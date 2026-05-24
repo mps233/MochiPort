@@ -124,7 +124,7 @@ pub fn install_shim(
     );
     std::fs::write(&shim, script)
         .with_context(|| format!("failed to write shim {}", shim.display()))?;
-    write_posix_shim(&posix_shim, config, &real_codex)?;
+    write_posix_shim(&posix_shim, config_path)?;
 
     config.shim.bin_dir = bin_dir.clone();
     config.shim.real_codex_path = Some(real_codex.clone());
@@ -1138,123 +1138,13 @@ fn looks_like_our_shim(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-fn write_posix_shim(path: &Path, config: &AppConfig, real_codex: &Path) -> Result<()> {
-    let real_codex = posix_shell_path(&posix_real_codex_path(real_codex));
-    let bind = &config.bind;
+fn write_posix_shim(path: &Path, config_path: &Path) -> Result<()> {
+    let exe =
+        posix_shell_path(&env::current_exe().context("failed to resolve codex-remote executable")?);
+    let config_path = posix_shell_path(&absolutize(config_path.to_path_buf())?);
     let script = format!(
         r#"#!/usr/bin/env sh
-set -u
-
-REAL_CODEX="{real_codex}"
-DAEMON="http://{bind}"
-
-json_escape() {{
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-}}
-
-post_event() {{
-  command -v curl >/dev/null 2>&1 || return 0
-  level=$(json_escape "$1")
-  kind=$(json_escape "$2")
-  message=$(json_escape "$3")
-  curl -fsS --max-time 1 -H 'content-type: application/json' \
-    -d "{{\"level\":\"$level\",\"kind\":\"$kind\",\"message\":\"$message\"}}" \
-    "$DAEMON/api/shim/event" >/dev/null 2>&1 || true
-}}
-
-fallback() {{
-  post_event warn shell_shim_fallback "$1"
-  shift
-  if [ -n "${{app_pid:-}}" ]; then
-    kill "$app_pid" >/dev/null 2>&1 || true
-  fi
-  exec "$REAL_CODEX" "$@"
-}}
-
-post_event info shell_shim_invoked "args=$* real_codex=$REAL_CODEX cwd=$(pwd 2>/dev/null || true)"
-
-case "${{CODEX_REMOTE_DISABLE:-}}" in
-  1|true|TRUE|yes|YES) fallback "disabled by CODEX_REMOTE_DISABLE" "$@" ;;
-esac
-
-case "${{1:-}}" in
-  app-server|exec|review|login|logout|doctor|auth|mcp|mcp-server|plugin|app|update|cloud|sandbox|debug|execpolicy|apply|responses-api-proxy|stdio-to-uds|exec-server|features|remote-control|proto|completion|--help|-h|--version|-V)
-    fallback "bypass command: ${{1:-}}" "$@"
-    ;;
-esac
-
-for arg in "$@"; do
-  if [ "$arg" = "--remote" ]; then
-    fallback "already has --remote" "$@"
-  fi
-done
-
-status_json=$(curl -fsS --max-time 1 "$DAEMON/api/shim/status" 2>/dev/null || true)
-case "$status_json" in
-  *'"available":true'*'"enabled":true'*)
-    post_event info shell_shim_status "daemon ready"
-    ;;
-  *)
-    fallback "daemon status not ready: $status_json" "$@"
-    ;;
-esac
-
-port=$(python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()' 2>/dev/null || py -3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()' 2>/dev/null || node -e 'const net=require("net"); const s=net.createServer(); s.listen(0,"127.0.0.1",()=>{{ console.log(s.address().port); s.close(); }});' 2>/dev/null)
-
-if [ -z "${{port:-}}" ]; then
-  fallback "failed to reserve local port" "$@"
-fi
-
-upstream="ws://127.0.0.1:$port"
-cwd=$(pwd -W 2>/dev/null || pwd)
-cwd_json=$(json_escape "$cwd")
-session_json=$(curl -fsS --max-time 2 -H 'content-type: application/json' \
-  -d "{{\"cwd\":\"$cwd_json\",\"upstreamWsUrl\":\"$upstream\"}}" \
-  "$DAEMON/api/shim/session" 2>/dev/null || true)
-
-case "$session_json" in
-  *'"ok":true'*)
-    post_event info shell_shim_session "cwd=$cwd upstream=$upstream"
-    ;;
-  *)
-    fallback "session rejected: $session_json" "$@"
-    ;;
-esac
-
-shim_dir=$(dirname "$0")
-log_dir="$shim_dir/../logs"
-mkdir -p "$log_dir" >/dev/null 2>&1 || true
-app_log="$log_dir/app-server-$(date +%Y%m%d-%H%M%S).log"
-post_event info shell_shim_app_server_start "upstream=$upstream log=$app_log"
-"$REAL_CODEX" app-server --listen "$upstream" >"$app_log" 2>&1 &
-app_pid=$!
-
-cleanup() {{
-  kill "$app_pid" >/dev/null 2>&1 || true
-}}
-trap cleanup EXIT INT TERM
-
-ready_url="http://127.0.0.1:$port/readyz"
-i=0
-while [ "$i" -lt 80 ]; do
-  if curl -fsS --max-time 1 "$ready_url" >/dev/null 2>&1; then
-    break
-  fi
-  i=$((i + 1))
-  sleep 0.1
-done
-
-if ! curl -fsS --max-time 1 "$ready_url" >/dev/null 2>&1; then
-  fallback "app-server not ready: $ready_url log=$app_log" "$@"
-fi
-
-post_event info shell_shim_exec_remote "relay=ws://127.0.0.1:3848 upstream=$upstream"
-"$REAL_CODEX" --remote ws://127.0.0.1:3848 "$@"
-exit_code=$?
-post_event info shell_shim_tui_exit "exit=$exit_code upstream=$upstream"
-cleanup
-trap - EXIT INT TERM
-exit "$exit_code"
+exec "{exe}" --config "{config_path}" shim -- "$@"
 "#
     );
     std::fs::write(path, script)
@@ -1267,21 +1157,6 @@ exit "$exit_code"
         std::fs::set_permissions(path, permissions)?;
     }
     Ok(())
-}
-
-fn posix_real_codex_path(real_codex: &Path) -> PathBuf {
-    if cfg!(windows)
-        && real_codex
-            .extension()
-            .and_then(|value| value.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("cmd") || ext.eq_ignore_ascii_case("bat"))
-    {
-        let sibling = real_codex.with_extension("");
-        if sibling.is_file() && !looks_like_our_shim(&sibling) {
-            return sibling;
-        }
-    }
-    real_codex.to_path_buf()
 }
 
 fn posix_shell_path(path: &Path) -> String {
@@ -1360,7 +1235,7 @@ fn ensure_shell_profile_prepend(dir: &Path) -> Result<PathUpdate> {
         "{SHELL_PROFILE_BEGIN}\ncase \":$PATH:\" in\n  *\":{shell_dir}:\"*) ;;\n  *) export PATH=\"{shell_dir}:$PATH\" ;;\nesac\nhash -r 2>/dev/null || true\ncodex() {{\n  \"{shell_shim}\" \"$@\"\n}}\n{SHELL_PROFILE_END}\n"
     );
     let mut changed = false;
-    for profile in [home.join(".bashrc"), home.join(".bash_profile")] {
+    for profile in shell_profile_paths(&home) {
         let existing = std::fs::read_to_string(&profile).unwrap_or_default();
         let cleaned = remove_shell_profile_block(&existing);
         if cleaned != existing || !existing.contains(&block) {
@@ -1386,7 +1261,7 @@ fn remove_shell_profile_prepend(dir: &Path) -> Result<PathUpdate> {
         return Ok(PathUpdate::Unsupported);
     };
     let mut changed = false;
-    for profile in [home.join(".bashrc"), home.join(".bash_profile")] {
+    for profile in shell_profile_paths(&home) {
         if !profile.exists() {
             continue;
         }
@@ -1406,6 +1281,23 @@ fn remove_shell_profile_prepend(dir: &Path) -> Result<PathUpdate> {
     } else {
         PathUpdate::AlreadyPresent
     })
+}
+
+fn shell_profile_paths(home: &Path) -> Vec<PathBuf> {
+    if cfg!(target_os = "macos") {
+        vec![
+            home.join(".zshrc"),
+            home.join(".zprofile"),
+            home.join(".bashrc"),
+            home.join(".bash_profile"),
+        ]
+    } else {
+        vec![
+            home.join(".zshrc"),
+            home.join(".bashrc"),
+            home.join(".bash_profile"),
+        ]
+    }
 }
 
 fn remove_shell_profile_block(content: &str) -> String {
