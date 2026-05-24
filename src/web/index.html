@@ -1,0 +1,609 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Codex Remote</title>
+    <style>
+        :root {
+            color-scheme: light;
+            font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #f5f6f8;
+            color: #20242a;
+        }
+        * { box-sizing: border-box; }
+        body { margin: 0; }
+        header {
+            height: 56px;
+            display: flex;
+            align-items: center;
+            padding: 0 28px;
+            border-bottom: 1px solid #e1e5ec;
+            background: #ffffff;
+        }
+        h1 { margin: 0; font-size: 18px; font-weight: 700; }
+        main {
+            max-width: 920px;
+            margin: 0 auto;
+            padding: 28px;
+            display: grid;
+            gap: 18px;
+        }
+        .surface, details {
+            background: #ffffff;
+            border: 1px solid #e1e5ec;
+            border-radius: 8px;
+        }
+        .surface { padding: 28px; }
+        .hero {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 24px;
+            align-items: start;
+        }
+        .state {
+            display: inline-flex;
+            width: fit-content;
+            border-radius: 999px;
+            padding: 5px 11px;
+            background: #fff6df;
+            color: #8a5a00;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .state.ok { background: #e8f7ee; color: #137333; }
+        .state.error { background: #fdecea; color: #b3261e; }
+        h2 {
+            margin: 16px 0 8px;
+            font-size: 30px;
+            line-height: 1.18;
+            letter-spacing: 0;
+        }
+        .lead {
+            margin: 0;
+            max-width: 620px;
+            color: #596170;
+            font-size: 15px;
+            line-height: 1.65;
+        }
+        .actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 22px;
+        }
+        button {
+            border: 1px solid #1f6feb;
+            background: #1f6feb;
+            color: #ffffff;
+            border-radius: 6px;
+            padding: 10px 14px;
+            min-height: 40px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: 700;
+        }
+        button.secondary { background: #ffffff; color: #1f6feb; }
+        button.danger { border-color: #c2410c; background: #ffffff; color: #c2410c; }
+        button:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
+        }
+        .command {
+            min-width: 210px;
+            border-left: 3px solid #1f6feb;
+            padding: 10px 0 10px 14px;
+            color: #20242a;
+            font-size: 14px;
+            line-height: 1.7;
+            background: #f8fafc;
+        }
+        .command strong {
+            display: block;
+            margin-bottom: 2px;
+            font-size: 13px;
+        }
+        .command code {
+            display: block;
+            font-size: 16px;
+            font-weight: 700;
+            color: #1f6feb;
+        }
+        .steps {
+            display: grid;
+            gap: 0;
+            margin-top: 28px;
+            border-top: 1px solid #e8ebf0;
+        }
+        .step {
+            display: grid;
+            grid-template-columns: 32px 1fr auto;
+            gap: 12px;
+            align-items: start;
+            padding: 16px 0;
+            border-bottom: 1px solid #e8ebf0;
+        }
+        .step-dot {
+            width: 22px;
+            height: 22px;
+            margin-top: 1px;
+            border-radius: 999px;
+            border: 2px solid #d0d6df;
+            background: #ffffff;
+        }
+        .step.done .step-dot {
+            border-color: #137333;
+            background: #137333;
+            box-shadow: inset 0 0 0 5px #ffffff;
+        }
+        .step h3 { margin: 0 0 4px; font-size: 15px; }
+        .step p { margin: 0; color: #596170; font-size: 13px; line-height: 1.5; }
+        .step-status {
+            border-radius: 999px;
+            padding: 4px 9px;
+            background: #f1f3f6;
+            color: #596170;
+            font-size: 12px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .step.done .step-status { background: #e8f7ee; color: #137333; }
+        .message {
+            margin: 14px 0 0;
+            min-height: 20px;
+            color: #596170;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .qr-wrap {
+            display: none;
+            margin-top: 22px;
+            padding-top: 22px;
+            border-top: 1px solid #e8ebf0;
+            gap: 16px;
+            align-items: start;
+            grid-template-columns: 220px 1fr;
+        }
+        .qr-wrap.visible { display: grid; }
+        .qr {
+            width: 220px;
+            min-height: 220px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid #dfe3ea;
+            border-radius: 8px;
+            background: #ffffff;
+        }
+        .qr:empty { display: none; }
+        .hint {
+            color: #596170;
+            font-size: 13px;
+            line-height: 1.6;
+            white-space: pre-wrap;
+        }
+        details { padding: 0; }
+        summary {
+            cursor: pointer;
+            padding: 16px 18px;
+            font-weight: 700;
+            font-size: 14px;
+        }
+        .details-body {
+            padding: 0 18px 18px;
+            display: grid;
+            gap: 14px;
+        }
+        .field {
+            display: grid;
+            gap: 6px;
+            max-width: 560px;
+        }
+        .field label {
+            color: #596170;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        input {
+            min-width: 0;
+            border: 1px solid #ccd4df;
+            border-radius: 6px;
+            padding: 9px 10px;
+            font: inherit;
+            background: #ffffff;
+            color: #20242a;
+        }
+        .candidates {
+            display: grid;
+            gap: 8px;
+        }
+        .candidate {
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 10px;
+            align-items: center;
+            padding: 10px 12px;
+            border: 1px solid #e1e5ec;
+            border-radius: 6px;
+            background: #fbfcfe;
+        }
+        .candidate strong {
+            display: block;
+            font-size: 13px;
+            word-break: break-all;
+        }
+        .candidate span {
+            display: block;
+            margin-top: 3px;
+            color: #596170;
+            font-size: 12px;
+        }
+        pre {
+            margin: 0;
+            white-space: pre-wrap;
+            background: #f1f3f6;
+            border-radius: 6px;
+            padding: 12px;
+            max-height: 300px;
+            overflow: auto;
+            font-size: 12px;
+        }
+        @media (max-width: 760px) {
+            header { padding: 0 18px; }
+            main { padding: 16px; }
+            .surface { padding: 20px; }
+            .hero { grid-template-columns: 1fr; }
+            h2 { font-size: 24px; }
+            .command { min-width: 0; }
+            .step { grid-template-columns: 28px 1fr; }
+            .step-status { grid-column: 2; width: fit-content; }
+            .qr-wrap.visible { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+<header>
+    <h1>Codex Remote</h1>
+</header>
+<main>
+    <section class="surface">
+        <div class="hero">
+            <div>
+                <span id="app.state" class="state">检查中</span>
+                <h2 id="app.title">正在读取状态</h2>
+                <p id="app.subtitle" class="lead">请稍等。</p>
+                <div class="actions">
+                    <button id="primary.action" onclick="runPrimaryAction()">刷新状态</button>
+                    <button id="secondary.action" class="secondary" onclick="runSecondaryAction()">暂停飞书接入</button>
+                </div>
+                <p id="app.message" class="message"></p>
+            </div>
+            <div class="command">
+                <strong>日常使用只需要</strong>
+                <code>codex</code>
+                <span>在项目目录打开终端运行</span>
+            </div>
+        </div>
+
+        <div class="steps">
+            <div id="step.install" class="step">
+                <div class="step-dot"></div>
+                <div>
+                    <h3>安装本机命令</h3>
+                    <p>安装后仍然使用原来的 codex 命令。</p>
+                </div>
+                <span id="step.install.status" class="step-status">待处理</span>
+            </div>
+            <div id="step.feishu" class="step">
+                <div class="step-dot"></div>
+                <div>
+                    <h3>接入飞书</h3>
+                    <p>飞书消息会进入当前本地 Codex 会话。</p>
+                </div>
+                <span id="step.feishu.status" class="step-status">待处理</span>
+            </div>
+            <div id="step.codex" class="step">
+                <div class="step-dot"></div>
+                <div>
+                    <h3>运行 Codex</h3>
+                    <p>打开新的终端，在任意项目目录运行 codex。</p>
+                </div>
+                <span id="step.codex.status" class="step-status">等待运行</span>
+            </div>
+        </div>
+
+        <div id="feishu.qrWrap" class="qr-wrap">
+            <div id="feishu.qr" class="qr"></div>
+            <div>
+                <h3>用飞书扫码确认</h3>
+                <p id="feishu.onboardStatus" class="message"></p>
+                <p id="feishu.qrHint" class="hint"></p>
+            </div>
+        </div>
+    </section>
+
+    <details id="advanced">
+        <summary>技术细节</summary>
+        <div class="details-body">
+            <div class="field">
+                <label for="shim.realCodexPath">找不到 Codex 时，手动填写真实 Codex 路径</label>
+                <input id="shim.realCodexPath" placeholder="例如 C:\Users\...\codex.cmd" />
+            </div>
+            <div id="shim.candidates" class="candidates"></div>
+            <div class="actions">
+                <button onclick="installShim()">安装/更新本机命令</button>
+                <button class="danger" onclick="uninstallShim()">卸载本机命令</button>
+                <button class="secondary" onclick="setShimEnabled(true)">启用飞书接入</button>
+                <button class="secondary" onclick="setShimEnabled(false)">暂停飞书接入</button>
+                <button class="secondary" onclick="startRelay()">启动本地通道</button>
+                <button class="secondary" onclick="startBridge()">启动飞书监听</button>
+                <button class="secondary" onclick="stopBridge()">停止飞书监听</button>
+                <button class="secondary" onclick="loadAll()">刷新</button>
+            </div>
+            <pre id="remote.detail"></pre>
+            <pre id="events"></pre>
+        </div>
+    </details>
+</main>
+
+<script>
+let onboardTimer = null;
+let currentPrimaryAction = "refresh";
+let currentSecondaryAction = "pause";
+let discoveredCandidates = [];
+const byId = (id) => document.getElementById(id);
+
+async function loadAll() {
+    const [status, config, relay, shim, events] = await Promise.all([
+        fetch("/api/status").then(r => r.json()),
+        fetch("/api/config").then(r => r.json()),
+        fetch("/api/relay/status").then(r => r.json()),
+        fetch("/api/shim/status").then(r => r.json()),
+        fetch("/api/events").then(r => r.json()),
+    ]);
+
+    const feishuWs = status.feishuWs || {};
+    const feishuReady = Boolean(shim.feishuConfigured);
+    const serviceReady = Boolean(status.running && relay.running && feishuWs.connected);
+    const commandReady = Boolean(shim.shimInstalled && shim.pathConfigured !== false);
+    const readyForCodex = Boolean(commandReady && shim.enabled && feishuReady && serviceReady);
+    const codexConnected = Boolean(relay.tuiConnected);
+
+    updateStep("step.install", commandReady, commandReady ? "完成" : "待处理");
+    updateStep("step.feishu", feishuReady && feishuWs.connected, feishuReady && feishuWs.connected ? "完成" : "待扫码");
+    updateStep("step.codex", codexConnected, codexConnected ? "已连接" : "等待运行");
+
+    if (shim.realCodexPath && !byId("shim.realCodexPath").value) {
+        byId("shim.realCodexPath").value = shim.realCodexPath;
+    }
+    discoveredCandidates = shim.codexCandidates || [];
+    renderCandidates(discoveredCandidates);
+
+    if (!commandReady) {
+        setHero("需要安装", "先安装本机 codex 命令", "点击安装后，用户以后仍然只需要在项目目录运行 codex。", "一键安装", "install", true);
+    } else if (!feishuReady || !feishuWs.connected) {
+        setHero("需要接入", "接入飞书后就可以双端会话", "用飞书扫码确认一次，之后飞书消息会进入当前本地 Codex 会话。", "扫码接入飞书", "feishu", true);
+    } else if (!shim.enabled) {
+        setHero("已暂停", "飞书接入目前关闭", "启用后，本地运行 codex 时会自动连接飞书。", "启用飞书接入", "enable", true);
+    } else if (!status.running) {
+        setHero("需要启动", "飞书监听没有运行", "点击启动后，飞书消息监听会恢复。", "启动飞书监听", "bridge", true);
+    } else if (!relay.running) {
+        setHero("需要启动", "本地通道没有运行", "点击启动后，Codex 可以连接到飞书桥接。", "启动本地通道", "relay", true);
+    } else if (!codexConnected) {
+        setHero("已准备好", "现在打开项目目录运行 codex", "请重新打开一个终端窗口，在你的项目目录直接运行 codex。", "刷新状态", "refresh", true);
+    } else {
+        setHero("正在同步", "Codex 已接入飞书", "你可以在本地终端和飞书里继续同一个会话。", "刷新状态", "refresh", true);
+    }
+
+    currentSecondaryAction = shim.enabled ? "pause" : "enable";
+    byId("secondary.action").textContent = shim.enabled ? "暂停飞书接入" : "启用飞书接入";
+    byId("secondary.action").style.display = commandReady ? "inline-flex" : "none";
+
+    byId("remote.detail").textContent = [
+        `页面地址：http://${status.bind || "127.0.0.1:3847"}`,
+        `配置：${config.statePath || "未找到"}`,
+        `本机命令文件：${shim.shimPath || "未配置"}`,
+        `本机命令目录：${shim.shimDir || "未配置"}`,
+        `真实 Codex：${shim.realCodexPath || "未配置"}`,
+        `PATH：${pathSummary(shim.pathConfigured)}`,
+        `飞书监听：${feishuWs.connected ? "已连接" : feishuWs.lastError || "未连接"}`,
+        `本地通道：${relay.publicWsUrl || "未启动"}`,
+        `Codex 连接：${relay.tuiConnected ? "已连接" : "未连接"}`,
+        `当前 thread：${relay.currentThreadId || "无"}`,
+    ].join("\n");
+    byId("events").textContent = events.slice().reverse().map(e =>
+        `${new Date(Number(e.atMs)).toLocaleString()} [${e.level}] ${e.kind}: ${e.message}`
+    ).join("\n");
+}
+
+function setHero(state, title, subtitle, buttonText, action, ok) {
+    byId("app.state").textContent = state;
+    byId("app.state").className = ok && (state === "已准备好" || state === "正在同步") ? "state ok" : "state";
+    byId("app.title").textContent = title;
+    byId("app.subtitle").textContent = subtitle;
+    byId("primary.action").textContent = buttonText;
+    currentPrimaryAction = action;
+}
+
+function updateStep(id, done, label) {
+    byId(id).className = done ? "step done" : "step";
+    byId(`${id}.status`).textContent = label;
+}
+
+function pathSummary(value) {
+    if (value === true) return "已配置";
+    if (value === false) return "未配置";
+    return "需手动确认";
+}
+
+async function runPrimaryAction() {
+    if (currentPrimaryAction === "install") return installShim();
+    if (currentPrimaryAction === "feishu") return startFeishuOnboard();
+    if (currentPrimaryAction === "enable") return setShimEnabled(true);
+    if (currentPrimaryAction === "bridge") return startBridge();
+    if (currentPrimaryAction === "relay") return startRelay();
+    return loadAll();
+}
+
+async function runSecondaryAction() {
+    if (currentSecondaryAction === "pause") return setShimEnabled(false);
+    return setShimEnabled(true);
+}
+
+async function startBridge() {
+    setMessage("正在启动飞书监听...");
+    await fetch("/api/bridge/start", { method: "POST" });
+    await loadAll();
+}
+
+async function stopBridge() {
+    setMessage("正在停止飞书监听...");
+    await fetch("/api/bridge/stop", { method: "POST" });
+    await loadAll();
+}
+
+async function startRelay() {
+    setMessage("正在启动本地通道...");
+    await fetch("/api/relay/start", { method: "POST" });
+    await loadAll();
+}
+
+async function installShim(allowAutoRetry = true) {
+    setMessage("正在安装...");
+    const realCodexPath = byId("shim.realCodexPath").value.trim();
+    const res = await fetch("/api/shim/install", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ realCodexPath })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+        const candidates = await loadCandidates();
+        if (allowAutoRetry && candidates.length > 0) {
+            byId("shim.realCodexPath").value = candidates[0].path;
+            setMessage(`已自动找到 Codex：${candidates[0].path}，正在继续安装...`);
+            byId("advanced").open = true;
+            return installShim(false);
+        }
+        setMessage(data.error || "没有找到已安装的 Codex。请先安装 Codex CLI，或在技术细节里填写真实 Codex 路径。");
+        byId("advanced").open = true;
+        return;
+    }
+    setMessage(data.pathUpdate === "added"
+        ? "已安装。请重新打开终端后运行 codex。"
+        : "已安装/更新。");
+    await loadAll();
+}
+
+async function loadCandidates() {
+    const candidates = await fetch("/api/shim/candidates").then(r => r.json()).catch(() => []);
+    discoveredCandidates = candidates || [];
+    renderCandidates(discoveredCandidates);
+    return discoveredCandidates;
+}
+
+function renderCandidates(candidates) {
+    const root = byId("shim.candidates");
+    if (!root) return;
+    if (!candidates || candidates.length === 0) {
+        root.innerHTML = "";
+        return;
+    }
+    root.innerHTML = candidates.slice(0, 5).map((candidate, index) => `
+        <div class="candidate">
+            <div>
+                <strong>${escapeHtml(candidate.path)}</strong>
+                <span>${escapeHtml(candidate.source || "自动发现")} · 可信度 ${candidate.confidence || 0}</span>
+            </div>
+            <button class="secondary" onclick="useCandidate(${index})">使用</button>
+        </div>
+    `).join("");
+}
+
+function useCandidate(index) {
+    const candidate = discoveredCandidates[index];
+    if (!candidate) return;
+    byId("shim.realCodexPath").value = candidate.path;
+    setMessage("已选择发现的 Codex 路径，可以重新安装。");
+}
+
+function escapeHtml(value) {
+    return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+async function uninstallShim() {
+    setMessage("正在卸载...");
+    const res = await fetch("/api/shim/uninstall", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+        setMessage(data.error || "卸载失败");
+        return;
+    }
+    setMessage(data.removedShim ? "已卸载。" : "本机命令原本未安装。");
+    await loadAll();
+}
+
+async function setShimEnabled(enabled) {
+    setMessage(enabled ? "正在启用飞书接入..." : "正在暂停飞书接入...");
+    await fetch("/api/shim/enabled", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled })
+    });
+    await loadAll();
+}
+
+async function startFeishuOnboard() {
+    clearInterval(onboardTimer);
+    setMessage("正在创建扫码确认...");
+    byId("feishu.qrWrap").className = "qr-wrap visible";
+    byId("feishu.qr").innerHTML = "";
+    byId("feishu.qrHint").textContent = "";
+    byId("feishu.onboardStatus").textContent = "";
+    const res = await fetch("/api/feishu/onboard/start", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok) {
+        setMessage(data.error || "创建失败");
+        return;
+    }
+    byId("feishu.qr").innerHTML = data.qrSvg || "";
+    byId("feishu.qrHint").innerHTML = `请用飞书扫码，或打开：<a href="${data.verificationUriComplete}" target="_blank">授权链接</a>`;
+    byId("feishu.onboardStatus").textContent = "等待扫码确认";
+    const intervalMs = Math.max(3, data.interval || 5) * 1000;
+    onboardTimer = setInterval(async () => {
+        const poll = await fetch("/api/feishu/onboard/poll", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ deviceCode: data.deviceCode })
+        });
+        const result = await poll.json();
+        if (result.done) {
+            clearInterval(onboardTimer);
+            byId("feishu.onboardStatus").textContent = result.displayName ? `已接入：${result.displayName}` : "已接入";
+            byId("feishu.qrWrap").className = "qr-wrap";
+            byId("feishu.qr").innerHTML = "";
+            byId("feishu.qrHint").textContent = "";
+            setMessage("飞书已接入。");
+            await loadAll();
+        } else if (result.error === "authorization_pending") {
+            byId("feishu.onboardStatus").textContent = "等待扫码确认";
+        } else if (result.error) {
+            byId("feishu.onboardStatus").textContent = result.errorDescription || result.error;
+        }
+    }, intervalMs);
+}
+
+function setMessage(text) {
+    byId("app.message").textContent = text;
+}
+
+loadAll();
+setInterval(loadAll, 3000);
+</script>
+</body>
+</html>
