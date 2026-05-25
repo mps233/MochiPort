@@ -5,3 +5,5 @@ codex-remote-state.json
 *.log
 .im/
 typescript
+rust_democodex-remoteconfig.toml
+references/

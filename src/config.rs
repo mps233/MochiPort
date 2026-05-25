@@ -7,18 +7,10 @@ use serde::{Deserialize, Serialize};
 #[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
     pub bind: String,
-    pub relay: RelayConfig,
     pub state_path: PathBuf,
     pub feishu: FeishuConfig,
     pub bridge: BridgeConfig,
     pub shim: ShimConfig,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct RelayConfig {
-    pub public_ws: String,
-    pub upstream_ws: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,20 +42,10 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             bind: "127.0.0.1:3847".to_string(),
-            relay: RelayConfig::default(),
             state_path: PathBuf::from("codex-remote-state.json"),
             feishu: FeishuConfig::default(),
             bridge: BridgeConfig::default(),
             shim: ShimConfig::default(),
-        }
-    }
-}
-
-impl Default for RelayConfig {
-    fn default() -> Self {
-        Self {
-            public_ws: "127.0.0.1:3848".to_string(),
-            upstream_ws: "127.0.0.1:3849".to_string(),
         }
     }
 }

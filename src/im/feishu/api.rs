@@ -8,6 +8,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tracing::{info, warn};
+
+use crate::chain_log;
 
 use super::errors::ensure_feishu_api_success;
 use super::types::FeishuSettings;
@@ -466,6 +469,14 @@ impl FeishuApi {
 
         let status = response.status();
         let payload: serde_json::Value = response.json().await?;
+        log_feishu_api_response(
+            &format!(
+                "send_text_message receive_id_type={receive_id_type} receive_id={receive_id} text_len={}",
+                text.len()
+            ),
+            status,
+            &payload,
+        );
         ensure_feishu_api_success("send_text_message", status, &payload)?;
         Ok(())
     }
@@ -503,6 +514,13 @@ impl FeishuApi {
 
         let status = response.status();
         let payload: serde_json::Value = response.json().await?;
+        log_feishu_api_response(
+            &format!(
+                "send_interactive_message receive_id_type={receive_id_type} receive_id={receive_id}"
+            ),
+            status,
+            &payload,
+        );
         ensure_feishu_api_success("send_interactive_message", status, &payload)?;
         payload
             .get("data")
@@ -546,6 +564,13 @@ impl FeishuApi {
 
         let status = response.status();
         let payload = read_json_response(response, "feishu send cardkit message", false).await?;
+        log_feishu_api_response(
+            &format!(
+                "send_cardkit_message receive_id_type={receive_id_type} receive_id={receive_id} card_id={card_id}"
+            ),
+            status,
+            &payload,
+        );
         ensure_feishu_api_success("send_cardkit_message", status, &payload)?;
         payload
             .get("data")
@@ -576,6 +601,7 @@ impl FeishuApi {
 
         let status = response.status();
         let payload: serde_json::Value = response.json().await?;
+        log_feishu_api_response("update_interactive_message", status, &payload);
         ensure_feishu_api_success("update_interactive_message", status, &payload)?;
         Ok(())
     }
@@ -596,6 +622,7 @@ impl FeishuApi {
             .await?;
         let status = response.status();
         let payload = read_json_response(response, "feishu cardkit create", false).await?;
+        log_feishu_api_response("create_cardkit_card", status, &payload);
         ensure_feishu_api_success("create_cardkit_card", status, &payload)?;
         payload
             .get("data")
@@ -634,6 +661,11 @@ impl FeishuApi {
             true,
         )
         .await?;
+        log_feishu_api_response(
+            &format!("update_cardkit_card card_id={card_id} sequence={sequence}"),
+            status,
+            &payload,
+        );
         ensure_feishu_api_success("update_cardkit_card", status, &payload)?;
         Ok(())
     }
@@ -668,6 +700,13 @@ impl FeishuApi {
             true,
         )
         .await?;
+        log_feishu_api_response(
+            &format!(
+                "set_cardkit_streaming_mode card_id={card_id} streaming_mode={streaming_mode} sequence={sequence}"
+            ),
+            status,
+            &payload,
+        );
         ensure_feishu_api_success("set_cardkit_streaming_mode", status, &payload)?;
         Ok(())
     }
@@ -701,6 +740,14 @@ impl FeishuApi {
             true,
         )
         .await?;
+        log_feishu_api_response(
+            &format!(
+                "stream_cardkit_element_content card_id={card_id} element_id={element_id} sequence={sequence} content_len={}",
+                content.len()
+            ),
+            status,
+            &payload,
+        );
         ensure_feishu_api_success("stream_cardkit_element_content", status, &payload)?;
         Ok(())
     }
@@ -795,6 +842,11 @@ impl FeishuApi {
             .await?;
         let status = response.status();
         let payload: serde_json::Value = response.json().await?;
+        log_feishu_api_response(
+            &format!("send_image_message chat_id={chat_id} image_key={image_key}"),
+            status,
+            &payload,
+        );
         ensure_feishu_api_success("send_image_message", status, &payload)?;
         Ok(())
     }
@@ -818,6 +870,11 @@ impl FeishuApi {
             .await?;
         let status = response.status();
         let payload: serde_json::Value = response.json().await?;
+        log_feishu_api_response(
+            &format!("send_file_message chat_id={chat_id} file_key={file_key}"),
+            status,
+            &payload,
+        );
         ensure_feishu_api_success("send_file_message", status, &payload)?;
         Ok(())
     }
@@ -861,6 +918,69 @@ impl FeishuApi {
             return Err(anyhow!("feishu file download failed: status={status}"));
         }
         Ok(response.bytes().await?.to_vec())
+    }
+}
+
+fn log_feishu_api_response(
+    operation: &str,
+    status: reqwest::StatusCode,
+    payload: &serde_json::Value,
+) {
+    let code = payload.get("code").and_then(|v| v.as_i64()).unwrap_or(-1);
+    let msg = payload
+        .get("msg")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let message_id = payload
+        .get("data")
+        .and_then(|v| v.get("message_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let card_id = payload
+        .get("data")
+        .and_then(|v| v.get("card_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    chain_log::write_line(format!(
+        "[feishu_api] event={} operation={} http_status={} code={} msg={} message_id={} card_id={} body={}",
+        if status.is_success() && code == 0 {
+            "ok"
+        } else {
+            "failed"
+        },
+        operation,
+        status.as_u16(),
+        code,
+        msg,
+        message_id,
+        card_id,
+        payload
+    ));
+
+    if status.is_success() && code == 0 {
+        info!(
+            target: "codex_remote::feishu",
+            event = "feishu_api_ok",
+            operation,
+            http_status = status.as_u16(),
+            code,
+            msg,
+            message_id,
+            card_id,
+            "Feishu API request succeeded"
+        );
+    } else {
+        warn!(
+            target: "codex_remote::feishu",
+            event = "feishu_api_failed",
+            operation,
+            http_status = status.as_u16(),
+            code,
+            msg,
+            body = %payload,
+            "Feishu API request failed"
+        );
     }
 }
 

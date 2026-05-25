@@ -1,10 +1,6 @@
 bind = "127.0.0.1:3847"
 statePath = "codex-remote-state.json"
 
-[relay]
-publicWs = "127.0.0.1:3848"
-upstreamWs = "127.0.0.1:3849"
-
 [feishu]
 appId = ""
 appSecret = ""

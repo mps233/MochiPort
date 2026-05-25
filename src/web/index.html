@@ -335,7 +335,6 @@
                 <button class="danger" onclick="uninstallShim()">卸载本机命令</button>
                 <button class="secondary" onclick="setShimEnabled(true)">启用飞书接入</button>
                 <button class="secondary" onclick="setShimEnabled(false)">暂停飞书接入</button>
-                <button class="secondary" onclick="startRelay()">启动本地通道</button>
                 <button class="secondary" onclick="startBridge()">启动飞书监听</button>
                 <button class="secondary" onclick="stopBridge()">停止飞书监听</button>
                 <button class="secondary" onclick="loadAll()">刷新</button>
@@ -354,20 +353,19 @@ let discoveredCandidates = [];
 const byId = (id) => document.getElementById(id);
 
 async function loadAll() {
-    const [status, config, relay, shim, events] = await Promise.all([
+    const [status, config, remote, shim, events] = await Promise.all([
         fetch("/api/status").then(r => r.json()),
         fetch("/api/config").then(r => r.json()),
-        fetch("/api/relay/status").then(r => r.json()),
+        fetch("/api/remote-control/status").then(r => r.json()),
         fetch("/api/shim/status").then(r => r.json()),
         fetch("/api/events").then(r => r.json()),
     ]);
 
     const feishuWs = status.feishuWs || {};
     const feishuReady = Boolean(shim.feishuConfigured);
-    const serviceReady = Boolean(status.running && relay.running && feishuWs.connected);
+    const serviceReady = Boolean(status.running && feishuWs.connected);
     const commandReady = Boolean(shim.shimInstalled && shim.pathConfigured !== false);
-    const readyForCodex = Boolean(commandReady && shim.enabled && feishuReady && serviceReady);
-    const codexConnected = Boolean(relay.tuiConnected);
+    const codexConnected = Boolean(remote.connected && remote.initialized);
 
     updateStep("step.install", commandReady, commandReady ? "完成" : "待处理");
     updateStep("step.feishu", feishuReady && feishuWs.connected, feishuReady && feishuWs.connected ? "完成" : "待扫码");
@@ -387,10 +385,8 @@ async function loadAll() {
         setHero("已暂停", "飞书接入目前关闭", "启用后，本地运行 codex 时会自动连接飞书。", "启用飞书接入", "enable", true);
     } else if (!status.running) {
         setHero("需要启动", "飞书监听没有运行", "点击启动后，飞书消息监听会恢复。", "启动飞书监听", "bridge", true);
-    } else if (!relay.running) {
-        setHero("需要启动", "本地通道没有运行", "点击启动后，Codex 可以连接到飞书桥接。", "启动本地通道", "relay", true);
     } else if (!codexConnected) {
-        setHero("已准备好", "现在打开项目目录运行 codex", "请重新打开一个终端窗口，在你的项目目录直接运行 codex。", "刷新状态", "refresh", true);
+        setHero("已准备好", "现在打开项目目录运行 codex", "Codex 会通过官方 remote-control 协议连接到飞书桥接。", "刷新状态", "refresh", true);
     } else {
         setHero("正在同步", "Codex 已接入飞书", "你可以在本地终端和飞书里继续同一个会话。", "刷新状态", "refresh", true);
     }
@@ -407,9 +403,10 @@ async function loadAll() {
         `真实 Codex：${shim.realCodexPath || "未配置"}`,
         `PATH：${pathSummary(shim.pathConfigured)}`,
         `飞书监听：${feishuWs.connected ? "已连接" : feishuWs.lastError || "未连接"}`,
-        `本地通道：${relay.publicWsUrl || "未启动"}`,
-        `Codex 连接：${relay.tuiConnected ? "已连接" : "未连接"}`,
-        `当前 thread：${relay.currentThreadId || "无"}`,
+        `remote-control backend：${shim.remoteControlBaseUrl || "未配置"}`,
+        `remote-control 连接：${remote.connected ? "已连接" : remote.lastError || "未连接"}`,
+        `remote-control 初始化：${remote.initialized ? "完成" : "等待"}`,
+        `当前 thread：${remote.currentThreadId || "无"}`,
     ].join("\n");
     byId("events").textContent = events.slice().reverse().map(e =>
         `${new Date(Number(e.atMs)).toLocaleString()} [${e.level}] ${e.kind}: ${e.message}`
@@ -441,7 +438,6 @@ async function runPrimaryAction() {
     if (currentPrimaryAction === "feishu") return startFeishuOnboard();
     if (currentPrimaryAction === "enable") return setShimEnabled(true);
     if (currentPrimaryAction === "bridge") return startBridge();
-    if (currentPrimaryAction === "relay") return startRelay();
     return loadAll();
 }
 
@@ -459,12 +455,6 @@ async function startBridge() {
 async function stopBridge() {
     setMessage("正在停止飞书监听...");
     await fetch("/api/bridge/stop", { method: "POST" });
-    await loadAll();
-}
-
-async function startRelay() {
-    setMessage("正在启动本地通道...");
-    await fetch("/api/relay/start", { method: "POST" });
     await loadAll();
 }
 

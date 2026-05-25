@@ -1,9 +1,11 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use tracing::{info, warn};
 
 use crate::{
     app_state::SharedState,
+    chain_log,
     im::feishu::{
         FeishuApi,
         renderer::{
@@ -17,6 +19,7 @@ use crate::{
 const FEISHU_CARDKIT_THROTTLE_MS: u64 = 100;
 const FEISHU_CARDKIT_LONG_GAP_THRESHOLD_MS: u64 = 2000;
 const FEISHU_CARDKIT_BATCH_AFTER_GAP_MS: u64 = 300;
+const FEISHU_LOG_PREVIEW_CHARS: usize = 240;
 
 fn streaming_card_key(thread_id: &str, item_id: &str) -> String {
     format!("{thread_id}:{item_id}")
@@ -27,6 +30,60 @@ fn feishu_receive_target(target: &str) -> (&'static str, &str) {
         .strip_prefix("open_id:")
         .map(|open_id| ("open_id", open_id))
         .unwrap_or(("chat_id", target))
+}
+
+fn log_preview(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\n', "\\n");
+    let mut out = String::new();
+    for ch in normalized.chars().take(FEISHU_LOG_PREVIEW_CHARS) {
+        out.push(ch);
+    }
+    if normalized.chars().count() > FEISHU_LOG_PREVIEW_CHARS {
+        out.push_str("...");
+    }
+    out
+}
+
+fn log_tail(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\n").replace('\n', "\\n");
+    let chars = normalized.chars().collect::<Vec<_>>();
+    let start = chars.len().saturating_sub(FEISHU_LOG_PREVIEW_CHARS);
+    let mut out = chars[start..].iter().collect::<String>();
+    if start > 0 {
+        out.insert_str(0, "...");
+    }
+    out
+}
+
+fn write_stream_log(
+    event: &str,
+    thread_id: &str,
+    item_id: &str,
+    state: &FeishuStreamingCardState,
+    extra: impl AsRef<str>,
+) {
+    chain_log::write_line(format!(
+        "[feishu_stream] event={} thread_id={} item_id={} kind={} account_id={} chat_id={} receive_id_type={} receive_id={} message_id={} card_id={} sequence={} text_len={} sent_text_len={} completed={} sending={} dirty={} preview={} tail={} {}",
+        event,
+        thread_id,
+        item_id,
+        state.kind,
+        state.account_id,
+        state.chat_id,
+        state.receive_id_type,
+        state.receive_id,
+        state.message_id.as_deref().unwrap_or_default(),
+        state.card_id.as_deref().unwrap_or_default(),
+        state.sequence,
+        state.text.len(),
+        state.sent_text.len(),
+        state.completed,
+        state.sending,
+        state.dirty,
+        log_preview(&state.text),
+        log_tail(&state.text),
+        extra.as_ref()
+    ));
 }
 
 pub async fn upsert_streaming_card_state(
@@ -83,6 +140,32 @@ pub async fn upsert_streaming_card_state(
             entry.text.push_str(delta);
         }
         entry.dirty = true;
+        write_stream_log(
+            "upsert",
+            thread_id,
+            item_id,
+            entry,
+            format!("delta_len={}", delta.len()),
+        );
+        info!(
+            target: "codex_remote::feishu",
+            event = "feishu_stream_upsert",
+            thread_id,
+            item_id,
+            kind = entry.kind.as_str(),
+            account_id = entry.account_id.as_str(),
+            chat_id = entry.chat_id.as_str(),
+            receive_id_type = entry.receive_id_type.as_str(),
+            receive_id = entry.receive_id.as_str(),
+            delta_len = delta.len(),
+            text_len = entry.text.len(),
+            completed = entry.completed,
+            sending = entry.sending,
+            dirty = entry.dirty,
+            preview = %log_preview(&entry.text),
+            tail = %log_tail(&entry.text),
+            "Feishu streaming state upserted"
+        );
     }
     spawn_streaming_card_driver(state, api, thread_id, item_id);
 }
@@ -132,6 +215,25 @@ pub async fn ensure_started_streaming_card_state(
             }
         }
         entry.dirty = true;
+        write_stream_log("started", thread_id, item_id, entry, "");
+        info!(
+            target: "codex_remote::feishu",
+            event = "feishu_stream_started",
+            thread_id,
+            item_id,
+            kind = entry.kind.as_str(),
+            account_id = entry.account_id.as_str(),
+            chat_id = entry.chat_id.as_str(),
+            receive_id_type = entry.receive_id_type.as_str(),
+            receive_id = entry.receive_id.as_str(),
+            text_len = entry.text.len(),
+            completed = entry.completed,
+            sending = entry.sending,
+            dirty = entry.dirty,
+            preview = %log_preview(&entry.text),
+            tail = %log_tail(&entry.text),
+            "Feishu streaming state started"
+        );
     }
     spawn_streaming_card_driver(state, api, thread_id, item_id);
 }
@@ -162,6 +264,25 @@ pub async fn complete_existing_item_card(
                 }
                 entry.completed = true;
                 entry.dirty = true;
+                write_stream_log("completed", thread_id, item_id, entry, "");
+                info!(
+                    target: "codex_remote::feishu",
+                    event = "feishu_stream_completed",
+                    thread_id,
+                    item_id,
+                    kind = entry.kind.as_str(),
+                    account_id = entry.account_id.as_str(),
+                    chat_id = entry.chat_id.as_str(),
+                    receive_id_type = entry.receive_id_type.as_str(),
+                    receive_id = entry.receive_id.as_str(),
+                    text_len = entry.text.len(),
+                    completed = entry.completed,
+                    sending = entry.sending,
+                    dirty = entry.dirty,
+                    preview = %log_preview(&entry.text),
+                    tail = %log_tail(&entry.text),
+                    "Feishu streaming state completed"
+                );
                 true
             }
             None => false,
@@ -211,6 +332,24 @@ async fn drive_streaming_card_state(
             current.clone()
         };
 
+        if should_skip_empty_streaming_send(&state_snapshot) {
+            let mut runtime = state.runtime.lock().await;
+            if let Some(current) = runtime.feishu_streaming_cards_by_item.get_mut(&state_key) {
+                current.sending = false;
+                if current.completed
+                    && current.text.trim().is_empty()
+                    && current.sent_text.is_empty()
+                {
+                    write_stream_log("skipped_empty", thread_id, item_id, current, "");
+                    runtime.feishu_streaming_cards_by_item.remove(&state_key);
+                    return Ok(());
+                }
+                write_stream_log("skipped_empty", thread_id, item_id, current, "");
+                return Ok(());
+            }
+            return Ok(());
+        }
+
         if state_snapshot.message_id.is_some() {
             let elapsed = state_snapshot
                 .last_sent_at
@@ -239,8 +378,50 @@ async fn drive_streaming_card_state(
         }
 
         let send_result = if state_snapshot.kind == "agentMessage" {
+            write_stream_log("send_begin", thread_id, item_id, &state_snapshot, "");
+            info!(
+                target: "codex_remote::feishu",
+                event = "feishu_stream_send_begin",
+                thread_id,
+                item_id,
+                kind = state_snapshot.kind.as_str(),
+                account_id = state_snapshot.account_id.as_str(),
+                chat_id = state_snapshot.chat_id.as_str(),
+                receive_id_type = state_snapshot.receive_id_type.as_str(),
+                receive_id = state_snapshot.receive_id.as_str(),
+                message_id = state_snapshot.message_id.as_deref().unwrap_or(""),
+                card_id = state_snapshot.card_id.as_deref().unwrap_or(""),
+                sequence = state_snapshot.sequence,
+                text_len = state_snapshot.text.len(),
+                sent_text_len = state_snapshot.sent_text.len(),
+                completed = state_snapshot.completed,
+                preview = %log_preview(&state_snapshot.text),
+                tail = %log_tail(&state_snapshot.text),
+                "Sending Feishu CardKit streaming card"
+            );
             send_agent_message_cardkit(&api, &state_snapshot).await
         } else {
+            write_stream_log("send_begin", thread_id, item_id, &state_snapshot, "");
+            info!(
+                target: "codex_remote::feishu",
+                event = "feishu_stream_send_begin",
+                thread_id,
+                item_id,
+                kind = state_snapshot.kind.as_str(),
+                account_id = state_snapshot.account_id.as_str(),
+                chat_id = state_snapshot.chat_id.as_str(),
+                receive_id_type = state_snapshot.receive_id_type.as_str(),
+                receive_id = state_snapshot.receive_id.as_str(),
+                message_id = state_snapshot.message_id.as_deref().unwrap_or(""),
+                card_id = state_snapshot.card_id.as_deref().unwrap_or(""),
+                sequence = state_snapshot.sequence,
+                text_len = state_snapshot.text.len(),
+                sent_text_len = state_snapshot.sent_text.len(),
+                completed = state_snapshot.completed,
+                preview = %log_preview(&state_snapshot.text),
+                tail = %log_tail(&state_snapshot.text),
+                "Sending Feishu interactive streaming card"
+            );
             send_interactive_streaming_card(&api, &state_snapshot).await
         };
 
@@ -263,6 +444,39 @@ async fn drive_streaming_card_state(
                     should_remove =
                         current.completed && !current.dirty && current.sent_text == current.text;
                     should_continue = current.dirty;
+                    write_stream_log(
+                        "send_ok",
+                        thread_id,
+                        item_id,
+                        current,
+                        format!(
+                            "should_continue={} should_remove={}",
+                            should_continue, should_remove
+                        ),
+                    );
+                    info!(
+                        target: "codex_remote::feishu",
+                        event = "feishu_stream_send_ok",
+                        thread_id,
+                        item_id,
+                        kind = current.kind.as_str(),
+                        account_id = current.account_id.as_str(),
+                        chat_id = current.chat_id.as_str(),
+                        receive_id_type = current.receive_id_type.as_str(),
+                        receive_id = current.receive_id.as_str(),
+                        message_id = current.message_id.as_deref().unwrap_or(""),
+                        card_id = current.card_id.as_deref().unwrap_or(""),
+                        sequence = current.sequence,
+                        text_len = current.text.len(),
+                        sent_text_len = current.sent_text.len(),
+                        completed = current.completed,
+                        dirty = current.dirty,
+                        should_continue,
+                        should_remove,
+                        preview = %log_preview(&current.text),
+                        tail = %log_tail(&current.text),
+                        "Feishu streaming send succeeded"
+                    );
                 }
                 if should_remove {
                     runtime.feishu_streaming_cards_by_item.remove(&state_key);
@@ -278,6 +492,34 @@ async fn drive_streaming_card_state(
                 if let Some(current) = runtime.feishu_streaming_cards_by_item.get_mut(&state_key) {
                     current.sending = false;
                     current.dirty = true;
+                    write_stream_log(
+                        "send_failed",
+                        thread_id,
+                        item_id,
+                        current,
+                        format!("err={}", err),
+                    );
+                    warn!(
+                        target: "codex_remote::feishu",
+                        event = "feishu_stream_send_failed",
+                        thread_id,
+                        item_id,
+                        kind = current.kind.as_str(),
+                        account_id = current.account_id.as_str(),
+                        chat_id = current.chat_id.as_str(),
+                        receive_id_type = current.receive_id_type.as_str(),
+                        receive_id = current.receive_id.as_str(),
+                        message_id = current.message_id.as_deref().unwrap_or(""),
+                        card_id = current.card_id.as_deref().unwrap_or(""),
+                        sequence = current.sequence,
+                        text_len = current.text.len(),
+                        sent_text_len = current.sent_text.len(),
+                        completed = current.completed,
+                        err = %err,
+                        preview = %log_preview(&current.text),
+                        tail = %log_tail(&current.text),
+                        "Feishu streaming send failed"
+                    );
                 }
                 return Err(err.to_string());
             }
@@ -374,6 +616,13 @@ fn build_streaming_card(kind: &str, text: &str, completed: bool) -> serde_json::
     }
 }
 
+fn should_skip_empty_streaming_send(state: &FeishuStreamingCardState) -> bool {
+    state.text.trim().is_empty()
+        && state.sent_text.is_empty()
+        && state.message_id.is_none()
+        && state.card_id.is_none()
+}
+
 fn build_cardkit_streaming_card(kind: &str) -> serde_json::Value {
     match kind {
         "agentMessage" => build_cardkit_streaming_agent_message_card(),
@@ -381,5 +630,43 @@ fn build_cardkit_streaming_card(kind: &str) -> serde_json::Value {
         "fileChange" => build_cardkit_streaming_tool_card("文件变更", "green", "状态：处理中"),
         "fileSummary" => build_cardkit_streaming_reply_card(),
         _ => build_cardkit_streaming_reply_card(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_empty_streaming_send;
+    use crate::im::feishu::types::FeishuStreamingCardState;
+
+    fn streaming_state() -> FeishuStreamingCardState {
+        FeishuStreamingCardState {
+            account_id: "default".to_string(),
+            chat_id: "chat".to_string(),
+            receive_id_type: "chat_id".to_string(),
+            receive_id: "chat".to_string(),
+            kind: "reasoning".to_string(),
+            message_id: None,
+            card_id: None,
+            sequence: 0,
+            text: String::new(),
+            sent_text: String::new(),
+            completed: false,
+            sending: false,
+            dirty: true,
+            last_sent_at: None,
+        }
+    }
+
+    #[test]
+    fn empty_first_send_is_skipped() {
+        let state = streaming_state();
+        assert!(should_skip_empty_streaming_send(&state));
+    }
+
+    #[test]
+    fn empty_update_after_message_exists_is_not_skipped() {
+        let mut state = streaming_state();
+        state.message_id = Some("om_123".to_string());
+        assert!(!should_skip_empty_streaming_send(&state));
     }
 }

@@ -15,7 +15,7 @@ use crate::{
     config::AppConfig,
     im::feishu::{FeishuApi, FeishuSettings},
 };
-use crate::{relay_backend, shim};
+use crate::{remote_control_backend, shim};
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
@@ -24,10 +24,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/config", get(get_config).post(save_config))
         .route("/api/bridge/start", post(start_bridge))
         .route("/api/bridge/stop", post(stop_bridge))
-        .route("/api/relay/start", post(relay_backend::start))
-        .route("/api/relay/status", get(relay_backend::status))
         .route("/api/shim/status", get(shim_status))
-        .route("/api/shim/session", post(shim_session))
         .route("/api/shim/enabled", post(shim_enabled))
         .route("/api/shim/install", post(shim_install))
         .route("/api/shim/uninstall", post(shim_uninstall))
@@ -47,6 +44,7 @@ pub fn router(state: SharedState) -> Router {
             get(plugin_installed_page),
         )
         .route("/api/events", get(events))
+        .merge(remote_control_backend::router())
         .with_state(state)
 }
 
@@ -177,7 +175,10 @@ async fn stop_bridge_task(state: &SharedState) {
 struct ShimStatusResponse {
     available: bool,
     enabled: bool,
-    relay_url: String,
+    remote_control_base_url: String,
+    remote_control_connected: bool,
+    remote_control_initialized: bool,
+    current_thread_id: Option<String>,
     shim_path: String,
     shim_dir: String,
     shim_installed: bool,
@@ -190,7 +191,7 @@ struct ShimStatusResponse {
 
 async fn shim_status(State(state): State<SharedState>) -> Json<ShimStatusResponse> {
     let config = state.config.lock().await.clone();
-    let relay = relay_backend::status_snapshot(&state).await;
+    let remote = remote_control_backend::status_snapshot(&state).await;
     let shim_path = shim::shim_path(&config);
     let shim_installed = shim_path.exists();
     let path_configured = shim::user_path_contains_dir(&config.shim.bin_dir)
@@ -213,8 +214,6 @@ async fn shim_status(State(state): State<SharedState>) -> Json<ShimStatusRespons
     };
     let reason = if !config.bridge.enabled {
         Some("bridge disabled".to_string())
-    } else if !relay.running {
-        Some("relay is not running".to_string())
     } else if !shim_installed {
         Some("shim is not installed".to_string())
     } else if !feishu_configured {
@@ -223,9 +222,12 @@ async fn shim_status(State(state): State<SharedState>) -> Json<ShimStatusRespons
         None
     };
     Json(ShimStatusResponse {
-        available: relay.running,
+        available: config.bridge.enabled && shim_installed && feishu_configured,
         enabled: config.bridge.enabled,
-        relay_url: relay.public_ws_url,
+        remote_control_base_url: shim::remote_control_base_url(&config),
+        remote_control_connected: remote.connected,
+        remote_control_initialized: remote.initialized,
+        current_thread_id: remote.current_thread_id,
         shim_path: shim_path.to_string_lossy().to_string(),
         shim_dir: config.shim.bin_dir.to_string_lossy().to_string(),
         shim_installed,
@@ -239,47 +241,6 @@ async fn shim_status(State(state): State<SharedState>) -> Json<ShimStatusRespons
         feishu_configured,
         reason,
     })
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ShimSessionRequest {
-    cwd: String,
-    upstream_ws_url: String,
-}
-
-async fn shim_session(
-    State(state): State<SharedState>,
-    Json(request): Json<ShimSessionRequest>,
-) -> impl IntoResponse {
-    if let Err(err) = relay_backend::start_relay(state.clone()).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": err.to_string() })),
-        );
-    }
-    let relay_url = {
-        let mut relay = state.relay.inner.lock().await;
-        relay.upstream_ws_url = request.upstream_ws_url.clone();
-        relay.upstream_connected = false;
-        relay.last_error = None;
-        relay.public_ws_url.clone()
-    };
-    state
-        .push_event(
-            "info",
-            "shim_session_registered",
-            format!("cwd={} upstream={}", request.cwd, request.upstream_ws_url),
-        )
-        .await;
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "relayUrl": relay_url,
-            "upstreamWsUrl": request.upstream_ws_url,
-        })),
-    )
 }
 
 #[derive(Deserialize)]

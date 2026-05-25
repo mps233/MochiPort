@@ -19,29 +19,23 @@ Expected:
 
 If `feishuWs.connected` is false, check Feishu credentials, websocket subscription, and the event log in the web console.
 
-## Check The Relay
+## Check Remote-Control
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:3847/api/relay/status
+Invoke-RestMethod http://127.0.0.1:3847/api/remote-control/status
 ```
 
 Important fields:
 
-- `running`: relay listener is started
-- `tuiConnected`: official Codex TUI is connected to the relay
-- `upstreamConnected`: relay is connected to official Codex app-server
-- `currentThreadId`: active Codex thread observed by the relay
+- `connected`: official Codex app-server is connected to the remote-control backend.
+- `initialized`: the JSON-RPC `initialize` / `initialized` handshake has completed.
+- `currentThreadId`: active Codex thread observed from app-server notifications or responses.
+- `lastError`: last remote-control websocket error, if any.
 
-If `tuiConnected=false`, start or restart Codex:
+If `connected=false`, start or restart Codex from a project directory:
 
 ```powershell
 codex
-```
-
-or in manual mode:
-
-```powershell
-codex --remote ws://127.0.0.1:3848
 ```
 
 ## Check The Shim
@@ -91,24 +85,25 @@ codex
 
 Codex cwd should be the directory where the user ran `codex`.
 
-The shim starts both app-server and TUI with:
+The shim starts app-server with:
 
 ```text
 current_dir = user terminal cwd
 ```
 
+It also starts TUI with:
+
+```text
+--remote ws://127.0.0.1:<temporary-port> -C <user terminal cwd>
+```
+
+`-C` matters because official remote TUI mode forwards cwd explicitly.
+
 If Codex shows the `codex-remote` repository as cwd, check:
 
-- whether you manually started `codex app-server` from the wrong directory
-- whether the command is bypassing the shim
+- whether the shim was bypassed
+- whether you manually started app-server/TUI from the wrong directory
 - whether a stale app-server process is still running
-
-Restart sequence:
-
-```powershell
-codex-remote --config config.toml off
-codex-remote --config config.toml on
-```
 
 Then open a new terminal in the project directory and run `codex`.
 
@@ -117,20 +112,20 @@ Then open a new terminal in the project directory and run `codex`.
 Check:
 
 1. Daemon status: Feishu websocket connected.
-2. Relay status: `tuiConnected=true` and `currentThreadId` is set.
+2. Remote-control status: `connected=true` and `initialized=true`.
 3. Feishu allowlists: `allowedOpenIds` and `allowedChatIds`.
 4. Group chat mention behavior: if `mentionOnly=true`, mention the bot in group chats.
 5. Event log: `GET /api/events` or the web console.
 
 ## Feishu Messages Do Not Reach Codex
 
-The bridge sends Feishu text to the active local thread. It needs:
+The bridge sends Feishu text to the active Codex thread. It needs:
 
-- a connected TUI
-- an active current thread
+- remote-control connected and initialized
+- an active current thread, or permission to create one through `thread/start`
 - the Feishu conversation bound to that thread
 
-If there is no current thread, send a message from the local Codex TUI first or start a new Codex session.
+If there is no current thread, send a message from Feishu. That lets the bridge create or bind the Codex thread through the official app-server API.
 
 ## Approval Cards
 
@@ -149,23 +144,14 @@ If old approvals are still clickable:
 
 If clicking an old card says "please handle current approval first", the bridge is preventing out-of-order approval, which is expected.
 
-## App-Server Connection Errors
+## Manual Protocol Debugging
 
-Example:
-
-```text
-failed to connect upstream app-server `ws://127.0.0.1:<port>`
-```
-
-Usually means the app-server process exited or was started on a different port.
-
-With shim mode, close the Codex terminal and start `codex` again.
-
-Manual mode must use matching ports:
+Use matching app-server and TUI ports:
 
 ```powershell
-codex app-server --listen ws://127.0.0.1:3849
-codex --remote ws://127.0.0.1:3848
+codex-remote --config config.toml daemon
+codex -c 'chatgpt_base_url="http://127.0.0.1:3847/backend-api"' app-server --listen ws://127.0.0.1:3849 --remote-control
+codex --remote ws://127.0.0.1:3849 -C D:\path\to\project
 ```
 
 ## Plugin List Warnings
@@ -187,13 +173,3 @@ Failed to create shell snapshot for powershell
 ```
 
 come from Codex shell snapshot support and are not caused by `codex-remote`.
-
-## Clean Build Artifacts Before Publishing
-
-```powershell
-cargo clean
-Remove-Item -Recurse -Force target-verify -ErrorAction SilentlyContinue
-Remove-Item *.log -ErrorAction SilentlyContinue
-```
-
-Do not remove local `config.toml` unless you no longer need your credentials.

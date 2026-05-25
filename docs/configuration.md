@@ -14,10 +14,6 @@ codex-remote --config D:\path\to\config.toml daemon
 bind = "127.0.0.1:3847"
 statePath = "codex-remote-state.json"
 
-[relay]
-publicWs = "127.0.0.1:3848"
-upstreamWs = "127.0.0.1:3849"
-
 [feishu]
 appId = ""
 appSecret = ""
@@ -56,26 +52,6 @@ Keep this on localhost. Do not expose it directly to a network.
 Path to the persisted state JSON file.
 
 This stores local bridge state such as Feishu conversation bindings. It should not be committed.
-
-## Relay
-
-```toml
-[relay]
-publicWs = "127.0.0.1:3848"
-upstreamWs = "127.0.0.1:3849"
-```
-
-### `publicWs`
-
-The websocket address exposed by `codex-remote`. Codex TUI connects here with:
-
-```text
-codex --remote ws://127.0.0.1:3848
-```
-
-### `upstreamWs`
-
-Default upstream app-server websocket address. In shim mode this is replaced per session with a temporary port.
 
 ## Feishu
 
@@ -202,3 +178,19 @@ codex-remote-state.json
 target/
 target-verify/
 ```
+
+## Reference Auth Artifacts
+
+The repository may also contain local auth-shape reference artifacts.
+
+They are inspection and experiment artifacts only:
+
+- not read by `codex-remote` at runtime
+- not a replacement for `config.toml`
+- not part of the normal remote-control + Feishu bridge flow
+- not documented here as a supported way to bypass official Codex / ChatGPT login
+
+See also:
+
+- [auth-notes.md](auth-notes.md)
+- [auth-notes.zh-CN.md](auth-notes.zh-CN.md)

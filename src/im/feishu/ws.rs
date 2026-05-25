@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::{
     app_state::SharedState,
-    types::{ChatType, InboundAttachment, InboundMessage},
+    types::{ChatType, InboundAction, InboundAttachment, InboundMessage, ThreadRouteDirection},
 };
 
 use super::api::FeishuApi;
@@ -388,6 +388,8 @@ async fn handle_event(
         text,
         mentioned,
         approval_request_key: None,
+        action: None,
+        card_message_id: None,
         attachments,
     })
     .await
@@ -424,25 +426,6 @@ async fn handle_card_action_event(
             .await;
         return Ok(());
     };
-    if value.get("kind").and_then(|v| v.as_str()) != Some("codex_approval_decision") {
-        state
-            .push_event(
-                "info",
-                "feishu_card_action_unhandled",
-                format!("value={}", serde_json::Value::Object(value.clone())),
-            )
-            .await;
-        return Ok(());
-    }
-    let option = value
-        .get("option")
-        .and_then(|v| v.as_u64())
-        .filter(|value| *value > 0)
-        .unwrap_or(1);
-    let request_key = value
-        .get("requestKey")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
     let chat_id = payload
         .context
         .as_ref()
@@ -463,10 +446,13 @@ async fn handle_card_action_event(
             "info",
             "feishu_card_action_received",
             format!(
-                "chat={} sender={} option={} message={}",
+                "chat={} sender={} kind={} message={}",
                 chat_id,
                 sender_id,
-                option,
+                value
+                    .get("kind")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
                 payload
                     .context
                     .as_ref()
@@ -475,6 +461,78 @@ async fn handle_card_action_event(
             ),
         )
         .await;
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let (text, approval_request_key, action) = match kind {
+        "codex_approval_decision" => {
+            let option = value
+                .get("option")
+                .and_then(|v| v.as_u64())
+                .filter(|value| *value > 0)
+                .unwrap_or(1);
+            let request_key = value
+                .get("requestKey")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            (format!("/{option}"), request_key, None)
+        }
+        "thread_route_resume_selected" => {
+            let request_id = value
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("thread route action missing requestId"))?
+                .to_string();
+            let thread_id = value
+                .get("threadId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("thread route action missing threadId"))?
+                .to_string();
+            (
+                String::new(),
+                None,
+                Some(InboundAction::ThreadRouteResumeSelected {
+                    request_id,
+                    thread_id,
+                }),
+            )
+        }
+        "thread_route_list_page" => {
+            let request_id = value
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("thread route page action missing requestId"))?
+                .to_string();
+            let direction = match value
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+            {
+                "prev" => ThreadRouteDirection::Prev,
+                "next" => ThreadRouteDirection::Next,
+                other => return Err(anyhow!("unsupported thread route page direction: {other}")),
+            };
+            (
+                String::new(),
+                None,
+                Some(InboundAction::ThreadRouteListPage {
+                    request_id,
+                    direction,
+                }),
+            )
+        }
+        _ => {
+            state
+                .push_event(
+                    "info",
+                    "feishu_card_action_unhandled",
+                    format!("value={}", serde_json::Value::Object(value.clone())),
+                )
+                .await;
+            return Ok(());
+        }
+    };
     tx.send(InboundMessage {
         account_id: account_id.to_string(),
         sender_id,
@@ -482,11 +540,17 @@ async fn handle_card_action_event(
         chat_type: ChatType::Direct,
         message_id: payload
             .context
-            .and_then(|context| context.open_message_id)
-            .unwrap_or_else(|| format!("card-action-{option}")),
-        text: format!("/{option}"),
+            .as_ref()
+            .and_then(|context| context.open_message_id.clone())
+            .unwrap_or_else(|| format!("card-action-{kind}")),
+        text,
         mentioned: true,
-        approval_request_key: request_key,
+        approval_request_key,
+        action,
+        card_message_id: payload
+            .context
+            .as_ref()
+            .and_then(|context| context.open_message_id.clone()),
         attachments: vec![],
     })
     .await

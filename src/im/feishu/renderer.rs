@@ -2,7 +2,6 @@ use serde_json::Value as JsonValue;
 
 use crate::im::feishu::types::FeishuUserInputQuestion;
 use crate::im_runtime::ApprovalDecisionOption;
-use crate::types::InboundAttachment;
 
 const DEFAULT_CARD_TEMPLATE: &str = "blue";
 const APPROVAL_CARD_TEMPLATE: &str = "orange";
@@ -2615,131 +2614,9 @@ fn build_dynamic_tool_call_card(item: &JsonValue) -> serde_json::Value {
     )
 }
 
-fn attachment_label(attachment: &InboundAttachment) -> String {
-    attachment
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .or_else(|| {
-            attachment
-                .local_path
-                .as_deref()
-                .and_then(|path| std::path::Path::new(path).file_name())
-                .and_then(|value| value.to_str())
-                .map(ToString::to_string)
-        })
-        .unwrap_or_else(|| "未命名附件".to_string())
-}
-
-fn attachment_descriptor(attachment: &InboundAttachment) -> &'static str {
-    match attachment.kind.as_str() {
-        "file" => "文件",
-        "text" => "文本附件",
-        "video" => "视频",
-        "image" => "图片",
-        _ => "附件",
-    }
-}
-
-fn attachment_details(attachment: &InboundAttachment) -> Option<String> {
-    attachment
-        .local_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("`{}`", normalize_card_markdown(value)))
-        .or_else(|| {
-            attachment
-                .mime_type
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(|value| format!("`{}`", normalize_card_markdown(value)))
-        })
-}
-
-pub fn build_desktop_user_message_card(
-    text: Option<&str>,
-    attachments: &[InboundAttachment],
-) -> serde_json::Value {
-    let text = text
-        .map(normalize_card_markdown)
-        .filter(|value| !value.is_empty());
-    let non_image_attachments = attachments
-        .iter()
-        .filter(|attachment| attachment.kind != "image")
-        .collect::<Vec<_>>();
-
-    let mut sections = Vec::new();
-    if let Some(text) = text {
-        sections.push(text);
-    }
-    if !non_image_attachments.is_empty() {
-        let lines = non_image_attachments
-            .iter()
-            .map(|attachment| {
-                let label = attachment_label(attachment);
-                let descriptor = attachment_descriptor(attachment);
-                match attachment_details(attachment) {
-                    Some(details) => format!("- **{}**: `{}`\n  {}", descriptor, label, details),
-                    None => format!("- **{}**: `{}`", descriptor, label),
-                }
-            })
-            .collect::<Vec<_>>();
-        sections.push(format!("**附件**\n{}", lines.join("\n")));
-    }
-
-    let content = if sections.is_empty() {
-        "用户发送了一条消息。".to_string()
-    } else {
-        sections.join("\n\n")
-    };
-    serde_json::json!({
-        "schema": "2.0",
-        "config": {
-            "wide_screen_mode": true
-        },
-        "body": {
-            "padding": "0px",
-            "elements": [
-                {
-                    "tag": "column_set",
-                    "flex_mode": "none",
-                    "horizontal_spacing": "0px",
-                    "background_style": "yellow-50",
-                    "columns": [
-                        {
-                            "tag": "column",
-                            "width": "weighted",
-                            "weight": 1,
-                            "padding": "0px",
-                            "margin": "0px",
-                            "vertical_spacing": "8px",
-                            "elements": [
-                                {
-                                    "tag": "markdown",
-                                    "content": content
-                                },
-                                {
-                                    "tag": "hr"
-                                },
-                                {
-                                    "tag": "markdown",
-                                    "content": "_消息来源：Desktop userMessage_"
-                                }
-                            ]
-                        }
-                    ]
-                }
-            ]
-        }
-    })
-}
-
 fn card_title_for_item_type(item_type: &str) -> (&'static str, &'static str) {
     match item_type {
+        "userMessage" => ("消息", "grey"),
         "agentMessage" => ("回复", "blue"),
         "reasoning" => ("思考", "wathet"),
         "plan" => ("计划", "indigo"),
@@ -2760,6 +2637,37 @@ fn card_title_for_item_type(item_type: &str) -> (&'static str, &'static str) {
 pub fn item_markdown_summary(item: &JsonValue) -> Option<String> {
     let item_type = item.get("type").and_then(|v| v.as_str())?;
     match item_type {
+        "userMessage" => {
+            let content = item.get("content").and_then(|v| v.as_array())?;
+            let parts = content
+                .iter()
+                .filter_map(|entry| match entry.get("type").and_then(|v| v.as_str()) {
+                    Some("text") => entry
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(normalize_card_markdown)
+                        .filter(|text| !text.is_empty()),
+                    Some("image") => entry
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .map(|url| format!("图片输入：`{}`", normalize_card_markdown(url))),
+                    Some("localImage") => entry
+                        .get("path")
+                        .and_then(|v| v.as_str())
+                        .map(|path| format!("本地图片：`{}`", normalize_card_markdown(path))),
+                    Some("mention") => entry
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|name| format!("@{}", normalize_card_markdown(name))),
+                    Some("skill") => entry
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|name| format!("技能：`{}`", normalize_card_markdown(name))),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            (!parts.is_empty()).then(|| parts.join("\n\n"))
+        }
         "agentMessage" => item
             .get("text")
             .and_then(|v| v.as_str())

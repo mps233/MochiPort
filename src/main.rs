@@ -1,11 +1,12 @@
 mod app_state;
 mod bridge;
+mod chain_log;
 mod cli;
 mod codex;
 mod config;
 mod im;
 mod im_runtime;
-mod relay_backend;
+mod remote_control_backend;
 mod shim;
 mod store;
 mod types;
@@ -28,14 +29,16 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("codex_remote=info".parse()?))
-        .init();
-
     let cli = Cli::parse()?;
     let config_path = config_path_from_cli(cli.config_path.clone());
     let mut config = AppConfig::load_or_default(&config_path)?;
     normalize_config_paths(&mut config, &config_path);
+    let log_path = init_logging(&config)?;
+    tracing::info!(
+        target: "codex_remote::logging",
+        path = %log_path.display(),
+        "codex-remote chain log initialized"
+    );
     if !config_path.exists() {
         config.save(&config_path)?;
     }
@@ -65,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
 
 async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<()> {
     let bind = config.bind.clone();
+    let chain_log_path = chain_log_path(&config);
     let state = AppState::new(config_path, config);
     {
         let config = state.config.lock().await;
@@ -80,11 +84,13 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             )
             .await;
     }
-    if let Err(err) = relay_backend::start_relay(state.clone()).await {
-        state
-            .push_event("error", "relay_start_failed", err.to_string())
-            .await;
-    }
+    state
+        .push_event(
+            "info",
+            "chain_log_ready",
+            format!("path={}", chain_log_path.display()),
+        )
+        .await;
     if state.config.lock().await.bridge.enabled {
         let bridge_state = state.clone();
         let bridge_handle = tokio::spawn(async move {
@@ -154,6 +160,31 @@ fn normalize_config_paths(config: &mut AppConfig, config_path: &Path) {
     {
         *real_codex_path = base.join(&real_codex_path);
     }
+}
+
+fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
+    let path = chain_log_path(config);
+    crate::chain_log::init(&path)?;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env().add_directive("codex_remote=info".parse()?))
+        .with_ansi(false)
+        .init();
+    Ok(path)
+}
+
+fn chain_log_path(config: &AppConfig) -> PathBuf {
+    log_dir_from_config(config).join("codex-remote-chain.log")
+}
+
+fn log_dir_from_config(config: &AppConfig) -> PathBuf {
+    config
+        .shim
+        .bin_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| config.shim.bin_dir.clone())
+        .join("logs")
 }
 
 fn absolutize(path: PathBuf) -> PathBuf {

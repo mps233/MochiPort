@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::Result;
 use tokio::{sync::mpsc, task::JoinSet};
@@ -8,8 +9,7 @@ use crate::{
     app_state::SharedState,
     codex::{
         approval_decision_by_input, approval_request_view, approval_response,
-        extract_agent_message_text, extract_turn_reply_text, extract_user_message_input,
-        notification_thread_id,
+        extract_agent_message_text, extract_turn_reply_text, notification_thread_id,
     },
     im::feishu::{
         FeishuApi, FeishuSettings, renderer,
@@ -19,10 +19,17 @@ use crate::{
         },
         ws::listen_ws,
     },
-    im_runtime::{PendingApproval, RouteTarget, route_from_conversation_key},
-    relay_backend,
-    types::InboundMessage,
+    im_runtime::{
+        PendingApproval, RouteTarget, ThreadRoutingRequestState, TurnOrigin,
+        route_from_conversation_key,
+    },
+    remote_control_backend,
+    types::{InboundAction, InboundMessage, ThreadRouteDirection},
 };
+
+static THREAD_ROUTING_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const THREAD_HISTORY_PAGE_SIZE: u32 = 8;
+const THREAD_LOADED_LIMIT: u32 = 64;
 
 pub async fn start_bridge(state: SharedState) {
     let config = state.config.lock().await.clone();
@@ -37,13 +44,13 @@ pub async fn start_bridge(state: SharedState) {
         return;
     }
 
-    let relay_status = relay_backend::status_snapshot(&state).await;
-    if !relay_status.tui_connected {
+    let remote_status = remote_control_backend::status_snapshot(&state).await;
+    if !remote_status.connected {
         state
             .push_event(
                 "warn",
-                "relay_not_connected",
-                "Codex TUI is not connected yet; Feishu listener will still start",
+                "remote_control_not_connected",
+                "Codex remote-control is not connected yet; Feishu listener will still start",
             )
             .await;
     }
@@ -63,7 +70,6 @@ pub async fn start_bridge(state: SharedState) {
     let ws_state = state.clone();
     let mut tasks = JoinSet::new();
     tasks.spawn(codex_event_router(state.clone(), api.clone(), generation));
-    tasks.spawn(local_turn_mirror(state.clone(), api.clone(), generation));
     tasks.spawn(async move {
         loop {
             if !is_current_generation(&ws_state, generation).await {
@@ -194,82 +200,76 @@ async fn handle_inbound(state: SharedState, api: FeishuApi, message: InboundMess
         .await;
 
     let trimmed = message.text.trim();
+    let route = route_for_message(&message);
     {
         let mut runtime = state.runtime.lock().await;
-        runtime.last_route = Some(RouteTarget {
-            conversation_key: message.conversation_key(),
-            account_id: message.account_id.clone(),
-            chat_id: message.chat_id.clone(),
-        });
+        runtime.last_route = Some(route.clone());
+    }
+    if let Some(action) = message.action.clone() {
+        return handle_inbound_action(state, api, message, action).await;
     }
     if handle_control_message(&state, &api, &message, trimmed).await? {
         return Ok(());
     }
-    let relay_status = relay_backend::status_snapshot(&state).await;
-    if !relay_status.tui_connected {
+    let remote_status = remote_control_backend::status_snapshot(&state).await;
+    if !remote_status.connected {
         api.send_text_message(
             &message.chat_id,
-            &format!(
-                "Codex 本地交互还没有连接。请先启动：codex --remote {}",
-                relay_status.public_ws_url
-            ),
+            "Codex remote-control 还没有连接。请在项目目录运行 codex，确认它已经通过 remote-control 连接到 codex-remote。",
         )
         .await?;
         return Ok(());
     }
 
-    let conversation_key = message.conversation_key();
-    let Some(thread_id) = relay_status.current_thread_id.clone() else {
-        api.send_text_message(
-            &message.chat_id,
-            "还没有本地 Codex 会话。请先在本地 Codex 里发送第一条消息，然后再从飞书接管。",
-        )
-        .await?;
+    let Some(thread_id) = live_thread_for_route(&state, &route).await else {
+        send_thread_routing_list(&state, &api, &message, None, None, 1).await?;
         return Ok(());
     };
     {
         let mut persisted = state.persisted.lock().await;
         persisted
             .sessions
-            .insert(conversation_key, thread_id.clone());
+            .insert(route.conversation_key.clone(), thread_id.clone());
         let config = state.config.lock().await.clone();
         persisted.save(&config.state_path)?;
     }
     {
         let mut runtime = state.runtime.lock().await;
-        runtime.bind_route(
-            &thread_id,
-            RouteTarget {
-                conversation_key: message.conversation_key(),
-                account_id: message.account_id.clone(),
-                chat_id: message.chat_id.clone(),
-            },
-        );
+        runtime.bind_route(&thread_id, route.clone());
     }
 
+    let turn_id =
+        match remote_control_backend::start_turn(&state, &thread_id, trimmed, &message.attachments)
+            .await
+        {
+            Ok(turn_id) => turn_id,
+            Err(err) if is_thread_not_found_error(&err) => {
+                clear_thread_binding(&state, &route.conversation_key).await?;
+                state
+                    .push_event(
+                        "warn",
+                        "thread_route_stale",
+                        format!(
+                            "conversation={} thread={} during=turn/start err={err}",
+                            route.conversation_key, thread_id
+                        ),
+                    )
+                    .await;
+                send_thread_routing_list(&state, &api, &message, None, None, 1).await?;
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
     state
         .runtime
         .lock()
         .await
-        .mark_bridge_turn_pending(&thread_id);
-    let turn_result =
-        relay_backend::start_turn(&state, &thread_id, trimmed, &message.attachments).await;
-    let turn_id = match turn_result {
-        Ok(turn_id) => turn_id,
-        Err(err) => {
-            state
-                .runtime
-                .lock()
-                .await
-                .clear_bridge_turn_pending(&thread_id);
-            return Err(err);
-        }
-    };
+        .mark_turn_started(&thread_id, &turn_id);
     state
         .runtime
         .lock()
         .await
-        .mark_turn_started_by_bridge(&thread_id, &turn_id);
+        .remember_turn_origin(&turn_id, TurnOrigin::Feishu);
     state
         .push_event(
             "info",
@@ -314,29 +314,37 @@ async fn handle_control_message(
                 .await?;
                 return Ok(true);
             }
+            {
+                let mut runtime = state.runtime.lock().await;
+                runtime.unbind_routes_for_conversation(&message.conversation_key());
+            }
             let mut persisted = state.persisted.lock().await;
             persisted.sessions.remove(&message.conversation_key());
             let config = state.config.lock().await.clone();
             persisted.save(&config.state_path)?;
-            api.send_text_message(&message.chat_id, "已新建下一轮 Codex 会话。")
-                .await?;
+            api.send_text_message(
+                &message.chat_id,
+                "已解除当前绑定。下一条消息会先让你选择要接入的 thread。",
+            )
+            .await?;
             return Ok(true);
         }
         "/status" => {
             let text =
                 if let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await {
                     format!("thread: {thread_id}\n执行: 执行中\nturn: {turn_id}")
-                } else if let Some(thread_id) = thread_for_message(state, message).await {
+                } else if let Some(thread_id) =
+                    live_thread_for_route(state, &route_for_message(message)).await
+                {
                     format!("thread: {thread_id}\n执行: 空闲")
                 } else {
-                    let relay_status = relay_backend::status_snapshot(state).await;
-                    if let Some(thread_id) = relay_status.current_thread_id {
-                        format!("thread: {thread_id}\n执行: 空闲")
-                    } else {
-                        "当前没有本地 Codex 会话。请先在本地 Codex 里发送一条消息。".to_string()
-                    }
+                    "当前飞书会话还没有绑定任何 thread。".to_string()
                 };
             api.send_text_message(&message.chat_id, &text).await?;
+            return Ok(true);
+        }
+        "/threads" => {
+            send_thread_routing_list(state, api, message, None, None, 1).await?;
             return Ok(true);
         }
         "/s" | "/stop" => {
@@ -345,7 +353,7 @@ async fn handle_control_message(
                     .await?;
                 return Ok(true);
             };
-            relay_backend::interrupt_turn(state, &thread_id, &turn_id).await?;
+            remote_control_backend::interrupt_turn(state, &thread_id, &turn_id).await?;
             state
                 .runtime
                 .lock()
@@ -357,12 +365,16 @@ async fn handle_control_message(
         }
         "/q" => {
             if let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await {
-                let _ = relay_backend::interrupt_turn(state, &thread_id, &turn_id).await;
+                let _ = remote_control_backend::interrupt_turn(state, &thread_id, &turn_id).await;
                 state
                     .runtime
                     .lock()
                     .await
                     .mark_turn_completed(&thread_id, Some(&turn_id));
+            }
+            {
+                let mut runtime = state.runtime.lock().await;
+                runtime.unbind_routes_for_conversation(&message.conversation_key());
             }
             let mut persisted = state.persisted.lock().await;
             persisted.sessions.remove(&message.conversation_key());
@@ -375,6 +387,26 @@ async fn handle_control_message(
         _ => {}
     }
     Ok(false)
+}
+
+async fn handle_inbound_action(
+    state: SharedState,
+    api: FeishuApi,
+    message: InboundMessage,
+    action: InboundAction,
+) -> Result<()> {
+    match action {
+        InboundAction::ThreadRouteResumeSelected {
+            request_id,
+            thread_id,
+        } => {
+            handle_thread_route_resume_selected(state, api, message, &request_id, &thread_id).await
+        }
+        InboundAction::ThreadRouteListPage {
+            request_id,
+            direction,
+        } => handle_thread_route_list_page(state, api, message, &request_id, direction).await,
+    }
 }
 
 fn is_approval_reply(command: &str) -> bool {
@@ -443,6 +475,140 @@ async fn handle_approval_text_reply(
     Ok(true)
 }
 
+async fn handle_thread_route_resume_selected(
+    state: SharedState,
+    api: FeishuApi,
+    message: InboundMessage,
+    request_id: &str,
+    thread_id: &str,
+) -> Result<()> {
+    let request = {
+        state
+            .runtime
+            .lock()
+            .await
+            .thread_routing_request(request_id)
+    };
+    let Some(request) = request else {
+        api.send_text_message(
+            &message.chat_id,
+            "这张 thread 选择卡片已经失效，请重新发送消息。",
+        )
+        .await?;
+        return Ok(());
+    };
+    if request.conversation_key != message.conversation_key() {
+        api.send_text_message(&message.chat_id, "这个 thread 选择不属于当前会话。")
+            .await?;
+        return Ok(());
+    }
+
+    let card_message_id = request
+        .message_id
+        .clone()
+        .or(message.card_message_id.clone());
+    if let Some(message_id) = card_message_id.as_deref() {
+        let loading = renderer::build_thread_routing_result_card(
+            "正在接入会话",
+            &format!("正在订阅 thread `{thread_id}` 的后续事件..."),
+        );
+        let _ = api.update_interactive_message(message_id, &loading).await;
+    }
+
+    let response = remote_control_backend::resume_thread(&state, thread_id, true).await?;
+    let thread = response
+        .get("thread")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let route = RouteTarget {
+        conversation_key: message.conversation_key(),
+        account_id: message.account_id.clone(),
+        chat_id: message.chat_id.clone(),
+    };
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.unbind_routes_for_conversation(&route.conversation_key);
+        runtime.bind_route(thread_id, route.clone());
+        runtime.clear_thread_routing_request(request_id);
+    }
+    {
+        let mut persisted = state.persisted.lock().await;
+        persisted
+            .sessions
+            .insert(route.conversation_key.clone(), thread_id.to_string());
+        let config = state.config.lock().await.clone();
+        persisted.save(&config.state_path)?;
+    }
+    let body = format!(
+        "已接入 thread `{thread_id}`。\n\n{}\n{}\n{}",
+        summarize_thread_title(&thread),
+        summarize_thread_cwd(&thread),
+        summarize_thread_status(&thread)
+    );
+    let card = renderer::build_thread_routing_result_card("已订阅会话", &body);
+    if let Some(message_id) = card_message_id.as_deref() {
+        let _ = api.update_interactive_message(message_id, &card).await;
+    } else {
+        let _ = send_interactive_to_target(&api, &route.chat_id, &card).await?;
+    }
+    state
+        .push_event(
+            "info",
+            "thread_route_resumed",
+            format!("conversation={} thread={thread_id}", route.conversation_key),
+        )
+        .await;
+    Ok(())
+}
+
+async fn handle_thread_route_list_page(
+    state: SharedState,
+    api: FeishuApi,
+    message: InboundMessage,
+    request_id: &str,
+    direction: ThreadRouteDirection,
+) -> Result<()> {
+    let request = {
+        state
+            .runtime
+            .lock()
+            .await
+            .thread_routing_request(request_id)
+    };
+    let Some(request) = request else {
+        api.send_text_message(
+            &message.chat_id,
+            "这张 thread 选择卡片已经失效，请重新发送消息。",
+        )
+        .await?;
+        return Ok(());
+    };
+    if request.conversation_key != message.conversation_key() {
+        api.send_text_message(&message.chat_id, "这个 thread 列表不属于当前会话。")
+            .await?;
+        return Ok(());
+    }
+
+    let target_page = match direction {
+        ThreadRouteDirection::Prev => request.page.saturating_sub(1).max(1),
+        ThreadRouteDirection::Next => request.page.saturating_add(1),
+    };
+    let cursor = request
+        .page_cursors
+        .get(target_page.saturating_sub(1))
+        .cloned()
+        .flatten();
+    send_thread_routing_list(
+        &state,
+        &api,
+        &message,
+        Some(request),
+        cursor.as_deref(),
+        target_page,
+    )
+    .await
+}
+
 async fn respond_to_pending_approval(
     state: &SharedState,
     api: &FeishuApi,
@@ -453,7 +619,7 @@ async fn respond_to_pending_approval(
     decision: crate::im_runtime::ApprovalDecisionOption,
 ) -> Result<()> {
     let response = approval_response(decision.decision);
-    relay_backend::send_response(state, pending.request_id.clone(), response).await?;
+    remote_control_backend::send_response(state, pending.request_id.clone(), response).await?;
     update_resolved_approval_card(api, &pending, option_index, &decision.label).await;
     let next = state
         .runtime
@@ -551,6 +717,218 @@ async fn send_approval_card(
     Ok(())
 }
 
+async fn send_thread_routing_list(
+    state: &SharedState,
+    api: &FeishuApi,
+    message: &InboundMessage,
+    existing_request: Option<ThreadRoutingRequestState>,
+    cursor: Option<&str>,
+    page: usize,
+) -> Result<()> {
+    let route = RouteTarget {
+        conversation_key: message.conversation_key(),
+        account_id: message.account_id.clone(),
+        chat_id: message.chat_id.clone(),
+    };
+    let request_id = existing_request
+        .as_ref()
+        .map(|request| request.request_id.clone())
+        .unwrap_or_else(next_thread_routing_request_id);
+    let mut page_cursors = existing_request
+        .as_ref()
+        .map(|request| request.page_cursors.clone())
+        .unwrap_or_else(|| vec![None]);
+    if page_cursors.len() < page {
+        page_cursors.resize(page, None);
+    }
+    page_cursors[page - 1] = cursor.map(str::to_string);
+
+    let loaded =
+        remote_control_backend::thread_loaded_list(state, None, Some(THREAD_LOADED_LIMIT)).await?;
+    let history =
+        remote_control_backend::thread_list(state, cursor, Some(THREAD_HISTORY_PAGE_SIZE), None)
+            .await?;
+    let loaded_ids = loaded
+        .get("data")
+        .and_then(|v| v.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+    let history_threads = history
+        .get("data")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let entries = build_thread_entries(&loaded_ids, &history_threads);
+    let next_cursor = history
+        .get("nextCursor")
+        .or_else(|| history.get("next_cursor"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    if page_cursors.len() <= page {
+        page_cursors.resize(page + 1, None);
+    }
+    page_cursors[page] = next_cursor.clone();
+
+    let card = renderer::build_thread_list_card(
+        &request_id,
+        "选择 Codex 会话",
+        "当前飞书会话还没有订阅任何 Codex thread。请选择一个会话接入后续事件。",
+        &entries,
+        page,
+        page > 1,
+        next_cursor.is_some(),
+    );
+    let message_id = if let Some(message_id) = existing_request
+        .as_ref()
+        .and_then(|request| request.message_id.clone())
+    {
+        api.update_interactive_message(&message_id, &card).await?;
+        message_id
+    } else {
+        send_interactive_to_target(api, &route.chat_id, &card).await?
+    };
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.remember_thread_routing_request(ThreadRoutingRequestState {
+            request_id: request_id.clone(),
+            conversation_key: route.conversation_key.clone(),
+            account_id: route.account_id.clone(),
+            chat_id: route.chat_id.clone(),
+            message_id: Some(message_id.clone()),
+            page,
+            page_cursors,
+            history_cursor: cursor.map(str::to_string),
+            history_has_next: next_cursor.is_some(),
+        });
+    }
+    state
+        .push_event(
+            "info",
+            "thread_route_list_sent",
+            format!(
+                "conversation={} page={page} entries={}",
+                route.conversation_key,
+                entries.len()
+            ),
+        )
+        .await;
+    Ok(())
+}
+
+fn next_thread_routing_request_id() -> String {
+    let value = THREAD_ROUTING_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("thread-route-{value}")
+}
+
+fn build_thread_entries(
+    loaded_ids: &[String],
+    history_threads: &[serde_json::Value],
+) -> Vec<renderer::FeishuThreadListEntry> {
+    let loaded_set = loaded_ids
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut entries = history_threads
+        .iter()
+        .map(|thread| renderer::FeishuThreadListEntry {
+            thread_id: thread
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            title: summarize_thread_title(thread),
+            summary: Some(summarize_thread_preview(thread)),
+            last_activity_text: Some(format!(
+                "{} · {}",
+                summarize_thread_status(thread),
+                summarize_thread_cwd(thread)
+            )),
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| {
+        (
+            !loaded_set.contains(&entry.thread_id),
+            entry.thread_id.clone(),
+        )
+    });
+    entries
+}
+
+fn summarize_thread_title(thread: &serde_json::Value) -> String {
+    thread
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            thread
+                .get("preview")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| truncate_text(v, 80))
+        })
+        .unwrap_or_else(|| {
+            let thread_id = thread
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            format!("会话 {thread_id}")
+        })
+}
+
+fn summarize_thread_preview(thread: &serde_json::Value) -> String {
+    thread
+        .get("preview")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| truncate_text(v, 120))
+        .unwrap_or_else(|| "无预览".to_string())
+}
+
+fn summarize_thread_cwd(thread: &serde_json::Value) -> String {
+    let cwd = thread
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if cwd.is_empty() {
+        "目录未知".to_string()
+    } else {
+        format!("目录：`{cwd}`")
+    }
+}
+
+fn summarize_thread_status(thread: &serde_json::Value) -> String {
+    match thread
+        .get("status")
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+    {
+        "active" => "运行中".to_string(),
+        "idle" => "空闲".to_string(),
+        "notLoaded" => "未加载".to_string(),
+        "systemError" => "系统错误".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in text.chars().enumerate() {
+        if index >= max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn approval_reply_hint(pending: &PendingApproval) -> String {
     let options = pending
         .decisions
@@ -565,37 +943,78 @@ fn approval_reply_hint(pending: &PendingApproval) -> String {
     }
 }
 
-async fn thread_for_message(state: &SharedState, message: &InboundMessage) -> Option<String> {
-    state
-        .persisted
-        .lock()
-        .await
-        .sessions
-        .get(&message.conversation_key())
-        .cloned()
-}
-
 async fn active_turn_for_message(
     state: &SharedState,
     message: &InboundMessage,
 ) -> Option<(String, String)> {
-    let thread_id = thread_for_message(state, message).await?;
+    let route = route_for_message(message);
+    let thread_id = live_thread_for_route(state, &route).await?;
     let runtime = state.runtime.lock().await;
     let turn_id = runtime.current_turn_by_thread.get(&thread_id)?.clone();
     Some((thread_id, turn_id))
 }
 
+fn route_for_message(message: &InboundMessage) -> RouteTarget {
+    RouteTarget {
+        conversation_key: message.conversation_key(),
+        account_id: message.account_id.clone(),
+        chat_id: message.chat_id.clone(),
+    }
+}
+
+async fn live_thread_for_route(state: &SharedState, route: &RouteTarget) -> Option<String> {
+    state
+        .runtime
+        .lock()
+        .await
+        .route_by_thread
+        .iter()
+        .find_map(|(thread_id, existing_route)| {
+            (existing_route.conversation_key == route.conversation_key).then(|| thread_id.clone())
+        })
+}
+
+async fn clear_thread_binding(state: &SharedState, conversation_key: &str) -> Result<()> {
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.unbind_routes_for_conversation(conversation_key);
+    }
+    let mut persisted = state.persisted.lock().await;
+    persisted.sessions.remove(conversation_key);
+    let config = state.config.lock().await.clone();
+    persisted.save(&config.state_path)?;
+    Ok(())
+}
+
+fn is_thread_not_found_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains("thread not found")
+}
+
 async fn codex_event_router(state: SharedState, api: FeishuApi, generation: u64) {
-    let mut rx = relay_backend::subscribe(&state);
+    let mut rx = remote_control_backend::subscribe(&state);
     loop {
         if !is_current_generation(&state, generation).await {
             break;
         }
         let notification = match rx.recv().await {
             Ok(notification) => notification,
-            Err(err) => {
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                 state
-                    .push_event("warn", "codex_event_router_closed", err.to_string())
+                    .push_event(
+                        "warn",
+                        "codex_event_router_lagged",
+                        format!("skipped={skipped}"),
+                    )
+                    .await;
+                continue;
+            }
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                state
+                    .push_event(
+                        "warn",
+                        "codex_event_router_closed",
+                        "notification channel closed",
+                    )
                     .await;
                 break;
             }
@@ -659,21 +1078,15 @@ async fn codex_event_router(state: SharedState, api: FeishuApi, generation: u64)
                 continue;
             };
             let route = { state.runtime.lock().await.route_for_thread(&thread_id) };
-            let route = match route {
-                Some(route) => route,
-                None => match route_from_persisted(&state, &thread_id).await {
-                    Some(route) => route,
-                    None => {
-                        state
-                            .push_event(
-                                "warn",
-                                "approval_no_route",
-                                format!("thread={thread_id} kind={request_kind}"),
-                            )
-                            .await;
-                        continue;
-                    }
-                },
+            let Some(route) = route else {
+                state
+                    .push_event(
+                        "warn",
+                        "approval_no_route",
+                        format!("thread={thread_id} kind={request_kind}"),
+                    )
+                    .await;
+                continue;
             };
             let (should_send_now, approval) = {
                 let mut runtime = state.runtime.lock().await;
@@ -728,74 +1141,6 @@ async fn codex_event_router(state: SharedState, api: FeishuApi, generation: u64)
     }
 }
 
-async fn local_turn_mirror(state: SharedState, _api: FeishuApi, generation: u64) {
-    let mut rx = relay_backend::subscribe(&state);
-    loop {
-        if !is_current_generation(&state, generation).await {
-            break;
-        }
-        let notification = match rx.recv().await {
-            Ok(notification) => notification,
-            Err(err) => {
-                state
-                    .push_event("warn", "local_turn_mirror_closed", err.to_string())
-                    .await;
-                break;
-            }
-        };
-        if !is_current_generation(&state, generation).await {
-            break;
-        }
-        if notification.method != "turn/started" {
-            continue;
-        }
-        let Some(params) = notification.params.as_ref() else {
-            continue;
-        };
-        let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        let Some(turn_id) = params
-            .get("turn")
-            .and_then(|v| v.get("id"))
-            .and_then(|v| v.as_str())
-        else {
-            continue;
-        };
-        if {
-            let runtime = state.runtime.lock().await;
-            runtime.is_bridge_turn(turn_id) || runtime.is_bridge_pending_thread(thread_id)
-        } {
-            continue;
-        }
-        if !state.runtime.lock().await.mark_turn_mirrored(turn_id) {
-            continue;
-        }
-        let route = {
-            let runtime = state.runtime.lock().await;
-            runtime
-                .route_for_thread(thread_id)
-                .or_else(|| runtime.last_route.clone())
-        };
-        let Some(route) = route else {
-            state
-                .push_event("warn", "local_turn_no_route", format!("thread={thread_id}"))
-                .await;
-            continue;
-        };
-        state
-            .runtime
-            .lock()
-            .await
-            .bind_route(thread_id, route.clone());
-        state
-            .runtime
-            .lock()
-            .await
-            .mark_turn_started(thread_id, turn_id);
-    }
-}
-
 async fn handle_codex_notification_for_feishu(
     state: SharedState,
     api: FeishuApi,
@@ -805,87 +1150,35 @@ async fn handle_codex_notification_for_feishu(
         return;
     };
     match notification.method.as_str() {
-        "item/started" => {
-            if let Some((thread_id, text, attachments)) = params
-                .get("item")
-                .and_then(extract_user_message_input)
-                .and_then(|(text, attachments)| {
-                    let thread_id = params.get("threadId").and_then(|v| v.as_str())?;
-                    Some((thread_id.to_string(), text, attachments))
-                })
+        "turn/started" => {
+            let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
+                return;
+            };
+            let Some(turn_id) = params
+                .get("turn")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .or_else(|| params.get("turnId").and_then(|v| v.as_str()))
+            else {
+                return;
+            };
+            if state
+                .runtime
+                .lock()
+                .await
+                .route_for_thread(thread_id)
+                .is_some()
             {
-                if let Some(turn_id) = params.get("turnId").and_then(|v| v.as_str()) {
-                    if state
-                        .runtime
-                        .lock()
-                        .await
-                        .turn_started_by_bridge
-                        .contains(turn_id)
-                    {
-                        return;
-                    }
-                }
-                if state
+                state
                     .runtime
                     .lock()
                     .await
-                    .is_bridge_pending_thread(&thread_id)
-                {
-                    return;
-                }
-                let route = { state.runtime.lock().await.route_for_thread(&thread_id) };
-                if let Some(route) = route {
-                    let should_send = {
-                        let mut runtime = state.runtime.lock().await;
-                        let dedupe_text = text
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or("[attachments]");
-                        let key = format!("{}:desktop-user", route.conversation_key);
-                        if runtime.should_skip_duplicate_text(&key, dedupe_text) {
-                            false
-                        } else {
-                            runtime.remember_sent_text(&key, dedupe_text);
-                            true
-                        }
-                    };
-                    if should_send {
-                        let card = renderer::build_desktop_user_message_card(
-                            text.as_deref(),
-                            &attachments,
-                        );
-                        match send_interactive_to_target(&api, &route.chat_id, &card).await {
-                            Ok(message_id) => {
-                                state
-                                    .push_event(
-                                        "info",
-                                        "feishu_desktop_user_message_sent",
-                                        format!(
-                                            "thread={thread_id} chat={} message={message_id}",
-                                            route.chat_id
-                                        ),
-                                    )
-                                    .await;
-                            }
-                            Err(err) => {
-                                state
-                                    .push_event(
-                                        "error",
-                                        "feishu_desktop_user_message_failed",
-                                        format!(
-                                            "thread={thread_id} chat={} err={err}",
-                                            route.chat_id
-                                        ),
-                                    )
-                                    .await;
-                            }
-                        }
-                    }
-                    return;
-                }
+                    .mark_turn_started(thread_id, turn_id);
             }
-
+        }
+        "thread/started" => {}
+        "thread/status/changed" => {}
+        "item/started" => {
             let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
                 return;
             };
@@ -1111,6 +1404,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
                 return;
             };
+            let turn_id = params.get("turnId").and_then(|v| v.as_str());
             let Some(item) = params.get("item") else {
                 return;
             };
@@ -1168,6 +1462,41 @@ async fn handle_codex_notification_for_feishu(
                         true,
                     )
                     .await;
+                }
+            } else if item_type == "userMessage" {
+                let should_forward = if let Some(turn_id) = turn_id {
+                    state.runtime.lock().await.turn_origin(turn_id) != Some(TurnOrigin::Feishu)
+                } else {
+                    true
+                };
+                if !should_forward {
+                    state
+                        .push_event(
+                            "info",
+                            "feishu_user_message_suppressed",
+                            format!(
+                                "thread={thread_id} item={item_id} turn={} chat={}",
+                                turn_id.unwrap_or(""),
+                                route.chat_id
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+                if let Some(card) = renderer::build_item_card(item) {
+                    if let Err(err) = send_interactive_to_target(&api, &route.chat_id, &card).await
+                    {
+                        state
+                            .push_event(
+                                "error",
+                                "feishu_item_card_failed",
+                                format!(
+                                    "thread={thread_id} item={item_id} chat={} err={err}",
+                                    route.chat_id
+                                ),
+                            )
+                            .await;
+                    }
                 }
             } else if let Some(card) = renderer::build_item_card(item) {
                 if let Err(err) = send_interactive_to_target(&api, &route.chat_id, &card).await {
@@ -1300,18 +1629,6 @@ fn command_execution_full_text(item: &serde_json::Value) -> Option<String> {
         output,
         meta.join(" · ")
     ))
-}
-
-async fn route_from_persisted(state: &SharedState, thread_id: &str) -> Option<RouteTarget> {
-    let persisted = state.persisted.lock().await;
-    persisted
-        .sessions
-        .iter()
-        .find_map(|(conversation_key, bound_thread_id)| {
-            (bound_thread_id == thread_id)
-                .then(|| route_from_conversation_key(conversation_key))
-                .flatten()
-        })
 }
 
 fn approval_kind_label(kind: &str) -> &str {

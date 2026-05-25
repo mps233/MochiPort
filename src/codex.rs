@@ -3,7 +3,6 @@
 use serde_json::{Value, json};
 
 use crate::im_runtime::ApprovalDecisionOption;
-use crate::types::InboundAttachment;
 
 #[derive(Debug, Clone)]
 pub struct CodexNotification {
@@ -47,63 +46,6 @@ pub fn extract_agent_message_text(item: &Value) -> Option<String> {
         })
 }
 
-pub fn extract_user_message_input(
-    item: &Value,
-) -> Option<(Option<String>, Vec<InboundAttachment>)> {
-    if item.get("type").and_then(|v| v.as_str()) != Some("userMessage") {
-        return None;
-    }
-    let content = item.get("content").and_then(|v| v.as_array())?;
-    let mut text = String::new();
-    let mut attachments = Vec::new();
-
-    for entry in content {
-        match entry.get("type").and_then(|v| v.as_str()) {
-            Some("text") => {
-                if let Some(value) = entry.get("text").and_then(|v| v.as_str()) {
-                    text.push_str(value);
-                }
-            }
-            Some("localImage") => {
-                if let Some(local_path) = entry
-                    .get("path")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                {
-                    attachments.push(InboundAttachment {
-                        kind: "image".to_string(),
-                        name: None,
-                        mime_type: None,
-                        text_hint: None,
-                        local_path: Some(local_path.to_string()),
-                    });
-                }
-            }
-            Some("image") => {
-                if let Some(url) = entry
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                {
-                    attachments.push(InboundAttachment {
-                        kind: "image".to_string(),
-                        name: None,
-                        mime_type: None,
-                        text_hint: Some(url.to_string()),
-                        local_path: None,
-                    });
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let text = text.trim().to_string();
-    Some(((!text.is_empty()).then_some(text), attachments))
-}
-
 pub fn extract_turn_reply_text(params: &Value) -> Option<String> {
     params
         .get("turn")
@@ -133,6 +75,11 @@ pub fn notification_thread_id(notification: &CodexNotification) -> Option<String
             p.get("threadId")
                 .and_then(|v| v.as_str())
                 .or_else(|| p.get("thread_id").and_then(|v| v.as_str()))
+                .or_else(|| {
+                    p.get("thread")
+                        .and_then(|t| t.get("id"))
+                        .and_then(|v| v.as_str())
+                })
                 .or_else(|| {
                     p.get("turn")
                         .and_then(|t| t.get("threadId"))
@@ -510,6 +457,7 @@ fn command_decision_option(decision: &Value, params: &Value) -> Option<ApprovalD
     } else if let Some(amendment) = decision.get("acceptWithExecpolicyAmendment") {
         let prefix = amendment
             .get("execpolicy_amendment")
+            .or_else(|| amendment.get("execpolicyAmendment"))
             .and_then(decision_prefix_from_execpolicy_amendment)
             .unwrap_or_else(|| "this command".to_string());
         if prefix.contains('\n') || prefix.contains('\r') {
@@ -519,6 +467,7 @@ fn command_decision_option(decision: &Value, params: &Value) -> Option<ApprovalD
     } else if let Some(amendment) = decision.get("applyNetworkPolicyAmendment") {
         let action = amendment
             .get("network_policy_amendment")
+            .or_else(|| amendment.get("networkPolicyAmendment"))
             .and_then(|v| v.get("action"))
             .and_then(|v| v.as_str())
             .unwrap_or("allow");
@@ -591,15 +540,116 @@ fn is_negative_decision(decision: &Value) -> bool {
         || decision
             .get("applyNetworkPolicyAmendment")
             .and_then(|value| value.get("network_policy_amendment"))
+            .or_else(|| {
+                decision
+                    .get("applyNetworkPolicyAmendment")
+                    .and_then(|value| value.get("networkPolicyAmendment"))
+            })
             .and_then(|value| value.get("action"))
             .and_then(|value| value.as_str())
             .is_some_and(|value| value == "deny")
 }
 
-pub fn fallback_server_request_response(notification: &CodexNotification) -> Option<Value> {
-    match notification.method.as_str() {
-        "mcpServer/elicitation/request" => Some(json!({ "action": "decline", "content": null })),
-        "item/tool/requestUserInput" => Some(json!({ "answers": [] })),
-        _ => None,
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::im_runtime::PendingApproval;
+
+    use super::{
+        CodexNotification, approval_decision_by_input, approval_request_view, approval_response,
+    };
+
+    fn notification(method: &str, params: serde_json::Value) -> CodexNotification {
+        CodexNotification {
+            method: method.to_string(),
+            params: Some(params),
+            request_id: Some(json!(1)),
+        }
+    }
+
+    #[test]
+    fn command_approval_uses_available_decisions_verbatim() {
+        let view = approval_request_view(&notification(
+            "item/commandExecution/requestApproval",
+            json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "itemId": "item",
+                "command": ["npm", "test"],
+                "cwd": "D:\\repo",
+                "availableDecisions": [
+                    "accept",
+                    "acceptForSession",
+                    {
+                        "acceptWithExecpolicyAmendment": {
+                            "execpolicy_amendment": ["npm", "test"]
+                        }
+                    },
+                    "cancel"
+                ]
+            }),
+        ))
+        .expect("approval view");
+
+        assert_eq!(
+            view.decisions
+                .iter()
+                .map(|option| option.decision.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                json!("accept"),
+                json!("acceptForSession"),
+                json!({
+                    "acceptWithExecpolicyAmendment": {
+                        "execpolicy_amendment": ["npm", "test"]
+                    }
+                }),
+                json!("cancel")
+            ]
+        );
+    }
+
+    #[test]
+    fn v1_approval_keeps_review_decision_values() {
+        let view = approval_request_view(&notification(
+            "execCommandApproval",
+            json!({
+                "command": "cargo test",
+                "cwd": "D:\\repo"
+            }),
+        ))
+        .expect("approval view");
+
+        assert_eq!(view.decisions[0].decision, json!("approved"));
+        assert_eq!(view.decisions[1].decision, json!("denied"));
+        assert_eq!(
+            approval_response(view.decisions[0].decision.clone()),
+            json!({ "decision": "approved" })
+        );
+    }
+
+    #[test]
+    fn yes_no_reply_maps_to_current_protocol_decisions() {
+        let pending = PendingApproval {
+            request_id: json!(7),
+            request_kind: "command".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({}),
+            summary: "summary".to_string(),
+            decisions: vec![
+                super::decision_option("Yes", json!("accept")),
+                super::decision_option("No", json!("cancel")),
+            ],
+            feishu_message_id: None,
+        };
+
+        let (yes_index, yes) = approval_decision_by_input(&pending, "/y").expect("yes");
+        let (no_index, no) = approval_decision_by_input(&pending, "/n").expect("no");
+
+        assert_eq!(yes_index, 1);
+        assert_eq!(yes.decision, json!("accept"));
+        assert_eq!(no_index, 2);
+        assert_eq!(no.decision, json!("cancel"));
     }
 }

@@ -36,34 +36,47 @@ pub struct ResolvedApproval {
     pub next_current: Option<PendingApproval>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ThreadRoutingRequestState {
+    pub request_id: String,
+    pub conversation_key: String,
+    pub account_id: String,
+    pub chat_id: String,
+    pub message_id: Option<String>,
+    pub page: usize,
+    pub page_cursors: Vec<Option<String>>,
+    pub history_cursor: Option<String>,
+    pub history_has_next: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnOrigin {
+    Feishu,
+}
+
 #[derive(Debug, Default)]
 pub struct RuntimeState {
     pub bridge_generation: u64,
     pub current_turn_by_thread: HashMap<String, String>,
-    pub bridge_pending_threads: HashSet<String>,
-    pub turn_started_by_bridge: HashSet<String>,
-    pub mirrored_turns: HashSet<String>,
+    pub turn_origin_by_id: HashMap<String, TurnOrigin>,
     pub last_sent_text_by_route: HashMap<String, String>,
     pub route_by_thread: HashMap<String, RouteTarget>,
     pub last_route: Option<RouteTarget>,
     pub pending_approvals_by_conversation: HashMap<String, Vec<PendingApproval>>,
     pub pending_approval_request_keys: HashSet<String>,
     pub feishu_streaming_cards_by_item: HashMap<String, FeishuStreamingCardState>,
+    pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
 }
 
 impl RuntimeState {
     pub fn start_bridge_generation(&mut self) -> u64 {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
-        self.bridge_pending_threads.clear();
-        self.turn_started_by_bridge.clear();
-        self.mirrored_turns.clear();
         self.feishu_streaming_cards_by_item.clear();
         self.bridge_generation
     }
 
     pub fn invalidate_bridge_generation(&mut self) {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
-        self.bridge_pending_threads.clear();
         self.feishu_streaming_cards_by_item.clear();
     }
 
@@ -81,35 +94,38 @@ impl RuntimeState {
         self.route_by_thread.insert(thread_id.to_string(), route);
     }
 
+    pub fn unbind_route(&mut self, thread_id: &str) {
+        self.route_by_thread.remove(thread_id);
+    }
+
+    pub fn unbind_routes_for_conversation(&mut self, conversation_key: &str) -> Vec<String> {
+        let thread_ids = self
+            .route_by_thread
+            .iter()
+            .filter_map(|(thread_id, route)| {
+                (route.conversation_key == conversation_key).then(|| thread_id.clone())
+            })
+            .collect::<Vec<_>>();
+        for thread_id in &thread_ids {
+            self.route_by_thread.remove(thread_id);
+            if let Some(turn_id) = self.current_turn_by_thread.remove(thread_id) {
+                self.turn_origin_by_id.remove(&turn_id);
+            }
+        }
+        thread_ids
+    }
+
     pub fn mark_turn_started(&mut self, thread_id: &str, turn_id: &str) {
-        self.bridge_pending_threads.remove(thread_id);
         self.current_turn_by_thread
             .insert(thread_id.to_string(), turn_id.to_string());
     }
 
-    pub fn mark_bridge_turn_pending(&mut self, thread_id: &str) {
-        self.bridge_pending_threads.insert(thread_id.to_string());
+    pub fn remember_turn_origin(&mut self, turn_id: &str, origin: TurnOrigin) {
+        self.turn_origin_by_id.insert(turn_id.to_string(), origin);
     }
 
-    pub fn clear_bridge_turn_pending(&mut self, thread_id: &str) {
-        self.bridge_pending_threads.remove(thread_id);
-    }
-
-    pub fn mark_turn_started_by_bridge(&mut self, thread_id: &str, turn_id: &str) {
-        self.mark_turn_started(thread_id, turn_id);
-        self.turn_started_by_bridge.insert(turn_id.to_string());
-    }
-
-    pub fn is_bridge_pending_thread(&self, thread_id: &str) -> bool {
-        self.bridge_pending_threads.contains(thread_id)
-    }
-
-    pub fn is_bridge_turn(&self, turn_id: &str) -> bool {
-        self.turn_started_by_bridge.contains(turn_id)
-    }
-
-    pub fn mark_turn_mirrored(&mut self, turn_id: &str) -> bool {
-        self.mirrored_turns.insert(turn_id.to_string())
+    pub fn turn_origin(&self, turn_id: &str) -> Option<TurnOrigin> {
+        self.turn_origin_by_id.get(turn_id).copied()
     }
 
     pub fn should_skip_duplicate_text(&self, route_key: &str, text: &str) -> bool {
@@ -124,12 +140,10 @@ impl RuntimeState {
             .insert(route_key.to_string(), text.to_string());
     }
 
-    pub fn mark_turn_completed(&mut self, thread_id: &str, turn_id: Option<&str>) {
-        self.current_turn_by_thread.remove(thread_id);
-        self.bridge_pending_threads.remove(thread_id);
-        if let Some(turn_id) = turn_id {
-            self.turn_started_by_bridge.remove(turn_id);
-            self.mirrored_turns.remove(turn_id);
+    pub fn mark_turn_completed(&mut self, thread_id: &str, _turn_id: Option<&str>) {
+        let completed_turn_id = self.current_turn_by_thread.remove(thread_id);
+        if let Some(turn_id) = _turn_id.or(completed_turn_id.as_deref()) {
+            self.turn_origin_by_id.remove(turn_id);
         }
     }
 
@@ -251,6 +265,50 @@ impl RuntimeState {
         }
         resolved
     }
+
+    pub fn remember_thread_routing_request(&mut self, request: ThreadRoutingRequestState) {
+        self.thread_routing_requests
+            .insert(request.request_id.clone(), request);
+    }
+
+    pub fn thread_routing_request(&self, request_id: &str) -> Option<ThreadRoutingRequestState> {
+        self.thread_routing_requests.get(request_id).cloned()
+    }
+
+    pub fn update_thread_routing_request_message_id(
+        &mut self,
+        request_id: &str,
+        message_id: String,
+    ) -> bool {
+        let Some(request) = self.thread_routing_requests.get_mut(request_id) else {
+            return false;
+        };
+        request.message_id = Some(message_id);
+        true
+    }
+
+    pub fn update_thread_routing_request_page(
+        &mut self,
+        request_id: &str,
+        page: usize,
+        page_cursors: Vec<Option<String>>,
+        history_cursor: Option<String>,
+        history_has_next: bool,
+    ) -> Option<ThreadRoutingRequestState> {
+        let request = self.thread_routing_requests.get_mut(request_id)?;
+        request.page = page;
+        request.page_cursors = page_cursors;
+        request.history_cursor = history_cursor;
+        request.history_has_next = history_has_next;
+        Some(request.clone())
+    }
+
+    pub fn clear_thread_routing_request(
+        &mut self,
+        request_id: &str,
+    ) -> Option<ThreadRoutingRequestState> {
+        self.thread_routing_requests.remove(request_id)
+    }
 }
 
 impl PendingApproval {
@@ -286,7 +344,7 @@ pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget
 mod tests {
     use serde_json::json;
 
-    use super::{PendingApproval, RuntimeState};
+    use super::{PendingApproval, RuntimeState, TurnOrigin};
 
     fn approval(id: i64) -> PendingApproval {
         PendingApproval {
@@ -368,5 +426,18 @@ mod tests {
             .expect("approval should be found globally");
         assert_eq!(found_route, route);
         assert_eq!(pending.request_id, json!(42));
+    }
+
+    #[test]
+    fn turn_origin_is_removed_when_turn_completes() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread-1", "turn-1");
+        runtime.remember_turn_origin("turn-1", TurnOrigin::Feishu);
+
+        assert_eq!(runtime.turn_origin("turn-1"), Some(TurnOrigin::Feishu));
+
+        runtime.mark_turn_completed("thread-1", Some("turn-1"));
+
+        assert_eq!(runtime.turn_origin("turn-1"), None);
     }
 }

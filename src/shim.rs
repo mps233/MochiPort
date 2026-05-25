@@ -2,10 +2,11 @@ use std::{
     collections::HashSet,
     env,
     ffi::OsString,
+    fs::{File, OpenOptions},
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
@@ -23,7 +24,7 @@ const SHIM_MODE_ENV: &str = "CODEX_REMOTE_SHIM";
 pub struct ShimStatusResponse {
     pub available: bool,
     pub enabled: bool,
-    pub relay_url: String,
+    pub remote_control_base_url: String,
     pub reason: Option<String>,
 }
 
@@ -51,22 +52,6 @@ pub struct CodexCandidate {
     pub path: PathBuf,
     pub source: String,
     pub confidence: u8,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ShimSessionRequest {
-    cwd: String,
-    upstream_ws_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ShimSessionResponse {
-    ok: bool,
-    relay_url: String,
-    upstream_ws_url: String,
-    error: Option<String>,
 }
 
 pub fn install_shim(
@@ -200,6 +185,10 @@ pub fn shim_path(config: &AppConfig) -> PathBuf {
     config.shim.bin_dir.join("codex.cmd")
 }
 
+pub fn remote_control_base_url(config: &AppConfig) -> String {
+    format!("http://{}/backend-api", config.bind)
+}
+
 pub fn user_path_contains_dir(dir: &Path) -> Result<Option<bool>> {
     user_path_contains_dir_impl(dir)
 }
@@ -259,7 +248,9 @@ pub async fn print_status(config: &AppConfig) -> Result<()> {
                 } else {
                     "unavailable"
                 },
-                status.reason.unwrap_or_else(|| status.relay_url)
+                status
+                    .reason
+                    .unwrap_or_else(|| status.remote_control_base_url)
             );
         }
         Err(err) => println!("daemon: unavailable ({err})"),
@@ -327,48 +318,48 @@ pub async fn run_shim(config: &AppConfig, args: Vec<String>) -> Result<i32> {
     };
 
     let cwd = env::current_dir().context("failed to resolve current directory")?;
-    let upstream_addr = reserve_local_addr()?;
-    let upstream_url = format!("ws://{upstream_addr}");
-    let session = match register_session(config, &cwd, &upstream_url).await {
-        Ok(session) if session.ok => session,
-        Ok(session) => {
-            notify_daemon_event(
-                config,
-                "warn",
-                "shim_passthrough",
-                format!("daemon refused session: {:?}", session.error),
-            )
-            .await;
-            return run_codex_passthrough(&real_codex, args);
-        }
-        Err(err) => {
-            notify_daemon_event(
-                config,
-                "warn",
-                "shim_passthrough",
-                format!("register session failed: {err}"),
-            )
-            .await;
-            return run_codex_passthrough(&real_codex, args);
-        }
-    };
+    let app_server_addr = reserve_local_addr()?;
+    let app_server_url = format!("ws://{app_server_addr}");
+    let remote_control_base_url = remote_control_base_url(config);
     notify_daemon_event(
         config,
         "info",
         "shim_app_server_start",
-        format!("cwd={} upstream={}", cwd.display(), session.upstream_ws_url),
+        format!(
+            "cwd={} listen={} remote_control={}",
+            cwd.display(),
+            app_server_url,
+            remote_control_base_url
+        ),
     )
     .await;
+    let app_server_log = create_app_server_log(config).await;
+    let stderr = match app_server_log {
+        Ok(file) => Stdio::from(file),
+        Err(err) => {
+            notify_daemon_event(
+                config,
+                "warn",
+                "shim_app_server_log_failed",
+                format!("failed to open app-server log: {err}"),
+            )
+            .await;
+            Stdio::null()
+        }
+    };
 
     let mut app_server = Command::new(&real_codex)
+        .arg("-c")
+        .arg(format!("chatgpt_base_url=\"{}\"", remote_control_base_url))
         .arg("app-server")
         .arg("--listen")
-        .arg(&session.upstream_ws_url)
+        .arg(&app_server_url)
+        .arg("--remote-control")
         .current_dir(&cwd)
         .env(SHIM_MODE_ENV, "1")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(stderr)
         .spawn()
         .with_context(|| {
             format!(
@@ -377,7 +368,7 @@ pub async fn run_shim(config: &AppConfig, args: Vec<String>) -> Result<i32> {
             )
         })?;
 
-    if let Err(err) = wait_ready(&session.upstream_ws_url).await {
+    if let Err(err) = wait_ready(&app_server_url).await {
         let _ = app_server.kill();
         notify_daemon_event(
             config,
@@ -392,14 +383,11 @@ pub async fn run_shim(config: &AppConfig, args: Vec<String>) -> Result<i32> {
         config,
         "info",
         "shim_app_server_ready",
-        session.upstream_ws_url.clone(),
+        app_server_url.clone(),
     )
     .await;
 
-    let mut remote_args = Vec::with_capacity(args.len() + 2);
-    remote_args.push("--remote".to_string());
-    remote_args.push(session.relay_url);
-    remote_args.extend(args);
+    let remote_args = build_remote_tui_args(app_server_url, &cwd, args);
     notify_daemon_event(
         config,
         "info",
@@ -419,6 +407,36 @@ pub async fn run_shim(config: &AppConfig, args: Vec<String>) -> Result<i32> {
     let _ = app_server.kill();
     let _ = app_server.wait();
     Ok(exit_code(exit))
+}
+
+async fn create_app_server_log(config: &AppConfig) -> Result<File> {
+    let log_dir = config
+        .shim
+        .bin_dir
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| config.shim.bin_dir.clone())
+        .join("logs");
+    std::fs::create_dir_all(&log_dir)
+        .with_context(|| format!("failed to create log directory {}", log_dir.display()))?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let path = log_dir.join(format!("app-server-{timestamp}.log"));
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open app-server log {}", path.display()))?;
+    notify_daemon_event(
+        config,
+        "info",
+        "shim_app_server_log",
+        format!("path={}", path.display()),
+    )
+    .await;
+    Ok(file)
 }
 
 fn should_bypass(args: &[String]) -> bool {
@@ -471,6 +489,38 @@ fn run_codex_status(real_codex: &Path, args: Vec<String>) -> Result<ExitStatus> 
         .with_context(|| format!("failed to run real codex {}", real_codex.display()))
 }
 
+fn build_remote_tui_args(app_server_url: String, cwd: &Path, args: Vec<String>) -> Vec<String> {
+    let mut remote_args = Vec::with_capacity(args.len() + 4);
+    let should_inject_cwd = !has_cwd_override(&args);
+    match args.first().map(String::as_str) {
+        Some("resume") | Some("fork") => {
+            remote_args.push(args[0].clone());
+            remote_args.push("--remote".to_string());
+            remote_args.push(app_server_url);
+            if should_inject_cwd {
+                remote_args.push("-C".to_string());
+                remote_args.push(cwd.to_string_lossy().to_string());
+            }
+            remote_args.extend(args.into_iter().skip(1));
+        }
+        _ => {
+            remote_args.push("--remote".to_string());
+            remote_args.push(app_server_url);
+            if should_inject_cwd {
+                remote_args.push("-C".to_string());
+                remote_args.push(cwd.to_string_lossy().to_string());
+            }
+            remote_args.extend(args);
+        }
+    }
+    remote_args
+}
+
+fn has_cwd_override(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg == "-C" || arg == "--cd" || arg.starts_with("--cd="))
+}
+
 fn exit_code(status: ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
@@ -489,36 +539,6 @@ async fn query_daemon_status(config: &AppConfig) -> Result<ShimStatusResponse> {
         .json::<ShimStatusResponse>()
         .await
         .map_err(Into::into)
-}
-
-async fn register_session(
-    config: &AppConfig,
-    cwd: &Path,
-    upstream_ws_url: &str,
-) -> Result<ShimSessionResponse> {
-    let url = format!("http://{}/api/shim/session", config.bind);
-    let response = reqwest::Client::new()
-        .post(url)
-        .json(&ShimSessionRequest {
-            cwd: cwd.to_string_lossy().to_string(),
-            upstream_ws_url: upstream_ws_url.to_string(),
-        })
-        .timeout(Duration::from_millis(900))
-        .send()
-        .await?;
-    if response.status() != StatusCode::OK {
-        anyhow::bail!("daemon returned {}", response.status());
-    }
-    let session = response.json::<ShimSessionResponse>().await?;
-    if !session.ok {
-        anyhow::bail!(
-            "{}",
-            session
-                .error
-                .unwrap_or_else(|| "daemon refused shim session".to_string())
-        );
-    }
-    Ok(session)
 }
 
 async fn notify_daemon_enabled(config: &AppConfig, enabled: bool) -> Result<()> {
@@ -551,8 +571,8 @@ async fn notify_daemon_event(
         .await;
 }
 
-async fn wait_ready(upstream_ws_url: &str) -> Result<()> {
-    let health_url = upstream_ws_url
+async fn wait_ready(app_server_ws_url: &str) -> Result<()> {
+    let health_url = app_server_ws_url
         .replacen("ws://", "http://", 1)
         .replacen("wss://", "https://", 1)
         + "/readyz";
@@ -1434,4 +1454,118 @@ fn absolutize(path: PathBuf) -> Result<PathBuf> {
 #[allow(dead_code)]
 fn os_string(value: &str) -> OsString {
     OsString::from(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{build_remote_tui_args, has_cwd_override};
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn remote_tui_args_inject_remote_and_current_directory() {
+        let args = build_remote_tui_args(
+            "ws://127.0.0.1:3849".to_string(),
+            Path::new("D:\\playfun\\GuJumpgate"),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            args,
+            strings(&[
+                "--remote",
+                "ws://127.0.0.1:3849",
+                "-C",
+                "D:\\playfun\\GuJumpgate"
+            ])
+        );
+    }
+
+    #[test]
+    fn remote_tui_args_preserve_prompt_args_after_remote_context() {
+        let args = build_remote_tui_args(
+            "ws://127.0.0.1:3849".to_string(),
+            Path::new("D:\\repo"),
+            strings(&["hello", "--model", "gpt-5.5"]),
+        );
+
+        assert_eq!(
+            args,
+            strings(&[
+                "--remote",
+                "ws://127.0.0.1:3849",
+                "-C",
+                "D:\\repo",
+                "hello",
+                "--model",
+                "gpt-5.5"
+            ])
+        );
+    }
+
+    #[test]
+    fn remote_tui_args_inject_after_resume_and_fork_subcommands() {
+        let resume = build_remote_tui_args(
+            "ws://127.0.0.1:3849".to_string(),
+            Path::new("D:\\repo"),
+            strings(&["resume", "thread_1"]),
+        );
+        let fork = build_remote_tui_args(
+            "ws://127.0.0.1:3849".to_string(),
+            Path::new("D:\\repo"),
+            strings(&["fork", "thread_2"]),
+        );
+
+        assert_eq!(
+            resume,
+            strings(&[
+                "resume",
+                "--remote",
+                "ws://127.0.0.1:3849",
+                "-C",
+                "D:\\repo",
+                "thread_1"
+            ])
+        );
+        assert_eq!(
+            fork,
+            strings(&[
+                "fork",
+                "--remote",
+                "ws://127.0.0.1:3849",
+                "-C",
+                "D:\\repo",
+                "thread_2"
+            ])
+        );
+    }
+
+    #[test]
+    fn remote_tui_args_respect_existing_directory_override() {
+        for args in [
+            strings(&["-C", "D:\\other", "hello"]),
+            strings(&["--cd", "D:\\other", "hello"]),
+            strings(&["--cd=D:\\other", "hello"]),
+        ] {
+            let built = build_remote_tui_args(
+                "ws://127.0.0.1:3849".to_string(),
+                Path::new("D:\\repo"),
+                args,
+            );
+
+            assert!(!built.windows(2).any(|pair| pair == ["-C", "D:\\repo"]));
+        }
+    }
+
+    #[test]
+    fn cwd_override_detection_matches_codex_flags() {
+        assert!(has_cwd_override(&strings(&["-C", "D:\\repo"])));
+        assert!(has_cwd_override(&strings(&["--cd", "D:\\repo"])));
+        assert!(has_cwd_override(&strings(&["--cd=D:\\repo"])));
+        assert!(!has_cwd_override(&strings(&["hello"])));
+    }
 }

@@ -19,6 +19,26 @@ pub struct InboundAttachment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub enum ThreadRouteDirection {
+    Prev,
+    Next,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InboundAction {
+    ThreadRouteResumeSelected {
+        request_id: String,
+        thread_id: String,
+    },
+    ThreadRouteListPage {
+        request_id: String,
+        direction: ThreadRouteDirection,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InboundMessage {
     pub account_id: String,
     pub sender_id: String,
@@ -28,6 +48,10 @@ pub struct InboundMessage {
     pub text: String,
     pub mentioned: bool,
     pub approval_request_key: Option<String>,
+    #[serde(default)]
+    pub action: Option<InboundAction>,
+    #[serde(default)]
+    pub card_message_id: Option<String>,
     #[serde(default)]
     pub attachments: Vec<InboundAttachment>,
 }

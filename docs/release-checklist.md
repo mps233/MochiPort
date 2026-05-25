@@ -35,9 +35,9 @@ Remove-Item *.log -ErrorAction SilentlyContinue
 - [ ] Install shim from the web console.
 - [ ] Open a new terminal in a test project.
 - [ ] Run `codex`.
-- [ ] Confirm relay status shows TUI and upstream connected.
-- [ ] Send a local Codex message and confirm Feishu receives it.
+- [ ] Confirm remote-control status shows connected and initialized.
 - [ ] Send a Feishu message and confirm Codex receives it.
+- [ ] Confirm assistant/tool output for the Feishu turn appears in Feishu.
 - [ ] Trigger a command approval and confirm one Feishu approval card appears.
 - [ ] Select the approval in Feishu and confirm the original card changes to `已审批`.
 - [ ] Disable bridge and confirm `codex` passes through to the real Codex CLI.
