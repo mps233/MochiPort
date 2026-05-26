@@ -28,6 +28,7 @@ use crate::{
 
 static REMOTE_REQUEST_ID: AtomicU64 = AtomicU64::new(200_000);
 const PROTOCOL_VERSION: &str = "3";
+const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 
 pub(crate) enum OutboundWsMessage {
     Text(Value),
@@ -720,6 +721,28 @@ async fn handle_server_envelope(
         stream_id,
         seq_id,
     } = envelope;
+    ack_server_envelope(
+        state,
+        &client_id,
+        &stream_id,
+        seq_id,
+        server_event_segment_id(&event),
+    )
+    .await?;
+    if !is_current_remote_stream(state, connection_epoch, &client_id, &stream_id).await {
+        if !matches!(event, IncomingServerEvent::Pong { .. }) {
+            chain_log::write_line(format!(
+                "[remote_control] event=stale_server_envelope connection_epoch={} seq_id={} client_id={} stream_id={} kind={} current_stream_id={}",
+                connection_epoch,
+                seq_id,
+                client_id,
+                stream_id,
+                server_event_kind(&event),
+                current_stream_id(state).await.unwrap_or_default()
+            ));
+        }
+        return Ok(());
+    }
     match event {
         IncomingServerEvent::ServerMessage { message } => {
             chain_log::write_line(format!(
@@ -740,7 +763,6 @@ async fn handle_server_envelope(
                 summary = %message_summary(&message),
                 "remote-control server message"
             );
-            ack_server_envelope(state, &client_id, &stream_id, seq_id, None).await?;
             observe_app_server_message(state, connection_epoch, &message).await;
         }
         IncomingServerEvent::ServerMessageChunk {
@@ -771,7 +793,6 @@ async fn handle_server_envelope(
                 message_size_bytes,
                 "remote-control server chunk"
             );
-            ack_server_envelope(state, &client_id, &stream_id, seq_id, Some(segment_id)).await?;
             if let Some(message) = observe_server_chunk(
                 chunks,
                 &client_id,
@@ -824,6 +845,41 @@ async fn handle_server_envelope(
         }
     }
     Ok(())
+}
+
+fn server_event_segment_id(event: &IncomingServerEvent) -> Option<usize> {
+    match event {
+        IncomingServerEvent::ServerMessageChunk { segment_id, .. } => Some(*segment_id),
+        IncomingServerEvent::ServerMessage { .. }
+        | IncomingServerEvent::Ack
+        | IncomingServerEvent::Pong { .. } => None,
+    }
+}
+
+fn server_event_kind(event: &IncomingServerEvent) -> &'static str {
+    match event {
+        IncomingServerEvent::ServerMessage { .. } => "server_message",
+        IncomingServerEvent::ServerMessageChunk { .. } => "server_message_chunk",
+        IncomingServerEvent::Ack => "ack",
+        IncomingServerEvent::Pong { .. } => "pong",
+    }
+}
+
+async fn is_current_remote_stream(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_id: &str,
+    stream_id: &str,
+) -> bool {
+    let remote = state.remote_control.inner.lock().await;
+    remote.connection_epoch == connection_epoch
+        && remote.client_id == client_id
+        && remote.stream_id == stream_id
+}
+
+async fn current_stream_id(state: &SharedState) -> Option<String> {
+    let stream_id = state.remote_control.inner.lock().await.stream_id.clone();
+    (!stream_id.is_empty()).then_some(stream_id)
 }
 
 async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, message: &Value) {
@@ -1005,6 +1061,14 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
             }
         } else if method == "turn/completed" {
             state.remote_control.inner.lock().await.current_turn_id = None;
+        } else if method == "thread/closed"
+            && let Some(thread_id) = params.as_ref().and_then(thread_id_from_payload)
+        {
+            let mut remote = state.remote_control.inner.lock().await;
+            if remote.current_thread_id.as_deref() == Some(thread_id.as_str()) {
+                remote.current_thread_id = None;
+                remote.current_turn_id = None;
+            }
         }
         state
             .push_event(
@@ -1282,12 +1346,18 @@ async fn mark_thread_active(state: &SharedState, thread_id: &str) {
 pub async fn request(state: &SharedState, method: &str, params: Value) -> Result<Value> {
     let id = next_request_id();
     let request_key = id.to_string();
+    let method_name = method.to_string();
     let (tx, rx) = tokio::sync::oneshot::channel();
     {
         let mut remote = state.remote_control.inner.lock().await;
         if !remote.connected {
             return Err(anyhow!(
                 "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 codex-remote 的 /backend-api。"
+            ));
+        }
+        if !remote.initialized {
+            return Err(anyhow!(
+                "Codex app-server remote-control 已连接，但还没有完成初始化。请稍等几秒后重试；如果一直如此，请在 Codex App 里关闭再打开 remote-control。"
             ));
         }
         remote.pending.insert(request_key.clone(), tx);
@@ -1297,7 +1367,7 @@ pub async fn request(state: &SharedState, method: &str, params: Value) -> Result
         if let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) {
             remote
                 .client_request_thread_ids
-                .insert(request_key, thread_id.to_string());
+                .insert(request_key.clone(), thread_id.to_string());
         }
     }
     if let Err(err) = send_raw_message(
@@ -1307,11 +1377,41 @@ pub async fn request(state: &SharedState, method: &str, params: Value) -> Result
     .await
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.pending.remove(&id.to_string());
+        remote.pending.remove(&request_key);
+        remote.client_request_methods.remove(&request_key);
+        remote.client_request_thread_ids.remove(&request_key);
         return Err(err);
     }
-    rx.await
-        .map_err(|_| anyhow!("remote-control response channel closed"))?
+    match tokio::time::timeout(REMOTE_REQUEST_TIMEOUT, rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err(anyhow!("remote-control response channel closed")),
+        Err(_) => {
+            {
+                let mut remote = state.remote_control.inner.lock().await;
+                remote.pending.remove(&request_key);
+                remote.client_request_methods.remove(&request_key);
+                remote.client_request_thread_ids.remove(&request_key);
+            }
+            state
+                .push_event(
+                    "warn",
+                    "remote_control_request_timeout",
+                    format!(
+                        "method={} id={} timeout_secs={}",
+                        method_name,
+                        id,
+                        REMOTE_REQUEST_TIMEOUT.as_secs()
+                    ),
+                )
+                .await;
+            Err(anyhow!(
+                "remote-control request timed out: method={} id={} after {}s",
+                method_name,
+                id,
+                REMOTE_REQUEST_TIMEOUT.as_secs()
+            ))
+        }
+    }
 }
 
 pub async fn start_thread(state: &SharedState) -> Result<String> {

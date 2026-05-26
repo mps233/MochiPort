@@ -221,7 +221,7 @@ async fn handle_inbound(state: SharedState, api: FeishuApi, message: InboundMess
         return Ok(());
     }
 
-    let Some(thread_id) = live_thread_for_route(&state, &route).await else {
+    let Some(thread_id) = resolve_thread_for_route(&state, &api, &message, &route).await? else {
         send_thread_routing_list(&state, &api, &message, None, None, 1).await?;
         return Ok(());
     };
@@ -238,28 +238,41 @@ async fn handle_inbound(state: SharedState, api: FeishuApi, message: InboundMess
         runtime.bind_route(&thread_id, route.clone());
     }
 
-    let turn_id =
-        match remote_control_backend::start_turn(&state, &thread_id, trimmed, &message.attachments)
-            .await
-        {
-            Ok(turn_id) => turn_id,
-            Err(err) if is_thread_not_found_error(&err) => {
-                clear_thread_binding(&state, &route.conversation_key).await?;
-                state
-                    .push_event(
-                        "warn",
-                        "thread_route_stale",
-                        format!(
-                            "conversation={} thread={} during=turn/start err={err}",
-                            route.conversation_key, thread_id
-                        ),
-                    )
-                    .await;
-                send_thread_routing_list(&state, &api, &message, None, None, 1).await?;
-                return Ok(());
-            }
-            Err(err) => return Err(err),
-        };
+    let turn_id = match remote_control_backend::start_turn(
+        &state,
+        &thread_id,
+        trimmed,
+        &message.attachments,
+    )
+    .await
+    {
+        Ok(turn_id) => turn_id,
+        Err(err) if is_stale_thread_error(&err) => {
+            clear_thread_binding(&state, &route.conversation_key).await?;
+            state
+                .push_event(
+                    "warn",
+                    "thread_route_stale",
+                    format!(
+                        "conversation={} thread={} during=turn/start err={err}",
+                        route.conversation_key, thread_id
+                    ),
+                )
+                .await;
+            send_thread_routing_list(&state, &api, &message, None, None, 1).await?;
+            return Ok(());
+        }
+        Err(err) => {
+            api.send_text_message(
+                    &message.chat_id,
+                    &format!(
+                        "Codex App 没有接收这条消息：{err}\n\n请确认 Codex App 还打开着 remote-control，或发送 /threads 重新选择会话。"
+                    ),
+                )
+                .await?;
+            return Err(err);
+        }
+    };
     state
         .runtime
         .lock()
@@ -962,6 +975,71 @@ fn route_for_message(message: &InboundMessage) -> RouteTarget {
     }
 }
 
+async fn resolve_thread_for_route(
+    state: &SharedState,
+    api: &FeishuApi,
+    message: &InboundMessage,
+    route: &RouteTarget,
+) -> Result<Option<String>> {
+    if let Some(thread_id) = live_thread_for_route(state, route).await {
+        return Ok(Some(thread_id));
+    }
+
+    let persisted_thread_id = {
+        state
+            .persisted
+            .lock()
+            .await
+            .sessions
+            .get(&route.conversation_key)
+            .cloned()
+    };
+    let Some(thread_id) = persisted_thread_id else {
+        return Ok(None);
+    };
+
+    match remote_control_backend::resume_thread(state, &thread_id, true).await {
+        Ok(_) => {
+            {
+                let mut runtime = state.runtime.lock().await;
+                runtime.bind_route(&thread_id, route.clone());
+            }
+            state
+                .push_event(
+                    "info",
+                    "thread_route_restored",
+                    format!("conversation={} thread={thread_id}", route.conversation_key),
+                )
+                .await;
+            Ok(Some(thread_id))
+        }
+        Err(err) if is_stale_thread_error(&err) => {
+            clear_thread_binding(state, &route.conversation_key).await?;
+            state
+                .push_event(
+                    "warn",
+                    "thread_route_stale",
+                    format!(
+                        "conversation={} thread={} during=thread/resume err={err}",
+                        route.conversation_key, thread_id
+                    ),
+                )
+                .await;
+            Ok(None)
+        }
+        Err(err) => {
+            api.send_text_message(
+                &message.chat_id,
+                &format!(
+                    "无法恢复 Codex thread `{thread_id}`：{err}\n\n请确认 Codex App 还打开着 remote-control，或发送 /threads 重新选择会话。"
+                ),
+            )
+            .await?;
+            Err(err)
+        }
+    }
+}
+
 async fn live_thread_for_route(state: &SharedState, route: &RouteTarget) -> Option<String> {
     state
         .runtime
@@ -986,8 +1064,9 @@ async fn clear_thread_binding(state: &SharedState, conversation_key: &str) -> Re
     Ok(())
 }
 
-fn is_thread_not_found_error(err: &anyhow::Error) -> bool {
-    err.to_string().contains("thread not found")
+fn is_stale_thread_error(err: &anyhow::Error) -> bool {
+    let message = err.to_string();
+    message.contains("thread not found") || message.contains("is closing")
 }
 
 async fn codex_event_router(state: SharedState, api: FeishuApi, generation: u64) {
