@@ -478,6 +478,26 @@ async fn handle_card_action_event(
                 .map(str::to_string);
             (format!("/{option}"), request_key, None)
         }
+        "thread_route_choice" => {
+            let request_id = value
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("thread route choice action missing requestId"))?
+                .to_string();
+            let route_action = value
+                .get("action")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("thread route choice action missing action"))?
+                .to_string();
+            (
+                String::new(),
+                None,
+                Some(InboundAction::ThreadRouteChoice {
+                    request_id,
+                    action: route_action,
+                }),
+            )
+        }
         "thread_route_resume_selected" => {
             let request_id = value
                 .get("requestId")

@@ -27,6 +27,10 @@ pub enum ThreadRouteDirection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum InboundAction {
+    ThreadRouteChoice {
+        request_id: String,
+        action: String,
+    },
     ThreadRouteResumeSelected {
         request_id: String,
         thread_id: String,

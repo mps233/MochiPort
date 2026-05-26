@@ -221,8 +221,8 @@ async fn handle_inbound(state: SharedState, api: FeishuApi, message: InboundMess
         return Ok(());
     }
 
-    let Some(thread_id) = resolve_thread_for_route(&state, &api, &message, &route).await? else {
-        send_thread_routing_list(&state, &api, &message, None, None, 1).await?;
+    let Some(thread_id) = resolve_thread_for_route(&state, &route).await? else {
+        send_thread_routing_choice_card(&state, &api, &message, None).await?;
         return Ok(());
     };
     {
@@ -409,6 +409,9 @@ async fn handle_inbound_action(
     action: InboundAction,
 ) -> Result<()> {
     match action {
+        InboundAction::ThreadRouteChoice { request_id, action } => {
+            handle_thread_route_choice(state, api, message, &request_id, &action).await
+        }
         InboundAction::ThreadRouteResumeSelected {
             request_id,
             thread_id,
@@ -419,6 +422,91 @@ async fn handle_inbound_action(
             request_id,
             direction,
         } => handle_thread_route_list_page(state, api, message, &request_id, direction).await,
+    }
+}
+
+async fn handle_thread_route_choice(
+    state: SharedState,
+    api: FeishuApi,
+    message: InboundMessage,
+    request_id: &str,
+    action: &str,
+) -> Result<()> {
+    let request = {
+        state
+            .runtime
+            .lock()
+            .await
+            .thread_routing_request(request_id)
+    };
+    let Some(request) = request else {
+        api.send_text_message(
+            &message.chat_id,
+            "这张 thread 选择卡片已经失效，请重新发送消息。",
+        )
+        .await?;
+        return Ok(());
+    };
+    if request.conversation_key != message.conversation_key() {
+        api.send_text_message(&message.chat_id, "这个 thread 选择不属于当前会话。")
+            .await?;
+        return Ok(());
+    }
+
+    let card_message_id = request
+        .message_id
+        .clone()
+        .or(message.card_message_id.clone());
+    update_thread_routing_choice_card_selected(&api, card_message_id.as_deref(), action).await;
+
+    match action {
+        "create_new" => {
+            let thread_id = remote_control_backend::start_thread(&state).await?;
+            let route = RouteTarget {
+                conversation_key: message.conversation_key(),
+                account_id: message.account_id.clone(),
+                chat_id: message.chat_id.clone(),
+            };
+            {
+                let mut runtime = state.runtime.lock().await;
+                runtime.unbind_routes_for_conversation(&route.conversation_key);
+                runtime.bind_route(&thread_id, route.clone());
+                runtime.clear_thread_routing_request(request_id);
+            }
+            {
+                let mut persisted = state.persisted.lock().await;
+                persisted
+                    .sessions
+                    .insert(route.conversation_key.clone(), thread_id.clone());
+                let config = state.config.lock().await.clone();
+                persisted.save(&config.state_path)?;
+            }
+            let card = renderer::build_thread_routing_result_card(
+                "已创建新会话",
+                &format!("已接入新 thread `{thread_id}`。\n\n现在可以直接发送消息。"),
+            );
+            if let Some(message_id) = card_message_id.as_deref() {
+                let _ = api.update_interactive_message(message_id, &card).await;
+            } else {
+                let _ = send_interactive_to_target(&api, &route.chat_id, &card).await?;
+            }
+            state
+                .push_event(
+                    "info",
+                    "thread_route_created",
+                    format!("conversation={} thread={thread_id}", route.conversation_key),
+                )
+                .await;
+            Ok(())
+        }
+        "resume_history" => {
+            send_thread_routing_list(&state, &api, &message, Some(request), None, 1).await
+        }
+        other => {
+            api.send_text_message(&message.chat_id, &format!("不支持的 thread 操作：{other}"))
+                .await?;
+            Ok(())
+        }
     }
 }
 
@@ -830,6 +918,123 @@ async fn send_thread_routing_list(
     Ok(())
 }
 
+async fn send_thread_routing_choice_card(
+    state: &SharedState,
+    api: &FeishuApi,
+    message: &InboundMessage,
+    existing_request: Option<ThreadRoutingRequestState>,
+) -> Result<()> {
+    let route = RouteTarget {
+        conversation_key: message.conversation_key(),
+        account_id: message.account_id.clone(),
+        chat_id: message.chat_id.clone(),
+    };
+    let request_id = existing_request
+        .as_ref()
+        .map(|request| request.request_id.clone())
+        .unwrap_or_else(next_thread_routing_request_id);
+    let card = renderer::build_thread_routing_choice_card(
+        "未绑定会话",
+        "当前飞书会话没有可直接使用的活跃 Codex thread。请选择新建会话，或显式恢复一个历史会话。",
+        &[
+            renderer::FeishuThreadRoutingAction {
+                label: "创建新会话".to_string(),
+                description: "创建一个新的 Codex thread，并接入后续消息。".to_string(),
+                value: serde_json::json!({
+                    "kind": "thread_route_choice",
+                    "requestId": request_id,
+                    "action": "create_new"
+                }),
+                primary: true,
+                selected: false,
+                resolved: false,
+            },
+            renderer::FeishuThreadRoutingAction {
+                label: "恢复历史会话".to_string(),
+                description: "查看 Codex App 当前可恢复的历史 thread 列表。".to_string(),
+                value: serde_json::json!({
+                    "kind": "thread_route_choice",
+                    "requestId": request_id,
+                    "action": "resume_history"
+                }),
+                primary: false,
+                selected: false,
+                resolved: false,
+            },
+        ],
+    );
+    let message_id = if let Some(message_id) = existing_request
+        .as_ref()
+        .and_then(|request| request.message_id.clone())
+    {
+        api.update_interactive_message(&message_id, &card).await?;
+        message_id
+    } else {
+        send_interactive_to_target(api, &route.chat_id, &card).await?
+    };
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.remember_thread_routing_request(ThreadRoutingRequestState {
+            request_id: request_id.clone(),
+            conversation_key: route.conversation_key.clone(),
+            account_id: route.account_id.clone(),
+            chat_id: route.chat_id.clone(),
+            message_id: Some(message_id),
+            page: 1,
+            page_cursors: vec![None],
+            history_cursor: None,
+            history_has_next: false,
+        });
+    }
+    state
+        .push_event(
+            "info",
+            "thread_route_choice_sent",
+            format!("conversation={}", route.conversation_key),
+        )
+        .await;
+    Ok(())
+}
+
+async fn update_thread_routing_choice_card_selected(
+    api: &FeishuApi,
+    message_id: Option<&str>,
+    selected_action: &str,
+) {
+    let Some(message_id) = message_id else {
+        return;
+    };
+    let card = renderer::build_thread_routing_choice_card(
+        "未绑定会话",
+        "当前飞书会话没有可直接使用的活跃 Codex thread。请选择新建会话，或显式恢复一个历史会话。",
+        &[
+            renderer::FeishuThreadRoutingAction {
+                label: "创建新会话".to_string(),
+                description: "创建一个新的 Codex thread，并接入后续消息。".to_string(),
+                value: serde_json::json!({
+                    "kind": "thread_route_choice",
+                    "action": "create_new"
+                }),
+                primary: true,
+                selected: selected_action == "create_new",
+                resolved: true,
+            },
+            renderer::FeishuThreadRoutingAction {
+                label: "恢复历史会话".to_string(),
+                description: "查看 Codex App 当前可恢复的历史 thread 列表。".to_string(),
+                value: serde_json::json!({
+                    "kind": "thread_route_choice",
+                    "action": "resume_history"
+                }),
+                primary: false,
+                selected: selected_action == "resume_history",
+                resolved: true,
+            },
+        ],
+    );
+    let _ = api.update_interactive_message(message_id, &card).await;
+}
+
 fn next_thread_routing_request_id() -> String {
     let value = THREAD_ROUTING_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     format!("thread-route-{value}")
@@ -977,67 +1182,12 @@ fn route_for_message(message: &InboundMessage) -> RouteTarget {
 
 async fn resolve_thread_for_route(
     state: &SharedState,
-    api: &FeishuApi,
-    message: &InboundMessage,
     route: &RouteTarget,
 ) -> Result<Option<String>> {
     if let Some(thread_id) = live_thread_for_route(state, route).await {
         return Ok(Some(thread_id));
     }
-
-    let persisted_thread_id = {
-        state
-            .persisted
-            .lock()
-            .await
-            .sessions
-            .get(&route.conversation_key)
-            .cloned()
-    };
-    let Some(thread_id) = persisted_thread_id else {
-        return Ok(None);
-    };
-
-    match remote_control_backend::resume_thread(state, &thread_id, true).await {
-        Ok(_) => {
-            {
-                let mut runtime = state.runtime.lock().await;
-                runtime.bind_route(&thread_id, route.clone());
-            }
-            state
-                .push_event(
-                    "info",
-                    "thread_route_restored",
-                    format!("conversation={} thread={thread_id}", route.conversation_key),
-                )
-                .await;
-            Ok(Some(thread_id))
-        }
-        Err(err) if is_stale_thread_error(&err) => {
-            clear_thread_binding(state, &route.conversation_key).await?;
-            state
-                .push_event(
-                    "warn",
-                    "thread_route_stale",
-                    format!(
-                        "conversation={} thread={} during=thread/resume err={err}",
-                        route.conversation_key, thread_id
-                    ),
-                )
-                .await;
-            Ok(None)
-        }
-        Err(err) => {
-            api.send_text_message(
-                &message.chat_id,
-                &format!(
-                    "无法恢复 Codex thread `{thread_id}`：{err}\n\n请确认 Codex App 还打开着 remote-control，或发送 /threads 重新选择会话。"
-                ),
-            )
-            .await?;
-            Err(err)
-        }
-    }
+    Ok(None)
 }
 
 async fn live_thread_for_route(state: &SharedState, route: &RouteTarget) -> Option<String> {
