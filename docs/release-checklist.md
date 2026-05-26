@@ -41,7 +41,6 @@ Remove-Item *.log -ErrorAction SilentlyContinue
 - [ ] Trigger a command approval and confirm one Feishu approval card appears.
 - [ ] Select the approval in Feishu and confirm the original card changes to `已审批`.
 - [ ] Disable bridge and confirm Feishu messages are no longer forwarded.
-- [ ] Optional: install shim from the web console and confirm `codex` CLI helper mode still starts a remote-control session.
 
 ## Suggested GitHub Topics
 

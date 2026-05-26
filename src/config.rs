@@ -10,7 +10,6 @@ pub struct AppConfig {
     pub state_path: PathBuf,
     pub feishu: FeishuConfig,
     pub bridge: BridgeConfig,
-    pub shim: ShimConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,13 +30,6 @@ pub struct BridgeConfig {
     pub send_streaming: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ShimConfig {
-    pub bin_dir: PathBuf,
-    pub real_codex_path: Option<PathBuf>,
-}
-
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -45,7 +37,6 @@ impl Default for AppConfig {
             state_path: PathBuf::from("codex-remote-state.json"),
             feishu: FeishuConfig::default(),
             bridge: BridgeConfig::default(),
-            shim: ShimConfig::default(),
         }
     }
 }
@@ -72,16 +63,11 @@ impl Default for BridgeConfig {
     }
 }
 
-impl Default for ShimConfig {
-    fn default() -> Self {
-        Self {
-            bin_dir: default_shim_bin_dir(),
-            real_codex_path: None,
-        }
-    }
-}
-
 impl AppConfig {
+    pub fn remote_control_base_url(&self) -> String {
+        format!("http://{}/backend-api", self.bind)
+    }
+
     pub fn load_or_default(path: &PathBuf) -> anyhow::Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
@@ -96,13 +82,4 @@ impl AppConfig {
         std::fs::write(path, raw)
             .with_context(|| format!("failed to write config {}", path.display()))
     }
-}
-
-fn default_shim_bin_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("codex-remote")
-        .join("bin")
 }

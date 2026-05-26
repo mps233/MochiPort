@@ -6,20 +6,12 @@ pub enum Command {
     On,
     Off,
     Status,
-    InstallShim {
-        real_codex: Option<PathBuf>,
-        bin_dir: Option<PathBuf>,
-    },
-    UninstallShim,
     ConfigureCodexApp {
         codex_home: Option<PathBuf>,
         provider_name: Option<String>,
         provider_base_url: Option<String>,
         provider_key: Option<String>,
         model: Option<String>,
-    },
-    Shim {
-        args: Vec<String>,
     },
 }
 
@@ -58,17 +50,10 @@ impl Cli {
             Some("on") => Command::On,
             Some("off") => Command::Off,
             Some("status") => Command::Status,
-            Some("uninstall-shim") => Command::UninstallShim,
-            Some("install-shim") => parse_install_shim(&remaining[1..])?,
             Some("configure-codex-app") => parse_configure_codex_app(&remaining[1..])?,
-            Some("shim") => {
-                let args = if remaining.get(1).map(String::as_str) == Some("--") {
-                    remaining[2..].to_vec()
-                } else {
-                    remaining[1..].to_vec()
-                };
-                Command::Shim { args }
-            }
+            Some("install-shim") | Some("uninstall-shim") | Some("shim") => anyhow::bail!(
+                "CLI shim support has been removed. Use `codex-remote configure-codex-app` and Codex App remote-control instead."
+            ),
             Some("-h") | Some("--help") | Some("help") => {
                 print_help();
                 std::process::exit(0);
@@ -134,33 +119,6 @@ fn parse_configure_codex_app(args: &[String]) -> anyhow::Result<Command> {
     })
 }
 
-fn parse_install_shim(args: &[String]) -> anyhow::Result<Command> {
-    let mut real_codex = None;
-    let mut bin_dir = None;
-    let mut iter = args.iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--real-codex" => {
-                let Some(value) = iter.next() else {
-                    anyhow::bail!("--real-codex requires a path");
-                };
-                real_codex = Some(PathBuf::from(value));
-            }
-            "--bin-dir" => {
-                let Some(value) = iter.next() else {
-                    anyhow::bail!("--bin-dir requires a path");
-                };
-                bin_dir = Some(PathBuf::from(value));
-            }
-            other => anyhow::bail!("unknown install-shim argument `{other}`"),
-        }
-    }
-    Ok(Command::InstallShim {
-        real_codex,
-        bin_dir,
-    })
-}
-
 pub fn print_help() {
     println!(
         r#"codex-remote
@@ -170,10 +128,7 @@ Usage:
   codex-remote [--config PATH] on
   codex-remote [--config PATH] off
   codex-remote [--config PATH] status
-  codex-remote [--config PATH] install-shim [--real-codex PATH] [--bin-dir PATH]
-  codex-remote [--config PATH] uninstall-shim
   codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
-  codex-remote [--config PATH] shim -- [codex args...]
 
 Default command is daemon.
 "#

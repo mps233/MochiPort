@@ -213,31 +213,6 @@
             background: #ffffff;
             color: #20242a;
         }
-        .candidates {
-            display: grid;
-            gap: 8px;
-        }
-        .candidate {
-            display: grid;
-            grid-template-columns: 1fr auto;
-            gap: 10px;
-            align-items: center;
-            padding: 10px 12px;
-            border: 1px solid #e1e5ec;
-            border-radius: 6px;
-            background: #fbfcfe;
-        }
-        .candidate strong {
-            display: block;
-            font-size: 13px;
-            word-break: break-all;
-        }
-        .candidate span {
-            display: block;
-            margin-top: 3px;
-            color: #596170;
-            font-size: 12px;
-        }
         pre {
             margin: 0;
             white-space: pre-wrap;
@@ -342,17 +317,10 @@
                 <label for="codex.model">模型名，可选</label>
                 <input id="codex.model" value="gpt-5.5" placeholder="例如 gpt-5.5" />
             </div>
-            <div class="field">
-                <label for="shim.realCodexPath">可选 CLI shim：找不到 Codex 时，手动填写真实 Codex 路径</label>
-                <input id="shim.realCodexPath" placeholder="例如 C:\Users\...\codex.cmd" />
-            </div>
-            <div id="shim.candidates" class="candidates"></div>
             <div class="actions">
                 <button onclick="configureCodexApp()">一键配置 Codex App</button>
-                <button onclick="installShim()">安装/更新可选 CLI shim</button>
-                <button class="danger" onclick="uninstallShim()">卸载可选 CLI shim</button>
-                <button class="secondary" onclick="setShimEnabled(true)">启用飞书接入</button>
-                <button class="secondary" onclick="setShimEnabled(false)">暂停飞书接入</button>
+                <button class="secondary" onclick="setBridgeEnabled(true)">启用飞书接入</button>
+                <button class="secondary" onclick="setBridgeEnabled(false)">暂停飞书接入</button>
                 <button class="secondary" onclick="startBridge()">启动飞书监听</button>
                 <button class="secondary" onclick="stopBridge()">停止飞书监听</button>
                 <button class="secondary" onclick="loadAll()">刷新</button>
@@ -367,36 +335,29 @@
 let onboardTimer = null;
 let currentPrimaryAction = "refresh";
 let currentSecondaryAction = "pause";
-let discoveredCandidates = [];
 const byId = (id) => document.getElementById(id);
 
 async function loadAll() {
-    const [status, config, remote, shim, codexApp, events] = await Promise.all([
+    const [status, config, remote, backend, codexApp, events] = await Promise.all([
         fetch("/api/status").then(r => r.json()),
         fetch("/api/config").then(r => r.json()),
         fetch("/api/remote-control/status").then(r => r.json()),
-        fetch("/api/shim/status").then(r => r.json()),
+        fetch("/api/remote-control/backend-status").then(r => r.json()),
         fetch("/api/codex-app/status").then(r => r.json()),
         fetch("/api/events").then(r => r.json()),
     ]);
 
     const feishuWs = status.feishuWs || {};
-    const feishuReady = Boolean(shim.feishuConfigured);
-    const bridgeEnabled = Boolean(shim.enabled);
+    const feishuReady = Boolean(backend.feishuConfigured);
+    const bridgeEnabled = Boolean(backend.enabled);
     const guiApiBase = codexApp.guiApiBase || {};
     const codexAppConfigured = Boolean(codexApp.configured);
     const codexConnected = Boolean(remote.connected && remote.initialized);
-    const backendUrl = shim.remoteControlBaseUrl || `http://${status.bind || "127.0.0.1:3847"}/backend-api`;
+    const backendUrl = backend.remoteControlBaseUrl || `http://${status.bind || "127.0.0.1:3847"}/backend-api`;
 
     updateStep("step.feishu", feishuReady && feishuWs.connected, feishuReady && feishuWs.connected ? "完成" : "待扫码");
     updateStep("step.config", codexAppConfigured, codexAppConfigured ? "完成" : "需确认");
     updateStep("step.codex", codexConnected, codexConnected ? "已连接" : (codexAppConfigured ? "等待打开" : "待配置"));
-
-    if (shim.realCodexPath && !byId("shim.realCodexPath").value) {
-        byId("shim.realCodexPath").value = shim.realCodexPath;
-    }
-    discoveredCandidates = shim.codexCandidates || [];
-    renderCandidates(discoveredCandidates);
 
     if (!feishuReady || !feishuWs.connected) {
         setHero("需要接入", "接入飞书后就可以双端会话", "用飞书扫码确认一次，之后飞书消息会进入当前本地 Codex 会话。", "扫码接入飞书", "feishu", true);
@@ -441,12 +402,6 @@ async function loadAll() {
         `remote-control 连接：${remote.connected ? "已连接" : remote.lastError || "未连接"}`,
         `remote-control 初始化：${remote.initialized ? "完成" : "等待"}`,
         `当前 thread：${remote.currentThreadId || "无"}`,
-        "",
-        "可选 CLI shim：",
-        `本机命令文件：${shim.shimPath || "未配置"}`,
-        `本机命令目录：${shim.shimDir || "未配置"}`,
-        `真实 Codex：${shim.realCodexPath || "未配置"}`,
-        `PATH：${pathSummary(shim.pathConfigured)}`,
     ].join("\n");
     byId("events").textContent = events.slice().reverse().map(e =>
         `${new Date(Number(e.atMs)).toLocaleString()} [${e.level}] ${e.kind}: ${e.message}`
@@ -467,23 +422,17 @@ function updateStep(id, done, label) {
     byId(`${id}.status`).textContent = label;
 }
 
-function pathSummary(value) {
-    if (value === true) return "已配置";
-    if (value === false) return "未配置";
-    return "需手动确认";
-}
-
 async function runPrimaryAction() {
     if (currentPrimaryAction === "feishu") return startFeishuOnboard();
-    if (currentPrimaryAction === "enable") return setShimEnabled(true);
+    if (currentPrimaryAction === "enable") return setBridgeEnabled(true);
     if (currentPrimaryAction === "bridge") return startBridge();
     if (currentPrimaryAction === "configureCodexApp") return configureCodexApp();
     return loadAll();
 }
 
 async function runSecondaryAction() {
-    if (currentSecondaryAction === "pause") return setShimEnabled(false);
-    return setShimEnabled(true);
+    if (currentSecondaryAction === "pause") return setBridgeEnabled(false);
+    return setBridgeEnabled(true);
 }
 
 async function startBridge() {
@@ -520,93 +469,9 @@ async function configureCodexApp() {
     await loadAll();
 }
 
-async function installShim(allowAutoRetry = true) {
-    setMessage("正在安装可选 CLI shim...");
-    const realCodexPath = byId("shim.realCodexPath").value.trim();
-    const res = await fetch("/api/shim/install", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ realCodexPath })
-    });
-    const data = await res.json();
-    if (!res.ok || !data.ok) {
-        const candidates = await loadCandidates();
-        if (allowAutoRetry && candidates.length > 0) {
-            byId("shim.realCodexPath").value = candidates[0].path;
-            setMessage(`已自动找到 Codex：${candidates[0].path}，正在继续安装...`);
-            byId("advanced").open = true;
-            return installShim(false);
-        }
-        setMessage(data.error || "没有找到已安装的 Codex CLI。Codex App 直连不需要 shim；只有 CLI 辅助模式才需要在技术细节里填写真实 Codex 路径。");
-        byId("advanced").open = true;
-        return;
-    }
-    setMessage(data.pathUpdate === "added"
-        ? "可选 CLI shim 已安装。重新打开终端后运行 codex 可走 CLI 辅助模式。"
-        : "可选 CLI shim 已安装/更新。");
-    await loadAll();
-}
-
-async function loadCandidates() {
-    const candidates = await fetch("/api/shim/candidates").then(r => r.json()).catch(() => []);
-    discoveredCandidates = candidates || [];
-    renderCandidates(discoveredCandidates);
-    return discoveredCandidates;
-}
-
-function renderCandidates(candidates) {
-    const root = byId("shim.candidates");
-    if (!root) return;
-    if (!candidates || candidates.length === 0) {
-        root.innerHTML = "";
-        return;
-    }
-    root.innerHTML = candidates.slice(0, 5).map((candidate, index) => `
-        <div class="candidate">
-            <div>
-                <strong>${escapeHtml(candidate.path)}</strong>
-                <span>${escapeHtml(candidate.source || "自动发现")} · 可信度 ${candidate.confidence || 0}</span>
-            </div>
-            <button class="secondary" onclick="useCandidate(${index})">使用</button>
-        </div>
-    `).join("");
-}
-
-function useCandidate(index) {
-    const candidate = discoveredCandidates[index];
-    if (!candidate) return;
-    byId("shim.realCodexPath").value = candidate.path;
-    setMessage("已选择发现的 Codex 路径，可以重新安装。");
-}
-
-function escapeHtml(value) {
-    return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-}
-
-async function uninstallShim() {
-    setMessage("正在卸载可选 CLI shim...");
-    const res = await fetch("/api/shim/uninstall", { method: "POST" });
-    const data = await res.json();
-    if (!res.ok || !data.ok) {
-        setMessage(data.error || "卸载失败");
-        return;
-    }
-    setMessage(data.removedShim ? "可选 CLI shim 已卸载。" : "可选 CLI shim 原本未安装。");
-    await loadAll();
-}
-
-async function setShimEnabled(enabled) {
+async function setBridgeEnabled(enabled) {
     setMessage(enabled ? "正在启用飞书接入..." : "正在暂停飞书接入...");
-    await fetch("/api/shim/enabled", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ enabled })
-    });
+    await fetch(enabled ? "/api/bridge/start" : "/api/bridge/stop", { method: "POST" });
     await loadAll();
 }
 

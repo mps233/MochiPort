@@ -104,66 +104,11 @@ If old approvals are still clickable:
 
 If clicking an old card says "please handle current approval first", the bridge is preventing out-of-order approval, which is expected.
 
-## Optional CLI Shim
-
-The shim is only for CLI helper flows. Check it with:
-
-```powershell
-codex-remote --config config.toml status
-```
-
-or:
-
-```powershell
-Invoke-RestMethod http://127.0.0.1:3847/api/shim/status
-```
-
-Common shim failures:
-
-- real Codex path is not configured
-- shim directory is not before official Codex in PATH
-- daemon is not running
-- Feishu is not configured
-- bridge is disabled
-
 To disable bridge mode:
 
 ```powershell
 codex-remote --config config.toml off
 ```
-
-To bypass the shim for one terminal:
-
-```powershell
-$env:CODEX_REMOTE_DISABLE = "1"
-codex
-```
-
-## Wrong Project Directory In CLI Shim Mode
-
-This applies to the optional CLI shim path, not the clean Codex App path.
-
-Codex cwd should be the directory where the user ran `codex`.
-
-The shim starts app-server with:
-
-```text
-current_dir = user terminal cwd
-```
-
-It also starts TUI with:
-
-```text
---remote ws://127.0.0.1:<temporary-port> -C <user terminal cwd>
-```
-
-`-C` matters because official remote TUI mode forwards cwd explicitly.
-
-If Codex shows the `codex-remote` repository as cwd, check:
-
-- whether the shim was bypassed
-- whether you manually started app-server/TUI from the wrong directory
-- whether a stale app-server process is still running
 
 ## Manual Protocol Debugging
 

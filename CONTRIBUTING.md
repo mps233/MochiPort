@@ -2,7 +2,7 @@
 
 Thanks for considering contributing to `codex-remote`.
 
-This project sits between Codex CLI/app-server and Feishu IM, so small protocol changes can affect local terminal behavior. Please keep changes conservative and easy to review.
+This project sits between Codex App remote-control and Feishu IM, so small protocol changes can affect message routing and approval behavior. Please keep changes conservative and easy to review.
 
 ## Development Setup
 
@@ -23,7 +23,7 @@ cargo test approval
 - Keep Codex as the source of truth.
 - Do not change Codex cwd, model, sandbox, approval policy, or environment from the bridge.
 - Prefer forwarding official app-server protocol payloads instead of inventing bridge-specific semantics.
-- If the bridge is disabled or unavailable, the shim should pass through to the real Codex binary.
+- Keep Codex App launch clean: configuration should point it at the local backend, but `codex-remote` should not wrap or launch Codex.
 - Feishu UI should be compact and stateful; avoid repeated explanatory messages when card state can show the result.
 
 ## Pull Request Checklist

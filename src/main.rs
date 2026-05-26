@@ -8,7 +8,6 @@ mod config;
 mod im;
 mod im_runtime;
 mod remote_control_backend;
-mod shim;
 mod store;
 mod types;
 mod web;
@@ -16,9 +15,11 @@ mod web;
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::Context;
+use serde_json::Value;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -46,20 +47,9 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Daemon => run_daemon(config_path, config).await,
-        Command::On => shim::set_enabled(&config_path, true).await,
-        Command::Off => shim::set_enabled(&config_path, false).await,
-        Command::Status => shim::print_status(&config).await,
-        Command::InstallShim {
-            real_codex,
-            bin_dir,
-        } => {
-            shim::install_shim(&mut config, &config_path, real_codex, bin_dir)?;
-            Ok(())
-        }
-        Command::UninstallShim => {
-            shim::uninstall_shim(&config)?;
-            Ok(())
-        }
+        Command::On => set_bridge_enabled(&config_path, true).await,
+        Command::Off => set_bridge_enabled(&config_path, false).await,
+        Command::Status => print_status(&config).await,
         Command::ConfigureCodexApp {
             codex_home,
             provider_name,
@@ -67,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
             provider_key,
             model,
         } => {
-            let backend_url = shim::remote_control_base_url(&config);
+            let backend_url = config.remote_control_base_url();
             let report = codex_app_config::configure_codex_app(
                 codex_app_config::ConfigureCodexAppOptions {
                     codex_home,
@@ -93,10 +83,6 @@ async fn main() -> anyhow::Result<()> {
                 gui_api_base.value.as_deref().unwrap_or("<unset>")
             );
             Ok(())
-        }
-        Command::Shim { args } => {
-            let code = shim::run_shim(&config, args).await?;
-            std::process::exit(code);
         }
     }
 }
@@ -187,14 +173,6 @@ fn normalize_config_paths(config: &mut AppConfig, config_path: &Path) {
     if config.state_path.is_relative() {
         config.state_path = base.join(&config.state_path);
     }
-    if config.shim.bin_dir.is_relative() {
-        config.shim.bin_dir = base.join(&config.shim.bin_dir);
-    }
-    if let Some(real_codex_path) = config.shim.real_codex_path.as_mut()
-        && real_codex_path.is_relative()
-    {
-        *real_codex_path = base.join(&real_codex_path);
-    }
 }
 
 fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
@@ -214,12 +192,92 @@ fn chain_log_path(config: &AppConfig) -> PathBuf {
 
 fn log_dir_from_config(config: &AppConfig) -> PathBuf {
     config
-        .shim
-        .bin_dir
+        .state_path
         .parent()
         .map(Path::to_path_buf)
-        .unwrap_or_else(|| config.shim.bin_dir.clone())
+        .unwrap_or_else(|| PathBuf::from("."))
         .join("logs")
+}
+
+async fn set_bridge_enabled(config_path: &Path, enabled: bool) -> anyhow::Result<()> {
+    let mut config = AppConfig::load_or_default(&config_path.to_path_buf())?;
+    config.bridge.enabled = enabled;
+    config.save(&config_path.to_path_buf())?;
+    let _ = notify_daemon_bridge(&config, enabled).await;
+    println!(
+        "codex-remote Feishu bridge {}",
+        if enabled { "enabled" } else { "disabled" }
+    );
+    Ok(())
+}
+
+async fn print_status(config: &AppConfig) -> anyhow::Result<()> {
+    println!(
+        "Feishu bridge: {}",
+        if config.bridge.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "remote-control backend: {}",
+        config.remote_control_base_url()
+    );
+    let status = query_daemon_backend_status(config).await;
+    match status {
+        Ok(status) => {
+            let reason = status
+                .get("reason")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    status
+                        .get("remoteControlBaseUrl")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                })
+                .unwrap_or("ok");
+            let available = status
+                .get("available")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            println!(
+                "daemon: {} ({reason})",
+                if available {
+                    "available"
+                } else {
+                    "unavailable"
+                }
+            );
+        }
+        Err(err) => println!("daemon: unavailable ({err})"),
+    }
+    Ok(())
+}
+
+async fn notify_daemon_bridge(config: &AppConfig, enabled: bool) -> anyhow::Result<()> {
+    let action = if enabled { "start" } else { "stop" };
+    let url = format!("http://{}/api/bridge/{action}", config.bind);
+    reqwest::Client::new()
+        .post(url)
+        .timeout(Duration::from_millis(700))
+        .send()
+        .await?;
+    Ok(())
+}
+
+async fn query_daemon_backend_status(config: &AppConfig) -> anyhow::Result<Value> {
+    let url = format!("http://{}/api/remote-control/backend-status", config.bind);
+    let response = reqwest::Client::new()
+        .get(url)
+        .timeout(Duration::from_millis(700))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        anyhow::bail!("daemon returned {}", response.status());
+    }
+    response.json::<Value>().await.map_err(Into::into)
 }
 
 fn absolutize(path: PathBuf) -> PathBuf {

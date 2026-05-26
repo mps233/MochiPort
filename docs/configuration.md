@@ -32,10 +32,6 @@ allowedChatIds = []
 enabled = true
 accountId = "default"
 sendStreaming = true
-
-[shim]
-binDir = "C:\\Users\\<user>\\AppData\\Local\\codex-remote\\bin"
-realCodexPath = "C:\\Users\\<user>\\AppData\\Roaming\\npm\\codex.cmd"
 ```
 
 Paths relative to the config file are normalized at startup.
@@ -104,7 +100,7 @@ sendStreaming = true
 
 Controls whether the Feishu bridge should run.
 
-When disabled, Feishu websocket listening stops and Feishu messages are not forwarded to Codex. The optional CLI shim also passes through to the real Codex binary when this is disabled.
+When disabled, Feishu websocket listening stops and Feishu messages are not forwarded to Codex.
 
 ### `accountId`
 
@@ -209,42 +205,6 @@ codex-remote --config config.toml configure-codex-app --provider-name llmx --pro
 When provider fields are supplied without `--provider-name`, `llmx` is used as the provider name.
 
 The daemon does not modify Codex App config on startup. It writes these files only when the web button or CLI command is used.
-
-## Optional Shim
-
-```toml
-[shim]
-binDir = "..."
-realCodexPath = "..."
-```
-
-The shim is optional and applies to CLI helper flows, not the clean Codex App flow.
-
-### `binDir`
-
-Directory where the generated `codex` shim is installed.
-
-On Windows the default is:
-
-```text
-%LOCALAPPDATA%\codex-remote\bin
-```
-
-### `realCodexPath`
-
-Path to the real official Codex executable or command script.
-
-The shim installer tries to discover this automatically from:
-
-- PATH candidates
-- common npm global install locations
-- configured previous value
-
-If discovery fails, pass it manually:
-
-```powershell
-codex-remote --config config.toml install-shim --real-codex C:\path\to\codex.cmd
-```
 
 ## Feishu App Requirements
 

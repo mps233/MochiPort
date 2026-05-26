@@ -33,7 +33,7 @@ The project stays a thin bridge. It does not implement a second Codex client, do
 - Lets Codex App connect to that local backend when `chatgpt_base_url` points to `codex-remote`.
 - Renders Codex thread items, assistant output, tool events, turn status, and approval requests to Feishu for Feishu-bound threads.
 - Sends Feishu messages back into the selected Codex thread through official app-server JSON-RPC.
-- Provides a local web console for Feishu onboarding, bridge status, remote-control diagnostics, and optional CLI shim management.
+- Provides a local web console for Feishu onboarding, bridge status, Codex App setup, and remote-control diagnostics.
 
 ## Supported Runtime Shape
 
@@ -143,39 +143,21 @@ experimental_bearer_token = "your-third-party-key"
 - Local Codex-origin `userMessage` items on a Feishu-bound thread can appear in Feishu.
 - Feishu-origin turns are marked by turn id, so their `userMessage` completion events are suppressed on the way back to Feishu.
 
-## Optional CLI Shim
+## Runtime Boundary
 
-The shim is no longer the primary Codex App path. It remains useful only when you want a CLI flow that starts an official app-server and a remote TUI for you:
-
-```text
-codex-remote [--config PATH] install-shim [--real-codex PATH] [--bin-dir PATH]
-codex-remote [--config PATH] uninstall-shim
-codex-remote [--config PATH] shim -- [codex args...]
-```
-
-When installed, the shim starts:
-
-```text
-real-codex -c chatgpt_base_url="http://127.0.0.1:3847/backend-api" app-server --listen ws://127.0.0.1:<port> --remote-control
-real-codex --remote ws://127.0.0.1:<port> -C <user cwd>
-```
-
-Use this only for `codex-cli` / GUI-launch helper scenarios. Codex App should stay clean and connect through config.
+`codex-remote` only supports the clean Codex App remote-control path. It does not install a `codex` wrapper, replace the Codex CLI, or launch Codex App through a shim. Start the daemon first, configure Codex App once, then open Codex App normally.
 
 ## Commands
 
 ```text
 codex-remote [--config PATH] daemon
-codex-remote [--config PATH] status
-codex-remote [--config PATH] on
-codex-remote [--config PATH] off
-codex-remote [--config PATH] install-shim [--real-codex PATH] [--bin-dir PATH]
-codex-remote [--config PATH] uninstall-shim
-codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
-codex-remote [--config PATH] shim -- [codex args...]
+  codex-remote [--config PATH] status
+  codex-remote [--config PATH] on
+  codex-remote [--config PATH] off
+  codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
 ```
 
-`on` / `off` enable or pause the Feishu bridge. They also affect the optional shim passthrough behavior.
+`on` / `off` enable or pause the Feishu bridge.
 
 `configure-codex-app` is the CLI equivalent of the web console button. It explicitly writes Codex App `config.toml` and `auth.json` with local `chatgpt_base_url` and `chatgptAuthTokens`. Provider options default to `llmx` / `gpt-5.5` when model provider fields are supplied. Daemon startup does not modify Codex App config until the user clicks the button or runs this command.
 
@@ -230,7 +212,7 @@ Useful status endpoints while the daemon is running:
 ```text
 GET http://127.0.0.1:3847/api/status
 GET http://127.0.0.1:3847/api/remote-control/status
-GET http://127.0.0.1:3847/api/shim/status
+GET http://127.0.0.1:3847/api/remote-control/backend-status
 GET http://127.0.0.1:3847/api/events
 ```
 

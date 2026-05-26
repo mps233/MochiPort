@@ -33,7 +33,7 @@ codex-remote 本地 backend
 - 让 Codex App 在 `chatgpt_base_url` 指向本地时连接到 `codex-remote`
 - 把已绑定到飞书会话的 Codex thread 项、助手输出、工具事件、turn 状态和审批请求渲染到飞书
 - 把飞书消息通过官方 app-server JSON-RPC 发回指定的 Codex thread
-- 提供本地 Web 控制台，用于飞书接入、bridge 状态、remote-control 诊断，以及可选 CLI shim 管理
+- 提供本地 Web 控制台，用于飞书接入、bridge 状态、Codex App 配置和 remote-control 诊断
 
 ## 正式运行形态
 
@@ -143,24 +143,9 @@ experimental_bearer_token = "your-third-party-key"
 - 本地 Codex 发出的 `userMessage` 可以在已绑定 thread 上同步到飞书
 - 飞书发起的 turn 会按 `turn id` 记录来源，后续对应的 `userMessage completed` 事件会被抑制，避免回显
 
-## 可选 CLI Shim
+## 运行边界
 
-shim 不再是 Codex App 主路径。它只保留给 `codex-cli` / GUI 启动辅助场景：自动启动官方 app-server 和 remote TUI。
-
-```text
-codex-remote [--config PATH] install-shim [--real-codex PATH] [--bin-dir PATH]
-codex-remote [--config PATH] uninstall-shim
-codex-remote [--config PATH] shim -- [codex args...]
-```
-
-安装后 shim 会启动：
-
-```text
-real-codex -c chatgpt_base_url="http://127.0.0.1:3847/backend-api" app-server --listen ws://127.0.0.1:<port> --remote-control
-real-codex --remote ws://127.0.0.1:<port> -C <用户当前目录>
-```
-
-Codex App 保持干净，不通过 shim 启动，只通过配置连接本地 backend。
+`codex-remote` 只支持干净的 Codex App remote-control 路径。它不安装 `codex` 包装命令，不替换 Codex CLI，也不通过 shim 启动 Codex App。先启动 daemon，一键配置 Codex App，然后正常双击打开 Codex App。
 
 ## 命令
 
@@ -169,13 +154,10 @@ codex-remote [--config PATH] daemon
 codex-remote [--config PATH] status
 codex-remote [--config PATH] on
 codex-remote [--config PATH] off
-codex-remote [--config PATH] install-shim [--real-codex PATH] [--bin-dir PATH]
-codex-remote [--config PATH] uninstall-shim
 codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
-codex-remote [--config PATH] shim -- [codex args...]
 ```
 
-`on` / `off` 用来启用或暂停飞书 bridge。它们也会影响可选 shim 的透传行为。
+`on` / `off` 用来启用或暂停飞书 bridge。
 
 `configure-codex-app` 是 Web 控制台按钮的 CLI 等价形式。它会显式写入 Codex App 的 `config.toml` 和 `auth.json`，设置本地 `chatgpt_base_url` 与 `chatgptAuthTokens`。如果写入模型 provider 配置，默认 provider 是 `llmx`，默认模型是 `gpt-5.5`。daemon 启动本身不会修改 Codex App 配置，只有用户点击按钮或运行这个命令才会写入。
 
@@ -230,7 +212,7 @@ daemon 运行时常用状态接口：
 ```text
 GET http://127.0.0.1:3847/api/status
 GET http://127.0.0.1:3847/api/remote-control/status
-GET http://127.0.0.1:3847/api/shim/status
+GET http://127.0.0.1:3847/api/remote-control/backend-status
 GET http://127.0.0.1:3847/api/events
 ```
 

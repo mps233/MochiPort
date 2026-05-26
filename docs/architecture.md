@@ -170,31 +170,9 @@ Behavior:
 
 This keeps the implementation aligned with the official remote-control model instead of inventing a parallel thread store.
 
-## Optional CLI Shim
+## Codex App Runtime
 
-The shim is not the primary Codex App path. It exists for CLI and GUI-launch helper scenarios where the user wants `codex` to start both app-server and a remote TUI.
-
-With the shim enabled, the user runs:
-
-```powershell
-codex
-```
-
-The shim resolves the real Codex binary and starts two official Codex processes:
-
-```text
-real-codex -c chatgpt_base_url="http://127.0.0.1:3847/backend-api" app-server --listen ws://127.0.0.1:<temporary-port> --remote-control
-real-codex --remote ws://127.0.0.1:<temporary-port> -C <user cwd>
-```
-
-`-C <user cwd>` is required for remote TUI mode because official Codex does not infer the remote session cwd from the local process cwd. This prevents `codex-remote`'s repository directory from becoming the Codex project directory.
-
-The shim is deliberately conservative:
-
-- If the bridge is off, it runs the real Codex directly.
-- If Feishu is not configured, it runs the real Codex directly.
-- If the daemon is unavailable, it runs the real Codex directly.
-- If the command is a subcommand such as `login`, `mcp`, `plugin`, `app-server`, or already uses `--remote`, it runs the real Codex directly.
+`codex-remote` is intentionally scoped to Codex App remote-control. Codex App is launched normally by the user, reads `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`, and opens the remote-control websocket back to the local daemon. The project does not install a CLI wrapper or start Codex processes on the user's behalf.
 
 ## Approval Handling
 
@@ -231,7 +209,6 @@ It provides:
 - Feishu onboarding and bridge on/off
 - remote-control status
 - Codex App config hints
-- optional CLI shim status/install/uninstall
 - recent event log
 
 ## State Boundaries
@@ -240,7 +217,6 @@ It provides:
 
 - config path
 - Feishu app credentials
-- optional shim configuration
 - Feishu conversation to Codex thread binding
 - pending approvals
 - Feishu card ids/message ids

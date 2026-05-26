@@ -1,5 +1,6 @@
 /target
 /target-verify
+.DS_Store
 config.toml
 codex-remote-state.json
 *.log

@@ -15,8 +15,8 @@ use crate::{
     codex_app_config::{self, ConfigureCodexAppOptions},
     config::AppConfig,
     im::feishu::{FeishuApi, FeishuSettings},
+    remote_control_backend,
 };
-use crate::{remote_control_backend, shim};
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
@@ -27,12 +27,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/codex-app/status", get(codex_app_status))
         .route("/api/bridge/start", post(start_bridge))
         .route("/api/bridge/stop", post(stop_bridge))
-        .route("/api/shim/status", get(shim_status))
-        .route("/api/shim/enabled", post(shim_enabled))
-        .route("/api/shim/install", post(shim_install))
-        .route("/api/shim/uninstall", post(shim_uninstall))
-        .route("/api/shim/candidates", get(shim_candidates))
-        .route("/api/shim/event", post(shim_event))
+        .route(
+            "/api/remote-control/backend-status",
+            get(remote_control_backend_status),
+        )
         .route("/api/feishu/onboard/start", post(feishu_onboard_start))
         .route("/api/feishu/onboard/poll", post(feishu_onboard_poll))
         .route("/backend-api/plugins/list", get(plugin_legacy_list))
@@ -146,7 +144,7 @@ async fn configure_codex_app(
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
 
-    let backend_url = shim::remote_control_base_url(&config);
+    let backend_url = config.remote_control_base_url();
     match codex_app_config::configure_codex_app(ConfigureCodexAppOptions {
         codex_home,
         backend_url: backend_url.clone(),
@@ -210,7 +208,7 @@ async fn codex_app_status(
     let config = state.config.lock().await.clone();
     Json(codex_app_config::inspect_codex_app_config(
         None,
-        &shim::remote_control_base_url(&config),
+        &config.remote_control_base_url(),
     ))
 }
 
@@ -286,234 +284,41 @@ async fn stop_bridge_task(state: &SharedState) {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ShimStatusResponse {
+struct RemoteControlBackendStatusResponse {
     available: bool,
     enabled: bool,
     remote_control_base_url: String,
     remote_control_connected: bool,
     remote_control_initialized: bool,
     current_thread_id: Option<String>,
-    shim_path: String,
-    shim_dir: String,
-    shim_installed: bool,
-    path_configured: Option<bool>,
-    real_codex_path: Option<String>,
-    codex_candidates: Vec<shim::CodexCandidate>,
     feishu_configured: bool,
     reason: Option<String>,
 }
 
-async fn shim_status(State(state): State<SharedState>) -> Json<ShimStatusResponse> {
+async fn remote_control_backend_status(
+    State(state): State<SharedState>,
+) -> Json<RemoteControlBackendStatusResponse> {
     let config = state.config.lock().await.clone();
     let remote = remote_control_backend::status_snapshot(&state).await;
-    let shim_path = shim::shim_path(&config);
-    let shim_installed = shim_path.exists();
-    let path_configured = shim::user_path_contains_dir(&config.shim.bin_dir)
-        .ok()
-        .flatten();
     let feishu_configured =
         !config.feishu.app_id.trim().is_empty() && !config.feishu.app_secret.trim().is_empty();
-    let codex_candidates = if config
-        .shim
-        .real_codex_path
-        .as_ref()
-        .is_some_and(|path| path.exists())
-    {
-        Vec::new()
-    } else {
-        shim::discover_codex_candidates(&config.shim.bin_dir)
-            .into_iter()
-            .take(8)
-            .collect()
-    };
     let reason = if !config.bridge.enabled {
         Some("bridge disabled".to_string())
-    } else if !shim_installed {
-        Some("shim is not installed".to_string())
     } else if !feishu_configured {
         Some("Feishu is not configured".to_string())
     } else {
         None
     };
-    Json(ShimStatusResponse {
-        available: config.bridge.enabled && shim_installed && feishu_configured,
+    Json(RemoteControlBackendStatusResponse {
+        available: config.bridge.enabled && feishu_configured,
         enabled: config.bridge.enabled,
-        remote_control_base_url: shim::remote_control_base_url(&config),
+        remote_control_base_url: config.remote_control_base_url(),
         remote_control_connected: remote.connected,
         remote_control_initialized: remote.initialized,
         current_thread_id: remote.current_thread_id,
-        shim_path: shim_path.to_string_lossy().to_string(),
-        shim_dir: config.shim.bin_dir.to_string_lossy().to_string(),
-        shim_installed,
-        path_configured,
-        real_codex_path: config
-            .shim
-            .real_codex_path
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string()),
-        codex_candidates,
         feishu_configured,
         reason,
     })
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ShimEnabledRequest {
-    enabled: bool,
-}
-
-async fn shim_enabled(
-    State(state): State<SharedState>,
-    Json(request): Json<ShimEnabledRequest>,
-) -> impl IntoResponse {
-    {
-        let mut config = state.config.lock().await;
-        config.bridge.enabled = request.enabled;
-        if let Err(err) = config.save(&state.config_path) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "ok": false, "error": err.to_string() })),
-            );
-        }
-    }
-    if request.enabled {
-        let mut task = state.bridge_task.lock().await;
-        if task
-            .as_ref()
-            .map(|handle| handle.is_finished())
-            .unwrap_or(false)
-        {
-            *task = None;
-        }
-        if task.is_none() {
-            let bridge_state = state.clone();
-            *task = Some(tokio::spawn(async move {
-                bridge::start_bridge(bridge_state).await;
-            }));
-        }
-        state
-            .push_event("info", "bridge_enabled", "bridge enabled")
-            .await;
-    } else {
-        stop_bridge_task(&state).await;
-        state
-            .push_event("warn", "bridge_disabled", "bridge disabled")
-            .await;
-    }
-    (
-        StatusCode::OK,
-        Json(json!({ "ok": true, "enabled": request.enabled })),
-    )
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ShimInstallRequest {
-    real_codex_path: Option<String>,
-    bin_dir: Option<String>,
-}
-
-async fn shim_install(
-    State(state): State<SharedState>,
-    payload: Option<Json<ShimInstallRequest>>,
-) -> impl IntoResponse {
-    let request = payload.map(|Json(value)| value);
-    let real_codex = request
-        .as_ref()
-        .and_then(|value| value.real_codex_path.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from);
-    let bin_dir = request
-        .as_ref()
-        .and_then(|value| value.bin_dir.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from);
-
-    let result = {
-        let mut config = state.config.lock().await;
-        shim::install_shim(&mut config, &state.config_path, real_codex, bin_dir)
-    };
-    match result {
-        Ok(report) => {
-            let response = json!({
-                "ok": true,
-                "shimPath": report.shim_path.to_string_lossy().to_string(),
-                "shimDir": report.bin_dir.to_string_lossy().to_string(),
-                "realCodexPath": report.real_codex_path.to_string_lossy().to_string(),
-                "pathUpdate": report.path_update,
-            });
-            state
-                .push_event(
-                    "info",
-                    "shim_installed",
-                    format!(
-                        "shim={} real_codex={}",
-                        report.shim_path.display(),
-                        report.real_codex_path.display()
-                    ),
-                )
-                .await;
-            (StatusCode::OK, Json(response))
-        }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": err.to_string() })),
-        ),
-    }
-}
-
-async fn shim_uninstall(State(state): State<SharedState>) -> impl IntoResponse {
-    let config = state.config.lock().await.clone();
-    match shim::uninstall_shim(&config) {
-        Ok(report) => {
-            let response = json!({
-                "ok": true,
-                "shimPath": report.shim_path.to_string_lossy().to_string(),
-                "shimDir": report.bin_dir.to_string_lossy().to_string(),
-                "removedShim": report.removed_shim,
-                "pathUpdate": report.path_update,
-            });
-            state
-                .push_event(
-                    "warn",
-                    "shim_uninstalled",
-                    format!("shim={}", report.shim_path.display()),
-                )
-                .await;
-            (StatusCode::OK, Json(response))
-        }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": err.to_string() })),
-        ),
-    }
-}
-
-async fn shim_candidates(State(state): State<SharedState>) -> Json<Vec<shim::CodexCandidate>> {
-    let config = state.config.lock().await.clone();
-    Json(shim::discover_codex_candidates(&config.shim.bin_dir))
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ShimEventRequest {
-    level: Option<String>,
-    kind: String,
-    message: String,
-}
-
-async fn shim_event(
-    State(state): State<SharedState>,
-    Json(request): Json<ShimEventRequest>,
-) -> impl IntoResponse {
-    let level = request.level.as_deref().unwrap_or("info");
-    state
-        .push_event(level, &request.kind, request.message)
-        .await;
-    Json(json!({ "ok": true }))
 }
 
 async fn events(State(state): State<SharedState>) -> impl IntoResponse {
