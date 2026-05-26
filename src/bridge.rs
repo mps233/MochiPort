@@ -1241,11 +1241,8 @@ async fn handle_codex_notification_for_feishu(
             else {
                 return;
             };
-            if state
-                .runtime
-                .lock()
+            if route_for_codex_output(&state, thread_id, params)
                 .await
-                .route_for_thread(thread_id)
                 .is_some()
             {
                 state
@@ -1273,7 +1270,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -1305,7 +1302,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(delta) = params.get("delta").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 state
                     .push_event(
@@ -1339,7 +1336,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(delta) = params.get("delta").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -1366,7 +1363,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(delta) = params.get("delta").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -1398,7 +1395,7 @@ async fn handle_codex_notification_for_feishu(
             } else {
                 "fileChange"
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -1425,7 +1422,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(message) = params.get("message").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -1458,7 +1455,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -1493,7 +1490,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -1543,6 +1540,9 @@ async fn handle_codex_notification_for_feishu(
                     .await;
                 }
             } else if item_type == "userMessage" {
+                if is_replayed_codex_output(params) {
+                    return;
+                }
                 let should_forward = if let Some(turn_id) = turn_id {
                     state.runtime.lock().await.turn_origin(turn_id) != Some(TurnOrigin::Feishu)
                 } else {
@@ -1609,7 +1609,7 @@ async fn handle_codex_notification_for_feishu(
             let Some(text) = extract_turn_reply_text(params) else {
                 return;
             };
-            let route = { state.runtime.lock().await.route_for_thread(thread_id) };
+            let route = route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -1638,6 +1638,54 @@ async fn handle_codex_notification_for_feishu(
         }
         _ => {}
     }
+}
+
+async fn route_for_codex_output(
+    state: &SharedState,
+    thread_id: &str,
+    params: &serde_json::Value,
+) -> Option<RouteTarget> {
+    if let Some(route) = state.runtime.lock().await.route_for_thread(thread_id) {
+        return Some(route);
+    }
+    if !is_replayed_codex_output(params) {
+        return None;
+    }
+    let persisted_routes = {
+        state
+            .persisted
+            .lock()
+            .await
+            .sessions
+            .iter()
+            .filter_map(|(conversation_key, persisted_thread_id)| {
+                (persisted_thread_id == thread_id)
+                    .then(|| route_from_conversation_key(conversation_key))
+                    .flatten()
+            })
+            .collect::<Vec<_>>()
+    };
+    let route = persisted_routes.into_iter().next()?;
+    state
+        .runtime
+        .lock()
+        .await
+        .bind_route(thread_id, route.clone());
+    state
+        .push_event(
+            "info",
+            "thread_route_restored_for_replay",
+            format!("thread={thread_id} conversation={}", route.conversation_key),
+        )
+        .await;
+    Some(route)
+}
+
+fn is_replayed_codex_output(params: &serde_json::Value) -> bool {
+    params
+        .get("_codexRemoteReplay")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
 }
 
 fn structured_streaming_kind(item_type: &str) -> Option<&'static str> {
