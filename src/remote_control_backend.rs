@@ -204,7 +204,9 @@ pub fn router() -> Router<SharedState> {
             "/backend-api/wham/remote/control/server/enroll",
             post(enroll),
         )
+        .route("/backend-api/remote/control/server/enroll", post(enroll))
         .route("/backend-api/wham/remote/control/server", get(websocket))
+        .route("/backend-api/remote/control/server", get(websocket))
         .route("/api/remote-control/status", get(status))
 }
 

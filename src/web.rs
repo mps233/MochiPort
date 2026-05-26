@@ -1,7 +1,9 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::State,
-    http::StatusCode,
+    http::{Request, StatusCode},
+    middleware::{self, Next},
     response::{Html, IntoResponse},
     routing::{get, post},
 };
@@ -11,7 +13,7 @@ use serde_json::json;
 
 use crate::{
     app_state::{FeishuWsState, SharedState},
-    bridge,
+    bridge, chain_log,
     codex_app_config::{self, ConfigureCodexAppOptions},
     config::AppConfig,
     im::feishu::{FeishuApi, FeishuSettings},
@@ -46,11 +48,37 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/events", get(events))
         .merge(remote_control_backend::router())
+        .layer(middleware::from_fn(access_log))
         .with_state(state)
 }
 
 async fn index() -> Html<&'static str> {
     Html(include_str!("web/index.html"))
+}
+
+async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let started = std::time::Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    let elapsed_ms = started.elapsed().as_millis();
+    chain_log::write_line(format!(
+        "[http] method={} path={} status={} elapsed_ms={}",
+        method,
+        path,
+        status.as_u16(),
+        elapsed_ms
+    ));
+    tracing::info!(
+        target: "codex_remote::http",
+        method = %method,
+        path,
+        status = status.as_u16(),
+        elapsed_ms,
+        "http request"
+    );
+    response
 }
 
 #[derive(Serialize)]
