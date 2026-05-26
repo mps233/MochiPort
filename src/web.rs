@@ -12,6 +12,7 @@ use serde_json::json;
 use crate::{
     app_state::{FeishuWsState, SharedState},
     bridge,
+    codex_app_config::{self, ConfigureCodexAppOptions},
     config::AppConfig,
     im::feishu::{FeishuApi, FeishuSettings},
 };
@@ -22,6 +23,8 @@ pub fn router(state: SharedState) -> Router {
         .route("/", get(index))
         .route("/api/status", get(status))
         .route("/api/config", get(get_config).post(save_config))
+        .route("/api/codex-app/configure", post(configure_codex_app))
+        .route("/api/codex-app/status", get(codex_app_status))
         .route("/api/bridge/start", post(start_bridge))
         .route("/api/bridge/stop", post(stop_bridge))
         .route("/api/shim/status", get(shim_status))
@@ -98,6 +101,117 @@ async fn save_config(
         .push_event("info", "config_saved", "configuration saved")
         .await;
     (StatusCode::OK, Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigureCodexAppRequest {
+    codex_home: Option<String>,
+    provider_name: Option<String>,
+    provider_base_url: Option<String>,
+    provider_key: Option<String>,
+    model: Option<String>,
+}
+
+async fn configure_codex_app(
+    State(state): State<SharedState>,
+    payload: Option<Json<ConfigureCodexAppRequest>>,
+) -> impl IntoResponse {
+    let request = payload.map(|Json(value)| value);
+    let config = state.config.lock().await.clone();
+    let codex_home = request
+        .as_ref()
+        .and_then(|value| value.codex_home.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    let provider_base_url = request
+        .as_ref()
+        .and_then(|value| value.provider_base_url.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let provider_name = request
+        .as_ref()
+        .and_then(|value| value.provider_name.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let provider_key = request
+        .as_ref()
+        .and_then(|value| value.provider_key.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let model = request
+        .as_ref()
+        .and_then(|value| value.model.clone())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let backend_url = shim::remote_control_base_url(&config);
+    match codex_app_config::configure_codex_app(ConfigureCodexAppOptions {
+        codex_home,
+        backend_url: backend_url.clone(),
+        account_id: "acct_codex_remote_local".to_string(),
+        user_id: "user_codex_remote_local".to_string(),
+        email: "codex-remote-local@example.local".to_string(),
+        plan_type: "pro".to_string(),
+        provider_name,
+        provider_base_url,
+        provider_key,
+        model,
+    }) {
+        Ok(report) => {
+            let gui_api_base = match codex_app_config::configure_gui_api_base_url(&backend_url) {
+                Ok(status) => status,
+                Err(err) => {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "ok": false,
+                            "error": format!("Codex App config/auth 已写入，但设置双击启动 API base 失败：{err}")
+                        })),
+                    );
+                }
+            };
+            state
+                .push_event(
+                    "info",
+                    "codex_app_configured",
+                    format!(
+                        "codex_home={} config={} auth={} gui_api_base={}",
+                        report.codex_home.display(),
+                        report.config_path.display(),
+                        report.auth_path.display(),
+                        gui_api_base.value.as_deref().unwrap_or_default()
+                    ),
+                )
+                .await;
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "ok": true,
+                    "codexHome": report.codex_home.to_string_lossy().to_string(),
+                    "configPath": report.config_path.to_string_lossy().to_string(),
+                    "authPath": report.auth_path.to_string_lossy().to_string(),
+                    "backendUrl": report.backend_url,
+                    "guiApiBase": gui_api_base,
+                })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn codex_app_status(
+    State(state): State<SharedState>,
+) -> Json<codex_app_config::CodexAppConfigStatus> {
+    let config = state.config.lock().await.clone();
+    Json(codex_app_config::inspect_codex_app_config(
+        None,
+        &shim::remote_control_base_url(&config),
+    ))
 }
 
 async fn start_bridge(State(state): State<SharedState>) -> impl IntoResponse {

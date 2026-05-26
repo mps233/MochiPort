@@ -2,38 +2,19 @@
 
 [中文说明](README.zh-CN.md)
 
-`codex-remote` connects official Codex remote-control sessions to Feishu IM. You keep using `codex` in a terminal; Feishu can subscribe to the same official Codex app-server session, send turns into Codex, and receive assistant output, tool events, turn status, and approval requests from that session.
-
-The project is intentionally a thin bridge. It does not implement a second Codex client, does not create its own workspace, and does not change Codex model, sandbox, approval policy, cwd, or environment. Those stay owned by official Codex app-server.
-
-## What It Does
-
-- Provides a local remote-control backend at `http://127.0.0.1:3847/backend-api`.
-- Lets official Codex app-server connect through `/backend-api/wham/remote/control/server`.
-- Renders Codex thread items, assistant output, tool cards, turn status, and approval requests to Feishu for Feishu-bound threads.
-- Sends Feishu messages back into the selected Codex thread through official app-server JSON-RPC.
-- Renders Codex approval requests as Feishu interactive cards and answers the original request id.
-- Provides a local web page for Feishu onboarding, shim install/uninstall, status, and diagnostics.
-
-## Architecture
+`codex-remote` is a local remote-control backend for Codex App, with a Feishu/Lark bridge on top. The primary path is:
 
 ```text
-user terminal
+Codex App
   |
-  | runs: codex
-  v
-codex shim
-  |
-  | starts official Codex app-server:
-  |   real-codex -c chatgpt_base_url="http://127.0.0.1:3847/backend-api" app-server --listen ws://127.0.0.1:<port> --remote-control
-  | starts official Codex TUI:
-  |   real-codex --remote ws://127.0.0.1:<port> -C <user cwd>
+  | reads: chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+  | user enables remote control in the app
   v
 official Codex app-server
   |
   | outbound remote-control websocket
   v
-codex-remote remote-control backend
+codex-remote local backend
   |
   | Feishu websocket events
   | Feishu message/card APIs
@@ -41,27 +22,61 @@ codex-remote remote-control backend
 Feishu IM
 ```
 
-Key design points:
+The project stays a thin bridge. It does not implement a second Codex client, does not own a workspace, and does not change Codex model, sandbox, approval policy, cwd, or environment. Those stay owned by official Codex App/app-server.
 
-- The Codex app-server is the source of truth for threads, turns, approvals, tools, and configuration.
-- `codex-remote` only implements the official remote-control backend endpoints and Feishu adaptation.
-- Feishu inbound messages are translated to official app-server JSON-RPC requests, usually `turn/start`.
-- Feishu only sees threads that it explicitly binds to. `codex-remote` does not globally mirror every Codex thread into Feishu.
-- Local TUI `userMessage` items can be forwarded to Feishu for Feishu-bound threads, but Feishu-origin turns are not echoed back into the same Feishu chat.
-- Codex server requests such as command/file approvals are rendered as Feishu cards, then answered through the original JSON-RPC request id.
-- The shim is only a convenience layer. If disabled or misconfigured, it runs the real Codex binary directly.
+## What It Does
 
-More details: [docs/architecture.md](docs/architecture.md)
+- Provides a local ChatGPT backend-shaped base URL at `http://127.0.0.1:3847/backend-api`.
+- Implements the official remote-control endpoints:
+  - `POST /backend-api/wham/remote/control/server/enroll`
+  - `GET /backend-api/wham/remote/control/server`
+- Lets Codex App connect to that local backend when `chatgpt_base_url` points to `codex-remote`.
+- Renders Codex thread items, assistant output, tool events, turn status, and approval requests to Feishu for Feishu-bound threads.
+- Sends Feishu messages back into the selected Codex thread through official app-server JSON-RPC.
+- Provides a local web console for Feishu onboarding, bridge status, remote-control diagnostics, and optional CLI shim management.
+
+## Supported Runtime Shape
+
+The clean Codex App path is config-driven:
+
+```toml
+# ~/.codex/config.toml, or the Codex App config home
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+```
+
+Codex remote-control requires a ChatGPT-compatible auth mode. For this project, the local auth shape is `chatgptAuthTokens`: a local, transparent, ChatGPT-shaped external token record used to satisfy Codex App's remote-control account check. The third-party model key remains in Codex's model provider config; it is not the remote-control identity.
+
+Minimal auth shape:
+
+```json
+{
+  "auth_mode": "chatgptAuthTokens",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "<local ChatGPT-shaped JWT>",
+    "access_token": "<local ChatGPT-shaped JWT>",
+    "refresh_token": "",
+    "account_id": "acct_codex_remote_local"
+  },
+  "last_refresh": "2026-05-26T00:00:00Z"
+}
+```
+
+Important boundary: API-key-only auth does not pass remote-control startup. Codex will fail with:
+
+```text
+remote control requires ChatGPT authentication; API key auth is not supported
+```
 
 ## Quick Start
 
 Prerequisites:
 
 - Rust stable toolchain
-- Official Codex CLI installed and working
-- A Feishu/Lark bot app, or use the built-in Feishu scan onboarding flow
+- Codex App installed
+- A Feishu/Lark bot app, or the built-in Feishu scan onboarding flow
 
-Build and start the daemon:
+Start the daemon:
 
 ```powershell
 cargo run -- --config config.toml daemon
@@ -73,34 +88,49 @@ Open the local web console:
 http://127.0.0.1:3847
 ```
 
-In the web console:
+Then:
 
 1. Connect Feishu by scanning the QR code, or fill existing app credentials in `config.toml`.
-2. Install the Codex shim.
-3. Make sure the page shows Feishu websocket connected.
+2. Click `Configure Codex App` in the web console. This writes local `chatgpt_base_url` and `chatgptAuthTokens`, with `.bak` backups for existing files.
+3. Open Codex App by double-clicking it.
+4. Enable remote control in Codex App.
+5. Check `GET http://127.0.0.1:3847/api/remote-control/status`.
 
-Then open a new terminal and use Codex normally:
+Expected remote-control status:
 
-```powershell
-cd D:\path\to\your\project
-codex
+```json
+{
+  "connected": true,
+  "initialized": true
+}
 ```
 
-When the shim is active, Codex connects to Feishu through official remote-control. The TUI still talks to the official app-server, and the app-server talks to `codex-remote`.
+If a Feishu chat is not yet bound to any thread, the first inbound message does not create hidden client state. The bridge shows a thread-selection card so Feishu can subscribe to an existing working thread or another historical thread first.
 
-If a Feishu chat is not yet bound to any thread, the first inbound message does not blindly create hidden client state. The bridge shows a thread-selection card so Feishu can subscribe to an existing working thread or a different historical thread first.
+## Third-Party Model Key
 
-## Manual Protocol Debugging
+The third-party key belongs in Codex's model provider config. Example:
 
-For debugging without the shim, start the daemon, then start official Codex app-server with remote-control enabled and `chatgpt_base_url` pointed at the local backend:
+```toml
+model_provider = "llmx"
+model = "gpt-5.5"
+review_model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+disable_response_storage = true
+network_access = "enabled"
+windows_wsl_setup_acknowledged = true
 
-```powershell
-codex-remote --config D:\path\to\config.toml daemon
-codex -c 'chatgpt_base_url="http://127.0.0.1:3847/backend-api"' app-server --listen ws://127.0.0.1:3849 --remote-control
-codex --remote ws://127.0.0.1:3849 -C D:\path\to\your\project
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+
+[model_providers.llmx]
+name = "llmx"
+base_url = "https://ai.llmx.cloud"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "your-third-party-key"
 ```
 
-Manual mode is only for protocol debugging. The intended user path is daemon plus shim, then just `codex`.
+`chatgpt_base_url` is for Codex App backend and remote-control traffic. `base_url` and `experimental_bearer_token` are for model calls.
 
 ## Thread Binding Model
 
@@ -110,10 +140,27 @@ Manual mode is only for protocol debugging. The intended user path is daemon plu
 - Feishu chats bind to one Codex thread at a time.
 - If Feishu has not bound a thread yet, the bridge sends a thread list card instead of guessing.
 - Resuming a thread from Feishu subscribes to that thread's future remote-control events.
-- TUI-origin `userMessage` items on a Feishu-bound thread can appear in Feishu.
+- Local Codex-origin `userMessage` items on a Feishu-bound thread can appear in Feishu.
 - Feishu-origin turns are marked by turn id, so their `userMessage` completion events are suppressed on the way back to Feishu.
 
-This is why Feishu can attach to an existing working thread without `codex-remote` becoming a separate workspace owner.
+## Optional CLI Shim
+
+The shim is no longer the primary Codex App path. It remains useful only when you want a CLI flow that starts an official app-server and a remote TUI for you:
+
+```text
+codex-remote [--config PATH] install-shim [--real-codex PATH] [--bin-dir PATH]
+codex-remote [--config PATH] uninstall-shim
+codex-remote [--config PATH] shim -- [codex args...]
+```
+
+When installed, the shim starts:
+
+```text
+real-codex -c chatgpt_base_url="http://127.0.0.1:3847/backend-api" app-server --listen ws://127.0.0.1:<port> --remote-control
+real-codex --remote ws://127.0.0.1:<port> -C <user cwd>
+```
+
+Use this only for `codex-cli` / GUI-launch helper scenarios. Codex App should stay clean and connect through config.
 
 ## Commands
 
@@ -124,19 +171,17 @@ codex-remote [--config PATH] on
 codex-remote [--config PATH] off
 codex-remote [--config PATH] install-shim [--real-codex PATH] [--bin-dir PATH]
 codex-remote [--config PATH] uninstall-shim
+codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
 codex-remote [--config PATH] shim -- [codex args...]
 ```
 
-`off` keeps the shim installed but makes it pass through directly to the real Codex binary. You can also bypass the shim for a single terminal:
+`on` / `off` enable or pause the Feishu bridge. They also affect the optional shim passthrough behavior.
 
-```powershell
-$env:CODEX_REMOTE_DISABLE = "1"
-codex
-```
+`configure-codex-app` is the CLI equivalent of the web console button. It explicitly writes Codex App `config.toml` and `auth.json` with local `chatgpt_base_url` and `chatgptAuthTokens`. Provider options default to `llmx` / `gpt-5.5` when model provider fields are supplied. Daemon startup does not modify Codex App config until the user clicks the button or runs this command.
 
 ## Configuration
 
-Example:
+`config.toml` is for `codex-remote` itself:
 
 ```toml
 bind = "127.0.0.1:3847"
@@ -153,32 +198,11 @@ allowedChatIds = []
 enabled = true
 accountId = "default"
 sendStreaming = true
-
-[shim]
-binDir = "..."
-realCodexPath = "..."
 ```
 
-`config.toml` contains local credentials and is ignored by git. See [config.example.toml](config.example.toml) and [docs/configuration.md](docs/configuration.md).
+Codex App config is separate and lives in the Codex config home, usually `~/.codex/config.toml`.
 
-## Auth Boundary
-
-`codex-remote` does not own Codex authentication.
-
-- The official Codex binary and app-server still own account state and login behavior.
-- The supported path is: make official Codex able to start and connect normally first, then attach `codex-remote` through remote-control.
-- `codex-remote` does not replace the official ChatGPT login flow.
-- `codex-remote` does not promise support for handcrafted, forged, or otherwise unofficial auth material.
-
-If Codex itself cannot start because of account or login state, resolve that in Codex first. The bridge only starts working after the official app-server is already able to run.
-
-More detail: [docs/auth-notes.md](docs/auth-notes.md)
-
-## References
-
-The repository may contain local reference material used during protocol and auth-shape investigation.
-
-Those materials are not part of the normal `codex-remote` runtime path, do not replace the official remote-control flow, and should not be treated as a supported login bypass mechanism.
+See [config.example.toml](config.example.toml) and [docs/configuration.md](docs/configuration.md).
 
 ## Feishu Commands
 
@@ -191,7 +215,7 @@ Those materials are not part of the normal `codex-remote` runtime path, do not r
 /1 /2 /3   select an exact approval card option
 ```
 
-Approval cards are updated after selection, so already handled approvals are marked visually instead of leaving ambiguous old buttons in the chat.
+Approval cards are updated after selection, so handled approvals are marked visually instead of leaving ambiguous old buttons in the chat.
 
 ## Development
 
@@ -214,10 +238,14 @@ GET http://127.0.0.1:3847/api/events
 
 - The daemon binds to `127.0.0.1` by default. Do not expose it publicly.
 - `config.toml` stores Feishu `appId` and `appSecret`; do not commit it.
+- Codex App `auth.json` and third-party provider keys are local secrets; do not commit them.
 - Attachments from Feishu are downloaded to a local state-adjacent `.im/attachments/feishu/` directory.
 - Restrict access with `allowedOpenIds` and/or `allowedChatIds` for real usage.
-- The bridge can send approval decisions to Codex. Treat Feishu access as equivalent to local terminal approval access.
+- The bridge can send approval decisions to Codex. Treat Feishu access as equivalent to local Codex approval access.
 
-## Troubleshooting
+## More Docs
 
-See [docs/troubleshooting.md](docs/troubleshooting.md).
+- [Architecture](docs/architecture.md)
+- [Configuration](docs/configuration.md)
+- [Auth notes](docs/auth-notes.md)
+- [Troubleshooting](docs/troubleshooting.md)

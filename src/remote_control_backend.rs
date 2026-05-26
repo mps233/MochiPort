@@ -1,14 +1,15 @@
 use std::{
     collections::HashMap,
+    path::Path,
     sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Json, Router,
     extract::{
-        State,
+        Path as AxumPath, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode},
@@ -128,6 +129,11 @@ struct EnrollResponse {
     environment_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct RenameEnvironmentRequest {
+    name: Option<String>,
+}
+
 struct ServerChunkAssembly {
     segment_count: usize,
     message_size_bytes: usize,
@@ -137,6 +143,62 @@ struct ServerChunkAssembly {
 
 pub fn router() -> Router<SharedState> {
     Router::new()
+        .route("/backend-api/wham/accounts/check", get(accounts_check))
+        .route("/backend-api/accounts/check", get(accounts_check))
+        .route("/backend-api/wham/usage", get(usage))
+        .route("/backend-api/usage", get(usage))
+        .route("/backend-api/wham/tasks/list", get(tasks_list))
+        .route("/backend-api/wham/environments", get(wham_environments))
+        .route("/backend-api/beacons/home", get(beacons_home))
+        .route("/backend-api/beacons/event", post(beacons_event))
+        .route(
+            "/backend-api/wham/onboarding/context",
+            get(onboarding_context),
+        )
+        .route("/backend-api/onboarding/context", get(onboarding_context))
+        .route("/backend-api/accounts/mfa_info", get(accounts_mfa_info))
+        .route(
+            "/backend-api/wham/remote/control/mfa_requirement",
+            get(remote_control_mfa_requirement),
+        )
+        .route(
+            "/backend-api/remote/control/mfa_requirement",
+            get(remote_control_mfa_requirement),
+        )
+        .route(
+            "/backend-api/wham/remote/control/clients",
+            get(remote_control_clients),
+        )
+        .route(
+            "/backend-api/remote/control/clients",
+            get(remote_control_clients),
+        )
+        .route(
+            "/backend-api/wham/remote/control/clients/{client_id}",
+            axum::routing::delete(delete_remote_control_client),
+        )
+        .route(
+            "/backend-api/remote/control/clients/{client_id}",
+            axum::routing::delete(delete_remote_control_client),
+        )
+        .route(
+            "/backend-api/codex/remote/control/environments",
+            get(remote_control_environments),
+        )
+        .route(
+            "/backend-api/remote/control/environments",
+            get(remote_control_environments),
+        )
+        .route(
+            "/backend-api/codex/remote/control/environments/{env_id}",
+            axum::routing::patch(rename_remote_control_environment)
+                .delete(delete_remote_control_environment),
+        )
+        .route(
+            "/backend-api/remote/control/environments/{env_id}",
+            axum::routing::patch(rename_remote_control_environment)
+                .delete(delete_remote_control_environment),
+        )
         .route(
             "/backend-api/wham/remote/control/server/enroll",
             post(enroll),
@@ -168,6 +230,205 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
         current_thread_id: remote.current_thread_id.clone(),
         current_turn_id: remote.current_turn_id.clone(),
         last_error: remote.last_error.clone(),
+    }
+}
+
+async fn accounts_check() -> Json<Value> {
+    Json(json!({
+        "account_ordering": ["acct_codex_remote_local"],
+        "current_account_id": "acct_codex_remote_local",
+        "accounts": [{
+            "id": "acct_codex_remote_local",
+            "account_id": "acct_codex_remote_local",
+            "account_user_id": "user_codex_remote_local__acct_codex_remote_local",
+            "user_id": "user_codex_remote_local",
+            "name": "Codex Remote Local",
+            "title": "Codex Remote Local",
+            "email": "codex-remote-local@example.local",
+            "plan_type": "pro",
+            "structure": "personal",
+            "role": "owner",
+            "is_default": true,
+            "is_deactivated": false,
+            "is_paid": true,
+        }],
+    }))
+}
+
+async fn onboarding_context() -> Json<Value> {
+    Json(json!({
+        "account_id": "acct_codex_remote_local",
+        "account_user_id": "user_codex_remote_local__acct_codex_remote_local",
+        "completed": true,
+        "requires_onboarding": false,
+        "items": [],
+    }))
+}
+
+async fn usage() -> Json<Value> {
+    Json(json!({
+        "plan_type": "pro",
+        "rate_limit": {
+            "allowed": true,
+            "limit_reached": false,
+        },
+        "credits": {
+            "has_credits": true,
+            "unlimited": true,
+        },
+    }))
+}
+
+async fn beacons_home() -> Json<Value> {
+    Json(json!({ "beacon_ui_response": Value::Null }))
+}
+
+async fn beacons_event() -> Json<Value> {
+    Json(json!({ "ok": true }))
+}
+
+async fn tasks_list() -> Json<Value> {
+    Json(json!({
+        "items": [],
+        "cursor": Value::Null,
+    }))
+}
+
+async fn wham_environments() -> Json<Value> {
+    Json(json!({
+        "items": [],
+        "cursor": Value::Null,
+    }))
+}
+
+async fn accounts_mfa_info() -> Json<Value> {
+    Json(json!({ "mfa_enabled_v2": true }))
+}
+
+async fn remote_control_mfa_requirement() -> Json<Value> {
+    Json(json!({ "requirement": "not_required" }))
+}
+
+async fn remote_control_clients(State(state): State<SharedState>) -> Json<Value> {
+    let snapshot = status_snapshot(&state).await;
+    let items = if snapshot.connected {
+        vec![remote_control_client_item(&snapshot)]
+    } else {
+        Vec::new()
+    };
+    Json(json!({
+        "items": items,
+        "cursor": Value::Null,
+    }))
+}
+
+async fn delete_remote_control_client(AxumPath(_client_id): AxumPath<String>) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+async fn remote_control_environments(State(state): State<SharedState>) -> Json<Value> {
+    let snapshot = status_snapshot(&state).await;
+    let items = if snapshot.connected {
+        vec![remote_control_environment_item(&snapshot)]
+    } else {
+        Vec::new()
+    };
+    Json(json!({
+        "items": items,
+        "cursor": Value::Null,
+    }))
+}
+
+async fn rename_remote_control_environment(
+    State(state): State<SharedState>,
+    AxumPath(_env_id): AxumPath<String>,
+    Json(request): Json<RenameEnvironmentRequest>,
+) -> Json<Value> {
+    if let Some(name) = request.name.map(|name| name.trim().to_string())
+        && !name.is_empty()
+    {
+        state.remote_control.inner.lock().await.server_name = Some(name);
+    }
+    let snapshot = status_snapshot(&state).await;
+    Json(remote_control_environment_item(&snapshot))
+}
+
+async fn delete_remote_control_environment(AxumPath(_env_id): AxumPath<String>) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Value {
+    let installation_id = snapshot
+        .installation_id
+        .clone()
+        .unwrap_or_else(|| "local-installation".to_string());
+    let env_id = snapshot
+        .environment_id
+        .clone()
+        .unwrap_or_else(|| stable_id("env", &installation_id));
+    let host_name = snapshot
+        .server_name
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(local_host_name);
+
+    json!({
+        "env_id": env_id,
+        "display_name": host_name,
+        "host_name": host_name,
+        "name": host_name,
+        "kind": "remote-control",
+        "client_type": "CODEX_DESKTOP_APP",
+        "online": snapshot.connected,
+        "busy": snapshot.current_turn_id.is_some(),
+        "os": local_platform_os(),
+        "arch": local_arch(),
+        "app_server_version": env!("CARGO_PKG_VERSION"),
+        "installation_id": installation_id,
+        "last_seen_at": Value::Null,
+    })
+}
+
+fn remote_control_client_item(snapshot: &RemoteControlStatusResponse) -> Value {
+    let client_id = if snapshot.client_id.trim().is_empty() {
+        "codex-remote-feishu".to_string()
+    } else {
+        snapshot.client_id.clone()
+    };
+    let display_name = "Codex Remote Feishu".to_string();
+
+    json!({
+        "client_id": client_id,
+        "display_name": display_name,
+        "device_model": display_name,
+        "device_type": "desktop",
+        "platform": local_platform_os(),
+        "client_type": "CODEX_DESKTOP_APP",
+        "enrollment_status": "enrolled",
+        "last_seen_at": Value::Null,
+    })
+}
+
+fn local_host_name() -> String {
+    std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "Codex App".to_string())
+}
+
+fn local_platform_os() -> String {
+    match std::env::consts::OS {
+        "macos" => "darwin".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn local_arch() -> String {
+    match std::env::consts::ARCH {
+        "aarch64" => "arm64".to_string(),
+        other => other.to_string(),
     }
 }
 
@@ -572,6 +833,39 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
     let message = message.get("message").unwrap_or(message);
     if let Some(id) = message.get("id") {
         if let Some(method) = message.get("method").and_then(|v| v.as_str()) {
+            if method == "account/chatgptAuthTokens/refresh" {
+                match local_chatgpt_auth_tokens_response(state).await {
+                    Ok(result) => {
+                        if let Err(err) = send_response(state, id.clone(), result).await {
+                            state
+                                .push_event(
+                                    "error",
+                                    "remote_control_auth_refresh_failed",
+                                    err.to_string(),
+                                )
+                                .await;
+                        } else {
+                            state
+                                .push_event(
+                                    "info",
+                                    "remote_control_auth_refresh",
+                                    format!("id={id}"),
+                                )
+                                .await;
+                        }
+                    }
+                    Err(err) => {
+                        state
+                            .push_event(
+                                "error",
+                                "remote_control_auth_refresh_failed",
+                                err.to_string(),
+                            )
+                            .await;
+                    }
+                }
+                return;
+            }
             let params = message.get("params").cloned();
             state
                 .push_event(
@@ -680,6 +974,9 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
             return;
         }
         let params = message.get("params").cloned();
+        if method == "remoteControl/status/changed" {
+            observe_remote_control_status_changed(state, params.as_ref()).await;
+        }
         if method == "thread/started" {
             if let Some(thread_id) = params.as_ref().and_then(thread_id_from_payload) {
                 mark_thread_active(state, &thread_id).await;
@@ -722,6 +1019,36 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
             request_id: message.get("id").cloned(),
         });
     }
+}
+
+async fn observe_remote_control_status_changed(state: &SharedState, params: Option<&Value>) {
+    let Some(params) = params else {
+        return;
+    };
+    let mut remote = state.remote_control.inner.lock().await;
+    if let Some(server_name) = json_string(params, "serverName") {
+        remote.server_name = Some(server_name);
+    }
+    if let Some(installation_id) = json_string(params, "installationId") {
+        remote.installation_id = Some(installation_id);
+    }
+    if let Some(environment_id) = json_string(params, "environmentId") {
+        remote.environment_id = Some(environment_id);
+    }
+    if let Some(status) = json_string(params, "status")
+        && status == "connected"
+    {
+        remote.last_error = None;
+    }
+}
+
+fn json_string(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn observe_server_chunk(
@@ -786,6 +1113,128 @@ fn observe_server_chunk(
 
 pub async fn send_response(state: &SharedState, request_id: Value, result: Value) -> Result<()> {
     send_raw_message(state, json!({ "id": request_id, "result": result })).await
+}
+
+async fn local_chatgpt_auth_tokens_response(state: &SharedState) -> Result<Value> {
+    let codex_home = std::env::var_os("HOME")
+        .map(|home| std::path::PathBuf::from(home).join(".codex"))
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .map(|home| std::path::PathBuf::from(home).join(".codex"))
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from(".codex"));
+    let auth_path = codex_home.join("auth.json");
+    let auth = read_auth_json(&auth_path)?;
+    let account_id = auth
+        .pointer("/tokens/account_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            auth.pointer("/tokens/access_token")
+                .and_then(|value| value.as_str())
+                .and_then(jwt_chatgpt_account_id)
+        })
+        .or_else(|| {
+            state
+                .remote_control
+                .inner
+                .try_lock()
+                .ok()
+                .and_then(|remote| remote.account_id.clone())
+        })
+        .unwrap_or_else(|| "acct_codex_remote_local".to_string());
+    let plan_type = auth
+        .pointer("/tokens/access_token")
+        .and_then(|value| value.as_str())
+        .and_then(jwt_chatgpt_plan_type)
+        .unwrap_or_else(|| "pro".to_string());
+    let access_token = auth
+        .pointer("/tokens/access_token")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| local_chatgpt_jwt(&account_id, &plan_type));
+    Ok(json!({
+        "accessToken": access_token,
+        "chatgptAccountId": account_id,
+        "chatgptPlanType": plan_type,
+    }))
+}
+
+fn read_auth_json(path: &Path) -> Result<Value> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read Codex App auth {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn jwt_chatgpt_account_id(jwt: &str) -> Option<String> {
+    jwt_payload(jwt).and_then(|payload| {
+        payload
+            .get("https://api.openai.com/auth")?
+            .get("chatgpt_account_id")?
+            .as_str()
+            .map(str::to_string)
+    })
+}
+
+fn jwt_chatgpt_plan_type(jwt: &str) -> Option<String> {
+    jwt_payload(jwt).and_then(|payload| {
+        payload
+            .get("https://api.openai.com/auth")?
+            .get("chatgpt_plan_type")?
+            .as_str()
+            .map(str::to_string)
+    })
+}
+
+fn jwt_payload(jwt: &str) -> Option<Value> {
+    let payload = jwt.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn local_chatgpt_jwt(account_id: &str, plan_type: &str) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0);
+    let exp = now + 10 * 365 * 24 * 60 * 60;
+    let payload = json!({
+        "iss": "https://auth.openai.com",
+        "aud": ["https://api.openai.com/v1"],
+        "iat": now,
+        "nbf": now,
+        "exp": exp,
+        "sub": "local|user_codex_remote_local",
+        "email": "codex-remote-local@example.local",
+        "email_verified": true,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_plan_type": plan_type,
+            "chatgpt_user_id": "user_codex_remote_local",
+            "user_id": "user_codex_remote_local",
+            "chatgpt_account_is_fedramp": false,
+            "localhost": true,
+            "groups": [],
+            "organizations": [{
+                "id": account_id,
+                "is_default": true,
+                "role": "owner",
+                "title": "Codex Remote Local"
+            }]
+        },
+        "scp": ["openid", "profile", "email", "offline_access"],
+    });
+    format!(
+        "{}.{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({ "alg": "none", "typ": "JWT" })).unwrap_or_default()
+        ),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap_or_default()),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig")
+    )
 }
 
 async fn send_initialized(state: &SharedState) -> Result<()> {

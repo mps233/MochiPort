@@ -3,6 +3,7 @@ mod bridge;
 mod chain_log;
 mod cli;
 mod codex;
+mod codex_app_config;
 mod config;
 mod im;
 mod im_runtime;
@@ -57,6 +58,40 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::UninstallShim => {
             shim::uninstall_shim(&config)?;
+            Ok(())
+        }
+        Command::ConfigureCodexApp {
+            codex_home,
+            provider_name,
+            provider_base_url,
+            provider_key,
+            model,
+        } => {
+            let backend_url = shim::remote_control_base_url(&config);
+            let report = codex_app_config::configure_codex_app(
+                codex_app_config::ConfigureCodexAppOptions {
+                    codex_home,
+                    backend_url: backend_url.clone(),
+                    account_id: "acct_codex_remote_local".to_string(),
+                    user_id: "user_codex_remote_local".to_string(),
+                    email: "codex-remote-local@example.local".to_string(),
+                    plan_type: "pro".to_string(),
+                    provider_name,
+                    provider_base_url,
+                    provider_key,
+                    model,
+                },
+            )?;
+            let gui_api_base = codex_app_config::configure_gui_api_base_url(&backend_url)?;
+            println!("Codex App configured:");
+            println!("  codex home: {}", report.codex_home.display());
+            println!("  config: {}", report.config_path.display());
+            println!("  auth: {}", report.auth_path.display());
+            println!("  chatgpt_base_url: {}", report.backend_url);
+            println!(
+                "  CODEX_API_BASE_URL for GUI launch: {}",
+                gui_api_base.value.as_deref().unwrap_or("<unset>")
+            );
             Ok(())
         }
         Command::Shim { args } => {

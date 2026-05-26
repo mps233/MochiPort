@@ -1,6 +1,13 @@
 # Configuration
 
-`codex-remote` reads a TOML config file. If no config path is passed, it tries to infer `config.toml` from the current directory or from the repository root when running from `target/debug` or `target/release`.
+There are two separate config surfaces:
+
+- `codex-remote` config, usually this repository's `config.toml`
+- Codex App config, usually `~/.codex/config.toml`
+
+Do not mix them. `codex-remote` stores Feishu and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
+
+## `codex-remote` Config
 
 Use an explicit config path for predictable behavior:
 
@@ -8,7 +15,7 @@ Use an explicit config path for predictable behavior:
 codex-remote --config D:\path\to\config.toml daemon
 ```
 
-## Example
+Example:
 
 ```toml
 bind = "127.0.0.1:3847"
@@ -33,11 +40,9 @@ realCodexPath = "C:\\Users\\<user>\\AppData\\Roaming\\npm\\codex.cmd"
 
 Paths relative to the config file are normalized at startup.
 
-## Top-Level Fields
-
 ### `bind`
 
-HTTP bind address for the local web console and API.
+HTTP bind address for the local web console, local backend API, and remote-control websocket.
 
 Default:
 
@@ -97,9 +102,9 @@ sendStreaming = true
 
 ### `enabled`
 
-Controls whether the shim should connect Codex to Feishu.
+Controls whether the Feishu bridge should run.
 
-When disabled, the shim runs the real Codex directly.
+When disabled, Feishu websocket listening stops and Feishu messages are not forwarded to Codex. The optional CLI shim also passes through to the real Codex binary when this is disabled.
 
 ### `accountId`
 
@@ -113,13 +118,107 @@ feishu:<accountId>:<chatId>
 
 Controls whether assistant deltas are streamed into Feishu cards.
 
-## Shim
+## Codex App Config
+
+Codex App must point ChatGPT backend traffic at the local daemon:
+
+```toml
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+```
+
+This belongs in the Codex App config home, usually:
+
+```text
+~/.codex/config.toml
+```
+
+Third-party model provider keys stay in the Codex model provider section. Example:
+
+```toml
+model_provider = "llmx"
+model = "gpt-5.5"
+review_model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+disable_response_storage = true
+network_access = "enabled"
+windows_wsl_setup_acknowledged = true
+
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+
+[model_providers.llmx]
+name = "llmx"
+base_url = "https://ai.llmx.cloud"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "your-third-party-key"
+```
+
+`chatgpt_base_url` is not the model API base URL. It is the ChatGPT backend-shaped URL used by Codex App features such as remote-control enrollment.
+
+## Codex App Auth
+
+Remote-control requires ChatGPT-compatible auth. API-key-only auth is rejected before the websocket connects.
+
+For this local backend, use `chatgptAuthTokens` in Codex App's `auth.json`:
+
+```json
+{
+  "auth_mode": "chatgptAuthTokens",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "<local ChatGPT-shaped JWT>",
+    "access_token": "<local ChatGPT-shaped JWT>",
+    "refresh_token": "",
+    "account_id": "acct_codex_remote_local"
+  },
+  "last_refresh": "2026-05-26T00:00:00Z"
+}
+```
+
+The local JWT needs to parse as a JWT and include the ChatGPT-shaped auth metadata Codex reads:
+
+```json
+{
+  "email": "codex-remote-local@example.local",
+  "https://api.openai.com/auth": {
+    "chatgpt_account_id": "acct_codex_remote_local",
+    "chatgpt_user_id": "user_codex_remote_local",
+    "user_id": "user_codex_remote_local",
+    "chatgpt_plan_type": "pro",
+    "chatgpt_account_is_fedramp": false
+  }
+}
+```
+
+This identity is local bridge identity only. The model provider key controls the actual model provider.
+
+After starting the daemon, the web console provides a `Configure Codex App` button that writes the local Codex App config for you.
+
+The CLI equivalent is:
+
+```powershell
+codex-remote --config config.toml configure-codex-app
+```
+
+Optional provider fields:
+
+```powershell
+codex-remote --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
+```
+
+When provider fields are supplied without `--provider-name`, `llmx` is used as the provider name.
+
+The daemon does not modify Codex App config on startup. It writes these files only when the web button or CLI command is used.
+
+## Optional Shim
 
 ```toml
 [shim]
 binDir = "..."
 realCodexPath = "..."
 ```
+
+The shim is optional and applies to CLI helper flows, not the clean Codex App flow.
 
 ### `binDir`
 
@@ -177,20 +276,7 @@ codex-remote-state.json
 .im/
 target/
 target-verify/
+reference/
 ```
 
-## Reference Auth Artifacts
-
-The repository may also contain local auth-shape reference artifacts.
-
-They are inspection and experiment artifacts only:
-
-- not read by `codex-remote` at runtime
-- not a replacement for `config.toml`
-- not part of the normal remote-control + Feishu bridge flow
-- not documented here as a supported way to bypass official Codex / ChatGPT login
-
-See also:
-
-- [auth-notes.md](auth-notes.md)
-- [auth-notes.zh-CN.md](auth-notes.zh-CN.md)
+Do not commit Codex App `auth.json`, third-party provider keys, Feishu credentials, open ids, or chat ids.

@@ -2,8 +2,8 @@
 
 `codex-remote` bridges three systems:
 
-- Official Codex CLI/TUI
-- Official Codex app-server remote-control protocol
+- Codex App / official Codex app-server remote-control protocol
+- A local ChatGPT backend-shaped base URL
 - Feishu IM websocket and message APIs
 
 It is not a Codex client replacement. It implements the remote-control backend that official Codex app-server connects to, then adapts those JSON-RPC messages to Feishu.
@@ -16,20 +16,28 @@ The design target is strict:
 
 ## Process Model
 
-With the shim enabled, the user still runs:
-
-```powershell
-codex
-```
-
-The shim resolves the real Codex binary and starts two official Codex processes:
+The primary path is Codex App direct connection:
 
 ```text
-real-codex -c chatgpt_base_url="http://127.0.0.1:3847/backend-api" app-server --listen ws://127.0.0.1:<temporary-port> --remote-control
-real-codex --remote ws://127.0.0.1:<temporary-port> -C <user cwd>
+Codex App
+  |
+  | ~/.codex/config.toml:
+  |   chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+  |
+  | user enables remote control
+  v
+official Codex app-server
+  |
+  | GET /backend-api/wham/remote/control/server
+  | outbound websocket
+  v
+codex-remote daemon
+  |
+  | Feishu websocket listener
+  | Feishu message/card APIs
+  v
+Feishu IM
 ```
-
-`-C <user cwd>` is required for remote TUI mode because official Codex does not infer the remote session cwd from the local process cwd. This is the boundary that prevents `codex-remote`'s repository directory from becoming the Codex project directory.
 
 The daemon runs separately:
 
@@ -41,6 +49,7 @@ It owns:
 
 - local web console
 - official remote-control backend endpoints
+- local ChatGPT backend compatibility endpoints needed by the app
 - Feishu websocket listener
 - in-memory route/thread/approval/card state
 
@@ -53,11 +62,13 @@ POST /backend-api/wham/remote/control/server/enroll
 GET  /backend-api/wham/remote/control/server
 ```
 
-Official Codex app-server connects outbound to those endpoints when started with:
+Official Codex app-server connects outbound to those endpoints when Codex App has:
 
-```text
--c chatgpt_base_url="http://127.0.0.1:3847/backend-api" app-server --remote-control
+```toml
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
 ```
+
+and remote control is enabled.
 
 Protocol notes:
 
@@ -66,6 +77,43 @@ Protocol notes:
 - The first client message is JSON-RPC `initialize`; after the initialize response, `codex-remote` sends `initialized`.
 - Server envelopes are acknowledged by `seq_id`; chunk acknowledgements include `segment_id`.
 - Large outbound client JSON-RPC messages are segmented with the same 100 KiB target used by official Codex.
+
+## Local Auth Shape
+
+Remote-control startup is gated by Codex auth, before the websocket reaches `codex-remote`. API-key-only auth is rejected by official Codex app-server.
+
+For this project, the local identity shape is `chatgptAuthTokens`:
+
+```json
+{
+  "auth_mode": "chatgptAuthTokens",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "<local ChatGPT-shaped JWT>",
+    "access_token": "<local ChatGPT-shaped JWT>",
+    "refresh_token": "",
+    "account_id": "acct_codex_remote_local"
+  },
+  "last_refresh": "2026-05-26T00:00:00Z"
+}
+```
+
+The JWT only needs the ChatGPT-shaped claims Codex reads locally, especially:
+
+```json
+{
+  "email": "codex-remote-local@example.local",
+  "https://api.openai.com/auth": {
+    "chatgpt_account_id": "acct_codex_remote_local",
+    "chatgpt_user_id": "user_codex_remote_local",
+    "user_id": "user_codex_remote_local",
+    "chatgpt_plan_type": "pro",
+    "chatgpt_account_is_fedramp": false
+  }
+}
+```
+
+The third-party model key is separate. It belongs in the Codex model provider configuration and is used for model calls, not remote-control enrollment.
 
 ## Feishu Bridge
 
@@ -88,7 +136,7 @@ The bridge only renders events for threads that are bound to a Feishu conversati
 
 `userMessage` handling is asymmetric by design:
 
-- TUI-origin `userMessage` items may be rendered to Feishu for a Feishu-bound thread.
+- Codex-origin `userMessage` items may be rendered to Feishu for a Feishu-bound thread.
 - Feishu-origin turns are marked in bridge-local runtime state by `turnId`.
 - When Codex later emits `item/completed` for that same `userMessage`, the bridge suppresses it instead of echoing the Feishu message back into the same Feishu chat.
 
@@ -122,21 +170,24 @@ Behavior:
 
 This keeps the implementation aligned with the official remote-control model instead of inventing a parallel thread store.
 
-## Why a Shim Exists
+## Optional CLI Shim
 
-Manual protocol debugging requires multiple commands:
+The shim is not the primary Codex App path. It exists for CLI and GUI-launch helper scenarios where the user wants `codex` to start both app-server and a remote TUI.
 
-```powershell
-codex-remote daemon
-codex -c 'chatgpt_base_url="http://127.0.0.1:3847/backend-api"' app-server --listen ws://127.0.0.1:3849 --remote-control
-codex --remote ws://127.0.0.1:3849 -C D:\path\to\project
-```
-
-That is too much for daily use. The shim makes the normal command work:
+With the shim enabled, the user runs:
 
 ```powershell
 codex
 ```
+
+The shim resolves the real Codex binary and starts two official Codex processes:
+
+```text
+real-codex -c chatgpt_base_url="http://127.0.0.1:3847/backend-api" app-server --listen ws://127.0.0.1:<temporary-port> --remote-control
+real-codex --remote ws://127.0.0.1:<temporary-port> -C <user cwd>
+```
+
+`-C <user cwd>` is required for remote TUI mode because official Codex does not infer the remote session cwd from the local process cwd. This prevents `codex-remote`'s repository directory from becoming the Codex project directory.
 
 The shim is deliberately conservative:
 
@@ -144,12 +195,6 @@ The shim is deliberately conservative:
 - If Feishu is not configured, it runs the real Codex directly.
 - If the daemon is unavailable, it runs the real Codex directly.
 - If the command is a subcommand such as `login`, `mcp`, `plugin`, `app-server`, or already uses `--remote`, it runs the real Codex directly.
-
-The shim is not the protocol. It is only a launcher convenience so the user can keep typing `codex` instead of manually starting:
-
-- `codex-remote daemon`
-- official `codex app-server --remote-control`
-- official `codex --remote ... -C <cwd>`
 
 ## Approval Handling
 
@@ -183,11 +228,10 @@ http://127.0.0.1:3847
 It provides:
 
 - daemon status
+- Feishu onboarding and bridge on/off
 - remote-control status
-- shim status
-- Feishu scan onboarding
-- shim install/uninstall
-- bridge on/off
+- Codex App config hints
+- optional CLI shim status/install/uninstall
 - recent event log
 
 ## State Boundaries
@@ -196,7 +240,7 @@ It provides:
 
 - config path
 - Feishu app credentials
-- shim configuration
+- optional shim configuration
 - Feishu conversation to Codex thread binding
 - pending approvals
 - Feishu card ids/message ids
@@ -211,9 +255,4 @@ Codex-owned state stays in Codex:
 - thread data
 - tool execution semantics
 - MCP configuration
-
-## Auth Experiment References
-
-The repository may keep local reference artifacts used while inspecting Codex auth file shapes.
-
-Those artifacts are for local auth experiments only. They do not change the remote-control architecture above, and they are not required for the normal Feishu bridge path.
+- model provider keys

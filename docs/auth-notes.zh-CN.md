@@ -1,110 +1,93 @@
 # 认证说明
 
-这份文档说明两件事：
+这份文档说明 Codex App remote-control 路径里的本地 auth 边界。
 
-1. 为什么仓库里会保留一些 auth 结构参考文件
-2. 这些文件和 `codex-remote` 正常运行链路之间是什么关系
+## 当前决策
 
-它不是“如何绕过官方 Codex / ChatGPT 登录”的说明文档。
+`codex-remote` 使用本地 `chatgptAuthTokens` 形态作为 Codex App remote-control 身份。
 
-## 范围
+含义是：
 
-`codex-remote` 的定位是 remote-control backend + 飞书 bridge，不是 Codex 的认证层。
+- Codex App 仍然负责 app-server 启动，并读取它正常的 Codex home
+- `chatgpt_base_url` 指向本地 `codex-remote` backend
+- Codex App 的 `auth.json` 使用 `auth_mode = "chatgptAuthTokens"`
+- 第三方模型 key 仍然放在 Codex model provider 配置里
+- app-server 连上 remote-control 后，`codex-remote` 再把协议流量桥到飞书
 
-正常运行时，职责边界是这样的：
+## 为什么不能只用 API Key
 
-- 官方 Codex 负责账号状态、登录状态、provider 选择，以及 app-server 能否启动
-- `codex-remote` 只在 app-server 已经能运行之后，负责 remote-control 传输和飞书适配
+官方 Codex remote-control 启动时会在连接 backend 之前拒绝纯 API key auth：
 
-## 支持路径
+```text
+remote control requires ChatGPT authentication; API key auth is not supported
+```
 
-受支持的工作流是：
+所以模型 provider key 不能当 remote-control 身份。它只负责后续模型请求。
 
-1. 先把官方 Codex 配置到可以正常启动
-2. 确认官方 Codex app-server 可以运行
-3. 再通过 remote-control 把 `codex-remote` 接上去
+## 本地 `chatgptAuthTokens`
 
-如果官方 Codex 因为账号或登录状态本身就无法启动，应该先在 Codex 侧解决。bridge 只有在 app-server 已经能跑起来之后才有意义。
+本地 auth 记录刻意做成 ChatGPT-shaped，因为这是 Codex remote-control 检查接受的形态：
 
-## `codex-remote` 会读取什么
+```json
+{
+  "auth_mode": "chatgptAuthTokens",
+  "OPENAI_API_KEY": null,
+  "tokens": {
+    "id_token": "<本地 ChatGPT-shaped JWT>",
+    "access_token": "<本地 ChatGPT-shaped JWT>",
+    "refresh_token": "",
+    "account_id": "acct_codex_remote_local"
+  },
+  "last_refresh": "2026-05-26T00:00:00Z"
+}
+```
 
-`codex-remote` 会读取：
+这个 JWT 是本地材料。Codex 读取它的 claims 来拿 account/user 元数据。`codex-remote` 不会用它去请求 OpenAI。
+
+## 辅助命令
+
+使用：
+
+```powershell
+codex-remote --config config.toml configure-codex-app
+```
+
+它会显式写入：
+
+- Codex App `config.toml`：`chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`
+- Codex App `auth.json`：本地 `chatgptAuthTokens`
+
+也可以顺手写第三方 provider 配置：
+
+```powershell
+codex-remote --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
+```
+
+如果写 provider 字段但不传 `--provider-name`，helper 默认使用 `llmx`。
+
+这个命令只在直接调用时执行。daemon 启动不会偷偷修改 Codex App 配置或 auth 状态。
+
+## 运行边界
+
+`codex-remote` 读取：
 
 - `config.toml`
-- 本地 bridge 状态文件
-- 飞书凭证和 bridge 本地配置
+- 本地 bridge 状态
+- 飞书凭证和 bridge 配置
 
-`codex-remote` 不会读取或管理：
+Codex App 读取：
 
-- `~/.codex/auth.json`
-- Codex 的 session refresh 逻辑
-- ChatGPT access token
-- Codex 账号存储内部状态
+- Codex App `config.toml`
+- Codex App `auth.json`
+- model provider 配置和 key
 
-daemon 和 shim 都不会加载 `references/` 目录下的 auth 参考文件。
-
-## 为什么会有 `references/`
-
-仓库里可能会保留一些本地参考材料。原因只有一个：之前做过本地研究，观察过 auth 文件结构，所以把参考信息留了下来。
-
-保留它们的典型用途是：
-
-- 对比观察过的 `auth.json` 结构
-- 回看某次本地实验里有哪些字段
-- 验证 remote-control bridge 和 Codex auth 存储其实是正交问题
-
-它们不参与：
-
-- daemon 启动
-- shim 启动
-- 飞书接入
-- remote-control 握手
-
-## 它和 remote-control 的关系
-
-remote-control 链路开始的前提，是官方 Codex app-server 已经活着。
-
-到了这一步，`codex-remote` 真正关心的是：
+当 Codex App 启动 remote-control 之后，`codex-remote` 真正关心的是：
 
 - app-server 是否连到了 `/backend-api/wham/remote/control/server`
 - remote-control 的 `initialize` / `initialized`
 - thread / turn 通知
 - approval 请求与响应
 
-它并不关心 Codex 最初是通过什么方式进入“可运行状态”的，只要那是一个官方支持或至少由用户自己维护、并且确实能启动 app-server 的 Codex 配置即可。
+## 参考材料
 
-换句话说：
-
-- auth 状态决定 Codex 能不能启动
-- remote-control 决定一个已经运行的 Codex 会话如何桥接到飞书
-
-这是相邻问题，不是同一个问题。
-
-## 不支持的方向
-
-这个仓库不会把下面这些内容当成正式支持路径：
-
-- 手工拼装或伪造 token 后作为生产方案
-- 把 `references/` 当成真实登录状态的替代品
-- 把本地 auth 实验当成公开 bridge 契约的一部分
-
-如果你要对外发布或运营 `codex-remote`，推荐表述应该是：
-
-- 先有官方 Codex
-- 再有 remote-control
-- 最后才是飞书 bridge
-
-## 实际调试建议
-
-调试时，把问题拆开看：
-
-- “官方 Codex 能不能启动？”  
-  这是 Codex 认证 / provider / 配置问题。
-
-- “Codex 启动后，`codex-remote` 能不能收到 remote-control 事件？”  
-  这是 bridge / 协议 / 运行态问题。
-
-- “thread 订阅后，飞书能不能正常收发消息？”  
-  这是飞书 bridge 问题。
-
-把这些边界拆清楚，排障和文档都会简单很多。
+仓库里可能会保留一些协议和 auth 结构研究时留下的本地参考材料。它们被 git 忽略，不参与 daemon 启动。

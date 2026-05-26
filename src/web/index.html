@@ -279,34 +279,34 @@
                 <p id="app.message" class="message"></p>
             </div>
             <div class="command">
-                <strong>日常使用只需要</strong>
-                <code>codex</code>
-                <span>在项目目录打开终端运行</span>
+                <strong>Codex App 配置</strong>
+                <code>chatgpt_base_url</code>
+                <span>指向本地 backend</span>
             </div>
         </div>
 
         <div class="steps">
-            <div id="step.install" class="step">
-                <div class="step-dot"></div>
-                <div>
-                    <h3>安装本机命令</h3>
-                    <p>安装后仍然使用原来的 codex 命令。</p>
-                </div>
-                <span id="step.install.status" class="step-status">待处理</span>
-            </div>
             <div id="step.feishu" class="step">
                 <div class="step-dot"></div>
                 <div>
                     <h3>接入飞书</h3>
-                    <p>飞书消息会进入当前本地 Codex 会话。</p>
+                    <p>飞书消息会进入已绑定的本地 Codex App 会话。</p>
                 </div>
                 <span id="step.feishu.status" class="step-status">待处理</span>
+            </div>
+            <div id="step.config" class="step">
+                <div class="step-dot"></div>
+                <div>
+                    <h3>配置 Codex App</h3>
+                    <p>在 Codex 配置里把 chatgpt_base_url 指向本地 backend，并使用 chatgptAuthTokens。</p>
+                </div>
+                <span id="step.config.status" class="step-status">需确认</span>
             </div>
             <div id="step.codex" class="step">
                 <div class="step-dot"></div>
                 <div>
-                    <h3>运行 Codex</h3>
-                    <p>打开新的终端，在任意项目目录运行 codex。</p>
+                    <h3>打开远程控制</h3>
+                    <p>启动 Codex App，并在 App 里启用 remote control。</p>
                 </div>
                 <span id="step.codex.status" class="step-status">等待运行</span>
             </div>
@@ -325,14 +325,32 @@
     <details id="advanced">
         <summary>技术细节</summary>
         <div class="details-body">
+            <pre id="app.configHint"></pre>
             <div class="field">
-                <label for="shim.realCodexPath">找不到 Codex 时，手动填写真实 Codex 路径</label>
+                <label for="codex.providerName">第三方模型 provider name，可选</label>
+                <input id="codex.providerName" value="llmx" placeholder="例如 llmx" />
+            </div>
+            <div class="field">
+                <label for="codex.providerBaseUrl">第三方模型 base_url，可选</label>
+                <input id="codex.providerBaseUrl" value="https://ai.llmx.cloud" placeholder="例如 https://ai.llmx.cloud" />
+            </div>
+            <div class="field">
+                <label for="codex.providerKey">第三方模型 key，可选</label>
+                <input id="codex.providerKey" placeholder="例如 sk-..." />
+            </div>
+            <div class="field">
+                <label for="codex.model">模型名，可选</label>
+                <input id="codex.model" value="gpt-5.5" placeholder="例如 gpt-5.5" />
+            </div>
+            <div class="field">
+                <label for="shim.realCodexPath">可选 CLI shim：找不到 Codex 时，手动填写真实 Codex 路径</label>
                 <input id="shim.realCodexPath" placeholder="例如 C:\Users\...\codex.cmd" />
             </div>
             <div id="shim.candidates" class="candidates"></div>
             <div class="actions">
-                <button onclick="installShim()">安装/更新本机命令</button>
-                <button class="danger" onclick="uninstallShim()">卸载本机命令</button>
+                <button onclick="configureCodexApp()">一键配置 Codex App</button>
+                <button onclick="installShim()">安装/更新可选 CLI shim</button>
+                <button class="danger" onclick="uninstallShim()">卸载可选 CLI shim</button>
                 <button class="secondary" onclick="setShimEnabled(true)">启用飞书接入</button>
                 <button class="secondary" onclick="setShimEnabled(false)">暂停飞书接入</button>
                 <button class="secondary" onclick="startBridge()">启动飞书监听</button>
@@ -353,23 +371,26 @@ let discoveredCandidates = [];
 const byId = (id) => document.getElementById(id);
 
 async function loadAll() {
-    const [status, config, remote, shim, events] = await Promise.all([
+    const [status, config, remote, shim, codexApp, events] = await Promise.all([
         fetch("/api/status").then(r => r.json()),
         fetch("/api/config").then(r => r.json()),
         fetch("/api/remote-control/status").then(r => r.json()),
         fetch("/api/shim/status").then(r => r.json()),
+        fetch("/api/codex-app/status").then(r => r.json()),
         fetch("/api/events").then(r => r.json()),
     ]);
 
     const feishuWs = status.feishuWs || {};
     const feishuReady = Boolean(shim.feishuConfigured);
-    const serviceReady = Boolean(status.running && feishuWs.connected);
-    const commandReady = Boolean(shim.shimInstalled && shim.pathConfigured !== false);
+    const bridgeEnabled = Boolean(shim.enabled);
+    const guiApiBase = codexApp.guiApiBase || {};
+    const codexAppConfigured = Boolean(codexApp.configured);
     const codexConnected = Boolean(remote.connected && remote.initialized);
+    const backendUrl = shim.remoteControlBaseUrl || `http://${status.bind || "127.0.0.1:3847"}/backend-api`;
 
-    updateStep("step.install", commandReady, commandReady ? "完成" : "待处理");
     updateStep("step.feishu", feishuReady && feishuWs.connected, feishuReady && feishuWs.connected ? "完成" : "待扫码");
-    updateStep("step.codex", codexConnected, codexConnected ? "已连接" : "等待运行");
+    updateStep("step.config", codexAppConfigured, codexAppConfigured ? "完成" : "需确认");
+    updateStep("step.codex", codexConnected, codexConnected ? "已连接" : (codexAppConfigured ? "等待打开" : "待配置"));
 
     if (shim.realCodexPath && !byId("shim.realCodexPath").value) {
         byId("shim.realCodexPath").value = shim.realCodexPath;
@@ -377,36 +398,55 @@ async function loadAll() {
     discoveredCandidates = shim.codexCandidates || [];
     renderCandidates(discoveredCandidates);
 
-    if (!commandReady) {
-        setHero("需要安装", "先安装本机 codex 命令", "点击安装后，用户以后仍然只需要在项目目录运行 codex。", "一键安装", "install", true);
-    } else if (!feishuReady || !feishuWs.connected) {
+    if (!feishuReady || !feishuWs.connected) {
         setHero("需要接入", "接入飞书后就可以双端会话", "用飞书扫码确认一次，之后飞书消息会进入当前本地 Codex 会话。", "扫码接入飞书", "feishu", true);
-    } else if (!shim.enabled) {
-        setHero("已暂停", "飞书接入目前关闭", "启用后，本地运行 codex 时会自动连接飞书。", "启用飞书接入", "enable", true);
+    } else if (!bridgeEnabled) {
+        setHero("已暂停", "飞书接入目前关闭", "启用后，飞书消息会转发到已连接的 Codex App remote-control 会话。", "启用飞书接入", "enable", true);
     } else if (!status.running) {
         setHero("需要启动", "飞书监听没有运行", "点击启动后，飞书消息监听会恢复。", "启动飞书监听", "bridge", true);
+    } else if (!codexAppConfigured) {
+        setHero("已准备好", "先配置 Codex App，再双击启动", "点击一键配置会写入本地 chatgpt_base_url 与 chatgptAuthTokens；然后启动 Codex App 并启用 remote control。", "一键配置 Codex App", "configureCodexApp", true);
     } else if (!codexConnected) {
-        setHero("已准备好", "现在打开项目目录运行 codex", "Codex 会通过官方 remote-control 协议连接到飞书桥接。", "刷新状态", "refresh", true);
+        setHero("已配置", "现在启动 Codex App 并打开远程控制", "本地 Codex App 配置已经就绪。双击启动 Codex App，并在 App 里启用 remote control。", "刷新状态", "refresh", true);
     } else {
         setHero("正在同步", "Codex 已接入飞书", "你可以在本地终端和飞书里继续同一个会话。", "刷新状态", "refresh", true);
     }
 
-    currentSecondaryAction = shim.enabled ? "pause" : "enable";
-    byId("secondary.action").textContent = shim.enabled ? "暂停飞书接入" : "启用飞书接入";
-    byId("secondary.action").style.display = commandReady ? "inline-flex" : "none";
+    currentSecondaryAction = bridgeEnabled ? "pause" : "enable";
+    byId("secondary.action").textContent = bridgeEnabled ? "暂停飞书接入" : "启用飞书接入";
+    byId("secondary.action").style.display = "inline-flex";
+
+    byId("app.configHint").textContent = [
+        "Codex App config:",
+        `chatgpt_base_url = "${backendUrl}"`,
+        "",
+        "Codex App auth:",
+        'auth_mode = "chatgptAuthTokens"',
+        "",
+        "点击「一键配置 Codex App」会写入 ~/.codex/config.toml 和 ~/.codex/auth.json，并为已有文件创建 .bak 备份。",
+        "macOS 会同时设置 launchctl CODEX_API_BASE_URL，保证 Finder/Dock 双击启动 Codex App 时也走本地 backend。",
+        "第三方模型 key 放在 Codex model_providers.* 配置里，不放在 codex-remote config.toml。"
+    ].join("\n");
 
     byId("remote.detail").textContent = [
         `页面地址：http://${status.bind || "127.0.0.1:3847"}`,
-        `配置：${config.statePath || "未找到"}`,
+        `codex-remote state：${config.statePath || "未找到"}`,
+        `Codex App chatgpt_base_url：${backendUrl}`,
+        `Codex App home：${codexApp.codexHome || "未找到"}`,
+        `Codex App config：${codexApp.configOk ? "已配置" : codexApp.configError || "未配置"}`,
+        `Codex App auth：${codexApp.authOk ? "已配置" : codexApp.authError || "未配置"}`,
+        `Codex App 双击启动 API base：${guiApiBase.configured ? "已配置" : guiApiBase.error || guiApiBase.value || "未配置"}`,
+        `飞书监听：${feishuWs.connected ? "已连接" : feishuWs.lastError || "未连接"}`,
+        `bridge：${bridgeEnabled ? "已启用" : "已暂停"}`,
+        `remote-control 连接：${remote.connected ? "已连接" : remote.lastError || "未连接"}`,
+        `remote-control 初始化：${remote.initialized ? "完成" : "等待"}`,
+        `当前 thread：${remote.currentThreadId || "无"}`,
+        "",
+        "可选 CLI shim：",
         `本机命令文件：${shim.shimPath || "未配置"}`,
         `本机命令目录：${shim.shimDir || "未配置"}`,
         `真实 Codex：${shim.realCodexPath || "未配置"}`,
         `PATH：${pathSummary(shim.pathConfigured)}`,
-        `飞书监听：${feishuWs.connected ? "已连接" : feishuWs.lastError || "未连接"}`,
-        `remote-control backend：${shim.remoteControlBaseUrl || "未配置"}`,
-        `remote-control 连接：${remote.connected ? "已连接" : remote.lastError || "未连接"}`,
-        `remote-control 初始化：${remote.initialized ? "完成" : "等待"}`,
-        `当前 thread：${remote.currentThreadId || "无"}`,
     ].join("\n");
     byId("events").textContent = events.slice().reverse().map(e =>
         `${new Date(Number(e.atMs)).toLocaleString()} [${e.level}] ${e.kind}: ${e.message}`
@@ -434,10 +474,10 @@ function pathSummary(value) {
 }
 
 async function runPrimaryAction() {
-    if (currentPrimaryAction === "install") return installShim();
     if (currentPrimaryAction === "feishu") return startFeishuOnboard();
     if (currentPrimaryAction === "enable") return setShimEnabled(true);
     if (currentPrimaryAction === "bridge") return startBridge();
+    if (currentPrimaryAction === "configureCodexApp") return configureCodexApp();
     return loadAll();
 }
 
@@ -458,8 +498,30 @@ async function stopBridge() {
     await loadAll();
 }
 
+async function configureCodexApp() {
+    const providerName = byId("codex.providerName").value.trim();
+    const providerBaseUrl = byId("codex.providerBaseUrl").value.trim();
+    const providerKey = byId("codex.providerKey").value.trim();
+    const model = byId("codex.model").value.trim();
+    setMessage("正在配置 Codex App...");
+    const res = await fetch("/api/codex-app/configure", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ providerName, providerBaseUrl, providerKey, model })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+        setMessage(data.error || "配置 Codex App 失败");
+        byId("advanced").open = true;
+        return;
+    }
+    setMessage(`已配置 Codex App：${data.configPath}；auth 已写入：${data.authPath}；双击启动 API base 已设置。请完全退出并重新打开 Codex App。`);
+    byId("advanced").open = true;
+    await loadAll();
+}
+
 async function installShim(allowAutoRetry = true) {
-    setMessage("正在安装...");
+    setMessage("正在安装可选 CLI shim...");
     const realCodexPath = byId("shim.realCodexPath").value.trim();
     const res = await fetch("/api/shim/install", {
         method: "POST",
@@ -475,13 +537,13 @@ async function installShim(allowAutoRetry = true) {
             byId("advanced").open = true;
             return installShim(false);
         }
-        setMessage(data.error || "没有找到已安装的 Codex。请先安装 Codex CLI，或在技术细节里填写真实 Codex 路径。");
+        setMessage(data.error || "没有找到已安装的 Codex CLI。Codex App 直连不需要 shim；只有 CLI 辅助模式才需要在技术细节里填写真实 Codex 路径。");
         byId("advanced").open = true;
         return;
     }
     setMessage(data.pathUpdate === "added"
-        ? "已安装。请重新打开终端后运行 codex。"
-        : "已安装/更新。");
+        ? "可选 CLI shim 已安装。重新打开终端后运行 codex 可走 CLI 辅助模式。"
+        : "可选 CLI shim 已安装/更新。");
     await loadAll();
 }
 
@@ -527,14 +589,14 @@ function escapeHtml(value) {
 }
 
 async function uninstallShim() {
-    setMessage("正在卸载...");
+    setMessage("正在卸载可选 CLI shim...");
     const res = await fetch("/api/shim/uninstall", { method: "POST" });
     const data = await res.json();
     if (!res.ok || !data.ok) {
         setMessage(data.error || "卸载失败");
         return;
     }
-    setMessage(data.removedShim ? "已卸载。" : "本机命令原本未安装。");
+    setMessage(data.removedShim ? "可选 CLI shim 已卸载。" : "可选 CLI shim 原本未安装。");
     await loadAll();
 }
 

@@ -32,15 +32,16 @@ Remove-Item *.log -ErrorAction SilentlyContinue
 - [ ] Start daemon with a clean config.
 - [ ] Open `http://127.0.0.1:3847`.
 - [ ] Complete Feishu onboarding or enter app credentials.
-- [ ] Install shim from the web console.
-- [ ] Open a new terminal in a test project.
-- [ ] Run `codex`.
+- [ ] Click `Configure Codex App` in the web console, or run `codex-remote --config config.toml configure-codex-app`.
+- [ ] Open Codex App by double-clicking it.
+- [ ] Enable remote control in Codex App.
 - [ ] Confirm remote-control status shows connected and initialized.
 - [ ] Send a Feishu message and confirm Codex receives it.
 - [ ] Confirm assistant/tool output for the Feishu turn appears in Feishu.
 - [ ] Trigger a command approval and confirm one Feishu approval card appears.
 - [ ] Select the approval in Feishu and confirm the original card changes to `已审批`.
-- [ ] Disable bridge and confirm `codex` passes through to the real Codex CLI.
+- [ ] Disable bridge and confirm Feishu messages are no longer forwarded.
+- [ ] Optional: install shim from the web console and confirm `codex` CLI helper mode still starts a remote-control session.
 
 ## Suggested GitHub Topics
 

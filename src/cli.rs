@@ -11,6 +11,13 @@ pub enum Command {
         bin_dir: Option<PathBuf>,
     },
     UninstallShim,
+    ConfigureCodexApp {
+        codex_home: Option<PathBuf>,
+        provider_name: Option<String>,
+        provider_base_url: Option<String>,
+        provider_key: Option<String>,
+        model: Option<String>,
+    },
     Shim {
         args: Vec<String>,
     },
@@ -53,6 +60,7 @@ impl Cli {
             Some("status") => Command::Status,
             Some("uninstall-shim") => Command::UninstallShim,
             Some("install-shim") => parse_install_shim(&remaining[1..])?,
+            Some("configure-codex-app") => parse_configure_codex_app(&remaining[1..])?,
             Some("shim") => {
                 let args = if remaining.get(1).map(String::as_str) == Some("--") {
                     remaining[2..].to_vec()
@@ -73,6 +81,57 @@ impl Cli {
             command,
         })
     }
+}
+
+fn parse_configure_codex_app(args: &[String]) -> anyhow::Result<Command> {
+    let mut codex_home = None;
+    let mut provider_name = None;
+    let mut provider_base_url = None;
+    let mut provider_key = None;
+    let mut model = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--codex-home" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--codex-home requires a path");
+                };
+                codex_home = Some(PathBuf::from(value));
+            }
+            "--provider-name" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--provider-name requires a name");
+                };
+                provider_name = Some(value.to_string());
+            }
+            "--provider-base-url" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--provider-base-url requires a URL");
+                };
+                provider_base_url = Some(value.to_string());
+            }
+            "--provider-key" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--provider-key requires a token");
+                };
+                provider_key = Some(value.to_string());
+            }
+            "--model" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--model requires a model name");
+                };
+                model = Some(value.to_string());
+            }
+            other => anyhow::bail!("unknown configure-codex-app argument `{other}`"),
+        }
+    }
+    Ok(Command::ConfigureCodexApp {
+        codex_home,
+        provider_name,
+        provider_base_url,
+        provider_key,
+        model,
+    })
 }
 
 fn parse_install_shim(args: &[String]) -> anyhow::Result<Command> {
@@ -113,6 +172,7 @@ Usage:
   codex-remote [--config PATH] status
   codex-remote [--config PATH] install-shim [--real-codex PATH] [--bin-dir PATH]
   codex-remote [--config PATH] uninstall-shim
+  codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
   codex-remote [--config PATH] shim -- [codex args...]
 
 Default command is daemon.
