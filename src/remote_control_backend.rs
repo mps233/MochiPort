@@ -884,65 +884,6 @@ async fn observe_stale_server_envelope(
             current_stream_id(state).await.unwrap_or_default()
         ));
     }
-    let IncomingServerEvent::ServerMessage { message } = event else {
-        return;
-    };
-    observe_replayed_app_server_notification(state, &message).await;
-}
-
-async fn observe_replayed_app_server_notification(state: &SharedState, message: &Value) {
-    let message = message.get("message").unwrap_or(message);
-    let Some(method) = message.get("method").and_then(|v| v.as_str()) else {
-        return;
-    };
-    let Some(params) = message.get("params").cloned() else {
-        return;
-    };
-    let Some(thread_id) = thread_id_from_payload(&params) else {
-        return;
-    };
-    if !is_replayable_thread_notification(method) {
-        return;
-    }
-    let params = mark_replayed_params(params);
-    state
-        .push_event(
-            "info",
-            "remote_control_replayed_notification",
-            format!("method={method} thread={thread_id}"),
-        )
-        .await;
-    let _ = state.remote_control.notifications.send(CodexNotification {
-        method: method.to_string(),
-        params: Some(params),
-        request_id: message.get("id").cloned(),
-    });
-}
-
-fn is_replayable_thread_notification(method: &str) -> bool {
-    matches!(
-        method,
-        "turn/started"
-            | "turn/completed"
-            | "codex/event/turn_completed"
-            | "item/started"
-            | "item/updated"
-            | "item/completed"
-            | "item/agentMessage/delta"
-            | "item/reasoning/textDelta"
-            | "item/reasoning/summaryTextDelta"
-            | "item/plan/delta"
-            | "item/commandExecution/outputDelta"
-            | "item/fileChange/outputDelta"
-            | "item/mcpToolCall/progress"
-    )
-}
-
-fn mark_replayed_params(mut params: Value) -> Value {
-    if let Some(object) = params.as_object_mut() {
-        object.insert("_codexRemoteReplay".to_string(), Value::Bool(true));
-    }
-    params
 }
 
 async fn is_current_remote_stream(
