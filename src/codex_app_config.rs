@@ -10,7 +10,7 @@ use base64::Engine;
 use serde::Serialize;
 use serde_json::json;
 
-const DEFAULT_PROVIDER_NAME: &str = "llmx";
+const DEFAULT_PROVIDER_NAME: &str = "codex";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_REASONING_EFFORT: &str = "xhigh";
 
@@ -317,7 +317,8 @@ fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)>
         .get("model_provider")
         .and_then(|item| item.as_str())
         .map(str::trim)
-        == Some(DEFAULT_PROVIDER_NAME);
+        .map(|value| value == DEFAULT_PROVIDER_NAME || value == "llmx")
+        .unwrap_or(false);
     if removed_model_provider {
         doc.remove("model_provider");
     }
@@ -607,7 +608,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configure_codex_app_writes_llmx_provider_and_local_auth() {
+    fn configure_codex_app_writes_provider_and_local_auth() {
         let codex_home = unique_temp_dir();
         let report = configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
@@ -616,8 +617,8 @@ mod tests {
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
             plan_type: "pro".to_string(),
-            provider_name: Some("llmx".to_string()),
-            provider_base_url: Some("https://ai.llmx.cloud".to_string()),
+            provider_name: Some("codex".to_string()),
+            provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
             model: Some("gpt-5.5".to_string()),
         })
@@ -625,15 +626,15 @@ mod tests {
 
         let config = std::fs::read_to_string(report.config_path).expect("read config");
         assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
-        assert!(config.contains("model_provider = \"llmx\""));
+        assert!(config.contains("model_provider = \"codex\""));
         assert!(config.contains("model = \"gpt-5.5\""));
         assert!(config.contains("review_model = \"gpt-5.5\""));
         assert!(config.contains("model_reasoning_effort = \"xhigh\""));
         assert!(config.contains("disable_response_storage = true"));
         assert!(config.contains("network_access = \"enabled\""));
         assert!(config.contains("windows_wsl_setup_acknowledged = true"));
-        assert!(config.contains("[model_providers.llmx]"));
-        assert!(config.contains("base_url = \"https://ai.llmx.cloud\""));
+        assert!(config.contains("[model_providers.codex]"));
+        assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(config.contains("wire_api = \"responses\""));
         assert!(config.contains("requires_openai_auth = true"));
         assert!(config.contains("experimental_bearer_token = \"test-provider-key\""));
@@ -657,10 +658,10 @@ mod tests {
         let config_path = codex_home.join("config.toml");
         std::fs::write(
             &config_path,
-            r#"model_provider = "llmx"
+            r#"model_provider = "codex"
 
-[model_providers.llmx]
-name = "llmx"
+[model_providers.codex]
+name = "codex"
 wire_api = "responses"
 requires_openai_auth = true
 base_url = "https://old.example"
@@ -676,8 +677,8 @@ requires_openai_auth = true
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
             plan_type: "pro".to_string(),
-            provider_name: Some("llmx".to_string()),
-            provider_base_url: Some("https://ai.llmx.cloud".to_string()),
+            provider_name: Some("codex".to_string()),
+            provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
             model: Some("gpt-5.5".to_string()),
         })
@@ -685,7 +686,7 @@ requires_openai_auth = true
 
         let config = std::fs::read_to_string(config_path).expect("read config");
         assert_eq!(config.matches("requires_openai_auth = true").count(), 1);
-        assert!(config.contains("base_url = \"https://ai.llmx.cloud\""));
+        assert!(config.contains("base_url = \"https://api.example.invalid\""));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -698,12 +699,12 @@ requires_openai_auth = true
         std::fs::write(
             &config_path,
             r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
-model_provider = "llmx"
+model_provider = "codex"
 model = "gpt-5.5"
 
-[model_providers.llmx]
-name = "llmx"
-base_url = "https://ai.llmx.cloud"
+[model_providers.codex]
+name = "codex"
+base_url = "https://api.example.invalid"
 "#,
         )
         .expect("write config");
@@ -730,10 +731,10 @@ base_url = "https://ai.llmx.cloud"
 
         let config = std::fs::read_to_string(&config_path).expect("read config");
         assert!(!config.contains("chatgpt_base_url"));
-        assert!(!config.contains("model_provider = \"llmx\""));
+        assert!(!config.contains("model_provider = \"codex\""));
         assert!(config.contains("model = \"gpt-5.5\""));
-        assert!(config.contains("[model_providers.llmx]"));
-        assert!(config.contains("base_url = \"https://ai.llmx.cloud\""));
+        assert!(config.contains("[model_providers.codex]"));
+        assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(!auth_path.exists());
 
         let _ = std::fs::remove_dir_all(codex_home);

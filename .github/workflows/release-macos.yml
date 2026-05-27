@@ -57,6 +57,7 @@ jobs:
           rm -rf "$APP"
           mkdir -p "$MACOS" "$RESOURCES"
           cp "packaging/macos/Info.plist" "$CONTENTS/Info.plist"
+          cp "packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
           cp "target/release/codex-remote-gui" "$MACOS/$APP_NAME"
           cp "target/release/codex-remote" "$RESOURCES/codex-remote"
           chmod +x "$MACOS/$APP_NAME" "$RESOURCES/codex-remote"

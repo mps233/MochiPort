@@ -8,6 +8,8 @@
   <string>Codex Remote</string>
   <key>CFBundleExecutable</key>
   <string>Codex Remote</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
   <string>com.codexremote.app</string>
   <key>CFBundleInfoDictionaryVersion</key>

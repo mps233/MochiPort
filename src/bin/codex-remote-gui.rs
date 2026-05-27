@@ -164,13 +164,8 @@ fn build_ui() {
         .with_gap(Size::new(10, 12))
         .build();
     form.add_growable_col(1, 1);
-    let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "llmx");
-    let provider_base_url = text_field_row(
-        &codex_page,
-        &form,
-        "第三方 Base URL",
-        "https://ai.llmx.cloud",
-    );
+    let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "");
+    let provider_base_url = text_field_row(&codex_page, &form, "第三方 Base URL", "");
     let provider_key = text_field_row(&codex_page, &form, "API Key", "");
     codex_sizer.add_sizer(
         &form,

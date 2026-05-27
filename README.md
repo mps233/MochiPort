@@ -117,28 +117,7 @@ If a Feishu chat is not yet bound to any thread, the first inbound message does 
 
 ## Third-Party Model Key
 
-The third-party key belongs in Codex's model provider config. Example:
-
-```toml
-model_provider = "llmx"
-model = "gpt-5.5"
-review_model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
-disable_response_storage = true
-network_access = "enabled"
-windows_wsl_setup_acknowledged = true
-
-chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
-
-[model_providers.llmx]
-name = "llmx"
-base_url = "https://ai.llmx.cloud"
-wire_api = "responses"
-requires_openai_auth = true
-experimental_bearer_token = "your-third-party-key"
-```
-
-`chatgpt_base_url` is for Codex App backend and remote-control traffic. `base_url` and `experimental_bearer_token` are for model calls.
+The third-party key belongs in Codex's model provider config. `chatgpt_base_url` is for Codex App backend and remote-control traffic. `base_url` and `experimental_bearer_token` are for model calls.
 
 ## Thread Binding Model
 
@@ -174,7 +153,7 @@ codex-remote [--config PATH] daemon
 
 `on` / `off` enable or pause the Feishu bridge.
 
-`configure-codex-app` is the CLI equivalent of the web console button. It explicitly writes Codex App `config.toml` and `auth.json` with local `chatgpt_base_url` and `chatgptAuthTokens`. Provider options default to `llmx` / `gpt-5.5` when model provider fields are supplied. Daemon startup does not modify Codex App config until the user clicks the button or runs this command.
+`configure-codex-app` is the CLI equivalent of the web console button. It explicitly writes Codex App `config.toml` and `auth.json` with local `chatgpt_base_url` and `chatgptAuthTokens`. Provider options default to `codex` / `gpt-5.5` when model provider fields are supplied. Daemon startup does not modify Codex App config until the user clicks the button or runs this command.
 
 `uninstall-codex-app` removes this project's injected `chatgpt_base_url` and local `ChatgptAuthTokens` auth file.
 
