@@ -26,6 +26,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/status", get(status))
         .route("/api/config", get(get_config).post(save_config))
         .route("/api/codex-app/configure", post(configure_codex_app))
+        .route("/api/codex-app/uninstall", post(uninstall_codex_app))
         .route("/api/codex-app/status", get(codex_app_status))
         .route("/api/bridge/start", post(start_bridge))
         .route("/api/bridge/stop", post(stop_bridge))
@@ -186,24 +187,13 @@ async fn configure_codex_app(
         model,
     }) {
         Ok(report) => {
-            let gui_api_base = match codex_app_config::configure_gui_api_base_url(&backend_url) {
-                Ok(status) => status,
-                Err(err) => {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({
-                            "ok": false,
-                            "error": format!("Codex App config/auth 已写入，但设置双击启动 API base 失败：{err}")
-                        })),
-                    );
-                }
-            };
+            let gui_api_base = codex_app_config::inspect_gui_api_base_url(&backend_url);
             state
                 .push_event(
                     "info",
                     "codex_app_configured",
                     format!(
-                        "codex_home={} config={} auth={} gui_api_base={}",
+                        "codex_home={} config={} auth={} legacy_gui_api_base={}",
                         report.codex_home.display(),
                         report.config_path.display(),
                         report.auth_path.display(),
@@ -221,6 +211,39 @@ async fn configure_codex_app(
                     "backendUrl": report.backend_url,
                     "guiApiBase": gui_api_base,
                 })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn uninstall_codex_app(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await.clone();
+    let backend_url = config.remote_control_base_url();
+    match codex_app_config::uninstall_codex_app(None, &backend_url) {
+        Ok(report) => {
+            state
+                .push_event(
+                    "info",
+                    "codex_app_uninstalled",
+                    format!(
+                        "codex_home={} config={} auth={} removed_chatgpt_base_url={} removed_model_provider={} removed_auth={} gui_api_base={}",
+                        report.codex_home.display(),
+                        report.config_path.display(),
+                        report.auth_path.display(),
+                        report.removed_chatgpt_base_url,
+                        report.removed_model_provider,
+                        report.removed_auth,
+                        report.gui_api_base.value.as_deref().unwrap_or_default()
+                    ),
+                )
+                .await;
+            (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "report": report })),
             )
         }
         Err(err) => (

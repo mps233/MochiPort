@@ -88,6 +88,14 @@ cargo run -- --config config.toml daemon
 http://127.0.0.1:3847
 ```
 
+也可以启动原生 GUI 预览。GUI 不会安装登录项，也不会自行启动后台服务；需要时请点击“启动本地服务”按钮，或手动运行 daemon 命令：
+
+```powershell
+cargo run --features gui --bin codex-remote-gui
+```
+
+wxDragon GUI 需要本机安装 CMake。没有 CMake 时不影响 daemon、Web 控制台和测试；GUI 依赖被隔离在 `gui` feature 里。如果 CMake 通过 Homebrew 安装但当前 shell 找不到它，可以临时使用 `PATH=/opt/homebrew/bin:$PATH cargo run --features gui --bin codex-remote-gui`。
+
 然后：
 
 1. 扫码接入飞书，或者把现有飞书凭证填进 `config.toml`
@@ -145,7 +153,17 @@ experimental_bearer_token = "your-third-party-key"
 
 ## 运行边界
 
-`codex-remote` 只支持干净的 Codex App remote-control 路径。它不安装 `codex` 包装命令，不替换 Codex CLI，也不通过 shim 启动 Codex App。先启动 daemon，一键配置 Codex App，然后正常双击打开 Codex App。
+`codex-remote` 只支持干净的 Codex App remote-control 路径。它不安装 `codex` 包装命令，不替换 Codex CLI，也不通过 shim 启动 Codex App。GUI 不安装登录项，不自动常驻；用户明确点击“启动本地服务”或运行 `daemon` 命令后才会启动 backend。
+
+## macOS App
+
+生成可双击运行的 `.app`：
+
+```bash
+./scripts/build-macos-app.sh
+```
+
+产物位于 `target/dist/Codex Remote.app`。App bundle 内包含 GUI 和 daemon 两个二进制；GUI 会从 bundle 内启动 daemon，但只在用户点击“启动本地服务”后执行。默认配置写入 `~/Library/Application Support/Codex Remote/config.toml`。
 
 ## 命令
 
@@ -155,11 +173,14 @@ codex-remote [--config PATH] status
 codex-remote [--config PATH] on
 codex-remote [--config PATH] off
 codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
+codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
 ```
 
 `on` / `off` 用来启用或暂停飞书 bridge。
 
 `configure-codex-app` 是 Web 控制台按钮的 CLI 等价形式。它会显式写入 Codex App 的 `config.toml` 和 `auth.json`，设置本地 `chatgpt_base_url` 与 `chatgptAuthTokens`。如果写入模型 provider 配置，默认 provider 是 `llmx`，默认模型是 `gpt-5.5`。daemon 启动本身不会修改 Codex App 配置，只有用户点击按钮或运行这个命令才会写入。
+
+`uninstall-codex-app` 会移除本项目注入的 `chatgpt_base_url` 和本地 `ChatgptAuthTokens` auth 文件。
 
 ## 配置
 

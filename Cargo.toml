@@ -25,3 +25,12 @@ tower-http = { version = "0.6", features = ["trace"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
+wxdragon = { version = "0.9.16", optional = true }
+
+[features]
+gui = ["dep:wxdragon", "reqwest/blocking"]
+
+[[bin]]
+name = "codex-remote-gui"
+path = "src/bin/codex-remote-gui.rs"
+required-features = ["gui"]

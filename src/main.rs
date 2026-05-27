@@ -13,6 +13,7 @@ mod types;
 mod web;
 
 use std::{
+    env,
     net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
@@ -72,15 +73,32 @@ async fn main() -> anyhow::Result<()> {
                     model,
                 },
             )?;
-            let gui_api_base = codex_app_config::configure_gui_api_base_url(&backend_url)?;
             println!("Codex App configured:");
             println!("  codex home: {}", report.codex_home.display());
             println!("  config: {}", report.config_path.display());
             println!("  auth: {}", report.auth_path.display());
             println!("  chatgpt_base_url: {}", report.backend_url);
+            Ok(())
+        }
+        Command::UninstallCodexApp { codex_home } => {
+            let backend_url = config.remote_control_base_url();
+            let report = codex_app_config::uninstall_codex_app(codex_home, &backend_url)?;
+            println!("Codex App local remote-control config removed:");
+            println!("  codex home: {}", report.codex_home.display());
+            println!("  config: {}", report.config_path.display());
+            println!("  auth: {}", report.auth_path.display());
             println!(
-                "  CODEX_API_BASE_URL for GUI launch: {}",
-                gui_api_base.value.as_deref().unwrap_or("<unset>")
+                "  removed chatgpt_base_url: {}",
+                report.removed_chatgpt_base_url
+            );
+            println!(
+                "  removed model_provider: {}",
+                report.removed_model_provider
+            );
+            println!("  removed local auth: {}", report.removed_auth);
+            println!(
+                "  legacy CODEX_API_BASE_URL: {}",
+                report.gui_api_base.value.as_deref().unwrap_or("<unset>")
             );
             Ok(())
         }
@@ -138,6 +156,10 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
         return absolutize(path);
     }
 
+    if env::var_os("CODEX_REMOTE_USE_REPO_CONFIG").is_none() {
+        return app_support_config_path();
+    }
+
     inferred_repo_config_from_target_exe()
         .or_else(|| {
             std::env::current_dir()
@@ -146,6 +168,19 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
                 .filter(|path| path.exists())
         })
         .unwrap_or_else(|| absolutize(PathBuf::from("config.toml")))
+}
+
+fn app_support_config_path() -> PathBuf {
+    let base = env::var_os("CODEX_REMOTE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("Library/Application Support/Codex Remote"))
+        })
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("config.toml")
 }
 
 fn inferred_repo_config_from_target_exe() -> Option<PathBuf> {

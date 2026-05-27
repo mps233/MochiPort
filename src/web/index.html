@@ -319,6 +319,7 @@
             </div>
             <div class="actions">
                 <button onclick="configureCodexApp()">一键配置 Codex App</button>
+                <button class="danger" onclick="uninstallCodexApp()">卸载 Codex App 配置</button>
                 <button class="secondary" onclick="setBridgeEnabled(true)">启用飞书接入</button>
                 <button class="secondary" onclick="setBridgeEnabled(false)">暂停飞书接入</button>
                 <button class="secondary" onclick="startBridge()">启动飞书监听</button>
@@ -385,7 +386,7 @@ async function loadAll() {
         'auth_mode = "chatgptAuthTokens"',
         "",
         "点击「一键配置 Codex App」会写入 ~/.codex/config.toml 和 ~/.codex/auth.json，并为已有文件创建 .bak 备份。",
-        "macOS 会同时设置 launchctl CODEX_API_BASE_URL，保证 Finder/Dock 双击启动 Codex App 时也走本地 backend。",
+        "不会修改 Codex App 的启动方式；Finder/Dock 双击仍按官方 App 自己的入口启动。",
         "第三方模型 key 放在 Codex model_providers.* 配置里，不放在 codex-remote config.toml。"
     ].join("\n");
 
@@ -396,7 +397,7 @@ async function loadAll() {
         `Codex App home：${codexApp.codexHome || "未找到"}`,
         `Codex App config：${codexApp.configOk ? "已配置" : codexApp.configError || "未配置"}`,
         `Codex App auth：${codexApp.authOk ? "已配置" : codexApp.authError || "未配置"}`,
-        `Codex App 双击启动 API base：${guiApiBase.configured ? "已配置" : guiApiBase.error || guiApiBase.value || "未配置"}`,
+        `遗留 CODEX_API_BASE_URL：${guiApiBase.value || "未设置"}`,
         `飞书监听：${feishuWs.connected ? "已连接" : feishuWs.lastError || "未连接"}`,
         `bridge：${bridgeEnabled ? "已启用" : "已暂停"}`,
         `remote-control 连接：${remote.connected ? "已连接" : remote.lastError || "未连接"}`,
@@ -464,7 +465,25 @@ async function configureCodexApp() {
         byId("advanced").open = true;
         return;
     }
-    setMessage(`已配置 Codex App：${data.configPath}；auth 已写入：${data.authPath}；双击启动 API base 已设置。请完全退出并重新打开 Codex App。`);
+    setMessage(`已配置 Codex App：${data.configPath}；auth 已写入：${data.authPath}；请完全退出并重新打开 Codex App。`);
+    byId("advanced").open = true;
+    await loadAll();
+}
+
+async function uninstallCodexApp() {
+    if (!confirm("移除 Codex App 的本地 remote-control 配置？这会删除 chatgpt_base_url 和本地 chatgptAuthTokens。")) {
+        return;
+    }
+    setMessage("正在卸载 Codex App 本地配置...");
+    const res = await fetch("/api/codex-app/uninstall", { method: "POST" });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+        setMessage(data.error || "卸载 Codex App 配置失败");
+        byId("advanced").open = true;
+        return;
+    }
+    const report = data.report || {};
+    setMessage(`已卸载 Codex App 本地配置：${report.configPath || ""}；请完全退出并重新打开 Codex App。`);
     byId("advanced").open = true;
     await loadAll();
 }

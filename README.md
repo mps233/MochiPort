@@ -88,6 +88,14 @@ Open the local web console:
 http://127.0.0.1:3847
 ```
 
+You can also run the native GUI preview. The GUI does not install login items or start background services by itself; use the `Start Local Service` button or run the daemon command explicitly when needed:
+
+```powershell
+cargo run --features gui --bin codex-remote-gui
+```
+
+The wxDragon GUI requires CMake on the machine. Without CMake, daemon, web console, and tests still build normally because the GUI dependency is isolated behind the `gui` feature. If CMake was installed through Homebrew but is not visible to the current shell, use `PATH=/opt/homebrew/bin:$PATH cargo run --features gui --bin codex-remote-gui`.
+
 Then:
 
 1. Connect Feishu by scanning the QR code, or fill existing app credentials in `config.toml`.
@@ -145,7 +153,17 @@ experimental_bearer_token = "your-third-party-key"
 
 ## Runtime Boundary
 
-`codex-remote` only supports the clean Codex App remote-control path. It does not install a `codex` wrapper, replace the Codex CLI, or launch Codex App through a shim. Start the daemon first, configure Codex App once, then open Codex App normally.
+`codex-remote` only supports the clean Codex App remote-control path. It does not install a `codex` wrapper, replace the Codex CLI, or launch Codex App through a shim. The GUI does not install login items or run as a background service automatically; the backend starts only when the user clicks `Start Local Service` or explicitly runs the `daemon` command.
+
+## macOS App
+
+Build a double-clickable `.app`:
+
+```bash
+./scripts/build-macos-app.sh
+```
+
+The output is `target/dist/Codex Remote.app`. The app bundle contains both the GUI and daemon binaries; the GUI starts the bundled daemon only after the user clicks `Start Local Service`. The default config path is `~/Library/Application Support/Codex Remote/config.toml`.
 
 ## Commands
 
@@ -155,11 +173,14 @@ codex-remote [--config PATH] daemon
   codex-remote [--config PATH] on
   codex-remote [--config PATH] off
   codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
+  codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
 ```
 
 `on` / `off` enable or pause the Feishu bridge.
 
 `configure-codex-app` is the CLI equivalent of the web console button. It explicitly writes Codex App `config.toml` and `auth.json` with local `chatgpt_base_url` and `chatgptAuthTokens`. Provider options default to `llmx` / `gpt-5.5` when model provider fields are supplied. Daemon startup does not modify Codex App config until the user clicks the button or runs this command.
+
+`uninstall-codex-app` removes this project's injected `chatgpt_base_url` and local `ChatgptAuthTokens` auth file.
 
 ## Configuration
 

@@ -617,6 +617,11 @@ async fn handle_thread_route_resume_selected(
     }
 
     let response = remote_control_backend::resume_thread(&state, thread_id, true).await?;
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.current_thread_id = Some(thread_id.to_string());
+        remote.current_turn_id = None;
+    }
     let thread = response
         .get("thread")
         .cloned()
@@ -861,7 +866,14 @@ async fn send_thread_routing_list(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let entries = build_thread_entries(&loaded_ids, &history_threads);
+    let current_thread_id = state
+        .remote_control
+        .inner
+        .lock()
+        .await
+        .current_thread_id
+        .clone();
+    let entries = build_thread_entries(&loaded_ids, &history_threads, current_thread_id.as_deref());
     let next_cursor = history
         .get("nextCursor")
         .or_else(|| history.get("next_cursor"))
@@ -1043,6 +1055,7 @@ fn next_thread_routing_request_id() -> String {
 fn build_thread_entries(
     loaded_ids: &[String],
     history_threads: &[serde_json::Value],
+    current_thread_id: Option<&str>,
 ) -> Vec<renderer::FeishuThreadListEntry> {
     let loaded_set = loaded_ids
         .iter()
@@ -1060,13 +1073,14 @@ fn build_thread_entries(
             summary: Some(summarize_thread_preview(thread)),
             last_activity_text: Some(format!(
                 "{} · {}",
-                summarize_thread_status(thread),
+                summarize_thread_route_state(thread, &loaded_set, current_thread_id),
                 summarize_thread_cwd(thread)
             )),
         })
         .collect::<Vec<_>>();
     entries.sort_by_key(|entry| {
         (
+            current_thread_id != Some(entry.thread_id.as_str()),
             !loaded_set.contains(&entry.thread_id),
             entry.thread_id.clone(),
         )
@@ -1133,6 +1147,24 @@ fn summarize_thread_status(thread: &serde_json::Value) -> String {
         "systemError" => "系统错误".to_string(),
         other => other.to_string(),
     }
+}
+
+fn summarize_thread_route_state(
+    thread: &serde_json::Value,
+    loaded_set: &std::collections::HashSet<String>,
+    current_thread_id: Option<&str>,
+) -> String {
+    let thread_id = thread
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if current_thread_id == Some(thread_id) {
+        return "当前会话".to_string();
+    }
+    if loaded_set.contains(thread_id) {
+        return "已加载，可接入".to_string();
+    }
+    "历史会话，可接入".to_string()
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {

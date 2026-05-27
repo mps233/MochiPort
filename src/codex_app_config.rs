@@ -38,6 +38,18 @@ pub struct ConfigureCodexAppReport {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UninstallCodexAppReport {
+    pub codex_home: PathBuf,
+    pub config_path: PathBuf,
+    pub auth_path: PathBuf,
+    pub removed_chatgpt_base_url: bool,
+    pub removed_model_provider: bool,
+    pub removed_auth: bool,
+    pub gui_api_base: CodexAppGuiApiBaseStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CodexAppGuiApiBaseStatus {
     pub supported: bool,
     pub configured: bool,
@@ -82,6 +94,30 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     })
 }
 
+pub fn uninstall_codex_app(
+    codex_home: Option<PathBuf>,
+    backend_url: &str,
+) -> Result<UninstallCodexAppReport> {
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    let config_path = codex_home.join("config.toml");
+    let auth_path = codex_home.join("auth.json");
+
+    let (removed_chatgpt_base_url, removed_model_provider) =
+        uninstall_config_toml(&config_path, backend_url)?;
+    let removed_auth = uninstall_auth_json(&auth_path)?;
+    let gui_api_base = inspect_gui_api_base_url(backend_url);
+
+    Ok(UninstallCodexAppReport {
+        codex_home,
+        config_path,
+        auth_path,
+        removed_chatgpt_base_url,
+        removed_model_provider,
+        removed_auth,
+        gui_api_base,
+    })
+}
+
 pub fn inspect_codex_app_config(
     codex_home: Option<PathBuf>,
     backend_url: &str,
@@ -94,48 +130,17 @@ pub fn inspect_codex_app_config(
     let (auth_ok, auth_error) = inspect_auth_json(&auth_path);
 
     let gui_api_base = inspect_gui_api_base_url(backend_url);
-    let gui_api_base_ok = !gui_api_base.supported || gui_api_base.configured;
 
     CodexAppConfigStatus {
         codex_home,
         config_path,
         auth_path,
-        configured: config_ok && auth_ok && gui_api_base_ok,
+        configured: config_ok && auth_ok,
         config_ok,
         auth_ok,
         config_error,
         auth_error,
         gui_api_base,
-    }
-}
-
-pub fn configure_gui_api_base_url(backend_url: &str) -> Result<CodexAppGuiApiBaseStatus> {
-    #[cfg(target_os = "macos")]
-    {
-        let output = Command::new("launchctl")
-            .arg("setenv")
-            .arg("CODEX_API_BASE_URL")
-            .arg(backend_url)
-            .output()
-            .context("failed to run launchctl setenv CODEX_API_BASE_URL")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            anyhow::bail!(
-                "launchctl setenv CODEX_API_BASE_URL failed: {}",
-                if stderr.is_empty() {
-                    output.status.to_string()
-                } else {
-                    stderr
-                }
-            );
-        }
-        Ok(inspect_gui_api_base_url(backend_url))
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = backend_url;
-        anyhow::bail!("CODEX_API_BASE_URL one-click setup is only implemented for macOS launchctl")
     }
 }
 
@@ -291,6 +296,56 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     backup_existing(path)?;
     std::fs::write(path, doc.to_string())
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)> {
+    if !path.exists() {
+        return Ok((false, false));
+    }
+    let mut doc = parse_existing_config_toml(path)?;
+
+    let removed_chatgpt_base_url = doc
+        .get("chatgpt_base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        == Some(backend_url);
+    if removed_chatgpt_base_url {
+        doc.remove("chatgpt_base_url");
+    }
+
+    let removed_model_provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        == Some(DEFAULT_PROVIDER_NAME);
+    if removed_model_provider {
+        doc.remove("model_provider");
+    }
+
+    if removed_chatgpt_base_url || removed_model_provider {
+        backup_existing(path)?;
+        std::fs::write(path, doc.to_string())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+
+    Ok((removed_chatgpt_base_url, removed_model_provider))
+}
+
+fn uninstall_auth_json(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let auth = serde_json::from_str::<serde_json::Value>(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    if auth.get("auth_mode").and_then(|value| value.as_str()) != Some("chatgptAuthTokens") {
+        return Ok(false);
+    }
+
+    backup_existing(path)?;
+    std::fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    Ok(true)
 }
 
 fn parse_existing_config_toml(path: &Path) -> Result<toml_edit::DocumentMut> {
@@ -631,6 +686,55 @@ requires_openai_auth = true
         let config = std::fs::read_to_string(config_path).expect("read config");
         assert_eq!(config.matches("requires_openai_auth = true").count(), 1);
         assert!(config.contains("base_url = \"https://ai.llmx.cloud\""));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn uninstall_codex_app_removes_local_routing_only() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let auth_path = codex_home.join("auth.json");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "llmx"
+model = "gpt-5.5"
+
+[model_providers.llmx]
+name = "llmx"
+base_url = "https://ai.llmx.cloud"
+"#,
+        )
+        .expect("write config");
+        std::fs::write(
+            &auth_path,
+            r#"{
+  "auth_mode": "chatgptAuthTokens",
+  "tokens": {
+    "account_id": "acct_test"
+  }
+}
+"#,
+        )
+        .expect("write auth");
+
+        let (removed_base_url, removed_model_provider) =
+            uninstall_config_toml(&config_path, "http://127.0.0.1:3847/backend-api")
+                .expect("uninstall config");
+        let removed_auth = uninstall_auth_json(&auth_path).expect("uninstall auth");
+
+        assert!(removed_base_url);
+        assert!(removed_model_provider);
+        assert!(removed_auth);
+
+        let config = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(!config.contains("chatgpt_base_url"));
+        assert!(!config.contains("model_provider = \"llmx\""));
+        assert!(config.contains("model = \"gpt-5.5\""));
+        assert!(config.contains("[model_providers.llmx]"));
+        assert!(config.contains("base_url = \"https://ai.llmx.cloud\""));
+        assert!(!auth_path.exists());
 
         let _ = std::fs::remove_dir_all(codex_home);
     }

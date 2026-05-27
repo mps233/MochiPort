@@ -13,6 +13,9 @@ pub enum Command {
         provider_key: Option<String>,
         model: Option<String>,
     },
+    UninstallCodexApp {
+        codex_home: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -51,6 +54,7 @@ impl Cli {
             Some("off") => Command::Off,
             Some("status") => Command::Status,
             Some("configure-codex-app") => parse_configure_codex_app(&remaining[1..])?,
+            Some("uninstall-codex-app") => parse_uninstall_codex_app(&remaining[1..])?,
             Some("install-shim") | Some("uninstall-shim") | Some("shim") => anyhow::bail!(
                 "CLI shim support has been removed. Use `codex-remote configure-codex-app` and Codex App remote-control instead."
             ),
@@ -119,6 +123,23 @@ fn parse_configure_codex_app(args: &[String]) -> anyhow::Result<Command> {
     })
 }
 
+fn parse_uninstall_codex_app(args: &[String]) -> anyhow::Result<Command> {
+    let mut codex_home = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--codex-home" => {
+                let Some(value) = iter.next() else {
+                    anyhow::bail!("--codex-home requires a path");
+                };
+                codex_home = Some(PathBuf::from(value));
+            }
+            other => anyhow::bail!("unknown uninstall-codex-app argument `{other}`"),
+        }
+    }
+    Ok(Command::UninstallCodexApp { codex_home })
+}
+
 pub fn print_help() {
     println!(
         r#"codex-remote
@@ -129,6 +150,7 @@ Usage:
   codex-remote [--config PATH] off
   codex-remote [--config PATH] status
   codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
+  codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
 
 Default command is daemon.
 "#

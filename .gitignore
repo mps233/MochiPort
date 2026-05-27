@@ -10,3 +10,10 @@ rust_democodex-remoteconfig.toml
 references/
 reference/
 改2个文件完美解锁codex.md
+*.p12
+*.pfx
+*.cer
+*.cert
+*.key
+*.pem
+*.p8

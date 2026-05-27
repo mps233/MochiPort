@@ -1059,9 +1059,8 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
                 mark_thread_active(state, &thread_id).await;
             }
         } else if method == "thread/status/changed" {
-            if let Some(thread_id) = params.as_ref().and_then(thread_id_from_payload) {
-                mark_thread_active(state, &thread_id).await;
-            }
+            // Status changes are emitted for any loaded thread, including idle/notLoaded
+            // transitions. They are not a reliable signal for the foreground thread.
         } else if method == "turn/started" {
             let thread_id = params.as_ref().and_then(thread_id_from_payload);
             let turn_id = params
