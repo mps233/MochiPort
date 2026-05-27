@@ -290,7 +290,7 @@
         <div id="feishu.qrWrap" class="qr-wrap">
             <div id="feishu.qr" class="qr"></div>
             <div>
-                <h3>用飞书扫码确认</h3>
+                <h3>请使用飞书扫码</h3>
                 <p id="feishu.onboardStatus" class="message"></p>
                 <p id="feishu.qrHint" class="hint"></p>
             </div>
@@ -508,9 +508,9 @@ async function startFeishuOnboard() {
         return;
     }
     byId("feishu.qr").innerHTML = data.qrSvg || "";
-    byId("feishu.qrHint").innerHTML = `请用飞书扫码，或打开：<a href="${data.verificationUriComplete}" target="_blank">授权链接</a>`;
-    byId("feishu.onboardStatus").textContent = "等待扫码确认";
-    const intervalMs = Math.max(3, data.interval || 5) * 1000;
+    byId("feishu.qrHint").textContent = "";
+    byId("feishu.onboardStatus").textContent = "扫码完成后会自动关闭。";
+    const intervalMs = 1500;
     onboardTimer = setInterval(async () => {
         const poll = await fetch("/api/feishu/onboard/poll", {
             method: "POST",
@@ -520,16 +520,13 @@ async function startFeishuOnboard() {
         const result = await poll.json();
         if (result.done) {
             clearInterval(onboardTimer);
-            byId("feishu.onboardStatus").textContent = result.displayName ? `已接入：${result.displayName}` : "已接入";
             byId("feishu.qrWrap").className = "qr-wrap";
             byId("feishu.qr").innerHTML = "";
             byId("feishu.qrHint").textContent = "";
             setMessage("飞书已接入。");
             await loadAll();
-        } else if (result.error === "authorization_pending") {
-            byId("feishu.onboardStatus").textContent = "等待扫码确认";
         } else if (result.error) {
-            byId("feishu.onboardStatus").textContent = result.errorDescription || result.error;
+            byId("feishu.onboardStatus").textContent = "接入失败，请重新扫码。";
         }
     }, intervalMs);
 }

@@ -791,17 +791,12 @@ struct ConfigureRequest {
 struct FeishuOnboardStart {
     verification_uri_complete: String,
     device_code: String,
-    expires_in: u64,
-    interval: u64,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FeishuOnboardPoll {
     done: bool,
-    app_id: Option<String>,
-    open_id: Option<String>,
-    display_name: Option<String>,
     error: Option<serde_json::Value>,
     error_description: Option<serde_json::Value>,
 }
@@ -1175,13 +1170,13 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
     };
 
     let dialog = Dialog::builder(parent, "更换飞书机器人")
-        .with_size(540, 620)
+        .with_size(500, 560)
         .build();
     dialog.set_background_color(Colour::rgb(255, 255, 255));
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&dialog)
-        .with_label("扫码接入新的飞书机器人")
+        .with_label("请使用飞书扫码")
         .build();
     title.set_foreground_color(Colour::rgb(21, 25, 31));
     sizer.add(&title, 0, SizerFlag::All, 18);
@@ -1213,21 +1208,20 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
     }
 
     let info = StaticText::builder(&dialog)
-        .with_label(&format!(
-            "有效期约 {} 秒；建议扫码后点击“检查结果”。建议检查间隔 {} 秒。\n{}",
-            start.expires_in, start.interval, start.verification_uri_complete
-        ))
+        .with_label("扫码完成后会自动关闭。")
         .build();
     info.set_foreground_color(Colour::rgb(88, 96, 108));
     info.wrap(480);
-    sizer.add(&info, 0, SizerFlag::All, 18);
+    sizer.add(
+        &info,
+        0,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        18,
+    );
 
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    let open_button = Button::builder(&dialog).with_label("浏览器打开").build();
-    let poll_button = Button::builder(&dialog).with_label("检查结果").build();
     let close_button = Button::builder(&dialog).with_label("关闭").build();
-    buttons.add(&open_button, 1, SizerFlag::Expand | SizerFlag::Right, 8);
-    buttons.add(&poll_button, 1, SizerFlag::Expand | SizerFlag::Right, 8);
+    buttons.add_stretch_spacer(1);
     buttons.add(&close_button, 1, SizerFlag::Expand, 0);
     sizer.add_sizer(
         &buttons,
@@ -1238,41 +1232,26 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
 
     dialog.set_sizer(sizer, true);
 
-    {
-        let url = start.verification_uri_complete.clone();
-        open_button.on_click(move |_| {
-            launch_default_browser(&url, BrowserLaunchFlags::Default);
-        });
-    }
-
+    let timer = Timer::new(&dialog);
     {
         let api = api.clone();
         let device_code = start.device_code.clone();
         let dialog = dialog;
-        poll_button.on_click(move |_| match api.poll_feishu_onboard(&device_code) {
+        timer.on_tick(move |_| match api.poll_feishu_onboard(&device_code) {
             Ok(result) if result.done => {
-                let name = result
-                    .display_name
-                    .or(result.app_id)
-                    .unwrap_or_else(|| "飞书机器人".to_string());
-                let detail = result
-                    .open_id
-                    .map(|open_id| format!("{name} 已接入。\nOpen ID: {}", short_id(&open_id)))
-                    .unwrap_or_else(|| format!("{name} 已接入。"));
-                show_info(&dialog, &detail);
                 dialog.end_modal(ID_OK);
             }
             Ok(result) => {
-                let detail = result
-                    .error_description
-                    .or(result.error)
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "飞书尚未返回完成状态。".to_string());
-                show_info(&dialog, &detail);
+                if result.error.is_some() && result.error_description.is_some() {
+                    info.set_label("接入失败，请关闭后重试。");
+                }
             }
-            Err(err) => show_error(&dialog, &err),
+            Err(_) => {
+                info.set_label("接入失败，请关闭后重试。");
+            }
         });
     }
+    timer.start(1500, false);
 
     {
         let dialog = dialog;
@@ -1280,6 +1259,7 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
     }
 
     dialog.show_modal();
+    timer.stop();
     dialog.destroy();
 }
 
