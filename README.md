@@ -8,95 +8,51 @@ It has one job: after the user explicitly starts the local service, Codex App co
 
 ## Quick Start
 
-### 1. Download Or Build
+### 1. Install
 
-macOS release builds are produced by GitHub Actions. Download `Codex Remote.dmg`, then open the app.
+Download `Codex Remote.dmg` from GitHub Releases, drag it to Applications, then open it.
 
-For development:
-
-```powershell
-cargo run --features gui --bin codex-remote-gui
-```
-
-The GUI uses wxDragon and requires CMake. Daemon, web console, and tests do not require the GUI feature.
+If macOS warns that the app was downloaded from the internet, confirm the system prompt. The app does not install startup items and does not run in the background automatically.
 
 ### 2. Start Local Service
 
-Open `Codex Remote.app`, then click `Start Local Service`.
+Open `Codex Remote`, then click `Start Local Service`.
 
-The local service listens on:
-
-```text
-http://127.0.0.1:3847
-```
-
-You can also start the daemon from the command line:
-
-```powershell
-cargo run -- --config config.toml daemon
-```
+Continue when the local service status shows running.
 
 ### 3. Connect Feishu
 
-In the GUI, click `Change Bot` and follow the QR onboarding flow.
+On first use, click `Change Bot` and complete the QR onboarding flow.
 
-If you already have Feishu bot credentials, you can write them to `config.toml`:
+After Feishu is connected, normal use does not require scanning again. Scan again only when switching bots.
 
-```toml
-[feishu]
-appId = ""
-appSecret = ""
-mentionOnly = true
-allowedOpenIds = []
-allowedChatIds = []
-```
+### 4. Fill Model Info
 
-### 4. Fill Model Provider
-
-In the Codex App page, fill:
+Open the `Codex App` page and fill your model service settings:
 
 - Provider name
 - Third-party Base URL
 - API Key
 
-If provider name is empty but Base URL or API Key is provided, the default provider name is `codex`.
-
-The third-party key belongs to Codex's model provider config. `chatgpt_base_url` is only for Codex App backend and remote-control traffic.
+Provider name can be empty. If it is empty but Base URL or API Key is filled, the default provider name is `codex`.
 
 ### 5. Write Codex App Config
 
 Click `Write Config`.
 
-This explicitly writes Codex App local config:
+This button only edits Codex App's local config, with backups for existing files. It points Codex App remote control to local `codex-remote`, and writes local auth plus optional model provider settings.
 
-- `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`
-- Local `ChatgptAuthTokens`
-- Optional model provider config
+### 6. Open Codex App
 
-Existing files are backed up as `.bak`. Starting the daemon does not modify Codex App config; only this button or the matching CLI command writes it.
+Open Codex App normally, then enable remote control in Codex App.
 
-### 6. Enable Remote Control In Codex App
+When connected, `Codex Remote` shows Codex App as connected.
 
-Open Codex App normally, then enable remote control in the app.
+### 7. Use Feishu
 
-If connected, the GUI shows Codex App as connected. You can also check:
+Send a message to the bot in Feishu.
 
-```text
-GET http://127.0.0.1:3847/api/remote-control/status
-```
-
-Expected status:
-
-```json
-{
-  "connected": true,
-  "initialized": true
-}
-```
-
-### 7. Select A Thread In Feishu
-
-If a Feishu chat is not bound to a thread yet, the first message does not create hidden client state. The bridge sends a thread-selection card so the user can create a new thread or resume an existing one.
+If the Feishu chat is not bound to a Codex thread yet, the bot first sends a selection card so you can create a new thread or resume an existing one. After selection, the chat is bridged to that Codex thread.
 
 ## Feishu Commands
 
@@ -119,12 +75,6 @@ Click `Uninstall Injection` in the GUI to remove this project's Codex App inject
 - `model_provider`
 - local `ChatgptAuthTokens` auth file
 
-CLI equivalent:
-
-```text
-codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
-```
-
 ## Project Boundary
 
 `codex-remote` only supports the clean Codex App remote-control path.
@@ -138,7 +88,7 @@ It does not:
 - run as a background service automatically
 - change Codex model, sandbox, approval policy, cwd, or environment
 
-The local backend starts only when the user clicks `Start Local Service` or explicitly runs the `daemon` command.
+The local backend starts only when the user clicks `Start Local Service` or explicitly starts it from development tooling.
 
 ## Technical Notes
 

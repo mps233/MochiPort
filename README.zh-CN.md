@@ -8,95 +8,51 @@
 
 ## 快速使用
 
-### 1. 下载或构建
+### 1. 安装
 
-macOS 发布包由 GitHub Actions 生成。下载 `Codex Remote.dmg` 后双击打开 App。
+从 GitHub Releases 下载 `Codex Remote.dmg`，拖到 Applications 后打开。
 
-开发环境也可以直接运行：
-
-```powershell
-cargo run --features gui --bin codex-remote-gui
-```
-
-GUI 依赖 wxDragon，构建 GUI 需要本机有 CMake。daemon、Web 控制台和测试不依赖 GUI。
+第一次打开时，如果 macOS 提示来自互联网，按系统提示确认即可。这个 App 不会安装开机启动项，也不会自动常驻后台。
 
 ### 2. 启动本地服务
 
-打开 `Codex Remote.app` 后，点击“启动本地服务”。
+打开 `Codex Remote`，点击“启动本地服务”。
 
-本地服务默认监听：
-
-```text
-http://127.0.0.1:3847
-```
-
-也可以用命令启动 daemon：
-
-```powershell
-cargo run -- --config config.toml daemon
-```
+看到“本地服务：运行中”后继续下一步。
 
 ### 3. 接入飞书
 
-在 GUI 里点击“更换机器人”，按二维码流程接入飞书。
+第一次使用时，点击“更换机器人”，按二维码流程完成飞书接入。
 
-如果已经有飞书机器人凭证，也可以写入 `config.toml`：
+接入成功后，飞书状态会显示为已连接。之后正常使用不需要反复扫码，只有更换机器人时才需要重新扫码。
 
-```toml
-[feishu]
-appId = ""
-appSecret = ""
-mentionOnly = true
-allowedOpenIds = []
-allowedChatIds = []
-```
+### 4. 填写模型信息
 
-### 4. 填写模型 provider
-
-在 GUI 的 Codex App 页面填写：
+切到 “Codex App” 页面，填写你的模型服务信息：
 
 - Provider 名称
 - 第三方 Base URL
 - API Key
 
-如果 Provider 名称留空，但填写了 Base URL 或 API Key，默认 provider 名称会使用 `codex`。
-
-第三方 key 属于 Codex 的 model provider 配置。`chatgpt_base_url` 只负责 Codex App backend 和 remote-control 流量。
+Provider 名称可以留空。留空时，如果填写了 Base URL 或 API Key，默认会使用 `codex`。
 
 ### 5. 写入 Codex App 配置
 
 点击“写入配置”。
 
-它会显式写入 Codex App 的本地配置：
+这个按钮只改 Codex App 的本地配置，并会先备份旧文件。它会让 Codex App 的 remote-control 连接到本机 `codex-remote`，同时写入本地认证信息和可选的模型 provider 配置。
 
-- `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`
-- 本地 `ChatgptAuthTokens`
-- 可选 model provider 配置
+### 6. 打开 Codex App
 
-已有文件会先备份为 `.bak`。daemon 启动本身不会修改 Codex App 配置，只有用户点击按钮或运行配置命令才会写入。
+正常双击启动 Codex App，然后在 Codex App 里打开远程控制。
 
-### 6. 打开 Codex App 远程控制
+连接成功后，`Codex Remote` 里会看到 Codex App 状态变为已连接。
 
-双击启动 Codex App，然后在 Codex App 里启用 remote control。
+### 7. 在飞书里开始使用
 
-如果连接成功，GUI 里会看到 Codex App 连接状态变为已连接。也可以检查：
+在飞书里给机器人发消息。
 
-```text
-GET http://127.0.0.1:3847/api/remote-control/status
-```
-
-期望状态：
-
-```json
-{
-  "connected": true,
-  "initialized": true
-}
-```
-
-### 7. 在飞书里选择 thread
-
-如果飞书会话还没有绑定 thread，第一条消息不会偷偷创建隐藏状态。bridge 会先发 thread 选择卡片，让用户选择新建 thread 或恢复已有 thread。
+如果当前飞书会话还没有绑定 Codex thread，机器人会先发一张选择卡片，让你新建 thread 或恢复已有 thread。选择后，后续对话就会进入对应的 Codex thread。
 
 ## 飞书命令
 
@@ -119,12 +75,6 @@ GUI 里点击“卸载注入”即可移除本项目写入 Codex App 的：
 - `model_provider`
 - 本地 `ChatgptAuthTokens` auth 文件
 
-命令行等价操作：
-
-```text
-codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
-```
-
 ## 项目边界
 
 `codex-remote` 只支持干净的 Codex App remote-control 路径。
@@ -138,7 +88,7 @@ codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
 - 自动常驻后台
 - 修改 Codex 的 model、sandbox、approval policy、cwd 或环境变量
 
-本地 backend 只在用户明确点击“启动本地服务”或运行 `daemon` 命令后启动。
+本地 backend 只会在用户明确点击“启动本地服务”或主动从开发工具启动时运行。
 
 ## 技术说明
 
