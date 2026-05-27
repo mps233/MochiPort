@@ -72,9 +72,9 @@ fn build_ui() {
     let status_title = section_label(&root, "状态概览");
     status_section.add(&status_title, 0, SizerFlag::Left | SizerFlag::Right, 4);
     let status_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let service_status = status_panel(&root, "本地服务");
-    let feishu_status = status_panel(&root, "飞书");
-    let codex_status = status_panel(&root, "Codex App");
+    let service_status = status_panel(&root, "本地服务", StatusIconKind::Service);
+    let feishu_status = status_panel(&root, "飞书", StatusIconKind::Feishu);
+    let codex_status = status_panel(&root, "Codex App", StatusIconKind::Codex);
     status_row.add(
         &service_status.panel,
         1,
@@ -677,6 +677,13 @@ struct StatusPanel {
 }
 
 #[derive(Clone, Copy)]
+enum StatusIconKind {
+    Service,
+    Feishu,
+    Codex,
+}
+
+#[derive(Clone, Copy)]
 struct UiHandles {
     status_bar: StatusBar,
     service_status: StatusPanel,
@@ -806,20 +813,34 @@ fn section_label(parent: &Panel, label: &str) -> StaticText {
     text
 }
 
-fn status_panel(parent: &Panel, title: &str) -> StatusPanel {
+fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> StatusPanel {
     let panel = Panel::builder(parent).build();
     panel.set_background_color(Colour::rgb(255, 255, 255));
     panel.set_min_size(Size::new(250, 78));
 
     let row = BoxSizer::builder(Orientation::Horizontal).build();
-    let marker = StaticText::builder(&panel).with_label("●").build();
-    marker.set_foreground_color(Colour::rgb(116, 124, 136));
-    row.add(&marker, 0, SizerFlag::Top | SizerFlag::Right, 3);
+    let icon = StaticBitmap::builder(&panel)
+        .with_bitmap(Some(status_icon_bitmap(icon_kind, 34)))
+        .with_scale_mode(Some(ScaleMode::None))
+        .with_size(Size::new(34, 34))
+        .build();
+    icon.set_min_size(Size::new(34, 34));
+    row.add(
+        &icon,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        12,
+    );
 
     let text_col = BoxSizer::builder(Orientation::Vertical).build();
+    let title_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let marker = StaticText::builder(&panel).with_label("●").build();
+    marker.set_foreground_color(Colour::rgb(116, 124, 136));
+    title_row.add(&marker, 0, SizerFlag::Right, 5);
     let title_label = StaticText::builder(&panel).with_label(title).build();
     title_label.set_foreground_color(Colour::rgb(91, 100, 114));
-    text_col.add(&title_label, 0, SizerFlag::Bottom, 4);
+    title_row.add(&title_label, 0, SizerFlag::Bottom, 0);
+    text_col.add_sizer(&title_row, 0, SizerFlag::Bottom, 4);
 
     let state = StaticText::builder(&panel).with_label("检测中").build();
     state.set_foreground_color(Colour::rgb(34, 39, 47));
@@ -838,6 +859,124 @@ fn status_panel(parent: &Panel, title: &str) -> StatusPanel {
         state,
         detail,
     }
+}
+
+fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
+    let mut canvas = IconCanvas::new(size, [0, 0, 0, 0]);
+    match kind {
+        StatusIconKind::Service => draw_service_icon(&mut canvas),
+        StatusIconKind::Feishu => draw_feishu_icon(&mut canvas),
+        StatusIconKind::Codex => draw_codex_icon(&mut canvas),
+    }
+    Bitmap::from_rgba(&canvas.rgba, size as u32, size as u32).expect("status icon bitmap")
+}
+
+struct IconCanvas {
+    size: usize,
+    rgba: Vec<u8>,
+}
+
+impl IconCanvas {
+    fn new(size: usize, background: [u8; 4]) -> Self {
+        let mut rgba = vec![0; size * size * 4];
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.copy_from_slice(&background);
+        }
+        Self { size, rgba }
+    }
+
+    fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
+        let min_x = (cx - radius).floor().max(0.0) as usize;
+        let max_x = (cx + radius).ceil().min((self.size - 1) as f32) as usize;
+        let min_y = (cy - radius).floor().max(0.0) as usize;
+        let max_y = (cy + radius).ceil().min((self.size - 1) as f32) as usize;
+        let radius_sq = radius * radius;
+        for y in min_y..=max_y {
+            for x in min_x..=max_x {
+                let dx = x as f32 + 0.5 - cx;
+                let dy = y as f32 + 0.5 - cy;
+                if dx * dx + dy * dy <= radius_sq {
+                    self.set_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
+    fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: [u8; 4]) {
+        for yy in y..(y + height).min(self.size) {
+            for xx in x..(x + width).min(self.size) {
+                self.set_pixel(xx, yy, color);
+            }
+        }
+    }
+
+    fn fill_round_rect(
+        &mut self,
+        x: usize,
+        y: usize,
+        width: usize,
+        height: usize,
+        radius: usize,
+        color: [u8; 4],
+    ) {
+        let x2 = x + width - 1;
+        let y2 = y + height - 1;
+        let radius = radius as f32;
+        for yy in y..=y2.min(self.size - 1) {
+            for xx in x..=x2.min(self.size - 1) {
+                let cx = if xx < x + radius as usize {
+                    x as f32 + radius
+                } else if xx > x2.saturating_sub(radius as usize) {
+                    x2 as f32 - radius
+                } else {
+                    xx as f32
+                };
+                let cy = if yy < y + radius as usize {
+                    y as f32 + radius
+                } else if yy > y2.saturating_sub(radius as usize) {
+                    y2 as f32 - radius
+                } else {
+                    yy as f32
+                };
+                let dx = xx as f32 - cx;
+                let dy = yy as f32 - cy;
+                if dx * dx + dy * dy <= radius * radius {
+                    self.set_pixel(xx, yy, color);
+                }
+            }
+        }
+    }
+
+    fn set_pixel(&mut self, x: usize, y: usize, color: [u8; 4]) {
+        let offset = (y * self.size + x) * 4;
+        self.rgba[offset..offset + 4].copy_from_slice(&color);
+    }
+}
+
+fn draw_service_icon(canvas: &mut IconCanvas) {
+    canvas.fill_circle(17.0, 17.0, 17.0, [229, 247, 239, 255]);
+    canvas.fill_round_rect(9, 9, 16, 16, 3, [29, 142, 103, 255]);
+    canvas.fill_round_rect(12, 12, 10, 3, 1, [246, 255, 251, 255]);
+    canvas.fill_round_rect(12, 17, 10, 3, 1, [246, 255, 251, 255]);
+    canvas.fill_rect(12, 22, 3, 2, [246, 255, 251, 255]);
+}
+
+fn draw_feishu_icon(canvas: &mut IconCanvas) {
+    canvas.fill_circle(17.0, 17.0, 17.0, [238, 246, 255, 255]);
+    canvas.fill_circle(14.0, 14.0, 6.5, [47, 121, 246, 255]);
+    canvas.fill_circle(21.0, 14.0, 6.5, [28, 184, 133, 255]);
+    canvas.fill_circle(14.0, 21.0, 6.5, [255, 181, 62, 255]);
+    canvas.fill_circle(21.0, 21.0, 6.5, [246, 96, 83, 255]);
+    canvas.fill_circle(17.5, 17.5, 5.5, [255, 255, 255, 255]);
+}
+
+fn draw_codex_icon(canvas: &mut IconCanvas) {
+    canvas.fill_circle(17.0, 17.0, 17.0, [241, 244, 248, 255]);
+    canvas.fill_round_rect(8, 9, 18, 16, 4, [32, 38, 48, 255]);
+    canvas.fill_rect(11, 13, 3, 2, [238, 246, 255, 255]);
+    canvas.fill_rect(14, 15, 3, 2, [238, 246, 255, 255]);
+    canvas.fill_rect(11, 17, 3, 2, [238, 246, 255, 255]);
+    canvas.fill_round_rect(17, 20, 6, 2, 1, [97, 203, 158, 255]);
 }
 
 fn text_field_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &str) -> TextCtrl {
