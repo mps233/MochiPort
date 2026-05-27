@@ -798,7 +798,6 @@ struct FeishuOnboardStart {
 struct FeishuOnboardPoll {
     done: bool,
     error: Option<serde_json::Value>,
-    error_description: Option<serde_json::Value>,
 }
 
 fn section_label(parent: &Panel, label: &str) -> StaticText {
@@ -1242,7 +1241,9 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
                 dialog.end_modal(ID_OK);
             }
             Ok(result) => {
-                if result.error.is_some() && result.error_description.is_some() {
+                if is_feishu_onboard_pending(result.error.as_ref()) {
+                    info.set_label("扫码完成后会自动关闭。");
+                } else if result.error.is_some() {
                     info.set_label("接入失败，请关闭后重试。");
                 }
             }
@@ -1261,6 +1262,13 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
     dialog.show_modal();
     timer.stop();
     dialog.destroy();
+}
+
+fn is_feishu_onboard_pending(error: Option<&serde_json::Value>) -> bool {
+    matches!(
+        error.and_then(|value| value.as_str()),
+        Some("authorization_pending" | "slow_down")
+    )
 }
 
 fn show_info(parent: &dyn WxWidget, message: &str) {

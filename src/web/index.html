@@ -525,6 +525,8 @@ async function startFeishuOnboard() {
             byId("feishu.qrHint").textContent = "";
             setMessage("飞书已接入。");
             await loadAll();
+        } else if (result.error === "authorization_pending" || result.error === "slow_down") {
+            byId("feishu.onboardStatus").textContent = "扫码完成后会自动关闭。";
         } else if (result.error) {
             byId("feishu.onboardStatus").textContent = "接入失败，请重新扫码。";
         }
