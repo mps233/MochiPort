@@ -157,13 +157,9 @@ experimental_bearer_token = "your-third-party-key"
 
 ## macOS App
 
-Build a double-clickable `.app`:
+Release builds are produced by GitHub Actions only. The `release-macos` workflow builds a notarized `Codex Remote.dmg` from a tag or manual workflow run.
 
-```bash
-./scripts/build-macos-app.sh
-```
-
-The output is `target/dist/Codex Remote.app`. The app bundle contains both the GUI and daemon binaries; the GUI starts the bundled daemon only after the user clicks `Start Local Service`. The default config path is `~/Library/Application Support/Codex Remote/config.toml`.
+The app bundle contains both the GUI and daemon binaries; the GUI starts the bundled daemon only after the user clicks `Start Local Service`. The default config path is `~/Library/Application Support/Codex Remote/config.toml`.
 
 ## Commands
 

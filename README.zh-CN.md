@@ -157,13 +157,9 @@ experimental_bearer_token = "your-third-party-key"
 
 ## macOS App
 
-生成可双击运行的 `.app`：
+发布构建只通过 GitHub Actions 生成。`release-macos` workflow 会在推 tag 或手动运行时构建并公证 `Codex Remote.dmg`。
 
-```bash
-./scripts/build-macos-app.sh
-```
-
-产物位于 `target/dist/Codex Remote.app`。App bundle 内包含 GUI 和 daemon 两个二进制；GUI 会从 bundle 内启动 daemon，但只在用户点击“启动本地服务”后执行。默认配置写入 `~/Library/Application Support/Codex Remote/config.toml`。
+App bundle 内包含 GUI 和 daemon 两个二进制；GUI 会从 bundle 内启动 daemon，但只在用户点击“启动本地服务”后执行。默认配置写入 `~/Library/Application Support/Codex Remote/config.toml`。
 
 ## 命令
 

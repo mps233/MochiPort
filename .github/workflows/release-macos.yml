@@ -43,7 +43,23 @@ jobs:
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
 
       - name: Build App Bundle
-        run: ./scripts/build-macos-app.sh
+        run: |
+          set -euo pipefail
+          APP_NAME="Codex Remote"
+          APP="target/dist/$APP_NAME.app"
+          CONTENTS="$APP/Contents"
+          MACOS="$CONTENTS/MacOS"
+          RESOURCES="$CONTENTS/Resources"
+
+          cargo build --release
+          PATH="/opt/homebrew/bin:$PATH" cargo build --release --features gui --bin codex-remote-gui
+
+          rm -rf "$APP"
+          mkdir -p "$MACOS" "$RESOURCES"
+          cp "packaging/macos/Info.plist" "$CONTENTS/Info.plist"
+          cp "target/release/codex-remote-gui" "$MACOS/$APP_NAME"
+          cp "target/release/codex-remote" "$RESOURCES/codex-remote"
+          chmod +x "$MACOS/$APP_NAME" "$RESOURCES/codex-remote"
 
       - name: Sign And Notarize
         env:
@@ -57,13 +73,61 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
+          APP="target/dist/Codex Remote.app"
+          DMG="target/dist/Codex Remote.dmg"
+          ZIP="target/dist/Codex Remote.zip"
+          ENTITLEMENTS="packaging/macos/entitlements.plist"
+
           if [ -n "${APPLE_API_KEY_P8:-}" ]; then
             API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
             printf '%s' "$APPLE_API_KEY_P8" > "$API_KEY_PATH"
             chmod 600 "$API_KEY_PATH"
             export APPLE_API_KEY_PATH="$API_KEY_PATH"
           fi
-          ./scripts/sign-notarize-macos-app.sh
+
+          notary_submit() {
+            local path="$1"
+            if [ -n "${NOTARY_KEYCHAIN_PROFILE:-}" ]; then
+              xcrun notarytool submit "$path" --keychain-profile "$NOTARY_KEYCHAIN_PROFILE" --wait
+            elif [ -n "${APPLE_API_KEY_ID:-}" ]; then
+              xcrun notarytool submit "$path" \
+                --key "$APPLE_API_KEY_PATH" \
+                --key-id "$APPLE_API_KEY_ID" \
+                --issuer "$APPLE_API_ISSUER_ID" \
+                --wait
+            else
+              xcrun notarytool submit "$path" \
+                --apple-id "$APPLE_ID" \
+                --team-id "$APPLE_TEAM_ID" \
+                --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+                --wait
+            fi
+          }
+
+          codesign --force --timestamp --options runtime \
+            --entitlements "$ENTITLEMENTS" \
+            --sign "$APPLE_CODESIGN_IDENTITY" \
+            "$APP/Contents/Resources/codex-remote"
+
+          codesign --force --timestamp --options runtime \
+            --entitlements "$ENTITLEMENTS" \
+            --sign "$APPLE_CODESIGN_IDENTITY" \
+            "$APP"
+
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          ditto -c -k --keepParent "$APP" "$ZIP"
+          notary_submit "$ZIP"
+          xcrun stapler staple "$APP"
+
+          hdiutil create -volname "Codex Remote" -srcfolder "$APP" -ov -format UDZO "$DMG"
+          codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$DMG"
+          notary_submit "$DMG"
+          xcrun stapler staple "$DMG"
+
+          xcrun stapler validate "$APP"
+          xcrun stapler validate "$DMG"
+          spctl --assess --type execute --verbose=4 "$APP"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
