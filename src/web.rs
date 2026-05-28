@@ -20,6 +20,10 @@ use crate::{
     remote_control_backend,
 };
 
+pub async fn start_bridge_if_ready(state: &SharedState, event_message: &'static str) -> bool {
+    start_bridge_task(state, BridgeStartMode::KeepExisting, event_message).await
+}
+
 pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(index))
@@ -274,29 +278,16 @@ async fn start_bridge(State(state): State<SharedState>) -> impl IntoResponse {
             );
         }
     }
-    let mut task = state.bridge_task.lock().await;
-    if task
-        .as_ref()
-        .map(|handle| !handle.is_finished())
-        .unwrap_or(false)
-    {
-        return (StatusCode::OK, Json(json!({ "ok": true, "running": true })));
-    }
-    if task
-        .as_ref()
-        .map(|handle| handle.is_finished())
-        .unwrap_or(false)
-    {
-        *task = None;
-    }
-    let bridge_state = state.clone();
-    *task = Some(tokio::spawn(async move {
-        bridge::start_bridge(bridge_state).await;
-    }));
-    state
-        .push_event("info", "bridge_start_requested", "bridge start requested")
-        .await;
-    (StatusCode::OK, Json(json!({ "ok": true, "running": true })))
+    let running = start_bridge_task(
+        &state,
+        BridgeStartMode::KeepExisting,
+        "bridge start requested",
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "running": running })),
+    )
 }
 
 async fn stop_bridge(State(state): State<SharedState>) -> impl IntoResponse {
@@ -333,6 +324,75 @@ async fn stop_bridge_task(state: &SharedState) {
         .await;
 }
 
+#[derive(Clone, Copy)]
+enum BridgeStartMode {
+    KeepExisting,
+    Restart,
+}
+
+async fn start_bridge_task(
+    state: &SharedState,
+    mode: BridgeStartMode,
+    event_message: &'static str,
+) -> bool {
+    let config = state.config.lock().await.clone();
+    if !config.bridge.enabled {
+        state
+            .push_event("warn", "bridge_disabled", "bridge disabled by config")
+            .await;
+        return false;
+    }
+    if !feishu_configured(&config) {
+        state
+            .push_event(
+                "warn",
+                "bridge_waiting_for_feishu",
+                "bridge is waiting for Feishu configuration",
+            )
+            .await;
+        return false;
+    }
+
+    let restart = matches!(mode, BridgeStartMode::Restart);
+    let mut aborted_existing = false;
+    {
+        let mut task = state.bridge_task.lock().await;
+        let running = task
+            .as_ref()
+            .map(|handle| !handle.is_finished())
+            .unwrap_or(false);
+        if running && !restart {
+            return true;
+        }
+        if let Some(handle) = task.take()
+            && !handle.is_finished()
+        {
+            handle.abort();
+            aborted_existing = true;
+        }
+        let bridge_state = state.clone();
+        *task = Some(tokio::spawn(async move {
+            bridge::start_bridge(bridge_state).await;
+        }));
+    }
+
+    if restart || aborted_existing {
+        state.runtime.lock().await.invalidate_bridge_generation();
+        let mut ws = state.feishu_ws.lock().await;
+        ws.connecting = false;
+        ws.connected = false;
+        ws.last_error = None;
+    }
+    state
+        .push_event("info", "bridge_start_requested", event_message)
+        .await;
+    true
+}
+
+fn feishu_configured(config: &AppConfig) -> bool {
+    !config.feishu.app_id.trim().is_empty() && !config.feishu.app_secret.trim().is_empty()
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteControlBackendStatusResponse {
@@ -351,8 +411,7 @@ async fn remote_control_backend_status(
 ) -> Json<RemoteControlBackendStatusResponse> {
     let config = state.config.lock().await.clone();
     let remote = remote_control_backend::status_snapshot(&state).await;
-    let feishu_configured =
-        !config.feishu.app_id.trim().is_empty() && !config.feishu.app_secret.trim().is_empty();
+    let feishu_configured = feishu_configured(&config);
     let reason = if !config.bridge.enabled {
         Some("bridge disabled".to_string())
     } else if !feishu_configured {
@@ -512,6 +571,7 @@ async fn feishu_onboard_poll(
                     {
                         config.feishu.allowed_open_ids.push(open_id);
                     }
+                    config.bridge.enabled = true;
                     if let Err(err) = config.save(&state.config_path) {
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -536,6 +596,12 @@ async fn feishu_onboard_poll(
                         ),
                     )
                     .await;
+                start_bridge_task(
+                    &state,
+                    BridgeStartMode::Restart,
+                    "bridge restarted after Feishu onboarding",
+                )
+                .await;
             }
             (
                 StatusCode::OK,

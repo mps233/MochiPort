@@ -131,11 +131,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         )
         .await;
     if state.config.lock().await.bridge.enabled {
-        let bridge_state = state.clone();
-        let bridge_handle = tokio::spawn(async move {
-            bridge::start_bridge(bridge_state).await;
-        });
-        *state.bridge_task.lock().await = Some(bridge_handle);
+        web::start_bridge_if_ready(&state, "bridge start requested during daemon startup").await;
     } else {
         state
             .push_event("warn", "bridge_disabled", "bridge disabled by config")

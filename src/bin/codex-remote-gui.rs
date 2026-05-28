@@ -1091,23 +1091,23 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
     let (feishu_state, feishu_detail, feishu_tone) = if !feishu_configured {
         (
             "未接入",
-            "点击“更换机器人”进入扫码接入流程。",
+            "扫码接入飞书机器人后才会启动飞书桥接。",
             StateTone::Warn,
         )
     } else if !bridge_enabled {
         (
-            "已暂停",
-            "机器人已配置，但飞书接入当前关闭。",
+            "已断开",
+            "机器人已保存，点击“更换机器人”可重新接入。",
             StateTone::Muted,
         )
     } else if feishu_ws.is_some_and(|ws| ws.connected) {
-        ("已接入", "飞书长连接正常。", StateTone::Ok)
+        ("已接入", "飞书桥接运行中。", StateTone::Ok)
     } else if feishu_ws.is_some_and(|ws| ws.connecting) {
-        ("连接中", "正在连接飞书长连接。", StateTone::Warn)
+        ("连接中", "正在连接飞书。", StateTone::Warn)
     } else {
         (
             "等待连接",
-            "机器人已配置，等待飞书连接建立。",
+            "机器人已保存，等待飞书桥接启动。",
             StateTone::Warn,
         )
     };
