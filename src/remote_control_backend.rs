@@ -135,6 +135,11 @@ struct RenameEnvironmentRequest {
     name: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RemoteControlClientFinishRequest {
+    client_id: String,
+}
+
 struct ServerChunkAssembly {
     segment_count: usize,
     message_size_bytes: usize,
@@ -208,6 +213,26 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/backend-api/wham/remote/control/server/enroll",
             post(enroll),
+        )
+        .route(
+            "/backend-api/codex/remote/control/client/enroll/start",
+            post(remote_control_client_enroll_start),
+        )
+        .route(
+            "/backend-api/codex/remote/control/client/enroll/finish",
+            post(remote_control_client_enroll_finish),
+        )
+        .route(
+            "/backend-api/codex/remote/control/client/refresh/start",
+            post(remote_control_client_refresh_start),
+        )
+        .route(
+            "/backend-api/codex/remote/control/client/refresh/finish",
+            post(remote_control_client_refresh_finish),
+        )
+        .route(
+            "/backend-api/codex/remote/control/client",
+            get(client_websocket),
         )
         .route("/backend-api/remote/control/server/enroll", post(enroll))
         .route("/backend-api/wham/remote/control/server", get(websocket))
@@ -374,6 +399,233 @@ async fn rename_remote_control_environment(
 
 async fn delete_remote_control_environment(AxumPath(_env_id): AxumPath<String>) -> StatusCode {
     StatusCode::NO_CONTENT
+}
+
+async fn remote_control_client_enroll_start(headers: HeaderMap) -> impl IntoResponse {
+    Json(remote_control_client_start_response(
+        &headers,
+        None,
+        "enroll/finish",
+    ))
+}
+
+async fn remote_control_client_refresh_start(
+    headers: HeaderMap,
+    payload: Option<Json<RemoteControlClientFinishRequest>>,
+) -> impl IntoResponse {
+    Json(remote_control_client_start_response(
+        &headers,
+        payload.map(|Json(value)| value.client_id),
+        "refresh/finish",
+    ))
+}
+
+async fn remote_control_client_enroll_finish(
+    headers: HeaderMap,
+    Json(request): Json<RemoteControlClientFinishRequest>,
+) -> impl IntoResponse {
+    Json(remote_control_client_token_response(
+        &headers,
+        &request.client_id,
+    ))
+}
+
+async fn remote_control_client_refresh_finish(
+    headers: HeaderMap,
+    Json(request): Json<RemoteControlClientFinishRequest>,
+) -> impl IntoResponse {
+    Json(remote_control_client_token_response(
+        &headers,
+        &request.client_id,
+    ))
+}
+
+async fn client_websocket(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(|mut socket| async move {
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Text(text)) => {
+                    let _ = socket.send(Message::Text(text)).await;
+                }
+                Ok(Message::Ping(payload)) => {
+                    let _ = socket.send(Message::Pong(payload)).await;
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    })
+}
+
+fn remote_control_client_start_response(
+    headers: &HeaderMap,
+    client_id: Option<String>,
+    finish_path: &str,
+) -> Value {
+    let account_user_id = remote_control_account_user_id(headers);
+    let client_id = client_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stable_id("client", &account_user_id));
+    let challenge = remote_control_device_key_challenge(
+        headers,
+        &account_user_id,
+        &client_id,
+        finish_path,
+        None,
+    );
+    json!({
+        "client_id": client_id,
+        "account_user_id": account_user_id,
+        "device_key_challenge": challenge,
+    })
+}
+
+fn remote_control_client_token_response(headers: &HeaderMap, client_id: &str) -> Value {
+    let account_user_id = remote_control_account_user_id(headers);
+    let expires_at = iso8601_after(Duration::from_secs(24 * 60 * 60));
+    json!({
+        "client_id": client_id,
+        "account_user_id": account_user_id,
+        "remote_control_token": local_remote_control_client_token(headers, client_id),
+        "expires_at": expires_at,
+        "scopes": ["remote_control_controller_websocket"],
+    })
+}
+
+fn remote_control_device_key_challenge(
+    headers: &HeaderMap,
+    account_user_id: &str,
+    client_id: &str,
+    finish_path: &str,
+    device_identity_hash: Option<String>,
+) -> Value {
+    let challenge_id = stable_id(
+        "challenge",
+        &format!("{account_user_id}:{client_id}:{finish_path}"),
+    );
+    let target_origin = request_origin(headers);
+    json!({
+        "challenge_id": challenge_id,
+        "challenge_token": local_remote_control_client_token(headers, client_id),
+        "nonce": stable_id("nonce", &challenge_id),
+        "purpose": "remote_control_client_enrollment",
+        "audience": "remote_control_client_enrollment",
+        "account_user_id": account_user_id,
+        "client_id": client_id,
+        "target_origin": target_origin,
+        "target_path": format!("/backend-api/codex/remote/control/client/{finish_path}"),
+        "challenge_expires_at": iso8601_after(Duration::from_secs(5 * 60)),
+        "device_identity_hash": device_identity_hash,
+    })
+}
+
+fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> String {
+    let now = unix_now_u64();
+    let account_id = header_str(headers, "chatgpt-account-id")
+        .unwrap_or_else(|| "acct_codex_remote_local".into());
+    let account_user_id = remote_control_account_user_id(headers);
+    let payload = json!({
+        "iss": "codex-remote-local",
+        "aud": "remote_control_controller_websocket",
+        "iat": now,
+        "nbf": now,
+        "exp": now + 24 * 60 * 60,
+        "sub": client_id,
+        "scope": "remote_control_controller_websocket",
+        "scp": ["remote_control_controller_websocket"],
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_account_user_id": account_user_id,
+            "account_user_id": account_user_id,
+            "user_id": jwt_bearer_claim(headers, "user_id")
+                .or_else(|| jwt_bearer_claim(headers, "chatgpt_user_id"))
+                .unwrap_or_else(|| "user_codex_remote_local".into()),
+        },
+    });
+    format!(
+        "{}.{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({ "alg": "none", "typ": "JWT" })).unwrap_or_default()
+        ),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap_or_default()),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig")
+    )
+}
+
+fn remote_control_account_user_id(headers: &HeaderMap) -> String {
+    jwt_bearer_claim(headers, "chatgpt_account_user_id")
+        .or_else(|| jwt_bearer_claim(headers, "account_user_id"))
+        .or_else(|| jwt_bearer_claim(headers, "user_id"))
+        .unwrap_or_else(|| "user_codex_remote_local__acct_codex_remote_local".into())
+}
+
+fn jwt_bearer_claim(headers: &HeaderMap, claim: &str) -> Option<String> {
+    let token = authorization_bearer(headers)?;
+    jwt_payload(&token).and_then(|payload| {
+        payload
+            .get("https://api.openai.com/auth")?
+            .get(claim)?
+            .as_str()
+            .map(str::to_string)
+    })
+}
+
+fn authorization_bearer(headers: &HeaderMap) -> Option<String> {
+    let value = header_str(headers, "authorization")?;
+    let mut parts = value.splitn(2, char::is_whitespace);
+    let scheme = parts.next()?;
+    let token = parts.next()?.trim();
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.to_string())
+}
+
+fn request_origin(headers: &HeaderMap) -> String {
+    header_str(headers, "origin")
+        .or_else(|| header_str(headers, "referer").and_then(|value| origin_from_url(&value)))
+        .unwrap_or_else(|| "http://127.0.0.1:3847".into())
+}
+
+fn origin_from_url(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value).ok()?;
+    Some(format!("{}://{}", url.scheme(), url.host_str()?))
+}
+
+fn iso8601_after(duration: Duration) -> String {
+    let timestamp = unix_now_u64().saturating_add(duration.as_secs());
+    format_rfc3339_utc(timestamp)
+}
+
+fn format_rfc3339_utc(timestamp: u64) -> String {
+    let days = (timestamp / 86_400) as i64;
+    let seconds_of_day = timestamp % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_unix_epoch + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + if m <= 2 { 1 } else { 0 };
+    (year as i32, m as u32, d as u32)
+}
+
+fn unix_now_u64() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Value {
