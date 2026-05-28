@@ -163,7 +163,7 @@ fn build_ui() {
         .with_gap(Size::new(10, 12))
         .build();
     form.add_growable_col(1, 1);
-    let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "");
+    let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "codex");
     let provider_base_url = text_field_row(&codex_page, &form, "Base URL", "");
     let provider_key = text_field_row(&codex_page, &form, "API Key", "");
     config_box.add_sizer(
@@ -331,6 +331,8 @@ fn build_ui() {
         }
     }
     refresh_dashboard(&api, &handles);
+    repair_gui_environment_if_needed(&api, &handles);
+    refresh_dashboard(&api, &handles);
 
     {
         let api = api.clone();
@@ -346,6 +348,7 @@ fn build_ui() {
         start_daemon_button.on_click(move |_| match restart_daemon_for_gui(&api) {
             Ok(child) => {
                 replace_managed_daemon(&daemon_child, child);
+                repair_gui_environment_if_needed(&api, &handles);
                 show_info(&frame, "本地服务已运行。");
                 refresh_dashboard(&api, &handles);
             }
@@ -748,6 +751,10 @@ impl ApiClient {
         self.post_empty("/api/codex-app/uninstall")
     }
 
+    fn repair_codex_app_gui_environment(&self) -> Result<serde_json::Value, String> {
+        self.post_empty("/api/codex-app/repair-gui-environment")
+    }
+
     fn stop_bridge(&self) -> Result<serde_json::Value, String> {
         self.post_empty("/api/bridge/stop")
     }
@@ -889,7 +896,13 @@ struct CodexAppProviderStatus {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GuiApiBaseStatus {
+    #[serde(default)]
+    configured: bool,
+    #[serde(default)]
+    login_issuer_configured: bool,
     value: Option<String>,
+    #[serde(default)]
+    login_issuer_value: Option<String>,
     error: Option<String>,
 }
 
@@ -1127,6 +1140,32 @@ fn text_field_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &st
 fn refresh_dashboard(api: &ApiClient, handles: &UiHandles) {
     let snapshot = api.dashboard();
     update_dashboard(handles, &snapshot);
+}
+
+fn repair_gui_environment_if_needed(api: &ApiClient, handles: &UiHandles) {
+    let snapshot = api.dashboard();
+    let Some(status) = snapshot.codex_app.as_ref() else {
+        return;
+    };
+    let needs_repair = status.config_ok
+        && status.auth_ok
+        && (!status.gui_api_base.configured || !status.gui_api_base.login_issuer_configured);
+    if !needs_repair {
+        return;
+    }
+
+    match api.repair_codex_app_gui_environment() {
+        Ok(_) => {
+            handles
+                .status_bar
+                .set_status_text("Codex App：已补写本地连接入口，重启 Codex App 生效", 2);
+        }
+        Err(err) => {
+            handles
+                .status_bar
+                .set_status_text(&format!("Codex App：补写本地连接入口失败：{err}"), 2);
+        }
+    }
 }
 
 fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
@@ -1386,7 +1425,7 @@ fn codex_app_detail(snapshot: &DashboardSnapshot) -> String {
     if status.configured {
         let mut detail = format!("已注入到 {}", status.codex_home);
         if let Some(value) = &status.gui_api_base.value {
-            detail.push_str(&format!("\n检测到遗留 CODEX_API_BASE_URL: {value}"));
+            detail.push_str(&format!("\nGUI backend: {value}"));
         }
         return detail;
     }
@@ -1397,6 +1436,12 @@ fn codex_app_detail(snapshot: &DashboardSnapshot) -> String {
     }
     if !status.auth_ok {
         parts.push("本地认证信息还没有准备好，请填写 API Key 后写入配置。".to_string());
+    }
+    if !status.gui_api_base.configured {
+        parts.push("Codex App GUI 还没有指向本地服务，请点击写入配置。".to_string());
+    }
+    if !status.gui_api_base.login_issuer_configured {
+        parts.push("本地授权入口还没有写入，请点击写入配置。".to_string());
     }
     if let Some(err) = &status.gui_api_base.error {
         parts.push(format!("检查环境变量时遇到问题: {err}"));

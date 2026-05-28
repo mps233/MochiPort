@@ -1,4 +1,4 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use tokio::{
     sync::{Mutex, broadcast, oneshot},
@@ -58,6 +58,16 @@ pub struct RemoteControlInner {
         std::collections::HashMap<String, tokio::sync::oneshot::Sender<anyhow::Result<Value>>>,
     pub client_request_methods: std::collections::HashMap<String, String>,
     pub client_request_thread_ids: std::collections::HashMap<String, String>,
+    pub authorized_clients: HashMap<String, AuthorizedRemoteControlClient>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizedRemoteControlClient {
+    pub client_id: String,
+    pub account_user_id: String,
+    pub device_identity: Option<Value>,
+    pub display_name: String,
+    pub last_seen_at_ms: u64,
 }
 
 impl RemoteControlState {
@@ -83,6 +93,7 @@ impl RemoteControlState {
                 pending: std::collections::HashMap::new(),
                 client_request_methods: std::collections::HashMap::new(),
                 client_request_thread_ids: std::collections::HashMap::new(),
+                authorized_clients: HashMap::new(),
             }),
             notifications,
         }

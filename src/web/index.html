@@ -303,7 +303,7 @@
             <pre id="app.configHint"></pre>
             <div class="field">
                 <label for="codex.providerName">第三方模型 provider name，可选</label>
-                <input id="codex.providerName" placeholder="可选" />
+                <input id="codex.providerName" value="codex" />
             </div>
             <div class="field">
                 <label for="codex.providerBaseUrl">第三方模型 base_url，可选</label>
@@ -397,7 +397,7 @@ async function loadAll() {
         `Codex App home：${codexApp.codexHome || "未找到"}`,
         `Codex App config：${codexApp.configOk ? "已配置" : codexApp.configError || "未配置"}`,
         `Codex App auth：${codexApp.authOk ? "已配置" : codexApp.authError || "未配置"}`,
-        `遗留 CODEX_API_BASE_URL：${guiApiBase.value || "未设置"}`,
+        `Codex App GUI backend：${guiApiBase.value || "未设置"}`,
         `飞书监听：${feishuWs.connected ? "已连接" : feishuWs.lastError || "未连接"}`,
         `bridge：${bridgeEnabled ? "已启用" : "已暂停"}`,
         `remote-control 连接：${remote.connected ? "已连接" : remote.lastError || "未连接"}`,

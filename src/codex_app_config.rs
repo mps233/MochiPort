@@ -55,6 +55,9 @@ pub struct CodexAppGuiApiBaseStatus {
     pub configured: bool,
     pub expected: String,
     pub value: Option<String>,
+    pub login_issuer_configured: bool,
+    pub login_issuer_expected: String,
+    pub login_issuer_value: Option<String>,
     pub error: Option<String>,
 }
 
@@ -95,6 +98,9 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     let auth_path = codex_home.join("auth.json");
     write_auth_json(&auth_path, &options)?;
 
+    #[cfg(not(test))]
+    let _ = configure_gui_environment(&options.backend_url);
+
     Ok(ConfigureCodexAppReport {
         codex_home,
         config_path,
@@ -114,7 +120,7 @@ pub fn uninstall_codex_app(
     let (removed_chatgpt_base_url, removed_model_provider) =
         uninstall_config_toml(&config_path, backend_url)?;
     let removed_auth = uninstall_auth_json(&auth_path)?;
-    let gui_api_base = inspect_gui_api_base_url(backend_url);
+    let gui_api_base = uninstall_gui_environment(backend_url);
 
     Ok(UninstallCodexAppReport {
         codex_home,
@@ -140,12 +146,13 @@ pub fn inspect_codex_app_config(
     let provider = inspect_provider_config(&config_path);
 
     let gui_api_base = inspect_gui_api_base_url(backend_url);
+    let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
 
     CodexAppConfigStatus {
         codex_home,
         config_path,
         auth_path,
-        configured: config_ok && auth_ok,
+        configured: config_ok && auth_ok && gui_ok,
         config_ok,
         auth_ok,
         config_error,
@@ -156,45 +163,49 @@ pub fn inspect_codex_app_config(
 }
 
 pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
+    let login_issuer_expected = oauth_issuer_url(backend_url);
     #[cfg(target_os = "macos")]
     {
-        match Command::new("launchctl")
-            .arg("getenv")
-            .arg("CODEX_API_BASE_URL")
-            .output()
-        {
-            Ok(output) if output.status.success() => {
-                let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let value = (!value.is_empty()).then_some(value);
-                CodexAppGuiApiBaseStatus {
-                    supported: true,
-                    configured: value.as_deref() == Some(backend_url),
-                    expected: backend_url.to_string(),
-                    value,
-                    error: None,
-                }
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                CodexAppGuiApiBaseStatus {
+        let api_base = match launchctl_getenv("CODEX_API_BASE_URL") {
+            Ok(value) => value,
+            Err(err) => {
+                return CodexAppGuiApiBaseStatus {
                     supported: true,
                     configured: false,
                     expected: backend_url.to_string(),
                     value: None,
-                    error: Some(if stderr.is_empty() {
-                        output.status.to_string()
-                    } else {
-                        stderr
-                    }),
-                }
+                    login_issuer_configured: false,
+                    login_issuer_expected,
+                    login_issuer_value: None,
+                    error: Some(err),
+                };
             }
-            Err(err) => CodexAppGuiApiBaseStatus {
-                supported: true,
-                configured: false,
-                expected: backend_url.to_string(),
-                value: None,
-                error: Some(err.to_string()),
-            },
+        };
+        let login_issuer = match launchctl_getenv("CODEX_APP_SERVER_LOGIN_ISSUER") {
+            Ok(value) => value,
+            Err(err) => {
+                return CodexAppGuiApiBaseStatus {
+                    supported: true,
+                    configured: false,
+                    expected: backend_url.to_string(),
+                    value: api_base,
+                    login_issuer_configured: false,
+                    login_issuer_expected,
+                    login_issuer_value: None,
+                    error: Some(err),
+                };
+            }
+        };
+        CodexAppGuiApiBaseStatus {
+            supported: true,
+            configured: api_base.as_deref() == Some(backend_url),
+            expected: backend_url.to_string(),
+            value: api_base,
+            login_issuer_configured: login_issuer.as_deref()
+                == Some(login_issuer_expected.as_str()),
+            login_issuer_expected,
+            login_issuer_value: login_issuer,
+            error: None,
         }
     }
 
@@ -205,12 +216,125 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
             configured: false,
             expected: backend_url.to_string(),
             value: None,
+            login_issuer_configured: false,
+            login_issuer_expected,
+            login_issuer_value: None,
             error: Some(
                 "CODEX_API_BASE_URL one-click setup is only implemented for macOS launchctl"
                     .to_string(),
             ),
         }
     }
+}
+
+pub fn configure_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
+    #[cfg(target_os = "macos")]
+    {
+        let login_issuer = oauth_issuer_url(backend_url);
+        let api_result = launchctl_setenv("CODEX_API_BASE_URL", backend_url);
+        let issuer_result = launchctl_setenv("CODEX_APP_SERVER_LOGIN_ISSUER", &login_issuer);
+        let mut status = inspect_gui_api_base_url(backend_url);
+        status.error = api_result.err().or_else(|| issuer_result.err());
+        status
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        inspect_gui_api_base_url(backend_url)
+    }
+}
+
+pub fn uninstall_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
+    #[cfg(target_os = "macos")]
+    {
+        let login_issuer = oauth_issuer_url(backend_url);
+        if launchctl_getenv("CODEX_API_BASE_URL")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(backend_url)
+        {
+            let _ = launchctl_unsetenv("CODEX_API_BASE_URL");
+        }
+        if launchctl_getenv("CODEX_APP_SERVER_LOGIN_ISSUER")
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(login_issuer.as_str())
+        {
+            let _ = launchctl_unsetenv("CODEX_APP_SERVER_LOGIN_ISSUER");
+        }
+        inspect_gui_api_base_url(backend_url)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        inspect_gui_api_base_url(backend_url)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_getenv(name: &str) -> Result<Option<String>, String> {
+    match Command::new("launchctl").arg("getenv").arg(name).output() {
+        Ok(output) if output.status.success() => {
+            let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            Ok((!value.is_empty()).then_some(value))
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_setenv(name: &str, value: &str) -> Result<(), String> {
+    match Command::new("launchctl")
+        .arg("setenv")
+        .arg(name)
+        .arg(value)
+        .output()
+    {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_unsetenv(name: &str) -> Result<(), String> {
+    match Command::new("launchctl").arg("unsetenv").arg(name).output() {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+pub fn oauth_issuer_url(backend_url: &str) -> String {
+    backend_url
+        .trim_end_matches('/')
+        .strip_suffix("/backend-api")
+        .unwrap_or_else(|| backend_url.trim_end_matches('/'))
+        .to_string()
 }
 
 fn inspect_config_toml(path: &Path, backend_url: &str) -> (bool, Option<String>) {
@@ -334,9 +458,65 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         }
     }
 
+    let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
-    std::fs::write(path, doc.to_string())
-        .with_context(|| format!("failed to write {}", path.display()))
+    std::fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn normalize_config_toml_order(raw: &str) -> String {
+    const PRIORITY_KEYS: &[&str] = &[
+        "chatgpt_base_url",
+        "model_provider",
+        "model",
+        "review_model",
+        "model_reasoning_effort",
+        "disable_response_storage",
+        "network_access",
+        "windows_wsl_setup_acknowledged",
+    ];
+
+    let mut root_lines = Vec::new();
+    let mut table_lines = Vec::new();
+    let mut in_tables = false;
+    for line in raw.lines() {
+        if line.trim_start().starts_with('[') {
+            in_tables = true;
+        }
+        if in_tables {
+            table_lines.push(line.to_string());
+        } else {
+            root_lines.push(line.to_string());
+        }
+    }
+
+    let mut prioritized = Vec::new();
+    let mut remaining = root_lines;
+    for key in PRIORITY_KEYS {
+        if let Some(index) = remaining
+            .iter()
+            .position(|line| assignment_key(line.trim()) == Some(*key))
+        {
+            prioritized.push(remaining.remove(index));
+        }
+    }
+
+    let mut output = Vec::new();
+    output.extend(prioritized);
+    for line in remaining {
+        if line.trim().is_empty()
+            && output
+                .last()
+                .is_none_or(|prev: &String| prev.trim().is_empty())
+        {
+            continue;
+        }
+        output.push(line);
+    }
+    if !output.is_empty() && !table_lines.is_empty() {
+        output.push(String::new());
+    }
+    output.extend(table_lines);
+    format!("{}\n", output.join("\n").trim_end())
 }
 
 fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)> {
@@ -559,7 +739,9 @@ fn local_chatgpt_jwt(options: &ConfigureCodexAppOptions) -> Result<String> {
         },
         "https://api.openai.com/auth": {
             "chatgpt_account_id": options.account_id,
+            "account_id": options.account_id,
             "chatgpt_account_user_id": format!("{}__{}", options.user_id, options.account_id),
+            "account_user_id": format!("{}__{}", options.user_id, options.account_id),
             "chatgpt_plan_type": options.plan_type,
             "chatgpt_user_id": options.user_id,
             "user_id": options.user_id,
@@ -666,6 +848,7 @@ mod tests {
         .expect("configure codex app");
 
         let config = std::fs::read_to_string(report.config_path).expect("read config");
+        assert!(config.starts_with("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\"\n"));
         assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
         assert!(config.contains("model_provider = \"codex\""));
         assert!(config.contains("model = \"gpt-5.5\""));

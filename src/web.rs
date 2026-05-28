@@ -1,12 +1,13 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::State,
+    extract::{Form, Query, State},
     http::{Request, StatusCode},
     middleware::{self, Next},
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Redirect},
     routing::{get, post},
 };
+use base64::Engine;
 use qrcode::{QrCode, render::svg};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -27,10 +28,16 @@ pub async fn start_bridge_if_ready(state: &SharedState, event_message: &'static 
 pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/oauth/authorize", get(oauth_authorize))
+        .route("/oauth/token", post(oauth_token))
         .route("/api/status", get(status))
         .route("/api/shutdown", post(shutdown))
         .route("/api/config", get(get_config).post(save_config))
         .route("/api/codex-app/configure", post(configure_codex_app))
+        .route(
+            "/api/codex-app/repair-gui-environment",
+            post(repair_codex_app_gui_environment),
+        )
         .route("/api/codex-app/uninstall", post(uninstall_codex_app))
         .route("/api/codex-app/status", get(codex_app_status))
         .route("/api/bridge/start", post(start_bridge))
@@ -60,6 +67,105 @@ pub fn router(state: SharedState) -> Router {
 
 async fn index() -> Html<&'static str> {
     Html(include_str!("web/index.html"))
+}
+
+#[derive(Deserialize)]
+struct OAuthAuthorizeQuery {
+    redirect_uri: String,
+    state: Option<String>,
+    current_workspace_id: Option<String>,
+    allowed_workspace_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OAuthTokenRequest {
+    code: String,
+}
+
+async fn oauth_authorize(Query(query): Query<OAuthAuthorizeQuery>) -> impl IntoResponse {
+    let account_id = query
+        .current_workspace_id
+        .or(query.allowed_workspace_id)
+        .unwrap_or_else(|| "acct_codex_remote_local".to_string());
+    let code = local_step_up_code(&account_id);
+    let mut redirect_uri = match reqwest::Url::parse(&query.redirect_uri) {
+        Ok(url) => url,
+        Err(_) => return (StatusCode::BAD_REQUEST, "invalid redirect_uri").into_response(),
+    };
+    {
+        let mut pairs = redirect_uri.query_pairs_mut();
+        pairs.append_pair("code", &code);
+        if let Some(state) = query.state {
+            pairs.append_pair("state", &state);
+        }
+    }
+    Redirect::temporary(redirect_uri.as_str()).into_response()
+}
+
+async fn oauth_token(Form(request): Form<OAuthTokenRequest>) -> impl IntoResponse {
+    let account_id = account_id_from_step_up_code(&request.code)
+        .unwrap_or_else(|| "acct_codex_remote_local".to_string());
+    let user_id = "user_codex_remote_local";
+    let account_user_id = format!("{user_id}__{account_id}");
+    let now = unix_now();
+    let token = jwt_none(&serde_json::json!({
+        "iss": "codex-remote-local",
+        "aud": ["https://api.openai.com/v1"],
+        "iat": now,
+        "nbf": now,
+        "exp": now + 5 * 60,
+        "pwd_auth_time": now * 1000,
+        "scope": "codex.remote_control.enroll",
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "account_id": account_id,
+            "chatgpt_account_user_id": account_user_id,
+            "account_user_id": account_user_id,
+            "user_id": user_id,
+        },
+    }));
+    Json(serde_json::json!({ "access_token": token })).into_response()
+}
+
+fn local_step_up_code(account_id: &str) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "account_id": account_id,
+            "iat": unix_now(),
+        }))
+        .unwrap_or_default(),
+    )
+}
+
+fn account_id_from_step_up_code(code: &str) -> Option<String> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(code)
+        .ok()?;
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    value
+        .get("account_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn jwt_none(payload: &serde_json::Value) -> String {
+    format!(
+        "{}.{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&serde_json::json!({ "alg": "none", "typ": "JWT" }))
+                .unwrap_or_default()
+        ),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(payload).unwrap_or_default()),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig")
+    )
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
@@ -210,7 +316,7 @@ async fn configure_codex_app(
                     "info",
                     "codex_app_configured",
                     format!(
-                        "codex_home={} config={} auth={} legacy_gui_api_base={}",
+                        "codex_home={} config={} auth={} gui_api_base={}",
                         report.codex_home.display(),
                         report.config_path.display(),
                         report.auth_path.display(),
@@ -268,6 +374,45 @@ async fn uninstall_codex_app(State(state): State<SharedState>) -> impl IntoRespo
             Json(json!({ "ok": false, "error": err.to_string() })),
         ),
     }
+}
+
+async fn repair_codex_app_gui_environment(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await.clone();
+    let backend_url = config.remote_control_base_url();
+    let status = codex_app_config::inspect_codex_app_config(None, &backend_url);
+    if !status.config_ok || !status.auth_ok {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "ok": false,
+                "error": "Codex App local config is not ready; write config first",
+                "status": status,
+            })),
+        );
+    }
+
+    let gui_api_base = codex_app_config::configure_gui_environment(&backend_url);
+    state
+        .push_event(
+            "info",
+            "codex_app_gui_environment_repaired",
+            format!(
+                "gui_api_base={} login_issuer={}",
+                gui_api_base.value.as_deref().unwrap_or_default(),
+                gui_api_base
+                    .login_issuer_value
+                    .as_deref()
+                    .unwrap_or_default()
+            ),
+        )
+        .await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "guiApiBase": gui_api_base,
+        })),
+    )
 }
 
 async fn codex_app_status(

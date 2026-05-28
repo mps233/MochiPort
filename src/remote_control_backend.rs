@@ -20,15 +20,20 @@ use base64::Engine;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::{
-    app_state::SharedState, chain_log, codex::CodexNotification, types::InboundAttachment,
+    app_state::{AuthorizedRemoteControlClient, SharedState},
+    chain_log,
+    codex::CodexNotification,
+    types::InboundAttachment,
 };
 
 static REMOTE_REQUEST_ID: AtomicU64 = AtomicU64::new(200_000);
 const PROTOCOL_VERSION: &str = "3";
 const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const FEISHU_BRIDGE_CLIENT_ID: &str = "codex-remote-feishu";
 
 pub(crate) enum OutboundWsMessage {
     Text(Value),
@@ -138,6 +143,18 @@ struct RenameEnvironmentRequest {
 #[derive(Debug, Deserialize)]
 struct RemoteControlClientFinishRequest {
     client_id: String,
+    step_up_token: Option<String>,
+    device_identity: Option<RemoteControlDeviceIdentity>,
+    device_key_proof: Option<Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RemoteControlDeviceIdentity {
+    algorithm: String,
+    key_id: String,
+    protection_class: String,
+    public_key_spki_der_base64: String,
 }
 
 struct ServerChunkAssembly {
@@ -354,19 +371,52 @@ async fn remote_control_mfa_requirement() -> Json<Value> {
 }
 
 async fn remote_control_clients(State(state): State<SharedState>) -> Json<Value> {
-    let snapshot = status_snapshot(&state).await;
-    let items = if snapshot.connected {
-        vec![remote_control_client_item(&snapshot)]
-    } else {
-        Vec::new()
-    };
+    let remote = state.remote_control.inner.lock().await;
+    let mut items = remote
+        .authorized_clients
+        .values()
+        .map(remote_control_client_item)
+        .collect::<Vec<_>>();
+    drop(remote);
+
+    let config = state.config.lock().await.clone();
+    if config.bridge.enabled
+        && !config.feishu.app_id.trim().is_empty()
+        && !items.iter().any(|item| {
+            item.get("client_id").and_then(Value::as_str) == Some(FEISHU_BRIDGE_CLIENT_ID)
+        })
+    {
+        let ws = state.feishu_ws.lock().await.clone();
+        items.push(feishu_bridge_client_item(ws.connected));
+    }
+    items.sort_by(|left, right| {
+        left.get("display_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .cmp(
+                right
+                    .get("display_name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+    });
     Json(json!({
         "items": items,
         "cursor": Value::Null,
     }))
 }
 
-async fn delete_remote_control_client(AxumPath(_client_id): AxumPath<String>) -> StatusCode {
+async fn delete_remote_control_client(
+    State(state): State<SharedState>,
+    AxumPath(client_id): AxumPath<String>,
+) -> StatusCode {
+    state
+        .remote_control
+        .inner
+        .lock()
+        .await
+        .authorized_clients
+        .remove(&client_id);
     StatusCode::NO_CONTENT
 }
 
@@ -406,38 +456,59 @@ async fn remote_control_client_enroll_start(headers: HeaderMap) -> impl IntoResp
         &headers,
         None,
         "enroll/finish",
+        None,
     ))
 }
 
 async fn remote_control_client_refresh_start(
+    State(state): State<SharedState>,
     headers: HeaderMap,
     payload: Option<Json<RemoteControlClientFinishRequest>>,
 ) -> impl IntoResponse {
+    let client_id = payload.map(|Json(value)| value.client_id);
+    let device_identity_hash = if let Some(client_id) = client_id.as_deref() {
+        state
+            .remote_control
+            .inner
+            .lock()
+            .await
+            .authorized_clients
+            .get(client_id)
+            .and_then(|client| {
+                client
+                    .device_identity
+                    .as_ref()
+                    .and_then(remote_control_device_identity_hash)
+            })
+    } else {
+        None
+    };
     Json(remote_control_client_start_response(
         &headers,
-        payload.map(|Json(value)| value.client_id),
+        client_id,
         "refresh/finish",
+        device_identity_hash,
     ))
 }
 
 async fn remote_control_client_enroll_finish(
+    State(state): State<SharedState>,
     headers: HeaderMap,
     Json(request): Json<RemoteControlClientFinishRequest>,
 ) -> impl IntoResponse {
-    Json(remote_control_client_token_response(
-        &headers,
-        &request.client_id,
-    ))
+    let token = remote_control_client_token_response(&headers, &request.client_id);
+    remember_remote_control_client(&state, &headers, &request).await;
+    Json(token)
 }
 
 async fn remote_control_client_refresh_finish(
+    State(state): State<SharedState>,
     headers: HeaderMap,
     Json(request): Json<RemoteControlClientFinishRequest>,
 ) -> impl IntoResponse {
-    Json(remote_control_client_token_response(
-        &headers,
-        &request.client_id,
-    ))
+    let token = remote_control_client_token_response(&headers, &request.client_id);
+    remember_remote_control_client(&state, &headers, &request).await;
+    Json(token)
 }
 
 async fn client_websocket(ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -461,6 +532,7 @@ fn remote_control_client_start_response(
     headers: &HeaderMap,
     client_id: Option<String>,
     finish_path: &str,
+    device_identity_hash: Option<String>,
 ) -> Value {
     let account_user_id = remote_control_account_user_id(headers);
     let client_id = client_id
@@ -471,7 +543,7 @@ fn remote_control_client_start_response(
         &account_user_id,
         &client_id,
         finish_path,
-        None,
+        device_identity_hash,
     );
     json!({
         "client_id": client_id,
@@ -507,7 +579,7 @@ fn remote_control_device_key_challenge(
     json!({
         "challenge_id": challenge_id,
         "challenge_token": local_remote_control_client_token(headers, client_id),
-        "nonce": stable_id("nonce", &challenge_id),
+        "nonce": stable_base64url_32("nonce", &challenge_id),
         "purpose": "remote_control_client_enrollment",
         "audience": "remote_control_client_enrollment",
         "account_user_id": account_user_id,
@@ -517,6 +589,30 @@ fn remote_control_device_key_challenge(
         "challenge_expires_at": iso8601_after(Duration::from_secs(5 * 60)),
         "device_identity_hash": device_identity_hash,
     })
+}
+
+async fn remember_remote_control_client(
+    state: &SharedState,
+    headers: &HeaderMap,
+    request: &RemoteControlClientFinishRequest,
+) {
+    let account_user_id = remote_control_account_user_id(headers);
+    let display_name = "Codex App Remote Control".to_string();
+    let device_identity = request
+        .device_identity
+        .as_ref()
+        .map(remote_control_device_identity_json);
+    let mut remote = state.remote_control.inner.lock().await;
+    remote.authorized_clients.insert(
+        request.client_id.clone(),
+        AuthorizedRemoteControlClient {
+            client_id: request.client_id.clone(),
+            account_user_id,
+            device_identity,
+            display_name,
+            last_seen_at_ms: unix_now_u64().saturating_mul(1000),
+        },
+    );
 }
 
 fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> String {
@@ -535,6 +631,7 @@ fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> St
         "scp": ["remote_control_controller_websocket"],
         "https://api.openai.com/auth": {
             "chatgpt_account_id": account_id,
+            "account_id": account_id,
             "chatgpt_account_user_id": account_user_id,
             "account_user_id": account_user_id,
             "user_id": jwt_bearer_claim(headers, "user_id")
@@ -660,24 +757,59 @@ fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Va
     })
 }
 
-fn remote_control_client_item(snapshot: &RemoteControlStatusResponse) -> Value {
-    let client_id = if snapshot.client_id.trim().is_empty() {
-        "codex-remote-feishu".to_string()
-    } else {
-        snapshot.client_id.clone()
-    };
-    let display_name = "Codex Remote Feishu".to_string();
-
+fn remote_control_client_item(client: &AuthorizedRemoteControlClient) -> Value {
     json!({
-        "client_id": client_id,
-        "display_name": display_name,
-        "device_model": display_name,
+        "client_id": client.client_id,
+        "account_user_id": client.account_user_id,
+        "display_name": client.display_name,
+        "device_model": client.display_name,
         "device_type": "desktop",
         "platform": local_platform_os(),
         "client_type": "CODEX_DESKTOP_APP",
         "enrollment_status": "enrolled",
-        "last_seen_at": Value::Null,
+        "last_seen_at": format_rfc3339_utc(client.last_seen_at_ms / 1000),
     })
+}
+
+fn feishu_bridge_client_item(connected: bool) -> Value {
+    json!({
+        "client_id": FEISHU_BRIDGE_CLIENT_ID,
+        "account_user_id": "user_codex_remote_local__acct_codex_remote_local",
+        "display_name": "飞书 Bridge",
+        "device_model": "Codex Remote Feishu",
+        "device_type": "desktop",
+        "platform": "feishu",
+        "client_type": "CODEX_DESKTOP_APP",
+        "enrollment_status": "enrolled",
+        "online": connected,
+        "last_seen_at": format_rfc3339_utc(unix_now_u64()),
+    })
+}
+
+fn remote_control_device_identity_json(identity: &RemoteControlDeviceIdentity) -> Value {
+    json!({
+        "algorithm": identity.algorithm.as_str(),
+        "key_id": identity.key_id.as_str(),
+        "protection_class": identity.protection_class.as_str(),
+        "public_key_spki_der_base64": identity.public_key_spki_der_base64.as_str(),
+    })
+}
+
+fn remote_control_device_identity_hash(identity: &Value) -> Option<String> {
+    let algorithm = identity.get("algorithm")?.as_str()?;
+    let key_id = identity.get("key_id")?.as_str()?;
+    let protection_class = identity.get("protection_class")?.as_str()?;
+    let public_key_spki_der_base64 = identity.get("public_key_spki_der_base64")?.as_str()?;
+    let canonical = json!({
+        "algorithm": algorithm,
+        "keyId": key_id,
+        "protectionClass": protection_class,
+        "publicKeySpkiDerBase64": public_key_spki_der_base64,
+    });
+    Some(
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(canonical.to_string().as_bytes())),
+    )
 }
 
 fn local_host_name() -> String {
@@ -1563,6 +1695,9 @@ fn local_chatgpt_jwt(account_id: &str, plan_type: &str) -> String {
         "email_verified": true,
         "https://api.openai.com/auth": {
             "chatgpt_account_id": account_id,
+            "account_id": account_id,
+            "chatgpt_account_user_id": format!("user_codex_remote_local__{account_id}"),
+            "account_user_id": format!("user_codex_remote_local__{account_id}"),
             "chatgpt_plan_type": plan_type,
             "chatgpt_user_id": "user_codex_remote_local",
             "user_id": "user_codex_remote_local",
@@ -2125,6 +2260,17 @@ fn stable_id(prefix: &str, seed: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("{prefix}_{hash:016x}")
+}
+
+fn stable_base64url_32(prefix: &str, seed: &str) -> String {
+    let mut bytes = [0u8; 32];
+    for chunk in 0..4 {
+        let id = stable_id(prefix, &format!("{seed}:{chunk}"));
+        let hex = id.rsplit('_').next().unwrap_or_default();
+        let value = u64::from_str_radix(hex, 16).unwrap_or_default();
+        bytes[(chunk * 8)..((chunk + 1) * 8)].copy_from_slice(&value.to_be_bytes());
+    }
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 fn uuid_like() -> String {

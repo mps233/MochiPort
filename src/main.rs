@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
             );
             println!("  removed local auth: {}", report.removed_auth);
             println!(
-                "  legacy CODEX_API_BASE_URL: {}",
+                "  Codex App GUI backend: {}",
                 report.gui_api_base.value.as_deref().unwrap_or("<unset>")
             );
             Ok(())
