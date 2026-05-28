@@ -108,7 +108,8 @@ async fn main() -> anyhow::Result<()> {
 async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<()> {
     let bind = config.bind.clone();
     let chain_log_path = chain_log_path(&config);
-    let state = AppState::new(config_path, config);
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let state = AppState::new(config_path, config, Some(shutdown_tx));
     {
         let config = state.config.lock().await;
         state
@@ -143,7 +144,11 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         .with_context(|| format!("invalid bind address `{bind}`"))?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("codex-remote web: http://{addr}");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        })
+        .await?;
     Ok(())
 }
 

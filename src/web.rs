@@ -28,6 +28,7 @@ pub fn router(state: SharedState) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/api/status", get(status))
+        .route("/api/shutdown", post(shutdown))
         .route("/api/config", get(get_config).post(save_config))
         .route("/api/codex-app/configure", post(configure_codex_app))
         .route("/api/codex-app/uninstall", post(uninstall_codex_app))
@@ -111,6 +112,18 @@ async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
         state_path: config.state_path.to_string_lossy().to_string(),
         feishu_ws,
     })
+}
+
+async fn shutdown(State(state): State<SharedState>) -> impl IntoResponse {
+    state
+        .push_event("warn", "shutdown_requested", "daemon shutdown requested")
+        .await;
+    stop_bridge_task(&state).await;
+    let accepted = state.request_shutdown().await;
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "accepted": accepted })),
+    )
 }
 
 async fn get_config(State(state): State<SharedState>) -> Json<AppConfig> {

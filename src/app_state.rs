@@ -1,7 +1,7 @@
 use std::{path::PathBuf, sync::Arc};
 
 use tokio::{
-    sync::{Mutex, broadcast},
+    sync::{Mutex, broadcast, oneshot},
     task::JoinHandle,
 };
 
@@ -28,6 +28,7 @@ pub struct AppState {
     pub events: Mutex<Vec<EventRecord>>,
     pub bridge_task: Mutex<Option<JoinHandle<()>>>,
     pub feishu_ws: Mutex<FeishuWsState>,
+    pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 pub struct RemoteControlState {
@@ -97,7 +98,11 @@ pub struct FeishuWsState {
 }
 
 impl AppState {
-    pub fn new(config_path: PathBuf, config: AppConfig) -> SharedState {
+    pub fn new(
+        config_path: PathBuf,
+        config: AppConfig,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+    ) -> SharedState {
         let persisted = PersistedState::load(&config.state_path);
         Arc::new(Self {
             config_path,
@@ -108,6 +113,7 @@ impl AppState {
             events: Mutex::new(Vec::new()),
             bridge_task: Mutex::new(None),
             feishu_ws: Mutex::new(FeishuWsState::default()),
+            shutdown_tx: Mutex::new(shutdown_tx),
         })
     }
 
@@ -147,6 +153,16 @@ impl AppState {
         if events.len() > 300 {
             let drain = events.len().saturating_sub(300);
             events.drain(0..drain);
+        }
+    }
+
+    pub async fn request_shutdown(&self) -> bool {
+        let mut shutdown_tx = self.shutdown_tx.lock().await;
+        if let Some(tx) = shutdown_tx.take() {
+            let _ = tx.send(());
+            true
+        } else {
+            false
         }
     }
 }

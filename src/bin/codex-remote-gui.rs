@@ -429,8 +429,9 @@ fn build_ui() {
     std::mem::forget(timer_store);
 
     {
+        let api = api.clone();
         let daemon_child = daemon_child.clone();
-        frame.on_close(move |_| stop_managed_daemon(&daemon_child));
+        frame.on_close(move |_| stop_daemon_on_exit(&api, &daemon_child));
     }
 
     frame.centre();
@@ -472,10 +473,59 @@ fn stop_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>) {
     }
 }
 
+fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>>) {
+    let _ = api.shutdown();
+    for _ in 0..10 {
+        thread::sleep(Duration::from_millis(100));
+        if !api.is_online() {
+            break;
+        }
+    }
+    stop_managed_daemon(daemon_child);
+    if api.is_online() {
+        stop_daemon_by_port(api);
+    }
+}
+
 fn replace_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>, child: Child) {
     stop_managed_daemon(daemon_child);
     daemon_child.borrow_mut().replace(child);
 }
+
+#[cfg(unix)]
+fn stop_daemon_by_port(api: &ApiClient) {
+    let Some(port) = api.local_port() else {
+        return;
+    };
+    let Ok(output) = Command::new("lsof")
+        .arg("-nP")
+        .arg("-iTCP")
+        .arg(format!(":{port}"))
+        .arg("-sTCP:LISTEN")
+        .arg("-F")
+        .arg("pc")
+        .output()
+    else {
+        return;
+    };
+    let mut pid: Option<String> = None;
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        if let Some(value) = line.strip_prefix('p') {
+            pid = Some(value.to_string());
+        } else if let Some(command) = line.strip_prefix('c')
+            && command.contains("codex-remote")
+        {
+            if let Some(pid) = pid.take() {
+                let _ = Command::new("kill").arg(pid).status();
+            }
+        } else if line.starts_with('c') {
+            pid = None;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn stop_daemon_by_port(_api: &ApiClient) {}
 
 fn spawn_daemon() -> Result<Child, String> {
     let mut command = daemon_command()?;
@@ -650,6 +700,12 @@ impl ApiClient {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
     }
 
+    fn local_port(&self) -> Option<u16> {
+        let url = reqwest::Url::parse(&self.base_url).ok()?;
+        let host = url.host_str()?;
+        matches!(host, "127.0.0.1" | "localhost" | "::1").then_some(url.port_or_known_default()?)
+    }
+
     fn dashboard(&self) -> DashboardSnapshot {
         let status = match self.get::<ServerStatus>("/api/status") {
             Ok(status) => status,
@@ -687,6 +743,10 @@ impl ApiClient {
 
     fn stop_bridge(&self) -> Result<serde_json::Value, String> {
         self.post_empty("/api/bridge/stop")
+    }
+
+    fn shutdown(&self) -> Result<serde_json::Value, String> {
+        self.post_empty("/api/shutdown")
     }
 
     fn start_feishu_onboard(&self) -> Result<FeishuOnboardStart, String> {
