@@ -10,7 +10,7 @@ use base64::Engine;
 use serde::Serialize;
 use serde_json::json;
 
-const DEFAULT_PROVIDER_NAME: &str = "codex";
+const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_REASONING_EFFORT: &str = "xhigh";
 
@@ -542,23 +542,56 @@ fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)>
         doc.remove("chatgpt_base_url");
     }
 
-    let removed_model_provider = doc
+    let model_provider = doc
         .get("model_provider")
         .and_then(|item| item.as_str())
         .map(str::trim)
-        .map(|value| value == DEFAULT_PROVIDER_NAME || value == "llmx")
+        .map(str::to_string);
+    let removed_model_provider = model_provider
+        .as_deref()
+        .map(is_local_provider_name)
         .unwrap_or(false);
     if removed_model_provider {
         doc.remove("model_provider");
     }
 
     if removed_chatgpt_base_url || removed_model_provider {
+        for provider_name in [
+            model_provider.as_deref(),
+            Some(DEFAULT_PROVIDER_NAME),
+            Some("codex"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|provider_name| is_local_provider_name(provider_name))
+        {
+            remove_provider_table(&mut doc, provider_name);
+        }
         backup_existing(path)?;
         std::fs::write(path, doc.to_string())
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
 
     Ok((removed_chatgpt_base_url, removed_model_provider))
+}
+
+fn is_local_provider_name(value: &str) -> bool {
+    matches!(value, DEFAULT_PROVIDER_NAME | "codex" | "llmx")
+}
+
+fn remove_provider_table(doc: &mut toml_edit::DocumentMut, provider_name: &str) {
+    let providers_empty = if let Some(providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    {
+        providers.remove(provider_name);
+        providers.is_empty()
+    } else {
+        false
+    };
+    if providers_empty {
+        doc.remove("model_providers");
+    }
 }
 
 fn uninstall_auth_json(path: &Path) -> Result<bool> {
@@ -848,7 +881,7 @@ mod tests {
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
             plan_type: "pro".to_string(),
-            provider_name: Some("codex".to_string()),
+            provider_name: None,
             provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
             model: Some("gpt-5.5".to_string()),
@@ -858,14 +891,14 @@ mod tests {
         let config = std::fs::read_to_string(report.config_path).expect("read config");
         assert!(config.starts_with("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\"\n"));
         assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
-        assert!(config.contains("model_provider = \"codex\""));
+        assert!(config.contains("model_provider = \"ai-codex\""));
         assert!(config.contains("model = \"gpt-5.5\""));
         assert!(config.contains("review_model = \"gpt-5.5\""));
         assert!(config.contains("model_reasoning_effort = \"xhigh\""));
         assert!(config.contains("disable_response_storage = true"));
         assert!(config.contains("network_access = \"enabled\""));
         assert!(config.contains("windows_wsl_setup_acknowledged = true"));
-        assert!(config.contains("[model_providers.codex]"));
+        assert!(config.contains("[model_providers.ai-codex]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(config.contains("wire_api = \"responses\""));
         assert!(config.contains("requires_openai_auth = true"));
@@ -890,10 +923,10 @@ mod tests {
         let config_path = codex_home.join("config.toml");
         std::fs::write(
             &config_path,
-            r#"model_provider = "codex"
+            r#"model_provider = "ai-codex"
 
-[model_providers.codex]
-name = "codex"
+[model_providers.ai-codex]
+name = "ai-codex"
 wire_api = "responses"
 requires_openai_auth = true
 base_url = "https://old.example"
@@ -909,7 +942,7 @@ requires_openai_auth = true
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
             plan_type: "pro".to_string(),
-            provider_name: Some("codex".to_string()),
+            provider_name: None,
             provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
             model: Some("gpt-5.5".to_string()),
@@ -965,8 +998,8 @@ base_url = "https://api.example.invalid"
         assert!(!config.contains("chatgpt_base_url"));
         assert!(!config.contains("model_provider = \"codex\""));
         assert!(config.contains("model = \"gpt-5.5\""));
-        assert!(config.contains("[model_providers.codex]"));
-        assert!(config.contains("base_url = \"https://api.example.invalid\""));
+        assert!(!config.contains("[model_providers.codex]"));
+        assert!(!config.contains("base_url = \"https://api.example.invalid\""));
         assert!(!auth_path.exists());
 
         let _ = std::fs::remove_dir_all(codex_home);

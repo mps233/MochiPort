@@ -34,7 +34,7 @@
 - 第三方 Base URL
 - API Key
 
-Provider 名称可以留空。留空时，如果填写了 Base URL 或 API Key，默认会使用 `codex`。
+Provider 名称可以留空。留空时，如果填写了 Base URL 或 API Key，默认会使用 `ai-codex`。
 
 ### 5. 写入 Codex App 配置
 

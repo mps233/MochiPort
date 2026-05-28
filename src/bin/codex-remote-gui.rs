@@ -163,7 +163,7 @@ fn build_ui() {
         .with_gap(Size::new(10, 12))
         .build();
     form.add_growable_col(1, 1);
-    let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "codex");
+    let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "ai-codex");
     let provider_base_url = text_field_row(&codex_page, &form, "Base URL", "");
     let provider_key = text_field_row(&codex_page, &form, "API Key", "");
     config_box.add_sizer(
