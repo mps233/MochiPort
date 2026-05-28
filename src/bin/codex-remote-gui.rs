@@ -147,14 +147,14 @@ fn build_ui() {
     .build();
     let config_header = BoxSizer::builder(Orientation::Horizontal).build();
     let config_hint = StaticText::builder(&codex_page)
-        .with_label("用于 Codex App remote-control。会写入本地 backend 地址和 ChatgptAuthTokens。")
+        .with_label("填写第三方模型服务的 Base URL 和 API Key，然后写入 Codex App 配置。")
         .build();
     config_hint.set_foreground_color(Colour::rgb(103, 111, 124));
     config_header.add(&config_hint, 1, SizerFlag::AlignCenterVertical, 0);
     let uninstall_button = Button::builder(&codex_page).with_label("卸载注入").build();
-    uninstall_button.set_tooltip("移除 chatgpt_base_url、model_provider 和本地认证注入");
+    uninstall_button.set_tooltip("移除 Codex App 中由 Codex Remote 写入的连接配置");
     let configure_button = Button::builder(&codex_page).with_label("写入配置").build();
-    configure_button.set_tooltip("写入 ~/.codex/config.toml 和本地 ChatgptAuthTokens");
+    configure_button.set_tooltip("写入 Codex App 使用 Codex Remote 所需的本地配置");
     config_header.add(&uninstall_button, 0, SizerFlag::Right, 8);
     config_header.add(&configure_button, 0, SizerFlag::Right, 0);
     config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 12);
@@ -164,7 +164,7 @@ fn build_ui() {
         .build();
     form.add_growable_col(1, 1);
     let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "");
-    let provider_base_url = text_field_row(&codex_page, &form, "第三方 Base URL", "");
+    let provider_base_url = text_field_row(&codex_page, &form, "Base URL", "");
     let provider_key = text_field_row(&codex_page, &form, "API Key", "");
     config_box.add_sizer(
         &form,
@@ -769,8 +769,6 @@ struct CodexAppStatus {
     configured: bool,
     config_ok: bool,
     auth_ok: bool,
-    config_error: Option<String>,
-    auth_error: Option<String>,
     gui_api_base: GuiApiBaseStatus,
 }
 
@@ -818,15 +816,16 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
         .with_size(Size::new(34, 34))
         .build();
     icon.set_min_size(Size::new(34, 34));
-    row.add_spacer(14);
+    row.add_spacer(18);
     row.add(
         &icon,
         0,
         SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        12,
+        16,
     );
 
     let text_col = BoxSizer::builder(Orientation::Vertical).build();
+    text_col.add_stretch_spacer(1);
     let title_row = BoxSizer::builder(Orientation::Horizontal).build();
     let marker = StaticText::builder(&panel).with_label("●").build();
     marker.set_foreground_color(Colour::rgb(116, 124, 136));
@@ -844,9 +843,10 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
     detail.set_foreground_color(Colour::rgb(103, 111, 124));
     detail.wrap(250);
     text_col.add(&detail, 0, SizerFlag::Expand, 0);
+    text_col.add_stretch_spacer(1);
 
     row.add_sizer(&text_col, 1, SizerFlag::Expand, 0);
-    row.add_spacer(12);
+    row.add_spacer(18);
     panel.set_sizer(row, true);
     StatusPanel {
         panel,
@@ -1181,7 +1181,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
         set_status_panel(
             &handles.codex_status,
             "未注入",
-            "需要先写入 chatgpt_base_url 和本地 ChatgptAuthTokens。",
+            "填写 Base URL 和 API Key 后写入配置。",
             StateTone::Warn,
         );
         handles.status_bar.set_status_text("Codex App：未注入", 2);
@@ -1255,25 +1255,13 @@ fn codex_app_detail(snapshot: &DashboardSnapshot) -> String {
 
     let mut parts = Vec::new();
     if !status.config_ok {
-        parts.push(
-            status
-                .config_error
-                .as_deref()
-                .unwrap_or("config.toml 未匹配本地 backend")
-                .to_string(),
-        );
+        parts.push("Codex App 还没有写入本地连接配置。".to_string());
     }
     if !status.auth_ok {
-        parts.push(
-            status
-                .auth_error
-                .as_deref()
-                .unwrap_or("auth.json 未使用 ChatgptAuthTokens")
-                .to_string(),
-        );
+        parts.push("本地认证信息还没有准备好，请填写 API Key 后写入配置。".to_string());
     }
     if let Some(err) = &status.gui_api_base.error {
-        parts.push(format!("检测遗留 CODEX_API_BASE_URL 失败: {err}"));
+        parts.push(format!("检查环境变量时遇到问题: {err}"));
     }
     if parts.is_empty() {
         "尚未注入 Codex App 配置。".to_string()
