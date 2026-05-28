@@ -32,7 +32,7 @@ fn build_ui() {
     let status_bar = StatusBar::builder(&frame)
         .with_fields_count(3)
         .with_status_widths(vec![-2, -1, -1])
-        .add_initial_text(0, "本地服务未自动启动")
+        .add_initial_text(0, "本地服务启动中")
         .add_initial_text(1, "日志写入本地文件")
         .add_initial_text(2, "自动刷新 2.5s")
         .build();
@@ -260,7 +260,7 @@ fn build_ui() {
         StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &system_page, "本地服务")
             .build();
     let service_text = StaticText::builder(&system_page)
-        .with_label("Codex Remote 不会自动常驻或修改系统启动项。需要使用本地 backend 时，请明确点击启动本地服务或手动运行 daemon。日志保留在项目 logs 目录。")
+        .with_label("Codex Remote 会在 GUI 打开时启动本地 backend，并在 GUI 退出时关闭本次启动的 backend。不会安装开机启动项，也不会修改系统常驻服务。")
         .build();
     service_text.set_foreground_color(Colour::rgb(82, 91, 105));
     service_text.wrap(760);
@@ -321,6 +321,17 @@ fn build_ui() {
         provider_key,
     };
 
+    let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
+    match start_daemon(&api) {
+        Ok(child) => {
+            if let Some(child) = child {
+                replace_managed_daemon(&daemon_child, child);
+            }
+        }
+        Err(err) => {
+            status_bar.set_status_text(&format!("本地服务启动失败：{err}"), 0);
+        }
+    }
     refresh_dashboard(&api, &handles);
 
     {
@@ -333,9 +344,13 @@ fn build_ui() {
         let api = api.clone();
         let handles = handles;
         let frame = frame;
+        let daemon_child = daemon_child.clone();
         start_daemon_button.on_click(move |_| match start_daemon(&api) {
-            Ok(_) => {
-                show_info(&frame, "本地服务已启动。");
+            Ok(child) => {
+                if let Some(child) = child {
+                    replace_managed_daemon(&daemon_child, child);
+                }
+                show_info(&frame, "本地服务已运行。");
                 refresh_dashboard(&api, &handles);
             }
             Err(err) => show_error(&frame, &err),
@@ -413,6 +428,11 @@ fn build_ui() {
     timer_store.borrow_mut().replace(timer);
     std::mem::forget(timer_store);
 
+    {
+        let daemon_child = daemon_child.clone();
+        frame.on_close(move |_| stop_managed_daemon(&daemon_child));
+    }
+
     frame.centre();
     frame.show(true);
 }
@@ -424,25 +444,37 @@ fn default_base_url() -> String {
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
 }
 
-fn start_daemon(api: &ApiClient) -> Result<(), String> {
+fn start_daemon(api: &ApiClient) -> Result<Option<Child>, String> {
     if api.is_online() {
-        return Ok(());
+        return Ok(None);
     }
 
     let mut child = spawn_daemon()?;
     for _ in 0..40 {
         thread::sleep(Duration::from_millis(250));
         if api.is_online() {
-            std::mem::forget(child);
-            return Ok(());
+            return Ok(Some(child));
         }
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
             return Err(format!("本地服务启动后退出：{status}"));
         }
     }
 
-    std::mem::forget(child);
+    let _ = child.kill();
+    let _ = child.wait();
     Err("本地服务已启动，但 10 秒内没有响应。请检查 logs/codex-remote-chain.log。".to_string())
+}
+
+fn stop_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>) {
+    if let Some(mut child) = daemon_child.borrow_mut().take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+fn replace_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>, child: Child) {
+    stop_managed_daemon(daemon_child);
+    daemon_child.borrow_mut().replace(child);
 }
 
 fn spawn_daemon() -> Result<Child, String> {
