@@ -26,9 +26,9 @@ fn build_ui() {
 
     let frame = Frame::builder()
         .with_title("Codex Remote")
-        .with_size(Size::new(920, 640))
+        .with_size(Size::new(980, 700))
         .build();
-    frame.set_background_color(Colour::rgb(248, 249, 251));
+    frame.set_background_color(Colour::rgb(246, 247, 250));
     let status_bar = StatusBar::builder(&frame)
         .with_fields_count(3)
         .with_status_widths(vec![-2, -1, -1])
@@ -38,39 +38,43 @@ fn build_ui() {
         .build();
 
     let root = Panel::builder(&frame).build();
-    root.set_background_color(Colour::rgb(248, 249, 251));
+    root.set_background_color(Colour::rgb(246, 247, 250));
 
     let root_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
+    let header_panel = Panel::builder(&root)
+        .with_style(PanelStyle::BorderNone)
+        .build();
+    header_panel.set_background_color(Colour::rgb(246, 247, 250));
     let header = BoxSizer::builder(Orientation::Horizontal).build();
     let header_copy = BoxSizer::builder(Orientation::Vertical).build();
-    let title = StaticText::builder(&root)
+    let title = StaticText::builder(&header_panel)
         .with_label("Codex Remote")
         .build();
     title.set_foreground_color(Colour::rgb(24, 28, 35));
     header_copy.add(&title, 0, SizerFlag::Bottom, 4);
-    let subtitle = StaticText::builder(&root)
+    let subtitle = StaticText::builder(&header_panel)
         .with_label("本地 remote-control backend + 飞书桥接")
         .build();
     subtitle.set_foreground_color(Colour::rgb(91, 100, 114));
     header_copy.add(&subtitle, 0, SizerFlag::Expand, 0);
     header.add_sizer(&header_copy, 1, SizerFlag::Expand, 0);
 
-    let endpoint = StaticText::builder(&root)
+    let endpoint = StaticText::builder(&header_panel)
         .with_label(&format!("服务地址 {}", api.base_url))
         .build();
     endpoint.set_foreground_color(Colour::rgb(103, 111, 124));
     header.add(&endpoint, 0, SizerFlag::AlignCenterVertical, 0);
-    root_sizer.add_sizer(
-        &header,
+    header_panel.set_sizer(header, true);
+    root_sizer.add(
+        &header_panel,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         18,
     );
 
-    let status_section = BoxSizer::builder(Orientation::Vertical).build();
-    let status_title = section_label(&root, "状态概览");
-    status_section.add(&status_title, 0, SizerFlag::Left | SizerFlag::Right, 4);
+    let status_section =
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &root, "状态概览").build();
     let status_row = BoxSizer::builder(Orientation::Horizontal).build();
     let service_status = status_panel(&root, "本地服务", StatusIconKind::Service);
     let feishu_status = status_panel(&root, "飞书", StatusIconKind::Feishu);
@@ -93,72 +97,67 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::All,
         8,
     );
-    status_section.add_sizer(&status_row, 0, SizerFlag::Expand | SizerFlag::Top, 6);
+    status_section.add_sizer(
+        &status_row,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        8,
+    );
     root_sizer.add_sizer(
         &status_section,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        16,
+        14,
     );
 
     let notebook = Notebook::builder(&root).build();
 
-    let codex_page = Panel::builder(&notebook).build();
-    codex_page.set_background_color(Colour::rgb(255, 255, 255));
+    let codex_page = Panel::builder(&notebook)
+        .with_style(PanelStyle::TabTraversal)
+        .build();
+    codex_page.set_background_color(Colour::rgb(250, 251, 253));
     let codex_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let codex_status_title = section_label(&codex_page, "Codex App 状态");
-    codex_sizer.add(
-        &codex_status_title,
-        0,
-        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        14,
-    );
+    let codex_status_box =
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &codex_page, "Codex App 状态")
+            .build();
     let codex_config_state = StaticText::builder(&codex_page)
         .with_label("正在读取 ~/.codex 配置状态")
         .build();
     codex_config_state.set_foreground_color(Colour::rgb(75, 84, 98));
     codex_config_state.wrap(760);
-    codex_sizer.add(
+    codex_status_box.add(
         &codex_config_state,
         0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
+        SizerFlag::Expand | SizerFlag::All,
+        12,
     );
-
-    let codex_divider = StaticLine::builder(&codex_page).build();
-    codex_sizer.add(
-        &codex_divider,
+    codex_sizer.add_sizer(
+        &codex_status_box,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        16,
+        14,
     );
 
+    let config_box = StaticBoxSizerBuilder::new_with_label(
+        Orientation::Vertical,
+        &codex_page,
+        "写入 Codex App 配置",
+    )
+    .build();
     let config_header = BoxSizer::builder(Orientation::Horizontal).build();
-    let config_title = section_label(&codex_page, "写入 Codex App 配置");
-    config_header.add(&config_title, 1, SizerFlag::AlignCenterVertical, 0);
+    let config_hint = StaticText::builder(&codex_page)
+        .with_label("用于 Codex App remote-control。会写入本地 backend 地址和 ChatgptAuthTokens。")
+        .build();
+    config_hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    config_header.add(&config_hint, 1, SizerFlag::AlignCenterVertical, 0);
     let uninstall_button = Button::builder(&codex_page).with_label("卸载注入").build();
     uninstall_button.set_tooltip("移除 chatgpt_base_url、model_provider 和本地认证注入");
     let configure_button = Button::builder(&codex_page).with_label("写入配置").build();
     configure_button.set_tooltip("写入 ~/.codex/config.toml 和本地 ChatgptAuthTokens");
     config_header.add(&uninstall_button, 0, SizerFlag::Right, 8);
     config_header.add(&configure_button, 0, SizerFlag::Right, 0);
-    codex_sizer.add_sizer(
-        &config_header,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        16,
-    );
-    let config_hint = StaticText::builder(&codex_page)
-        .with_label("用于 Codex App remote-control。会写入本地 backend 地址和 ChatgptAuthTokens。")
-        .build();
-    config_hint.set_foreground_color(Colour::rgb(103, 111, 124));
-    codex_sizer.add(
-        &config_hint,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
+    config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 12);
 
     let form = FlexGridSizer::builder(0, 2)
         .with_gap(Size::new(10, 12))
@@ -167,35 +166,39 @@ fn build_ui() {
     let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "");
     let provider_base_url = text_field_row(&codex_page, &form, "第三方 Base URL", "");
     let provider_key = text_field_row(&codex_page, &form, "API Key", "");
-    codex_sizer.add_sizer(
+    config_box.add_sizer(
         &form,
         0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        12,
+    );
+    codex_sizer.add_sizer(
+        &config_box,
+        0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        16,
+        14,
     );
     codex_sizer.add_stretch_spacer(1);
     codex_page.set_sizer(codex_sizer, true);
 
-    let feishu_page = Panel::builder(&notebook).build();
-    feishu_page.set_background_color(Colour::rgb(255, 255, 255));
+    let feishu_page = Panel::builder(&notebook)
+        .with_style(PanelStyle::TabTraversal)
+        .build();
+    feishu_page.set_background_color(Colour::rgb(250, 251, 253));
     let feishu_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let feishu_title = section_label(&feishu_page, "飞书机器人");
-    feishu_sizer.add(
-        &feishu_title,
-        0,
-        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
-    );
+    let feishu_box =
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &feishu_page, "飞书机器人")
+            .build();
     let feishu_state = StaticText::builder(&feishu_page)
         .with_label("检测中")
         .build();
     feishu_state.set_foreground_color(Colour::rgb(73, 83, 96));
-    feishu_sizer.add(
+    feishu_box.add(
         &feishu_state,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
+        12,
     );
 
     let feishu_detail = StaticText::builder(&feishu_page)
@@ -203,29 +206,29 @@ fn build_ui() {
         .build();
     feishu_detail.set_foreground_color(Colour::rgb(82, 91, 105));
     feishu_detail.wrap(760);
-    feishu_sizer.add(
+    feishu_box.add(
         &feishu_detail,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
+        12,
     );
 
     let divider = StaticLine::builder(&feishu_page).build();
-    feishu_sizer.add(
+    feishu_box.add(
         &divider,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
+        14,
     );
 
     let feishu_meta = StaticText::builder(&feishu_page).with_label("").build();
     feishu_meta.set_foreground_color(Colour::rgb(103, 111, 124));
     feishu_meta.wrap(760);
-    feishu_sizer.add(
+    feishu_box.add(
         &feishu_meta,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
+        12,
     );
 
     let feishu_buttons = BoxSizer::builder(Orientation::Horizontal).build();
@@ -238,36 +241,30 @@ fn build_ui() {
     change_bot_button.set_tooltip("重新进入飞书扫码接入流程");
     feishu_buttons.add(&stop_bridge_button, 0, SizerFlag::Right, 8);
     feishu_buttons.add(&change_bot_button, 0, SizerFlag::Right, 0);
+    feishu_box.add_sizer(&feishu_buttons, 0, SizerFlag::Expand | SizerFlag::All, 12);
     feishu_sizer.add_sizer(
-        &feishu_buttons,
+        &feishu_box,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
+        14,
     );
     feishu_sizer.add_stretch_spacer(1);
     feishu_page.set_sizer(feishu_sizer, true);
 
-    let system_page = Panel::builder(&notebook).build();
-    system_page.set_background_color(Colour::rgb(255, 255, 255));
+    let system_page = Panel::builder(&notebook)
+        .with_style(PanelStyle::TabTraversal)
+        .build();
+    system_page.set_background_color(Colour::rgb(250, 251, 253));
     let system_sizer = BoxSizer::builder(Orientation::Vertical).build();
-    let system_title = section_label(&system_page, "本地服务");
-    system_sizer.add(
-        &system_title,
-        0,
-        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
-    );
+    let system_box =
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &system_page, "本地服务")
+            .build();
     let service_text = StaticText::builder(&system_page)
         .with_label("Codex Remote 不会自动常驻或修改系统启动项。需要使用本地 backend 时，请明确点击启动本地服务或手动运行 daemon。日志保留在项目 logs 目录。")
         .build();
     service_text.set_foreground_color(Colour::rgb(82, 91, 105));
     service_text.wrap(760);
-    system_sizer.add(
-        &service_text,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
-    );
+    system_box.add(&service_text, 0, SizerFlag::Expand | SizerFlag::All, 12);
     let refresh_button = Button::builder(&system_page).with_label("检测状态").build();
     refresh_button.set_tooltip("立即刷新本地服务、飞书和 Codex App 连接状态");
     let start_daemon_button = Button::builder(&system_page)
@@ -278,11 +275,12 @@ fn build_ui() {
     system_buttons.add_stretch_spacer(1);
     system_buttons.add(&start_daemon_button, 0, SizerFlag::Right, 8);
     system_buttons.add(&refresh_button, 0, SizerFlag::Right, 0);
+    system_box.add_sizer(&system_buttons, 0, SizerFlag::Expand | SizerFlag::All, 12);
     system_sizer.add_sizer(
-        &system_buttons,
+        &system_box,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        22,
+        14,
     );
     system_sizer.add_stretch_spacer(1);
     system_page.set_sizer(system_sizer, true);
@@ -716,7 +714,6 @@ struct DashboardSnapshot {
 #[serde(rename_all = "camelCase")]
 struct ServerStatus {
     bind: String,
-    state_path: String,
     feishu_ws: FeishuWsState,
 }
 
@@ -807,16 +804,12 @@ struct FeishuOnboardPoll {
     error: Option<serde_json::Value>,
 }
 
-fn section_label(parent: &Panel, label: &str) -> StaticText {
-    let text = StaticText::builder(parent).with_label(label).build();
-    text.set_foreground_color(Colour::rgb(30, 35, 43));
-    text
-}
-
 fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> StatusPanel {
-    let panel = Panel::builder(parent).build();
+    let panel = Panel::builder(parent)
+        .with_style(PanelStyle::BorderStatic)
+        .build();
     panel.set_background_color(Colour::rgb(255, 255, 255));
-    panel.set_min_size(Size::new(250, 78));
+    panel.set_min_size(Size::new(280, 96));
 
     let row = BoxSizer::builder(Orientation::Horizontal).build();
     let icon = StaticBitmap::builder(&panel)
@@ -825,6 +818,7 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
         .with_size(Size::new(34, 34))
         .build();
     icon.set_min_size(Size::new(34, 34));
+    row.add_spacer(14);
     row.add(
         &icon,
         0,
@@ -848,10 +842,11 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
 
     let detail = StaticText::builder(&panel).with_label("").build();
     detail.set_foreground_color(Colour::rgb(103, 111, 124));
-    detail.wrap(220);
+    detail.wrap(250);
     text_col.add(&detail, 0, SizerFlag::Expand, 0);
 
     row.add_sizer(&text_col, 1, SizerFlag::Expand, 0);
+    row.add_spacer(12);
     panel.set_sizer(row, true);
     StatusPanel {
         panel,
@@ -1025,7 +1020,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
         set_status_panel(
             &handles.service_status,
             "未运行",
-            snapshot.error.as_deref().unwrap_or("无法连接本地服务"),
+            "点击“启动本地服务”后再连接 Codex App。",
             StateTone::Error,
         );
         set_status_panel(
@@ -1045,9 +1040,12 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
             .feishu_detail
             .set_label("请先启动 codex-remote 后端。");
         handles.feishu_meta.set_label("");
-        handles
-            .codex_config_state
-            .set_label("无法读取 Codex App 配置状态。");
+        let config_state = snapshot
+            .error
+            .as_deref()
+            .map(|err| format!("无法读取 Codex App 配置状态。\n本地服务连接错误: {err}"))
+            .unwrap_or_else(|| "无法读取 Codex App 配置状态。".to_string());
+        handles.codex_config_state.set_label(&config_state);
         handles.status_bar.set_status_text("本地服务：离线", 0);
         handles.status_bar.set_status_text("飞书：不可用", 1);
         handles.status_bar.set_status_text("Codex App：不可用", 2);
@@ -1063,7 +1061,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
         set_status_panel(
             &handles.service_status,
             "运行中",
-            &format!("监听 {}，状态文件 {}", status.bind, status.state_path),
+            &format!("监听 {}", status.bind),
             StateTone::Ok,
         );
         handles
