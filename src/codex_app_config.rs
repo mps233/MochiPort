@@ -70,6 +70,15 @@ pub struct CodexAppConfigStatus {
     pub config_error: Option<String>,
     pub auth_error: Option<String>,
     pub gui_api_base: CodexAppGuiApiBaseStatus,
+    pub provider: Option<CodexAppProviderStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAppProviderStatus {
+    pub name: String,
+    pub base_url: Option<String>,
+    pub key: Option<String>,
 }
 
 pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<ConfigureCodexAppReport> {
@@ -128,6 +137,7 @@ pub fn inspect_codex_app_config(
 
     let (config_ok, config_error) = inspect_config_toml(&config_path, backend_url);
     let (auth_ok, auth_error) = inspect_auth_json(&auth_path);
+    let provider = inspect_provider_config(&config_path);
 
     let gui_api_base = inspect_gui_api_base_url(backend_url);
 
@@ -141,6 +151,7 @@ pub fn inspect_codex_app_config(
         config_error,
         auth_error,
         gui_api_base,
+        provider,
     }
 }
 
@@ -251,6 +262,36 @@ fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
             Some("auth_mode is not chatgptAuthTokens".to_string()),
         )
     }
+}
+
+fn inspect_provider_config(path: &Path) -> Option<CodexAppProviderStatus> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let doc = raw.parse::<toml_edit::DocumentMut>().ok()?;
+    let name = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let provider = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|providers| providers.get(&name))
+        .and_then(|item| item.as_table());
+    let base_url = provider
+        .and_then(|table| table.get("base_url"))
+        .and_then(|item| item.as_str())
+        .map(str::to_string);
+    let key = provider
+        .and_then(|table| table.get("experimental_bearer_token"))
+        .and_then(|item| item.as_str())
+        .map(str::to_string);
+
+    Some(CodexAppProviderStatus {
+        name,
+        base_url,
+        key,
+    })
 }
 
 fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()> {

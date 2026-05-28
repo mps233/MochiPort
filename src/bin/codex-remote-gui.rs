@@ -316,6 +316,9 @@ fn build_ui() {
         refresh_button,
         start_daemon_button,
         uninstall_button,
+        provider_name,
+        provider_base_url,
+        provider_key,
     };
 
     refresh_dashboard(&api, &handles);
@@ -697,6 +700,9 @@ struct UiHandles {
     refresh_button: Button,
     start_daemon_button: Button,
     uninstall_button: Button,
+    provider_name: TextCtrl,
+    provider_base_url: TextCtrl,
+    provider_key: TextCtrl,
 }
 
 #[derive(Default)]
@@ -770,6 +776,15 @@ struct CodexAppStatus {
     config_ok: bool,
     auth_ok: bool,
     gui_api_base: GuiApiBaseStatus,
+    provider: Option<CodexAppProviderStatus>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexAppProviderStatus {
+    name: String,
+    base_url: Option<String>,
+    key: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1191,6 +1206,30 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
         .codex_config_state
         .set_label(&codex_app_detail(snapshot));
     handles.codex_config_state.wrap(500);
+    fill_provider_form_if_empty(handles, snapshot);
+}
+
+fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot) {
+    let Some(provider) = snapshot
+        .codex_app
+        .as_ref()
+        .and_then(|status| status.provider.as_ref())
+    else {
+        return;
+    };
+    if handles.provider_name.get_value().trim().is_empty() {
+        handles.provider_name.change_value(&provider.name);
+    }
+    if handles.provider_base_url.get_value().trim().is_empty()
+        && let Some(base_url) = provider.base_url.as_deref()
+    {
+        handles.provider_base_url.change_value(base_url);
+    }
+    if handles.provider_key.get_value().trim().is_empty()
+        && let Some(key) = provider.key.as_deref()
+    {
+        handles.provider_key.change_value(key);
+    }
 }
 
 fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
