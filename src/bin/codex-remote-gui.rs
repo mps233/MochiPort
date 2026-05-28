@@ -821,7 +821,7 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
     let row = BoxSizer::builder(Orientation::Horizontal).build();
     let icon = StaticBitmap::builder(&panel)
         .with_bitmap(Some(status_icon_bitmap(icon_kind, 34)))
-        .with_scale_mode(Some(ScaleMode::None))
+        .with_scale_mode(Some(ScaleMode::AspectFit))
         .with_size(Size::new(34, 34))
         .build();
     icon.set_min_size(Size::new(34, 34));
@@ -862,13 +862,48 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
 }
 
 fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
-    let mut canvas = IconCanvas::new(size, [0, 0, 0, 0]);
     match kind {
-        StatusIconKind::Service => draw_service_icon(&mut canvas),
-        StatusIconKind::Feishu => draw_feishu_icon(&mut canvas),
-        StatusIconKind::Codex => draw_codex_icon(&mut canvas),
+        StatusIconKind::Feishu => return brand_bitmap("feishu-logo.png"),
+        StatusIconKind::Codex => return brand_bitmap("codex-app-logo.png"),
+        StatusIconKind::Service => {}
     }
+
+    let mut canvas = IconCanvas::new(size, [0, 0, 0, 0]);
+    draw_service_icon(&mut canvas);
     Bitmap::from_rgba(&canvas.rgba, size as u32, size as u32).expect("status icon bitmap")
+}
+
+fn brand_bitmap(file_name: &str) -> Bitmap {
+    let path = brand_asset_path(file_name);
+    let image = image::open(&path)
+        .unwrap_or_else(|err| panic!("failed to load brand image {}: {err}", path.display()))
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    Bitmap::from_rgba(image.as_raw(), width, height)
+        .unwrap_or_else(|| panic!("failed to create bitmap from {}", path.display()))
+}
+
+fn brand_asset_path(file_name: &str) -> PathBuf {
+    if let Some(path) = bundled_brand_asset_path(file_name) {
+        return path;
+    }
+
+    repo_root_from_target_exe()
+        .or_else(repo_root_from_cwd)
+        .map(|repo| repo.join("packaging/brand").join(file_name))
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| panic!("brand asset not found: {file_name}"))
+}
+
+fn bundled_brand_asset_path(file_name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let macos_dir = exe.parent()?;
+    let contents_dir = macos_dir.parent()?;
+    if macos_dir.file_name().and_then(|value| value.to_str()) != Some("MacOS") {
+        return None;
+    }
+    let path = contents_dir.join("Resources/brand").join(file_name);
+    path.exists().then_some(path)
 }
 
 struct IconCanvas {
@@ -959,24 +994,6 @@ fn draw_service_icon(canvas: &mut IconCanvas) {
     canvas.fill_round_rect(12, 12, 10, 3, 1, [246, 255, 251, 255]);
     canvas.fill_round_rect(12, 17, 10, 3, 1, [246, 255, 251, 255]);
     canvas.fill_rect(12, 22, 3, 2, [246, 255, 251, 255]);
-}
-
-fn draw_feishu_icon(canvas: &mut IconCanvas) {
-    canvas.fill_circle(17.0, 17.0, 17.0, [238, 246, 255, 255]);
-    canvas.fill_circle(14.0, 14.0, 6.5, [47, 121, 246, 255]);
-    canvas.fill_circle(21.0, 14.0, 6.5, [28, 184, 133, 255]);
-    canvas.fill_circle(14.0, 21.0, 6.5, [255, 181, 62, 255]);
-    canvas.fill_circle(21.0, 21.0, 6.5, [246, 96, 83, 255]);
-    canvas.fill_circle(17.5, 17.5, 5.5, [255, 255, 255, 255]);
-}
-
-fn draw_codex_icon(canvas: &mut IconCanvas) {
-    canvas.fill_circle(17.0, 17.0, 17.0, [241, 244, 248, 255]);
-    canvas.fill_round_rect(8, 9, 18, 16, 4, [32, 38, 48, 255]);
-    canvas.fill_rect(11, 13, 3, 2, [238, 246, 255, 255]);
-    canvas.fill_rect(14, 15, 3, 2, [238, 246, 255, 255]);
-    canvas.fill_rect(11, 17, 3, 2, [238, 246, 255, 255]);
-    canvas.fill_round_rect(17, 20, 6, 2, 1, [97, 203, 158, 255]);
 }
 
 fn text_field_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &str) -> TextCtrl {

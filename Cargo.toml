@@ -10,6 +10,7 @@ async-trait = "0.1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 futures-util = "0.3"
+image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
 mime_guess = "2"
 once_cell = "1"
 prost = "0.13"
@@ -29,7 +30,7 @@ url = "2"
 wxdragon = { version = "0.9.16", optional = true }
 
 [features]
-gui = ["dep:wxdragon", "reqwest/blocking"]
+gui = ["dep:image", "dep:wxdragon", "reqwest/blocking"]
 
 [[bin]]
 name = "codex-remote-gui"
