@@ -513,7 +513,11 @@ fn oauth_issuer_url(backend_url: &str) -> String {
 
 #[cfg(target_os = "macos")]
 fn unset_launchctl_env_if_matches(name: &str, expected: &str) {
-    let Ok(output) = Command::new("launchctl").arg("getenv").arg(name).output() else {
+    let Ok(output) = Command::new("/bin/launchctl")
+        .arg("getenv")
+        .arg(name)
+        .output()
+    else {
         return;
     };
     if !output.status.success() {
@@ -521,7 +525,10 @@ fn unset_launchctl_env_if_matches(name: &str, expected: &str) {
     }
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if value == expected {
-        let _ = Command::new("launchctl").arg("unsetenv").arg(name).output();
+        let _ = Command::new("/bin/launchctl")
+            .arg("unsetenv")
+            .arg(name)
+            .output();
     }
 }
 

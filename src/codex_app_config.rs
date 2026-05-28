@@ -275,7 +275,11 @@ pub fn uninstall_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus 
 
 #[cfg(target_os = "macos")]
 fn launchctl_getenv(name: &str) -> Result<Option<String>, String> {
-    match Command::new("launchctl").arg("getenv").arg(name).output() {
+    match Command::new("/bin/launchctl")
+        .arg("getenv")
+        .arg(name)
+        .output()
+    {
         Ok(output) if output.status.success() => {
             let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
             Ok((!value.is_empty()).then_some(value))
@@ -294,7 +298,7 @@ fn launchctl_getenv(name: &str) -> Result<Option<String>, String> {
 
 #[cfg(target_os = "macos")]
 fn launchctl_setenv(name: &str, value: &str) -> Result<(), String> {
-    match Command::new("launchctl")
+    match Command::new("/bin/launchctl")
         .arg("setenv")
         .arg(name)
         .arg(value)
@@ -315,7 +319,11 @@ fn launchctl_setenv(name: &str, value: &str) -> Result<(), String> {
 
 #[cfg(target_os = "macos")]
 fn launchctl_unsetenv(name: &str) -> Result<(), String> {
-    match Command::new("launchctl").arg("unsetenv").arg(name).output() {
+    match Command::new("/bin/launchctl")
+        .arg("unsetenv")
+        .arg(name)
+        .output()
+    {
         Ok(output) if output.status.success() => Ok(()),
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
