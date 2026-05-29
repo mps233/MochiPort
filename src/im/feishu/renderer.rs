@@ -140,6 +140,27 @@ fn looks_like_image_data_url(text: &str) -> bool {
     trimmed.starts_with("data:image/") && trimmed.contains(";base64,")
 }
 
+fn looks_like_image_base64(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("iVBORw0KGgo")
+        || trimmed.starts_with("/9j/")
+        || trimmed.starts_with("R0lGOD")
+        || trimmed.starts_with("UklGR")
+}
+
+fn image_element(image_key: &str, alt: &str) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "img",
+        "img_key": image_key,
+        "alt": {
+            "tag": "plain_text",
+            "content": alt
+        },
+        "mode": "fit_horizontal",
+        "preview": true
+    })
+}
+
 fn summarize_command_header(text: &str) -> String {
     let single_line = text
         .replace("\r\n", " ")
@@ -426,6 +447,14 @@ pub struct FeishuThreadListEntry {
     pub title: String,
     pub summary: Option<String>,
     pub last_activity_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FeishuThreadCreateDefaults {
+    pub cwd: Option<String>,
+    pub model_provider: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
 }
 
 fn build_interactive_choice_block(
@@ -1233,6 +1262,59 @@ pub fn build_status_card(text: &str) -> serde_json::Value {
     build_markdown_card(&content, None, None)
 }
 
+pub fn build_image_generation_result_card(
+    status: &str,
+    revised_prompt: Option<&str>,
+    saved_path: Option<&str>,
+    image_key: &str,
+) -> serde_json::Value {
+    let mut elements = vec![image_element(image_key, "生成图片")];
+    let mut details = vec![format!(
+        "**状态**：`{}`",
+        normalize_card_markdown(status).trim()
+    )];
+    if let Some(revised_prompt) = revised_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        details.push(format!(
+            "**修订提示词**\n{}",
+            normalize_card_markdown(revised_prompt)
+        ));
+    }
+    if let Some(saved_path) = saved_path.map(str::trim).filter(|value| !value.is_empty()) {
+        details.push(format!(
+            "**保存路径**：`{}`",
+            normalize_card_markdown(saved_path)
+        ));
+    }
+    elements.push(serde_json::json!({
+        "tag": "markdown",
+        "content": details.join("\n\n")
+    }));
+
+    let mut card = build_markdown_card("", Some("图片生成"), Some("orange"));
+    card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
+    card["body"]["vertical_spacing"] = serde_json::json!("8px");
+    card["body"]["elements"] = serde_json::Value::Array(elements);
+    card
+}
+
+pub fn build_image_view_result_card(path: &str, image_key: &str) -> serde_json::Value {
+    let elements = vec![
+        image_element(image_key, "图片预览"),
+        serde_json::json!({
+            "tag": "markdown",
+            "content": format!("**路径**：`{}`", normalize_card_markdown(path))
+        }),
+    ];
+    let mut card = build_markdown_card("", Some("图片"), Some("carmine"));
+    card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
+    card["body"]["vertical_spacing"] = serde_json::json!("8px");
+    card["body"]["elements"] = serde_json::Value::Array(elements);
+    card
+}
+
 pub fn build_thread_routing_choice_card(
     title: &str,
     body: &str,
@@ -1260,6 +1342,159 @@ pub fn build_thread_routing_choice_card(
     }
 
     let mut card = build_markdown_card("", Some(title), Some("indigo"));
+    card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
+    card["body"]["vertical_spacing"] = serde_json::json!("8px");
+    card["body"]["elements"] = serde_json::Value::Array(elements);
+    card
+}
+
+pub fn build_thread_create_settings_card(
+    request_id: &str,
+    defaults: &FeishuThreadCreateDefaults,
+) -> serde_json::Value {
+    let default_line = |label: &str, value: Option<&String>| {
+        format!(
+            "{}：{}",
+            label,
+            value
+                .map(|value| normalize_card_markdown(value))
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| "使用 Codex App 默认值".to_string())
+        )
+    };
+    let mut elements = vec![
+        serde_json::json!({
+            "tag": "markdown",
+            "content": "填写这次新会话的属性。留空表示沿用 Codex App 当前配置。"
+        }),
+        serde_json::json!({
+            "tag": "markdown",
+            "content": format!(
+                "<font color='grey'>{}\n{}\n{}\n{}</font>",
+                default_line("目录", defaults.cwd.as_ref()),
+                default_line("Provider", defaults.model_provider.as_ref()),
+                default_line("模型", defaults.model.as_ref()),
+                default_line("推理强度", defaults.effort.as_ref())
+            )
+        }),
+        serde_json::json!({
+            "tag": "form",
+            "name": "thread_create_form",
+            "element_id": "thread_create_form",
+            "direction": "vertical",
+            "vertical_spacing": "8px",
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": "**项目目录**"
+                },
+                {
+                    "tag": "input",
+                    "name": "cwd",
+                    "required": false,
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "留空=不指定目录；也可以填绝对路径"
+                    }
+                },
+                {
+                    "tag": "markdown",
+                    "content": "**Provider**"
+                },
+                {
+                    "tag": "input",
+                    "name": "model_provider",
+                    "required": false,
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "留空=使用当前 provider"
+                    }
+                },
+                {
+                    "tag": "markdown",
+                    "content": "**模型**"
+                },
+                {
+                    "tag": "input",
+                    "name": "model",
+                    "required": false,
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "留空=使用当前模型"
+                    }
+                },
+                {
+                    "tag": "markdown",
+                    "content": "**推理强度**"
+                },
+                {
+                    "tag": "input",
+                    "name": "effort",
+                    "required": false,
+                    "placeholder": {
+                        "tag": "plain_text",
+                        "content": "minimal / low / medium / high / xhigh"
+                    }
+                },
+                {
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "auto",
+                            "elements": [
+                                {
+                                    "tag": "button",
+                                    "type": "primary",
+                                    "text": {
+                                        "tag": "plain_text",
+                                        "content": "确认创建"
+                                    },
+                                    "name": "submit_thread_create",
+                                    "form_action_type": "submit",
+                                    "behaviors": [
+                                        {
+                                            "type": "callback",
+                                            "value": {
+                                                "kind": "thread_route_create_submit",
+                                                "requestId": request_id
+                                            }
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }),
+    ];
+    elements.push(build_interactive_choice_block(
+        "使用默认配置创建",
+        "不指定目录、模型和推理强度，完全沿用 Codex App 当前配置。",
+        serde_json::json!({
+            "kind": "thread_route_create_default",
+            "requestId": request_id
+        }),
+        false,
+        false,
+        false,
+    ));
+    elements.push(build_interactive_choice_block(
+        "返回",
+        "回到新建/恢复会话选择。",
+        serde_json::json!({
+            "kind": "thread_route_choice",
+            "requestId": request_id,
+            "action": "back"
+        }),
+        false,
+        false,
+        false,
+    ));
+
+    let mut card = build_markdown_card("", Some("新建会话设置"), Some("indigo"));
     card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
     card["body"]["vertical_spacing"] = serde_json::json!("8px");
     card["body"]["elements"] = serde_json::Value::Array(elements);
@@ -2915,6 +3150,7 @@ pub fn item_markdown_summary(item: &JsonValue) -> Option<String> {
                 .get("result")
                 .and_then(|v| v.as_str())
                 .filter(|v| !looks_like_image_data_url(v))
+                .filter(|v| !looks_like_image_base64(v))
                 .map(|v| truncate_text(v, 800))
                 .map(|v| normalize_card_markdown(&v))
                 .filter(|text| !text.is_empty());

@@ -84,6 +84,8 @@ struct CardActionOperator {
 struct CardAction {
     #[serde(default)]
     value: serde_json::Value,
+    #[serde(default)]
+    form_value: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -498,6 +500,36 @@ async fn handle_card_action_event(
                 }),
             )
         }
+        "thread_route_create_submit" => {
+            let request_id = value
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("thread route create action missing requestId"))?
+                .to_string();
+            (
+                String::new(),
+                None,
+                Some(InboundAction::ThreadRouteCreateSubmit {
+                    request_id,
+                    cwd: form_string(&payload.action.form_value, "cwd"),
+                    model_provider: form_string(&payload.action.form_value, "model_provider"),
+                    model: form_string(&payload.action.form_value, "model"),
+                    effort: form_string(&payload.action.form_value, "effort"),
+                }),
+            )
+        }
+        "thread_route_create_default" => {
+            let request_id = value
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("thread route create action missing requestId"))?
+                .to_string();
+            (
+                String::new(),
+                None,
+                Some(InboundAction::ThreadRouteCreateDefault { request_id }),
+            )
+        }
         "thread_route_resume_selected" => {
             let request_id = value
                 .get("requestId")
@@ -575,6 +607,22 @@ async fn handle_card_action_event(
     })
     .await
     .map_err(|_| anyhow!("feishu inbound pump closed"))
+}
+
+fn form_string(form_value: &serde_json::Value, name: &str) -> Option<String> {
+    form_value
+        .get(name)
+        .and_then(|value| {
+            value.as_str().map(str::to_string).or_else(|| {
+                value
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .and_then(|item| item.as_str())
+                    .map(str::to_string)
+            })
+        })
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn service_id_from_ws_url(wss_url: &str) -> i32 {

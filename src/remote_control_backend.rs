@@ -1837,8 +1837,45 @@ pub async fn request(state: &SharedState, method: &str, params: Value) -> Result
     }
 }
 
-pub async fn start_thread(state: &SharedState) -> Result<String> {
-    let response = request(state, "thread/start", json!({})).await?;
+#[derive(Debug, Clone, Default)]
+pub struct ThreadStartOptions {
+    pub cwd: Option<String>,
+    pub model_provider: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
+impl ThreadStartOptions {
+    fn to_params(&self) -> Value {
+        let mut params = serde_json::Map::new();
+        if let Some(cwd) = non_empty(self.cwd.as_deref()) {
+            params.insert("cwd".to_string(), json!(cwd));
+            params.insert("runtimeWorkspaceRoots".to_string(), json!([cwd]));
+        }
+        if let Some(model_provider) = non_empty(self.model_provider.as_deref()) {
+            params.insert("modelProvider".to_string(), json!(model_provider));
+        }
+        if let Some(model) = non_empty(self.model.as_deref()) {
+            params.insert("model".to_string(), json!(model));
+        }
+        if let Some(effort) = non_empty(self.reasoning_effort.as_deref()) {
+            params.insert(
+                "config".to_string(),
+                json!({
+                    "model_reasoning_effort": effort,
+                }),
+            );
+        }
+        Value::Object(params)
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+pub async fn start_thread(state: &SharedState, options: ThreadStartOptions) -> Result<String> {
+    let response = request(state, "thread/start", options.to_params()).await?;
     response
         .get("thread")
         .and_then(|v| v.get("id"))

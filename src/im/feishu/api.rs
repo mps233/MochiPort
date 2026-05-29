@@ -760,9 +760,12 @@ impl FeishuApi {
             .and_then(|v| v.to_str())
             .unwrap_or("image.png")
             .to_string();
+        let mime = mime_guess::from_path(&file_name)
+            .first_raw()
+            .unwrap_or("image/png");
         let part = reqwest::multipart::Part::bytes(bytes)
             .file_name(file_name)
-            .mime_str("image/png")?;
+            .mime_str(mime)?;
         let form = reqwest::multipart::Form::new()
             .text("image_type", "message")
             .part("image", part);

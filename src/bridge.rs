@@ -1,7 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context, Result, anyhow};
+use base64::Engine;
 use tokio::{sync::mpsc, task::JoinSet};
 use tracing::info;
 
@@ -30,6 +31,26 @@ use crate::{
 static THREAD_ROUTING_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const THREAD_HISTORY_PAGE_SIZE: u32 = 8;
 const THREAD_LOADED_LIMIT: u32 = 64;
+
+#[derive(Debug, Clone, Default)]
+struct ThreadCreateForm {
+    cwd: Option<String>,
+    model_provider: Option<String>,
+    model: Option<String>,
+    effort: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct UploadedImageForFeishu {
+    image_key: String,
+    local_path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+struct DecodedImage {
+    bytes: Vec<u8>,
+    extension: &'static str,
+}
 
 pub async fn start_bridge(state: SharedState) {
     let config = state.config.lock().await.clone();
@@ -412,6 +433,30 @@ async fn handle_inbound_action(
         InboundAction::ThreadRouteChoice { request_id, action } => {
             handle_thread_route_choice(state, api, message, &request_id, &action).await
         }
+        InboundAction::ThreadRouteCreateSubmit {
+            request_id,
+            cwd,
+            model_provider,
+            model,
+            effort,
+        } => {
+            handle_thread_route_create_submit(
+                state,
+                api,
+                message,
+                &request_id,
+                ThreadCreateForm {
+                    cwd,
+                    model_provider,
+                    model,
+                    effort,
+                },
+            )
+            .await
+        }
+        InboundAction::ThreadRouteCreateDefault { request_id } => {
+            handle_thread_route_create_default(state, api, message, &request_id).await
+        }
         InboundAction::ThreadRouteResumeSelected {
             request_id,
             thread_id,
@@ -460,53 +505,296 @@ async fn handle_thread_route_choice(
     update_thread_routing_choice_card_selected(&api, card_message_id.as_deref(), action).await;
 
     match action {
-        "create_new" => {
-            let thread_id = remote_control_backend::start_thread(&state).await?;
-            let route = RouteTarget {
-                conversation_key: message.conversation_key(),
-                account_id: message.account_id.clone(),
-                chat_id: message.chat_id.clone(),
-            };
-            {
-                let mut runtime = state.runtime.lock().await;
-                runtime.unbind_routes_for_conversation(&route.conversation_key);
-                runtime.bind_route(&thread_id, route.clone());
-                runtime.clear_thread_routing_request(request_id);
-            }
-            {
-                let mut persisted = state.persisted.lock().await;
-                persisted
-                    .sessions
-                    .insert(route.conversation_key.clone(), thread_id.clone());
-                let config = state.config.lock().await.clone();
-                persisted.save(&config.state_path)?;
-            }
-            let card = renderer::build_thread_routing_result_card(
-                "已创建新会话",
-                &format!("已接入新 thread `{thread_id}`。\n\n现在可以直接发送消息。"),
-            );
-            if let Some(message_id) = card_message_id.as_deref() {
-                let _ = api.update_interactive_message(message_id, &card).await;
-            } else {
-                let _ = send_interactive_to_target(&api, &route.chat_id, &card).await?;
-            }
-            state
-                .push_event(
-                    "info",
-                    "thread_route_created",
-                    format!("conversation={} thread={thread_id}", route.conversation_key),
-                )
-                .await;
-            Ok(())
-        }
+        "create_new" => send_thread_create_settings_card(&state, &api, &message, request).await,
         "resume_history" => {
             send_thread_routing_list(&state, &api, &message, Some(request), None, 1).await
         }
+        "back" => send_thread_routing_choice_card(&state, &api, &message, Some(request)).await,
         other => {
             api.send_text_message(&message.chat_id, &format!("不支持的 thread 操作：{other}"))
                 .await?;
             Ok(())
         }
+    }
+}
+
+async fn handle_thread_route_create_default(
+    state: SharedState,
+    api: FeishuApi,
+    message: InboundMessage,
+    request_id: &str,
+) -> Result<()> {
+    let Some(request) = checked_thread_routing_request(&state, &api, &message, request_id).await?
+    else {
+        return Ok(());
+    };
+    create_new_thread_for_route(
+        &state,
+        &api,
+        &message,
+        request_id,
+        request,
+        remote_control_backend::ThreadStartOptions::default(),
+    )
+    .await
+}
+
+async fn handle_thread_route_create_submit(
+    state: SharedState,
+    api: FeishuApi,
+    message: InboundMessage,
+    request_id: &str,
+    form: ThreadCreateForm,
+) -> Result<()> {
+    let Some(request) = checked_thread_routing_request(&state, &api, &message, request_id).await?
+    else {
+        return Ok(());
+    };
+    let options = match thread_start_options_from_form(form) {
+        Ok(options) => options,
+        Err(err) => {
+            api.send_text_message(&message.chat_id, &format!("新建会话参数不正确：{err}"))
+                .await?;
+            return Ok(());
+        }
+    };
+    create_new_thread_for_route(&state, &api, &message, request_id, request, options).await
+}
+
+async fn checked_thread_routing_request(
+    state: &SharedState,
+    api: &FeishuApi,
+    message: &InboundMessage,
+    request_id: &str,
+) -> Result<Option<ThreadRoutingRequestState>> {
+    let request = {
+        state
+            .runtime
+            .lock()
+            .await
+            .thread_routing_request(request_id)
+    };
+    let Some(request) = request else {
+        api.send_text_message(
+            &message.chat_id,
+            "这张 thread 选择卡片已经失效，请重新发送消息。",
+        )
+        .await?;
+        return Ok(None);
+    };
+    if request.conversation_key != message.conversation_key() {
+        api.send_text_message(&message.chat_id, "这个 thread 选择不属于当前会话。")
+            .await?;
+        return Ok(None);
+    }
+    Ok(Some(request))
+}
+
+async fn send_thread_create_settings_card(
+    state: &SharedState,
+    api: &FeishuApi,
+    message: &InboundMessage,
+    request: ThreadRoutingRequestState,
+) -> Result<()> {
+    let defaults = load_thread_create_defaults();
+    let card = renderer::build_thread_create_settings_card(&request.request_id, &defaults);
+    if let Some(message_id) = request
+        .message_id
+        .clone()
+        .or_else(|| message.card_message_id.clone())
+    {
+        api.update_interactive_message(&message_id, &card).await?;
+    } else {
+        let message_id = send_interactive_to_target(api, &message.chat_id, &card).await?;
+        state
+            .runtime
+            .lock()
+            .await
+            .update_thread_routing_request_message_id(&request.request_id, message_id);
+    }
+    state
+        .push_event(
+            "info",
+            "thread_create_settings_sent",
+            format!("conversation={}", request.conversation_key),
+        )
+        .await;
+    Ok(())
+}
+
+async fn create_new_thread_for_route(
+    state: &SharedState,
+    api: &FeishuApi,
+    message: &InboundMessage,
+    request_id: &str,
+    request: ThreadRoutingRequestState,
+    options: remote_control_backend::ThreadStartOptions,
+) -> Result<()> {
+    let card_message_id = request
+        .message_id
+        .clone()
+        .or_else(|| message.card_message_id.clone());
+    if let Some(message_id) = card_message_id.as_deref() {
+        let card = renderer::build_thread_routing_result_card(
+            "正在创建会话",
+            "正在创建新的 Codex thread...",
+        );
+        let _ = api.update_interactive_message(message_id, &card).await;
+    }
+
+    let thread_id = remote_control_backend::start_thread(state, options.clone()).await?;
+    let route = RouteTarget {
+        conversation_key: message.conversation_key(),
+        account_id: message.account_id.clone(),
+        chat_id: message.chat_id.clone(),
+    };
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.unbind_routes_for_conversation(&route.conversation_key);
+        runtime.bind_route(&thread_id, route.clone());
+        runtime.clear_thread_routing_request(request_id);
+    }
+    {
+        let mut persisted = state.persisted.lock().await;
+        persisted
+            .sessions
+            .insert(route.conversation_key.clone(), thread_id.clone());
+        let config = state.config.lock().await.clone();
+        persisted.save(&config.state_path)?;
+    }
+    let card = renderer::build_thread_routing_result_card(
+        "已创建新会话",
+        &format!(
+            "已接入新 thread `{thread_id}`。\n\n{}\n\n现在可以直接发送消息。",
+            summarize_thread_start_options(&options)
+        ),
+    );
+    if let Some(message_id) = card_message_id.as_deref() {
+        let _ = api.update_interactive_message(message_id, &card).await;
+    } else {
+        let _ = send_interactive_to_target(api, &route.chat_id, &card).await?;
+    }
+    state
+        .push_event(
+            "info",
+            "thread_route_created",
+            format!("conversation={} thread={thread_id}", route.conversation_key),
+        )
+        .await;
+    Ok(())
+}
+
+fn thread_start_options_from_form(
+    form: ThreadCreateForm,
+) -> Result<remote_control_backend::ThreadStartOptions> {
+    Ok(remote_control_backend::ThreadStartOptions {
+        cwd: normalize_thread_cwd(form.cwd)?,
+        model_provider: normalize_optional_text(form.model_provider),
+        model: normalize_optional_text(form.model),
+        reasoning_effort: normalize_reasoning_effort(form.effort)?,
+    })
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_reasoning_effort(value: Option<String>) -> Result<Option<String>> {
+    let Some(value) = normalize_optional_text(value) else {
+        return Ok(None);
+    };
+    let normalized = value.to_ascii_lowercase();
+    match normalized.as_str() {
+        "default" | "默认" => Ok(None),
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" => Ok(Some(normalized)),
+        _ => Err(anyhow!(
+            "推理强度只支持 none / minimal / low / medium / high / xhigh"
+        )),
+    }
+}
+
+fn normalize_thread_cwd(value: Option<String>) -> Result<Option<String>> {
+    let Some(value) = normalize_optional_text(value) else {
+        return Ok(None);
+    };
+    let expanded = expand_home_prefix(&value);
+    let path = PathBuf::from(expanded);
+    if !path.is_absolute() {
+        return Err(anyhow!("项目目录必须是绝对路径，或留空不指定目录"));
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(anyhow!("项目目录不是文件夹：{}", path.display()));
+    }
+    if !path.exists() {
+        std::fs::create_dir_all(&path)
+            .with_context(|| format!("创建项目目录失败：{}", path.display()))?;
+    }
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("读取项目目录失败：{}", path.display()))?;
+    Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+fn expand_home_prefix(value: &str) -> PathBuf {
+    if value == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return Path::new(&home).join(rest);
+        }
+    }
+    PathBuf::from(value)
+}
+
+fn summarize_thread_start_options(options: &remote_control_backend::ThreadStartOptions) -> String {
+    let mut lines = Vec::new();
+    if let Some(cwd) = options.cwd.as_ref() {
+        lines.push(format!("目录：`{cwd}`"));
+    } else {
+        lines.push("目录：使用 Codex App 默认值".to_string());
+    }
+    if let Some(provider) = options.model_provider.as_ref() {
+        lines.push(format!("Provider：`{provider}`"));
+    }
+    if let Some(model) = options.model.as_ref() {
+        lines.push(format!("模型：`{model}`"));
+    }
+    if let Some(effort) = options.reasoning_effort.as_ref() {
+        lines.push(format!("推理强度：`{effort}`"));
+    }
+    lines.join("\n")
+}
+
+fn load_thread_create_defaults() -> renderer::FeishuThreadCreateDefaults {
+    let Some(home) = std::env::var_os("HOME") else {
+        return renderer::FeishuThreadCreateDefaults::default();
+    };
+    let path = Path::new(&home).join(".codex").join("config.toml");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return renderer::FeishuThreadCreateDefaults::default();
+    };
+    let Ok(doc) = raw.parse::<toml::Value>() else {
+        return renderer::FeishuThreadCreateDefaults::default();
+    };
+    renderer::FeishuThreadCreateDefaults {
+        cwd: None,
+        model_provider: doc
+            .get("model_provider")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        model: doc
+            .get("model")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        effort: doc
+            .get("model_reasoning_effort")
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
     }
 }
 
@@ -1676,6 +1964,12 @@ async fn handle_codex_notification_for_feishu(
             let Some(route) = route else {
                 return;
             };
+            if matches!(item_type, "imageGeneration" | "imageView")
+                && send_image_item_card(&state, &api, &route, item_type, item, thread_id, item_id)
+                    .await
+            {
+                return;
+            }
             let kind = structured_streaming_kind(item_type).unwrap_or(item_type);
             let text = if item_type == "agentMessage" {
                 extract_agent_message_text(item)
@@ -1816,6 +2110,216 @@ async fn handle_codex_notification_for_feishu(
             }
         }
         _ => {}
+    }
+}
+
+async fn send_image_item_card(
+    state: &SharedState,
+    api: &FeishuApi,
+    route: &RouteTarget,
+    item_type: &str,
+    item: &serde_json::Value,
+    thread_id: &str,
+    item_id: &str,
+) -> bool {
+    let result = async {
+        let uploaded = image_for_feishu(state, api, item_type, item, item_id).await?;
+        let card = match item_type {
+            "imageGeneration" => renderer::build_image_generation_result_card(
+                item.get("status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("completed"),
+                item.get("revisedPrompt")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| item.get("revised_prompt").and_then(|value| value.as_str())),
+                item.get("savedPath")
+                    .and_then(|value| value.as_str())
+                    .or_else(|| item.get("saved_path").and_then(|value| value.as_str()))
+                    .or_else(|| uploaded.local_path.to_str()),
+                &uploaded.image_key,
+            ),
+            "imageView" => {
+                let path = item
+                    .get("path")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_else(|| uploaded.local_path.to_str().unwrap_or(""));
+                renderer::build_image_view_result_card(path, &uploaded.image_key)
+            }
+            _ => return Ok(false),
+        };
+        send_interactive_to_target(api, &route.chat_id, &card).await?;
+        Ok::<bool, anyhow::Error>(true)
+    }
+    .await;
+
+    match result {
+        Ok(sent) => sent,
+        Err(err) => {
+            state
+                .push_event(
+                    "warn",
+                    "feishu_image_item_failed",
+                    format!(
+                        "thread={thread_id} item={item_id} type={item_type} chat={} err={err}",
+                        route.chat_id
+                    ),
+                )
+                .await;
+            false
+        }
+    }
+}
+
+async fn image_for_feishu(
+    state: &SharedState,
+    api: &FeishuApi,
+    item_type: &str,
+    item: &serde_json::Value,
+    item_id: &str,
+) -> Result<UploadedImageForFeishu> {
+    let local_path = match item_type {
+        "imageGeneration" => image_generation_local_path(state, item, item_id).await?,
+        "imageView" => item
+            .get("path")
+            .and_then(|value| value.as_str())
+            .map(PathBuf::from)
+            .ok_or_else(|| anyhow!("imageView item missing path"))?,
+        _ => return Err(anyhow!("unsupported image item type: {item_type}")),
+    };
+    if !local_path.is_file() {
+        return Err(anyhow!("image file not found: {}", local_path.display()));
+    }
+    let image_key = api.upload_image(&local_path.to_string_lossy()).await?;
+    Ok(UploadedImageForFeishu {
+        image_key,
+        local_path,
+    })
+}
+
+async fn image_generation_local_path(
+    state: &SharedState,
+    item: &serde_json::Value,
+    item_id: &str,
+) -> Result<PathBuf> {
+    if let Some(result) = item.get("result").and_then(|value| value.as_str())
+        && let Some(decoded) = decode_image_string(result)
+    {
+        return write_decoded_image(state, item_id, decoded).await;
+    }
+    let saved_path = item
+        .get("savedPath")
+        .and_then(|value| value.as_str())
+        .or_else(|| item.get("saved_path").and_then(|value| value.as_str()))
+        .ok_or_else(|| anyhow!("imageGeneration item has no image result or savedPath"))?;
+    Ok(PathBuf::from(saved_path))
+}
+
+async fn write_decoded_image(
+    state: &SharedState,
+    item_id: &str,
+    decoded: DecodedImage,
+) -> Result<PathBuf> {
+    let state_path = state.config.lock().await.state_path.clone();
+    let root = state_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".im")
+        .join("images");
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("failed to create image cache {}", root.display()))?;
+    let path = root.join(format!(
+        "{}-{}.{}",
+        crate::types::now_ms(),
+        sanitize_file_stem(item_id),
+        decoded.extension
+    ));
+    std::fs::write(&path, decoded.bytes)
+        .with_context(|| format!("failed to write image cache {}", path.display()))?;
+    Ok(path)
+}
+
+fn decode_image_string(value: &str) -> Option<DecodedImage> {
+    let trimmed = value.trim();
+    if let Some((mime, payload)) = parse_image_data_url(trimmed) {
+        let bytes = decode_base64_payload(payload)?;
+        let extension =
+            image_extension_from_mime(mime).or_else(|| image_extension_from_bytes(&bytes))?;
+        return Some(DecodedImage { bytes, extension });
+    }
+    if !looks_like_inline_image_base64(trimmed) {
+        return None;
+    }
+    let bytes = decode_base64_payload(trimmed)?;
+    let extension = image_extension_from_bytes(&bytes)?;
+    Some(DecodedImage { bytes, extension })
+}
+
+fn parse_image_data_url(value: &str) -> Option<(&str, &str)> {
+    let rest = value.strip_prefix("data:")?;
+    let (metadata, payload) = rest.split_once(',')?;
+    let mut parts = metadata.split(';');
+    let mime = parts.next()?.trim();
+    if !mime.starts_with("image/") || !parts.any(|part| part == "base64") {
+        return None;
+    }
+    Some((mime, payload))
+}
+
+fn decode_base64_payload(value: &str) -> Option<Vec<u8>> {
+    let compact = value.split_whitespace().collect::<String>();
+    base64::engine::general_purpose::STANDARD
+        .decode(compact.as_bytes())
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(compact.as_bytes()))
+        .ok()
+}
+
+fn looks_like_inline_image_base64(value: &str) -> bool {
+    let compact = value.trim_start();
+    compact.starts_with("iVBORw0KGgo")
+        || compact.starts_with("/9j/")
+        || compact.starts_with("R0lGOD")
+        || compact.starts_with("UklGR")
+}
+
+fn image_extension_from_mime(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+fn image_extension_from_bytes(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+fn sanitize_file_stem(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        }
+        if out.len() >= 48 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        "image".to_string()
+    } else {
+        out
     }
 }
 

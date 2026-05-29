@@ -31,6 +31,16 @@ pub enum InboundAction {
         request_id: String,
         action: String,
     },
+    ThreadRouteCreateSubmit {
+        request_id: String,
+        cwd: Option<String>,
+        model_provider: Option<String>,
+        model: Option<String>,
+        effort: Option<String>,
+    },
+    ThreadRouteCreateDefault {
+        request_id: String,
+    },
     ThreadRouteResumeSelected {
         request_id: String,
         thread_id: String,
