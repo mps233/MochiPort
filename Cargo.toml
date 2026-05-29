@@ -3,6 +3,7 @@ name = "codex-remote"
 version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
+build = "build.rs"
 
 [dependencies]
 anyhow = "1"
@@ -29,6 +30,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 wxdragon = { version = "0.9.16", optional = true }
+
+[build-dependencies]
+embed-resource = "3.0.6"
 
 [features]
 gui = ["dep:image", "dep:wxdragon", "reqwest/blocking"]

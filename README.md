@@ -4,29 +4,29 @@
 
 ## 产品预览
 
+本地 GUI 负责启动 bridge、接入飞书、写入 Codex App 所需的本地配置。
+
 <p align="center">
   <img src="docs/assets/product/codex-remote-gui.png" alt="Codex Remote GUI 状态和配置界面" width="900">
 </p>
 
-<table>
-  <tr>
-    <td width="33%" align="center">
-      <img src="docs/assets/product/codex-app-connection.png" alt="Codex App 远程控制连接状态" width="100%">
-      <br>
-      <sub>Codex App 识别本地 Bridge</sub>
-    </td>
-    <td width="33%" align="center">
-      <img src="docs/assets/product/codex-app-chat.png" alt="Codex App 会话同步和图片结果" width="100%">
-      <br>
-      <sub>Codex App 里继续查看会话</sub>
-    </td>
-    <td width="33%" align="center">
-      <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="100%">
-      <br>
-      <sub>飞书里直接接收 Codex 工具结果</sub>
-    </td>
-  </tr>
-</table>
+Codex App 打开 remote-control 后，会识别本机 `codex-remote` bridge。
+
+<p align="center">
+  <img src="docs/assets/product/codex-app-connection.png" alt="Codex App 远程控制连接状态" width="900">
+</p>
+
+同一个 Codex thread 可以继续在 Codex App 里查看，飞书发起的会话和工具结果会同步回来。
+
+<p align="center">
+  <img src="docs/assets/product/codex-app-chat.png" alt="Codex App 会话同步和图片结果" width="900">
+</p>
+
+在飞书移动端也可以直接收到 Codex 的图片、命令和审批结果。
+
+<p align="center">
+  <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="520">
+</p>
 
 `codex-remote` 是一个本地 Codex App remote-control backend，用来把 Codex App 的远程控制能力接到飞书 / Lark。
 

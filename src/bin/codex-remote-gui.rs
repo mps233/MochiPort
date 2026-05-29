@@ -4,10 +4,12 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     rc::Rc,
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
 
+use image::imageops::FilterType;
 use qrcode::{Color, QrCode};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -27,8 +29,9 @@ fn build_ui() {
 
     let frame = Frame::builder()
         .with_title("Codex Remote")
-        .with_size(Size::new(980, 700))
+        .with_size(Size::new(1100, 760))
         .build();
+    frame.set_icon(&app_icon_bitmap(48));
     frame.set_background_color(Colour::rgb(246, 247, 250));
     let status_bar = StatusBar::builder(&frame)
         .with_fields_count(3)
@@ -126,16 +129,16 @@ fn build_ui() {
         .with_label("正在读取 ~/.codex 配置状态")
         .build();
     codex_config_state.set_foreground_color(Colour::rgb(75, 84, 98));
-    codex_config_state.wrap(760);
+    codex_config_state.wrap(980);
     codex_status_box.add(
         &codex_config_state,
-        0,
+        1,
         SizerFlag::Expand | SizerFlag::All,
-        12,
+        14,
     );
     codex_sizer.add_sizer(
         &codex_status_box,
-        0,
+        1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         14,
     );
@@ -148,9 +151,9 @@ fn build_ui() {
     .build();
     let config_header = BoxSizer::builder(Orientation::Horizontal).build();
     let config_hint = StaticText::builder(&codex_page)
-        .with_label("填写第三方模型服务的 Base URL 和 API Key，然后写入 Codex App 配置。")
+        .with_label("模型服务")
         .build();
-    config_hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    config_hint.set_foreground_color(Colour::rgb(34, 39, 47));
     config_header.add(&config_hint, 1, SizerFlag::AlignCenterVertical, 0);
     let uninstall_button = Button::builder(&codex_page).with_label("卸载注入").build();
     uninstall_button.set_tooltip("移除 Codex App 中由 Codex Remote 写入的连接配置");
@@ -158,13 +161,13 @@ fn build_ui() {
     configure_button.set_tooltip("写入 Codex App 使用 Codex Remote 所需的本地配置");
     config_header.add(&uninstall_button, 0, SizerFlag::Right, 8);
     config_header.add(&configure_button, 0, SizerFlag::Right, 0);
-    config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 12);
+    config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 14);
 
     let provider_help = StaticText::builder(&codex_page)
-        .with_label("Provider 名称会影响 Codex App 的历史会话归属和飞书会话列表过滤。已有 provider 建议直接复用；没有时可以新建。")
+        .with_label("填写 Base URL 和 API Key 后写入 Codex App 配置。已有 provider 建议直接复用；没有时可以新建。")
         .build();
     provider_help.set_foreground_color(Colour::rgb(91, 100, 114));
-    provider_help.wrap(760);
+    provider_help.wrap(980);
     config_box.add(
         &provider_help,
         0,
@@ -173,7 +176,7 @@ fn build_ui() {
     );
 
     let form = FlexGridSizer::builder(0, 2)
-        .with_gap(Size::new(10, 12))
+        .with_gap(Size::new(14, 14))
         .build();
     form.add_growable_col(1, 1);
     let provider_name =
@@ -190,7 +193,7 @@ fn build_ui() {
         .with_label("正在匹配 ~/.codex/config.toml 里的 provider")
         .build();
     provider_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
-    provider_catalog.wrap(760);
+    provider_catalog.wrap(980);
     config_box.add(
         &provider_catalog,
         0,
@@ -348,17 +351,9 @@ fn build_ui() {
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
-    match restart_daemon_for_gui(&api) {
-        Ok(child) => {
-            replace_managed_daemon(&daemon_child, child);
-        }
-        Err(err) => {
-            status_bar.set_status_text(&format!("本地服务启动失败：{err}"), 0);
-        }
-    }
-    refresh_dashboard(&api, &handles);
-    repair_gui_environment_if_needed(&api, &handles);
-    refresh_dashboard(&api, &handles);
+    handles
+        .status_bar
+        .set_status_text("本地服务启动中，界面已可操作", 0);
 
     {
         let api = api.clone();
@@ -468,6 +463,8 @@ fn build_ui() {
     timer_store.borrow_mut().replace(timer);
     std::mem::forget(timer_store);
 
+    start_daemon_for_gui_async(&api, &handles, &frame, &daemon_child);
+
     {
         let api = api.clone();
         let daemon_child = daemon_child.clone();
@@ -519,15 +516,93 @@ fn stop_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>) {
     }
 }
 
+struct StartupResult {
+    child: Child,
+    repair_error: Option<String>,
+}
+
+fn start_daemon_for_gui_async(
+    api: &ApiClient,
+    handles: &UiHandles,
+    frame: &Frame,
+    daemon_child: &Rc<RefCell<Option<Child>>>,
+) {
+    let result: Arc<Mutex<Option<Result<StartupResult, String>>>> = Arc::new(Mutex::new(None));
+    {
+        let api = api.clone();
+        let result = result.clone();
+        thread::spawn(move || {
+            let startup = restart_daemon_for_gui(&api).map(|child| {
+                let repair_error = api.repair_codex_app_gui_environment().err();
+                StartupResult {
+                    child,
+                    repair_error,
+                }
+            });
+            if let Ok(mut slot) = result.lock() {
+                slot.replace(startup);
+            }
+        });
+    }
+
+    let startup_timer_store: Rc<RefCell<Option<Timer<Frame>>>> = Rc::new(RefCell::new(None));
+    let startup_timer = Timer::new(frame);
+    {
+        let api = api.clone();
+        let handles = *handles;
+        let daemon_child = daemon_child.clone();
+        let startup_timer_store = startup_timer_store.clone();
+        startup_timer.on_tick(move |_| {
+            let startup = result.lock().ok().and_then(|mut slot| slot.take());
+            let Some(startup) = startup else {
+                return;
+            };
+
+            if let Some(timer) = startup_timer_store.borrow().as_ref() {
+                timer.stop();
+            }
+
+            match startup {
+                Ok(startup) => {
+                    replace_managed_daemon(&daemon_child, startup.child);
+                    if let Some(err) = startup.repair_error {
+                        handles
+                            .status_bar
+                            .set_status_text(&format!("Codex App 环境修复失败：{err}"), 2);
+                    }
+                }
+                Err(err) => {
+                    handles
+                        .status_bar
+                        .set_status_text(&format!("本地服务启动失败：{err}"), 0);
+                }
+            }
+            refresh_dashboard(&api, &handles);
+        });
+    }
+    startup_timer.start(100, false);
+    startup_timer_store.borrow_mut().replace(startup_timer);
+    std::mem::forget(startup_timer_store);
+}
+
 fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>>) {
     clear_codex_app_gui_environment(&api.url("/backend-api"));
-    let _ = api.shutdown();
-    wait_for_daemon_offline(api, 10);
-    stop_managed_daemon(daemon_child);
-    if api.is_online() {
-        stop_daemon_by_port(api);
-        wait_for_daemon_offline(api, 10);
+    let child = daemon_child.borrow_mut().take();
+    if let Some(mut child) = child {
+        let _ = child.kill();
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
     }
+
+    let api = api.clone();
+    thread::spawn(move || {
+        let _ = api.shutdown();
+        wait_for_daemon_offline(&api, 3);
+        if api.is_online() {
+            stop_daemon_by_port(&api);
+        }
+    });
 }
 
 fn clear_codex_app_gui_environment(backend_url: &str) {
@@ -1027,7 +1102,7 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
     let row = BoxSizer::builder(Orientation::Horizontal).build();
     let icon = StaticBitmap::builder(&panel)
         .with_bitmap(Some(status_icon_bitmap(icon_kind, 34)))
-        .with_scale_mode(Some(ScaleMode::AspectFit))
+        .with_scale_mode(Some(ScaleMode::None))
         .with_size(Size::new(34, 34))
         .build();
     icon.set_min_size(Size::new(34, 34));
@@ -1073,8 +1148,20 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
 
 fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     match kind {
-        StatusIconKind::Feishu => return brand_bitmap("feishu-logo.png"),
-        StatusIconKind::Codex => return brand_bitmap("codex-app-logo.png"),
+        StatusIconKind::Feishu => {
+            return brand_bitmap(
+                "feishu-logo.png",
+                include_bytes!("../../packaging/brand/feishu-logo.png"),
+                size,
+            );
+        }
+        StatusIconKind::Codex => {
+            return brand_bitmap(
+                "codex-app-logo.png",
+                include_bytes!("../../packaging/brand/codex-app-logo.png"),
+                size,
+            );
+        }
         StatusIconKind::Service => {}
     }
 
@@ -1083,37 +1170,22 @@ fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     Bitmap::from_rgba(&canvas.rgba, size as u32, size as u32).expect("status icon bitmap")
 }
 
-fn brand_bitmap(file_name: &str) -> Bitmap {
-    let path = brand_asset_path(file_name);
-    let image = image::open(&path)
-        .unwrap_or_else(|err| panic!("failed to load brand image {}: {err}", path.display()))
+fn app_icon_bitmap(size: usize) -> Bitmap {
+    brand_bitmap(
+        "dolphin-rounded-256.png",
+        include_bytes!("../../packaging/icons/dolphin-rounded-256.png"),
+        size,
+    )
+}
+
+fn brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .unwrap_or_else(|err| panic!("failed to load brand image {file_name}: {err}"))
+        .resize(size as u32, size as u32, FilterType::Lanczos3)
         .into_rgba8();
     let (width, height) = image.dimensions();
     Bitmap::from_rgba(image.as_raw(), width, height)
-        .unwrap_or_else(|| panic!("failed to create bitmap from {}", path.display()))
-}
-
-fn brand_asset_path(file_name: &str) -> PathBuf {
-    if let Some(path) = bundled_brand_asset_path(file_name) {
-        return path;
-    }
-
-    repo_root_from_target_exe()
-        .or_else(repo_root_from_cwd)
-        .map(|repo| repo.join("packaging/brand").join(file_name))
-        .filter(|path| path.exists())
-        .unwrap_or_else(|| panic!("brand asset not found: {file_name}"))
-}
-
-fn bundled_brand_asset_path(file_name: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let macos_dir = exe.parent()?;
-    let contents_dir = macos_dir.parent()?;
-    if macos_dir.file_name().and_then(|value| value.to_str()) != Some("MacOS") {
-        return None;
-    }
-    let path = contents_dir.join("Resources/brand").join(file_name);
-    path.exists().then_some(path)
+        .unwrap_or_else(|| panic!("failed to create bitmap from {file_name}"))
 }
 
 struct IconCanvas {
@@ -1306,6 +1378,8 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
             .map(|err| format!("无法读取 Codex App 配置状态。\n本地服务连接错误: {err}"))
             .unwrap_or_else(|| "无法读取 Codex App 配置状态。".to_string());
         handles.codex_config_state.set_label(&config_state);
+        handles.codex_config_state.wrap(980);
+        handles.codex_config_state.layout();
         handles.status_bar.set_status_text("本地服务：离线", 0);
         handles.status_bar.set_status_text("飞书：不可用", 1);
         handles.status_bar.set_status_text("Codex App：不可用", 2);
@@ -1450,7 +1524,8 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
     handles
         .codex_config_state
         .set_label(&codex_app_detail(snapshot));
-    handles.codex_config_state.wrap(500);
+    handles.codex_config_state.wrap(980);
+    handles.codex_config_state.layout();
     fill_provider_form_if_empty(handles, snapshot);
 }
 
@@ -1459,14 +1534,16 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
         handles
             .provider_catalog
             .set_label("本地服务运行后会读取 ~/.codex/config.toml 里的 provider。");
-        handles.provider_catalog.wrap(760);
+        handles.provider_catalog.wrap(980);
+        handles.provider_catalog.layout();
         return;
     };
     refresh_provider_choices(&handles.provider_name, &status.providers);
     handles
         .provider_catalog
         .set_label(&provider_catalog_label(status));
-    handles.provider_catalog.wrap(760);
+    handles.provider_catalog.wrap(980);
+    handles.provider_catalog.layout();
 
     let target = status
         .provider
