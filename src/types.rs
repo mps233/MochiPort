@@ -33,8 +33,8 @@ pub enum InboundAction {
     },
     ThreadRouteCreateSubmit {
         request_id: String,
-        cwd: Option<String>,
-        model_provider: Option<String>,
+        cwd_choice: Option<String>,
+        cwd_custom: Option<String>,
         model: Option<String>,
         effort: Option<String>,
     },

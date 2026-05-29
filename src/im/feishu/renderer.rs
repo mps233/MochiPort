@@ -455,6 +455,8 @@ pub struct FeishuThreadCreateDefaults {
     pub model_provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub projects: Vec<String>,
+    pub models: Vec<String>,
 }
 
 fn build_interactive_choice_block(
@@ -1352,6 +1354,9 @@ pub fn build_thread_create_settings_card(
     request_id: &str,
     defaults: &FeishuThreadCreateDefaults,
 ) -> serde_json::Value {
+    let cwd_options = thread_cwd_options(defaults);
+    let model_options = thread_model_options(defaults);
+    let effort_options = thread_effort_options(defaults);
     let default_line = |label: &str, value: Option<&String>| {
         format!(
             "{}：{}",
@@ -1365,7 +1370,7 @@ pub fn build_thread_create_settings_card(
     let mut elements = vec![
         serde_json::json!({
             "tag": "markdown",
-            "content": "填写这次新会话的属性。留空表示沿用 Codex App 当前配置。"
+            "content": "选择这次新会话的属性。Provider 固定使用 Codex App 当前配置。"
         }),
         serde_json::json!({
             "tag": "markdown",
@@ -1388,54 +1393,38 @@ pub fn build_thread_create_settings_card(
                     "tag": "markdown",
                     "content": "**项目目录**"
                 },
+                select_static_element(
+                    "cwd_choice",
+                    "选择已有项目目录",
+                    cwd_options
+                ),
                 {
                     "tag": "input",
-                    "name": "cwd",
+                    "name": "cwd_custom",
                     "required": false,
                     "placeholder": {
                         "tag": "plain_text",
-                        "content": "留空=不指定目录；也可以填绝对路径"
-                    }
-                },
-                {
-                    "tag": "markdown",
-                    "content": "**Provider**"
-                },
-                {
-                    "tag": "input",
-                    "name": "model_provider",
-                    "required": false,
-                    "placeholder": {
-                        "tag": "plain_text",
-                        "content": "留空=使用当前 provider"
+                        "content": "可选：填绝对路径；不存在会自动创建"
                     }
                 },
                 {
                     "tag": "markdown",
                     "content": "**模型**"
                 },
-                {
-                    "tag": "input",
-                    "name": "model",
-                    "required": false,
-                    "placeholder": {
-                        "tag": "plain_text",
-                        "content": "留空=使用当前模型"
-                    }
-                },
+                select_static_element(
+                    "model",
+                    "选择模型",
+                    model_options
+                ),
                 {
                     "tag": "markdown",
                     "content": "**推理强度**"
                 },
-                {
-                    "tag": "input",
-                    "name": "effort",
-                    "required": false,
-                    "placeholder": {
-                        "tag": "plain_text",
-                        "content": "minimal / low / medium / high / xhigh"
-                    }
-                },
+                select_static_element(
+                    "effort",
+                    "选择推理强度",
+                    effort_options
+                ),
                 {
                     "tag": "column_set",
                     "flex_mode": "none",
@@ -1472,7 +1461,7 @@ pub fn build_thread_create_settings_card(
     ];
     elements.push(build_interactive_choice_block(
         "使用默认配置创建",
-        "不指定目录、模型和推理强度，完全沿用 Codex App 当前配置。",
+        "使用当前 provider，不指定目录、模型和推理强度。",
         serde_json::json!({
             "kind": "thread_route_create_default",
             "requestId": request_id
@@ -1499,6 +1488,103 @@ pub fn build_thread_create_settings_card(
     card["body"]["vertical_spacing"] = serde_json::json!("8px");
     card["body"]["elements"] = serde_json::Value::Array(elements);
     card
+}
+
+fn select_static_element(
+    name: &str,
+    placeholder: &str,
+    options: Vec<(String, String)>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "select_static",
+        "name": name,
+        "required": false,
+        "placeholder": {
+            "tag": "plain_text",
+            "content": placeholder
+        },
+        "options": options
+            .into_iter()
+            .map(|(label, value)| {
+                serde_json::json!({
+                    "text": {
+                        "tag": "plain_text",
+                        "content": label
+                    },
+                    "value": value
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+fn thread_cwd_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, String)> {
+    let mut options = vec![(
+        "使用 Codex App 默认目录".to_string(),
+        "__default__".to_string(),
+    )];
+    for project in defaults
+        .projects
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .take(20)
+    {
+        options.push((project_option_label(project), project.to_string()));
+    }
+    options.push(("自定义或新建目录".to_string(), "__custom__".to_string()));
+    dedupe_options(options)
+}
+
+fn thread_model_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, String)> {
+    let mut options = vec![("使用当前模型".to_string(), "__default__".to_string())];
+    for model in defaults
+        .models
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        options.push((model.to_string(), model.to_string()));
+    }
+    dedupe_options(options)
+}
+
+fn thread_effort_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, String)> {
+    let mut options = vec![("使用当前推理强度".to_string(), "__default__".to_string())];
+    for effort in ["minimal", "low", "medium", "high", "xhigh"] {
+        options.push((effort.to_string(), effort.to_string()));
+    }
+    if let Some(effort) = defaults.effort.as_deref().map(str::trim)
+        && !effort.is_empty()
+    {
+        options.push((effort.to_string(), effort.to_string()));
+    }
+    dedupe_options(options)
+}
+
+fn dedupe_options(options: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut output = Vec::new();
+    for (label, value) in options {
+        if !output
+            .iter()
+            .any(|(_, existing_value): &(String, String)| existing_value == &value)
+        {
+            output.push((label, value));
+        }
+    }
+    output
+}
+
+fn project_option_label(path: &str) -> String {
+    let name = std::path::Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match name {
+        Some(name) => format!("{name} - {path}"),
+        None => path.to_string(),
+    }
 }
 
 pub fn build_thread_list_card(

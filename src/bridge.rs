@@ -34,8 +34,8 @@ const THREAD_LOADED_LIMIT: u32 = 64;
 
 #[derive(Debug, Clone, Default)]
 struct ThreadCreateForm {
-    cwd: Option<String>,
-    model_provider: Option<String>,
+    cwd_choice: Option<String>,
+    cwd_custom: Option<String>,
     model: Option<String>,
     effort: Option<String>,
 }
@@ -435,8 +435,8 @@ async fn handle_inbound_action(
         }
         InboundAction::ThreadRouteCreateSubmit {
             request_id,
-            cwd,
-            model_provider,
+            cwd_choice,
+            cwd_custom,
             model,
             effort,
         } => {
@@ -446,8 +446,8 @@ async fn handle_inbound_action(
                 message,
                 &request_id,
                 ThreadCreateForm {
-                    cwd,
-                    model_provider,
+                    cwd_choice,
+                    cwd_custom,
                     model,
                     effort,
                 },
@@ -534,7 +534,9 @@ async fn handle_thread_route_create_default(
         &message,
         request_id,
         request,
-        remote_control_backend::ThreadStartOptions::default(),
+        thread_start_options_with_current_provider(
+            remote_control_backend::ThreadStartOptions::default(),
+        ),
     )
     .await
 }
@@ -687,12 +689,14 @@ async fn create_new_thread_for_route(
 fn thread_start_options_from_form(
     form: ThreadCreateForm,
 ) -> Result<remote_control_backend::ThreadStartOptions> {
-    Ok(remote_control_backend::ThreadStartOptions {
-        cwd: normalize_thread_cwd(form.cwd)?,
-        model_provider: normalize_optional_text(form.model_provider),
-        model: normalize_optional_text(form.model),
-        reasoning_effort: normalize_reasoning_effort(form.effort)?,
-    })
+    Ok(thread_start_options_with_current_provider(
+        remote_control_backend::ThreadStartOptions {
+            cwd: normalize_thread_cwd(form.cwd_choice, form.cwd_custom)?,
+            model: normalize_optional_selection(form.model),
+            reasoning_effort: normalize_reasoning_effort(form.effort)?,
+            ..Default::default()
+        },
+    ))
 }
 
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
@@ -701,8 +705,12 @@ fn normalize_optional_text(value: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn normalize_optional_selection(value: Option<String>) -> Option<String> {
+    normalize_optional_text(value).filter(|value| value != "__default__")
+}
+
 fn normalize_reasoning_effort(value: Option<String>) -> Result<Option<String>> {
-    let Some(value) = normalize_optional_text(value) else {
+    let Some(value) = normalize_optional_selection(value) else {
         return Ok(None);
     };
     let normalized = value.to_ascii_lowercase();
@@ -715,8 +723,16 @@ fn normalize_reasoning_effort(value: Option<String>) -> Result<Option<String>> {
     }
 }
 
-fn normalize_thread_cwd(value: Option<String>) -> Result<Option<String>> {
-    let Some(value) = normalize_optional_text(value) else {
+fn normalize_thread_cwd(choice: Option<String>, custom: Option<String>) -> Result<Option<String>> {
+    let choice = normalize_optional_text(choice);
+    let custom = normalize_optional_text(custom);
+    if choice.as_deref() == Some("__custom__") && custom.is_none() {
+        return Err(anyhow!("选择自定义目录时需要填写绝对路径"));
+    }
+    let Some(value) = custom.or_else(|| match choice.as_deref() {
+        Some("__default__" | "__custom__") | None => None,
+        Some(_) => choice,
+    }) else {
         return Ok(None);
     };
     let expanded = expand_home_prefix(&value);
@@ -735,6 +751,13 @@ fn normalize_thread_cwd(value: Option<String>) -> Result<Option<String>> {
         .canonicalize()
         .with_context(|| format!("读取项目目录失败：{}", path.display()))?;
     Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+fn thread_start_options_with_current_provider(
+    mut options: remote_control_backend::ThreadStartOptions,
+) -> remote_control_backend::ThreadStartOptions {
+    options.model_provider = load_codex_app_model_provider();
+    options
 }
 
 fn expand_home_prefix(value: &str) -> PathBuf {
@@ -771,31 +794,95 @@ fn summarize_thread_start_options(options: &remote_control_backend::ThreadStartO
 }
 
 fn load_thread_create_defaults() -> renderer::FeishuThreadCreateDefaults {
-    let Some(home) = std::env::var_os("HOME") else {
+    let Some(doc) = load_codex_app_config_doc() else {
         return renderer::FeishuThreadCreateDefaults::default();
     };
-    let path = Path::new(&home).join(".codex").join("config.toml");
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return renderer::FeishuThreadCreateDefaults::default();
-    };
-    let Ok(doc) = raw.parse::<toml::Value>() else {
-        return renderer::FeishuThreadCreateDefaults::default();
-    };
+    let model = doc
+        .get("model")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
     renderer::FeishuThreadCreateDefaults {
         cwd: None,
         model_provider: doc
             .get("model_provider")
             .and_then(|value| value.as_str())
             .map(str::to_string),
-        model: doc
-            .get("model")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
+        model: model.clone(),
         effort: doc
             .get("model_reasoning_effort")
             .and_then(|value| value.as_str())
             .map(str::to_string),
+        projects: codex_project_paths(&doc),
+        models: thread_model_choices(model.as_deref()),
     }
+}
+
+fn thread_model_choices(current: Option<&str>) -> Vec<String> {
+    let mut models = Vec::new();
+    for model in [
+        current,
+        Some("gpt-5.5"),
+        Some("gpt-5.4"),
+        Some("gpt-5.4-mini"),
+        Some("gpt-5.3-codex"),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let model = model.trim();
+        if !model.is_empty() && !models.iter().any(|existing| existing == model) {
+            models.push(model.to_string());
+        }
+    }
+    models
+}
+
+fn codex_project_paths(doc: &toml::Value) -> Vec<String> {
+    let mut projects = doc
+        .get("projects")
+        .and_then(|value| value.as_table())
+        .map(|table| {
+            table
+                .keys()
+                .map(|key| key.trim().to_string())
+                .filter(|key| !key.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    projects.sort();
+    projects
+}
+
+fn load_codex_app_model_provider() -> Option<String> {
+    load_codex_app_config_doc().and_then(|doc| {
+        doc.get("model_provider")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn load_codex_app_config_doc() -> Option<toml::Value> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return None;
+    };
+    let path = Path::new(&home).join(".codex").join("config.toml");
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return None;
+    };
+    raw.parse::<toml::Value>().ok()
+}
+
+fn thread_list_body(model_provider_filter: Option<&str>) -> String {
+    let mut body =
+        "当前飞书会话还没有订阅任何 Codex thread。请选择一个会话接入后续事件。".to_string();
+    if let Some(provider) = model_provider_filter {
+        body.push_str(&format!(
+            "\n\n<font color='grey'>已按当前 Codex App provider `{provider}` 过滤。</font>"
+        ));
+    }
+    body
 }
 
 fn is_approval_reply(command: &str) -> bool {
@@ -1139,9 +1226,15 @@ async fn send_thread_routing_list(
 
     let loaded =
         remote_control_backend::thread_loaded_list(state, None, Some(THREAD_LOADED_LIMIT)).await?;
-    let history =
-        remote_control_backend::thread_list(state, cursor, Some(THREAD_HISTORY_PAGE_SIZE), None)
-            .await?;
+    let model_provider_filter = load_codex_app_model_provider();
+    let history = remote_control_backend::thread_list(
+        state,
+        cursor,
+        Some(THREAD_HISTORY_PAGE_SIZE),
+        None,
+        model_provider_filter.as_deref(),
+    )
+    .await?;
     let loaded_ids = loaded
         .get("data")
         .and_then(|v| v.as_array())
@@ -1172,10 +1265,11 @@ async fn send_thread_routing_list(
     }
     page_cursors[page] = next_cursor.clone();
 
+    let body = thread_list_body(model_provider_filter.as_deref());
     let card = renderer::build_thread_list_card(
         &request_id,
         "选择 Codex 会话",
-        "当前飞书会话还没有订阅任何 Codex thread。请选择一个会话接入后续事件。",
+        &body,
         &entries,
         page,
         page > 1,
@@ -1209,9 +1303,10 @@ async fn send_thread_routing_list(
             "info",
             "thread_route_list_sent",
             format!(
-                "conversation={} page={page} entries={}",
+                "conversation={} page={page} entries={} provider={}",
                 route.conversation_key,
-                entries.len()
+                entries.len(),
+                model_provider_filter.as_deref().unwrap_or("")
             ),
         )
         .await;

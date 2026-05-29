@@ -2,6 +2,32 @@
 
 [English](README.en.md)
 
+## 产品预览
+
+<p align="center">
+  <img src="docs/assets/product/codex-remote-gui.png" alt="Codex Remote GUI 状态和配置界面" width="900">
+</p>
+
+<table>
+  <tr>
+    <td width="33%" align="center">
+      <img src="docs/assets/product/codex-app-connection.png" alt="Codex App 远程控制连接状态" width="100%">
+      <br>
+      <sub>Codex App 识别本地 Bridge</sub>
+    </td>
+    <td width="33%" align="center">
+      <img src="docs/assets/product/codex-app-chat.png" alt="Codex App 会话同步和图片结果" width="100%">
+      <br>
+      <sub>Codex App 里继续查看会话</sub>
+    </td>
+    <td width="33%" align="center">
+      <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="100%">
+      <br>
+      <sub>飞书里直接接收 Codex 工具结果</sub>
+    </td>
+  </tr>
+</table>
+
 `codex-remote` 是一个本地 Codex App remote-control backend，用来把 Codex App 的远程控制能力接到飞书 / Lark。
 
 它只做一件事：用户明确启动本地服务后，让 Codex App 连接本机 backend，再把远程控制消息桥接到飞书[tg和微信待续]。
@@ -152,7 +178,7 @@ codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
 
 `on` / `off` 用来启用或暂停飞书 bridge。
 
-`configure-codex-app` 是 GUI“写入配置”的 CLI 等价形式。如果写入模型 provider 配置，默认 provider 是 `codex`，默认模型是 `gpt-5.5`。
+`configure-codex-app` 是 GUI“写入配置”的 CLI 等价形式。如果写入模型 provider 配置，默认 provider 是 `ai-codex`，默认模型是 `gpt-5.5`。
 
 ## 配置
 

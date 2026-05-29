@@ -17,3 +17,4 @@ reference/
 *.key
 *.pem
 *.p8
+app_show*

@@ -1889,6 +1889,7 @@ pub async fn thread_list(
     cursor: Option<&str>,
     limit: Option<u32>,
     cwd: Option<&str>,
+    model_provider: Option<&str>,
 ) -> Result<Value> {
     let mut params = json!({});
     if let Some(cursor) = cursor {
@@ -1897,8 +1898,13 @@ pub async fn thread_list(
     if let Some(limit) = limit {
         params["limit"] = json!(limit);
     }
+    params["sortKey"] = json!("updated_at");
+    params["archived"] = json!(false);
     if let Some(cwd) = cwd {
         params["cwd"] = json!(cwd);
+    }
+    if let Some(model_provider) = non_empty(model_provider) {
+        params["modelProviders"] = json!([model_provider]);
     }
     request(state, "thread/list", params).await
 }

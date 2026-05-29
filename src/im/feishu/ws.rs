@@ -511,8 +511,9 @@ async fn handle_card_action_event(
                 None,
                 Some(InboundAction::ThreadRouteCreateSubmit {
                     request_id,
-                    cwd: form_string(&payload.action.form_value, "cwd"),
-                    model_provider: form_string(&payload.action.form_value, "model_provider"),
+                    cwd_choice: form_string(&payload.action.form_value, "cwd_choice")
+                        .or_else(|| form_string(&payload.action.form_value, "cwd")),
+                    cwd_custom: form_string(&payload.action.form_value, "cwd_custom"),
                     model: form_string(&payload.action.form_value, "model"),
                     effort: form_string(&payload.action.form_value, "effort"),
                 }),
@@ -612,17 +613,28 @@ async fn handle_card_action_event(
 fn form_string(form_value: &serde_json::Value, name: &str) -> Option<String> {
     form_value
         .get(name)
-        .and_then(|value| {
-            value.as_str().map(str::to_string).or_else(|| {
-                value
-                    .as_array()
-                    .and_then(|items| items.first())
-                    .and_then(|item| item.as_str())
-                    .map(str::to_string)
-            })
-        })
+        .and_then(first_form_string)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn first_form_string(value: &serde_json::Value) -> Option<String> {
+    if let Some(value) = value.as_str() {
+        return Some(value.to_string());
+    }
+    if let Some(value) = value.get("value").and_then(|value| value.as_str()) {
+        return Some(value.to_string());
+    }
+    if let Some(value) = value
+        .get("selected_option")
+        .and_then(|option| option.get("value"))
+        .and_then(|value| value.as_str())
+    {
+        return Some(value.to_string());
+    }
+    value
+        .as_array()
+        .and_then(|items| items.iter().find_map(first_form_string))
 }
 
 fn service_id_from_ws_url(wss_url: &str) -> i32 {

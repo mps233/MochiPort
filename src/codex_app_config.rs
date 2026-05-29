@@ -74,6 +74,7 @@ pub struct CodexAppConfigStatus {
     pub auth_error: Option<String>,
     pub gui_api_base: CodexAppGuiApiBaseStatus,
     pub provider: Option<CodexAppProviderStatus>,
+    pub providers: Vec<CodexAppProviderStatus>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,7 +144,7 @@ pub fn inspect_codex_app_config(
 
     let (config_ok, config_error) = inspect_config_toml(&config_path, backend_url);
     let (auth_ok, auth_error) = inspect_auth_json(&auth_path);
-    let provider = inspect_provider_config(&config_path);
+    let (provider, providers) = inspect_provider_catalog(&config_path);
 
     let gui_api_base = inspect_gui_api_base_url(backend_url);
     let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
@@ -159,6 +160,7 @@ pub fn inspect_codex_app_config(
         auth_error,
         gui_api_base,
         provider,
+        providers,
     }
 }
 
@@ -396,20 +398,47 @@ fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
     }
 }
 
-fn inspect_provider_config(path: &Path) -> Option<CodexAppProviderStatus> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    let doc = raw.parse::<toml_edit::DocumentMut>().ok()?;
-    let name = doc
+fn inspect_provider_catalog(
+    path: &Path,
+) -> (Option<CodexAppProviderStatus>, Vec<CodexAppProviderStatus>) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(_) => return (None, Vec::new()),
+    };
+    let doc = match raw.parse::<toml_edit::DocumentMut>() {
+        Ok(doc) => doc,
+        Err(_) => return (None, Vec::new()),
+    };
+
+    let mut providers = Vec::new();
+    if let Some(table) = doc.get("model_providers").and_then(|item| item.as_table()) {
+        for (name, item) in table.iter() {
+            if let Some(provider) = item.as_table() {
+                providers.push(provider_status_from_table(name, Some(provider)));
+            }
+        }
+    }
+
+    let provider = doc
         .get("model_provider")
         .and_then(|item| item.as_str())
         .map(str::trim)
-        .filter(|value| !value.is_empty())?
-        .to_string();
-    let provider = doc
-        .get("model_providers")
-        .and_then(|item| item.as_table())
-        .and_then(|providers| providers.get(&name))
-        .and_then(|item| item.as_table());
+        .filter(|value| !value.is_empty())
+        .map(|name| {
+            providers
+                .iter()
+                .find(|provider| provider.name == name)
+                .cloned()
+                .unwrap_or_else(|| provider_status_from_table(name, None))
+        });
+
+    (provider, providers)
+}
+
+fn provider_status_from_table(
+    name: &str,
+    provider: Option<&toml_edit::Table>,
+) -> CodexAppProviderStatus {
     let base_url = provider
         .and_then(|table| table.get("base_url"))
         .and_then(|item| item.as_str())
@@ -419,11 +448,11 @@ fn inspect_provider_config(path: &Path) -> Option<CodexAppProviderStatus> {
         .and_then(|item| item.as_str())
         .map(str::to_string);
 
-    Some(CodexAppProviderStatus {
-        name,
+    CodexAppProviderStatus {
+        name: name.to_string(),
         base_url,
         key,
-    })
+    }
 }
 
 fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()> {
@@ -952,6 +981,52 @@ requires_openai_auth = true
         let config = std::fs::read_to_string(config_path).expect("read config");
         assert_eq!(config.matches("requires_openai_auth = true").count(), 1);
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn inspect_codex_app_config_lists_existing_providers() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "llmx"
+
+[model_providers.llmx]
+name = "llmx"
+base_url = "https://llmx.example"
+experimental_bearer_token = "llmx-key"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+"#,
+        )
+        .expect("write config");
+
+        let status = inspect_codex_app_config(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        );
+
+        let active = status.provider.expect("active provider");
+        assert_eq!(active.name, "llmx");
+        assert_eq!(active.base_url.as_deref(), Some("https://llmx.example"));
+        assert_eq!(status.providers.len(), 2);
+        assert!(
+            status
+                .providers
+                .iter()
+                .any(|provider| provider.name == "llmx")
+        );
+        assert!(
+            status
+                .providers
+                .iter()
+                .any(|provider| provider.name == "openai")
+        );
 
         let _ = std::fs::remove_dir_all(codex_home);
     }

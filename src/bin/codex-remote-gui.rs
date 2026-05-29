@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wxdragon::{prelude::*, timer::Timer};
 
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
+const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 
 fn main() {
     if let Err(err) = wxdragon::main(|_| build_ui()) {
@@ -159,15 +160,39 @@ fn build_ui() {
     config_header.add(&configure_button, 0, SizerFlag::Right, 0);
     config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 12);
 
+    let provider_help = StaticText::builder(&codex_page)
+        .with_label("Provider 名称会影响 Codex App 的历史会话归属和飞书会话列表过滤。已有 provider 建议直接复用；没有时可以新建。")
+        .build();
+    provider_help.set_foreground_color(Colour::rgb(91, 100, 114));
+    provider_help.wrap(760);
+    config_box.add(
+        &provider_help,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        12,
+    );
+
     let form = FlexGridSizer::builder(0, 2)
         .with_gap(Size::new(10, 12))
         .build();
     form.add_growable_col(1, 1);
-    let provider_name = text_field_row(&codex_page, &form, "Provider 名称", "ai-codex");
+    let provider_name =
+        provider_combo_row(&codex_page, &form, "Provider 名称", DEFAULT_PROVIDER_NAME);
     let provider_base_url = text_field_row(&codex_page, &form, "Base URL", "");
     let provider_key = text_field_row(&codex_page, &form, "API Key", "");
     config_box.add_sizer(
         &form,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        12,
+    );
+    let provider_catalog = StaticText::builder(&codex_page)
+        .with_label("正在匹配 ~/.codex/config.toml 里的 provider")
+        .build();
+    provider_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
+    provider_catalog.wrap(760);
+    config_box.add(
+        &provider_catalog,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         12,
@@ -319,6 +344,7 @@ fn build_ui() {
         provider_name,
         provider_base_url,
         provider_key,
+        provider_catalog,
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
@@ -359,6 +385,9 @@ fn build_ui() {
     {
         let api = api.clone();
         let handles = handles;
+        let provider_name = provider_name;
+        let provider_base_url = provider_base_url;
+        let provider_key = provider_key;
         let frame = frame;
         configure_button.on_click(move |_| {
             let request = ConfigureRequest {
@@ -376,6 +405,18 @@ fn build_ui() {
                     refresh_dashboard(&api, &handles);
                 }
                 Err(err) => show_error(&frame, &err),
+            }
+        });
+    }
+
+    {
+        let api = api.clone();
+        let handles = handles;
+        provider_name.on_selection_changed(move |_| {
+            let selected = provider_name.get_value();
+            let snapshot = api.dashboard();
+            if let Some(provider) = find_provider(&snapshot, &selected) {
+                apply_provider_to_form(&handles, &provider, true);
             }
         });
     }
@@ -850,9 +891,10 @@ struct UiHandles {
     refresh_button: Button,
     start_daemon_button: Button,
     uninstall_button: Button,
-    provider_name: TextCtrl,
+    provider_name: ComboBox,
     provider_base_url: TextCtrl,
     provider_key: TextCtrl,
+    provider_catalog: StaticText,
 }
 
 #[derive(Default)]
@@ -927,9 +969,11 @@ struct CodexAppStatus {
     auth_ok: bool,
     gui_api_base: GuiApiBaseStatus,
     provider: Option<CodexAppProviderStatus>,
+    #[serde(default)]
+    providers: Vec<CodexAppProviderStatus>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexAppProviderStatus {
     name: String,
@@ -1181,6 +1225,25 @@ fn text_field_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &st
     input
 }
 
+fn provider_combo_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &str) -> ComboBox {
+    let label_widget = StaticText::builder(parent).with_label(label).build();
+    label_widget.set_foreground_color(Colour::rgb(78, 86, 98));
+    sizer.add(
+        &label_widget,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        0,
+    );
+
+    let input = ComboBox::builder(parent)
+        .with_value(value)
+        .with_style(ComboBoxStyle::Default | ComboBoxStyle::ProcessEnter)
+        .build();
+    input.set_min_size(Size::new(420, 30));
+    sizer.add(&input, 1, SizerFlag::Expand, 0);
+    input
+}
+
 fn refresh_dashboard(api: &ApiClient, handles: &UiHandles) {
     let snapshot = api.dashboard();
     update_dashboard(handles, &snapshot);
@@ -1392,25 +1455,128 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
 }
 
 fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot) {
-    let Some(provider) = snapshot
-        .codex_app
-        .as_ref()
-        .and_then(|status| status.provider.as_ref())
-    else {
+    let Some(status) = snapshot.codex_app.as_ref() else {
+        handles
+            .provider_catalog
+            .set_label("本地服务运行后会读取 ~/.codex/config.toml 里的 provider。");
+        handles.provider_catalog.wrap(760);
         return;
     };
-    if handles.provider_name.get_value().trim().is_empty() {
-        handles.provider_name.change_value(&provider.name);
-    }
-    if handles.provider_base_url.get_value().trim().is_empty()
-        && let Some(base_url) = provider.base_url.as_deref()
+    refresh_provider_choices(&handles.provider_name, &status.providers);
+    handles
+        .provider_catalog
+        .set_label(&provider_catalog_label(status));
+    handles.provider_catalog.wrap(760);
+
+    let target = status
+        .provider
+        .as_ref()
+        .or_else(|| status.providers.first());
+    let current = handles.provider_name.get_value();
+    let current = current.trim();
+    let provider_values_empty = handles.provider_base_url.get_value().trim().is_empty()
+        && handles.provider_key.get_value().trim().is_empty();
+
+    if current.is_empty() {
+        if let Some(provider) = target {
+            apply_provider_to_form(handles, provider, true);
+        } else {
+            handles.provider_name.set_value(DEFAULT_PROVIDER_NAME);
+        }
+    } else if current == DEFAULT_PROVIDER_NAME
+        && provider_values_empty
+        && let Some(provider) = target
+        && provider.name != DEFAULT_PROVIDER_NAME
     {
-        handles.provider_base_url.change_value(base_url);
+        apply_provider_to_form(handles, provider, true);
     }
-    if handles.provider_key.get_value().trim().is_empty()
-        && let Some(key) = provider.key.as_deref()
-    {
-        handles.provider_key.change_value(key);
+
+    let selected = handles.provider_name.get_value();
+    if let Some(provider) = find_provider(snapshot, &selected) {
+        apply_provider_to_form(handles, &provider, false);
+    }
+}
+
+fn refresh_provider_choices(input: &ComboBox, providers: &[CodexAppProviderStatus]) {
+    let current = input.get_value();
+    input.clear();
+    if providers.is_empty() {
+        input.append(DEFAULT_PROVIDER_NAME);
+    } else {
+        let mut names = Vec::<&str>::new();
+        for provider in providers {
+            if !names.iter().any(|name| *name == provider.name.as_str()) {
+                input.append(&provider.name);
+                names.push(&provider.name);
+            }
+        }
+    }
+    input.set_value(&current);
+}
+
+fn provider_catalog_label(status: &CodexAppStatus) -> String {
+    if status.providers.is_empty() {
+        if let Some(active) = status.provider.as_ref() {
+            return format!(
+                "当前配置里有 model_provider: {active}，但没有匹配到 provider 详情。可以继续填写 Base URL 和 API Key 补齐。",
+                active = active.name.as_str()
+            );
+        }
+        return "没有在 ~/.codex/config.toml 里找到 provider，默认新建 ai-codex。".to_string();
+    }
+
+    let names = status
+        .providers
+        .iter()
+        .map(|provider| provider.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    if let Some(active) = status.provider.as_ref() {
+        format!(
+            "已匹配 provider: {names}。建议选择当前使用的 {active}，也可以直接输入新名字新建。",
+            active = active.name.as_str()
+        )
+    } else {
+        format!("已匹配 provider: {names}。请选择原来使用的 provider，也可以直接输入新名字新建。")
+    }
+}
+
+fn find_provider(
+    snapshot: &DashboardSnapshot,
+    provider_name: &str,
+) -> Option<CodexAppProviderStatus> {
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() {
+        return None;
+    }
+    let status = snapshot.codex_app.as_ref()?;
+    status
+        .providers
+        .iter()
+        .find(|provider| provider.name == provider_name)
+        .cloned()
+        .or_else(|| {
+            status
+                .provider
+                .as_ref()
+                .filter(|provider| provider.name == provider_name)
+                .cloned()
+        })
+}
+
+fn apply_provider_to_form(handles: &UiHandles, provider: &CodexAppProviderStatus, overwrite: bool) {
+    if overwrite || handles.provider_name.get_value().trim().is_empty() {
+        handles.provider_name.set_value(&provider.name);
+    }
+    if overwrite || handles.provider_base_url.get_value().trim().is_empty() {
+        handles
+            .provider_base_url
+            .change_value(provider.base_url.as_deref().unwrap_or_default());
+    }
+    if overwrite || handles.provider_key.get_value().trim().is_empty() {
+        handles
+            .provider_key
+            .change_value(provider.key.as_deref().unwrap_or_default());
     }
 }
 
