@@ -9,7 +9,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use image::imageops::FilterType;
@@ -614,10 +614,15 @@ fn build_ui() {
     {
         let api = api.clone();
         let daemon_child = daemon_child.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
         let gui_timers = gui_timers.clone();
+        let frame = frame;
         frame.on_close(move |_| {
+            dashboard_refresh.closing.store(true, Ordering::SeqCst);
             gui_timers.stop_all();
+            stop_pending_startup_daemon(&dashboard_refresh);
             stop_daemon_on_exit(&api, &daemon_child);
+            frame.destroy();
         });
     }
 
@@ -702,9 +707,7 @@ fn stop_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>) {
     }
 }
 
-struct StartupResult {
-    child: Child,
-}
+struct StartupResult;
 
 fn start_daemon_for_gui_async(
     api: &ApiClient,
@@ -730,9 +733,24 @@ fn start_daemon_for_gui_async(
     let result: Arc<Mutex<Option<Result<StartupResult, String>>>> = Arc::new(Mutex::new(None));
     {
         let api = api.clone();
+        let closing = dashboard_refresh.closing.clone();
+        let pending_startup_child = dashboard_refresh.pending_startup_child.clone();
         let result = result.clone();
         thread::spawn(move || {
-            let startup = restart_daemon_for_gui(&api).map(|child| StartupResult { child });
+            let startup = match restart_daemon_for_gui(&api) {
+                Ok(mut child) => {
+                    let mut pending_child = pending_startup_child.lock().ok();
+                    if closing.load(Ordering::SeqCst) {
+                        wait_or_kill_child(&mut child, Duration::from_millis(250));
+                    } else if let Some(slot) = pending_child.as_mut() {
+                        slot.replace(child);
+                    } else {
+                        wait_or_kill_child(&mut child, Duration::from_millis(250));
+                    }
+                    Ok(StartupResult)
+                }
+                Err(err) => Err(err),
+            };
             if let Ok(mut slot) = result.lock() {
                 slot.replace(startup);
             }
@@ -765,8 +783,13 @@ fn start_daemon_for_gui_async(
                 .daemon_starting
                 .store(false, Ordering::SeqCst);
             match startup {
-                Ok(startup) => {
-                    replace_managed_daemon(&daemon_child, startup.child);
+                Ok(_) if dashboard_refresh.closing.load(Ordering::SeqCst) => {
+                    stop_pending_startup_daemon(&dashboard_refresh);
+                }
+                Ok(_) => {
+                    if let Some(child) = take_pending_startup_daemon(&dashboard_refresh) {
+                        replace_managed_daemon(&daemon_child, child);
+                    }
                     repair_codex_app_gui_environment_async(&api, &dashboard_refresh);
                     handles
                         .status_bar
@@ -798,28 +821,49 @@ fn repair_codex_app_gui_environment_async(api: &ApiClient, dashboard_refresh: &D
 }
 
 fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>>) {
-    let backend_url = api.url("/backend-api");
     let child = daemon_child.borrow_mut().take();
 
-    let api = api.clone();
-    thread::spawn(move || {
-        clear_codex_app_gui_environment(&backend_url);
-        let _ = api.shutdown();
-        wait_for_daemon_offline(&api, 3);
-        if let Some(mut child) = child {
-            if child.try_wait().ok().flatten().is_none() {
-                let _ = child.kill();
-            }
-            let _ = child.wait();
-        }
-        if api.is_online() {
-            stop_daemon_by_port(&api);
-        }
-    });
+    let _ = api.shutdown();
+    wait_for_daemon_offline(api, 3);
+    if let Some(mut child) = child {
+        wait_or_kill_child(&mut child, Duration::from_millis(250));
+    }
+    if api.is_online() {
+        stop_daemon_by_port(api);
+    }
 }
 
-fn clear_codex_app_gui_environment(backend_url: &str) {
-    let _ = crate::codex_app_config::uninstall_gui_environment(backend_url);
+fn stop_pending_startup_daemon(dashboard_refresh: &DashboardRefresh) {
+    if let Some(mut child) = take_pending_startup_daemon(dashboard_refresh) {
+        wait_or_kill_child(&mut child, Duration::from_millis(250));
+    }
+}
+
+fn take_pending_startup_daemon(dashboard_refresh: &DashboardRefresh) -> Option<Child> {
+    dashboard_refresh
+        .pending_startup_child
+        .lock()
+        .ok()
+        .and_then(|mut child| child.take())
+}
+
+fn wait_or_kill_child(child: &mut Child, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let _ = child.wait();
+                return;
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(_) => return,
+        }
+    }
+
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
 }
 
 fn wait_for_daemon_offline(api: &ApiClient, attempts: usize) {
@@ -1125,6 +1169,8 @@ struct DashboardRefresh {
     last_snapshot: Arc<Mutex<Option<DashboardSnapshot>>>,
     daemon_starting: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
+    closing: Arc<AtomicBool>,
+    pending_startup_child: Arc<Mutex<Option<Child>>>,
 }
 
 impl DashboardRefresh {
@@ -1135,6 +1181,8 @@ impl DashboardRefresh {
             last_snapshot: Arc::new(Mutex::new(None)),
             daemon_starting: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
+            closing: Arc::new(AtomicBool::new(false)),
+            pending_startup_child: Arc::new(Mutex::new(None)),
         }
     }
 }
