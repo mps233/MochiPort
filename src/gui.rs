@@ -2361,10 +2361,10 @@ fn codex_app_detail(snapshot: &DashboardSnapshot) -> String {
 
 fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {
     let code = QrCode::new(value.as_bytes()).ok()?;
-    const TARGET_PIXELS: usize = 384;
+    const TARGET_PIXELS: usize = 560;
     let quiet_zone = 4usize;
     let cells = code.width() + quiet_zone * 2;
-    let module_size = (TARGET_PIXELS / cells).clamp(2, 8);
+    let module_size = (TARGET_PIXELS / cells).clamp(3, 12);
     let image_size = cells * module_size;
     let mut rgba = vec![255u8; image_size * image_size * 4];
 
@@ -2401,32 +2401,46 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
     };
 
     let dialog = Dialog::builder(parent, "更换飞书机器人")
-        .with_size(460, 560)
+        .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
+        .with_size(660, 760)
         .build();
+    dialog.set_min_size(Size::new(560, 660));
     dialog.set_background_color(Colour::rgb(255, 255, 255));
+
+    let panel = Panel::builder(&dialog).build();
+    panel.set_background_color(Colour::rgb(255, 255, 255));
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let title = StaticText::builder(&dialog)
+    let title = StaticText::builder(&panel)
         .with_label("请使用飞书扫码")
         .build();
     title.set_foreground_color(Colour::rgb(21, 25, 31));
     sizer.add(&title, 0, SizerFlag::All, 18);
 
     if let Some((bitmap, qr_size)) = qr_bitmap(&start.verification_uri_complete) {
-        let qr = StaticBitmap::builder(&dialog)
+        let qr_panel = Panel::builder(&panel).build();
+        qr_panel.set_background_color(Colour::rgb(255, 255, 255));
+        qr_panel.set_min_size(Size::new(500, 500));
+
+        let qr = StaticBitmap::builder(&qr_panel)
             .with_bitmap(Some(bitmap))
-            .with_scale_mode(Some(ScaleMode::None))
-            .with_size(Size::new(qr_size, qr_size))
+            .with_scale_mode(Some(ScaleMode::AspectFit))
+            .with_size(Size::new(qr_size.max(500), qr_size.max(500)))
             .build();
-        qr.set_min_size(Size::new(qr_size, qr_size));
+        qr.set_min_size(Size::new(500, 500));
+
+        let qr_sizer = BoxSizer::builder(Orientation::Vertical).build();
+        qr_sizer.add(&qr, 1, SizerFlag::Expand | SizerFlag::All, 0);
+        qr_panel.set_sizer(qr_sizer, true);
+
         sizer.add(
-            &qr,
-            0,
-            SizerFlag::AlignCenterHorizontal | SizerFlag::Top | SizerFlag::Bottom,
+            &qr_panel,
+            1,
+            SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
             12,
         );
     } else {
-        let qr_error = StaticText::builder(&dialog)
+        let qr_error = StaticText::builder(&panel)
             .with_label("二维码生成失败，请使用浏览器打开链接。")
             .build();
         qr_error.set_foreground_color(Colour::rgb(185, 55, 55));
@@ -2438,11 +2452,22 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
         );
     }
 
-    let info = StaticText::builder(&dialog)
+    let fallback_link = HyperlinkCtrl::builder(&panel)
+        .with_label("扫码失败？打开飞书确认链接")
+        .with_url(&start.verification_uri_complete)
+        .build();
+    sizer.add(
+        &fallback_link,
+        0,
+        SizerFlag::AlignCenterHorizontal | SizerFlag::Bottom,
+        12,
+    );
+
+    let info = StaticText::builder(&panel)
         .with_label("扫码完成后会自动关闭。")
         .build();
     info.set_foreground_color(Colour::rgb(88, 96, 108));
-    info.wrap(424);
+    info.wrap(600);
     sizer.add(
         &info,
         0,
@@ -2451,7 +2476,7 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
     );
 
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    let close_button = Button::builder(&dialog).with_label("关闭").build();
+    let close_button = Button::builder(&panel).with_label("关闭").build();
     buttons.add_stretch_spacer(1);
     buttons.add(&close_button, 1, SizerFlag::Expand, 0);
     sizer.add_sizer(
@@ -2461,7 +2486,11 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
         18,
     );
 
-    dialog.set_sizer(sizer, true);
+    panel.set_sizer(sizer, true);
+    let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer(dialog_sizer, true);
+    dialog.center();
 
     let timer = Timer::new(&dialog);
     {
