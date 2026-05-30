@@ -824,12 +824,8 @@ fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>
     let child = daemon_child.borrow_mut().take();
 
     let _ = api.shutdown();
-    wait_for_daemon_offline(api, 3);
     if let Some(mut child) = child {
-        wait_or_kill_child(&mut child, Duration::from_millis(250));
-    }
-    if api.is_online() {
-        stop_daemon_by_port(api);
+        kill_child(&mut child);
     }
 }
 
@@ -860,6 +856,13 @@ fn wait_or_kill_child(child: &mut Child, timeout: Duration) {
         }
     }
 
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+fn kill_child(child: &mut Child) {
     if child.try_wait().ok().flatten().is_none() {
         let _ = child.kill();
     }
