@@ -26,7 +26,6 @@ const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_REASONING_EFFORT: &str = "xhigh";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
-const CODEX_CLI_PATH_ENV: &str = "CODEX_CLI_PATH";
 const CODEX_APP_SQLITE_DIR: &str = "sqlite";
 const CODEX_APP_PRIMARY_DB: &str = "codex.db";
 const CODEX_APP_DEV_DB: &str = "codex-dev.db";
@@ -220,25 +219,6 @@ pub fn enable_codex_app_remote_control_switch(
 ) -> Result<CodexAppRemoteControlSwitchStatus> {
     let codex_home = codex_home.unwrap_or_else(default_codex_home);
     enable_remote_control_switch_in_home(&codex_home)
-}
-
-pub fn repair_codex_app_node_repl_cli_path(codex_home: Option<PathBuf>) -> Result<bool> {
-    let codex_home = codex_home.unwrap_or_else(default_codex_home);
-    let config_path = codex_home.join("config.toml");
-    if !config_path.exists() {
-        return Ok(false);
-    }
-
-    let mut doc = parse_existing_config_toml(&config_path)?;
-    if !repair_node_repl_codex_cli_path(&mut doc) {
-        return Ok(false);
-    }
-
-    let raw = normalize_config_toml_order(&doc.to_string());
-    backup_existing(&config_path)?;
-    std::fs::write(&config_path, raw)
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-    Ok(true)
 }
 
 fn enable_remote_control_switch_in_home(
@@ -848,7 +828,6 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     }
 
     write_bundled_plugin_marketplace(&mut doc);
-    repair_node_repl_codex_cli_path(&mut doc);
 
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
@@ -1123,18 +1102,9 @@ fn provider_table_mut<'a>(
 }
 
 fn write_bundled_plugin_marketplace(doc: &mut toml_edit::DocumentMut) {
-    let Some(resources_root) = find_openai_codex_app_resources_root() else {
+    let Some(root) = find_openai_bundled_marketplace_root() else {
         return;
     };
-    let root = resources_root.join("plugins").join("openai-bundled");
-    if !root
-        .join(".agents")
-        .join("plugins")
-        .join("marketplace.json")
-        .is_file()
-    {
-        return;
-    }
 
     if !doc.contains_key("marketplaces") {
         doc["marketplaces"] = toml_edit::Item::Table(toml_edit::Table::new());
@@ -1149,48 +1119,7 @@ fn write_bundled_plugin_marketplace(doc: &mut toml_edit::DocumentMut) {
     marketplaces["openai-bundled"] = toml_edit::Item::Table(marketplace);
 }
 
-fn repair_node_repl_codex_cli_path(doc: &mut toml_edit::DocumentMut) -> bool {
-    let Some(resources_root) = find_openai_codex_app_resources_root() else {
-        return false;
-    };
-    repair_node_repl_codex_cli_path_with_resources(doc, &resources_root)
-}
-
-fn repair_node_repl_codex_cli_path_with_resources(
-    doc: &mut toml_edit::DocumentMut,
-    resources_root: &Path,
-) -> bool {
-    let cli_path = resources_root.join("codex.exe");
-    let setup_path = resources_root.join("codex-windows-sandbox-setup.exe");
-    if !cli_path.is_file() || !setup_path.is_file() {
-        return false;
-    }
-
-    let Some(env) = doc
-        .get_mut("mcp_servers")
-        .and_then(|item| item.as_table_mut())
-        .and_then(|table| table.get_mut("node_repl"))
-        .and_then(|item| item.as_table_mut())
-        .and_then(|table| table.get_mut("env"))
-        .and_then(|item| item.as_table_mut())
-    else {
-        return false;
-    };
-
-    let value = cli_path.to_string_lossy().to_string();
-    if env
-        .get(CODEX_CLI_PATH_ENV)
-        .and_then(|item| item.as_str())
-        .is_some_and(|existing| existing == value)
-    {
-        return false;
-    }
-
-    env[CODEX_CLI_PATH_ENV] = toml_edit::value(value);
-    true
-}
-
-fn find_openai_codex_app_resources_root() -> Option<PathBuf> {
+fn find_openai_bundled_marketplace_root() -> Option<PathBuf> {
     let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from)?;
     let windows_apps = program_files.join("WindowsApps");
     let entries = std::fs::read_dir(windows_apps).ok()?;
@@ -1201,8 +1130,17 @@ fn find_openai_codex_app_resources_root() -> Option<PathBuf> {
             if !name.starts_with("OpenAI.Codex_") {
                 return None;
             }
-            let root = entry.path().join("app").join("resources");
-            root.join("codex.exe").is_file().then_some(root)
+            let root = entry
+                .path()
+                .join("app")
+                .join("resources")
+                .join("plugins")
+                .join("openai-bundled");
+            root.join(".agents")
+                .join("plugins")
+                .join("marketplace.json")
+                .is_file()
+                .then_some(root)
         })
         .collect::<Vec<_>>();
     roots.sort();
@@ -1543,36 +1481,6 @@ requires_openai_auth = true
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
 
         let _ = std::fs::remove_dir_all(codex_home);
-    }
-
-    #[test]
-    fn repairs_node_repl_codex_cli_path_to_app_resources() {
-        let temp = unique_temp_dir();
-        let resources = temp.join("resources");
-        std::fs::create_dir_all(&resources).expect("create resources");
-        std::fs::write(resources.join("codex.exe"), b"codex").expect("write codex exe");
-        std::fs::write(resources.join("codex-windows-sandbox-setup.exe"), b"setup")
-            .expect("write setup exe");
-
-        let mut doc = r#"[mcp_servers.node_repl]
-command = 'C:\Users\example\AppData\Local\OpenAI\Codex\bin\hash\node_repl.exe'
-
-[mcp_servers.node_repl.env]
-CODEX_CLI_PATH = 'C:\Users\example\AppData\Local\OpenAI\Codex\bin\old\codex.exe'
-"#
-        .parse::<toml_edit::DocumentMut>()
-        .expect("parse config");
-
-        assert!(repair_node_repl_codex_cli_path_with_resources(
-            &mut doc, &resources
-        ));
-
-        let cli_path = doc["mcp_servers"]["node_repl"]["env"][CODEX_CLI_PATH_ENV]
-            .as_str()
-            .expect("CODEX_CLI_PATH");
-        assert_eq!(cli_path, resources.join("codex.exe").to_string_lossy());
-
-        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
