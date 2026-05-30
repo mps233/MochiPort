@@ -827,6 +827,8 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         }
     }
 
+    write_bundled_plugin_marketplace(&mut doc);
+
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
     std::fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
@@ -1097,6 +1099,52 @@ fn provider_table_mut<'a>(
         .expect("provider table should exist")
         .as_table_mut()
         .expect("provider should be a table")
+}
+
+fn write_bundled_plugin_marketplace(doc: &mut toml_edit::DocumentMut) {
+    let Some(root) = find_openai_bundled_marketplace_root() else {
+        return;
+    };
+
+    if !doc.contains_key("marketplaces") {
+        doc["marketplaces"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let Some(marketplaces) = doc["marketplaces"].as_table_mut() else {
+        return;
+    };
+
+    let mut marketplace = toml_edit::Table::new();
+    marketplace["source_type"] = toml_edit::value("local");
+    marketplace["source"] = toml_edit::value(root.to_string_lossy().to_string());
+    marketplaces["openai-bundled"] = toml_edit::Item::Table(marketplace);
+}
+
+fn find_openai_bundled_marketplace_root() -> Option<PathBuf> {
+    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from)?;
+    let windows_apps = program_files.join("WindowsApps");
+    let entries = std::fs::read_dir(windows_apps).ok()?;
+    let mut roots = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("OpenAI.Codex_") {
+                return None;
+            }
+            let root = entry
+                .path()
+                .join("app")
+                .join("resources")
+                .join("plugins")
+                .join("openai-bundled");
+            root.join(".agents")
+                .join("plugins")
+                .join("marketplace.json")
+                .is_file()
+                .then_some(root)
+        })
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.pop()
 }
 
 fn provider_name(value: Option<&str>) -> Result<String> {
