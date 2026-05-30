@@ -1,4 +1,4 @@
-# Codex Remote v0.2.1
+# Codex Remote v0.2.2
 
 本次版本整理了 Codex Remote 的正式使用路径：本地 remote-control backend + 飞书 bridge。
 
