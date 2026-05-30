@@ -1,19 +1,12 @@
-# Codex Remote v0.2.2
+# Codex Remote v0.2.3
 
-本次版本整理了 Codex Remote 的正式使用路径：本地 remote-control backend + 飞书 bridge。
+本次版本修复 Windows GUI 中飞书机器人接入二维码过大时难以扫码的问题。
 
 ## 更新内容
 
-- 支持 macOS 和 Windows。
-- 支持 Codex App 接入本地 remote-control backend。
-- 支持 Codex VS Code 插件接入本地 remote-control backend。
-- GUI 自动启动本地 backend，退出 GUI 时关闭本次启动的 backend。
-- 写入配置时支持第三方 Base URL、API Key 和 provider 配置。
-- 首页状态更直观：只要“本地服务”“飞书”“Codex 控制通道”都是绿色，就可以直接使用。
-- Codex App 的“连接”设置页不需要显示远程连接设备列表，本项目不依赖那个列表展示。
-- 优化配置读取速度，GUI 会先读取本地 Codex 配置，不再等待 bridge 网络初始化。
-- 修复 macOS 关闭窗口时 timer 残留导致的意外退出。
-- 修复 Windows GUI 关闭时等待环境变量清理导致的卡顿。
+- 修复飞书扫码弹窗里二维码在长授权链接下被放得过大、底部显示空间不足的问题。
+- 二维码渲染现在限制在稳定尺寸内，同时保留静区，提升手机扫码识别率。
+- 调整扫码弹窗布局，避免提示文字和按钮挤压二维码区域。
 
 ## 使用方式
 

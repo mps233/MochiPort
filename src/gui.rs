@@ -2361,9 +2361,10 @@ fn codex_app_detail(snapshot: &DashboardSnapshot) -> String {
 
 fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {
     let code = QrCode::new(value.as_bytes()).ok()?;
+    const TARGET_PIXELS: usize = 384;
     let quiet_zone = 4usize;
     let cells = code.width() + quiet_zone * 2;
-    let module_size = (420usize / cells).clamp(3, 8);
+    let module_size = (TARGET_PIXELS / cells).clamp(2, 8);
     let image_size = cells * module_size;
     let mut rgba = vec![255u8; image_size * image_size * 4];
 
@@ -2400,7 +2401,7 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
     };
 
     let dialog = Dialog::builder(parent, "更换飞书机器人")
-        .with_size(500, 560)
+        .with_size(460, 560)
         .build();
     dialog.set_background_color(Colour::rgb(255, 255, 255));
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
@@ -2441,7 +2442,7 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
         .with_label("扫码完成后会自动关闭。")
         .build();
     info.set_foreground_color(Colour::rgb(88, 96, 108));
-    info.wrap(480);
+    info.wrap(424);
     sizer.add(
         &info,
         0,
