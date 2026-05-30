@@ -33,8 +33,8 @@ const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
 
-const LOCAL_AUTH_MODE: &str = "chatgpt";
-const LEGACY_LOCAL_AUTH_MODE: &str = "chatgptAuthTokens";
+const LOCAL_AUTH_MODE: &str = "chatgptAuthTokens";
+const LEGACY_LOCAL_AUTH_MODE: &str = "chatgpt";
 
 #[derive(Debug, Clone)]
 pub struct ConfigureCodexAppOptions {
