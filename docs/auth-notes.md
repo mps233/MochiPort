@@ -4,13 +4,13 @@ This document describes the local auth boundary for the Codex App remote-control
 
 ## Decision
 
-`codex-remote` uses a local `chatgptAuthTokens` shape for Codex App remote-control identity.
+`codex-remote` uses a local `chatgpt` auth shape for Codex App remote-control identity.
 
 That means:
 
 - Codex App still owns app-server startup and reads its normal Codex home.
 - `chatgpt_base_url` points Codex App at the local `codex-remote` backend.
-- Codex App `auth.json` uses `auth_mode = "chatgptAuthTokens"`.
+- Codex App `auth.json` uses `auth_mode = "chatgpt"`.
 - The third-party model key stays in Codex model provider config.
 - `codex-remote` bridges remote-control protocol traffic to Feishu after the app-server connects.
 
@@ -24,13 +24,13 @@ remote control requires ChatGPT authentication; API key auth is not supported
 
 So the model provider key cannot be used as the remote-control identity. It is only for model requests.
 
-## Local `chatgptAuthTokens`
+## Local `chatgpt`
 
 The local auth record is intentionally ChatGPT-shaped because that is what Codex's remote-control gate accepts:
 
 ```json
 {
-  "auth_mode": "chatgptAuthTokens",
+  "auth_mode": "chatgpt",
   "OPENAI_API_KEY": null,
   "tokens": {
     "id_token": "<local ChatGPT-shaped JWT>",
@@ -55,7 +55,7 @@ codex-remote --config config.toml configure-codex-app
 This explicitly writes:
 
 - Codex App `config.toml` with `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`
-- Codex App `auth.json` with local `chatgptAuthTokens`
+- Codex App `auth.json` with local `chatgpt` auth
 
 Optional provider fields can also be written:
 

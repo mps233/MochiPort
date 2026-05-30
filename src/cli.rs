@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Gui,
     Daemon,
     On,
     Off,
@@ -48,7 +49,8 @@ impl Cli {
         }
 
         let command = match remaining.first().map(String::as_str) {
-            None => Command::Daemon,
+            None => default_command(),
+            Some("gui") => Command::Gui,
             Some("daemon") | Some("run") => Command::Daemon,
             Some("on") => Command::On,
             Some("off") => Command::Off,
@@ -69,6 +71,14 @@ impl Cli {
             config_path,
             command,
         })
+    }
+}
+
+fn default_command() -> Command {
+    if cfg!(feature = "gui") {
+        Command::Gui
+    } else {
+        Command::Daemon
     }
 }
 
@@ -145,6 +155,7 @@ pub fn print_help() {
         r#"codex-remote
 
 Usage:
+  codex-remote [--config PATH] gui
   codex-remote [--config PATH] daemon
   codex-remote [--config PATH] on
   codex-remote [--config PATH] off
@@ -152,7 +163,7 @@ Usage:
   codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
   codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
 
-Default command is daemon.
+Default command is gui when built with the gui feature, otherwise daemon.
 "#
     );
 }

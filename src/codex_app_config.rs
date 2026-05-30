@@ -1,18 +1,38 @@
+#[cfg(target_os = "macos")]
+use std::process::Command;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde::Serialize;
 use serde_json::json;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
+};
+#[cfg(target_os = "windows")]
+use winreg::{
+    RegKey,
+    enums::{HKEY_CURRENT_USER, KEY_SET_VALUE},
+};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const DEFAULT_REASONING_EFFORT: &str = "xhigh";
+const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
+const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
+const CODEX_APP_SQLITE_DIR: &str = "sqlite";
+const CODEX_APP_PRIMARY_DB: &str = "codex.db";
+const CODEX_APP_DEV_DB: &str = "codex-dev.db";
+const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
+
+const LOCAL_AUTH_MODE: &str = "chatgpt";
+const LEGACY_LOCAL_AUTH_MODE: &str = "chatgptAuthTokens";
 
 #[derive(Debug, Clone)]
 pub struct ConfigureCodexAppOptions {
@@ -34,6 +54,7 @@ pub struct ConfigureCodexAppReport {
     pub config_path: PathBuf,
     pub auth_path: PathBuf,
     pub backend_url: String,
+    pub remote_control_switch: CodexAppRemoteControlSwitchStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,8 +94,29 @@ pub struct CodexAppConfigStatus {
     pub config_error: Option<String>,
     pub auth_error: Option<String>,
     pub gui_api_base: CodexAppGuiApiBaseStatus,
+    pub remote_control_switch: CodexAppRemoteControlSwitchStatus,
     pub provider: Option<CodexAppProviderStatus>,
     pub providers: Vec<CodexAppProviderStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAppRemoteControlSwitchStatus {
+    pub supported: bool,
+    pub configured: bool,
+    pub feature_name: String,
+    pub databases: Vec<CodexAppRemoteControlSwitchDatabaseStatus>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAppRemoteControlSwitchDatabaseStatus {
+    pub path: PathBuf,
+    pub exists: bool,
+    pub enabled: Option<bool>,
+    pub updated_at: Option<i64>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +141,8 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     let auth_path = codex_home.join("auth.json");
     write_auth_json(&auth_path, &options)?;
 
+    let remote_control_switch = enable_remote_control_switch_in_home(&codex_home)?;
+
     #[cfg(not(test))]
     let _ = configure_gui_environment(&options.backend_url);
 
@@ -107,6 +151,7 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
         config_path,
         auth_path,
         backend_url: options.backend_url,
+        remote_control_switch,
     })
 }
 
@@ -148,27 +193,226 @@ pub fn inspect_codex_app_config(
 
     let gui_api_base = inspect_gui_api_base_url(backend_url);
     let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
+    let remote_control_switch = inspect_remote_control_switch_in_home(&codex_home);
+    let remote_control_ok = remote_control_switch.configured;
 
     CodexAppConfigStatus {
         codex_home,
         config_path,
         auth_path,
-        configured: config_ok && auth_ok && gui_ok,
+        configured: config_ok && auth_ok && gui_ok && remote_control_ok,
         config_ok,
         auth_ok,
         config_error,
         auth_error,
         gui_api_base,
+        remote_control_switch,
         provider,
         providers,
     }
 }
 
+pub fn enable_codex_app_remote_control_switch(
+    codex_home: Option<PathBuf>,
+) -> Result<CodexAppRemoteControlSwitchStatus> {
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    enable_remote_control_switch_in_home(&codex_home)
+}
+
+fn enable_remote_control_switch_in_home(
+    codex_home: &Path,
+) -> Result<CodexAppRemoteControlSwitchStatus> {
+    let sqlite_dir = codex_home.join(CODEX_APP_SQLITE_DIR);
+    std::fs::create_dir_all(&sqlite_dir).with_context(|| {
+        format!(
+            "failed to create Codex App sqlite directory {}",
+            sqlite_dir.display()
+        )
+    })?;
+
+    for db_path in codex_app_feature_db_paths(codex_home) {
+        upsert_remote_control_feature(&db_path)?;
+    }
+
+    let status = inspect_remote_control_switch_in_home(codex_home);
+    if status.configured {
+        Ok(status)
+    } else {
+        Err(anyhow!(
+            "{}",
+            status.error.unwrap_or_else(|| {
+                "remote_control switch was written but could not be verified".to_string()
+            })
+        ))
+    }
+}
+
+fn inspect_remote_control_switch_in_home(codex_home: &Path) -> CodexAppRemoteControlSwitchStatus {
+    let databases = codex_app_feature_db_paths(codex_home)
+        .into_iter()
+        .map(|path| inspect_remote_control_switch_db(&path))
+        .collect::<Vec<_>>();
+    let error = databases.iter().find_map(|db| db.error.clone());
+    let configured = !databases.is_empty()
+        && error.is_none()
+        && databases
+            .iter()
+            .all(|db| db.exists && db.enabled == Some(true));
+
+    CodexAppRemoteControlSwitchStatus {
+        supported: true,
+        configured,
+        feature_name: CODEX_APP_REMOTE_CONTROL_FEATURE.to_string(),
+        databases,
+        error,
+    }
+}
+
+fn codex_app_feature_db_paths(codex_home: &Path) -> Vec<PathBuf> {
+    let sqlite_dir = codex_home.join(CODEX_APP_SQLITE_DIR);
+    let primary = sqlite_dir.join(CODEX_APP_PRIMARY_DB);
+    let dev = sqlite_dir.join(CODEX_APP_DEV_DB);
+    if dev.exists() && dev != primary {
+        vec![primary, dev]
+    } else {
+        vec![primary]
+    }
+}
+
+fn upsert_remote_control_feature(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let connection = Connection::open(path)
+        .with_context(|| format!("failed to open Codex App sqlite DB {}", path.display()))?;
+    connection
+        .busy_timeout(Duration::from_secs(2))
+        .with_context(|| {
+            format!(
+                "failed to configure sqlite busy timeout for {}",
+                path.display()
+            )
+        })?;
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS local_app_server_feature_enablement (
+                feature_name TEXT PRIMARY KEY,
+                enabled INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .with_context(|| {
+            format!(
+                "failed to ensure local_app_server_feature_enablement in {}",
+                path.display()
+            )
+        })?;
+    let updated_at = unix_now_millis()?;
+    connection
+        .execute(
+            r#"
+            INSERT INTO local_app_server_feature_enablement (feature_name, enabled, updated_at)
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(feature_name) DO UPDATE SET
+                enabled = excluded.enabled,
+                updated_at = excluded.updated_at
+            "#,
+            params![CODEX_APP_REMOTE_CONTROL_FEATURE, 1_i64, updated_at],
+        )
+        .with_context(|| {
+            format!(
+                "failed to upsert remote_control feature enablement in {}",
+                path.display()
+            )
+        })?;
+    Ok(())
+}
+
+fn inspect_remote_control_switch_db(path: &Path) -> CodexAppRemoteControlSwitchDatabaseStatus {
+    if !path.exists() {
+        return CodexAppRemoteControlSwitchDatabaseStatus {
+            path: path.to_path_buf(),
+            exists: false,
+            enabled: None,
+            updated_at: None,
+            error: None,
+        };
+    }
+
+    match read_remote_control_switch_db(path) {
+        Ok((enabled, updated_at)) => CodexAppRemoteControlSwitchDatabaseStatus {
+            path: path.to_path_buf(),
+            exists: true,
+            enabled,
+            updated_at,
+            error: None,
+        },
+        Err(err) => CodexAppRemoteControlSwitchDatabaseStatus {
+            path: path.to_path_buf(),
+            exists: true,
+            enabled: None,
+            updated_at: None,
+            error: Some(err.to_string()),
+        },
+    }
+}
+
+fn read_remote_control_switch_db(path: &Path) -> Result<(Option<bool>, Option<i64>)> {
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .with_context(|| format!("failed to open Codex App sqlite DB {}", path.display()))?;
+    connection
+        .busy_timeout(Duration::from_secs(2))
+        .with_context(|| {
+            format!(
+                "failed to configure sqlite busy timeout for {}",
+                path.display()
+            )
+        })?;
+    let table_exists = connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+            params!["local_app_server_feature_enablement"],
+            |_| Ok(()),
+        )
+        .optional()
+        .with_context(|| {
+            format!(
+                "failed to inspect local_app_server_feature_enablement in {}",
+                path.display()
+            )
+        })?
+        .is_some();
+    if !table_exists {
+        return Ok((None, None));
+    }
+
+    let row = connection
+        .query_row(
+            "SELECT enabled, updated_at FROM local_app_server_feature_enablement WHERE feature_name = ?1",
+            params![CODEX_APP_REMOTE_CONTROL_FEATURE],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .with_context(|| {
+            format!(
+                "failed to read remote_control feature enablement from {}",
+                path.display()
+            )
+        })?;
+
+    Ok(row
+        .map(|(enabled, updated_at)| (Some(enabled != 0), Some(updated_at)))
+        .unwrap_or((None, None)))
+}
+
 pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
     let login_issuer_expected = oauth_issuer_url(backend_url);
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let api_base = match launchctl_getenv("CODEX_API_BASE_URL") {
+        let api_base = match gui_getenv(CODEX_API_BASE_URL_ENV) {
             Ok(value) => value,
             Err(err) => {
                 return CodexAppGuiApiBaseStatus {
@@ -183,7 +427,7 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
                 };
             }
         };
-        let login_issuer = match launchctl_getenv("CODEX_APP_SERVER_LOGIN_ISSUER") {
+        let login_issuer = match gui_getenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV) {
             Ok(value) => value,
             Err(err) => {
                 return CodexAppGuiApiBaseStatus {
@@ -211,7 +455,7 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         CodexAppGuiApiBaseStatus {
             supported: false,
@@ -222,7 +466,7 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
             login_issuer_expected,
             login_issuer_value: None,
             error: Some(
-                "CODEX_API_BASE_URL one-click setup is only implemented for macOS launchctl"
+                "CODEX_API_BASE_URL one-click setup is only implemented for macOS and Windows"
                     .to_string(),
             ),
         }
@@ -230,48 +474,119 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
 }
 
 pub fn configure_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let login_issuer = oauth_issuer_url(backend_url);
-        let api_result = launchctl_setenv("CODEX_API_BASE_URL", backend_url);
-        let issuer_result = launchctl_setenv("CODEX_APP_SERVER_LOGIN_ISSUER", &login_issuer);
+        let api_result = gui_setenv(CODEX_API_BASE_URL_ENV, backend_url);
+        let issuer_result = gui_setenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV, &login_issuer);
         let mut status = inspect_gui_api_base_url(backend_url);
         status.error = api_result.err().or_else(|| issuer_result.err());
         status
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         inspect_gui_api_base_url(backend_url)
     }
 }
 
 pub fn uninstall_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let login_issuer = oauth_issuer_url(backend_url);
-        if launchctl_getenv("CODEX_API_BASE_URL")
-            .ok()
-            .flatten()
-            .as_deref()
-            == Some(backend_url)
-        {
-            let _ = launchctl_unsetenv("CODEX_API_BASE_URL");
+        if gui_getenv(CODEX_API_BASE_URL_ENV).ok().flatten().as_deref() == Some(backend_url) {
+            let _ = gui_unsetenv(CODEX_API_BASE_URL_ENV);
         }
-        if launchctl_getenv("CODEX_APP_SERVER_LOGIN_ISSUER")
+        if gui_getenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV)
             .ok()
             .flatten()
             .as_deref()
             == Some(login_issuer.as_str())
         {
-            let _ = launchctl_unsetenv("CODEX_APP_SERVER_LOGIN_ISSUER");
+            let _ = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
         }
         inspect_gui_api_base_url(backend_url)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         inspect_gui_api_base_url(backend_url)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn gui_getenv(name: &str) -> Result<Option<String>, String> {
+    launchctl_getenv(name)
+}
+
+#[cfg(target_os = "macos")]
+fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
+    launchctl_setenv(name, value)
+}
+
+#[cfg(target_os = "macos")]
+fn gui_unsetenv(name: &str) -> Result<(), String> {
+    launchctl_unsetenv(name)
+}
+
+#[cfg(target_os = "windows")]
+fn gui_getenv(name: &str) -> Result<Option<String>, String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let env = match hkcu.open_subkey("Environment") {
+        Ok(env) => env,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    match env.get_value::<String, _>(name) {
+        Ok(value) => Ok((!value.trim().is_empty()).then_some(value)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (env, _) = hkcu
+        .create_subkey("Environment")
+        .map_err(|err| err.to_string())?;
+    env.set_value(name, &value).map_err(|err| err.to_string())?;
+    broadcast_windows_environment_change();
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn gui_unsetenv(name: &str) -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let env = match hkcu.open_subkey_with_flags("Environment", KEY_SET_VALUE) {
+        Ok(env) => env,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(err.to_string()),
+    };
+    match env.delete_value(name) {
+        Ok(()) => {
+            broadcast_windows_environment_change();
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn broadcast_windows_environment_change() {
+    let message: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
+    let mut result = 0usize;
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            message.as_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            5000,
+            &mut result,
+        );
     }
 }
 
@@ -388,12 +703,12 @@ fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
         Ok(auth) => auth,
         Err(err) => return (false, Some(err.to_string())),
     };
-    if auth.get("auth_mode").and_then(|value| value.as_str()) == Some("chatgptAuthTokens") {
+    if is_codex_remote_auth_json(&auth) {
         (true, None)
     } else {
         (
             false,
-            Some("auth_mode is not chatgptAuthTokens".to_string()),
+            Some("auth.json is not codex-remote local auth".to_string()),
         )
     }
 }
@@ -631,7 +946,7 @@ fn uninstall_auth_json(path: &Path) -> Result<bool> {
         .with_context(|| format!("failed to read {}", path.display()))?;
     let auth = serde_json::from_str::<serde_json::Value>(&raw)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    if auth.get("auth_mode").and_then(|value| value.as_str()) != Some("chatgptAuthTokens") {
+    if !is_codex_remote_auth_json(&auth) {
         return Ok(false);
     }
 
@@ -756,7 +1071,7 @@ fn provider_name(value: Option<&str>) -> Result<String> {
 fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()> {
     let jwt = local_chatgpt_jwt(options)?;
     let auth = json!({
-        "auth_mode": "chatgptAuthTokens",
+        "auth_mode": LOCAL_AUTH_MODE,
         "OPENAI_API_KEY": null,
         "tokens": {
             "id_token": jwt,
@@ -770,6 +1085,46 @@ fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()
     backup_existing(path)?;
     std::fs::write(path, format!("{raw}\n"))
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn is_codex_remote_auth_json(auth: &serde_json::Value) -> bool {
+    let auth_mode = auth.get("auth_mode").and_then(|value| value.as_str());
+    if !matches!(
+        auth_mode,
+        Some(LOCAL_AUTH_MODE) | Some(LEGACY_LOCAL_AUTH_MODE)
+    ) {
+        return false;
+    }
+
+    auth.pointer("/tokens/access_token")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            auth.pointer("/tokens/id_token")
+                .and_then(|value| value.as_str())
+        })
+        .is_some_and(is_codex_remote_local_jwt)
+}
+
+fn is_codex_remote_local_jwt(token: &str) -> bool {
+    let Some(payload) = token.split('.').nth(1) else {
+        return false;
+    };
+    let Ok(payload) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+        return false;
+    };
+    let local_subject = payload
+        .get("sub")
+        .and_then(|value| value.as_str())
+        .is_some_and(|value| value.starts_with("local|"));
+    let local_auth = payload
+        .get("https://api.openai.com/auth")
+        .and_then(|value| value.get("localhost"))
+        .and_then(|value| value.as_bool())
+        == Some(true);
+    local_subject && local_auth
 }
 
 fn backup_existing(path: &Path) -> Result<()> {
@@ -854,6 +1209,14 @@ fn unix_now() -> Result<u64> {
         .as_secs())
 }
 
+fn unix_now_millis() -> Result<i64> {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow!("system time is before UNIX epoch: {err}"))?
+        .as_millis();
+    i64::try_from(millis).map_err(|_| anyhow!("system time is too large for sqlite timestamp"))
+}
+
 fn rfc3339_now() -> String {
     match unix_now() {
         Ok(now) => format_rfc3339_utc(now),
@@ -934,8 +1297,50 @@ mod tests {
         assert!(config.contains("experimental_bearer_token = \"test-provider-key\""));
 
         let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
-        assert!(auth.contains("\"auth_mode\": \"chatgptAuthTokens\""));
+        assert!(auth.contains(&format!("\"auth_mode\": \"{LOCAL_AUTH_MODE}\"")));
         assert!(auth.contains("\"account_id\": \"acct_test\""));
+        assert!(report.remote_control_switch.configured);
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn enable_remote_control_switch_updates_existing_disabled_row() {
+        let codex_home = unique_temp_dir();
+        let db_path = codex_home
+            .join(CODEX_APP_SQLITE_DIR)
+            .join(CODEX_APP_PRIMARY_DB);
+        std::fs::create_dir_all(db_path.parent().expect("db parent")).expect("create sqlite dir");
+        let connection = Connection::open(&db_path).expect("open sqlite db");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE local_app_server_feature_enablement (
+                    feature_name TEXT PRIMARY KEY,
+                    enabled INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+                "#,
+            )
+            .expect("create feature table");
+        connection
+            .execute(
+                "INSERT INTO local_app_server_feature_enablement (feature_name, enabled, updated_at) VALUES (?1, ?2, ?3)",
+                params![CODEX_APP_REMOTE_CONTROL_FEATURE, 0_i64, 1_i64],
+            )
+            .expect("insert disabled row");
+        drop(connection);
+
+        let status = enable_codex_app_remote_control_switch(Some(codex_home.clone()))
+            .expect("enable remote_control switch");
+        assert!(status.configured);
+        let db_status = status
+            .databases
+            .iter()
+            .find(|db| db.path == db_path)
+            .expect("codex db status");
+        assert_eq!(db_status.enabled, Some(true));
+        assert!(db_status.updated_at.unwrap_or_default() > 1);
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -1048,15 +1453,20 @@ base_url = "https://api.example.invalid"
 "#,
         )
         .expect("write config");
-        std::fs::write(
+        write_auth_json(
             &auth_path,
-            r#"{
-  "auth_mode": "chatgptAuthTokens",
-  "tokens": {
-    "account_id": "acct_test"
-  }
-}
-"#,
+            &ConfigureCodexAppOptions {
+                codex_home: Some(codex_home.clone()),
+                backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+                account_id: "acct_test".to_string(),
+                user_id: "user_test".to_string(),
+                email: "local@example.test".to_string(),
+                plan_type: "pro".to_string(),
+                provider_name: None,
+                provider_base_url: None,
+                provider_key: None,
+                model: None,
+            },
         )
         .expect("write auth");
 
@@ -1080,6 +1490,31 @@ base_url = "https://api.example.invalid"
         let _ = std::fs::remove_dir_all(codex_home);
     }
 
+    #[test]
+    fn uninstall_auth_json_preserves_non_local_chatgpt_auth() {
+        let codex_home = unique_temp_dir();
+        let auth_path = codex_home.join("auth.json");
+        std::fs::write(
+            &auth_path,
+            r#"{
+  "auth_mode": "chatgpt",
+  "tokens": {
+    "access_token": "official-token",
+    "account_id": "acct_test"
+  }
+}
+"#,
+        )
+        .expect("write auth");
+
+        let removed_auth = uninstall_auth_json(&auth_path).expect("uninstall auth");
+
+        assert!(!removed_auth);
+        assert!(auth_path.exists());
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
     fn unique_temp_dir() -> PathBuf {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1096,7 +1531,9 @@ base_url = "https://api.example.invalid"
 
     #[test]
     fn default_codex_home_ignores_process_codex_home() {
-        let home = std::env::var_os("HOME").expect("HOME should exist for this test");
+        let home = std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .expect("HOME or USERPROFILE should exist for this test");
         let expected = PathBuf::from(home).join(".codex");
 
         let old_codex_home = std::env::var_os("CODEX_HOME");

@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     rc::Rc,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -15,10 +18,19 @@ use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use wxdragon::{prelude::*, timer::Timer};
 
+#[cfg(target_os = "windows")]
+const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
+#[cfg(not(target_os = "windows"))]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
+const CODEX_APP_GUI_UNSUPPORTED: bool = !(cfg!(target_os = "macos") || cfg!(target_os = "windows"));
+const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 2500;
+const DASHBOARD_RESULT_POLL_MS: i32 = 100;
+const GUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
+const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
+const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 
-fn main() {
+pub fn run() {
     if let Err(err) = wxdragon::main(|_| build_ui()) {
         eprintln!("failed to start Codex Remote GUI: {err:?}");
     }
@@ -80,9 +92,30 @@ fn build_ui() {
     let status_section =
         StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &root, "状态概览").build();
     let status_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let codex_status = status_panel(&root, "Codex App", StatusIconKind::Codex);
+    let vscode_status = status_panel(&root, "VS Code 插件", StatusIconKind::VsCodeCodex);
+    if CODEX_APP_GUI_UNSUPPORTED {
+        set_disabled_status_panel(&codex_status, "暂不可用", "当前平台暂不支持 App GUI");
+    }
     let service_status = status_panel(&root, "本地服务", StatusIconKind::Service);
     let feishu_status = status_panel(&root, "飞书", StatusIconKind::Feishu);
-    let codex_status = status_panel(&root, "Codex App", StatusIconKind::Codex);
+    let entry_connector = topology_connector(&root);
+    let bridge_connector = topology_arrow(&root);
+    let entry_column = BoxSizer::builder(Orientation::Vertical).build();
+    entry_column.add(
+        &codex_status.panel,
+        1,
+        SizerFlag::Expand | SizerFlag::Bottom,
+        8,
+    );
+    entry_column.add(&vscode_status.panel, 1, SizerFlag::Expand, 0);
+    status_row.add_sizer(&entry_column, 1, SizerFlag::Expand | SizerFlag::All, 8);
+    status_row.add(
+        &entry_connector,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Left | SizerFlag::Right,
+        4,
+    );
     status_row.add(
         &service_status.panel,
         1,
@@ -90,13 +123,13 @@ fn build_ui() {
         8,
     );
     status_row.add(
-        &feishu_status.panel,
-        1,
-        SizerFlag::Expand | SizerFlag::All,
-        8,
+        &bridge_connector,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Left | SizerFlag::Right,
+        2,
     );
     status_row.add(
-        &codex_status.panel,
+        &feishu_status.panel,
         1,
         SizerFlag::Expand | SizerFlag::All,
         8,
@@ -123,7 +156,7 @@ fn build_ui() {
     let codex_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let codex_status_box =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &codex_page, "Codex App 状态")
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &codex_page, "Codex 接入状态")
             .build();
     let codex_config_state = StaticText::builder(&codex_page)
         .with_label("正在读取 ~/.codex 配置状态")
@@ -146,7 +179,7 @@ fn build_ui() {
     let config_box = StaticBoxSizerBuilder::new_with_label(
         Orientation::Vertical,
         &codex_page,
-        "写入 Codex App 配置",
+        "写入 Codex 接入配置",
     )
     .build();
     let config_header = BoxSizer::builder(Orientation::Horizontal).build();
@@ -155,16 +188,15 @@ fn build_ui() {
         .build();
     config_hint.set_foreground_color(Colour::rgb(34, 39, 47));
     config_header.add(&config_hint, 1, SizerFlag::AlignCenterVertical, 0);
-    let uninstall_button = Button::builder(&codex_page).with_label("卸载注入").build();
-    uninstall_button.set_tooltip("移除 Codex App 中由 Codex Remote 写入的连接配置");
     let configure_button = Button::builder(&codex_page).with_label("写入配置").build();
-    configure_button.set_tooltip("写入 Codex App 使用 Codex Remote 所需的本地配置");
-    config_header.add(&uninstall_button, 0, SizerFlag::Right, 8);
+    configure_button.set_tooltip("写入 Codex Remote 使用的本地 provider 配置");
     config_header.add(&configure_button, 0, SizerFlag::Right, 0);
     config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 14);
 
     let provider_help = StaticText::builder(&codex_page)
-        .with_label("填写 Base URL 和 API Key 后写入 Codex App 配置。已有 provider 建议直接复用；没有时可以新建。")
+        .with_label(
+            "写入本地 provider 配置。Codex App 和 VS Code 插件都可以接入本地 remote-control。",
+        )
         .build();
     provider_help.set_foreground_color(Colour::rgb(91, 100, 114));
     provider_help.wrap(980);
@@ -313,7 +345,7 @@ fn build_ui() {
     system_sizer.add_stretch_spacer(1);
     system_page.set_sizer(system_sizer, true);
 
-    notebook.add_page(&codex_page, "Codex App", true, None);
+    notebook.add_page(&codex_page, "Codex 接入", true, None);
     notebook.add_page(&feishu_page, "飞书", false, None);
     notebook.add_page(&system_page, "本地服务", false, None);
 
@@ -334,6 +366,7 @@ fn build_ui() {
         service_status,
         feishu_status,
         codex_status,
+        vscode_status,
         feishu_state,
         feishu_detail,
         feishu_meta,
@@ -343,7 +376,6 @@ fn build_ui() {
         configure_button,
         refresh_button,
         start_daemon_button,
-        uninstall_button,
         provider_name,
         provider_base_url,
         provider_key,
@@ -351,14 +383,17 @@ fn build_ui() {
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
-    handles
-        .status_bar
-        .set_status_text("本地服务启动中，界面已可操作", 0);
+    let dashboard_refresh = DashboardRefresh::new();
+    show_dashboard_starting(&handles);
 
     {
         let api = api.clone();
         let handles = handles;
-        refresh_button.on_click(move |_| refresh_dashboard(&api, &handles));
+        let dashboard_refresh = dashboard_refresh.clone();
+        refresh_button.on_click(move |_| {
+            handles.status_bar.set_status_text("状态刷新中", 0);
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
     }
 
     {
@@ -366,20 +401,15 @@ fn build_ui() {
         let handles = handles;
         let frame = frame;
         let daemon_child = daemon_child.clone();
-        start_daemon_button.on_click(move |_| match restart_daemon_for_gui(&api) {
-            Ok(child) => {
-                replace_managed_daemon(&daemon_child, child);
-                repair_gui_environment_if_needed(&api, &handles);
-                show_info(&frame, "本地服务已运行。");
-                refresh_dashboard(&api, &handles);
-            }
-            Err(err) => show_error(&frame, &err),
+        let dashboard_refresh = dashboard_refresh.clone();
+        start_daemon_button.on_click(move |_| {
+            start_daemon_for_gui_async(&api, &handles, &frame, &daemon_child, &dashboard_refresh);
         });
     }
 
     {
         let api = api.clone();
-        let handles = handles;
+        let dashboard_refresh = dashboard_refresh.clone();
         let provider_name = provider_name;
         let provider_base_url = provider_base_url;
         let provider_key = provider_key;
@@ -395,9 +425,9 @@ fn build_ui() {
                 Ok(_) => {
                     show_info(
                         &frame,
-                        "配置已写入。请重新打开 Codex App，或在 Codex App 中重新进入远程控制。",
+                        "配置已写入。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。",
                     );
-                    refresh_dashboard(&api, &handles);
+                    schedule_dashboard_refresh(&api, &dashboard_refresh);
                 }
                 Err(err) => show_error(&frame, &err),
             }
@@ -405,11 +435,13 @@ fn build_ui() {
     }
 
     {
-        let api = api.clone();
         let handles = handles;
+        let dashboard_refresh = dashboard_refresh.clone();
         provider_name.on_selection_changed(move |_| {
             let selected = provider_name.get_value();
-            let snapshot = api.dashboard();
+            let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) else {
+                return;
+            };
             if let Some(provider) = find_provider(&snapshot, &selected) {
                 apply_provider_to_form(&handles, &provider, true);
             }
@@ -418,25 +450,12 @@ fn build_ui() {
 
     {
         let api = api.clone();
-        let handles = handles;
-        let frame = frame;
-        uninstall_button.on_click(move |_| match api.uninstall_codex_app() {
-            Ok(_) => {
-                show_info(&frame, "Codex App 注入配置已卸载。");
-                refresh_dashboard(&api, &handles);
-            }
-            Err(err) => show_error(&frame, &err),
-        });
-    }
-
-    {
-        let api = api.clone();
-        let handles = handles;
+        let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         stop_bridge_button.on_click(move |_| match api.stop_bridge() {
             Ok(_) => {
                 show_info(&frame, "飞书接入已断开。");
-                refresh_dashboard(&api, &handles);
+                schedule_dashboard_refresh(&api, &dashboard_refresh);
             }
             Err(err) => show_error(&frame, &err),
         });
@@ -444,26 +463,41 @@ fn build_ui() {
 
     {
         let api = api.clone();
-        let handles = handles;
+        let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         change_bot_button.on_click(move |_| {
             show_onboard_dialog(&frame, api.clone());
-            refresh_dashboard(&api, &handles);
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
+
+    let result_timer_store: Rc<RefCell<Option<Timer<Frame>>>> = Rc::new(RefCell::new(None));
+    let result_timer = Timer::new(&frame);
+    {
+        let handles = handles;
+        let dashboard_refresh = dashboard_refresh.clone();
+        result_timer.on_tick(move |_| {
+            apply_pending_dashboard(&handles, &dashboard_refresh);
+        });
+    }
+    result_timer.start(DASHBOARD_RESULT_POLL_MS, false);
+    result_timer_store.borrow_mut().replace(result_timer);
+    std::mem::forget(result_timer_store);
 
     let timer_store: Rc<RefCell<Option<Timer<Frame>>>> = Rc::new(RefCell::new(None));
     let timer = Timer::new(&frame);
     {
         let api = api.clone();
-        let handles = handles;
-        timer.on_tick(move |_| refresh_dashboard(&api, &handles));
+        let dashboard_refresh = dashboard_refresh.clone();
+        timer.on_tick(move |_| {
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
     }
-    timer.start(2500, false);
+    timer.start(DASHBOARD_REFRESH_INTERVAL_MS, false);
     timer_store.borrow_mut().replace(timer);
     std::mem::forget(timer_store);
 
-    start_daemon_for_gui_async(&api, &handles, &frame, &daemon_child);
+    start_daemon_for_gui_async(&api, &handles, &frame, &daemon_child, &dashboard_refresh);
 
     {
         let api = api.clone();
@@ -526,7 +560,21 @@ fn start_daemon_for_gui_async(
     handles: &UiHandles,
     frame: &Frame,
     daemon_child: &Rc<RefCell<Option<Child>>>,
+    dashboard_refresh: &DashboardRefresh,
 ) {
+    if dashboard_refresh
+        .daemon_starting
+        .swap(true, Ordering::SeqCst)
+    {
+        handles.status_bar.set_status_text("本地服务正在启动", 0);
+        return;
+    }
+    dashboard_refresh.generation.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut result) = dashboard_refresh.result.lock() {
+        result.take();
+    }
+    show_dashboard_starting(handles);
+
     let result: Arc<Mutex<Option<Result<StartupResult, String>>>> = Arc::new(Mutex::new(None));
     {
         let api = api.clone();
@@ -551,6 +599,7 @@ fn start_daemon_for_gui_async(
         let api = api.clone();
         let handles = *handles;
         let daemon_child = daemon_child.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
         let startup_timer_store = startup_timer_store.clone();
         startup_timer.on_tick(move |_| {
             let startup = result.lock().ok().and_then(|mut slot| slot.take());
@@ -562,6 +611,13 @@ fn start_daemon_for_gui_async(
                 timer.stop();
             }
 
+            dashboard_refresh.generation.fetch_add(1, Ordering::SeqCst);
+            if let Ok(mut result) = dashboard_refresh.result.lock() {
+                result.take();
+            }
+            dashboard_refresh
+                .daemon_starting
+                .store(false, Ordering::SeqCst);
             match startup {
                 Ok(startup) => {
                     replace_managed_daemon(&daemon_child, startup.child);
@@ -570,14 +626,19 @@ fn start_daemon_for_gui_async(
                             .status_bar
                             .set_status_text(&format!("Codex App 环境修复失败：{err}"), 2);
                     }
+                    handles
+                        .status_bar
+                        .set_status_text("本地服务已启动，正在刷新状态", 0);
                 }
                 Err(err) => {
                     handles
                         .status_bar
                         .set_status_text(&format!("本地服务启动失败：{err}"), 0);
+                    set_actions_enabled(&handles, false);
+                    handles.start_daemon_button.enable(true);
                 }
             }
-            refresh_dashboard(&api, &handles);
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
     startup_timer.start(100, false);
@@ -588,17 +649,17 @@ fn start_daemon_for_gui_async(
 fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>>) {
     clear_codex_app_gui_environment(&api.url("/backend-api"));
     let child = daemon_child.borrow_mut().take();
-    if let Some(mut child) = child {
-        let _ = child.kill();
-        thread::spawn(move || {
-            let _ = child.wait();
-        });
-    }
 
     let api = api.clone();
     thread::spawn(move || {
         let _ = api.shutdown();
         wait_for_daemon_offline(&api, 3);
+        if let Some(mut child) = child {
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
         if api.is_online() {
             stop_daemon_by_port(&api);
         }
@@ -606,46 +667,7 @@ fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>
 }
 
 fn clear_codex_app_gui_environment(backend_url: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        let login_issuer = oauth_issuer_url(backend_url);
-        unset_launchctl_env_if_matches("CODEX_API_BASE_URL", backend_url);
-        unset_launchctl_env_if_matches("CODEX_APP_SERVER_LOGIN_ISSUER", &login_issuer);
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = backend_url;
-    }
-}
-
-fn oauth_issuer_url(backend_url: &str) -> String {
-    backend_url
-        .trim_end_matches('/')
-        .strip_suffix("/backend-api")
-        .unwrap_or_else(|| backend_url.trim_end_matches('/'))
-        .to_string()
-}
-
-#[cfg(target_os = "macos")]
-fn unset_launchctl_env_if_matches(name: &str, expected: &str) {
-    let Ok(output) = Command::new("/bin/launchctl")
-        .arg("getenv")
-        .arg(name)
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if value == expected {
-        let _ = Command::new("/bin/launchctl")
-            .arg("unsetenv")
-            .arg(name)
-            .output();
-    }
+    let _ = crate::codex_app_config::uninstall_gui_environment(backend_url);
 }
 
 fn wait_for_daemon_offline(api: &ApiClient, attempts: usize) {
@@ -708,28 +730,8 @@ fn spawn_daemon() -> Result<Child, String> {
 }
 
 fn daemon_command() -> Result<Command, String> {
-    if let Some(exe) = sibling_daemon_exe() {
-        let mut command = Command::new(exe);
-        append_daemon_args(&mut command);
-        return Ok(command);
-    }
-
-    if let Some(exe) = bundled_daemon_exe() {
-        let mut command = Command::new(exe);
-        append_daemon_args(&mut command);
-        return Ok(command);
-    }
-
-    if env::var_os("CODEX_REMOTE_USE_REPO_CONFIG").is_some()
-        && let Some(repo_root) = repo_root_from_target_exe().or_else(|| repo_root_from_cwd())
-    {
-        let mut command = Command::new("cargo");
-        command.current_dir(repo_root).arg("run").arg("--");
-        append_daemon_args(&mut command);
-        return Ok(command);
-    }
-
-    let mut command = Command::new("codex-remote");
+    let exe = std::env::current_exe().map_err(|err| format!("无法定位当前程序：{err}"))?;
+    let mut command = Command::new(exe);
     append_daemon_args(&mut command);
     Ok(command)
 }
@@ -739,32 +741,6 @@ fn append_daemon_args(command: &mut Command) {
         command.arg("--config").arg(config_path);
     }
     command.arg("daemon");
-}
-
-fn sibling_daemon_exe() -> Option<PathBuf> {
-    let exe_name = if cfg!(windows) {
-        "codex-remote.exe"
-    } else {
-        "codex-remote"
-    };
-    let path = std::env::current_exe().ok()?.with_file_name(exe_name);
-    path.exists().then_some(path)
-}
-
-fn bundled_daemon_exe() -> Option<PathBuf> {
-    let exe_name = if cfg!(windows) {
-        "codex-remote.exe"
-    } else {
-        "codex-remote"
-    };
-    let exe = std::env::current_exe().ok()?;
-    let macos_dir = exe.parent()?;
-    let contents_dir = macos_dir.parent()?;
-    if macos_dir.file_name().and_then(|value| value.to_str()) != Some("MacOS") {
-        return None;
-    }
-    let path = contents_dir.join("Resources").join(exe_name);
-    path.exists().then_some(path)
 }
 
 fn daemon_config_path() -> Option<PathBuf> {
@@ -795,11 +771,6 @@ fn app_support_config_path() -> PathBuf {
     base.join("config.toml")
 }
 
-fn repo_root_from_cwd() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    has_manifest(&cwd).then_some(cwd)
-}
-
 fn repo_root_from_target_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let profile_dir = exe.parent()?;
@@ -824,19 +795,20 @@ struct ApiClient {
 impl ApiClient {
     fn new(base_url: String) -> Self {
         let http = Client::builder()
-            .timeout(Duration::from_secs(2))
+            .connect_timeout(GUI_CONNECT_TIMEOUT)
+            .timeout(GUI_ACTION_TIMEOUT)
             .build()
             .expect("build HTTP client");
         Self { base_url, http }
     }
 
-    fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        let text = self.request_text(self.http.get(self.url(path)))?;
+    fn get_quick<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        let text = self.request_text(self.http.get(self.url(path)).timeout(GUI_STATUS_TIMEOUT))?;
         serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
     }
 
     fn is_online(&self) -> bool {
-        self.get::<serde_json::Value>("/api/status").is_ok()
+        self.get_quick::<serde_json::Value>("/api/status").is_ok()
     }
 
     fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
@@ -870,6 +842,7 @@ impl ApiClient {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
     }
 
+    #[cfg(unix)]
     fn local_port(&self) -> Option<u16> {
         let url = reqwest::Url::parse(&self.base_url).ok()?;
         let host = url.host_str()?;
@@ -877,7 +850,7 @@ impl ApiClient {
     }
 
     fn dashboard(&self) -> DashboardSnapshot {
-        let status = match self.get::<ServerStatus>("/api/status") {
+        let status = match self.get_quick::<ServerStatus>("/api/status") {
             Ok(status) => status,
             Err(err) => {
                 return DashboardSnapshot {
@@ -891,24 +864,22 @@ impl ApiClient {
         DashboardSnapshot {
             service_online: true,
             error: None,
-            config: self.get::<AppConfig>("/api/config").ok(),
+            config: self.get_quick::<AppConfig>("/api/config").ok(),
             backend: self
-                .get::<RemoteControlBackendStatus>("/api/remote-control/backend-status")
+                .get_quick::<RemoteControlBackendStatus>("/api/remote-control/backend-status")
                 .ok(),
             remote: self
-                .get::<RemoteControlStatus>("/api/remote-control/status")
+                .get_quick::<RemoteControlStatus>("/api/remote-control/status")
                 .ok(),
-            codex_app: self.get::<CodexAppStatus>("/api/codex-app/status").ok(),
+            codex_app: self
+                .get_quick::<CodexAppStatus>("/api/codex-app/status")
+                .ok(),
             status: Some(status),
         }
     }
 
     fn configure_codex_app(&self, request: &ConfigureRequest) -> Result<serde_json::Value, String> {
         self.post_json("/api/codex-app/configure", request)
-    }
-
-    fn uninstall_codex_app(&self) -> Result<serde_json::Value, String> {
-        self.post_empty("/api/codex-app/uninstall")
     }
 
     fn repair_codex_app_gui_environment(&self) -> Result<serde_json::Value, String> {
@@ -938,9 +909,12 @@ impl ApiClient {
 #[derive(Clone, Copy)]
 struct StatusPanel {
     panel: Panel,
+    icon: StaticBitmap,
     marker: StaticText,
+    title: StaticText,
     state: StaticText,
     detail: StaticText,
+    icon_kind: StatusIconKind,
 }
 
 #[derive(Clone, Copy)]
@@ -948,6 +922,7 @@ enum StatusIconKind {
     Service,
     Feishu,
     Codex,
+    VsCodeCodex,
 }
 
 #[derive(Clone, Copy)]
@@ -956,6 +931,7 @@ struct UiHandles {
     service_status: StatusPanel,
     feishu_status: StatusPanel,
     codex_status: StatusPanel,
+    vscode_status: StatusPanel,
     feishu_state: StaticText,
     feishu_detail: StaticText,
     feishu_meta: StaticText,
@@ -965,14 +941,34 @@ struct UiHandles {
     configure_button: Button,
     refresh_button: Button,
     start_daemon_button: Button,
-    uninstall_button: Button,
     provider_name: ComboBox,
     provider_base_url: TextCtrl,
     provider_key: TextCtrl,
     provider_catalog: StaticText,
 }
 
-#[derive(Default)]
+#[derive(Clone)]
+struct DashboardRefresh {
+    in_flight: Arc<AtomicBool>,
+    result: Arc<Mutex<Option<(u64, DashboardSnapshot)>>>,
+    last_snapshot: Arc<Mutex<Option<DashboardSnapshot>>>,
+    daemon_starting: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+}
+
+impl DashboardRefresh {
+    fn new() -> Self {
+        Self {
+            in_flight: Arc::new(AtomicBool::new(false)),
+            result: Arc::new(Mutex::new(None)),
+            last_snapshot: Arc::new(Mutex::new(None)),
+            daemon_starting: Arc::new(AtomicBool::new(false)),
+            generation: Arc::new(AtomicU64::new(0)),
+        }
+    }
+}
+
+#[derive(Clone, Default)]
 struct DashboardSnapshot {
     service_online: bool,
     status: Option<ServerStatus>,
@@ -983,14 +979,14 @@ struct DashboardSnapshot {
     error: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ServerStatus {
     bind: String,
     feishu_ws: FeishuWsState,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FeishuWsState {
     connecting: bool,
@@ -998,34 +994,34 @@ struct FeishuWsState {
     last_error: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AppConfig {
     feishu: FeishuConfig,
     bridge: BridgeConfig,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FeishuConfig {
     app_id: String,
     allowed_open_ids: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeConfig {
     enabled: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteControlBackendStatus {
     enabled: bool,
     feishu_configured: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteControlStatus {
     connected: bool,
@@ -1035,7 +1031,7 @@ struct RemoteControlStatus {
     last_error: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexAppStatus {
     codex_home: String,
@@ -1043,9 +1039,18 @@ struct CodexAppStatus {
     config_ok: bool,
     auth_ok: bool,
     gui_api_base: GuiApiBaseStatus,
+    #[serde(default)]
+    remote_control_switch: Option<CodexAppRemoteControlSwitchStatus>,
     provider: Option<CodexAppProviderStatus>,
     #[serde(default)]
     providers: Vec<CodexAppProviderStatus>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexAppRemoteControlSwitchStatus {
+    configured: bool,
+    error: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1056,7 +1061,7 @@ struct CodexAppProviderStatus {
     key: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GuiApiBaseStatus {
     #[serde(default)]
@@ -1097,7 +1102,7 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
         .with_style(PanelStyle::BorderStatic)
         .build();
     panel.set_background_color(Colour::rgb(255, 255, 255));
-    panel.set_min_size(Size::new(280, 96));
+    panel.set_min_size(Size::new(230, 94));
 
     let row = BoxSizer::builder(Orientation::Horizontal).build();
     let icon = StaticBitmap::builder(&panel)
@@ -1140,10 +1145,62 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
     panel.set_sizer(row, true);
     StatusPanel {
         panel,
+        icon,
         marker,
+        title: title_label,
         state,
         detail,
+        icon_kind,
     }
+}
+
+fn topology_connector(parent: &Panel) -> StaticBitmap {
+    let bitmap = topology_connector_bitmap(72, 124);
+    let connector = StaticBitmap::builder(parent)
+        .with_bitmap(Some(bitmap))
+        .with_scale_mode(Some(ScaleMode::None))
+        .with_size(Size::new(72, 124))
+        .build();
+    connector.set_min_size(Size::new(72, 124));
+    connector
+}
+
+fn topology_arrow(parent: &Panel) -> StaticBitmap {
+    let bitmap = topology_arrow_bitmap(48, 48);
+    let arrow = StaticBitmap::builder(parent)
+        .with_bitmap(Some(bitmap))
+        .with_scale_mode(Some(ScaleMode::None))
+        .with_size(Size::new(48, 48))
+        .build();
+    arrow.set_min_size(Size::new(48, 48));
+    arrow
+}
+
+fn topology_connector_bitmap(width: usize, height: usize) -> Bitmap {
+    let mut canvas = IconCanvas::new_with_size(width, height, [0, 0, 0, 0]);
+    let colour = [118, 127, 140, 210];
+    let trunk_x = 30usize;
+    let top_y = 33usize;
+    let mid_y = height / 2;
+    let bottom_y = height.saturating_sub(33);
+    canvas.draw_line(0, top_y, trunk_x, top_y, 2, colour);
+    canvas.draw_line(0, bottom_y, trunk_x, bottom_y, 2, colour);
+    canvas.draw_line(trunk_x, top_y, trunk_x, bottom_y, 2, colour);
+    canvas.draw_line(trunk_x, mid_y, width.saturating_sub(1), mid_y, 2, colour);
+    Bitmap::from_rgba(&canvas.rgba, width as u32, height as u32).expect("topology connector bitmap")
+}
+
+fn topology_arrow_bitmap(width: usize, height: usize) -> Bitmap {
+    let mut canvas = IconCanvas::new_with_size(width, height, [0, 0, 0, 0]);
+    canvas.draw_line(
+        0,
+        height / 2,
+        width.saturating_sub(1),
+        height / 2,
+        2,
+        [118, 127, 140, 210],
+    );
+    Bitmap::from_rgba(&canvas.rgba, width as u32, height as u32).expect("topology arrow bitmap")
 }
 
 fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
@@ -1151,14 +1208,21 @@ fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
         StatusIconKind::Feishu => {
             return brand_bitmap(
                 "feishu-logo.png",
-                include_bytes!("../../packaging/brand/feishu-logo.png"),
+                include_bytes!("../packaging/brand/feishu-logo.png"),
                 size,
             );
         }
         StatusIconKind::Codex => {
             return brand_bitmap(
                 "codex-app-logo.png",
-                include_bytes!("../../packaging/brand/codex-app-logo.png"),
+                include_bytes!("../packaging/brand/codex-app-logo.png"),
+                size,
+            );
+        }
+        StatusIconKind::VsCodeCodex => {
+            return brand_bitmap(
+                "codex-vscode-logo.png",
+                include_bytes!("../packaging/brand/codex-vscode-logo.png"),
                 size,
             );
         }
@@ -1170,10 +1234,41 @@ fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     Bitmap::from_rgba(&canvas.rgba, size as u32, size as u32).expect("status icon bitmap")
 }
 
+fn disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
+    match kind {
+        StatusIconKind::Feishu => {
+            return disabled_brand_bitmap(
+                "feishu-logo.png",
+                include_bytes!("../packaging/brand/feishu-logo.png"),
+                size,
+            );
+        }
+        StatusIconKind::Codex => {
+            return disabled_brand_bitmap(
+                "codex-app-logo.png",
+                include_bytes!("../packaging/brand/codex-app-logo.png"),
+                size,
+            );
+        }
+        StatusIconKind::VsCodeCodex => {
+            return disabled_brand_bitmap(
+                "codex-vscode-logo.png",
+                include_bytes!("../packaging/brand/codex-vscode-logo.png"),
+                size,
+            );
+        }
+        StatusIconKind::Service => {}
+    }
+
+    let mut canvas = IconCanvas::new(size, [0, 0, 0, 0]);
+    draw_disabled_service_icon(&mut canvas);
+    Bitmap::from_rgba(&canvas.rgba, size as u32, size as u32).expect("disabled status icon bitmap")
+}
+
 fn app_icon_bitmap(size: usize) -> Bitmap {
     brand_bitmap(
         "dolphin-rounded-256.png",
-        include_bytes!("../../packaging/icons/dolphin-rounded-256.png"),
+        include_bytes!("../packaging/icons/dolphin-rounded-256.png"),
         size,
     )
 }
@@ -1188,25 +1283,57 @@ fn brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
         .unwrap_or_else(|| panic!("failed to create bitmap from {file_name}"))
 }
 
+fn disabled_brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
+    let mut image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .unwrap_or_else(|err| panic!("failed to load brand image {file_name}: {err}"))
+        .resize(size as u32, size as u32, FilterType::Lanczos3)
+        .into_rgba8();
+    for pixel in image.pixels_mut() {
+        let alpha = pixel[3];
+        if alpha == 0 {
+            continue;
+        }
+        let gray =
+            ((pixel[0] as u16 * 30 + pixel[1] as u16 * 59 + pixel[2] as u16 * 11) / 100) as u8;
+        let soft = (gray as u16 + 180) / 2;
+        pixel[0] = soft as u8;
+        pixel[1] = soft as u8;
+        pixel[2] = soft as u8;
+        pixel[3] = ((alpha as u16 * 50) / 100) as u8;
+    }
+    let (width, height) = image.dimensions();
+    Bitmap::from_rgba(image.as_raw(), width, height)
+        .unwrap_or_else(|| panic!("failed to create disabled bitmap from {file_name}"))
+}
+
 struct IconCanvas {
-    size: usize,
+    width: usize,
+    height: usize,
     rgba: Vec<u8>,
 }
 
 impl IconCanvas {
     fn new(size: usize, background: [u8; 4]) -> Self {
-        let mut rgba = vec![0; size * size * 4];
+        Self::new_with_size(size, size, background)
+    }
+
+    fn new_with_size(width: usize, height: usize, background: [u8; 4]) -> Self {
+        let mut rgba = vec![0; width * height * 4];
         for pixel in rgba.chunks_exact_mut(4) {
             pixel.copy_from_slice(&background);
         }
-        Self { size, rgba }
+        Self {
+            width,
+            height,
+            rgba,
+        }
     }
 
     fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
         let min_x = (cx - radius).floor().max(0.0) as usize;
-        let max_x = (cx + radius).ceil().min((self.size - 1) as f32) as usize;
+        let max_x = (cx + radius).ceil().min((self.width - 1) as f32) as usize;
         let min_y = (cy - radius).floor().max(0.0) as usize;
-        let max_y = (cy + radius).ceil().min((self.size - 1) as f32) as usize;
+        let max_y = (cy + radius).ceil().min((self.height - 1) as f32) as usize;
         let radius_sq = radius * radius;
         for y in min_y..=max_y {
             for x in min_x..=max_x {
@@ -1220,10 +1347,32 @@ impl IconCanvas {
     }
 
     fn fill_rect(&mut self, x: usize, y: usize, width: usize, height: usize, color: [u8; 4]) {
-        for yy in y..(y + height).min(self.size) {
-            for xx in x..(x + width).min(self.size) {
+        for yy in y..(y + height).min(self.height) {
+            for xx in x..(x + width).min(self.width) {
                 self.set_pixel(xx, yy, color);
             }
+        }
+    }
+
+    fn draw_line(
+        &mut self,
+        x1: usize,
+        y1: usize,
+        x2: usize,
+        y2: usize,
+        thickness: usize,
+        color: [u8; 4],
+    ) {
+        if y1 == y2 {
+            let start = x1.min(x2);
+            let end = x1.max(x2);
+            let y = y1.saturating_sub(thickness / 2);
+            self.fill_rect(start, y, end - start + 1, thickness, color);
+        } else if x1 == x2 {
+            let start = y1.min(y2);
+            let end = y1.max(y2);
+            let x = x1.saturating_sub(thickness / 2);
+            self.fill_rect(x, start, thickness, end - start + 1, color);
         }
     }
 
@@ -1239,8 +1388,8 @@ impl IconCanvas {
         let x2 = x + width - 1;
         let y2 = y + height - 1;
         let radius = radius as f32;
-        for yy in y..=y2.min(self.size - 1) {
-            for xx in x..=x2.min(self.size - 1) {
+        for yy in y..=y2.min(self.height - 1) {
+            for xx in x..=x2.min(self.width - 1) {
                 let cx = if xx < x + radius as usize {
                     x as f32 + radius
                 } else if xx > x2.saturating_sub(radius as usize) {
@@ -1265,7 +1414,7 @@ impl IconCanvas {
     }
 
     fn set_pixel(&mut self, x: usize, y: usize, color: [u8; 4]) {
-        let offset = (y * self.size + x) * 4;
+        let offset = (y * self.width + x) * 4;
         self.rgba[offset..offset + 4].copy_from_slice(&color);
     }
 }
@@ -1276,6 +1425,14 @@ fn draw_service_icon(canvas: &mut IconCanvas) {
     canvas.fill_round_rect(12, 12, 10, 3, 1, [246, 255, 251, 255]);
     canvas.fill_round_rect(12, 17, 10, 3, 1, [246, 255, 251, 255]);
     canvas.fill_rect(12, 22, 3, 2, [246, 255, 251, 255]);
+}
+
+fn draw_disabled_service_icon(canvas: &mut IconCanvas) {
+    canvas.fill_circle(17.0, 17.0, 17.0, [229, 232, 236, 180]);
+    canvas.fill_round_rect(9, 9, 16, 16, 3, [151, 158, 168, 130]);
+    canvas.fill_round_rect(12, 12, 10, 3, 1, [247, 248, 250, 180]);
+    canvas.fill_round_rect(12, 17, 10, 3, 1, [247, 248, 250, 180]);
+    canvas.fill_rect(12, 22, 3, 2, [247, 248, 250, 180]);
 }
 
 fn text_field_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &str) -> TextCtrl {
@@ -1316,43 +1473,105 @@ fn provider_combo_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value:
     input
 }
 
-fn refresh_dashboard(api: &ApiClient, handles: &UiHandles) {
-    let snapshot = api.dashboard();
-    update_dashboard(handles, &snapshot);
+fn schedule_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh) -> bool {
+    if refresh.in_flight.swap(true, Ordering::SeqCst) {
+        return false;
+    }
+
+    let api = api.clone();
+    let result = refresh.result.clone();
+    let in_flight = refresh.in_flight.clone();
+    let generation = refresh.generation.load(Ordering::SeqCst);
+    thread::spawn(move || {
+        let snapshot = api.dashboard();
+        if let Ok(mut slot) = result.lock() {
+            slot.replace((generation, snapshot));
+        }
+        in_flight.store(false, Ordering::SeqCst);
+    });
+    true
 }
 
-fn repair_gui_environment_if_needed(api: &ApiClient, handles: &UiHandles) {
-    let snapshot = api.dashboard();
-    let Some(status) = snapshot.codex_app.as_ref() else {
-        return;
+fn apply_pending_dashboard(handles: &UiHandles, refresh: &DashboardRefresh) -> bool {
+    let result = refresh.result.lock().ok().and_then(|mut slot| slot.take());
+    let Some((generation, snapshot)) = result else {
+        return false;
     };
-    let needs_repair = status.config_ok
-        && status.auth_ok
-        && (!status.gui_api_base.configured || !status.gui_api_base.login_issuer_configured);
-    if !needs_repair {
-        return;
+    if generation != refresh.generation.load(Ordering::SeqCst) {
+        return false;
     }
 
-    match api.repair_codex_app_gui_environment() {
-        Ok(_) => {
-            handles
-                .status_bar
-                .set_status_text("Codex App：已补写本地连接入口，重启 Codex App 生效", 2);
-        }
-        Err(err) => {
-            handles
-                .status_bar
-                .set_status_text(&format!("Codex App：补写本地连接入口失败：{err}"), 2);
-        }
+    let daemon_starting = refresh.daemon_starting.load(Ordering::SeqCst);
+    update_dashboard(handles, &snapshot, daemon_starting);
+    if let Ok(mut last_snapshot) = refresh.last_snapshot.lock() {
+        last_snapshot.replace(snapshot);
     }
+    true
 }
 
-fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
+fn cached_dashboard_snapshot(refresh: &DashboardRefresh) -> Option<DashboardSnapshot> {
+    refresh
+        .last_snapshot
+        .lock()
+        .ok()
+        .and_then(|snapshot| snapshot.clone())
+}
+
+fn show_dashboard_starting(handles: &UiHandles) {
+    set_status_panel(
+        &handles.service_status,
+        "启动中",
+        "正在启动本地 backend。",
+        StateTone::Warn,
+    );
+    set_status_panel(
+        &handles.feishu_status,
+        "等待服务",
+        "服务启动后读取飞书状态。",
+        StateTone::Muted,
+    );
+    set_disabled_status_panel(
+        &handles.codex_status,
+        "等待服务",
+        if CODEX_APP_GUI_UNSUPPORTED {
+            "当前平台暂不支持 App GUI"
+        } else {
+            "服务启动后读取配置"
+        },
+    );
+    set_status_panel(
+        &handles.vscode_status,
+        "等待服务",
+        "服务启动后可连接 VS Code 插件。",
+        StateTone::Muted,
+    );
+    handles.feishu_state.set_label("本地服务启动中");
+    handles
+        .feishu_detail
+        .set_label("服务启动完成后会刷新飞书状态。");
+    handles.feishu_meta.set_label("");
+    handles
+        .codex_config_state
+        .set_label("正在启动本地服务，界面保持可操作。");
+    handles.codex_config_state.wrap(980);
+    handles.codex_config_state.layout();
+    handles.status_bar.set_status_text("本地服务：启动中", 0);
+    handles.status_bar.set_status_text("飞书：等待服务", 1);
+    handles.status_bar.set_status_text("Codex App：等待服务", 2);
+    set_actions_enabled(handles, false);
+    handles.start_daemon_button.enable(false);
+}
+
+fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_starting: bool) {
     if !snapshot.service_online {
+        if daemon_starting {
+            show_dashboard_starting(handles);
+            return;
+        }
         set_status_panel(
             &handles.service_status,
             "未运行",
-            "点击“启动本地服务”后再连接 Codex App。",
+            "点击“启动本地服务”后再连接 VS Code 插件。",
             StateTone::Error,
         );
         set_status_panel(
@@ -1361,8 +1580,17 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
             "本地服务未运行",
             StateTone::Muted,
         );
-        set_status_panel(
+        set_disabled_status_panel(
             &handles.codex_status,
+            "不可用",
+            if CODEX_APP_GUI_UNSUPPORTED {
+                "当前平台暂不支持 App GUI"
+            } else {
+                "本地服务未运行"
+            },
+        );
+        set_status_panel(
+            &handles.vscode_status,
             "不可用",
             "本地服务未运行",
             StateTone::Muted,
@@ -1484,7 +1712,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
     handles.feishu_meta.set_label(&feishu_meta);
     handles.feishu_meta.wrap(300);
 
-    let codex_connected = snapshot
+    let remote_connected = snapshot
         .remote
         .as_ref()
         .map(|remote| remote.connected && remote.initialized)
@@ -1495,7 +1723,16 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
         .map(|status| status.configured)
         .unwrap_or(false);
 
-    if codex_connected {
+    if CODEX_APP_GUI_UNSUPPORTED {
+        set_disabled_status_panel(
+            &handles.codex_status,
+            "暂不可用",
+            "当前平台暂不支持 App GUI",
+        );
+        handles
+            .status_bar
+            .set_status_text("Codex App：当前平台暂不可用", 2);
+    } else if remote_connected {
         let detail = snapshot
             .remote
             .as_ref()
@@ -1521,6 +1758,22 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot) {
         handles.status_bar.set_status_text("Codex App：未注入", 2);
     }
 
+    if remote_connected {
+        let detail = snapshot
+            .remote
+            .as_ref()
+            .map(codex_remote_detail)
+            .unwrap_or_else(|| "remote-control 已连接。".to_string());
+        set_status_panel(&handles.vscode_status, "已连接", &detail, StateTone::Ok);
+    } else {
+        set_status_panel(
+            &handles.vscode_status,
+            "可接入",
+            "VS Code 插件可通过 chatgpt.cliExecutable 使用本地 wrapper。",
+            StateTone::Warn,
+        );
+    }
+
     handles
         .codex_config_state
         .set_label(&codex_app_detail(snapshot));
@@ -1538,12 +1791,17 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
         handles.provider_catalog.layout();
         return;
     };
-    refresh_provider_choices(&handles.provider_name, &status.providers);
     handles
         .provider_catalog
         .set_label(&provider_catalog_label(status));
     handles.provider_catalog.wrap(980);
     handles.provider_catalog.layout();
+
+    if provider_form_has_focus(handles) {
+        return;
+    }
+
+    refresh_provider_choices(&handles.provider_name, &status.providers);
 
     let target = status
         .provider
@@ -1558,7 +1816,7 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
         if let Some(provider) = target {
             apply_provider_to_form(handles, provider, true);
         } else {
-            handles.provider_name.set_value(DEFAULT_PROVIDER_NAME);
+            set_combo_value_if_changed(&handles.provider_name, DEFAULT_PROVIDER_NAME);
         }
     } else if current == DEFAULT_PROVIDER_NAME
         && provider_values_empty
@@ -1574,21 +1832,46 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
     }
 }
 
+fn provider_form_has_focus(handles: &UiHandles) -> bool {
+    handles.provider_name.has_focus()
+        || handles.provider_base_url.has_focus()
+        || handles.provider_key.has_focus()
+}
+
 fn refresh_provider_choices(input: &ComboBox, providers: &[CodexAppProviderStatus]) {
+    let names = provider_choice_names(providers);
+    if combo_box_items(input) == names {
+        return;
+    }
+
     let current = input.get_value();
+    let insertion_point = input.get_insertion_point();
     input.clear();
+    for name in names {
+        input.append(&name);
+    }
+    set_combo_value_if_changed(input, &current);
+    input.set_insertion_point(insertion_point.min(current.chars().count() as i64));
+}
+
+fn provider_choice_names(providers: &[CodexAppProviderStatus]) -> Vec<String> {
     if providers.is_empty() {
-        input.append(DEFAULT_PROVIDER_NAME);
-    } else {
-        let mut names = Vec::<&str>::new();
-        for provider in providers {
-            if !names.iter().any(|name| *name == provider.name.as_str()) {
-                input.append(&provider.name);
-                names.push(&provider.name);
-            }
+        return vec![DEFAULT_PROVIDER_NAME.to_string()];
+    }
+
+    let mut names = Vec::<String>::new();
+    for provider in providers {
+        if !names.iter().any(|name| name == &provider.name) {
+            names.push(provider.name.clone());
         }
     }
-    input.set_value(&current);
+    names
+}
+
+fn combo_box_items(input: &ComboBox) -> Vec<String> {
+    (0..input.get_count())
+        .filter_map(|index| input.get_string(index))
+        .collect()
 }
 
 fn provider_catalog_label(status: &CodexAppStatus) -> String {
@@ -1643,25 +1926,40 @@ fn find_provider(
 
 fn apply_provider_to_form(handles: &UiHandles, provider: &CodexAppProviderStatus, overwrite: bool) {
     if overwrite || handles.provider_name.get_value().trim().is_empty() {
-        handles.provider_name.set_value(&provider.name);
+        set_combo_value_if_changed(&handles.provider_name, &provider.name);
     }
     if overwrite || handles.provider_base_url.get_value().trim().is_empty() {
-        handles
-            .provider_base_url
-            .change_value(provider.base_url.as_deref().unwrap_or_default());
+        change_text_value_if_changed(
+            &handles.provider_base_url,
+            provider.base_url.as_deref().unwrap_or_default(),
+        );
     }
     if overwrite || handles.provider_key.get_value().trim().is_empty() {
-        handles
-            .provider_key
-            .change_value(provider.key.as_deref().unwrap_or_default());
+        change_text_value_if_changed(
+            &handles.provider_key,
+            provider.key.as_deref().unwrap_or_default(),
+        );
     }
+}
+
+fn set_combo_value_if_changed(input: &ComboBox, value: &str) {
+    if input.get_value() == value {
+        return;
+    }
+    input.set_value(value);
+}
+
+fn change_text_value_if_changed(input: &TextCtrl, value: &str) {
+    if input.get_value() == value {
+        return;
+    }
+    input.change_value(value);
 }
 
 fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.change_bot_button.enable(enabled);
     handles.configure_button.enable(enabled);
     handles.refresh_button.enable(true);
-    handles.uninstall_button.enable(enabled);
     handles.stop_bridge_button.enable(enabled);
 }
 
@@ -1685,11 +1983,47 @@ impl StateTone {
 }
 
 fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, tone: StateTone) {
+    if panel.state.get_label() == state && panel.detail.get_label() == detail {
+        return;
+    }
+
+    let title_colour = Colour::rgb(91, 100, 114);
+    panel.panel.set_background_color(Colour::rgb(255, 255, 255));
+    if panel.title.get_foreground_color() != title_colour {
+        panel
+            .icon
+            .set_bitmap(&status_icon_bitmap(panel.icon_kind, 34));
+    }
+    panel.title.set_foreground_color(title_colour);
     panel.marker.set_foreground_color(tone.colour());
     panel.state.set_label(state);
     panel.state.set_foreground_color(tone.colour());
     panel.detail.set_label(detail);
+    panel
+        .detail
+        .set_foreground_color(Colour::rgb(103, 111, 124));
     panel.detail.wrap(220);
+}
+
+fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail: &str) {
+    if panel.state.get_label() == state && panel.detail.get_label() == detail {
+        return;
+    }
+
+    let muted = Colour::rgb(145, 151, 160);
+    panel.panel.set_background_color(Colour::rgb(242, 244, 247));
+    if panel.title.get_foreground_color() != muted {
+        panel
+            .icon
+            .set_bitmap(&disabled_status_icon_bitmap(panel.icon_kind, 34));
+    }
+    panel.title.set_foreground_color(muted);
+    panel.marker.set_foreground_color(muted);
+    panel.state.set_label(state);
+    panel.state.set_foreground_color(muted);
+    panel.detail.set_label(detail);
+    panel.detail.set_foreground_color(muted);
+    panel.detail.wrap(190);
 }
 
 fn codex_remote_detail(remote: &RemoteControlStatus) -> String {
@@ -1702,13 +2036,25 @@ fn codex_remote_detail(remote: &RemoteControlStatus) -> String {
     if let Some(err) = &remote.last_error {
         return format!("最近错误: {err}");
     }
-    "Codex App remote-control 已连接。".to_string()
+    "remote-control 已连接。".to_string()
 }
 
 fn codex_app_detail(snapshot: &DashboardSnapshot) -> String {
     let Some(status) = &snapshot.codex_app else {
         return "无法读取 ~/.codex 配置状态。".to_string();
     };
+    if CODEX_APP_GUI_UNSUPPORTED {
+        let mut detail = format!(
+            "当前平台 Codex App GUI 自动接入暂不可用，请使用 VS Code 插件接入。\n配置会写入到 {}，用于准备本地 provider；是否可用以 VS Code 插件实际连接结果为准。",
+            status.codex_home
+        );
+        if status.configured {
+            detail.push_str("\n当前检测到本地配置已写入。");
+        } else {
+            detail.push_str("\n当前检测到本地配置尚未写入。");
+        }
+        return detail;
+    }
     if status.configured {
         let mut detail = format!("已注入到 {}", status.codex_home);
         if let Some(value) = &status.gui_api_base.value {
@@ -1730,8 +2076,22 @@ fn codex_app_detail(snapshot: &DashboardSnapshot) -> String {
     if !status.gui_api_base.login_issuer_configured {
         parts.push("本地授权入口还没有写入，请点击写入配置。".to_string());
     }
+    if status
+        .remote_control_switch
+        .as_ref()
+        .is_some_and(|remote_control_switch| !remote_control_switch.configured)
+    {
+        parts.push("Codex App remote-control 持久化开关还没有写入，请点击写入配置。".to_string());
+    }
     if let Some(err) = &status.gui_api_base.error {
         parts.push(format!("检查环境变量时遇到问题: {err}"));
+    }
+    if let Some(err) = status
+        .remote_control_switch
+        .as_ref()
+        .and_then(|remote_control_switch| remote_control_switch.error.as_ref())
+    {
+        parts.push(format!("检查 remote-control 开关时遇到问题: {err}"));
     }
     if parts.is_empty() {
         "尚未注入 Codex App 配置。".to_string()

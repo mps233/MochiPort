@@ -450,13 +450,22 @@ pub struct FeishuThreadListEntry {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct FeishuThreadModelChoice {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct FeishuThreadCreateDefaults {
+    pub remote_name: Option<String>,
     pub cwd: Option<String>,
     pub model_provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
+    pub permission: Option<String>,
     pub projects: Vec<String>,
-    pub models: Vec<String>,
+    pub models: Vec<FeishuThreadModelChoice>,
+    pub efforts: Vec<String>,
 }
 
 fn build_interactive_choice_block(
@@ -1357,6 +1366,7 @@ pub fn build_thread_create_settings_card(
     let cwd_options = thread_cwd_options(defaults);
     let model_options = thread_model_options(defaults);
     let effort_options = thread_effort_options(defaults);
+    let permission_options = thread_permission_options();
     let default_line = |label: &str, value: Option<&String>| {
         format!(
             "{}：{}",
@@ -1367,6 +1377,15 @@ pub fn build_thread_create_settings_card(
                 .unwrap_or_else(|| "使用 Codex App 默认值".to_string())
         )
     };
+    let remote_line = format!(
+        "远端：{}",
+        defaults
+            .remote_name
+            .as_ref()
+            .map(|value| normalize_card_markdown(value))
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "未连接".to_string())
+    );
     let mut elements = vec![
         serde_json::json!({
             "tag": "markdown",
@@ -1375,11 +1394,13 @@ pub fn build_thread_create_settings_card(
         serde_json::json!({
             "tag": "markdown",
             "content": format!(
-                "<font color='grey'>{}\n{}\n{}\n{}</font>",
+                "<font color='grey'>{}\n{}\n{}\n{}\n{}\n{}</font>",
+                remote_line,
                 default_line("目录", defaults.cwd.as_ref()),
                 default_line("Provider", defaults.model_provider.as_ref()),
                 default_line("模型", defaults.model.as_ref()),
-                default_line("推理强度", defaults.effort.as_ref())
+                default_line("推理强度", defaults.effort.as_ref()),
+                default_line("权限", defaults.permission.as_ref())
             )
         }),
         serde_json::json!({
@@ -1424,6 +1445,15 @@ pub fn build_thread_create_settings_card(
                     "effort",
                     "选择推理强度",
                     effort_options
+                ),
+                {
+                    "tag": "markdown",
+                    "content": "**权限**"
+                },
+                select_static_element(
+                    "permission",
+                    "选择权限",
+                    permission_options
                 ),
                 {
                     "tag": "column_set",
@@ -1541,25 +1571,52 @@ fn thread_model_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, S
     for model in defaults
         .models
         .iter()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.value.trim().is_empty())
     {
-        options.push((model.to_string(), model.to_string()));
+        options.push((model.label.clone(), model.value.clone()));
     }
     dedupe_options(options)
 }
 
 fn thread_effort_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, String)> {
-    let mut options = vec![("使用当前推理强度".to_string(), "__default__".to_string())];
-    for effort in ["minimal", "low", "medium", "high", "xhigh"] {
-        options.push((effort.to_string(), effort.to_string()));
-    }
+    let mut options = vec![(
+        "使用模型默认推理强度".to_string(),
+        "__default__".to_string(),
+    )];
     if let Some(effort) = defaults.effort.as_deref().map(str::trim)
         && !effort.is_empty()
     {
-        options.push((effort.to_string(), effort.to_string()));
+        options.push((reasoning_effort_label(effort), effort.to_string()));
+    }
+    for effort in defaults
+        .efforts
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        options.push((reasoning_effort_label(effort), effort.to_string()));
     }
     dedupe_options(options)
+}
+
+fn thread_permission_options() -> Vec<(String, String)> {
+    vec![
+        ("默认权限".to_string(), "workspace_user".to_string()),
+        ("自动审查".to_string(), "auto_review".to_string()),
+        ("完全访问权限".to_string(), "full_access".to_string()),
+    ]
+}
+
+fn reasoning_effort_label(effort: &str) -> String {
+    match effort {
+        "none" => "无".to_string(),
+        "minimal" => "极低".to_string(),
+        "low" => "低".to_string(),
+        "medium" => "中".to_string(),
+        "high" => "高".to_string(),
+        "xhigh" => "超高".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn dedupe_options(options: Vec<(String, String)>) -> Vec<(String, String)> {

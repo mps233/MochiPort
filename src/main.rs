@@ -5,11 +5,14 @@ mod cli;
 mod codex;
 mod codex_app_config;
 mod config;
+#[cfg(feature = "gui")]
+mod gui;
 mod im;
 mod im_runtime;
 mod remote_control_backend;
 mod store;
 mod types;
+mod vscode_extension_patch;
 mod web;
 
 use std::{
@@ -33,8 +36,13 @@ use crate::{
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
+    if matches!(cli.command, Command::Gui) {
+        return run_gui_command();
+    }
+
     let config_path = config_path_from_cli(cli.config_path.clone());
     let mut config = AppConfig::load_or_default(&config_path)?;
+    let should_save_config = !config_path.exists() || config.apply_platform_defaults();
     normalize_config_paths(&mut config, &config_path);
     let log_path = init_logging(&config)?;
     tracing::info!(
@@ -42,7 +50,7 @@ async fn main() -> anyhow::Result<()> {
         path = %log_path.display(),
         "codex-remote chain log initialized"
     );
-    if !config_path.exists() {
+    if should_save_config {
         config.save(&config_path)?;
     }
 
@@ -78,6 +86,14 @@ async fn main() -> anyhow::Result<()> {
             println!("  config: {}", report.config_path.display());
             println!("  auth: {}", report.auth_path.display());
             println!("  chatgpt_base_url: {}", report.backend_url);
+            println!(
+                "  remote_control switch: {}",
+                if report.remote_control_switch.configured {
+                    "enabled"
+                } else {
+                    "not enabled"
+                }
+            );
             Ok(())
         }
         Command::UninstallCodexApp { codex_home } => {
@@ -102,6 +118,20 @@ async fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Gui => unreachable!("GUI command is handled before config loading"),
+    }
+}
+
+fn run_gui_command() -> anyhow::Result<()> {
+    #[cfg(feature = "gui")]
+    {
+        gui::run();
+        Ok(())
+    }
+
+    #[cfg(not(feature = "gui"))]
+    {
+        anyhow::bail!("this codex-remote build does not include GUI support")
     }
 }
 
@@ -131,6 +161,35 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             format!("path={}", chain_log_path.display()),
         )
         .await;
+    match vscode_extension_patch::enable_remote_control() {
+        Ok(report) => {
+            state
+                .push_event(
+                    "info",
+                    "vscode_codex_extension_patch",
+                    format!(
+                        "action={} extension_js={} message={}",
+                        report.action,
+                        report
+                            .extension_js
+                            .as_ref()
+                            .map(|path| path.display().to_string())
+                            .unwrap_or_default(),
+                        report.message
+                    ),
+                )
+                .await;
+        }
+        Err(err) => {
+            state
+                .push_event(
+                    "warn",
+                    "vscode_codex_extension_patch_failed",
+                    err.to_string(),
+                )
+                .await;
+        }
+    }
     if state.config.lock().await.bridge.enabled {
         web::start_bridge_if_ready(&state, "bridge start requested during daemon startup").await;
     } else {
@@ -149,6 +208,24 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             let _ = shutdown_rx.await;
         })
         .await?;
+    match vscode_extension_patch::restore_remote_control() {
+        Ok(report) => {
+            tracing::info!(
+                target: "codex_remote::vscode_extension_patch",
+                action = %report.action,
+                extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
+                message = %report.message,
+                "VS Code Codex extension restore finished"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "codex_remote::vscode_extension_patch",
+                error = %err,
+                "VS Code Codex extension restore failed"
+            );
+        }
+    }
     Ok(())
 }
 

@@ -311,16 +311,18 @@ async fn configure_codex_app(
     }) {
         Ok(report) => {
             let gui_api_base = codex_app_config::inspect_gui_api_base_url(&backend_url);
+            let remote_control_switch = report.remote_control_switch.clone();
             state
                 .push_event(
                     "info",
                     "codex_app_configured",
                     format!(
-                        "codex_home={} config={} auth={} gui_api_base={}",
+                        "codex_home={} config={} auth={} gui_api_base={} remote_control_switch={}",
                         report.codex_home.display(),
                         report.config_path.display(),
                         report.auth_path.display(),
-                        gui_api_base.value.as_deref().unwrap_or_default()
+                        gui_api_base.value.as_deref().unwrap_or_default(),
+                        remote_control_switch.configured
                     ),
                 )
                 .await;
@@ -333,6 +335,7 @@ async fn configure_codex_app(
                     "authPath": report.auth_path.to_string_lossy().to_string(),
                     "backendUrl": report.backend_url,
                     "guiApiBase": gui_api_base,
+                    "remoteControlSwitch": remote_control_switch,
                 })),
             )
         }
@@ -391,18 +394,33 @@ async fn repair_codex_app_gui_environment(State(state): State<SharedState>) -> i
         );
     }
 
+    let remote_control_switch = match codex_app_config::enable_codex_app_remote_control_switch(None)
+    {
+        Ok(status) => status,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "ok": false,
+                    "error": err.to_string(),
+                    "status": status,
+                })),
+            );
+        }
+    };
     let gui_api_base = codex_app_config::configure_gui_environment(&backend_url);
     state
         .push_event(
             "info",
             "codex_app_gui_environment_repaired",
             format!(
-                "gui_api_base={} login_issuer={}",
+                "gui_api_base={} login_issuer={} remote_control_switch={}",
                 gui_api_base.value.as_deref().unwrap_or_default(),
                 gui_api_base
                     .login_issuer_value
                     .as_deref()
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                remote_control_switch.configured
             ),
         )
         .await;
@@ -411,6 +429,7 @@ async fn repair_codex_app_gui_environment(State(state): State<SharedState>) -> i
         Json(json!({
             "ok": true,
             "guiApiBase": gui_api_base,
+            "remoteControlSwitch": remote_control_switch,
         })),
     )
 }
@@ -559,6 +578,9 @@ struct RemoteControlBackendStatusResponse {
     remote_control_base_url: String,
     remote_control_connected: bool,
     remote_control_initialized: bool,
+    server_name: Option<String>,
+    environment_id: Option<String>,
+    installation_id: Option<String>,
     current_thread_id: Option<String>,
     feishu_configured: bool,
     reason: Option<String>,
@@ -583,6 +605,9 @@ async fn remote_control_backend_status(
         remote_control_base_url: config.remote_control_base_url(),
         remote_control_connected: remote.connected,
         remote_control_initialized: remote.initialized,
+        server_name: remote.server_name,
+        environment_id: remote.environment_id,
+        installation_id: remote.installation_id,
         current_thread_id: remote.current_thread_id,
         feishu_configured,
         reason,

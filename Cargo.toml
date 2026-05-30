@@ -4,6 +4,7 @@ version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"
 build = "build.rs"
+autobins = false
 
 [dependencies]
 anyhow = "1"
@@ -20,6 +21,7 @@ reqwest = { version = "0.12", features = ["json", "multipart", "rustls-tls"], de
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -31,6 +33,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 wxdragon = { version = "0.9.16", optional = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+winreg = "0.55"
+
 [build-dependencies]
 embed-resource = "3.0.6"
 
@@ -38,6 +44,5 @@ embed-resource = "3.0.6"
 gui = ["dep:image", "dep:wxdragon", "reqwest/blocking"]
 
 [[bin]]
-name = "codex-remote-gui"
-path = "src/bin/codex-remote-gui.rs"
-required-features = ["gui"]
+name = "codex-remote"
+path = "src/main.rs"

@@ -38,6 +38,7 @@ struct ThreadCreateForm {
     cwd_custom: Option<String>,
     model: Option<String>,
     effort: Option<String>,
+    permission: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -439,6 +440,7 @@ async fn handle_inbound_action(
             cwd_custom,
             model,
             effort,
+            permission,
         } => {
             handle_thread_route_create_submit(
                 state,
@@ -450,6 +452,7 @@ async fn handle_inbound_action(
                     cwd_custom,
                     model,
                     effort,
+                    permission,
                 },
             )
             .await
@@ -552,7 +555,7 @@ async fn handle_thread_route_create_submit(
     else {
         return Ok(());
     };
-    let options = match thread_start_options_from_form(form) {
+    let options = match thread_start_options_from_form(&state, form).await {
         Ok(options) => options,
         Err(err) => {
             api.send_text_message(&message.chat_id, &format!("新建会话参数不正确：{err}"))
@@ -598,7 +601,7 @@ async fn send_thread_create_settings_card(
     message: &InboundMessage,
     request: ThreadRoutingRequestState,
 ) -> Result<()> {
-    let defaults = load_thread_create_defaults();
+    let defaults = load_thread_create_defaults(state).await;
     let card = renderer::build_thread_create_settings_card(&request.request_id, &defaults);
     if let Some(message_id) = request
         .message_id
@@ -686,14 +689,26 @@ async fn create_new_thread_for_route(
     Ok(())
 }
 
-fn thread_start_options_from_form(
+async fn thread_start_options_from_form(
+    state: &SharedState,
     form: ThreadCreateForm,
 ) -> Result<remote_control_backend::ThreadStartOptions> {
+    let cwd = normalize_thread_cwd(form.cwd_choice, form.cwd_custom)?;
+    let model = normalize_optional_selection(form.model);
+    let reasoning_effort = normalize_reasoning_effort(form.effort)?;
+    validate_reasoning_effort_for_model(state, model.as_deref(), reasoning_effort.as_deref())
+        .await?;
+    let (permissions, approval_policy, approvals_reviewer) =
+        permission_mode_to_thread_start(form.permission)?;
+
     Ok(thread_start_options_with_current_provider(
         remote_control_backend::ThreadStartOptions {
-            cwd: normalize_thread_cwd(form.cwd_choice, form.cwd_custom)?,
-            model: normalize_optional_selection(form.model),
-            reasoning_effort: normalize_reasoning_effort(form.effort)?,
+            cwd,
+            model,
+            reasoning_effort,
+            permissions,
+            approval_policy,
+            approvals_reviewer,
             ..Default::default()
         },
     ))
@@ -720,6 +735,32 @@ fn normalize_reasoning_effort(value: Option<String>) -> Result<Option<String>> {
         _ => Err(anyhow!(
             "推理强度只支持 none / minimal / low / medium / high / xhigh"
         )),
+    }
+}
+
+fn permission_mode_to_thread_start(
+    value: Option<String>,
+) -> Result<(Option<String>, Option<String>, Option<String>)> {
+    let Some(value) = normalize_optional_selection(value) else {
+        return Ok((None, None, None));
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "workspace_user" | "default" | "default_permissions" | "auto" => Ok((
+            Some(":workspace".to_string()),
+            Some("on-request".to_string()),
+            Some("user".to_string()),
+        )),
+        "auto_review" | "guardian-approvals" | "guardian_approvals" => Ok((
+            Some(":workspace".to_string()),
+            Some("on-request".to_string()),
+            Some("auto_review".to_string()),
+        )),
+        "full_access" | "full-access" => Ok((
+            Some(":danger-full-access".to_string()),
+            Some("never".to_string()),
+            Some("user".to_string()),
+        )),
+        _ => Err(anyhow!("权限只支持 默认权限 / 自动审查 / 完全访问权限")),
     }
 }
 
@@ -762,12 +803,12 @@ fn thread_start_options_with_current_provider(
 
 fn expand_home_prefix(value: &str) -> PathBuf {
     if value == "~" {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = user_home_dir() {
             return PathBuf::from(home);
         }
     }
     if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = std::env::var_os("HOME") {
+        if let Some(home) = user_home_dir() {
             return Path::new(&home).join(rest);
         }
     }
@@ -790,56 +831,295 @@ fn summarize_thread_start_options(options: &remote_control_backend::ThreadStartO
     if let Some(effort) = options.reasoning_effort.as_ref() {
         lines.push(format!("推理强度：`{effort}`"));
     }
+    lines.push(format!("权限：{}", thread_start_permission_label(options)));
     lines.join("\n")
 }
 
-fn load_thread_create_defaults() -> renderer::FeishuThreadCreateDefaults {
-    let Some(doc) = load_codex_app_config_doc() else {
-        return renderer::FeishuThreadCreateDefaults::default();
-    };
-    let model = doc
-        .get("model")
-        .and_then(|value| value.as_str())
-        .map(str::to_string);
-    renderer::FeishuThreadCreateDefaults {
-        cwd: None,
-        model_provider: doc
-            .get("model_provider")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        model: model.clone(),
-        effort: doc
-            .get("model_reasoning_effort")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
-        projects: codex_project_paths(&doc),
-        models: thread_model_choices(model.as_deref()),
+fn thread_start_permission_label(options: &remote_control_backend::ThreadStartOptions) -> String {
+    match (
+        options.permissions.as_deref(),
+        options.approval_policy.as_deref(),
+        options.approvals_reviewer.as_deref(),
+    ) {
+        (Some(":workspace"), Some("on-request"), Some("user")) => "默认权限".to_string(),
+        (Some(":workspace"), Some("on-request"), Some("auto_review" | "guardian_subagent")) => {
+            "自动审查".to_string()
+        }
+        (Some(":danger-full-access"), Some("never"), Some("user")) => "完全访问权限".to_string(),
+        (None, None, None) => "使用 Codex App 默认值".to_string(),
+        _ => "自定义".to_string(),
     }
 }
 
-fn thread_model_choices(current: Option<&str>) -> Vec<String> {
+#[derive(Debug, Clone, Default)]
+struct ThreadModelCatalogEntry {
+    model: String,
+    label: String,
+    hidden: bool,
+    is_default: bool,
+    supported_efforts: Vec<String>,
+    default_effort: Option<String>,
+}
+
+async fn load_thread_create_defaults(state: &SharedState) -> renderer::FeishuThreadCreateDefaults {
+    let local_doc = load_codex_app_config_doc();
+    let remote_status = remote_control_backend::status_snapshot(state).await;
+    let remote_config = remote_control_backend::config_read(state, None, false)
+        .await
+        .ok()
+        .and_then(|value| value.get("config").cloned());
+    let catalog = load_model_catalog(state).await.unwrap_or_default();
+    let catalog_default_model = catalog
+        .iter()
+        .find(|entry| entry.is_default)
+        .or_else(|| catalog.iter().find(|entry| !entry.hidden))
+        .map(|entry| entry.model.clone());
+    let model = config_string(remote_config.as_ref(), "model")
+        .or_else(|| local_config_string(local_doc.as_ref(), "model"))
+        .or(catalog_default_model);
+    let effort = config_string(remote_config.as_ref(), "model_reasoning_effort")
+        .or_else(|| {
+            model
+                .as_deref()
+                .and_then(|model| catalog.iter().find(|entry| entry.model == model))
+                .and_then(|entry| entry.default_effort.clone())
+        })
+        .or_else(|| local_config_string(local_doc.as_ref(), "model_reasoning_effort"));
+
+    renderer::FeishuThreadCreateDefaults {
+        remote_name: remote_status.server_name,
+        cwd: None,
+        model_provider: config_string(remote_config.as_ref(), "model_provider")
+            .or_else(|| local_config_string(local_doc.as_ref(), "model_provider")),
+        model: model.clone(),
+        effort: effort.clone(),
+        permission: infer_permission_label(remote_config.as_ref()),
+        projects: codex_project_paths(local_doc.as_ref()),
+        models: thread_model_choices(model.as_deref(), &catalog),
+        efforts: thread_reasoning_effort_choices(model.as_deref(), &catalog, effort.as_deref()),
+    }
+}
+
+async fn load_model_catalog(state: &SharedState) -> Result<Vec<ThreadModelCatalogEntry>> {
+    let response = remote_control_backend::model_list(state, true, Some(100)).await?;
+    Ok(parse_model_catalog(&response))
+}
+
+fn parse_model_catalog(response: &serde_json::Value) -> Vec<ThreadModelCatalogEntry> {
+    response
+        .get("data")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            let model = value
+                .get("model")
+                .or_else(|| value.get("id"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?
+                .to_string();
+            let display_name = value
+                .get("displayName")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&model);
+            let label = if display_name == model {
+                model.clone()
+            } else {
+                format!("{display_name} ({model})")
+            };
+            let supported_efforts = value
+                .get("supportedReasoningEfforts")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|value| {
+                    value
+                        .get("reasoningEffort")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            Some(ThreadModelCatalogEntry {
+                model,
+                label,
+                hidden: value
+                    .get("hidden")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                is_default: value
+                    .get("isDefault")
+                    .and_then(|value| value.as_bool())
+                    .unwrap_or(false),
+                supported_efforts: dedupe_strings(supported_efforts),
+                default_effort: value
+                    .get("defaultReasoningEffort")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            })
+        })
+        .collect()
+}
+
+fn thread_model_choices(
+    current: Option<&str>,
+    catalog: &[ThreadModelCatalogEntry],
+) -> Vec<renderer::FeishuThreadModelChoice> {
     let mut models = Vec::new();
-    for model in [
-        current,
-        Some("gpt-5.5"),
-        Some("gpt-5.4"),
-        Some("gpt-5.4-mini"),
-        Some("gpt-5.3-codex"),
-    ]
-    .into_iter()
-    .flatten()
+    if let Some(current) = current.map(str::trim).filter(|value| !value.is_empty()) {
+        let label = catalog
+            .iter()
+            .find(|entry| entry.model == current)
+            .map(|entry| entry.label.clone())
+            .unwrap_or_else(|| current.to_string());
+        push_model_choice(&mut models, label, current.to_string());
+    }
+    for entry in catalog
+        .iter()
+        .filter(|entry| !entry.hidden || Some(entry.model.as_str()) == current)
     {
-        let model = model.trim();
-        if !model.is_empty() && !models.iter().any(|existing| existing == model) {
-            models.push(model.to_string());
-        }
+        push_model_choice(&mut models, entry.label.clone(), entry.model.clone());
+    }
+    for model in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"] {
+        push_model_choice(&mut models, model.to_string(), model.to_string());
     }
     models
 }
 
-fn codex_project_paths(doc: &toml::Value) -> Vec<String> {
+fn push_model_choice(
+    models: &mut Vec<renderer::FeishuThreadModelChoice>,
+    label: String,
+    value: String,
+) {
+    if !value.trim().is_empty() && !models.iter().any(|existing| existing.value == value) {
+        models.push(renderer::FeishuThreadModelChoice { label, value });
+    }
+}
+
+fn thread_reasoning_effort_choices(
+    current_model: Option<&str>,
+    catalog: &[ThreadModelCatalogEntry],
+    current_effort: Option<&str>,
+) -> Vec<String> {
+    let mut efforts = Vec::new();
+    if let Some(current_effort) = current_effort
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        efforts.push(current_effort.to_string());
+    }
+    if let Some(entry) =
+        current_model.and_then(|model| catalog.iter().find(|entry| entry.model == model))
+    {
+        efforts.extend(entry.supported_efforts.iter().cloned());
+    }
+    for entry in catalog.iter().filter(|entry| !entry.hidden) {
+        efforts.extend(entry.supported_efforts.iter().cloned());
+    }
+    if efforts.is_empty() {
+        efforts.extend(["minimal", "low", "medium", "high", "xhigh"].map(str::to_string));
+    }
+    sort_reasoning_efforts(dedupe_strings(efforts))
+}
+
+async fn validate_reasoning_effort_for_model(
+    state: &SharedState,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<()> {
+    let (Some(model), Some(effort)) = (model, effort) else {
+        return Ok(());
+    };
+    let Ok(catalog) = load_model_catalog(state).await else {
+        return Ok(());
+    };
+    let Some(entry) = catalog.iter().find(|entry| entry.model == model) else {
+        return Ok(());
+    };
+    if entry.supported_efforts.is_empty()
+        || entry
+            .supported_efforts
+            .iter()
+            .any(|supported| supported == effort)
+    {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "模型 `{model}` 不支持推理强度 `{effort}`，可选：{}",
+        entry.supported_efforts.join(" / ")
+    ))
+}
+
+fn sort_reasoning_efforts(mut efforts: Vec<String>) -> Vec<String> {
+    efforts.sort_by_key(|effort| reasoning_effort_rank(effort));
+    efforts
+}
+
+fn reasoning_effort_rank(effort: &str) -> usize {
+    match effort {
+        "none" => 0,
+        "minimal" => 1,
+        "low" => 2,
+        "medium" => 3,
+        "high" => 4,
+        "xhigh" => 5,
+        _ => 100,
+    }
+}
+
+fn dedupe_strings(values: Vec<String>) -> Vec<String> {
+    let mut output = Vec::new();
+    for value in values {
+        if !output.iter().any(|existing| existing == &value) {
+            output.push(value);
+        }
+    }
+    output
+}
+
+fn config_string(config: Option<&serde_json::Value>, key: &str) -> Option<String> {
+    config
+        .and_then(|config| config.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn local_config_string(doc: Option<&toml::Value>, key: &str) -> Option<String> {
+    doc.and_then(|doc| doc.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn infer_permission_label(config: Option<&serde_json::Value>) -> Option<String> {
+    let sandbox = config_string(config, "sandbox_mode");
+    let approval = config_string(config, "approval_policy");
+    let reviewer = config_string(config, "approvals_reviewer");
+    match (sandbox.as_deref(), approval.as_deref(), reviewer.as_deref()) {
+        (Some("danger-full-access"), Some("never") | None, _) => Some("完全访问权限".to_string()),
+        (Some("workspace-write"), _, Some("auto_review" | "guardian_subagent")) => {
+            Some("自动审查".to_string())
+        }
+        (Some("workspace-write") | None, Some("on-request") | None, _) => {
+            Some("默认权限".to_string())
+        }
+        (Some("read-only"), _, _) => Some("只读".to_string()),
+        _ => None,
+    }
+}
+
+fn codex_project_paths(doc: Option<&toml::Value>) -> Vec<String> {
     let mut projects = doc
-        .get("projects")
+        .and_then(|doc| doc.get("projects"))
         .and_then(|value| value.as_table())
         .map(|table| {
             table
@@ -849,7 +1129,14 @@ fn codex_project_paths(doc: &toml::Value) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    if let Ok(cwd) = std::env::current_dir() {
+        let cwd = cwd.to_string_lossy().to_string();
+        if !cwd.trim().is_empty() {
+            projects.push(cwd);
+        }
+    }
     projects.sort();
+    projects.dedup();
     projects
 }
 
@@ -864,14 +1151,49 @@ fn load_codex_app_model_provider() -> Option<String> {
 }
 
 fn load_codex_app_config_doc() -> Option<toml::Value> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return None;
+    for path in codex_config_candidate_paths() {
+        if let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(doc) = raw.parse::<toml::Value>()
+        {
+            return Some(doc);
+        }
+    }
+    None
+}
+
+fn codex_config_candidate_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
+        push_path_once(&mut paths, Path::new(&codex_home).join("config.toml"));
+    }
+    for home in home_env_candidates() {
+        push_path_once(
+            &mut paths,
+            Path::new(&home).join(".codex").join("config.toml"),
+        );
+    }
+    paths
+}
+
+fn home_env_candidates() -> Vec<std::ffi::OsString> {
+    let keys = if cfg!(windows) {
+        ["USERPROFILE", "HOME"]
+    } else {
+        ["HOME", "USERPROFILE"]
     };
-    let path = Path::new(&home).join(".codex").join("config.toml");
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return None;
-    };
-    raw.parse::<toml::Value>().ok()
+    keys.into_iter()
+        .filter_map(std::env::var_os)
+        .collect::<Vec<_>>()
+}
+
+fn user_home_dir() -> Option<std::ffi::OsString> {
+    home_env_candidates().into_iter().next()
+}
+
+fn push_path_once(paths: &mut Vec<PathBuf>, path: PathBuf) {
+    if !paths.iter().any(|existing| existing == &path) {
+        paths.push(path);
+    }
 }
 
 fn thread_list_body(model_provider_filter: Option<&str>) -> String {

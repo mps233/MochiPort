@@ -37,6 +37,7 @@ pub enum InboundAction {
         cwd_custom: Option<String>,
         model: Option<String>,
         effort: Option<String>,
+        permission: Option<String>,
     },
     ThreadRouteCreateDefault {
         request_id: String,

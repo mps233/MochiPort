@@ -51,17 +51,15 @@ jobs:
           MACOS="$CONTENTS/MacOS"
           RESOURCES="$CONTENTS/Resources"
 
-          cargo build --release
-          PATH="/opt/homebrew/bin:$PATH" cargo build --release --features gui --bin codex-remote-gui
+          PATH="/opt/homebrew/bin:$PATH" cargo build --release --features gui --bin codex-remote
 
           rm -rf "$APP"
           mkdir -p "$MACOS" "$RESOURCES/brand"
           cp "packaging/macos/Info.plist" "$CONTENTS/Info.plist"
           cp "packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
           cp packaging/brand/*.png "$RESOURCES/brand/"
-          cp "target/release/codex-remote-gui" "$MACOS/$APP_NAME"
-          cp "target/release/codex-remote" "$RESOURCES/codex-remote"
-          chmod +x "$MACOS/$APP_NAME" "$RESOURCES/codex-remote"
+          cp "target/release/codex-remote" "$MACOS/$APP_NAME"
+          chmod +x "$MACOS/$APP_NAME"
 
       - name: Sign And Notarize
         env:
@@ -105,11 +103,6 @@ jobs:
                 --wait
             fi
           }
-
-          codesign --force --timestamp --options runtime \
-            --entitlements "$ENTITLEMENTS" \
-            --sign "$APPLE_CODESIGN_IDENTITY" \
-            "$APP/Contents/Resources/codex-remote"
 
           codesign --force --timestamp --options runtime \
             --entitlements "$ENTITLEMENTS" \

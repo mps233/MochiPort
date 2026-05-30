@@ -3,9 +3,9 @@
   <assemblyIdentity
     version="0.2.0.0"
     processorArchitecture="*"
-    name="codex-remote-gui"
+    name="codex-remote"
     type="win32" />
-  <description>Codex Remote GUI</description>
+  <description>Codex Remote</description>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity

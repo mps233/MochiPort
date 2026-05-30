@@ -273,7 +273,7 @@
                 <div class="step-dot"></div>
                 <div>
                     <h3>配置 Codex App</h3>
-                    <p>在 Codex 配置里把 chatgpt_base_url 指向本地 backend，并使用 chatgptAuthTokens。</p>
+                    <p>在 Codex 配置里把 chatgpt_base_url 指向本地 backend，并写入本地 ChatGPT 登录态。</p>
                 </div>
                 <span id="step.config.status" class="step-status">需确认</span>
             </div>
@@ -367,7 +367,7 @@ async function loadAll() {
     } else if (!status.running) {
         setHero("需要启动", "飞书监听没有运行", "点击启动后，飞书消息监听会恢复。", "启动飞书监听", "bridge", true);
     } else if (!codexAppConfigured) {
-        setHero("已准备好", "先配置 Codex App，再双击启动", "点击一键配置会写入本地 chatgpt_base_url 与 chatgptAuthTokens；然后启动 Codex App 并启用 remote control。", "一键配置 Codex App", "configureCodexApp", true);
+        setHero("已准备好", "先配置 Codex App，再双击启动", "点击一键配置会写入本地 chatgpt_base_url 与 ChatGPT 登录态；然后启动 Codex App 并启用 remote control。", "一键配置 Codex App", "configureCodexApp", true);
     } else if (!codexConnected) {
         setHero("已配置", "现在启动 Codex App 并打开远程控制", "本地 Codex App 配置已经就绪。双击启动 Codex App，并在 App 里启用 remote control。", "刷新状态", "refresh", true);
     } else {
@@ -383,7 +383,7 @@ async function loadAll() {
         `chatgpt_base_url = "${backendUrl}"`,
         "",
         "Codex App auth:",
-        'auth_mode = "chatgptAuthTokens"',
+        'auth_mode = "chatgpt"',
         "",
         "点击「一键配置 Codex App」会写入 ~/.codex/config.toml 和 ~/.codex/auth.json，并为已有文件创建 .bak 备份。",
         "不会修改 Codex App 的启动方式；Finder/Dock 双击仍按官方 App 自己的入口启动。",
@@ -471,7 +471,7 @@ async function configureCodexApp() {
 }
 
 async function uninstallCodexApp() {
-    if (!confirm("移除 Codex App 的本地 remote-control 配置？这会删除 chatgpt_base_url 和本地 chatgptAuthTokens。")) {
+    if (!confirm("移除 Codex App 的本地 remote-control 配置？这会删除 chatgpt_base_url 和 codex-remote 写入的本地登录态。")) {
         return;
     }
     setMessage("正在卸载 Codex App 本地配置...");

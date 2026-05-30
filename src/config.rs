@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+const DEFAULT_BIND: &str = "127.0.0.1:3847";
+const LEGACY_DEFAULT_BIND: &str = "127.0.0.1:8000";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
@@ -33,7 +36,7 @@ pub struct BridgeConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            bind: "127.0.0.1:3847".to_string(),
+            bind: DEFAULT_BIND.to_string(),
             state_path: PathBuf::from("codex-remote-state.json"),
             feishu: FeishuConfig::default(),
             bridge: BridgeConfig::default(),
@@ -64,6 +67,15 @@ impl Default for BridgeConfig {
 }
 
 impl AppConfig {
+    pub fn apply_platform_defaults(&mut self) -> bool {
+        if self.bind == LEGACY_DEFAULT_BIND {
+            self.bind = DEFAULT_BIND.to_string();
+            return true;
+        }
+
+        false
+    }
+
     pub fn remote_control_base_url(&self) -> String {
         format!("http://{}/backend-api", self.bind)
     }

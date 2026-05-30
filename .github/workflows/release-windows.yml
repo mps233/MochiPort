@@ -1,0 +1,93 @@
+name: release-windows
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-package:
+    runs-on: windows-2022
+    env:
+      HAS_WINDOWS_CODESIGN: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 != '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo build --release --features gui --bin codex-remote
+
+      - name: Sign Binaries
+        if: env.HAS_WINDOWS_CODESIGN == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $certPath = Join-Path $env:RUNNER_TEMP "windows-codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
+
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match "\\x64\\signtool.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) {
+            throw "signtool.exe not found in Windows SDK"
+          }
+
+          $files = @(
+            "target\release\codex-remote.exe"
+          )
+          foreach ($file in $files) {
+            & $signtool.FullName sign `
+              /fd SHA256 `
+              /td SHA256 `
+              /tr "http://timestamp.digicert.com" `
+              /f $certPath `
+              /p $env:WINDOWS_CODESIGN_PFX_PASSWORD `
+              $file
+            & $signtool.FullName verify /pa /v $file
+          }
+
+      - name: Package Zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dist = "target\dist\Codex Remote Windows"
+          $zip = "target\dist\Codex Remote Windows.zip"
+          Remove-Item -Recurse -Force "target\dist" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $dist | Out-Null
+
+          Copy-Item "target\release\codex-remote.exe" (Join-Path $dist "Codex Remote.exe")
+          Copy-Item "README.md" $dist
+          if (Test-Path "config.example.toml") {
+            Copy-Item "config.example.toml" $dist
+          }
+
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip -Force
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Codex-Remote-Windows
+          path: target/dist/Codex Remote Windows.zip
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/dist/Codex Remote Windows.zip

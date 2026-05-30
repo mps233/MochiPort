@@ -4,13 +4,13 @@
 
 ## 当前决策
 
-`codex-remote` 使用本地 `chatgptAuthTokens` 形态作为 Codex App remote-control 身份。
+`codex-remote` 使用本地 `chatgpt` auth 形态作为 Codex App remote-control 身份。
 
 含义是：
 
 - Codex App 仍然负责 app-server 启动，并读取它正常的 Codex home
 - `chatgpt_base_url` 指向本地 `codex-remote` backend
-- Codex App 的 `auth.json` 使用 `auth_mode = "chatgptAuthTokens"`
+- Codex App 的 `auth.json` 使用 `auth_mode = "chatgpt"`
 - 第三方模型 key 仍然放在 Codex model provider 配置里
 - app-server 连上 remote-control 后，`codex-remote` 再把协议流量桥到飞书
 
@@ -24,13 +24,13 @@ remote control requires ChatGPT authentication; API key auth is not supported
 
 所以模型 provider key 不能当 remote-control 身份。它只负责后续模型请求。
 
-## 本地 `chatgptAuthTokens`
+## 本地 `chatgpt`
 
 本地 auth 记录刻意做成 ChatGPT-shaped，因为这是 Codex remote-control 检查接受的形态：
 
 ```json
 {
-  "auth_mode": "chatgptAuthTokens",
+  "auth_mode": "chatgpt",
   "OPENAI_API_KEY": null,
   "tokens": {
     "id_token": "<本地 ChatGPT-shaped JWT>",
@@ -55,7 +55,7 @@ codex-remote --config config.toml configure-codex-app
 它会显式写入：
 
 - Codex App `config.toml`：`chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`
-- Codex App `auth.json`：本地 `chatgptAuthTokens`
+- Codex App `auth.json`：本地 `chatgpt` auth
 
 也可以顺手写第三方 provider 配置：
 

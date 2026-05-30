@@ -16,7 +16,7 @@ Use this before publishing the repository or creating a release.
 ```powershell
 cargo fmt
 cargo test
-cargo build --release
+cargo build --release --features gui --bin codex-remote
 ```
 
 ## Clean Local Artifacts

@@ -34,6 +34,8 @@ static REMOTE_REQUEST_ID: AtomicU64 = AtomicU64::new(200_000);
 const PROTOCOL_VERSION: &str = "3";
 const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const FEISHU_BRIDGE_CLIENT_ID: &str = "codex-remote-feishu";
+const FEISHU_BRIDGE_ENV_ID: &str = "env_codex_remote_feishu_bridge";
+const FEISHU_BRIDGE_INSTALLATION_ID: &str = "codex-remote-feishu-bridge";
 
 pub(crate) enum OutboundWsMessage {
     Text(Value),
@@ -133,6 +135,8 @@ struct EnrollRequest {
 struct EnrollResponse {
     server_id: String,
     environment_id: String,
+    remote_control_token: String,
+    expires_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,6 +178,19 @@ pub fn router() -> Router<SharedState> {
         .route("/backend-api/wham/environments", get(wham_environments))
         .route("/backend-api/wham/apps", post(wham_apps))
         .route(
+            "/backend-api/connectors/directory/list",
+            get(connectors_directory_list),
+        )
+        .route(
+            "/backend-api/connectors/directory/list_workspace",
+            get(connectors_directory_list),
+        )
+        .route("/connectors/directory/list", get(connectors_directory_list))
+        .route(
+            "/connectors/directory/list_workspace",
+            get(connectors_directory_list),
+        )
+        .route(
             "/backend-api/codex/analytics-events/events",
             post(analytics_events),
         )
@@ -194,7 +211,15 @@ pub fn router() -> Router<SharedState> {
             get(remote_control_mfa_requirement),
         )
         .route(
+            "/backend-api/codex/remote/control/mfa_requirement",
+            get(remote_control_mfa_requirement),
+        )
+        .route(
             "/backend-api/wham/remote/control/clients",
+            get(remote_control_clients),
+        )
+        .route(
+            "/backend-api/codex/remote/control/clients",
             get(remote_control_clients),
         )
         .route(
@@ -203,6 +228,10 @@ pub fn router() -> Router<SharedState> {
         )
         .route(
             "/backend-api/wham/remote/control/clients/{client_id}",
+            axum::routing::delete(delete_remote_control_client),
+        )
+        .route(
+            "/backend-api/codex/remote/control/clients/{client_id}",
             axum::routing::delete(delete_remote_control_client),
         )
         .route(
@@ -358,6 +387,13 @@ async fn wham_apps() -> Json<Value> {
     }))
 }
 
+async fn connectors_directory_list() -> Json<Value> {
+    Json(json!({
+        "apps": [],
+        "nextToken": Value::Null,
+    }))
+}
+
 async fn analytics_events() -> StatusCode {
     StatusCode::NO_CONTENT
 }
@@ -400,8 +436,11 @@ async fn remote_control_clients(State(state): State<SharedState>) -> Json<Value>
                     .unwrap_or_default(),
             )
     });
+    let aliases = items.clone();
     Json(json!({
         "items": items,
+        "clients": aliases.clone(),
+        "data": aliases,
         "cursor": Value::Null,
     }))
 }
@@ -650,6 +689,41 @@ fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> St
     )
 }
 
+fn local_remote_control_server_token(headers: &HeaderMap, server_id: &str) -> String {
+    let now = unix_now_u64();
+    let account_id = header_str(headers, "chatgpt-account-id")
+        .unwrap_or_else(|| "acct_codex_remote_local".into());
+    let account_user_id = remote_control_account_user_id(headers);
+    let payload = json!({
+        "iss": "codex-remote-local",
+        "aud": "remote_control_server_websocket",
+        "iat": now,
+        "nbf": now,
+        "exp": now + 24 * 60 * 60,
+        "sub": server_id,
+        "scope": "remote_control_server_websocket",
+        "scp": ["remote_control_server_websocket"],
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "account_id": account_id,
+            "chatgpt_account_user_id": account_user_id,
+            "account_user_id": account_user_id,
+            "user_id": jwt_bearer_claim(headers, "user_id")
+                .or_else(|| jwt_bearer_claim(headers, "chatgpt_user_id"))
+                .unwrap_or_else(|| "user_codex_remote_local".into()),
+        },
+    });
+    format!(
+        "{}.{}.{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+            serde_json::to_vec(&json!({ "alg": "none", "typ": "JWT" })).unwrap_or_default()
+        ),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&payload).unwrap_or_default()),
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig")
+    )
+}
+
 fn remote_control_account_user_id(headers: &HeaderMap) -> String {
     jwt_bearer_claim(headers, "chatgpt_account_user_id")
         .or_else(|| jwt_bearer_claim(headers, "account_user_id"))
@@ -681,7 +755,17 @@ fn authorization_bearer(headers: &HeaderMap) -> Option<String> {
 fn request_origin(headers: &HeaderMap) -> String {
     header_str(headers, "origin")
         .or_else(|| header_str(headers, "referer").and_then(|value| origin_from_url(&value)))
-        .unwrap_or_else(|| "http://127.0.0.1:3847".into())
+        .unwrap_or_else(default_request_origin)
+}
+
+#[cfg(target_os = "windows")]
+fn default_request_origin() -> String {
+    "http://127.0.0.1:3847".into()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn default_request_origin() -> String {
+    "http://127.0.0.1:3847".into()
 }
 
 fn origin_from_url(value: &str) -> Option<String> {
@@ -726,63 +810,116 @@ fn unix_now_u64() -> u64 {
 }
 
 fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Value {
-    let installation_id = snapshot
-        .installation_id
-        .clone()
-        .unwrap_or_else(|| "local-installation".to_string());
-    let env_id = snapshot
-        .environment_id
-        .clone()
-        .unwrap_or_else(|| stable_id("env", &installation_id));
     let host_name = snapshot
         .server_name
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(local_host_name);
+        .unwrap_or_else(|| format!("飞书 Bridge ({})", local_host_name()));
 
     json!({
-        "env_id": env_id,
+        "id": FEISHU_BRIDGE_ENV_ID,
+        "hostId": FEISHU_BRIDGE_ENV_ID,
+        "host_id": FEISHU_BRIDGE_ENV_ID,
+        "envId": FEISHU_BRIDGE_ENV_ID,
+        "env_id": FEISHU_BRIDGE_ENV_ID,
+        "displayName": host_name,
         "display_name": host_name,
+        "hostName": host_name,
         "host_name": host_name,
         "name": host_name,
+        "title": host_name,
         "kind": "remote-control",
+        "type": "remote-control",
+        "clientType": "CODEX_DESKTOP_APP",
         "client_type": "CODEX_DESKTOP_APP",
         "online": snapshot.connected,
         "busy": snapshot.current_turn_id.is_some(),
         "os": local_platform_os(),
         "arch": local_arch(),
+        "appServerVersion": env!("CARGO_PKG_VERSION"),
         "app_server_version": env!("CARGO_PKG_VERSION"),
-        "installation_id": installation_id,
+        "installationId": FEISHU_BRIDGE_INSTALLATION_ID,
+        "installation_id": FEISHU_BRIDGE_INSTALLATION_ID,
+        "autoConnect": true,
+        "auto_connect": true,
+        "lastSeenAt": Value::Null,
         "last_seen_at": Value::Null,
     })
 }
 
 fn remote_control_client_item(client: &AuthorizedRemoteControlClient) -> Value {
-    json!({
-        "client_id": client.client_id,
-        "account_user_id": client.account_user_id,
-        "display_name": client.display_name,
-        "device_model": client.display_name,
-        "device_type": "desktop",
-        "platform": local_platform_os(),
-        "client_type": "CODEX_DESKTOP_APP",
-        "enrollment_status": "enrolled",
-        "last_seen_at": format_rfc3339_utc(client.last_seen_at_ms / 1000),
+    remote_control_client_json(RemoteControlClientJson {
+        client_id: client.client_id.clone(),
+        account_user_id: client.account_user_id.clone(),
+        display_name: client.display_name.clone(),
+        device_model: client.display_name.clone(),
+        device_type: "desktop",
+        platform: local_platform_os(),
+        client_type: "CODEX_DESKTOP_APP",
+        enrollment_status: "enrolled",
+        online: true,
+        last_seen_at: format_rfc3339_utc(client.last_seen_at_ms / 1000),
     })
 }
 
 fn feishu_bridge_client_item(connected: bool) -> Value {
+    remote_control_client_json(RemoteControlClientJson {
+        client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
+        account_user_id: "user_codex_remote_local__acct_codex_remote_local".to_string(),
+        display_name: "飞书 Bridge".to_string(),
+        device_model: "Codex Remote Feishu".to_string(),
+        device_type: "desktop",
+        platform: "feishu".to_string(),
+        client_type: "CODEX_DESKTOP_APP",
+        enrollment_status: "enrolled",
+        online: connected,
+        last_seen_at: format_rfc3339_utc(unix_now_u64()),
+    })
+}
+
+struct RemoteControlClientJson {
+    client_id: String,
+    account_user_id: String,
+    display_name: String,
+    device_model: String,
+    device_type: &'static str,
+    platform: String,
+    client_type: &'static str,
+    enrollment_status: &'static str,
+    online: bool,
+    last_seen_at: String,
+}
+
+fn remote_control_client_json(client: RemoteControlClientJson) -> Value {
+    let status = if client.online { "online" } else { "offline" };
     json!({
-        "client_id": FEISHU_BRIDGE_CLIENT_ID,
-        "account_user_id": "user_codex_remote_local__acct_codex_remote_local",
-        "display_name": "飞书 Bridge",
-        "device_model": "Codex Remote Feishu",
-        "device_type": "desktop",
-        "platform": "feishu",
-        "client_type": "CODEX_DESKTOP_APP",
-        "enrollment_status": "enrolled",
-        "online": connected,
-        "last_seen_at": format_rfc3339_utc(unix_now_u64()),
+        "id": client.client_id,
+        "client_id": client.client_id,
+        "clientId": client.client_id,
+        "account_user_id": client.account_user_id,
+        "accountUserId": client.account_user_id,
+        "display_name": client.display_name,
+        "displayName": client.display_name,
+        "name": client.display_name,
+        "title": client.display_name,
+        "device_model": client.device_model,
+        "deviceModel": client.device_model,
+        "device_name": client.display_name,
+        "deviceName": client.display_name,
+        "device_type": client.device_type,
+        "deviceType": client.device_type,
+        "platform": client.platform,
+        "os": client.platform,
+        "client_type": client.client_type,
+        "clientType": client.client_type,
+        "enrollment_status": client.enrollment_status,
+        "enrollmentStatus": client.enrollment_status,
+        "status": status,
+        "online": client.online,
+        "last_seen_at": client.last_seen_at,
+        "lastSeenAt": client.last_seen_at,
+        "last_used_at": client.last_seen_at,
+        "lastUsedAt": client.last_seen_at,
     })
 }
 
@@ -847,6 +984,8 @@ async fn enroll(
         .unwrap_or_else(|| "unknown-installation".to_string());
     let server_id = stable_id("srv", &installation_id);
     let environment_id = stable_id("env", &installation_id);
+    let expires_at = iso8601_after(Duration::from_secs(24 * 60 * 60));
+    let remote_control_token = local_remote_control_server_token(&headers, &server_id);
     {
         let mut remote = state.remote_control.inner.lock().await;
         remote.server_id = Some(server_id.clone());
@@ -876,6 +1015,8 @@ async fn enroll(
         Json(EnrollResponse {
             server_id,
             environment_id,
+            remote_control_token,
+            expires_at,
         }),
     )
 }
@@ -1843,6 +1984,9 @@ pub struct ThreadStartOptions {
     pub model_provider: Option<String>,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    pub permissions: Option<String>,
+    pub approval_policy: Option<String>,
+    pub approvals_reviewer: Option<String>,
 }
 
 impl ThreadStartOptions {
@@ -1866,6 +2010,15 @@ impl ThreadStartOptions {
                 }),
             );
         }
+        if let Some(permissions) = non_empty(self.permissions.as_deref()) {
+            params.insert("permissions".to_string(), json!(permissions));
+        }
+        if let Some(approval_policy) = non_empty(self.approval_policy.as_deref()) {
+            params.insert("approvalPolicy".to_string(), json!(approval_policy));
+        }
+        if let Some(approvals_reviewer) = non_empty(self.approvals_reviewer.as_deref()) {
+            params.insert("approvalsReviewer".to_string(), json!(approvals_reviewer));
+        }
         Value::Object(params)
     }
 }
@@ -1882,6 +2035,35 @@ pub async fn start_thread(state: &SharedState, options: ThreadStartOptions) -> R
         .and_then(|v| v.as_str())
         .map(str::to_string)
         .ok_or_else(|| anyhow!("thread/start response missing thread.id: {response}"))
+}
+
+pub async fn config_read(
+    state: &SharedState,
+    cwd: Option<&str>,
+    include_layers: bool,
+) -> Result<Value> {
+    let mut params = json!({});
+    if let Some(cwd) = non_empty(cwd) {
+        params["cwd"] = json!(cwd);
+    }
+    if include_layers {
+        params["includeLayers"] = json!(true);
+    }
+    request(state, "config/read", params).await
+}
+
+pub async fn model_list(
+    state: &SharedState,
+    include_hidden: bool,
+    limit: Option<u32>,
+) -> Result<Value> {
+    let mut params = json!({
+        "includeHidden": include_hidden,
+    });
+    if let Some(limit) = limit {
+        params["limit"] = json!(limit);
+    }
+    request(state, "model/list", params).await
 }
 
 pub async fn thread_list(

@@ -35,7 +35,7 @@ Important fields:
 If `connected=false`, check the Codex App side:
 
 1. Codex App config contains `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`.
-2. Codex App auth is `chatgptAuthTokens`, not API-key-only auth.
+2. Codex App auth is local `chatgpt`, not API-key-only auth.
 3. The `codex-remote daemon` process is running before remote control is enabled.
 4. Remote control is enabled in Codex App.
 
@@ -49,11 +49,11 @@ remote control requires ChatGPT authentication; API key auth is not supported
 
 then Codex App never reached the remote-control websocket. The local backend cannot fix this after the fact.
 
-Use a local ChatGPT-shaped external auth record:
+Use a local ChatGPT-shaped auth record:
 
 ```json
 {
-  "auth_mode": "chatgptAuthTokens",
+  "auth_mode": "chatgpt",
   "OPENAI_API_KEY": null,
   "tokens": {
     "id_token": "<local ChatGPT-shaped JWT>",

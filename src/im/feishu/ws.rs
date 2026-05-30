@@ -516,6 +516,7 @@ async fn handle_card_action_event(
                     cwd_custom: form_string(&payload.action.form_value, "cwd_custom"),
                     model: form_string(&payload.action.form_value, "model"),
                     effort: form_string(&payload.action.form_value, "effort"),
+                    permission: form_string(&payload.action.form_value, "permission"),
                 }),
             )
         }
