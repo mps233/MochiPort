@@ -1,3 +1,5 @@
+#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
+
 mod app_state;
 mod bridge;
 mod chain_log;
@@ -161,6 +163,40 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             format!("path={}", chain_log_path.display()),
         )
         .await;
+    tokio::spawn(run_daemon_startup_tasks(state.clone()));
+    let app = web::router(state).layer(TraceLayer::new_for_http());
+    let addr: SocketAddr = bind
+        .parse()
+        .with_context(|| format!("invalid bind address `{bind}`"))?;
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    println!("codex-remote web: http://{addr}");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        })
+        .await?;
+    match vscode_extension_patch::restore_remote_control() {
+        Ok(report) => {
+            tracing::info!(
+                target: "codex_remote::vscode_extension_patch",
+                action = %report.action,
+                extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
+                message = %report.message,
+                "VS Code Codex extension restore finished"
+            );
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "codex_remote::vscode_extension_patch",
+                error = %err,
+                "VS Code Codex extension restore failed"
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn run_daemon_startup_tasks(state: crate::app_state::SharedState) {
     match vscode_extension_patch::enable_remote_control() {
         Ok(report) => {
             state
@@ -197,36 +233,6 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             .push_event("warn", "bridge_disabled", "bridge disabled by config")
             .await;
     }
-    let app = web::router(state).layer(TraceLayer::new_for_http());
-    let addr: SocketAddr = bind
-        .parse()
-        .with_context(|| format!("invalid bind address `{bind}`"))?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("codex-remote web: http://{addr}");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = shutdown_rx.await;
-        })
-        .await?;
-    match vscode_extension_patch::restore_remote_control() {
-        Ok(report) => {
-            tracing::info!(
-                target: "codex_remote::vscode_extension_patch",
-                action = %report.action,
-                extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
-                message = %report.message,
-                "VS Code Codex extension restore finished"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                target: "codex_remote::vscode_extension_patch",
-                error = %err,
-                "VS Code Codex extension restore failed"
-            );
-        }
-    }
-    Ok(())
 }
 
 fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {

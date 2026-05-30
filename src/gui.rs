@@ -16,6 +16,7 @@ use image::imageops::FilterType;
 use qrcode::{Color, QrCode};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
 #[cfg(target_os = "windows")]
@@ -29,6 +30,37 @@ const DASHBOARD_RESULT_POLL_MS: i32 = 100;
 const GUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
 const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+const ID_MENU_CLOSE_WINDOW: i32 = 10_001;
+const ID_MENU_MINIMIZE: i32 = 10_002;
+
+type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
+
+#[derive(Clone)]
+struct GuiTimers {
+    stores: Rc<RefCell<Vec<FrameTimerStore>>>,
+}
+
+impl GuiTimers {
+    fn new() -> Self {
+        Self {
+            stores: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
+
+    fn track(&self, store: &FrameTimerStore) {
+        self.stores.borrow_mut().push(store.clone());
+    }
+
+    fn stop_all(&self) {
+        let stores = self.stores.borrow().clone();
+        for store in stores {
+            if let Some(timer) = store.borrow().as_ref() {
+                timer.stop();
+            }
+        }
+        self.stores.borrow_mut().clear();
+    }
+}
 
 pub fn run() {
     if let Err(err) = wxdragon::main(|_| build_ui()) {
@@ -44,6 +76,7 @@ fn build_ui() {
         .with_size(Size::new(1100, 760))
         .build();
     frame.set_icon(&app_icon_bitmap(48));
+    install_system_menu(&frame);
     frame.set_background_color(Colour::rgb(246, 247, 250));
     let status_bar = StatusBar::builder(&frame)
         .with_fields_count(3)
@@ -89,18 +122,19 @@ fn build_ui() {
         18,
     );
 
+    let status_box = StaticBox::builder(&root).with_label("状态概览").build();
     let status_section =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &root, "状态概览").build();
+        StaticBoxSizerBuilder::new_with_box(&status_box, Orientation::Vertical).build();
     let status_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let codex_status = status_panel(&root, "Codex App 控制通道", StatusIconKind::Codex);
-    let vscode_status = status_panel(&root, "VS Code 插件", StatusIconKind::VsCodeCodex);
+    let codex_status = status_panel(&status_box, "Codex App 控制通道", StatusIconKind::Codex);
+    let vscode_status = status_panel(&status_box, "VS Code 插件", StatusIconKind::VsCodeCodex);
     if CODEX_APP_GUI_UNSUPPORTED {
         set_disabled_status_panel(&codex_status, "暂不可用", "当前平台暂不支持 App GUI");
     }
-    let service_status = status_panel(&root, "本地服务", StatusIconKind::Service);
-    let feishu_status = status_panel(&root, "飞书", StatusIconKind::Feishu);
-    let entry_connector = topology_connector(&root);
-    let bridge_connector = topology_arrow(&root);
+    let service_status = status_panel(&status_box, "本地服务", StatusIconKind::Service);
+    let feishu_status = status_panel(&status_box, "飞书", StatusIconKind::Feishu);
+    let entry_connector = topology_connector(&status_box);
+    let bridge_connector = topology_arrow(&status_box);
     let entry_column = BoxSizer::builder(Orientation::Vertical).build();
     entry_column.add(
         &codex_status.panel,
@@ -149,54 +183,67 @@ fn build_ui() {
 
     let notebook = Notebook::builder(&root).build();
 
-    let codex_page = Panel::builder(&notebook)
-        .with_style(PanelStyle::TabTraversal)
+    let codex_page = ScrolledWindow::builder(&notebook)
+        .with_style(ScrolledWindowStyle::VScroll)
         .build();
     codex_page.set_background_color(Colour::rgb(250, 251, 253));
     let codex_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
+    let codex_status_static_box = StaticBox::builder(&codex_page)
+        .with_label("Codex App 配置")
+        .build();
     let codex_status_box =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &codex_page, "Codex App 配置")
+        StaticBoxSizerBuilder::new_with_box(&codex_status_static_box, Orientation::Vertical)
             .build();
-    let codex_config_state = StaticText::builder(&codex_page)
+    let codex_config_state = StaticText::builder(&codex_status_static_box)
         .with_label("正在读取 ~/.codex 配置状态")
         .build();
     codex_config_state.set_foreground_color(Colour::rgb(75, 84, 98));
     codex_config_state.wrap(980);
     codex_status_box.add(
         &codex_config_state,
-        1,
+        0,
         SizerFlag::Expand | SizerFlag::All,
-        14,
+        12,
     );
     codex_sizer.add_sizer(
         &codex_status_box,
-        1,
+        0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        14,
+        10,
     );
 
-    let config_box = StaticBoxSizerBuilder::new_with_label(
-        Orientation::Vertical,
-        &codex_page,
-        "写入 Codex 接入配置",
-    )
-    .build();
+    let config_static_box = StaticBox::builder(&codex_page)
+        .with_label("写入 Codex 接入配置")
+        .build();
+    let config_box =
+        StaticBoxSizerBuilder::new_with_box(&config_static_box, Orientation::Vertical).build();
     let config_header = BoxSizer::builder(Orientation::Horizontal).build();
-    let config_hint = StaticText::builder(&codex_page)
-        .with_label("模型服务")
+    let config_hint = StaticText::builder(&config_static_box)
+        .with_label("填写第三方模型服务，然后写入 Codex App 本地配置。")
         .build();
     config_hint.set_foreground_color(Colour::rgb(34, 39, 47));
+    config_hint.wrap(760);
     config_header.add(&config_hint, 1, SizerFlag::AlignCenterVertical, 0);
-    let configure_button = Button::builder(&codex_page).with_label("写入配置").build();
+    let uninstall_button = Button::builder(&config_static_box)
+        .with_label("卸载配置")
+        .build();
+    uninstall_button.set_tooltip("移除本工具写入的 Codex App 本地接入配置");
+    config_header.add(
+        &uninstall_button,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        8,
+    );
+    let configure_button = Button::builder(&config_static_box)
+        .with_label("写入配置")
+        .build();
     configure_button.set_tooltip("写入 Codex Remote 使用的本地 provider 配置");
-    config_header.add(&configure_button, 0, SizerFlag::Right, 0);
-    config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 14);
+    config_header.add(&configure_button, 0, SizerFlag::AlignCenterVertical, 0);
+    config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 12);
 
-    let provider_help = StaticText::builder(&codex_page)
-        .with_label(
-            "写入本地 provider 配置。Codex App 和 VS Code 插件都可以接入本地 remote-control。",
-        )
+    let provider_help = StaticText::builder(&config_static_box)
+        .with_label("Codex App 会使用这里的 Base URL 和 API Key。Provider 可以选择已有配置，也可以输入新名字新建。")
         .build();
     provider_help.set_foreground_color(Colour::rgb(91, 100, 114));
     provider_help.wrap(980);
@@ -204,24 +251,28 @@ fn build_ui() {
         &provider_help,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        12,
+        8,
     );
 
     let form = FlexGridSizer::builder(0, 2)
-        .with_gap(Size::new(14, 14))
+        .with_gap(Size::new(12, 10))
         .build();
     form.add_growable_col(1, 1);
-    let provider_name =
-        provider_combo_row(&codex_page, &form, "Provider 名称", DEFAULT_PROVIDER_NAME);
-    let provider_base_url = text_field_row(&codex_page, &form, "Base URL", "");
-    let provider_key = text_field_row(&codex_page, &form, "API Key", "");
+    let provider_name = provider_combo_row(
+        &config_static_box,
+        &form,
+        "Provider 名称",
+        DEFAULT_PROVIDER_NAME,
+    );
+    let provider_base_url = text_field_row(&config_static_box, &form, "Base URL", "");
+    let provider_key = text_field_row(&config_static_box, &form, "API Key", "");
     config_box.add_sizer(
         &form,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        12,
+        8,
     );
-    let provider_catalog = StaticText::builder(&codex_page)
+    let provider_catalog = StaticText::builder(&config_static_box)
         .with_label("正在匹配 ~/.codex/config.toml 里的 provider")
         .build();
     provider_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
@@ -230,16 +281,27 @@ fn build_ui() {
         &provider_catalog,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        12,
+        8,
     );
     codex_sizer.add_sizer(
         &config_box,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        14,
+        10,
     );
     codex_sizer.add_stretch_spacer(1);
     codex_page.set_sizer(codex_sizer, true);
+    codex_page.set_scroll_rate(10, 10);
+    let codex_best_size = codex_page.get_best_size();
+    codex_page.set_scrollbars(ScrollBarConfig {
+        pixels_per_unit_x: 10,
+        pixels_per_unit_y: 10,
+        no_units_x: (codex_best_size.width + 20).max(1) / 10,
+        no_units_y: (codex_best_size.height + 80).max(1) / 10,
+        x_pos: 0,
+        y_pos: 0,
+        no_refresh: true,
+    });
 
     let feishu_page = Panel::builder(&notebook)
         .with_style(PanelStyle::TabTraversal)
@@ -247,10 +309,12 @@ fn build_ui() {
     feishu_page.set_background_color(Colour::rgb(250, 251, 253));
     let feishu_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
+    let feishu_static_box = StaticBox::builder(&feishu_page)
+        .with_label("飞书机器人")
+        .build();
     let feishu_box =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &feishu_page, "飞书机器人")
-            .build();
-    let feishu_state = StaticText::builder(&feishu_page)
+        StaticBoxSizerBuilder::new_with_box(&feishu_static_box, Orientation::Vertical).build();
+    let feishu_state = StaticText::builder(&feishu_static_box)
         .with_label("检测中")
         .build();
     feishu_state.set_foreground_color(Colour::rgb(73, 83, 96));
@@ -261,7 +325,7 @@ fn build_ui() {
         12,
     );
 
-    let feishu_detail = StaticText::builder(&feishu_page)
+    let feishu_detail = StaticText::builder(&feishu_static_box)
         .with_label("正在读取飞书接入状态")
         .build();
     feishu_detail.set_foreground_color(Colour::rgb(82, 91, 105));
@@ -273,7 +337,7 @@ fn build_ui() {
         12,
     );
 
-    let divider = StaticLine::builder(&feishu_page).build();
+    let divider = StaticLine::builder(&feishu_static_box).build();
     feishu_box.add(
         &divider,
         0,
@@ -281,7 +345,9 @@ fn build_ui() {
         14,
     );
 
-    let feishu_meta = StaticText::builder(&feishu_page).with_label("").build();
+    let feishu_meta = StaticText::builder(&feishu_static_box)
+        .with_label("")
+        .build();
     feishu_meta.set_foreground_color(Colour::rgb(103, 111, 124));
     feishu_meta.wrap(760);
     feishu_box.add(
@@ -293,9 +359,11 @@ fn build_ui() {
 
     let feishu_buttons = BoxSizer::builder(Orientation::Horizontal).build();
     feishu_buttons.add_stretch_spacer(1);
-    let stop_bridge_button = Button::builder(&feishu_page).with_label("断开接入").build();
+    let stop_bridge_button = Button::builder(&feishu_static_box)
+        .with_label("断开接入")
+        .build();
     stop_bridge_button.set_tooltip("停止飞书桥接，不删除已保存的机器人配置");
-    let change_bot_button = Button::builder(&feishu_page)
+    let change_bot_button = Button::builder(&feishu_static_box)
         .with_label("更换机器人")
         .build();
     change_bot_button.set_tooltip("重新进入飞书扫码接入流程");
@@ -316,18 +384,22 @@ fn build_ui() {
         .build();
     system_page.set_background_color(Colour::rgb(250, 251, 253));
     let system_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let system_static_box = StaticBox::builder(&system_page)
+        .with_label("本地服务")
+        .build();
     let system_box =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &system_page, "本地服务")
-            .build();
-    let service_text = StaticText::builder(&system_page)
+        StaticBoxSizerBuilder::new_with_box(&system_static_box, Orientation::Vertical).build();
+    let service_text = StaticText::builder(&system_static_box)
         .with_label("Codex Remote 会在 GUI 打开时接管并重启本地 backend，避免旧版本服务残留；GUI 退出时会关闭本地 backend，并清除本次写入的 Codex App 环境变量。不会安装开机启动项，也不会修改系统常驻服务。")
         .build();
     service_text.set_foreground_color(Colour::rgb(82, 91, 105));
     service_text.wrap(760);
     system_box.add(&service_text, 0, SizerFlag::Expand | SizerFlag::All, 12);
-    let refresh_button = Button::builder(&system_page).with_label("检测状态").build();
+    let refresh_button = Button::builder(&system_static_box)
+        .with_label("检测状态")
+        .build();
     refresh_button.set_tooltip("立即刷新本地服务、飞书和 Codex App 连接状态");
-    let start_daemon_button = Button::builder(&system_page)
+    let start_daemon_button = Button::builder(&system_static_box)
         .with_label("启动本地服务")
         .build();
     start_daemon_button.set_tooltip("本次会话启动 codex-remote daemon，不安装开机启动项");
@@ -373,6 +445,7 @@ fn build_ui() {
         codex_config_state,
         change_bot_button,
         stop_bridge_button,
+        uninstall_button,
         configure_button,
         refresh_button,
         start_daemon_button,
@@ -384,7 +457,9 @@ fn build_ui() {
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
     let dashboard_refresh = DashboardRefresh::new();
+    let gui_timers = GuiTimers::new();
     show_dashboard_starting(&handles);
+    show_local_codex_app_config_preview(&handles, &api);
 
     {
         let api = api.clone();
@@ -402,8 +477,16 @@ fn build_ui() {
         let frame = frame;
         let daemon_child = daemon_child.clone();
         let dashboard_refresh = dashboard_refresh.clone();
+        let gui_timers = gui_timers.clone();
         start_daemon_button.on_click(move |_| {
-            start_daemon_for_gui_async(&api, &handles, &frame, &daemon_child, &dashboard_refresh);
+            start_daemon_for_gui_async(
+                &api,
+                &handles,
+                &frame,
+                &daemon_child,
+                &dashboard_refresh,
+                &gui_timers,
+            );
         });
     }
 
@@ -426,6 +509,28 @@ fn build_ui() {
                     show_info(
                         &frame,
                         "配置已写入。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。",
+                    );
+                    schedule_dashboard_refresh(&api, &dashboard_refresh);
+                }
+                Err(err) => show_error(&frame, &err),
+            }
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
+        uninstall_button.on_click(move |_| {
+            if !confirm_uninstall_codex_app_config(&frame) {
+                return;
+            }
+
+            match api.uninstall_codex_app() {
+                Ok(_) => {
+                    show_info(
+                        &frame,
+                        "Codex App 本地接入配置已卸载。请重启 Codex App 以恢复官方连接。",
                     );
                     schedule_dashboard_refresh(&api, &dashboard_refresh);
                 }
@@ -471,7 +576,7 @@ fn build_ui() {
         });
     }
 
-    let result_timer_store: Rc<RefCell<Option<Timer<Frame>>>> = Rc::new(RefCell::new(None));
+    let result_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let result_timer = Timer::new(&frame);
     {
         let handles = handles;
@@ -482,9 +587,9 @@ fn build_ui() {
     }
     result_timer.start(DASHBOARD_RESULT_POLL_MS, false);
     result_timer_store.borrow_mut().replace(result_timer);
-    std::mem::forget(result_timer_store);
+    gui_timers.track(&result_timer_store);
 
-    let timer_store: Rc<RefCell<Option<Timer<Frame>>>> = Rc::new(RefCell::new(None));
+    let timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let timer = Timer::new(&frame);
     {
         let api = api.clone();
@@ -495,14 +600,25 @@ fn build_ui() {
     }
     timer.start(DASHBOARD_REFRESH_INTERVAL_MS, false);
     timer_store.borrow_mut().replace(timer);
-    std::mem::forget(timer_store);
+    gui_timers.track(&timer_store);
 
-    start_daemon_for_gui_async(&api, &handles, &frame, &daemon_child, &dashboard_refresh);
+    start_daemon_for_gui_async(
+        &api,
+        &handles,
+        &frame,
+        &daemon_child,
+        &dashboard_refresh,
+        &gui_timers,
+    );
 
     {
         let api = api.clone();
         let daemon_child = daemon_child.clone();
-        frame.on_close(move |_| stop_daemon_on_exit(&api, &daemon_child));
+        let gui_timers = gui_timers.clone();
+        frame.on_close(move |_| {
+            gui_timers.stop_all();
+            stop_daemon_on_exit(&api, &daemon_child);
+        });
     }
 
     frame.centre();
@@ -514,6 +630,42 @@ fn default_base_url() -> String {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+}
+
+fn install_system_menu(frame: &Frame) {
+    let file_menu = Menu::builder()
+        .append_item(
+            ID_MENU_CLOSE_WINDOW,
+            "&Close Window\tCtrl+W",
+            "Close this window",
+        )
+        .append_item(
+            ID_MENU_MINIMIZE,
+            "Mi&nimize\tCtrl+M",
+            "Minimize this window",
+        )
+        .append_separator()
+        .append_item(ID_EXIT, "&Quit Codex Remote\tCtrl+Q", "Quit Codex Remote")
+        .build();
+    let help_menu = Menu::builder()
+        .append_item(ID_ABOUT, "&About Codex Remote", "About Codex Remote")
+        .build();
+    let menu_bar = MenuBar::builder()
+        .append(file_menu, "&File")
+        .append(help_menu, "&Help")
+        .build();
+    frame.set_menu_bar(menu_bar);
+
+    let frame = *frame;
+    frame.on_menu_selected(move |event| match event.get_id() {
+        ID_EXIT | ID_MENU_CLOSE_WINDOW => frame.close(true),
+        ID_MENU_MINIMIZE => frame.iconize(true),
+        ID_ABOUT => show_info(
+            &frame,
+            "Codex Remote\n本地 remote-control backend + 飞书桥接。",
+        ),
+        _ => event.skip(true),
+    });
 }
 
 fn restart_daemon_for_gui(api: &ApiClient) -> Result<Child, String> {
@@ -552,7 +704,6 @@ fn stop_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>) {
 
 struct StartupResult {
     child: Child,
-    repair_error: Option<String>,
 }
 
 fn start_daemon_for_gui_async(
@@ -561,6 +712,7 @@ fn start_daemon_for_gui_async(
     frame: &Frame,
     daemon_child: &Rc<RefCell<Option<Child>>>,
     dashboard_refresh: &DashboardRefresh,
+    gui_timers: &GuiTimers,
 ) {
     if dashboard_refresh
         .daemon_starting
@@ -580,20 +732,14 @@ fn start_daemon_for_gui_async(
         let api = api.clone();
         let result = result.clone();
         thread::spawn(move || {
-            let startup = restart_daemon_for_gui(&api).map(|child| {
-                let repair_error = api.repair_codex_app_gui_environment().err();
-                StartupResult {
-                    child,
-                    repair_error,
-                }
-            });
+            let startup = restart_daemon_for_gui(&api).map(|child| StartupResult { child });
             if let Ok(mut slot) = result.lock() {
                 slot.replace(startup);
             }
         });
     }
 
-    let startup_timer_store: Rc<RefCell<Option<Timer<Frame>>>> = Rc::new(RefCell::new(None));
+    let startup_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let startup_timer = Timer::new(frame);
     {
         let api = api.clone();
@@ -621,14 +767,10 @@ fn start_daemon_for_gui_async(
             match startup {
                 Ok(startup) => {
                     replace_managed_daemon(&daemon_child, startup.child);
-                    if let Some(err) = startup.repair_error {
-                        handles
-                            .status_bar
-                            .set_status_text(&format!("Codex App 环境修复失败：{err}"), 2);
-                    }
+                    repair_codex_app_gui_environment_async(&api, &dashboard_refresh);
                     handles
                         .status_bar
-                        .set_status_text("本地服务已启动，正在刷新状态", 0);
+                        .set_status_text("本地服务已启动，正在读取配置", 0);
                 }
                 Err(err) => {
                     handles
@@ -643,15 +785,25 @@ fn start_daemon_for_gui_async(
     }
     startup_timer.start(100, false);
     startup_timer_store.borrow_mut().replace(startup_timer);
-    std::mem::forget(startup_timer_store);
+    gui_timers.track(&startup_timer_store);
+}
+
+fn repair_codex_app_gui_environment_async(api: &ApiClient, dashboard_refresh: &DashboardRefresh) {
+    let api = api.clone();
+    let dashboard_refresh = dashboard_refresh.clone();
+    thread::spawn(move || {
+        let _ = api.repair_codex_app_gui_environment();
+        schedule_dashboard_refresh(&api, &dashboard_refresh);
+    });
 }
 
 fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>>) {
-    clear_codex_app_gui_environment(&api.url("/backend-api"));
+    let backend_url = api.url("/backend-api");
     let child = daemon_child.borrow_mut().take();
 
     let api = api.clone();
     thread::spawn(move || {
+        clear_codex_app_gui_environment(&backend_url);
         let _ = api.shutdown();
         wait_for_daemon_offline(&api, 3);
         if let Some(mut child) = child {
@@ -861,25 +1013,39 @@ impl ApiClient {
             }
         };
 
+        let config = self.get_quick_optional_async::<AppConfig>("/api/config");
+        let backend = self.get_quick_optional_async::<RemoteControlBackendStatus>(
+            "/api/remote-control/backend-status",
+        );
+        let remote =
+            self.get_quick_optional_async::<RemoteControlStatus>("/api/remote-control/status");
+        let codex_app = self.get_quick_optional_async::<CodexAppStatus>("/api/codex-app/status");
+
         DashboardSnapshot {
             service_online: true,
             error: None,
-            config: self.get_quick::<AppConfig>("/api/config").ok(),
-            backend: self
-                .get_quick::<RemoteControlBackendStatus>("/api/remote-control/backend-status")
-                .ok(),
-            remote: self
-                .get_quick::<RemoteControlStatus>("/api/remote-control/status")
-                .ok(),
-            codex_app: self
-                .get_quick::<CodexAppStatus>("/api/codex-app/status")
-                .ok(),
+            config: join_optional(config),
+            backend: join_optional(backend),
+            remote: join_optional(remote),
+            codex_app: join_optional(codex_app),
             status: Some(status),
         }
     }
 
+    fn get_quick_optional_async<T>(&self, path: &'static str) -> thread::JoinHandle<Option<T>>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        let api = self.clone();
+        thread::spawn(move || api.get_quick::<T>(path).ok())
+    }
+
     fn configure_codex_app(&self, request: &ConfigureRequest) -> Result<serde_json::Value, String> {
         self.post_json("/api/codex-app/configure", request)
+    }
+
+    fn uninstall_codex_app(&self) -> Result<serde_json::Value, String> {
+        self.post_empty("/api/codex-app/uninstall")
     }
 
     fn repair_codex_app_gui_environment(&self) -> Result<serde_json::Value, String> {
@@ -904,6 +1070,10 @@ impl ApiClient {
             &serde_json::json!({ "deviceCode": device_code }),
         )
     }
+}
+
+fn join_optional<T>(handle: thread::JoinHandle<Option<T>>) -> Option<T> {
+    handle.join().ok().flatten()
 }
 
 #[derive(Clone, Copy)]
@@ -938,6 +1108,7 @@ struct UiHandles {
     codex_config_state: StaticText,
     change_bot_button: Button,
     stop_bridge_button: Button,
+    uninstall_button: Button,
     configure_button: Button,
     refresh_button: Button,
     start_daemon_button: Button,
@@ -1097,7 +1268,7 @@ struct FeishuOnboardPoll {
     error: Option<serde_json::Value>,
 }
 
-fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> StatusPanel {
+fn status_panel<W: WxWidget>(parent: &W, title: &str, icon_kind: StatusIconKind) -> StatusPanel {
     let panel = Panel::builder(parent)
         .with_style(PanelStyle::BorderStatic)
         .build();
@@ -1154,7 +1325,7 @@ fn status_panel(parent: &Panel, title: &str, icon_kind: StatusIconKind) -> Statu
     }
 }
 
-fn topology_connector(parent: &Panel) -> StaticBitmap {
+fn topology_connector<W: WxWidget>(parent: &W) -> StaticBitmap {
     let bitmap = topology_connector_bitmap(72, 124);
     let connector = StaticBitmap::builder(parent)
         .with_bitmap(Some(bitmap))
@@ -1165,7 +1336,7 @@ fn topology_connector(parent: &Panel) -> StaticBitmap {
     connector
 }
 
-fn topology_arrow(parent: &Panel) -> StaticBitmap {
+fn topology_arrow<W: WxWidget>(parent: &W) -> StaticBitmap {
     let bitmap = topology_arrow_bitmap(48, 48);
     let arrow = StaticBitmap::builder(parent)
         .with_bitmap(Some(bitmap))
@@ -1435,7 +1606,12 @@ fn draw_disabled_service_icon(canvas: &mut IconCanvas) {
     canvas.fill_rect(12, 22, 3, 2, [247, 248, 250, 180]);
 }
 
-fn text_field_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &str) -> TextCtrl {
+fn text_field_row<W: WxWidget>(
+    parent: &W,
+    sizer: &FlexGridSizer,
+    label: &str,
+    value: &str,
+) -> TextCtrl {
     let label_widget = StaticText::builder(parent).with_label(label).build();
     label_widget.set_foreground_color(Colour::rgb(78, 86, 98));
     sizer.add(
@@ -1454,7 +1630,12 @@ fn text_field_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &st
     input
 }
 
-fn provider_combo_row(parent: &Panel, sizer: &FlexGridSizer, label: &str, value: &str) -> ComboBox {
+fn provider_combo_row<W: WxWidget>(
+    parent: &W,
+    sizer: &FlexGridSizer,
+    label: &str,
+    value: &str,
+) -> ComboBox {
     let label_widget = StaticText::builder(parent).with_label(label).build();
     label_widget.set_foreground_color(Colour::rgb(78, 86, 98));
     sizer.add(
@@ -1560,6 +1741,60 @@ fn show_dashboard_starting(handles: &UiHandles) {
     handles.status_bar.set_status_text("Codex App：等待服务", 2);
     set_actions_enabled(handles, false);
     handles.start_daemon_button.enable(false);
+}
+
+fn show_local_codex_app_config_preview(handles: &UiHandles, api: &ApiClient) {
+    if CODEX_APP_GUI_UNSUPPORTED {
+        return;
+    }
+    let status = crate::codex_app_config::inspect_codex_app_config(None, &api.url("/backend-api"));
+    let snapshot = DashboardSnapshot {
+        service_online: false,
+        codex_app: Some(local_codex_app_status(status)),
+        ..DashboardSnapshot::default()
+    };
+    handles
+        .codex_config_state
+        .set_label(&codex_app_detail(&snapshot));
+    handles.codex_config_state.wrap(980);
+    handles.codex_config_state.layout();
+    fill_provider_form_if_empty(handles, &snapshot);
+}
+
+fn local_codex_app_status(status: crate::codex_app_config::CodexAppConfigStatus) -> CodexAppStatus {
+    CodexAppStatus {
+        codex_home: status.codex_home.display().to_string(),
+        configured: status.configured,
+        config_ok: status.config_ok,
+        auth_ok: status.auth_ok,
+        gui_api_base: GuiApiBaseStatus {
+            configured: status.gui_api_base.configured,
+            login_issuer_configured: status.gui_api_base.login_issuer_configured,
+            value: status.gui_api_base.value,
+            login_issuer_value: status.gui_api_base.login_issuer_value,
+            error: status.gui_api_base.error,
+        },
+        remote_control_switch: Some(CodexAppRemoteControlSwitchStatus {
+            configured: status.remote_control_switch.configured,
+            error: status.remote_control_switch.error,
+        }),
+        provider: status.provider.map(local_codex_app_provider_status),
+        providers: status
+            .providers
+            .into_iter()
+            .map(local_codex_app_provider_status)
+            .collect(),
+    }
+}
+
+fn local_codex_app_provider_status(
+    provider: crate::codex_app_config::CodexAppProviderStatus,
+) -> CodexAppProviderStatus {
+    CodexAppProviderStatus {
+        name: provider.name,
+        base_url: provider.base_url,
+        key: provider.key,
+    }
 }
 
 fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_starting: bool) {
@@ -1984,6 +2219,7 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.configure_button.enable(enabled);
     handles.refresh_button.enable(true);
     handles.stop_bridge_button.enable(enabled);
+    handles.uninstall_button.enable(enabled);
 }
 
 #[derive(Clone, Copy)]
@@ -2278,6 +2514,18 @@ fn show_error(parent: &dyn WxWidget, message: &str) {
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
         .build()
         .show_modal();
+}
+
+fn confirm_uninstall_codex_app_config(parent: &dyn WxWidget) -> bool {
+    MessageDialog::builder(
+        parent,
+        "卸载会移除本工具写入的 chatgpt_base_url、本地认证信息和 Codex App 环境变量。确认继续？",
+        "卸载 Codex App 配置",
+    )
+    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+    .build()
+    .show_modal()
+        == ID_YES
 }
 
 fn short_id(value: &str) -> String {

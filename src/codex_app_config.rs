@@ -30,6 +30,8 @@ const CODEX_APP_SQLITE_DIR: &str = "sqlite";
 const CODEX_APP_PRIMARY_DB: &str = "codex.db";
 const CODEX_APP_DEV_DB: &str = "codex-dev.db";
 const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
+const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
+const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
 
 const LOCAL_AUTH_MODE: &str = "chatgpt";
 const LEGACY_LOCAL_AUTH_MODE: &str = "chatgptAuthTokens";
@@ -287,7 +289,7 @@ fn upsert_remote_control_feature(path: &Path) -> Result<()> {
     let connection = Connection::open(path)
         .with_context(|| format!("failed to open Codex App sqlite DB {}", path.display()))?;
     connection
-        .busy_timeout(Duration::from_secs(2))
+        .busy_timeout(SQLITE_WRITE_BUSY_TIMEOUT)
         .with_context(|| {
             format!(
                 "failed to configure sqlite busy timeout for {}",
@@ -364,7 +366,7 @@ fn read_remote_control_switch_db(path: &Path) -> Result<(Option<bool>, Option<i6
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .with_context(|| format!("failed to open Codex App sqlite DB {}", path.display()))?;
     connection
-        .busy_timeout(Duration::from_secs(2))
+        .busy_timeout(SQLITE_INSPECT_BUSY_TIMEOUT)
         .with_context(|| {
             format!(
                 "failed to configure sqlite busy timeout for {}",
