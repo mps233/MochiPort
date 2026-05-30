@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,25 @@ impl AppConfig {
     }
 
     pub fn remote_control_base_url(&self) -> String {
-        format!("http://{}/backend-api", self.bind)
+        let host_port = self
+            .bind
+            .parse::<SocketAddr>()
+            .ok()
+            .map(|addr| {
+                let host = if addr.ip().is_loopback() || addr.ip().is_unspecified() {
+                    "localhost".to_string()
+                } else {
+                    let host = addr.ip().to_string();
+                    if host.contains(':') {
+                        format!("[{host}]")
+                    } else {
+                        host
+                    }
+                };
+                format!("{host}:{}", addr.port())
+            })
+            .unwrap_or_else(|| self.bind.clone());
+        format!("http://{host_port}/backend-api")
     }
 
     pub fn load_or_default(path: &PathBuf) -> anyhow::Result<Self> {

@@ -203,6 +203,10 @@ pub fn router() -> Router<SharedState> {
         .route("/backend-api/onboarding/context", get(onboarding_context))
         .route("/backend-api/accounts/mfa_info", get(accounts_mfa_info))
         .route(
+            "/backend-api/wham/accounts/mfa_info",
+            get(accounts_mfa_info),
+        )
+        .route(
             "/backend-api/wham/remote/control/mfa_requirement",
             get(remote_control_mfa_requirement),
         )
@@ -413,11 +417,13 @@ async fn remote_control_clients(State(state): State<SharedState>) -> Json<Value>
         .values()
         .map(remote_control_client_item)
         .collect::<Vec<_>>();
+    let feishu_revoked = remote.revoked_clients.contains(FEISHU_BRIDGE_CLIENT_ID);
     drop(remote);
 
     let config = state.config.lock().await.clone();
     if config.bridge.enabled
         && !config.feishu.app_id.trim().is_empty()
+        && !feishu_revoked
         && !items.iter().any(|item| {
             item.get("client_id").and_then(Value::as_str) == Some(FEISHU_BRIDGE_CLIENT_ID)
         })
@@ -437,6 +443,13 @@ async fn remote_control_clients(State(state): State<SharedState>) -> Json<Value>
             )
     });
     let aliases = items.clone();
+    chain_log::write_line(format!(
+        "[remote_control] event=clients_list count={} bridge_enabled={} feishu_configured={} feishu_revoked={}",
+        items.len(),
+        config.bridge.enabled,
+        !config.feishu.app_id.trim().is_empty(),
+        feishu_revoked
+    ));
     Json(json!({
         "items": items,
         "clients": aliases.clone(),
@@ -449,13 +462,11 @@ async fn delete_remote_control_client(
     State(state): State<SharedState>,
     AxumPath(client_id): AxumPath<String>,
 ) -> StatusCode {
-    state
-        .remote_control
-        .inner
-        .lock()
-        .await
-        .authorized_clients
-        .remove(&client_id);
+    let mut remote = state.remote_control.inner.lock().await;
+    remote.authorized_clients.remove(&client_id);
+    if client_id == FEISHU_BRIDGE_CLIENT_ID {
+        remote.revoked_clients.insert(client_id);
+    }
     StatusCode::NO_CONTENT
 }
 
@@ -755,22 +766,23 @@ fn authorization_bearer(headers: &HeaderMap) -> Option<String> {
 fn request_origin(headers: &HeaderMap) -> String {
     header_str(headers, "origin")
         .or_else(|| header_str(headers, "referer").and_then(|value| origin_from_url(&value)))
+        .or_else(|| header_str(headers, "host").map(|host| format!("http://{host}")))
         .unwrap_or_else(default_request_origin)
 }
 
 #[cfg(target_os = "windows")]
 fn default_request_origin() -> String {
-    "http://127.0.0.1:3847".into()
+    "http://localhost:3847".into()
 }
 
 #[cfg(not(target_os = "windows"))]
 fn default_request_origin() -> String {
-    "http://127.0.0.1:3847".into()
+    "http://localhost:3847".into()
 }
 
 fn origin_from_url(value: &str) -> Option<String> {
     let url = reqwest::Url::parse(value).ok()?;
-    Some(format!("{}://{}", url.scheme(), url.host_str()?))
+    Some(url.origin().ascii_serialization())
 }
 
 fn iso8601_after(duration: Duration) -> String {
@@ -852,12 +864,13 @@ fn remote_control_client_item(client: &AuthorizedRemoteControlClient) -> Value {
         client_id: client.client_id.clone(),
         account_user_id: client.account_user_id.clone(),
         display_name: client.display_name.clone(),
-        device_model: client.display_name.clone(),
-        device_type: "desktop",
-        platform: local_platform_os(),
+        device_model: local_device_model(),
+        device_type: local_device_type(),
+        platform: local_client_platform(),
         client_type: "CODEX_DESKTOP_APP",
         enrollment_status: "enrolled",
         online: true,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
         last_seen_at: format_rfc3339_utc(client.last_seen_at_ms / 1000),
     })
 }
@@ -867,12 +880,13 @@ fn feishu_bridge_client_item(connected: bool) -> Value {
         client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
         account_user_id: "user_codex_remote_local__acct_codex_remote_local".to_string(),
         display_name: "飞书 Bridge".to_string(),
-        device_model: "Codex Remote Feishu".to_string(),
-        device_type: "desktop",
-        platform: "feishu".to_string(),
+        device_model: local_device_model(),
+        device_type: local_device_type(),
+        platform: local_client_platform(),
         client_type: "CODEX_DESKTOP_APP",
         enrollment_status: "enrolled",
         online: connected,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
         last_seen_at: format_rfc3339_utc(unix_now_u64()),
     })
 }
@@ -887,6 +901,7 @@ struct RemoteControlClientJson {
     client_type: &'static str,
     enrollment_status: &'static str,
     online: bool,
+    app_version: String,
     last_seen_at: String,
 }
 
@@ -898,29 +913,72 @@ fn remote_control_client_json(client: RemoteControlClientJson) -> Value {
         "clientId": client.client_id,
         "account_user_id": client.account_user_id,
         "accountUserId": client.account_user_id,
+        "enrollment_status": client.enrollment_status,
+        "enrollmentStatus": client.enrollment_status,
         "display_name": client.display_name,
         "displayName": client.display_name,
         "name": client.display_name,
         "title": client.display_name,
-        "device_model": client.device_model,
-        "deviceModel": client.device_model,
-        "device_name": client.display_name,
-        "deviceName": client.display_name,
         "device_type": client.device_type,
         "deviceType": client.device_type,
         "platform": client.platform,
         "os": client.platform,
+        "os_version": Value::Null,
+        "device_model": client.device_model,
+        "deviceModel": client.device_model,
+        "device_name": client.display_name,
+        "deviceName": client.display_name,
         "client_type": client.client_type,
         "clientType": client.client_type,
-        "enrollment_status": client.enrollment_status,
-        "enrollmentStatus": client.enrollment_status,
         "status": status,
         "online": client.online,
+        "app_version": client.app_version,
+        "appVersion": client.app_version,
         "last_seen_at": client.last_seen_at,
         "lastSeenAt": client.last_seen_at,
         "last_used_at": client.last_seen_at,
         "lastUsedAt": client.last_seen_at,
+        "last_seen_city": Value::Null,
+        "lastSeenCity": Value::Null,
+        "last_seen_region_code": Value::Null,
+        "lastSeenRegionCode": Value::Null,
+        "last_seen_country": Value::Null,
+        "lastSeenCountry": Value::Null,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn local_client_platform() -> String {
+    "macintosh".to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn local_client_platform() -> String {
+    "windows".to_string()
+}
+
+#[cfg(target_os = "linux")]
+fn local_client_platform() -> String {
+    "linux".to_string()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn local_client_platform() -> String {
+    local_platform_os()
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+fn local_device_type() -> &'static str {
+    "desktop"
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn local_device_type() -> &'static str {
+    "desktop"
+}
+
+fn local_device_model() -> String {
+    format!("{} {}", local_platform_os(), local_arch())
 }
 
 fn remote_control_device_identity_json(identity: &RemoteControlDeviceIdentity) -> Value {

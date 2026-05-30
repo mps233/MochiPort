@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use tokio::{
     sync::{Mutex, broadcast, oneshot},
@@ -59,6 +63,7 @@ pub struct RemoteControlInner {
     pub client_request_methods: std::collections::HashMap<String, String>,
     pub client_request_thread_ids: std::collections::HashMap<String, String>,
     pub authorized_clients: HashMap<String, AuthorizedRemoteControlClient>,
+    pub revoked_clients: HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +99,7 @@ impl RemoteControlState {
                 client_request_methods: std::collections::HashMap::new(),
                 client_request_thread_ids: std::collections::HashMap::new(),
                 authorized_clients: HashMap::new(),
+                revoked_clients: HashSet::new(),
             }),
             notifications,
         }

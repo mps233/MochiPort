@@ -2,7 +2,10 @@ use axum::{
     Json, Router,
     body::Body,
     extract::{Form, Query, State},
-    http::{Request, StatusCode},
+    http::{
+        Request, StatusCode,
+        header::{CACHE_CONTROL, EXPIRES, HeaderValue, PRAGMA},
+    },
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
@@ -172,9 +175,18 @@ async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
     let started = std::time::Instant::now();
-    let response = next.run(request).await;
+    let mut response = next.run(request).await;
     let status = response.status();
     let elapsed_ms = started.elapsed().as_millis();
+    if path.starts_with("/backend-api/") || path.starts_with("/api/") {
+        let headers = response.headers_mut();
+        headers.insert(
+            CACHE_CONTROL,
+            HeaderValue::from_static("no-store, no-cache, max-age=0, must-revalidate"),
+        );
+        headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+        headers.insert(EXPIRES, HeaderValue::from_static("0"));
+    }
     chain_log::write_line(format!(
         "[http] method={} path={} status={} elapsed_ms={}",
         method,

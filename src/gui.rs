@@ -92,7 +92,7 @@ fn build_ui() {
     let status_section =
         StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &root, "状态概览").build();
     let status_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let codex_status = status_panel(&root, "Codex App", StatusIconKind::Codex);
+    let codex_status = status_panel(&root, "Codex App 控制通道", StatusIconKind::Codex);
     let vscode_status = status_panel(&root, "VS Code 插件", StatusIconKind::VsCodeCodex);
     if CODEX_APP_GUI_UNSUPPORTED {
         set_disabled_status_panel(&codex_status, "暂不可用", "当前平台暂不支持 App GUI");
@@ -156,7 +156,7 @@ fn build_ui() {
     let codex_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let codex_status_box =
-        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &codex_page, "Codex 接入状态")
+        StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &codex_page, "Codex App 配置")
             .build();
     let codex_config_state = StaticText::builder(&codex_page)
         .with_label("正在读取 ~/.codex 配置状态")
@@ -1649,6 +1649,23 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         .or_else(|| snapshot.config.as_ref().map(|config| config.bridge.enabled))
         .unwrap_or(false);
 
+    let remote_connected = snapshot
+        .remote
+        .as_ref()
+        .map(|remote| remote.connected)
+        .unwrap_or(false);
+    let remote_initialized = snapshot
+        .remote
+        .as_ref()
+        .map(|remote| remote.initialized)
+        .unwrap_or(false);
+    let codex_control_ready = remote_connected && remote_initialized;
+    let codex_configured = snapshot
+        .codex_app
+        .as_ref()
+        .map(|status| status.configured)
+        .unwrap_or(false);
+
     let feishu_ws = snapshot.status.as_ref().map(|status| &status.feishu_ws);
     let (feishu_state, feishu_detail, feishu_tone) = if !feishu_configured {
         (
@@ -1663,7 +1680,14 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             StateTone::Muted,
         )
     } else if feishu_ws.is_some_and(|ws| ws.connected) {
-        ("已接入", "飞书桥接运行中。", StateTone::Ok)
+        let detail = if codex_control_ready {
+            "飞书桥接运行中。"
+        } else if remote_connected {
+            "飞书桥接运行中，Codex App 控制通道正在初始化。"
+        } else {
+            "飞书桥接运行中，等待 Codex App 打开“控制这台 Mac”。"
+        };
+        ("已接入", detail, StateTone::Ok)
     } else if feishu_ws.is_some_and(|ws| ws.connecting) {
         ("连接中", "正在连接飞书。", StateTone::Warn)
     } else {
@@ -1712,17 +1736,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     handles.feishu_meta.set_label(&feishu_meta);
     handles.feishu_meta.wrap(300);
 
-    let remote_connected = snapshot
-        .remote
-        .as_ref()
-        .map(|remote| remote.connected && remote.initialized)
-        .unwrap_or(false);
-    let codex_configured = snapshot
-        .codex_app
-        .as_ref()
-        .map(|status| status.configured)
-        .unwrap_or(false);
-
     if CODEX_APP_GUI_UNSUPPORTED {
         set_disabled_status_panel(
             &handles.codex_status,
@@ -1732,7 +1745,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         handles
             .status_bar
             .set_status_text("Codex App：当前平台暂不可用", 2);
-    } else if remote_connected {
+    } else if codex_control_ready {
         let detail = snapshot
             .remote
             .as_ref()
@@ -1740,14 +1753,24 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             .unwrap_or_else(|| "Codex App remote-control 已连接。".to_string());
         set_status_panel(&handles.codex_status, "已连接", &detail, StateTone::Ok);
         handles.status_bar.set_status_text("Codex App：已连接", 2);
+    } else if remote_connected {
+        set_status_panel(
+            &handles.codex_status,
+            "初始化中",
+            "Codex App 已打开控制通道，正在完成 remote-control 初始化。",
+            StateTone::Warn,
+        );
+        handles.status_bar.set_status_text("Codex App：初始化中", 2);
     } else if codex_configured {
         set_status_panel(
             &handles.codex_status,
-            "等待连接",
-            "配置已注入，打开 Codex App 的远程控制后会连接到本机服务。",
+            "未打开控制",
+            "配置已注入，请在 Codex App 里打开“控制这台 Mac”。",
             StateTone::Warn,
         );
-        handles.status_bar.set_status_text("Codex App：等待连接", 2);
+        handles
+            .status_bar
+            .set_status_text("Codex App：未打开控制", 2);
     } else {
         set_status_panel(
             &handles.codex_status,
@@ -1758,7 +1781,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         handles.status_bar.set_status_text("Codex App：未注入", 2);
     }
 
-    if remote_connected {
+    if codex_control_ready {
         let detail = snapshot
             .remote
             .as_ref()
