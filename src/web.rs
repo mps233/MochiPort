@@ -436,18 +436,33 @@ async fn repair_codex_app_gui_environment(State(state): State<SharedState>) -> i
         }
     };
     let gui_api_base = codex_app_config::configure_gui_environment(&backend_url);
+    let node_repl_cli_path_repaired =
+        match codex_app_config::repair_codex_app_node_repl_cli_path(None) {
+            Ok(repaired) => repaired,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "ok": false,
+                        "error": err.to_string(),
+                        "status": status,
+                    })),
+                );
+            }
+        };
     state
         .push_event(
             "info",
             "codex_app_gui_environment_repaired",
             format!(
-                "gui_api_base={} login_issuer={} remote_control_switch={}",
+                "gui_api_base={} login_issuer={} remote_control_switch={} node_repl_cli_path_repaired={}",
                 gui_api_base.value.as_deref().unwrap_or_default(),
                 gui_api_base
                     .login_issuer_value
                     .as_deref()
                     .unwrap_or_default(),
-                remote_control_switch.configured
+                remote_control_switch.configured,
+                node_repl_cli_path_repaired
             ),
         )
         .await;
@@ -457,6 +472,7 @@ async fn repair_codex_app_gui_environment(State(state): State<SharedState>) -> i
             "ok": true,
             "guiApiBase": gui_api_base,
             "remoteControlSwitch": remote_control_switch,
+            "nodeReplCliPathRepaired": node_repl_cli_path_repaired,
         })),
     )
 }
