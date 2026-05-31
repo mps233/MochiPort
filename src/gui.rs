@@ -25,14 +25,22 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const CODEX_APP_GUI_UNSUPPORTED: bool = !(cfg!(target_os = "macos") || cfg!(target_os = "windows"));
+const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codex-remote";
+const UPDATE_MANIFEST_URL: &str =
+    "https://github.com/happy-loki/codex-remote/releases/latest/download/latest.json";
+const UPDATE_RELEASE_API_URL: &str =
+    "https://api.github.com/repos/happy-loki/codex-remote/releases/latest";
+const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/happy-loki/codex-remote/releases/latest";
 const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 2500;
 const DASHBOARD_RESULT_POLL_MS: i32 = 100;
 const GUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
 const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 const GUI_CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 const ID_MENU_CLOSE_WINDOW: i32 = 10_001;
 const ID_MENU_MINIMIZE: i32 = 10_002;
+const ID_MENU_CHECK_UPDATE: i32 = 10_003;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type ConfigActionResultStore = Arc<Mutex<Option<ConfigActionResult>>>;
@@ -72,57 +80,25 @@ pub fn run() {
 
 fn build_ui() {
     let api = ApiClient::new(default_base_url());
+    let gui_timers = GuiTimers::new();
 
     let frame = Frame::builder()
         .with_title("Codex Remote")
         .with_size(Size::new(1100, 760))
         .build();
     frame.set_icon(&app_icon_bitmap(48));
-    install_system_menu(&frame);
+    install_system_menu(&frame, &gui_timers);
     frame.set_background_color(Colour::rgb(246, 247, 250));
-    let status_bar = StatusBar::builder(&frame)
-        .with_fields_count(3)
-        .with_status_widths(vec![-2, -1, -1])
-        .add_initial_text(0, "本地服务启动中")
-        .add_initial_text(1, "日志写入本地文件")
-        .add_initial_text(2, "自动刷新 2.5s")
+    let _status_bar = StatusBar::builder(&frame)
+        .with_fields_count(1)
+        .with_status_widths(vec![-1])
+        .add_initial_text(0, &format!("版本 {}", env!("CARGO_PKG_VERSION")))
         .build();
 
     let root = Panel::builder(&frame).build();
     root.set_background_color(Colour::rgb(246, 247, 250));
 
     let root_sizer = BoxSizer::builder(Orientation::Vertical).build();
-
-    let header_panel = Panel::builder(&root)
-        .with_style(PanelStyle::BorderNone)
-        .build();
-    header_panel.set_background_color(Colour::rgb(246, 247, 250));
-    let header = BoxSizer::builder(Orientation::Horizontal).build();
-    let header_copy = BoxSizer::builder(Orientation::Vertical).build();
-    let title = StaticText::builder(&header_panel)
-        .with_label("Codex Remote")
-        .build();
-    title.set_foreground_color(Colour::rgb(24, 28, 35));
-    header_copy.add(&title, 0, SizerFlag::Bottom, 4);
-    let subtitle = StaticText::builder(&header_panel)
-        .with_label("本地 remote-control backend + 飞书桥接")
-        .build();
-    subtitle.set_foreground_color(Colour::rgb(91, 100, 114));
-    header_copy.add(&subtitle, 0, SizerFlag::Expand, 0);
-    header.add_sizer(&header_copy, 1, SizerFlag::Expand, 0);
-
-    let endpoint = StaticText::builder(&header_panel)
-        .with_label(&format!("服务地址 {}", api.base_url))
-        .build();
-    endpoint.set_foreground_color(Colour::rgb(103, 111, 124));
-    header.add(&endpoint, 0, SizerFlag::AlignCenterVertical, 0);
-    header_panel.set_sizer(header, true);
-    root_sizer.add(
-        &header_panel,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        18,
-    );
 
     let status_box = StaticBox::builder(&root).with_label("状态概览").build();
     let status_section =
@@ -208,10 +184,6 @@ fn build_ui() {
         12,
     );
 
-    let uninstall_button = Button::builder(&config_static_box)
-        .with_label("卸载")
-        .build();
-    uninstall_button.set_tooltip("移除本工具写入的 Codex App 本地接入配置");
     let new_provider_button = Button::builder(&config_static_box)
         .with_label("新增")
         .build();
@@ -225,9 +197,9 @@ fn build_ui() {
         .build();
     delete_provider_button.set_tooltip("删除当前选中的 provider");
     let configure_button = Button::builder(&config_static_box)
-        .with_label("启动")
+        .with_label("启用")
         .build();
-    configure_button.set_tooltip("保存当前表单并设为 Codex App 当前 provider");
+    configure_button.set_tooltip("保存并使用这个模型服务");
 
     let provider_catalog = StaticText::builder(&config_static_box)
         .with_label("正在匹配 ~/.codex/config.toml 里的 provider")
@@ -259,10 +231,8 @@ fn build_ui() {
     let provider_actions = BoxSizer::builder(Orientation::Horizontal).build();
     provider_actions.add_stretch_spacer(1);
     provider_actions.add(&new_provider_button, 0, SizerFlag::Right, 8);
-    provider_actions.add(&save_provider_button, 0, SizerFlag::Right, 8);
     provider_actions.add(&delete_provider_button, 0, SizerFlag::Right, 8);
-    provider_actions.add(&configure_button, 0, SizerFlag::Right, 8);
-    provider_actions.add(&uninstall_button, 0, SizerFlag::Right, 0);
+    provider_actions.add(&configure_button, 0, SizerFlag::Right, 0);
     config_box.add_sizer(
         &provider_actions,
         0,
@@ -300,6 +270,15 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         8,
     );
+    let save_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    save_actions.add_stretch_spacer(1);
+    save_actions.add(&save_provider_button, 0, SizerFlag::Right, 0);
+    config_box.add_sizer(
+        &save_actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        12,
+    );
     codex_sizer.add_sizer(
         &config_box,
         0,
@@ -307,7 +286,20 @@ fn build_ui() {
         10,
     );
 
+    let uninstall_button = Button::builder(&codex_page)
+        .with_label("清除 Codex 接入")
+        .build();
+    uninstall_button.set_tooltip("移除本工具写入的 Codex App 本地接入配置");
+    let codex_maintenance_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    codex_maintenance_actions.add_stretch_spacer(1);
+    codex_maintenance_actions.add(&uninstall_button, 0, SizerFlag::Right, 0);
     codex_sizer.add_stretch_spacer(1);
+    codex_sizer.add_sizer(
+        &codex_maintenance_actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        20,
+    );
     codex_page.set_sizer(codex_sizer, true);
     codex_page.set_scroll_rate(10, 10);
     let codex_best_size = codex_page.get_best_size();
@@ -380,11 +372,11 @@ fn build_ui() {
     let stop_bridge_button = Button::builder(&feishu_static_box)
         .with_label("断开接入")
         .build();
-    stop_bridge_button.set_tooltip("停止飞书桥接，不删除已保存的机器人配置");
+    stop_bridge_button.set_tooltip("暂停飞书桥接，不删除已保存的机器人配置");
     let change_bot_button = Button::builder(&feishu_static_box)
-        .with_label("更换机器人")
+        .with_label("扫码使用新机器人")
         .build();
-    change_bot_button.set_tooltip("重新进入飞书扫码接入流程");
+    change_bot_button.set_tooltip("扫码接入一个新的飞书机器人");
     feishu_buttons.add(&stop_bridge_button, 0, SizerFlag::Right, 8);
     feishu_buttons.add(&change_bot_button, 0, SizerFlag::Right, 0);
     feishu_box.add_sizer(&feishu_buttons, 0, SizerFlag::Expand | SizerFlag::All, 12);
@@ -397,47 +389,8 @@ fn build_ui() {
     feishu_sizer.add_stretch_spacer(1);
     feishu_page.set_sizer(feishu_sizer, true);
 
-    let system_page = Panel::builder(&notebook)
-        .with_style(PanelStyle::TabTraversal)
-        .build();
-    system_page.set_background_color(Colour::rgb(250, 251, 253));
-    let system_sizer = BoxSizer::builder(Orientation::Vertical).build();
-    let system_static_box = StaticBox::builder(&system_page)
-        .with_label("本地服务")
-        .build();
-    let system_box =
-        StaticBoxSizerBuilder::new_with_box(&system_static_box, Orientation::Vertical).build();
-    let service_text = StaticText::builder(&system_static_box)
-        .with_label("Codex Remote 会在 GUI 打开时接管并重启本地 backend，避免旧版本服务残留；GUI 退出时会关闭本地 backend，并清除本次写入的 Codex App 环境变量。不会安装开机启动项，也不会修改系统常驻服务。")
-        .build();
-    service_text.set_foreground_color(Colour::rgb(82, 91, 105));
-    service_text.wrap(760);
-    system_box.add(&service_text, 0, SizerFlag::Expand | SizerFlag::All, 12);
-    let refresh_button = Button::builder(&system_static_box)
-        .with_label("检测状态")
-        .build();
-    refresh_button.set_tooltip("立即刷新本地服务、飞书和 Codex App 连接状态");
-    let start_daemon_button = Button::builder(&system_static_box)
-        .with_label("启动本地服务")
-        .build();
-    start_daemon_button.set_tooltip("本次会话启动 codex-remote daemon，不安装开机启动项");
-    let system_buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    system_buttons.add_stretch_spacer(1);
-    system_buttons.add(&start_daemon_button, 0, SizerFlag::Right, 8);
-    system_buttons.add(&refresh_button, 0, SizerFlag::Right, 0);
-    system_box.add_sizer(&system_buttons, 0, SizerFlag::Expand | SizerFlag::All, 12);
-    system_sizer.add_sizer(
-        &system_box,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        14,
-    );
-    system_sizer.add_stretch_spacer(1);
-    system_page.set_sizer(system_sizer, true);
-
     notebook.add_page(&codex_page, "Codex 接入", true, None);
     notebook.add_page(&feishu_page, "飞书", false, None);
-    notebook.add_page(&system_page, "本地服务", false, None);
 
     root_sizer.add(
         &notebook,
@@ -452,7 +405,6 @@ fn build_ui() {
     frame.set_sizer(frame_sizer, true);
 
     let handles = UiHandles {
-        status_bar,
         service_status,
         feishu_status,
         codex_status,
@@ -467,8 +419,6 @@ fn build_ui() {
         save_provider_button,
         delete_provider_button,
         configure_button,
-        refresh_button,
-        start_daemon_button,
         provider_name,
         provider_base_url,
         provider_key,
@@ -478,40 +428,10 @@ fn build_ui() {
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
     let dashboard_refresh = DashboardRefresh::new();
-    let gui_timers = GuiTimers::new();
     let config_action_result: ConfigActionResultStore = Arc::new(Mutex::new(None));
     let config_action_in_flight = Arc::new(AtomicBool::new(false));
     show_dashboard_starting(&handles);
     show_local_codex_app_config_preview(&handles, &api, &dashboard_refresh);
-
-    {
-        let api = api.clone();
-        let handles = handles;
-        let dashboard_refresh = dashboard_refresh.clone();
-        refresh_button.on_click(move |_| {
-            handles.status_bar.set_status_text("状态刷新中", 0);
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
-        });
-    }
-
-    {
-        let api = api.clone();
-        let handles = handles;
-        let frame = frame;
-        let daemon_child = daemon_child.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let gui_timers = gui_timers.clone();
-        start_daemon_button.on_click(move |_| {
-            start_daemon_for_gui_async(
-                &api,
-                &handles,
-                &frame,
-                &daemon_child,
-                &dashboard_refresh,
-                &gui_timers,
-            );
-        });
-    }
 
     {
         let handles = handles;
@@ -522,7 +442,7 @@ fn build_ui() {
             change_text_value_if_changed(&handles.provider_key, "");
             handles
                 .provider_catalog
-                .set_label("填写新 provider 名称、Base URL 和 API Key，然后点击启动。");
+                .set_label("填写新 provider 名称、Base URL 和 API Key，然后点击启用。");
             handles.provider_catalog.wrap(980);
             handles.provider_catalog.layout();
         });
@@ -639,11 +559,9 @@ fn build_ui() {
             if config_action_in_flight.swap(true, Ordering::SeqCst) {
                 return;
             }
-            handles
-                .provider_catalog
-                .set_label("正在写入配置，请稍候...");
+            handles.provider_catalog.set_label("正在启用，请稍候...");
             handles.provider_catalog.wrap(980);
-            handles.configure_button.set_label("启动中...");
+            handles.configure_button.set_label("启用中...");
             set_actions_enabled(&handles, false);
             frame.refresh(true, None);
             frame.update();
@@ -732,12 +650,31 @@ fn build_ui() {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
-        stop_bridge_button.on_click(move |_| match api.stop_bridge() {
-            Ok(_) => {
-                show_info(&frame, "飞书接入已断开。");
-                schedule_dashboard_refresh(&api, &dashboard_refresh);
+        stop_bridge_button.on_click(move |_| {
+            let snapshot = cached_dashboard_snapshot(&dashboard_refresh);
+            let feishu_configured = snapshot.as_ref().is_some_and(feishu_configured);
+            let bridge_enabled = snapshot.as_ref().is_some_and(bridge_enabled);
+            if !feishu_configured {
+                show_error(&frame, "请先接入飞书机器人。");
+                return;
             }
-            Err(err) => show_error(&frame, &err),
+
+            let result = if bridge_enabled {
+                api.stop_bridge()
+            } else {
+                api.start_bridge()
+            };
+            match result {
+                Ok(_) => {
+                    if bridge_enabled {
+                        show_info(&frame, "飞书接入已断开。");
+                    } else {
+                        show_info(&frame, "飞书接入已恢复。");
+                    }
+                    schedule_dashboard_refresh(&api, &dashboard_refresh);
+                }
+                Err(err) => show_error(&frame, &err),
+            }
         });
     }
 
@@ -836,7 +773,7 @@ fn default_base_url() -> String {
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
 }
 
-fn install_system_menu(frame: &Frame) {
+fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers) {
     let file_menu = Menu::builder()
         .append_item(
             ID_MENU_CLOSE_WINDOW,
@@ -852,6 +789,12 @@ fn install_system_menu(frame: &Frame) {
         .append_item(ID_EXIT, "&Quit Codex Remote\tCtrl+Q", "Quit Codex Remote")
         .build();
     let help_menu = Menu::builder()
+        .append_item(
+            ID_MENU_CHECK_UPDATE,
+            "&Check for Updates",
+            "Check GitHub Releases for a newer Codex Remote version",
+        )
+        .append_separator()
         .append_item(ID_ABOUT, "&About Codex Remote", "About Codex Remote")
         .build();
     let menu_bar = MenuBar::builder()
@@ -861,15 +804,316 @@ fn install_system_menu(frame: &Frame) {
     frame.set_menu_bar(menu_bar);
 
     let frame = *frame;
+    let gui_timers = gui_timers.clone();
+    let update_check_in_flight = Arc::new(AtomicBool::new(false));
     frame.on_menu_selected(move |event| match event.get_id() {
         ID_EXIT | ID_MENU_CLOSE_WINDOW => frame.close(true),
         ID_MENU_MINIMIZE => frame.iconize(true),
-        ID_ABOUT => show_info(
-            &frame,
-            "Codex Remote\n本地 remote-control backend + 飞书桥接。",
-        ),
+        ID_MENU_CHECK_UPDATE => {
+            check_for_updates_async(&frame, &gui_timers, &update_check_in_flight);
+        }
+        ID_ABOUT => show_about_dialog(&frame),
         _ => event.skip(true),
     });
+}
+
+#[derive(Debug)]
+struct LatestReleaseInfo {
+    version: String,
+    release_url: String,
+    notes: Option<String>,
+}
+
+#[derive(Debug)]
+enum UpdateCheckOutcome {
+    Newer {
+        current_version: String,
+        latest_version: String,
+        release_url: String,
+        notes: Option<String>,
+    },
+    Current {
+        current_version: String,
+        latest_version: String,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateManifest {
+    version: String,
+    #[serde(default, alias = "release_url", alias = "html_url")]
+    release_url: Option<String>,
+    #[serde(default)]
+    notes: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    body: Option<String>,
+}
+
+fn check_for_updates_async(frame: &Frame, gui_timers: &GuiTimers, in_flight: &Arc<AtomicBool>) {
+    if in_flight.swap(true, Ordering::SeqCst) {
+        show_info(frame, "正在检查更新，请稍候。");
+        return;
+    }
+
+    let result: Arc<Mutex<Option<Result<UpdateCheckOutcome, String>>>> = Arc::new(Mutex::new(None));
+    {
+        let result = result.clone();
+        thread::spawn(move || {
+            let update = check_for_updates();
+            if let Ok(mut slot) = result.lock() {
+                slot.replace(update);
+            }
+        });
+    }
+
+    let update_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
+    let update_timer = Timer::new(frame);
+    {
+        let frame = *frame;
+        let in_flight = in_flight.clone();
+        let update_timer_store = update_timer_store.clone();
+        update_timer.on_tick(move |_| {
+            let update = result.lock().ok().and_then(|mut slot| slot.take());
+            let Some(update) = update else {
+                return;
+            };
+
+            if let Some(timer) = update_timer_store.borrow().as_ref() {
+                timer.stop();
+            }
+            in_flight.store(false, Ordering::SeqCst);
+            show_update_check_result(&frame, update);
+        });
+    }
+    update_timer.start(100, false);
+    update_timer_store.borrow_mut().replace(update_timer);
+    gui_timers.track(&update_timer_store);
+}
+
+fn check_for_updates() -> Result<UpdateCheckOutcome, String> {
+    let client = Client::builder()
+        .connect_timeout(UPDATE_CHECK_TIMEOUT)
+        .timeout(UPDATE_CHECK_TIMEOUT)
+        .build()
+        .map_err(|err| format!("创建更新检查客户端失败：{err}"))?;
+
+    let release = fetch_update_manifest(&client).or_else(|manifest_err| {
+        fetch_github_latest_release(&client).map_err(|api_err| {
+            format!(
+                "无法读取 GitHub Release 更新信息：{api_err}\nlatest.json 检查结果：{manifest_err}"
+            )
+        })
+    })?;
+    build_update_check_outcome(release)
+}
+
+fn fetch_update_manifest(client: &Client) -> Result<LatestReleaseInfo, String> {
+    let text = fetch_update_text(client, UPDATE_MANIFEST_URL)?;
+    let manifest: UpdateManifest =
+        serde_json::from_str(&text).map_err(|err| format!("latest.json 无法解析：{err}"))?;
+    let release_url = manifest
+        .release_url
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| UPDATE_RELEASE_PAGE_URL.to_string());
+    Ok(LatestReleaseInfo {
+        version: manifest.version,
+        release_url,
+        notes: manifest.notes,
+    })
+}
+
+fn fetch_github_latest_release(client: &Client) -> Result<LatestReleaseInfo, String> {
+    let text = fetch_update_text(client, UPDATE_RELEASE_API_URL)?;
+    let release: GitHubRelease =
+        serde_json::from_str(&text).map_err(|err| format!("GitHub Release API 无法解析：{err}"))?;
+    Ok(LatestReleaseInfo {
+        version: release.tag_name,
+        release_url: release.html_url,
+        notes: release.body,
+    })
+}
+
+fn fetch_update_text(client: &Client, url: &str) -> Result<String, String> {
+    let response = client
+        .get(url)
+        .header("User-Agent", "codex-remote")
+        .header("Accept", "application/json")
+        .send()
+        .map_err(|err| {
+            if err.is_timeout() {
+                format!("{url} 请求超时：{err}")
+            } else {
+                format!("{url} 请求失败：{err}")
+            }
+        })?;
+    let status = response.status();
+    let text = response.text().map_err(|err| err.to_string())?;
+    if status.is_success() {
+        Ok(text)
+    } else {
+        Err(format!("{url} 返回 HTTP {status}: {text}"))
+    }
+}
+
+fn build_update_check_outcome(release: LatestReleaseInfo) -> Result<UpdateCheckOutcome, String> {
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let latest_version = release.version.trim().to_string();
+    if latest_version.is_empty() {
+        return Err("GitHub Release 没有版本号。".to_string());
+    }
+
+    if is_version_newer(&latest_version, &current_version)? {
+        Ok(UpdateCheckOutcome::Newer {
+            current_version,
+            latest_version,
+            release_url: release.release_url,
+            notes: release.notes,
+        })
+    } else {
+        Ok(UpdateCheckOutcome::Current {
+            current_version,
+            latest_version,
+        })
+    }
+}
+
+fn show_update_check_result(parent: &Frame, result: Result<UpdateCheckOutcome, String>) {
+    match result {
+        Ok(UpdateCheckOutcome::Current {
+            current_version,
+            latest_version,
+        }) => {
+            show_info(
+                parent,
+                &format!(
+                    "已是最新版本。\n当前版本：{current_version}\nGitHub 最新版本：{latest_version}"
+                ),
+            );
+        }
+        Ok(UpdateCheckOutcome::Newer {
+            current_version,
+            latest_version,
+            release_url,
+            notes,
+        }) => {
+            let notes = update_notes_for_dialog(notes.as_deref());
+            let message = format!(
+                "发现新版本。\n当前版本：{current_version}\n最新版本：{latest_version}\n\n{notes}\n\n是否打开 GitHub Releases 下载？"
+            );
+            if confirm_open_update_release(parent, &message) {
+                if let Err(err) = open_url_in_browser(&release_url) {
+                    show_error(parent, &err);
+                }
+            }
+        }
+        Err(err) => {
+            show_error(parent, &format!("检查更新失败：{err}"));
+        }
+    }
+}
+
+fn update_notes_for_dialog(notes: Option<&str>) -> String {
+    let notes = notes.unwrap_or_default().trim();
+    if notes.is_empty() {
+        return "Release 页面包含安装包和更新说明。".to_string();
+    }
+    format!("更新说明：\n{}", truncate_for_dialog(notes, 700))
+}
+
+fn truncate_for_dialog(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut result = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        result.push_str("\n...");
+    }
+    result
+}
+
+fn is_version_newer(latest: &str, current: &str) -> Result<bool, String> {
+    let latest = parse_version_segments(latest)?;
+    let current = parse_version_segments(current)?;
+    for index in 0..latest.len().max(current.len()) {
+        let latest_segment = latest.get(index).copied().unwrap_or_default();
+        let current_segment = current.get(index).copied().unwrap_or_default();
+        if latest_segment != current_segment {
+            return Ok(latest_segment > current_segment);
+        }
+    }
+    Ok(false)
+}
+
+fn parse_version_segments(version: &str) -> Result<Vec<u64>, String> {
+    let normalized = version
+        .trim()
+        .trim_start_matches('v')
+        .trim_start_matches('V')
+        .split(['-', '+'])
+        .next()
+        .unwrap_or_default();
+    let segments = normalized
+        .split('.')
+        .map(|segment| {
+            segment
+                .parse::<u64>()
+                .map_err(|_| format!("版本号 {version} 无法比较。"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if segments.is_empty() {
+        Err(format!("版本号 {version} 无法比较。"))
+    } else {
+        Ok(segments)
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn compares_release_versions() {
+        assert!(is_version_newer("v0.2.6", "0.2.5").unwrap());
+        assert!(is_version_newer("0.3.0", "0.2.99").unwrap());
+        assert!(!is_version_newer("v0.2.5", "0.2.5").unwrap());
+        assert!(!is_version_newer("v0.2.4", "0.2.5").unwrap());
+        assert!(!is_version_newer("v0.2.5-beta.1", "0.2.5").unwrap());
+    }
+}
+
+fn open_url_in_browser(url: &str) -> Result<(), String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("下载地址为空。".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(url);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("无法打开浏览器：{err}\n下载地址：{url}"))
 }
 
 fn restart_daemon_for_gui(api: &ApiClient) -> Result<Child, String> {
@@ -920,7 +1164,6 @@ fn start_daemon_for_gui_async(
         .daemon_starting
         .swap(true, Ordering::SeqCst)
     {
-        handles.status_bar.set_status_text("本地服务正在启动", 0);
         return;
     }
     dashboard_refresh.generation.fetch_add(1, Ordering::SeqCst);
@@ -990,16 +1233,9 @@ fn start_daemon_for_gui_async(
                         replace_managed_daemon(&daemon_child, child);
                     }
                     repair_codex_app_gui_environment_async(&api, &dashboard_refresh);
-                    handles
-                        .status_bar
-                        .set_status_text("本地服务已启动，正在读取配置", 0);
                 }
-                Err(err) => {
-                    handles
-                        .status_bar
-                        .set_status_text(&format!("本地服务启动失败：{err}"), 0);
+                Err(_) => {
                     set_actions_enabled(&handles, false);
-                    handles.start_daemon_button.enable(true);
                 }
             }
             schedule_dashboard_refresh(&api, &dashboard_refresh);
@@ -1349,6 +1585,10 @@ impl ApiClient {
         self.post_empty("/api/bridge/stop")
     }
 
+    fn start_bridge(&self) -> Result<serde_json::Value, String> {
+        self.post_empty("/api/bridge/start")
+    }
+
     fn shutdown(&self) -> Result<serde_json::Value, String> {
         self.post_empty("/api/shutdown")
     }
@@ -1390,7 +1630,6 @@ enum StatusIconKind {
 
 #[derive(Clone, Copy)]
 struct UiHandles {
-    status_bar: StatusBar,
     service_status: StatusPanel,
     feishu_status: StatusPanel,
     codex_status: StatusPanel,
@@ -1405,8 +1644,6 @@ struct UiHandles {
     save_provider_button: Button,
     delete_provider_button: Button,
     configure_button: Button,
-    refresh_button: Button,
-    start_daemon_button: Button,
     provider_name: ComboBox,
     provider_base_url: TextCtrl,
     provider_key: TextCtrl,
@@ -2102,7 +2339,7 @@ fn apply_pending_config_action(
         return false;
     };
 
-    handles.configure_button.set_label("启动");
+    handles.configure_button.set_label("启用");
     handles.save_provider_button.set_label("保存");
     handles.delete_provider_button.set_label("删除");
     set_actions_enabled(handles, true);
@@ -2113,7 +2350,7 @@ fn apply_pending_config_action(
             result: Ok(status),
         } => {
             apply_provider_action_status(handles, refresh, status, &provider_name);
-            show_info(frame, "Provider 已保存。需要使用它时再点击启动。");
+            show_info(frame, "Provider 已保存。需要使用它时再点击启用。");
             schedule_dashboard_refresh(api, refresh);
         }
         ConfigActionResult::Save {
@@ -2150,7 +2387,7 @@ fn apply_pending_config_action(
             apply_provider_action_status(handles, refresh, status, &provider_name);
             show_info(
                 frame,
-                "配置已写入。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。",
+                "已启用。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。",
             );
             schedule_dashboard_refresh(api, refresh);
         }
@@ -2229,11 +2466,7 @@ fn show_dashboard_starting(handles: &UiHandles) {
         .feishu_detail
         .set_label("服务启动完成后会刷新飞书状态。");
     handles.feishu_meta.set_label("");
-    handles.status_bar.set_status_text("本地服务：启动中", 0);
-    handles.status_bar.set_status_text("飞书：等待服务", 1);
-    handles.status_bar.set_status_text("Codex App：等待服务", 2);
     set_actions_enabled(handles, false);
-    handles.start_daemon_button.enable(false);
 }
 
 fn show_local_codex_app_config_preview(
@@ -2287,7 +2520,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         set_status_panel(
             &handles.service_status,
             "未运行",
-            "点击“启动本地服务”后再连接 VS Code 插件。",
+            "GUI 会自动启动本地服务；如果一直未运行，请重启 Codex Remote。",
             StateTone::Error,
         );
         set_status_panel(
@@ -2314,18 +2547,13 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         handles.feishu_state.set_label("本地服务未运行");
         handles
             .feishu_detail
-            .set_label("请先启动 codex-remote 后端。");
+            .set_label("请重启 Codex Remote，或查看 logs/codex-remote-chain.log。");
         handles.feishu_meta.set_label("");
-        handles.status_bar.set_status_text("本地服务：离线", 0);
-        handles.status_bar.set_status_text("飞书：不可用", 1);
-        handles.status_bar.set_status_text("Codex App：不可用", 2);
         set_actions_enabled(handles, false);
-        handles.start_daemon_button.enable(true);
         return;
     }
 
     set_actions_enabled(handles, true);
-    handles.start_daemon_button.enable(false);
 
     if let Some(status) = &snapshot.status {
         set_status_panel(
@@ -2334,29 +2562,10 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             &format!("监听 {}", status.bind),
             StateTone::Ok,
         );
-        handles
-            .status_bar
-            .set_status_text(&format!("本地服务：{}", status.bind), 0);
     }
 
-    let feishu_configured = snapshot
-        .backend
-        .as_ref()
-        .map(|backend| backend.feishu_configured)
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| !config.feishu.app_id.is_empty())
-        })
-        .or_else(|| snapshot.feishu_bot.as_ref().map(|bot| bot.configured))
-        .unwrap_or(false);
-    let bridge_enabled = snapshot
-        .backend
-        .as_ref()
-        .map(|backend| backend.enabled)
-        .or_else(|| snapshot.config.as_ref().map(|config| config.bridge.enabled))
-        .unwrap_or(false);
+    let feishu_configured = feishu_configured(snapshot);
+    let bridge_enabled = bridge_enabled(snapshot);
 
     let remote_connected = snapshot
         .remote
@@ -2386,7 +2595,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     } else if !bridge_enabled {
         (
             "已断开",
-            "机器人已保存，点击“更换机器人”可重新接入。",
+            "机器人已保存，点击“重新接入”恢复。",
             StateTone::Muted,
         )
     } else if feishu_ws.is_some_and(|ws| ws.connected) {
@@ -2419,18 +2628,29 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         feishu_tone,
     );
     let feishu_state_label = feishu_state_label(feishu_state, feishu_bot_name.as_deref());
-    handles
-        .status_bar
-        .set_status_text(&format!("飞书：{feishu_state_label}"), 1);
     handles.feishu_state.set_label(&feishu_state_label);
     handles
         .feishu_state
         .set_foreground_color(feishu_tone.colour());
     handles.feishu_detail.set_label(feishu_detail);
     handles.feishu_detail.wrap(300);
-    handles
-        .stop_bridge_button
-        .enable(feishu_configured && bridge_enabled);
+    if feishu_configured && bridge_enabled {
+        handles.stop_bridge_button.set_label("断开接入");
+        handles
+            .stop_bridge_button
+            .set_tooltip("暂停飞书桥接，不删除已保存的机器人配置");
+    } else if feishu_configured {
+        handles.stop_bridge_button.set_label("重新接入");
+        handles
+            .stop_bridge_button
+            .set_tooltip("使用已保存的飞书机器人重新接入");
+    } else {
+        handles.stop_bridge_button.set_label("断开接入");
+        handles
+            .stop_bridge_button
+            .set_tooltip("扫码接入飞书机器人后可断开或重新接入");
+    }
+    handles.stop_bridge_button.enable(feishu_configured);
 
     let feishu_meta = match (&snapshot.config, &snapshot.feishu_bot) {
         (Some(config), Some(bot)) if !config.feishu.app_id.is_empty() => {
@@ -2479,9 +2699,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             "暂不可用",
             "当前平台暂不支持 App GUI",
         );
-        handles
-            .status_bar
-            .set_status_text("Codex App：当前平台暂不可用", 2);
     } else if codex_control_ready {
         let detail = snapshot
             .remote
@@ -2489,7 +2706,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             .map(codex_remote_detail)
             .unwrap_or_else(|| "Codex App remote-control 已连接。".to_string());
         set_status_panel(&handles.codex_status, "已连接", &detail, StateTone::Ok);
-        handles.status_bar.set_status_text("Codex App：已连接", 2);
     } else if remote_connected {
         set_status_panel(
             &handles.codex_status,
@@ -2497,7 +2713,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             "Codex App 已打开控制通道，正在完成 remote-control 初始化。",
             StateTone::Warn,
         );
-        handles.status_bar.set_status_text("Codex App：初始化中", 2);
     } else if codex_configured {
         set_status_panel(
             &handles.codex_status,
@@ -2505,17 +2720,13 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             "配置已注入，请在 Codex App 里打开“控制这台 Mac”。",
             StateTone::Warn,
         );
-        handles
-            .status_bar
-            .set_status_text("Codex App：未打开控制", 2);
     } else {
         set_status_panel(
             &handles.codex_status,
             "未注入",
-            "填写 Base URL 和 API Key 后写入配置。",
+            "填写 Base URL 和 API Key 后点击启用。",
             StateTone::Warn,
         );
-        handles.status_bar.set_status_text("Codex App：未注入", 2);
     }
 
     if codex_control_ready {
@@ -2533,6 +2744,30 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             StateTone::Warn,
         );
     }
+}
+
+fn feishu_configured(snapshot: &DashboardSnapshot) -> bool {
+    snapshot
+        .backend
+        .as_ref()
+        .map(|backend| backend.feishu_configured)
+        .or_else(|| {
+            snapshot
+                .config
+                .as_ref()
+                .map(|config| !config.feishu.app_id.is_empty())
+        })
+        .or_else(|| snapshot.feishu_bot.as_ref().map(|bot| bot.configured))
+        .unwrap_or(false)
+}
+
+fn bridge_enabled(snapshot: &DashboardSnapshot) -> bool {
+    snapshot
+        .backend
+        .as_ref()
+        .map(|backend| backend.enabled)
+        .or_else(|| snapshot.config.as_ref().map(|config| config.bridge.enabled))
+        .unwrap_or(false)
 }
 
 fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot) {
@@ -2770,7 +3005,7 @@ fn provider_catalog_label(status: &CodexAppStatus) -> String {
         if let Some(active) = status.provider.as_ref() {
             return format!("当前 provider: {active}", active = active.name.as_str());
         }
-        return "还没有 provider，填写后点击写入配置。".to_string();
+        return "还没有 provider，填写后点击启用。".to_string();
     }
 
     if let Some(active) = status.provider.as_ref() {
@@ -3016,7 +3251,6 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.new_provider_button.enable(enabled);
     handles.save_provider_button.enable(enabled);
     handles.delete_provider_button.enable(enabled);
-    handles.refresh_button.enable(true);
     handles.stop_bridge_button.enable(enabled);
     handles.uninstall_button.enable(enabled);
 }
@@ -3172,7 +3406,7 @@ fn show_onboard_dialog(parent: &Frame, api: ApiClient) {
         }
     };
 
-    let dialog = Dialog::builder(parent, "更换飞书机器人")
+    let dialog = Dialog::builder(parent, "扫码使用新机器人")
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
         .with_size(660, 760)
         .build();
@@ -3304,6 +3538,73 @@ fn is_feishu_onboard_pending(error: Option<&serde_json::Value>) -> bool {
     )
 }
 
+fn show_about_dialog(parent: &Frame) {
+    let dialog = Dialog::builder(parent, "About Codex Remote")
+        .with_style(DialogStyle::DefaultDialogStyle)
+        .with_size(520, 260)
+        .build();
+    dialog.set_icon(&app_icon_bitmap(48));
+    dialog.set_background_color(Colour::rgb(255, 255, 255));
+
+    let panel = Panel::builder(&dialog).build();
+    panel.set_background_color(Colour::rgb(255, 255, 255));
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let title = StaticText::builder(&panel)
+        .with_label(&format!("Codex Remote {}", env!("CARGO_PKG_VERSION")))
+        .build();
+    title.set_foreground_color(Colour::rgb(21, 25, 31));
+    sizer.add(
+        &title,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let description = StaticText::builder(&panel)
+        .with_label("本地 remote-control backend + 飞书桥接。")
+        .build();
+    description.set_foreground_color(Colour::rgb(88, 96, 108));
+    description.wrap(460);
+    sizer.add(
+        &description,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let link = HyperlinkCtrl::builder(&panel)
+        .with_label(PROJECT_HOME_URL)
+        .with_url(PROJECT_HOME_URL)
+        .build();
+    sizer.add(
+        &link,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+    let close_button = Button::builder(&panel).with_label("关闭").build();
+    buttons.add_stretch_spacer(1);
+    buttons.add(&close_button, 0, SizerFlag::AlignLeft, 0);
+    sizer.add_sizer(&buttons, 0, SizerFlag::Expand | SizerFlag::All, 18);
+
+    panel.set_sizer(sizer, true);
+    let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer(dialog_sizer, true);
+    dialog.center();
+
+    {
+        let dialog = dialog;
+        close_button.on_click(move |_| dialog.end_modal(ID_OK));
+    }
+
+    dialog.show_modal();
+    dialog.destroy();
+}
+
 fn show_info(parent: &dyn WxWidget, message: &str) {
     MessageDialog::builder(parent, message, "Codex Remote")
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
@@ -3316,6 +3617,14 @@ fn show_error(parent: &dyn WxWidget, message: &str) {
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
         .build()
         .show_modal();
+}
+
+fn confirm_open_update_release(parent: &dyn WxWidget, message: &str) -> bool {
+    MessageDialog::builder(parent, message, "Codex Remote 更新")
+        .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+        .build()
+        .show_modal()
+        == ID_YES
 }
 
 fn confirm_uninstall_codex_app_config(parent: &dyn WxWidget) -> bool {

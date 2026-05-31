@@ -124,6 +124,30 @@ jobs:
           spctl --assess --type execute --verbose=4 "$APP"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
 
+      - name: Write Update Manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          notes_path = Path("RELEASE_NOTES.md")
+          manifest = {
+              "version": os.environ["RELEASE_TAG"],
+              "releaseUrl": f"https://github.com/{os.environ['RELEASE_REPOSITORY']}/releases/tag/{os.environ['RELEASE_TAG']}",
+              "notes": notes_path.read_text(encoding="utf-8") if notes_path.exists() else "",
+          }
+          Path("target/dist/latest.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -135,4 +159,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
-          files: target/dist/Codex Remote.dmg
+          overwrite_files: true
+          files: |
+            target/dist/Codex Remote.dmg
+            target/dist/latest.json

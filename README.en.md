@@ -4,7 +4,7 @@
 
 `codex-remote` is a local Codex App remote-control backend with a Feishu/Lark bridge.
 
-It has one job: after the user explicitly starts the local service, Codex App connects to the local backend, and remote-control messages are bridged to Feishu.
+It has one job: after the user opens the GUI, Codex App connects to the local backend, and remote-control messages are bridged to Feishu.
 
 ## Quick Start
 
@@ -14,33 +14,35 @@ Download `Codex Remote.dmg` from GitHub Releases, drag it to Applications, then 
 
 If macOS warns that the app was downloaded from the internet, confirm the system prompt. The app does not install startup items and does not run in the background automatically.
 
-### 2. Start Local Service
+Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The MVP only opens the download page; it does not silently replace the local app.
 
-Open `Codex Remote`, then click `Start Local Service`.
+### 2. Open The App
 
-Continue when the local service status shows running.
+Open `Codex Remote`. The GUI starts the local backend automatically and stops the backend it started when the GUI exits.
+
+Continue when the status overview shows the local service is running.
 
 ### 3. Connect Feishu
 
-On first use, click `Change Bot` and complete the QR onboarding flow.
+On first use, click `扫码使用新机器人` and complete the QR onboarding flow.
 
 After Feishu is connected, normal use does not require scanning again. Scan again only when switching bots.
 
 ### 4. Fill Model Info
 
-Open the `Codex App` page and fill your model service settings:
+Open the `Codex 接入` page, click `新增`, then fill your model service settings:
 
 - Provider name
 - Third-party Base URL
 - API Key
 
-Provider name can be empty. If it is empty but Base URL or API Key is filled, the default provider name is `codex`.
+Provider name can be empty. If it is empty but Base URL or API Key is filled, the default provider name is `ai-codex`.
 
-### 5. Write Codex App Config
+### 5. Enable Provider
 
-Click `Write Config`.
+Click `保存` to save the current provider only. Click `启用` to save the current provider and make Codex App use it.
 
-This button only edits Codex App's local config, with backups for existing files. It points Codex App remote control to local `codex-remote`, and writes local auth plus optional model provider settings.
+Enabling a provider backs up the old config, points Codex App remote control to local `codex-remote`, and writes local auth plus the current model provider.
 
 ### 6. Open Codex App
 
@@ -74,9 +76,9 @@ Only `/q` is needed in normal use. Follow the card prompts for other actions.
 
 Approval cards are updated after selection, so handled approvals are marked visually.
 
-## Uninstall Injection
+## Clear Codex Access
 
-Click `Uninstall Injection` in the GUI to remove this project's Codex App injection:
+Click `清除 Codex 接入` in the GUI to remove this project's root Codex routing entries:
 
 - `chatgpt_base_url`
 - `model_provider`
@@ -94,7 +96,7 @@ It does not:
 - run as a background service automatically
 - change Codex model, sandbox, approval policy, cwd, or environment
 
-The local backend starts only when the user clicks `Start Local Service` or explicitly starts it from development tooling.
+The local backend starts only when the user opens the GUI or explicitly starts it from development tooling.
 
 ## Technical Notes
 
@@ -148,7 +150,7 @@ codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
 
 `on` / `off` enable or pause the Feishu bridge.
 
-`configure-codex-app` is the CLI equivalent of the GUI `Write Config` button. If model provider config is written, the default provider is `codex` and the default model is `gpt-5.5`.
+`configure-codex-app` is the CLI equivalent of enabling a provider in the GUI. If model provider config is written, the default provider is `ai-codex` and the default model is `gpt-5.5`.
 
 ## Configuration
 

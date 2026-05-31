@@ -80,6 +80,25 @@ jobs:
 
           Compress-Archive -Path "$dist\*" -DestinationPath $zip -Force
 
+      - name: Write Update Manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $notes = ""
+          if (Test-Path "RELEASE_NOTES.md") {
+            $notes = Get-Content "RELEASE_NOTES.md" -Raw
+          }
+          $manifest = [ordered]@{
+            version = $env:RELEASE_TAG
+            releaseUrl = "https://github.com/$env:RELEASE_REPOSITORY/releases/tag/$env:RELEASE_TAG"
+            notes = $notes
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path "target\dist\latest.json" -Encoding utf8
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -91,4 +110,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           body_path: RELEASE_NOTES.md
-          files: target/dist/Codex Remote Windows.zip
+          overwrite_files: true
+          files: |
+            target/dist/Codex Remote Windows.zip
+            target/dist/latest.json
