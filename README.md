@@ -142,7 +142,7 @@ GUI 里点击“卸载配置”即可移除本项目写入 Codex 的：
 ```text
 Codex App / Codex VS Code 插件
   |
-  | chatgpt_base_url = "http://localhost:3847/backend-api"
+  | chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
   | 用户打开 remote-control
   v
 官方 Codex app-server

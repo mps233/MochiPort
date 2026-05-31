@@ -81,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
                     provider_base_url,
                     provider_key,
                     model,
+                    activate_provider: true,
                 },
             )?;
             println!("Codex App configured:");

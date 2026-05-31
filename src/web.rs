@@ -44,6 +44,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/config", get(get_config).post(save_config))
         .route("/api/codex-app/configure", post(configure_codex_app))
         .route(
+            "/api/codex-app/provider/delete",
+            post(delete_codex_app_provider),
+        )
+        .route(
             "/api/codex-app/repair-gui-environment",
             post(repair_codex_app_gui_environment),
         )
@@ -288,6 +292,13 @@ struct ConfigureCodexAppRequest {
     provider_base_url: Option<String>,
     provider_key: Option<String>,
     model: Option<String>,
+    activate: Option<bool>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteCodexAppProviderRequest {
+    provider_name: String,
 }
 
 async fn configure_codex_app(
@@ -322,6 +333,10 @@ async fn configure_codex_app(
         .and_then(|value| value.model.clone())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
+    let activate_provider = request
+        .as_ref()
+        .and_then(|value| value.activate)
+        .unwrap_or(true);
 
     let backend_url = config.remote_control_base_url();
     match codex_app_config::configure_codex_app(ConfigureCodexAppOptions {
@@ -335,6 +350,7 @@ async fn configure_codex_app(
         provider_base_url,
         provider_key,
         model,
+        activate_provider,
     }) {
         Ok(report) => {
             let gui_api_base = codex_app_config::inspect_gui_api_base_url(&backend_url);
@@ -364,6 +380,40 @@ async fn configure_codex_app(
                     "guiApiBase": gui_api_base,
                     "remoteControlSwitch": remote_control_switch,
                 })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn delete_codex_app_provider(
+    State(state): State<SharedState>,
+    Json(request): Json<DeleteCodexAppProviderRequest>,
+) -> impl IntoResponse {
+    let config = state.config.lock().await.clone();
+    let backend_url = config.remote_control_base_url();
+    match codex_app_config::delete_codex_app_provider(None, request.provider_name.trim()) {
+        Ok(config_path) => {
+            let status = codex_app_config::inspect_codex_app_config(None, &backend_url);
+            state
+                .push_event(
+                    "info",
+                    "codex_app_provider_deleted",
+                    format!(
+                        "config={} provider={}",
+                        config_path.display(),
+                        request.provider_name.trim()
+                    ),
+                )
+                .await;
+            (
+                StatusCode::OK,
+                Json(
+                    json!({ "ok": true, "configPath": config_path.to_string_lossy().to_string(), "status": status }),
+                ),
             )
         }
         Err(err) => (

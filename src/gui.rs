@@ -30,10 +30,12 @@ const DASHBOARD_RESULT_POLL_MS: i32 = 100;
 const GUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
 const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
+const GUI_CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
 const ID_MENU_CLOSE_WINDOW: i32 = 10_001;
 const ID_MENU_MINIMIZE: i32 = 10_002;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
+type ConfigActionResultStore = Arc<Mutex<Option<ConfigActionResult>>>;
 
 #[derive(Clone)]
 struct GuiTimers {
@@ -189,61 +191,87 @@ fn build_ui() {
     codex_page.set_background_color(Colour::rgb(250, 251, 253));
     let codex_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let codex_status_static_box = StaticBox::builder(&codex_page)
-        .with_label("Codex App 配置")
-        .build();
-    let codex_status_box =
-        StaticBoxSizerBuilder::new_with_box(&codex_status_static_box, Orientation::Vertical)
-            .build();
-    let codex_config_state = StaticText::builder(&codex_status_static_box)
-        .with_label("正在读取 ~/.codex 配置状态")
-        .build();
-    codex_config_state.set_foreground_color(Colour::rgb(75, 84, 98));
-    codex_config_state.wrap(980);
-    codex_status_box.add(
-        &codex_config_state,
-        0,
-        SizerFlag::Expand | SizerFlag::All,
-        12,
-    );
-    codex_sizer.add_sizer(
-        &codex_status_box,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        10,
-    );
-
     let config_static_box = StaticBox::builder(&codex_page)
-        .with_label("写入 Codex 接入配置")
+        .with_label("Provider 管理")
         .build();
     let config_box =
         StaticBoxSizerBuilder::new_with_box(&config_static_box, Orientation::Vertical).build();
-    let config_header = BoxSizer::builder(Orientation::Horizontal).build();
     let config_hint = StaticText::builder(&config_static_box)
-        .with_label("填写第三方模型服务，然后写入 Codex App 本地配置。")
+        .with_label("选择或填写第三方模型服务，然后写入 Codex App。")
         .build();
     config_hint.set_foreground_color(Colour::rgb(34, 39, 47));
     config_hint.wrap(760);
-    config_header.add(&config_hint, 1, SizerFlag::AlignCenterVertical, 0);
+    config_box.add(
+        &config_hint,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        12,
+    );
+
     let uninstall_button = Button::builder(&config_static_box)
-        .with_label("卸载配置")
+        .with_label("卸载")
         .build();
     uninstall_button.set_tooltip("移除本工具写入的 Codex App 本地接入配置");
-    config_header.add(
-        &uninstall_button,
+    let new_provider_button = Button::builder(&config_static_box)
+        .with_label("新增")
+        .build();
+    new_provider_button.set_tooltip("清空表单，新增一个 provider");
+    let save_provider_button = Button::builder(&config_static_box)
+        .with_label("保存")
+        .build();
+    save_provider_button.set_tooltip("保存或更新当前表单里的 provider");
+    let delete_provider_button = Button::builder(&config_static_box)
+        .with_label("删除")
+        .build();
+    delete_provider_button.set_tooltip("删除当前选中的 provider");
+    let configure_button = Button::builder(&config_static_box)
+        .with_label("启动")
+        .build();
+    configure_button.set_tooltip("保存当前表单并设为 Codex App 当前 provider");
+
+    let provider_catalog = StaticText::builder(&config_static_box)
+        .with_label("正在匹配 ~/.codex/config.toml 里的 provider")
+        .build();
+    provider_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
+    provider_catalog.wrap(980);
+    config_box.add(
+        &provider_catalog,
         0,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         8,
     );
-    let configure_button = Button::builder(&config_static_box)
-        .with_label("写入配置")
+
+    let provider_list = ListCtrl::builder(&config_static_box)
+        .with_style(ListCtrlStyle::Report | ListCtrlStyle::SingleSel | ListCtrlStyle::HRules)
+        .with_size(Size::new(-1, 142))
         .build();
-    configure_button.set_tooltip("写入 Codex Remote 使用的本地 provider 配置");
-    config_header.add(&configure_button, 0, SizerFlag::AlignCenterVertical, 0);
-    config_box.add_sizer(&config_header, 0, SizerFlag::Expand | SizerFlag::All, 12);
+    provider_list.insert_column(0, "名称", ListColumnFormat::Left, 160);
+    provider_list.insert_column(1, "Base URL", ListColumnFormat::Left, 420);
+    provider_list.insert_column(2, "当前", ListColumnFormat::Left, 90);
+    provider_list.insert_column(3, "API Key", ListColumnFormat::Left, 160);
+    config_box.add(
+        &provider_list,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        10,
+    );
+
+    let provider_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    provider_actions.add_stretch_spacer(1);
+    provider_actions.add(&new_provider_button, 0, SizerFlag::Right, 8);
+    provider_actions.add(&save_provider_button, 0, SizerFlag::Right, 8);
+    provider_actions.add(&delete_provider_button, 0, SizerFlag::Right, 8);
+    provider_actions.add(&configure_button, 0, SizerFlag::Right, 8);
+    provider_actions.add(&uninstall_button, 0, SizerFlag::Right, 0);
+    config_box.add_sizer(
+        &provider_actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        10,
+    );
 
     let provider_help = StaticText::builder(&config_static_box)
-        .with_label("Codex App 会使用这里的 Base URL 和 API Key。Provider 可以选择已有配置，也可以输入新名字新建。")
+        .with_label("API Key 已保存时会用星号显示；需要更换时直接输入新 key。")
         .build();
     provider_help.set_foreground_color(Colour::rgb(91, 100, 114));
     provider_help.wrap(980);
@@ -272,23 +300,13 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         8,
     );
-    let provider_catalog = StaticText::builder(&config_static_box)
-        .with_label("正在匹配 ~/.codex/config.toml 里的 provider")
-        .build();
-    provider_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
-    provider_catalog.wrap(980);
-    config_box.add(
-        &provider_catalog,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        8,
-    );
     codex_sizer.add_sizer(
         &config_box,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
     );
+
     codex_sizer.add_stretch_spacer(1);
     codex_page.set_sizer(codex_sizer, true);
     codex_page.set_scroll_rate(10, 10);
@@ -442,24 +460,29 @@ fn build_ui() {
         feishu_state,
         feishu_detail,
         feishu_meta,
-        codex_config_state,
         change_bot_button,
         stop_bridge_button,
         uninstall_button,
+        new_provider_button,
+        save_provider_button,
+        delete_provider_button,
         configure_button,
         refresh_button,
         start_daemon_button,
         provider_name,
         provider_base_url,
         provider_key,
+        provider_list,
         provider_catalog,
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
     let dashboard_refresh = DashboardRefresh::new();
     let gui_timers = GuiTimers::new();
+    let config_action_result: ConfigActionResultStore = Arc::new(Mutex::new(None));
+    let config_action_in_flight = Arc::new(AtomicBool::new(false));
     show_dashboard_starting(&handles);
-    show_local_codex_app_config_preview(&handles, &api);
+    show_local_codex_app_config_preview(&handles, &api, &dashboard_refresh);
 
     {
         let api = api.clone();
@@ -491,29 +514,161 @@ fn build_ui() {
     }
 
     {
+        let handles = handles;
+        new_provider_button.on_click(move |_| {
+            clear_provider_list_selection(&handles.provider_list);
+            set_combo_value_if_changed(&handles.provider_name, "");
+            change_text_value_if_changed(&handles.provider_base_url, "");
+            change_text_value_if_changed(&handles.provider_key, "");
+            handles
+                .provider_catalog
+                .set_label("填写新 provider 名称、Base URL 和 API Key，然后点击启动。");
+            handles.provider_catalog.wrap(980);
+            handles.provider_catalog.layout();
+        });
+    }
+
+    {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let provider_name = provider_name;
         let provider_base_url = provider_base_url;
         let provider_key = provider_key;
         let frame = frame;
-        configure_button.on_click(move |_| {
-            let request = ConfigureRequest {
-                provider_name: Some(provider_name.get_value()),
-                provider_base_url: Some(provider_base_url.get_value()),
-                provider_key: Some(provider_key.get_value()),
-                model: None,
-            };
-            match api.configure_codex_app(&request) {
-                Ok(_) => {
-                    show_info(
-                        &frame,
-                        "配置已写入。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。",
-                    );
-                    schedule_dashboard_refresh(&api, &dashboard_refresh);
-                }
-                Err(err) => show_error(&frame, &err),
+        let handles = handles;
+        let config_action_result = config_action_result.clone();
+        let config_action_in_flight = config_action_in_flight.clone();
+        save_provider_button.on_click(move |_| {
+            if config_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
             }
+            handles
+                .provider_catalog
+                .set_label("正在保存 provider，请稍候...");
+            handles.provider_catalog.wrap(980);
+            handles.save_provider_button.set_label("保存中...");
+            set_actions_enabled(&handles, false);
+            frame.refresh(true, None);
+            frame.update();
+
+            let (selected_provider, request) = provider_config_request_from_ui(
+                &handles,
+                &provider_name,
+                &provider_base_url,
+                &provider_key,
+                cached_dashboard_snapshot(&dashboard_refresh).as_ref(),
+                false,
+            );
+            let api = api.clone();
+            let config_action_result = config_action_result.clone();
+            let config_action_in_flight = config_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = save_codex_provider_and_verify(&api, &request, &selected_provider);
+                if let Ok(mut slot) = config_action_result.lock() {
+                    slot.replace(ConfigActionResult::Save {
+                        provider_name: selected_provider,
+                        result: outcome,
+                    });
+                }
+                config_action_in_flight.store(false, Ordering::SeqCst);
+            });
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let provider_name = provider_name;
+        let frame = frame;
+        let handles = handles;
+        let config_action_result = config_action_result.clone();
+        let config_action_in_flight = config_action_in_flight.clone();
+        delete_provider_button.on_click(move |_| {
+            if config_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let provider_name = provider_name_from_ui(
+                &handles,
+                &provider_name,
+                cached_dashboard_snapshot(&dashboard_refresh).as_ref(),
+            );
+            if provider_name.trim().is_empty() {
+                config_action_in_flight.store(false, Ordering::SeqCst);
+                show_error(&frame, "请先选择或填写要删除的 provider。");
+                return;
+            }
+            if !confirm_delete_provider(&frame, &provider_name) {
+                config_action_in_flight.store(false, Ordering::SeqCst);
+                return;
+            }
+
+            handles
+                .provider_catalog
+                .set_label("正在删除 provider，请稍候...");
+            handles.provider_catalog.wrap(980);
+            handles.delete_provider_button.set_label("删除中...");
+            set_actions_enabled(&handles, false);
+            frame.refresh(true, None);
+            frame.update();
+
+            let request = DeleteProviderRequest { provider_name };
+            let api = api.clone();
+            let config_action_result = config_action_result.clone();
+            let config_action_in_flight = config_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = delete_codex_provider_and_verify(&api, &request);
+                if let Ok(mut slot) = config_action_result.lock() {
+                    slot.replace(ConfigActionResult::Delete(outcome));
+                }
+                config_action_in_flight.store(false, Ordering::SeqCst);
+            });
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let provider_name = provider_name;
+        let provider_base_url = provider_base_url;
+        let provider_key = provider_key;
+        let frame = frame;
+        let handles = handles;
+        let config_action_result = config_action_result.clone();
+        let config_action_in_flight = config_action_in_flight.clone();
+        configure_button.on_click(move |_| {
+            if config_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            handles
+                .provider_catalog
+                .set_label("正在写入配置，请稍候...");
+            handles.provider_catalog.wrap(980);
+            handles.configure_button.set_label("启动中...");
+            set_actions_enabled(&handles, false);
+            frame.refresh(true, None);
+            frame.update();
+
+            let (selected_provider, request) = provider_config_request_from_ui(
+                &handles,
+                &provider_name,
+                &provider_base_url,
+                &provider_key,
+                cached_dashboard_snapshot(&dashboard_refresh).as_ref(),
+                true,
+            );
+            let api = api.clone();
+            let config_action_result = config_action_result.clone();
+            let config_action_in_flight = config_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = configure_codex_app_and_verify(&api, &request, &selected_provider);
+                if let Ok(mut slot) = config_action_result.lock() {
+                    slot.replace(ConfigActionResult::Configure {
+                        provider_name: selected_provider,
+                        result: outcome,
+                    });
+                }
+                config_action_in_flight.store(false, Ordering::SeqCst);
+            });
         });
     }
 
@@ -521,6 +676,7 @@ fn build_ui() {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
+        let handles = handles;
         uninstall_button.on_click(move |_| {
             if !confirm_uninstall_codex_app_config(&frame) {
                 return;
@@ -532,6 +688,7 @@ fn build_ui() {
                         &frame,
                         "Codex App 本地接入配置已卸载。请重启 Codex App 以恢复官方连接。",
                     );
+                    show_local_codex_app_config_preview(&handles, &api, &dashboard_refresh);
                     schedule_dashboard_refresh(&api, &dashboard_refresh);
                 }
                 Err(err) => show_error(&frame, &err),
@@ -543,13 +700,31 @@ fn build_ui() {
         let handles = handles;
         let dashboard_refresh = dashboard_refresh.clone();
         provider_name.on_selection_changed(move |_| {
-            let selected = provider_name.get_value();
+            let selected = clean_provider_text(&provider_name.get_value());
             let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) else {
                 return;
             };
             if let Some(provider) = find_provider(&snapshot, &selected) {
                 apply_provider_to_form(&handles, &provider, true);
             }
+        });
+    }
+
+    {
+        let handles = handles;
+        let dashboard_refresh = dashboard_refresh.clone();
+        provider_list.on_item_selected(move |event| {
+            let index = event.get_item_index();
+            if index < 0 {
+                return;
+            }
+            if let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) {
+                if let Some(provider) = provider_from_list_row(&snapshot, index as i64) {
+                    apply_provider_to_form(&handles, &provider, true);
+                    return;
+                }
+            }
+            apply_provider_row_to_form(&handles, &provider_list, index as i64);
         });
     }
 
@@ -588,6 +763,30 @@ fn build_ui() {
     result_timer.start(DASHBOARD_RESULT_POLL_MS, false);
     result_timer_store.borrow_mut().replace(result_timer);
     gui_timers.track(&result_timer_store);
+
+    let config_action_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
+    let config_action_timer = Timer::new(&frame);
+    {
+        let api = api.clone();
+        let handles = handles;
+        let frame = frame;
+        let dashboard_refresh = dashboard_refresh.clone();
+        let config_action_result = config_action_result.clone();
+        config_action_timer.on_tick(move |_| {
+            apply_pending_config_action(
+                &api,
+                &handles,
+                &frame,
+                &dashboard_refresh,
+                &config_action_result,
+            );
+        });
+    }
+    config_action_timer.start(DASHBOARD_RESULT_POLL_MS, false);
+    config_action_timer_store
+        .borrow_mut()
+        .replace(config_action_timer);
+    gui_timers.track(&config_action_timer_store);
 
     let timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let timer = Timer::new(&frame);
@@ -1006,12 +1205,29 @@ impl ApiClient {
         serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
     }
 
+    fn get_with_timeout<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        let text = self.request_text(self.http.get(self.url(path)).timeout(timeout))?;
+        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+    }
+
     fn is_online(&self) -> bool {
         self.get_quick::<serde_json::Value>("/api/status").is_ok()
     }
 
     fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        let text = self.request_text(self.http.post(self.url(path)))?;
+        self.post_empty_with_timeout(path, GUI_ACTION_TIMEOUT)
+    }
+
+    fn post_empty_with_timeout<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        let text = self.request_text(self.http.post(self.url(path)).timeout(timeout))?;
         serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
     }
 
@@ -1020,14 +1236,29 @@ impl ApiClient {
         path: &str,
         body: &B,
     ) -> Result<T, String> {
-        let text = self.request_text(self.http.post(self.url(path)).json(body))?;
+        self.post_json_with_timeout(path, body, GUI_ACTION_TIMEOUT)
+    }
+
+    fn post_json_with_timeout<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        let text = self.request_text(self.http.post(self.url(path)).json(body).timeout(timeout))?;
         serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
     }
 
     fn request_text(&self, request: reqwest::blocking::RequestBuilder) -> Result<String, String> {
-        let response = request
-            .send()
-            .map_err(|err| format!("无法连接本地服务 {}：{err}", self.base_url))?;
+        let response = request.send().map_err(|err| {
+            if err.is_timeout() {
+                format!("本地服务 {} 响应超时：{err}", self.base_url)
+            } else if err.is_connect() {
+                format!("无法连接本地服务 {}：{err}", self.base_url)
+            } else {
+                format!("本地服务 {} 请求失败：{err}", self.base_url)
+            }
+        })?;
         let status = response.status();
         let text = response.text().map_err(|err| err.to_string())?;
         if status.is_success() {
@@ -1051,10 +1282,9 @@ impl ApiClient {
     fn dashboard(&self) -> DashboardSnapshot {
         let status = match self.get_quick::<ServerStatus>("/api/status") {
             Ok(status) => status,
-            Err(err) => {
+            Err(_err) => {
                 return DashboardSnapshot {
                     service_online: false,
-                    error: Some(err),
                     ..DashboardSnapshot::default()
                 };
             }
@@ -1070,7 +1300,6 @@ impl ApiClient {
 
         DashboardSnapshot {
             service_online: true,
-            error: None,
             config: join_optional(config),
             backend: join_optional(backend),
             remote: join_optional(remote),
@@ -1088,15 +1317,30 @@ impl ApiClient {
     }
 
     fn configure_codex_app(&self, request: &ConfigureRequest) -> Result<serde_json::Value, String> {
-        self.post_json("/api/codex-app/configure", request)
+        self.post_json_with_timeout("/api/codex-app/configure", request, GUI_CONFIG_TIMEOUT)
+    }
+
+    fn delete_codex_provider(
+        &self,
+        request: &DeleteProviderRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout(
+            "/api/codex-app/provider/delete",
+            request,
+            GUI_CONFIG_TIMEOUT,
+        )
+    }
+
+    fn codex_app_status(&self) -> Result<CodexAppStatus, String> {
+        self.get_with_timeout("/api/codex-app/status", GUI_CONFIG_TIMEOUT)
     }
 
     fn uninstall_codex_app(&self) -> Result<serde_json::Value, String> {
-        self.post_empty("/api/codex-app/uninstall")
+        self.post_empty_with_timeout("/api/codex-app/uninstall", GUI_CONFIG_TIMEOUT)
     }
 
     fn repair_codex_app_gui_environment(&self) -> Result<serde_json::Value, String> {
-        self.post_empty("/api/codex-app/repair-gui-environment")
+        self.post_empty_with_timeout("/api/codex-app/repair-gui-environment", GUI_CONFIG_TIMEOUT)
     }
 
     fn stop_bridge(&self) -> Result<serde_json::Value, String> {
@@ -1152,16 +1396,19 @@ struct UiHandles {
     feishu_state: StaticText,
     feishu_detail: StaticText,
     feishu_meta: StaticText,
-    codex_config_state: StaticText,
     change_bot_button: Button,
     stop_bridge_button: Button,
     uninstall_button: Button,
+    new_provider_button: Button,
+    save_provider_button: Button,
+    delete_provider_button: Button,
     configure_button: Button,
     refresh_button: Button,
     start_daemon_button: Button,
     provider_name: ComboBox,
     provider_base_url: TextCtrl,
     provider_key: TextCtrl,
+    provider_list: ListCtrl,
     provider_catalog: StaticText,
 }
 
@@ -1198,7 +1445,6 @@ struct DashboardSnapshot {
     backend: Option<RemoteControlBackendStatus>,
     remote: Option<RemoteControlStatus>,
     codex_app: Option<CodexAppStatus>,
-    error: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1256,23 +1502,10 @@ struct RemoteControlStatus {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexAppStatus {
-    codex_home: String,
     configured: bool,
-    config_ok: bool,
-    auth_ok: bool,
-    gui_api_base: GuiApiBaseStatus,
-    #[serde(default)]
-    remote_control_switch: Option<CodexAppRemoteControlSwitchStatus>,
     provider: Option<CodexAppProviderStatus>,
     #[serde(default)]
     providers: Vec<CodexAppProviderStatus>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct CodexAppRemoteControlSwitchStatus {
-    configured: bool,
-    error: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1283,19 +1516,6 @@ struct CodexAppProviderStatus {
     key: Option<String>,
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GuiApiBaseStatus {
-    #[serde(default)]
-    configured: bool,
-    #[serde(default)]
-    login_issuer_configured: bool,
-    value: Option<String>,
-    #[serde(default)]
-    login_issuer_value: Option<String>,
-    error: Option<String>,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigureRequest {
@@ -1303,6 +1523,25 @@ struct ConfigureRequest {
     provider_base_url: Option<String>,
     provider_key: Option<String>,
     model: Option<String>,
+    activate: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteProviderRequest {
+    provider_name: String,
+}
+
+enum ConfigActionResult {
+    Configure {
+        provider_name: String,
+        result: Result<CodexAppStatus, String>,
+    },
+    Save {
+        provider_name: String,
+        result: Result<CodexAppStatus, String>,
+    },
+    Delete(Result<CodexAppStatus, String>),
 }
 
 #[derive(Deserialize, Clone)]
@@ -1749,6 +1988,200 @@ fn cached_dashboard_snapshot(refresh: &DashboardRefresh) -> Option<DashboardSnap
         .and_then(|snapshot| snapshot.clone())
 }
 
+fn configure_codex_app_and_verify(
+    api: &ApiClient,
+    request: &ConfigureRequest,
+    selected_provider: &str,
+) -> Result<CodexAppStatus, String> {
+    api.configure_codex_app(request)?;
+    let status = api.codex_app_status()?;
+    verify_selected_provider(&status, selected_provider)?;
+    Ok(status)
+}
+
+fn save_codex_provider_and_verify(
+    api: &ApiClient,
+    request: &ConfigureRequest,
+    selected_provider: &str,
+) -> Result<CodexAppStatus, String> {
+    api.configure_codex_app(request)?;
+    let status = api.codex_app_status()?;
+    verify_saved_provider(&status, selected_provider)?;
+    Ok(status)
+}
+
+fn delete_codex_provider_and_verify(
+    api: &ApiClient,
+    request: &DeleteProviderRequest,
+) -> Result<CodexAppStatus, String> {
+    api.delete_codex_provider(request)?;
+    let status = api.codex_app_status()?;
+    verify_deleted_provider(&status, &request.provider_name)?;
+    Ok(status)
+}
+
+fn verify_selected_provider(
+    status: &CodexAppStatus,
+    selected_provider: &str,
+) -> Result<(), String> {
+    let selected_provider = selected_provider.trim();
+    if selected_provider.is_empty() {
+        return Ok(());
+    }
+
+    let active = status
+        .provider
+        .as_ref()
+        .map(|provider| provider.name.as_str());
+    if active == Some(selected_provider) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "配置接口已返回成功，但当前 provider 仍是 {}，期望是 {}。请刷新后再试一次。",
+        active.unwrap_or("<未设置>"),
+        selected_provider
+    ))
+}
+
+fn verify_saved_provider(status: &CodexAppStatus, selected_provider: &str) -> Result<(), String> {
+    let selected_provider = selected_provider.trim();
+    if selected_provider.is_empty() {
+        return Err("Provider 名称不能为空。".to_string());
+    }
+
+    if provider_rows(status)
+        .iter()
+        .any(|provider| provider.name == selected_provider)
+    {
+        return Ok(());
+    }
+
+    Err(format!(
+        "保存接口已返回成功，但 provider {} 没有出现在配置列表里。请刷新后再试一次。",
+        selected_provider
+    ))
+}
+
+fn verify_deleted_provider(status: &CodexAppStatus, provider_name: &str) -> Result<(), String> {
+    if provider_rows(status)
+        .iter()
+        .any(|provider| provider.name == provider_name)
+    {
+        return Err(format!(
+            "删除接口已返回成功，但 provider {} 仍在配置列表里。请刷新后再试一次。",
+            provider_name
+        ));
+    }
+    Ok(())
+}
+
+fn apply_pending_config_action(
+    api: &ApiClient,
+    handles: &UiHandles,
+    frame: &Frame,
+    refresh: &DashboardRefresh,
+    result: &ConfigActionResultStore,
+) -> bool {
+    let result = result.lock().ok().and_then(|mut slot| slot.take());
+    let Some(result) = result else {
+        return false;
+    };
+
+    handles.configure_button.set_label("启动");
+    handles.save_provider_button.set_label("保存");
+    handles.delete_provider_button.set_label("删除");
+    set_actions_enabled(handles, true);
+
+    match result {
+        ConfigActionResult::Save {
+            provider_name,
+            result: Ok(status),
+        } => {
+            apply_provider_action_status(handles, refresh, status, &provider_name);
+            show_info(frame, "Provider 已保存。需要使用它时再点击启动。");
+            schedule_dashboard_refresh(api, refresh);
+        }
+        ConfigActionResult::Save {
+            result: Err(err), ..
+        } => {
+            show_local_codex_app_config_preview(handles, api, refresh);
+            show_error(frame, &err);
+        }
+        ConfigActionResult::Delete(Ok(status)) => {
+            clear_provider_list_selection(&handles.provider_list);
+            set_combo_value_if_changed(&handles.provider_name, "");
+            change_text_value_if_changed(&handles.provider_base_url, "");
+            change_text_value_if_changed(&handles.provider_key, "");
+            let snapshot = DashboardSnapshot {
+                service_online: true,
+                codex_app: Some(status),
+                ..DashboardSnapshot::default()
+            };
+            if let Ok(mut last_snapshot) = refresh.last_snapshot.lock() {
+                last_snapshot.replace(snapshot.clone());
+            }
+            fill_provider_form_if_empty(handles, &snapshot);
+            show_info(frame, "Provider 已删除。");
+            schedule_dashboard_refresh(api, refresh);
+        }
+        ConfigActionResult::Delete(Err(err)) => {
+            show_local_codex_app_config_preview(handles, api, refresh);
+            show_error(frame, &err);
+        }
+        ConfigActionResult::Configure {
+            provider_name,
+            result: Ok(status),
+        } => {
+            apply_provider_action_status(handles, refresh, status, &provider_name);
+            show_info(
+                frame,
+                "配置已写入。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。",
+            );
+            schedule_dashboard_refresh(api, refresh);
+        }
+        ConfigActionResult::Configure {
+            result: Err(err), ..
+        } => {
+            show_local_codex_app_config_preview(handles, api, refresh);
+            show_error(frame, &err);
+        }
+    }
+    true
+}
+
+fn apply_provider_action_status(
+    handles: &UiHandles,
+    refresh: &DashboardRefresh,
+    status: CodexAppStatus,
+    provider_name: &str,
+) {
+    let snapshot = DashboardSnapshot {
+        service_online: true,
+        codex_app: Some(status),
+        ..DashboardSnapshot::default()
+    };
+    if let Ok(mut last_snapshot) = refresh.last_snapshot.lock() {
+        last_snapshot.replace(snapshot.clone());
+    }
+
+    if let Some(status) = snapshot.codex_app.as_ref() {
+        handles
+            .provider_catalog
+            .set_label(&provider_catalog_label(status));
+        handles.provider_catalog.wrap(980);
+        handles.provider_catalog.layout();
+        refresh_provider_choices(&handles.provider_name, &status.providers);
+        refresh_provider_list(handles, Some(status));
+    }
+
+    if let Some(provider) = find_provider(&snapshot, provider_name) {
+        apply_provider_to_form(handles, &provider, true);
+    } else {
+        set_combo_value_if_changed(&handles.provider_name, provider_name);
+    }
+}
+
 fn show_dashboard_starting(handles: &UiHandles) {
     set_status_panel(
         &handles.service_status,
@@ -1782,11 +2215,6 @@ fn show_dashboard_starting(handles: &UiHandles) {
         .feishu_detail
         .set_label("服务启动完成后会刷新飞书状态。");
     handles.feishu_meta.set_label("");
-    handles
-        .codex_config_state
-        .set_label("正在启动本地服务，界面保持可操作。");
-    handles.codex_config_state.wrap(980);
-    handles.codex_config_state.layout();
     handles.status_bar.set_status_text("本地服务：启动中", 0);
     handles.status_bar.set_status_text("飞书：等待服务", 1);
     handles.status_bar.set_status_text("Codex App：等待服务", 2);
@@ -1794,7 +2222,11 @@ fn show_dashboard_starting(handles: &UiHandles) {
     handles.start_daemon_button.enable(false);
 }
 
-fn show_local_codex_app_config_preview(handles: &UiHandles, api: &ApiClient) {
+fn show_local_codex_app_config_preview(
+    handles: &UiHandles,
+    api: &ApiClient,
+    refresh: &DashboardRefresh,
+) {
     if CODEX_APP_GUI_UNSUPPORTED {
         return;
     }
@@ -1804,31 +2236,15 @@ fn show_local_codex_app_config_preview(handles: &UiHandles, api: &ApiClient) {
         codex_app: Some(local_codex_app_status(status)),
         ..DashboardSnapshot::default()
     };
-    handles
-        .codex_config_state
-        .set_label(&codex_app_detail(&snapshot));
-    handles.codex_config_state.wrap(980);
-    handles.codex_config_state.layout();
+    if let Ok(mut last_snapshot) = refresh.last_snapshot.lock() {
+        last_snapshot.replace(snapshot.clone());
+    }
     fill_provider_form_if_empty(handles, &snapshot);
 }
 
 fn local_codex_app_status(status: crate::codex_app_config::CodexAppConfigStatus) -> CodexAppStatus {
     CodexAppStatus {
-        codex_home: status.codex_home.display().to_string(),
         configured: status.configured,
-        config_ok: status.config_ok,
-        auth_ok: status.auth_ok,
-        gui_api_base: GuiApiBaseStatus {
-            configured: status.gui_api_base.configured,
-            login_issuer_configured: status.gui_api_base.login_issuer_configured,
-            value: status.gui_api_base.value,
-            login_issuer_value: status.gui_api_base.login_issuer_value,
-            error: status.gui_api_base.error,
-        },
-        remote_control_switch: Some(CodexAppRemoteControlSwitchStatus {
-            configured: status.remote_control_switch.configured,
-            error: status.remote_control_switch.error,
-        }),
         provider: status.provider.map(local_codex_app_provider_status),
         providers: status
             .providers
@@ -1886,14 +2302,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             .feishu_detail
             .set_label("请先启动 codex-remote 后端。");
         handles.feishu_meta.set_label("");
-        let config_state = snapshot
-            .error
-            .as_deref()
-            .map(|err| format!("无法读取 Codex App 配置状态。\n本地服务连接错误: {err}"))
-            .unwrap_or_else(|| "无法读取 Codex App 配置状态。".to_string());
-        handles.codex_config_state.set_label(&config_state);
-        handles.codex_config_state.wrap(980);
-        handles.codex_config_state.layout();
         handles.status_bar.set_status_text("本地服务：离线", 0);
         handles.status_bar.set_status_text("飞书：不可用", 1);
         handles.status_bar.set_status_text("Codex App：不可用", 2);
@@ -2082,13 +2490,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             StateTone::Warn,
         );
     }
-
-    handles
-        .codex_config_state
-        .set_label(&codex_app_detail(snapshot));
-    handles.codex_config_state.wrap(980);
-    handles.codex_config_state.layout();
-    fill_provider_form_if_empty(handles, snapshot);
 }
 
 fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot) {
@@ -2098,6 +2499,7 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
             .set_label("本地服务运行后会读取 ~/.codex/config.toml 里的 provider。");
         handles.provider_catalog.wrap(980);
         handles.provider_catalog.layout();
+        refresh_provider_list(handles, None);
         return;
     };
     handles
@@ -2105,6 +2507,7 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
         .set_label(&provider_catalog_label(status));
     handles.provider_catalog.wrap(980);
     handles.provider_catalog.layout();
+    refresh_provider_list(handles, Some(status));
 
     if provider_form_has_focus(handles) {
         return;
@@ -2163,6 +2566,99 @@ fn refresh_provider_choices(input: &ComboBox, providers: &[CodexAppProviderStatu
     input.set_insertion_point(insertion_point.min(current.chars().count() as i64));
 }
 
+fn refresh_provider_list(handles: &UiHandles, status: Option<&CodexAppStatus>) {
+    let rows = provider_list_rows(status);
+    if provider_list_matches(&handles.provider_list, &rows) {
+        return;
+    }
+
+    handles.provider_list.delete_all_items();
+
+    for (index, row_data) in rows.iter().enumerate() {
+        let row = handles
+            .provider_list
+            .insert_item(index as i64, &row_data[0], None);
+        handles
+            .provider_list
+            .set_item_text_by_column(row as i64, 1, row_data[1].as_str());
+        handles
+            .provider_list
+            .set_item_text_by_column(row as i64, 2, row_data[2].as_str());
+        handles
+            .provider_list
+            .set_item_text_by_column(row as i64, 3, row_data[3].as_str());
+
+        if row_data[2] == "使用中" {
+            handles.provider_list.ensure_visible(row as i64);
+        }
+    }
+}
+
+fn provider_list_rows(status: Option<&CodexAppStatus>) -> Vec<[String; 4]> {
+    let Some(status) = status else {
+        return vec![[
+            "等待本地服务".to_string(),
+            "启动后读取 ~/.codex/config.toml".to_string(),
+            String::new(),
+            String::new(),
+        ]];
+    };
+
+    let active_name = status
+        .provider
+        .as_ref()
+        .map(|provider| provider.name.as_str());
+    let providers = provider_rows(status);
+    if providers.is_empty() {
+        return vec![[
+            DEFAULT_PROVIDER_NAME.to_string(),
+            "未配置，写入时新建".to_string(),
+            String::new(),
+            "未配置".to_string(),
+        ]];
+    }
+
+    providers
+        .iter()
+        .map(|provider| {
+            [
+                provider.name.clone(),
+                provider
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "未配置".to_string()),
+                if Some(provider.name.as_str()) == active_name {
+                    "使用中".to_string()
+                } else {
+                    String::new()
+                },
+                masked_provider_key(provider.key.as_deref()),
+            ]
+        })
+        .collect()
+}
+
+fn provider_list_matches(list: &ListCtrl, rows: &[[String; 4]]) -> bool {
+    if list.get_item_count() != rows.len() as i32 {
+        return false;
+    }
+    rows.iter().enumerate().all(|(index, row)| {
+        (0..4).all(|column| list.get_item_text(index as i64, column) == row[column as usize])
+    })
+}
+
+fn provider_rows(status: &CodexAppStatus) -> Vec<CodexAppProviderStatus> {
+    let mut providers = status.providers.clone();
+    if let Some(active) = &status.provider
+        && !providers
+            .iter()
+            .any(|provider| provider.name == active.name)
+    {
+        providers.insert(0, active.clone());
+    }
+    providers
+}
+
 fn provider_choice_names(providers: &[CodexAppProviderStatus]) -> Vec<String> {
     if providers.is_empty() {
         return vec![DEFAULT_PROVIDER_NAME.to_string()];
@@ -2177,6 +2673,49 @@ fn provider_choice_names(providers: &[CodexAppProviderStatus]) -> Vec<String> {
     names
 }
 
+fn masked_provider_key(value: Option<&str>) -> String {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return "未配置".to_string();
+    };
+    format!("已配置 {}", masked_secret(value))
+}
+
+fn masked_provider_key_input(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(masked_secret)
+        .unwrap_or_default()
+}
+
+fn masked_secret(value: &str) -> String {
+    let suffix = value
+        .chars()
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("****{suffix}")
+}
+
+fn provider_key_value_for_config(value: &str) -> Option<String> {
+    let value = value.trim();
+    if is_placeholder_config_value(value) || is_masked_provider_key(value) {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn is_masked_provider_key(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with("****")
+        && value.chars().filter(|ch| *ch == '*').count() >= 4
+        && value.chars().any(|ch| ch != '*')
+}
+
 fn combo_box_items(input: &ComboBox) -> Vec<String> {
     (0..input.get_count())
         .filter_map(|index| input.get_string(index))
@@ -2186,27 +2725,18 @@ fn combo_box_items(input: &ComboBox) -> Vec<String> {
 fn provider_catalog_label(status: &CodexAppStatus) -> String {
     if status.providers.is_empty() {
         if let Some(active) = status.provider.as_ref() {
-            return format!(
-                "当前配置里有 model_provider: {active}，但没有匹配到 provider 详情。可以继续填写 Base URL 和 API Key 补齐。",
-                active = active.name.as_str()
-            );
+            return format!("当前 provider: {active}", active = active.name.as_str());
         }
-        return "没有在 ~/.codex/config.toml 里找到 provider，默认新建 ai-codex。".to_string();
+        return "还没有 provider，填写后点击写入配置。".to_string();
     }
 
-    let names = status
-        .providers
-        .iter()
-        .map(|provider| provider.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
     if let Some(active) = status.provider.as_ref() {
-        format!(
-            "已匹配 provider: {names}。建议选择当前使用的 {active}，也可以直接输入新名字新建。",
-            active = active.name.as_str()
-        )
+        format!("当前 provider: {}", active.name)
     } else {
-        format!("已匹配 provider: {names}。请选择原来使用的 provider，也可以直接输入新名字新建。")
+        format!(
+            "已保存 {} 个 provider，请选择一个使用。",
+            status.providers.len()
+        )
     }
 }
 
@@ -2233,21 +2763,177 @@ fn find_provider(
         })
 }
 
+fn provider_from_list_row(
+    snapshot: &DashboardSnapshot,
+    row: i64,
+) -> Option<CodexAppProviderStatus> {
+    let status = snapshot.codex_app.as_ref()?;
+    (row >= 0)
+        .then(|| provider_rows(status).get(row as usize).cloned())
+        .flatten()
+}
+
+fn provider_config_request_from_ui(
+    handles: &UiHandles,
+    provider_name: &ComboBox,
+    provider_base_url: &TextCtrl,
+    provider_key: &TextCtrl,
+    snapshot: Option<&DashboardSnapshot>,
+    activate: bool,
+) -> (String, ConfigureRequest) {
+    let form_provider = clean_provider_text(&provider_name.get_value());
+    let mut selected_provider = form_provider.clone();
+    let mut selected_base_url = strip_nul(&provider_base_url.get_value());
+    let mut selected_key = strip_nul(&provider_key.get_value());
+
+    let selected_row = handles.provider_list.get_first_selected_item();
+    if selected_provider.is_empty() && selected_row >= 0 {
+        let row = selected_row as i64;
+        if let Some(provider) = snapshot.and_then(|snapshot| provider_from_list_row(snapshot, row))
+        {
+            selected_provider = provider.name;
+            let row_base_url = provider.base_url.unwrap_or_default();
+
+            if selected_provider != form_provider || selected_base_url.trim().is_empty() {
+                selected_base_url = row_base_url;
+            }
+
+            let row_key = masked_provider_key_input(provider.key.as_deref());
+            if selected_provider != form_provider || selected_key.trim().is_empty() {
+                selected_key = row_key;
+            }
+        } else {
+            let row_name = clean_provider_text(&handles.provider_list.get_item_text(row, 0));
+            if is_real_provider_name(&row_name) {
+                selected_provider = row_name;
+                let row_base_url =
+                    list_base_url_cell_to_input(&handles.provider_list.get_item_text(row, 1));
+
+                if selected_provider != form_provider || selected_base_url.trim().is_empty() {
+                    selected_base_url = row_base_url;
+                }
+
+                let row_key = list_key_cell_to_input(&handles.provider_list.get_item_text(row, 3));
+                if selected_provider != form_provider || selected_key.trim().is_empty() {
+                    selected_key = row_key;
+                }
+            }
+        }
+    }
+
+    let selected_base_url = config_text_value(&selected_base_url).unwrap_or_default();
+    let provider_key = provider_key_value_for_config(&selected_key);
+    let request = ConfigureRequest {
+        provider_name: Some(selected_provider.clone()),
+        provider_base_url: Some(selected_base_url),
+        provider_key,
+        model: None,
+        activate,
+    };
+    (selected_provider, request)
+}
+
+fn provider_name_from_ui(
+    handles: &UiHandles,
+    provider_name: &ComboBox,
+    snapshot: Option<&DashboardSnapshot>,
+) -> String {
+    let form_provider = clean_provider_text(&provider_name.get_value());
+    if !form_provider.is_empty() {
+        return form_provider;
+    }
+
+    let selected_row = handles.provider_list.get_first_selected_item();
+    if selected_row < 0 {
+        return String::new();
+    }
+
+    snapshot
+        .and_then(|snapshot| provider_from_list_row(snapshot, selected_row as i64))
+        .map(|provider| provider.name)
+        .unwrap_or_else(|| {
+            clean_provider_text(&handles.provider_list.get_item_text(selected_row as i64, 0))
+        })
+}
+
+fn is_real_provider_name(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty() && value != "等待本地服务"
+}
+
+fn apply_provider_row_to_form(handles: &UiHandles, list: &ListCtrl, row: i64) {
+    let name = clean_provider_text(&list.get_item_text(row, 0));
+    let base_url = list_base_url_cell_to_input(&list.get_item_text(row, 1));
+    let key = list_key_cell_to_input(&list.get_item_text(row, 3));
+    if is_real_provider_name(&name) {
+        set_combo_value_if_changed(&handles.provider_name, &name);
+    }
+    change_text_value_if_changed(&handles.provider_base_url, &base_url);
+    change_text_value_if_changed(&handles.provider_key, &key);
+}
+
+fn list_base_url_cell_to_input(value: &str) -> String {
+    let value = strip_nul(value);
+    let value = value.trim();
+    if is_placeholder_config_value(value) {
+        String::new()
+    } else {
+        value.to_string()
+    }
+}
+
+fn list_key_cell_to_input(value: &str) -> String {
+    let value = strip_nul(value);
+    let value = value.trim();
+    if is_placeholder_config_value(value) {
+        return String::new();
+    }
+    value.strip_prefix("已配置 ").unwrap_or(value).to_string()
+}
+
+fn clean_provider_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn strip_nul(value: &str) -> String {
+    value.chars().filter(|ch| *ch != '\0').collect()
+}
+
+fn config_text_value(value: &str) -> Option<String> {
+    let value = strip_nul(value).trim().to_string();
+    (!is_placeholder_config_value(&value)).then_some(value)
+}
+
+fn is_placeholder_config_value(value: &str) -> bool {
+    let value = value.trim();
+    value.is_empty() || value.contains("未配")
+}
+
 fn apply_provider_to_form(handles: &UiHandles, provider: &CodexAppProviderStatus, overwrite: bool) {
     if overwrite || handles.provider_name.get_value().trim().is_empty() {
         set_combo_value_if_changed(&handles.provider_name, &provider.name);
     }
     if overwrite || handles.provider_base_url.get_value().trim().is_empty() {
-        change_text_value_if_changed(
-            &handles.provider_base_url,
-            provider.base_url.as_deref().unwrap_or_default(),
-        );
+        let base_url = provider
+            .base_url
+            .as_deref()
+            .and_then(config_text_value)
+            .unwrap_or_default();
+        change_text_value_if_changed(&handles.provider_base_url, &base_url);
     }
     if overwrite || handles.provider_key.get_value().trim().is_empty() {
-        change_text_value_if_changed(
-            &handles.provider_key,
-            provider.key.as_deref().unwrap_or_default(),
-        );
+        let key = provider
+            .key
+            .as_deref()
+            .and_then(config_text_value)
+            .map(|value| masked_secret(&value))
+            .unwrap_or_default();
+        change_text_value_if_changed(&handles.provider_key, &key);
     }
 }
 
@@ -2265,9 +2951,28 @@ fn change_text_value_if_changed(input: &TextCtrl, value: &str) {
     input.change_value(value);
 }
 
+fn clear_provider_list_selection(list: &ListCtrl) {
+    loop {
+        let selected = list.get_first_selected_item();
+        if selected < 0 {
+            break;
+        }
+        if !list.set_item_state(
+            selected as i64,
+            ListItemState::None,
+            ListItemState::Selected,
+        ) {
+            break;
+        }
+    }
+}
+
 fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.change_bot_button.enable(enabled);
     handles.configure_button.enable(enabled);
+    handles.new_provider_button.enable(enabled);
+    handles.save_provider_button.enable(enabled);
+    handles.delete_provider_button.enable(enabled);
     handles.refresh_button.enable(true);
     handles.stop_bridge_button.enable(enabled);
     handles.uninstall_button.enable(enabled);
@@ -2347,67 +3052,6 @@ fn codex_remote_detail(remote: &RemoteControlStatus) -> String {
         return format!("最近错误: {err}");
     }
     "remote-control 已连接。".to_string()
-}
-
-fn codex_app_detail(snapshot: &DashboardSnapshot) -> String {
-    let Some(status) = &snapshot.codex_app else {
-        return "无法读取 ~/.codex 配置状态。".to_string();
-    };
-    if CODEX_APP_GUI_UNSUPPORTED {
-        let mut detail = format!(
-            "当前平台 Codex App GUI 自动接入暂不可用，请使用 VS Code 插件接入。\n配置会写入到 {}，用于准备本地 provider；是否可用以 VS Code 插件实际连接结果为准。",
-            status.codex_home
-        );
-        if status.configured {
-            detail.push_str("\n当前检测到本地配置已写入。");
-        } else {
-            detail.push_str("\n当前检测到本地配置尚未写入。");
-        }
-        return detail;
-    }
-    if status.configured {
-        let mut detail = format!("已注入到 {}", status.codex_home);
-        if let Some(value) = &status.gui_api_base.value {
-            detail.push_str(&format!("\nGUI backend: {value}"));
-        }
-        return detail;
-    }
-
-    let mut parts = Vec::new();
-    if !status.config_ok {
-        parts.push("Codex App 还没有写入本地连接配置。".to_string());
-    }
-    if !status.auth_ok {
-        parts.push("本地认证信息还没有准备好，请填写 API Key 后写入配置。".to_string());
-    }
-    if !status.gui_api_base.configured {
-        parts.push("Codex App GUI 还没有指向本地服务，请点击写入配置。".to_string());
-    }
-    if !status.gui_api_base.login_issuer_configured {
-        parts.push("本地授权入口还没有写入，请点击写入配置。".to_string());
-    }
-    if status
-        .remote_control_switch
-        .as_ref()
-        .is_some_and(|remote_control_switch| !remote_control_switch.configured)
-    {
-        parts.push("Codex App remote-control 持久化开关还没有写入，请点击写入配置。".to_string());
-    }
-    if let Some(err) = &status.gui_api_base.error {
-        parts.push(format!("检查环境变量时遇到问题: {err}"));
-    }
-    if let Some(err) = status
-        .remote_control_switch
-        .as_ref()
-        .and_then(|remote_control_switch| remote_control_switch.error.as_ref())
-    {
-        parts.push(format!("检查 remote-control 开关时遇到问题: {err}"));
-    }
-    if parts.is_empty() {
-        "尚未注入 Codex App 配置。".to_string()
-    } else {
-        parts.join("\n")
-    }
 }
 
 fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {
@@ -2602,6 +3246,18 @@ fn confirm_uninstall_codex_app_config(parent: &dyn WxWidget) -> bool {
         parent,
         "卸载会移除本工具写入的 chatgpt_base_url、本地认证信息和 Codex App 环境变量。确认继续？",
         "卸载 Codex App 配置",
+    )
+    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+    .build()
+    .show_modal()
+        == ID_YES
+}
+
+fn confirm_delete_provider(parent: &dyn WxWidget, provider_name: &str) -> bool {
+    MessageDialog::builder(
+        parent,
+        &format!("删除 provider `{provider_name}`？如果它正在使用中，也会取消当前 provider 设置。"),
+        "删除 Provider",
     )
     .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
     .build()

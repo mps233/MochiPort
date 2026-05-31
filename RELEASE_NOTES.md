@@ -1,23 +1,17 @@
-# Codex Remote v0.2.4
+# Codex Remote v0.2.5
 
-本次版本继续修复 Windows GUI 中飞书机器人接入二维码难以扫码的问题。
+本次版本聚焦 Codex App 第三方 provider 管理和本地插件可见性。
 
 ## 更新内容
 
-- 飞书扫码弹窗现在支持手动拖拽放大。
-- 二维码区域使用独立可扩展容器，窗口变大时二维码区域会同步展开。
-- 二维码使用更高分辨率底图并按比例完整适配容器。
-- 增加“扫码失败？打开飞书确认链接”兜底入口，扫码不稳定时可以直接打开确认链接。
+- Codex 接入页改为更直观的 Provider 管理，支持新增、保存、启动和删除 provider。
+- 启动 provider 只切换 `model_provider`，保存 provider 不会自动切换当前使用项。
+- 卸载只移除根级 `chatgpt_base_url` 和 `model_provider`，保留已有 `[model_providers.*]`、认证和环境配置。
+- GUI 关闭时只关闭本地 backend，不再触碰 Codex App 配置。
+- 自动写入本地可用的 OpenAI bundled marketplace，让新用户能看到本地插件入口。
+- Windows 默认使用 `127.0.0.1`，避免 `localhost` 解析到 IPv6 导致本地服务不可达。
 
-## 使用方式
+## 验证
 
-1. 下载对应平台安装包。
-2. 打开 Codex Remote，接入飞书机器人。
-3. 在“Codex 接入”里填写第三方 Base URL 和 API Key，并点击“写入配置”。
-4. 启动 Codex App 或 Codex VS Code 插件，打开 remote-control / 控制这台电脑。
-5. 回到飞书开始会话。
-
-## 平台产物
-
-- macOS: `Codex Remote.dmg`
-- Windows: `Codex Remote Windows.zip`
+- `cargo test`
+- `cargo build --release --features gui --bin codex-remote`

@@ -772,12 +772,12 @@ fn request_origin(headers: &HeaderMap) -> String {
 
 #[cfg(target_os = "windows")]
 fn default_request_origin() -> String {
-    "http://localhost:3847".into()
+    "http://127.0.0.1:3847".into()
 }
 
 #[cfg(not(target_os = "windows"))]
 fn default_request_origin() -> String {
-    "http://localhost:3847".into()
+    "http://127.0.0.1:3847".into()
 }
 
 fn origin_from_url(value: &str) -> Option<String> {

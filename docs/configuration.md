@@ -119,7 +119,7 @@ Controls whether assistant deltas are streamed into Feishu cards.
 Codex App must point ChatGPT backend traffic at the local daemon:
 
 ```toml
-chatgpt_base_url = "http://localhost:3847/backend-api"
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
 ```
 
 This belongs in the Codex App config home, usually:
@@ -133,13 +133,8 @@ Third-party model provider keys stay in the Codex model provider section. Exampl
 ```toml
 model_provider = "llmx"
 model = "gpt-5.5"
-review_model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
-disable_response_storage = true
-network_access = "enabled"
-windows_wsl_setup_acknowledged = true
 
-chatgpt_base_url = "http://localhost:3847/backend-api"
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
 
 [model_providers.llmx]
 name = "llmx"
@@ -150,6 +145,7 @@ experimental_bearer_token = "your-third-party-key"
 ```
 
 `chatgpt_base_url` is not the model API base URL. It is the ChatGPT backend-shaped URL used by Codex App features such as remote-control enrollment.
+`codex-remote` does not manage Codex App runtime settings such as `[features]`, `[windows]`, `[desktop]`, `[mcp_servers]`, or per-plugin `enabled` flags.
 
 ## Codex App Auth
 

@@ -354,7 +354,7 @@ async function loadAll() {
     const guiApiBase = codexApp.guiApiBase || {};
     const codexAppConfigured = Boolean(codexApp.configured);
     const codexConnected = Boolean(remote.connected && remote.initialized);
-    const backendUrl = backend.remoteControlBaseUrl || `http://${status.bind || "127.0.0.1:3847"}/backend-api`;
+    const backendUrl = backend.remoteControlBaseUrl || "http://127.0.0.1:3847/backend-api";
 
     updateStep("step.feishu", feishuReady && feishuWs.connected, feishuReady && feishuWs.connected ? "完成" : "待扫码");
     updateStep("step.config", codexAppConfigured, codexAppConfigured ? "完成" : "需确认");
@@ -391,7 +391,7 @@ async function loadAll() {
     ].join("\n");
 
     byId("remote.detail").textContent = [
-        `页面地址：http://${status.bind || "127.0.0.1:3847"}`,
+        "页面地址：http://127.0.0.1:3847",
         `codex-remote state：${config.statePath || "未找到"}`,
         `Codex App chatgpt_base_url：${backendUrl}`,
         `Codex App home：${codexApp.codexHome || "未找到"}`,

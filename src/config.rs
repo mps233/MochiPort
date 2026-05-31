@@ -83,7 +83,7 @@ impl AppConfig {
             .ok()
             .map(|addr| {
                 let host = if addr.ip().is_loopback() || addr.ip().is_unspecified() {
-                    "localhost".to_string()
+                    "127.0.0.1".to_string()
                 } else {
                     let host = addr.ip().to_string();
                     if host.contains(':') {

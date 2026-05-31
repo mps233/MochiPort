@@ -16,14 +16,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
 };
 #[cfg(target_os = "windows")]
-use winreg::{
-    RegKey,
-    enums::{HKEY_CURRENT_USER, KEY_SET_VALUE},
-};
+use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const DEFAULT_MODEL: &str = "gpt-5.5";
-const DEFAULT_REASONING_EFFORT: &str = "xhigh";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
 const CODEX_APP_SQLITE_DIR: &str = "sqlite";
@@ -48,6 +44,7 @@ pub struct ConfigureCodexAppOptions {
     pub provider_base_url: Option<String>,
     pub provider_key: Option<String>,
     pub model: Option<String>,
+    pub activate_provider: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -167,8 +164,8 @@ pub fn uninstall_codex_app(
 
     let (removed_chatgpt_base_url, removed_model_provider) =
         uninstall_config_toml(&config_path, backend_url)?;
-    let removed_auth = uninstall_auth_json(&auth_path)?;
-    let gui_api_base = uninstall_gui_environment(backend_url);
+    let removed_auth = false;
+    let gui_api_base = inspect_gui_api_base_url(backend_url);
 
     Ok(UninstallCodexAppReport {
         codex_home,
@@ -219,6 +216,16 @@ pub fn enable_codex_app_remote_control_switch(
 ) -> Result<CodexAppRemoteControlSwitchStatus> {
     let codex_home = codex_home.unwrap_or_else(default_codex_home);
     enable_remote_control_switch_in_home(&codex_home)
+}
+
+pub fn delete_codex_app_provider(
+    codex_home: Option<PathBuf>,
+    provider_name: &str,
+) -> Result<PathBuf> {
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    let config_path = codex_home.join("config.toml");
+    delete_provider_from_config_toml(&config_path, provider_name)?;
+    Ok(config_path)
 }
 
 fn enable_remote_control_switch_in_home(
@@ -497,37 +504,6 @@ pub fn configure_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus 
     }
 }
 
-pub fn uninstall_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let login_issuer = oauth_issuer_url(backend_url);
-        if gui_getenv(CODEX_API_BASE_URL_ENV)
-            .ok()
-            .flatten()
-            .as_deref()
-            .map(|value| backend_urls_equivalent(value, backend_url))
-            .unwrap_or(false)
-        {
-            let _ = gui_unsetenv(CODEX_API_BASE_URL_ENV);
-        }
-        if gui_getenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV)
-            .ok()
-            .flatten()
-            .as_deref()
-            .map(|value| backend_urls_equivalent(value, &login_issuer))
-            .unwrap_or(false)
-        {
-            let _ = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
-        }
-        inspect_gui_api_base_url(backend_url)
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        inspect_gui_api_base_url(backend_url)
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn gui_getenv(name: &str) -> Result<Option<String>, String> {
     launchctl_getenv(name)
@@ -536,11 +512,6 @@ fn gui_getenv(name: &str) -> Result<Option<String>, String> {
 #[cfg(target_os = "macos")]
 fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
     launchctl_setenv(name, value)
-}
-
-#[cfg(target_os = "macos")]
-fn gui_unsetenv(name: &str) -> Result<(), String> {
-    launchctl_unsetenv(name)
 }
 
 #[cfg(target_os = "windows")]
@@ -567,24 +538,6 @@ fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
     env.set_value(name, &value).map_err(|err| err.to_string())?;
     broadcast_windows_environment_change();
     Ok(())
-}
-
-#[cfg(target_os = "windows")]
-fn gui_unsetenv(name: &str) -> Result<(), String> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let env = match hkcu.open_subkey_with_flags("Environment", KEY_SET_VALUE) {
-        Ok(env) => env,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(err) => return Err(err.to_string()),
-    };
-    match env.delete_value(name) {
-        Ok(()) => {
-            broadcast_windows_environment_change();
-            Ok(())
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.to_string()),
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -633,26 +586,6 @@ fn launchctl_setenv(name: &str, value: &str) -> Result<(), String> {
         .arg("setenv")
         .arg(name)
         .arg(value)
-        .output()
-    {
-        Ok(output) if output.status.success() => Ok(()),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            Err(if stderr.is_empty() {
-                output.status.to_string()
-            } else {
-                stderr
-            })
-        }
-        Err(err) => Err(err.to_string()),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn launchctl_unsetenv(name: &str) -> Result<(), String> {
-    match Command::new("/bin/launchctl")
-        .arg("unsetenv")
-        .arg(name)
         .output()
     {
         Ok(output) if output.status.success() => Ok(()),
@@ -774,16 +707,25 @@ fn provider_status_from_table(
     let base_url = provider
         .and_then(|table| table.get("base_url"))
         .and_then(|item| item.as_str())
-        .map(str::to_string);
+        .and_then(config_value);
     let key = provider
         .and_then(|table| table.get("experimental_bearer_token"))
         .and_then(|item| item.as_str())
-        .map(str::to_string);
+        .and_then(config_value);
 
     CodexAppProviderStatus {
         name: name.to_string(),
         base_url,
         key,
+    }
+}
+
+fn config_value(value: &str) -> Option<String> {
+    let value = value.trim_matches('\0').trim();
+    if value.is_empty() || value.contains("未配") {
+        None
+    } else {
+        Some(value.to_string())
     }
 }
 
@@ -796,23 +738,23 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
 
     doc["chatgpt_base_url"] = toml_edit::value(&options.backend_url);
 
-    let provider_base_url = non_empty(options.provider_base_url.as_deref());
-    let provider_key = non_empty(options.provider_key.as_deref());
+    let provider_base_url = options.provider_base_url.as_deref().and_then(config_value);
+    let provider_key = options.provider_key.as_deref().and_then(config_value);
     let model = non_empty(options.model.as_deref());
-    let provider_config_requested =
-        provider_base_url.is_some() || provider_key.is_some() || model.is_some();
+    let provider_name_requested = non_empty(options.provider_name.as_deref()).is_some();
+    let provider_config_requested = provider_name_requested
+        || provider_base_url.is_some()
+        || provider_key.is_some()
+        || model.is_some();
 
     if provider_config_requested {
         let provider_name = provider_name(options.provider_name.as_deref())?;
         let model = model.unwrap_or(DEFAULT_MODEL);
 
-        doc["model_provider"] = toml_edit::value(provider_name.as_str());
-        doc["model"] = toml_edit::value(model);
-        doc["review_model"] = toml_edit::value(model);
-        doc["model_reasoning_effort"] = toml_edit::value(DEFAULT_REASONING_EFFORT);
-        doc["disable_response_storage"] = toml_edit::value(true);
-        doc["network_access"] = toml_edit::value("enabled");
-        doc["windows_wsl_setup_acknowledged"] = toml_edit::value(true);
+        if options.activate_provider {
+            doc["model_provider"] = toml_edit::value(provider_name.as_str());
+            doc["model"] = toml_edit::value(model);
+        }
 
         let provider = provider_table_mut(&mut doc, provider_name.as_str());
         provider["name"] = toml_edit::value(provider_name.as_str());
@@ -835,16 +777,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
 }
 
 fn normalize_config_toml_order(raw: &str) -> String {
-    const PRIORITY_KEYS: &[&str] = &[
-        "chatgpt_base_url",
-        "model_provider",
-        "model",
-        "review_model",
-        "model_reasoning_effort",
-        "disable_response_storage",
-        "network_access",
-        "windows_wsl_setup_acknowledged",
-    ];
+    const PRIORITY_KEYS: &[&str] = &["chatgpt_base_url", "model_provider", "model"];
 
     let mut root_lines = Vec::new();
     let mut table_lines = Vec::new();
@@ -906,41 +839,18 @@ fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)>
         doc.remove("chatgpt_base_url");
     }
 
-    let model_provider = doc
-        .get("model_provider")
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .map(str::to_string);
-    let removed_model_provider = model_provider
-        .as_deref()
-        .map(is_local_provider_name)
-        .unwrap_or(false);
+    let removed_model_provider = doc.get("model_provider").is_some();
     if removed_model_provider {
         doc.remove("model_provider");
     }
 
     if removed_chatgpt_base_url || removed_model_provider {
-        for provider_name in [
-            model_provider.as_deref(),
-            Some(DEFAULT_PROVIDER_NAME),
-            Some("codex"),
-        ]
-        .into_iter()
-        .flatten()
-        .filter(|provider_name| is_local_provider_name(provider_name))
-        {
-            remove_provider_table(&mut doc, provider_name);
-        }
         backup_existing(path)?;
-        std::fs::write(path, doc.to_string())
+        std::fs::write(path, normalize_config_toml_order(&doc.to_string()))
             .with_context(|| format!("failed to write {}", path.display()))?;
     }
 
     Ok((removed_chatgpt_base_url, removed_model_provider))
-}
-
-fn is_local_provider_name(value: &str) -> bool {
-    matches!(value, DEFAULT_PROVIDER_NAME | "codex" | "llmx")
 }
 
 fn backend_urls_equivalent(actual: &str, expected: &str) -> bool {
@@ -985,6 +895,27 @@ fn remove_provider_table(doc: &mut toml_edit::DocumentMut, provider_name: &str) 
     }
 }
 
+fn delete_provider_from_config_toml(path: &Path, requested_provider_name: &str) -> Result<()> {
+    if !path.exists() {
+        return Err(anyhow!("config.toml not found"));
+    }
+    let provider_name = provider_name(Some(requested_provider_name))?;
+    let mut doc = parse_existing_config_toml(path)?;
+    let active_provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(|active| active == provider_name);
+    if active_provider {
+        doc.remove("model_provider");
+    }
+    remove_provider_table(&mut doc, &provider_name);
+    backup_existing(path)?;
+    std::fs::write(path, normalize_config_toml_order(&doc.to_string()))
+        .with_context(|| format!("failed to write {}", path.display()))
+}
+
+#[cfg(test)]
 fn uninstall_auth_json(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
@@ -1361,7 +1292,7 @@ mod tests {
         let codex_home = unique_temp_dir();
         let report = configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
-            backend_url: "http://localhost:3847/backend-api".to_string(),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -1370,19 +1301,20 @@ mod tests {
             provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
             model: Some("gpt-5.5".to_string()),
+            activate_provider: true,
         })
         .expect("configure codex app");
 
         let config = std::fs::read_to_string(report.config_path).expect("read config");
-        assert!(config.starts_with("chatgpt_base_url = \"http://localhost:3847/backend-api\"\n"));
-        assert!(config.contains("chatgpt_base_url = \"http://localhost:3847/backend-api\""));
+        assert!(config.starts_with("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\"\n"));
+        assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
         assert!(config.contains("model_provider = \"ai-codex\""));
         assert!(config.contains("model = \"gpt-5.5\""));
-        assert!(config.contains("review_model = \"gpt-5.5\""));
-        assert!(config.contains("model_reasoning_effort = \"xhigh\""));
-        assert!(config.contains("disable_response_storage = true"));
-        assert!(config.contains("network_access = \"enabled\""));
-        assert!(config.contains("windows_wsl_setup_acknowledged = true"));
+        assert!(!config.contains("review_model"));
+        assert!(!config.contains("model_reasoning_effort"));
+        assert!(!config.contains("disable_response_storage"));
+        assert!(!config.contains("network_access"));
+        assert!(!config.contains("windows_wsl_setup_acknowledged"));
         assert!(config.contains("[model_providers.ai-codex]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(config.contains("wire_api = \"responses\""));
@@ -1393,6 +1325,126 @@ mod tests {
         assert!(auth.contains(&format!("\"auth_mode\": \"{LOCAL_AUTH_MODE}\"")));
         assert!(auth.contains("\"account_id\": \"acct_test\""));
         assert!(report.remote_control_switch.configured);
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_switches_existing_provider_by_name_only() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "old-provider"
+model = "gpt-5.5"
+
+[model_providers.old-provider]
+name = "old-provider"
+base_url = "https://old.example.invalid"
+
+[model_providers.qwen]
+name = "qwen"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+experimental_bearer_token = "existing-qwen-key"
+"#,
+        )
+        .expect("write config");
+
+        let report = configure_codex_app(ConfigureCodexAppOptions {
+            codex_home: Some(codex_home.clone()),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "local@example.test".to_string(),
+            plan_type: "pro".to_string(),
+            provider_name: Some("qwen".to_string()),
+            provider_base_url: None,
+            provider_key: None,
+            model: None,
+            activate_provider: true,
+        })
+        .expect("configure codex app");
+
+        let config = std::fs::read_to_string(report.config_path).expect("read config");
+        assert!(config.contains("model_provider = \"qwen\""));
+        assert!(config.contains("[model_providers.qwen]"));
+        assert!(
+            config.contains("base_url = \"https://dashscope.aliyuncs.com/compatible-mode/v1\"")
+        );
+        assert!(config.contains("experimental_bearer_token = \"existing-qwen-key\""));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_can_save_provider_without_activating() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "old-provider"
+model = "gpt-5.5"
+
+[model_providers.old-provider]
+name = "old-provider"
+base_url = "https://old.example.invalid"
+"#,
+        )
+        .expect("write config");
+
+        let report = configure_codex_app(ConfigureCodexAppOptions {
+            codex_home: Some(codex_home.clone()),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "local@example.test".to_string(),
+            plan_type: "pro".to_string(),
+            provider_name: Some("qwen".to_string()),
+            provider_base_url: Some(
+                "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
+            ),
+            provider_key: Some("existing-qwen-key".to_string()),
+            model: None,
+            activate_provider: false,
+        })
+        .expect("configure codex app");
+
+        let config = std::fs::read_to_string(report.config_path).expect("read config");
+        assert!(config.contains("model_provider = \"old-provider\""));
+        assert!(config.contains("[model_providers.qwen]"));
+        assert!(
+            config.contains("base_url = \"https://dashscope.aliyuncs.com/compatible-mode/v1\"")
+        );
+        assert!(config.contains("experimental_bearer_token = \"existing-qwen-key\""));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn delete_codex_app_provider_removes_provider_and_active_selection() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "qwen"
+model = "gpt-5.5"
+
+[model_providers.qwen]
+name = "qwen"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+"#,
+        )
+        .expect("write config");
+
+        delete_codex_app_provider(Some(codex_home.clone()), "qwen").expect("delete provider");
+
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        assert!(!config.contains("model_provider = \"qwen\""));
+        assert!(!config.contains("[model_providers.qwen]"));
+        assert!(config.contains("model = \"gpt-5.5\""));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -1464,7 +1516,7 @@ requires_openai_auth = true
 
         configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
-            backend_url: "http://localhost:3847/backend-api".to_string(),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -1473,6 +1525,7 @@ requires_openai_auth = true
             provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
             model: Some("gpt-5.5".to_string()),
+            activate_provider: true,
         })
         .expect("configure codex app");
 
@@ -1489,7 +1542,7 @@ requires_openai_auth = true
         let config_path = codex_home.join("config.toml");
         std::fs::write(
             &config_path,
-            r#"chatgpt_base_url = "http://localhost:3847/backend-api"
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
 model_provider = "llmx"
 
 [model_providers.llmx]
@@ -1506,7 +1559,7 @@ base_url = "https://api.openai.com/v1"
 
         let status = inspect_codex_app_config(
             Some(codex_home.clone()),
-            "http://localhost:3847/backend-api",
+            "http://127.0.0.1:3847/backend-api",
         );
 
         let active = status.provider.expect("active provider");
@@ -1530,13 +1583,43 @@ base_url = "https://api.openai.com/v1"
     }
 
     #[test]
-    fn uninstall_codex_app_removes_local_routing_only() {
+    fn inspect_provider_catalog_ignores_placeholder_values() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-code"
+
+[model_providers.ai-code]
+name = "ai-code"
+base_url = "未配置，写入时新�"
+experimental_bearer_token = "****未配�"
+"#,
+        )
+        .expect("write config");
+
+        let status = inspect_codex_app_config(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        );
+
+        let active = status.provider.expect("active provider");
+        assert_eq!(active.name, "ai-code");
+        assert_eq!(active.base_url, None);
+        assert_eq!(active.key, None);
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn uninstall_codex_app_removes_root_routing_only() {
         let codex_home = unique_temp_dir();
         let config_path = codex_home.join("config.toml");
         let auth_path = codex_home.join("auth.json");
         std::fs::write(
             &config_path,
-            r#"chatgpt_base_url = "http://localhost:3847/backend-api"
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
 model_provider = "codex"
 model = "gpt-5.5"
 
@@ -1550,7 +1633,7 @@ base_url = "https://api.example.invalid"
             &auth_path,
             &ConfigureCodexAppOptions {
                 codex_home: Some(codex_home.clone()),
-                backend_url: "http://localhost:3847/backend-api".to_string(),
+                backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
                 account_id: "acct_test".to_string(),
                 user_id: "user_test".to_string(),
                 email: "local@example.test".to_string(),
@@ -1559,26 +1642,28 @@ base_url = "https://api.example.invalid"
                 provider_base_url: None,
                 provider_key: None,
                 model: None,
+                activate_provider: true,
             },
         )
         .expect("write auth");
 
-        let (removed_base_url, removed_model_provider) =
-            uninstall_config_toml(&config_path, "http://localhost:3847/backend-api")
-                .expect("uninstall config");
-        let removed_auth = uninstall_auth_json(&auth_path).expect("uninstall auth");
+        let report = uninstall_codex_app(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        )
+        .expect("uninstall config");
 
-        assert!(removed_base_url);
-        assert!(removed_model_provider);
-        assert!(removed_auth);
+        assert!(report.removed_chatgpt_base_url);
+        assert!(report.removed_model_provider);
+        assert!(!report.removed_auth);
 
         let config = std::fs::read_to_string(&config_path).expect("read config");
         assert!(!config.contains("chatgpt_base_url"));
         assert!(!config.contains("model_provider = \"codex\""));
         assert!(config.contains("model = \"gpt-5.5\""));
-        assert!(!config.contains("[model_providers.codex]"));
-        assert!(!config.contains("base_url = \"https://api.example.invalid\""));
-        assert!(!auth_path.exists());
+        assert!(config.contains("[model_providers.codex]"));
+        assert!(config.contains("base_url = \"https://api.example.invalid\""));
+        assert!(auth_path.exists());
 
         let _ = std::fs::remove_dir_all(codex_home);
     }

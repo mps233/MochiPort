@@ -22,7 +22,7 @@ The primary path is Codex App direct connection:
 Codex App
   |
   | ~/.codex/config.toml:
-  |   chatgpt_base_url = "http://localhost:3847/backend-api"
+  |   chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
   |
   | user enables remote control
   v
@@ -65,7 +65,7 @@ GET  /backend-api/wham/remote/control/server
 Official Codex app-server connects outbound to those endpoints when Codex App has:
 
 ```toml
-chatgpt_base_url = "http://localhost:3847/backend-api"
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
 ```
 
 and remote control is enabled.
@@ -172,7 +172,7 @@ This keeps the implementation aligned with the official remote-control model ins
 
 ## Codex App Runtime
 
-`codex-remote` is intentionally scoped to Codex App remote-control. Codex App is launched normally by the user, reads `chatgpt_base_url = "http://localhost:3847/backend-api"`, and opens the remote-control websocket back to the local daemon. The project does not install a CLI wrapper or start Codex processes on the user's behalf.
+`codex-remote` is intentionally scoped to Codex App remote-control. Codex App is launched normally by the user, reads `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`, and opens the remote-control websocket back to the local daemon. The project does not install a CLI wrapper or start Codex processes on the user's behalf.
 
 ## Approval Handling
 

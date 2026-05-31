@@ -34,7 +34,7 @@ Important fields:
 
 If `connected=false`, check the Codex App side:
 
-1. Codex App config contains `chatgpt_base_url = "http://localhost:3847/backend-api"`.
+1. Codex App config contains `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`.
 2. Codex App auth is local `chatgpt`, not API-key-only auth.
 3. The `codex-remote daemon` process is running before remote control is enabled.
 4. Remote control is enabled in Codex App.
@@ -116,7 +116,7 @@ Use matching app-server and TUI ports:
 
 ```powershell
 codex-remote --config config.toml daemon
-codex -c 'chatgpt_base_url="http://localhost:3847/backend-api"' app-server --listen ws://127.0.0.1:3849 --remote-control
+codex -c 'chatgpt_base_url="http://127.0.0.1:3847/backend-api"' app-server --listen ws://127.0.0.1:3849 --remote-control
 codex --remote ws://127.0.0.1:3849 -C D:\path\to\project
 ```
 

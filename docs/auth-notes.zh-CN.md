@@ -54,7 +54,7 @@ codex-remote --config config.toml configure-codex-app
 
 它会显式写入：
 
-- Codex App `config.toml`：`chatgpt_base_url = "http://localhost:3847/backend-api"`
+- Codex App `config.toml`：`chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`
 - Codex App `auth.json`：本地 `chatgptAuthTokens` auth
 
 也可以顺手写第三方 provider 配置：
