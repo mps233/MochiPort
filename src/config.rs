@@ -20,6 +20,7 @@ pub struct AppConfig {
 pub struct FeishuConfig {
     pub app_id: String,
     pub app_secret: String,
+    pub display_name: String,
     pub mention_only: bool,
     pub allowed_open_ids: Vec<String>,
     pub allowed_chat_ids: Vec<String>,
@@ -49,6 +50,7 @@ impl Default for FeishuConfig {
         Self {
             app_id: String::new(),
             app_secret: String::new(),
+            display_name: String::new(),
             mention_only: true,
             allowed_open_ids: Vec::new(),
             allowed_chat_ids: Vec::new(),

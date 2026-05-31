@@ -1297,6 +1297,7 @@ impl ApiClient {
         let remote =
             self.get_quick_optional_async::<RemoteControlStatus>("/api/remote-control/status");
         let codex_app = self.get_quick_optional_async::<CodexAppStatus>("/api/codex-app/status");
+        let feishu_bot = self.get_quick_optional_async::<FeishuBotStatus>("/api/feishu/bot");
 
         DashboardSnapshot {
             service_online: true,
@@ -1304,6 +1305,7 @@ impl ApiClient {
             backend: join_optional(backend),
             remote: join_optional(remote),
             codex_app: join_optional(codex_app),
+            feishu_bot: join_optional(feishu_bot),
             status: Some(status),
         }
     }
@@ -1445,6 +1447,7 @@ struct DashboardSnapshot {
     backend: Option<RemoteControlBackendStatus>,
     remote: Option<RemoteControlStatus>,
     codex_app: Option<CodexAppStatus>,
+    feishu_bot: Option<FeishuBotStatus>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -1473,7 +1476,18 @@ struct AppConfig {
 #[serde(rename_all = "camelCase")]
 struct FeishuConfig {
     app_id: String,
+    display_name: String,
     allowed_open_ids: Vec<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuBotStatus {
+    configured: bool,
+    app_id: Option<String>,
+    display_name: Option<String>,
+    allowed_open_ids: usize,
+    error: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2335,6 +2349,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
                 .as_ref()
                 .map(|config| !config.feishu.app_id.is_empty())
         })
+        .or_else(|| snapshot.feishu_bot.as_ref().map(|bot| bot.configured))
         .unwrap_or(false);
     let bridge_enabled = snapshot
         .backend
@@ -2361,6 +2376,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         .unwrap_or(false);
 
     let feishu_ws = snapshot.status.as_ref().map(|status| &status.feishu_ws);
+    let feishu_bot_name = feishu_bot_display_name(snapshot);
     let (feishu_state, feishu_detail, feishu_tone) = if !feishu_configured {
         (
             "未接入",
@@ -2392,16 +2408,21 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         )
     };
 
+    set_status_panel_title(
+        &handles.feishu_status,
+        &feishu_status_title(feishu_bot_name.as_deref()),
+    );
     set_status_panel(
         &handles.feishu_status,
         feishu_state,
         feishu_detail,
         feishu_tone,
     );
+    let feishu_state_label = feishu_state_label(feishu_state, feishu_bot_name.as_deref());
     handles
         .status_bar
-        .set_status_text(&format!("飞书：{feishu_state}"), 1);
-    handles.feishu_state.set_label(feishu_state);
+        .set_status_text(&format!("飞书：{feishu_state_label}"), 1);
+    handles.feishu_state.set_label(&feishu_state_label);
     handles
         .feishu_state
         .set_foreground_color(feishu_tone.colour());
@@ -2411,19 +2432,41 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         .stop_bridge_button
         .enable(feishu_configured && bridge_enabled);
 
-    let feishu_meta = match (
-        &snapshot.config,
-        feishu_ws.and_then(|ws| ws.last_error.as_deref()),
-    ) {
-        (Some(config), Some(err)) if !err.is_empty() => format!(
-            "App ID: {}\n允许用户: {}\n最近错误: {err}",
-            short_id(&config.feishu.app_id),
-            config.feishu.allowed_open_ids.len()
-        ),
+    let feishu_meta = match (&snapshot.config, &snapshot.feishu_bot) {
+        (Some(config), Some(bot)) if !config.feishu.app_id.is_empty() => {
+            let mut lines = Vec::new();
+            if let Some(name) = feishu_bot_name.as_deref() {
+                lines.push(format!("机器人: {name}"));
+            }
+            lines.push(format!(
+                "App ID: {}",
+                short_id(bot.app_id.as_deref().unwrap_or(&config.feishu.app_id))
+            ));
+            lines.push(format!("允许用户: {}", bot.allowed_open_ids));
+            if let Some(err) = feishu_ws.and_then(|ws| ws.last_error.as_deref())
+                && !err.is_empty()
+            {
+                lines.push(format!("最近错误: {err}"));
+            } else if let Some(err) = bot.error.as_deref()
+                && !err.is_empty()
+            {
+                lines.push(format!("名称读取失败: {err}"));
+            }
+            lines.join("\n")
+        }
         (Some(config), _) if !config.feishu.app_id.is_empty() => format!(
-            "App ID: {}\n允许用户: {}",
+            "{}App ID: {}\n允许用户: {}{}",
+            feishu_bot_name
+                .as_deref()
+                .map(|name| format!("机器人: {name}\n"))
+                .unwrap_or_default(),
             short_id(&config.feishu.app_id),
-            config.feishu.allowed_open_ids.len()
+            config.feishu.allowed_open_ids.len(),
+            feishu_ws
+                .and_then(|ws| ws.last_error.as_deref())
+                .filter(|err| !err.is_empty())
+                .map(|err| format!("\n最近错误: {err}"))
+                .unwrap_or_default()
         ),
         _ => "未保存飞书机器人凭据。".to_string(),
     };
@@ -3020,6 +3063,12 @@ fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, tone: StateT
     panel.detail.wrap(220);
 }
 
+fn set_status_panel_title(panel: &StatusPanel, title: &str) {
+    if panel.title.get_label() != title {
+        panel.title.set_label(title);
+    }
+}
+
 fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail: &str) {
     if panel.state.get_label() == state && panel.detail.get_label() == detail {
         return;
@@ -3039,6 +3088,34 @@ fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail: &str) {
     panel.detail.set_label(detail);
     panel.detail.set_foreground_color(muted);
     panel.detail.wrap(190);
+}
+
+fn feishu_bot_display_name(snapshot: &DashboardSnapshot) -> Option<String> {
+    snapshot
+        .feishu_bot
+        .as_ref()
+        .and_then(|bot| bot.display_name.as_deref())
+        .or_else(|| {
+            snapshot
+                .config
+                .as_ref()
+                .map(|config| config.feishu.display_name.as_str())
+        })
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+}
+
+fn feishu_status_title(bot_name: Option<&str>) -> String {
+    bot_name
+        .map(|name| format!("飞书：{name}"))
+        .unwrap_or_else(|| "飞书".to_string())
+}
+
+fn feishu_state_label(state: &str, bot_name: Option<&str>) -> String {
+    bot_name
+        .map(|name| format!("{state} · {name}"))
+        .unwrap_or_else(|| state.to_string())
 }
 
 fn codex_remote_detail(remote: &RemoteControlStatus) -> String {

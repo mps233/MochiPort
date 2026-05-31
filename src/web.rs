@@ -61,6 +61,7 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/feishu/onboard/start", post(feishu_onboard_start))
         .route("/api/feishu/onboard/poll", post(feishu_onboard_poll))
+        .route("/api/feishu/bot", get(feishu_bot_status))
         .route("/backend-api/plugins/list", get(plugin_legacy_list))
         .route("/backend-api/plugins/featured", get(plugin_legacy_featured))
         .route(
@@ -645,6 +646,60 @@ async fn start_bridge_task(
 
 fn feishu_configured(config: &AppConfig) -> bool {
     !config.feishu.app_id.trim().is_empty() && !config.feishu.app_secret.trim().is_empty()
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FeishuBotStatus {
+    configured: bool,
+    app_id: Option<String>,
+    display_name: Option<String>,
+    allowed_open_ids: usize,
+    error: Option<String>,
+}
+
+async fn feishu_bot_status(State(state): State<SharedState>) -> Json<FeishuBotStatus> {
+    let config = state.config.lock().await.clone();
+    let app_id = non_empty_string(&config.feishu.app_id);
+    let mut display_name = non_empty_string(&config.feishu.display_name);
+    let configured = feishu_configured(&config);
+    let mut error = None;
+
+    if configured && display_name.is_none() {
+        let api = FeishuApi::new(FeishuSettings::from_app_config(&config.feishu));
+        match api
+            .get_application_display_name(app_id.as_deref().unwrap_or_default())
+            .await
+        {
+            Ok(Some(name)) => {
+                display_name = Some(name.clone());
+                let mut config = state.config.lock().await;
+                if config.feishu.display_name.trim().is_empty()
+                    && config.feishu.app_id.trim() == app_id.as_deref().unwrap_or_default()
+                {
+                    config.feishu.display_name = name;
+                    if let Err(err) = config.save(&state.config_path) {
+                        error = Some(err.to_string());
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(err) => error = Some(err.to_string()),
+        }
+    }
+
+    Json(FeishuBotStatus {
+        configured,
+        app_id,
+        display_name,
+        allowed_open_ids: config.feishu.allowed_open_ids.len(),
+        error,
+    })
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 #[derive(Serialize)]
@@ -1368,6 +1423,13 @@ async fn feishu_onboard_poll(
                     .await
                     .ok()
                     .flatten();
+                if let Some(name) = display_name.clone() {
+                    let mut config = state.config.lock().await;
+                    if config.feishu.app_id == app_id {
+                        config.feishu.display_name = name;
+                        let _ = config.save(&state.config_path);
+                    }
+                }
                 state
                     .push_event(
                         "info",
