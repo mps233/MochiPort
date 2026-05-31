@@ -66,13 +66,10 @@ The WeChat group is for issue feedback, usage discussion, and feature suggestion
 
 ## Feishu Commands
 
+Only `/q` is needed in normal use. Follow the card prompts for other actions.
+
 ```text
-/new       bind the Feishu chat to a new Codex thread
-/status    show current binding and runtime status
-/s /stop   interrupt the active Codex turn
 /q         interrupt and clear the current binding
-/y /n      approve or reject the current approval request
-/1 /2 /3   select an exact approval card option
 ```
 
 Approval cards are updated after selection, so handled approvals are marked visually.
@@ -83,7 +80,6 @@ Click `Uninstall Injection` in the GUI to remove this project's Codex App inject
 
 - `chatgpt_base_url`
 - `model_provider`
-- local `ChatgptAuthTokens` auth file
 
 ## Project Boundary
 
