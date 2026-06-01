@@ -1,0 +1,618 @@
+use anyhow::Result;
+use serde_json::json;
+use tokio::time::{Duration, sleep};
+
+use crate::im_runtime::PendingApproval;
+
+use super::api::{TelegramApi, TelegramParseMode};
+
+const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4096;
+const TELEGRAM_CONTINUATION_OVERHEAD: usize = 30;
+const TELEGRAM_CHUNK_DELAY_MS: u64 = 100;
+
+#[derive(Clone)]
+pub struct TelegramAdapter {
+    api: TelegramApi,
+}
+
+#[derive(Debug, Clone)]
+pub struct TelegramThreadListEntry {
+    pub title: String,
+    pub summary: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TelegramCreateOption {
+    pub label: String,
+    pub summary: Option<String>,
+}
+
+impl TelegramAdapter {
+    pub fn new(api: TelegramApi) -> Self {
+        Self { api }
+    }
+
+    pub async fn send_text(&self, target: &str, text: &str) -> Result<String> {
+        let mut last_message_id = 0;
+        let chunks = telegram_text_chunks(text);
+        for (index, chunk) in chunks.iter().enumerate() {
+            let html = telegram_markdown_to_html(chunk);
+            last_message_id = match self
+                .api
+                .send_text_parse_mode(target, &html, TelegramParseMode::Html)
+                .await
+            {
+                Ok(message_id) => message_id,
+                Err(_) => self.api.send_text(target, &chunk).await?,
+            };
+            if index + 1 < chunks.len() {
+                sleep(Duration::from_millis(TELEGRAM_CHUNK_DELAY_MS)).await;
+            }
+        }
+        Ok(last_message_id.to_string())
+    }
+
+    pub async fn send_turn_completed(&self, target: &str, reply_text: &str) -> Result<String> {
+        self.send_text(target, reply_text).await
+    }
+
+    pub async fn send_approval(&self, target: &str, approval: &PendingApproval) -> Result<String> {
+        self.send_text(target, &approval_text(approval)).await
+    }
+
+    pub async fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<()> {
+        self.api
+            .answer_callback_query(callback_query_id, Some(text))
+            .await
+    }
+
+    pub async fn send_thread_routing_choice(
+        &self,
+        target: &str,
+        request_id: &str,
+    ) -> Result<String> {
+        let keyboard = inline_keyboard(vec![
+            vec![button("创建新会话", &format!("trc:{request_id}:new"))],
+            vec![button("恢复历史会话", &format!("trc:{request_id}:load"))],
+        ]);
+        let text =
+            "当前 Telegram 会话还没有接入 Codex thread。\n请选择创建新会话，或恢复一个历史会话。";
+        let message_id = self
+            .api
+            .send_text_with_reply_markup(target, text, keyboard)
+            .await?;
+        Ok(message_id.to_string())
+    }
+
+    pub async fn send_thread_create_settings(
+        &self,
+        target: &str,
+        request_id: &str,
+        text: &str,
+    ) -> Result<String> {
+        let keyboard = inline_keyboard(vec![
+            vec![
+                button("目录", &format!("tce:{request_id}:cwd")),
+                button("模型", &format!("tce:{request_id}:model")),
+            ],
+            vec![
+                button("推理强度", &format!("tce:{request_id}:effort")),
+                button("权限", &format!("tce:{request_id}:perm")),
+            ],
+            vec![button("创建", &format!("tcc:{request_id}"))],
+            vec![button("恢复历史会话", &format!("trc:{request_id}:load"))],
+        ]);
+        let message_id = self
+            .api
+            .send_text_with_reply_markup(target, text, keyboard)
+            .await?;
+        Ok(message_id.to_string())
+    }
+
+    pub async fn send_thread_create_options(
+        &self,
+        target: &str,
+        request_id: &str,
+        field: &str,
+        title: &str,
+        body: &str,
+        options: &[TelegramCreateOption],
+        page: usize,
+        has_prev: bool,
+        has_next: bool,
+    ) -> Result<String> {
+        let mut rows = options
+            .iter()
+            .enumerate()
+            .map(|(index, option)| {
+                vec![button(
+                    &option_button_label(index, option),
+                    &format!("tcs:{request_id}:{field}:{page}:{index}"),
+                )]
+            })
+            .collect::<Vec<_>>();
+        let mut nav = Vec::new();
+        if has_prev {
+            nav.push(button("上一页", &format!("tcp:{request_id}:{field}:prev")));
+        }
+        if has_next {
+            nav.push(button("下一页", &format!("tcp:{request_id}:{field}:next")));
+        }
+        if !nav.is_empty() {
+            rows.push(nav);
+        }
+        rows.push(vec![button(
+            "返回创建设置",
+            &format!("trc:{request_id}:new"),
+        )]);
+
+        let option_text = options
+            .iter()
+            .enumerate()
+            .map(|(index, option)| option_entry_text(index, option))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = format!(
+            "{title}\n\n{body}\n\n第 {} 页\n\n{option_text}",
+            page.max(1)
+        );
+        let message_id = self
+            .api
+            .send_text_with_reply_markup(target, &text, inline_keyboard(rows))
+            .await?;
+        Ok(message_id.to_string())
+    }
+
+    pub async fn send_thread_list(
+        &self,
+        target: &str,
+        request_id: &str,
+        title: &str,
+        body: &str,
+        entries: &[TelegramThreadListEntry],
+        page: usize,
+        has_prev: bool,
+        has_next: bool,
+    ) -> Result<String> {
+        let mut rows = Vec::new();
+        let mut nav = Vec::new();
+        if has_prev {
+            nav.push(button("上一页", &format!("tlp:{request_id}:prev")));
+        }
+        if has_next {
+            nav.push(button("下一页", &format!("tlp:{request_id}:next")));
+        }
+        if !nav.is_empty() {
+            rows.push(nav);
+        }
+        rows.push(vec![button("创建新会话", &format!("trc:{request_id}:new"))]);
+
+        let entries_html = if entries.is_empty() {
+            telegram_html_escape("当前没有可恢复的历史会话。")
+        } else {
+            thread_entries_table_html(entries)
+        };
+        let hint = if entries.is_empty() {
+            "可以新建一个会话。".to_string()
+        } else {
+            format!("点击或回复 /1 ~ /{} 选择会话。", entries.len())
+        };
+        let text = thread_list_html_text(title, body, page, &hint, &entries_html);
+        let message_id = self
+            .api
+            .send_text_with_reply_markup_parse_mode(
+                target,
+                &text,
+                inline_keyboard(rows),
+                TelegramParseMode::Html,
+            )
+            .await?;
+        Ok(message_id.to_string())
+    }
+
+    pub async fn send_thread_routing_result(
+        &self,
+        target: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<String> {
+        self.send_text(target, &format!("{title}\n\n{body}")).await
+    }
+}
+
+fn approval_text(approval: &PendingApproval) -> String {
+    let mut lines = vec![
+        format!("审批请求：{}", approval_kind_label(&approval.request_kind)),
+        String::new(),
+        approval.summary.trim().to_string(),
+        String::new(),
+        "回复下面的命令处理：".to_string(),
+    ];
+    if approval.decisions.is_empty() {
+        lines.push("/y 同意".to_string());
+        lines.push("/n 拒绝".to_string());
+    } else {
+        lines.extend(
+            approval
+                .decisions
+                .iter()
+                .enumerate()
+                .map(|(index, decision)| format!("/{} {}", index + 1, decision.label)),
+        );
+    }
+    lines.join("\n")
+}
+
+fn approval_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "command" => "命令执行",
+        "fileChange" => "文件修改",
+        "review" => "补丁审查",
+        _ => "操作审批",
+    }
+}
+
+fn inline_keyboard(rows: Vec<Vec<serde_json::Value>>) -> serde_json::Value {
+    json!({ "inline_keyboard": rows })
+}
+
+fn button(text: &str, callback_data: &str) -> serde_json::Value {
+    json!({
+        "text": truncate_button_text(text),
+        "callback_data": callback_data,
+    })
+}
+
+fn option_button_label(index: usize, option: &TelegramCreateOption) -> String {
+    format!("{}. {}", index + 1, truncate_button_text(&option.label))
+}
+
+fn option_entry_text(index: usize, option: &TelegramCreateOption) -> String {
+    let mut line = format!("{}. {}", index + 1, option.label.trim());
+    if let Some(summary) = option
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        line.push_str(&format!("\n   {summary}"));
+    }
+    line
+}
+
+fn thread_entries_table_html(entries: &[TelegramThreadListEntry]) -> String {
+    let mut lines = vec![
+        "<b>序号 | 状态 | 会话</b>".to_string(),
+        "---- | ---- | ----".to_string(),
+    ];
+    lines.extend(
+        entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| thread_entry_table_html(index, entry)),
+    );
+    lines.join("\n")
+}
+
+fn thread_entry_table_html(index: usize, entry: &TelegramThreadListEntry) -> String {
+    let title = entry.title.trim();
+    let title = if title.is_empty() {
+        "未命名会话"
+    } else {
+        title
+    };
+    let summary = entry
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let (state, cwd) = thread_detail_parts(entry.detail.as_deref());
+    let state = truncate_display_text(state.as_deref().unwrap_or("可接入"), 8);
+    let title = truncate_display_text(title, 22);
+    let mut row = format!(
+        "/{} | <code>{}</code> | <b>{}</b>",
+        index + 1,
+        telegram_html_escape(&state),
+        telegram_html_escape(&title)
+    );
+    if let Some(cwd) = cwd {
+        row.push_str(&format!(
+            "\n    目录 <code>{}</code>",
+            telegram_html_escape(&truncate_middle(&cwd, 44))
+        ));
+    }
+    if let Some(summary) = summary {
+        let summary = telegram_cleanup_text(summary);
+        let summary = truncate_display_text(&summary, 42);
+        if !summary.is_empty() && summary != title {
+            row.push_str(&format!("\n    {}", telegram_markdown_to_html(&summary)));
+        }
+    }
+    row
+}
+
+fn thread_list_html_text(
+    title: &str,
+    body: &str,
+    page: usize,
+    hint: &str,
+    entries_html: &str,
+) -> String {
+    format!(
+        "<b>{}</b>\n\n{}\n\n第 {} 页\n{}\n\n{}",
+        telegram_html_escape(title),
+        telegram_markdown_to_html(&telegram_cleanup_text(body)),
+        page.max(1),
+        telegram_html_escape(hint),
+        entries_html
+    )
+}
+
+fn thread_detail_parts(detail: Option<&str>) -> (Option<String>, Option<String>) {
+    let Some(detail) = detail.map(telegram_cleanup_text) else {
+        return (None, None);
+    };
+    let mut state = None;
+    let mut cwd = None;
+    for part in detail
+        .split('·')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+    {
+        if let Some(value) = part.strip_prefix("目录：") {
+            cwd = Some(value.trim().trim_matches('`').to_string());
+        } else if state.is_none() {
+            state = Some(part.to_string());
+        }
+    }
+    (state, cwd)
+}
+
+fn truncate_display_text(text: &str, max_chars: usize) -> String {
+    let text = text
+        .replace('\r', " ")
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+    let mut output = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    output.push('…');
+    output
+}
+
+fn truncate_middle(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let head_len = max_chars.saturating_sub(3) / 2;
+    let tail_len = max_chars.saturating_sub(3 + head_len);
+    let head = text.chars().take(head_len).collect::<String>();
+    let tail = text
+        .chars()
+        .rev()
+        .take(tail_len)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{head}...{tail}")
+}
+
+fn telegram_markdown_to_html(text: &str) -> String {
+    let text = telegram_cleanup_text(text);
+    let mut html = String::new();
+    let mut in_code_block = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            if in_code_block {
+                html.push_str("</code></pre>\n");
+            } else {
+                html.push_str("<pre><code>");
+            }
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block {
+            html.push_str(&telegram_html_escape(line));
+            html.push('\n');
+        } else {
+            html.push_str(&telegram_inline_markdown_to_html(line));
+            html.push('\n');
+        }
+    }
+    if in_code_block {
+        html.push_str("</code></pre>");
+    }
+    html.trim_end().to_string()
+}
+
+fn telegram_inline_markdown_to_html(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("**")
+            && let Some(end) = after.find("**")
+        {
+            out.push_str("<b>");
+            out.push_str(&telegram_html_escape(&after[..end]));
+            out.push_str("</b>");
+            rest = &after[end + 2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('`')
+            && let Some(end) = after.find('`')
+        {
+            out.push_str("<code>");
+            out.push_str(&telegram_html_escape(&after[..end]));
+            out.push_str("</code>");
+            rest = &after[end + 1..];
+            continue;
+        }
+        if let Some(after_label) = rest.strip_prefix('[')
+            && let Some(label_end) = after_label.find("](")
+            && let Some(url_end) = after_label[label_end + 2..].find(')')
+        {
+            let label = &after_label[..label_end];
+            let url = &after_label[label_end + 2..label_end + 2 + url_end];
+            if url.starts_with("http://") || url.starts_with("https://") {
+                out.push_str("<a href=\"");
+                out.push_str(&telegram_html_attr_escape(url));
+                out.push_str("\">");
+                out.push_str(&telegram_html_escape(label));
+                out.push_str("</a>");
+            } else {
+                out.push_str(&telegram_html_escape(label));
+            }
+            rest = &after_label[label_end + 2 + url_end + 1..];
+            continue;
+        }
+        let ch = rest.chars().next().expect("rest is non-empty");
+        out.push_str(&telegram_html_escape(&ch.to_string()));
+        rest = &rest[ch.len_utf8()..];
+    }
+    out
+}
+
+fn telegram_cleanup_text(text: &str) -> String {
+    text.replace("<font color='grey'>", "")
+        .replace("<font color=\"grey\">", "")
+        .replace("</font>", "")
+}
+
+fn telegram_html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn telegram_html_attr_escape(text: &str) -> String {
+    telegram_html_escape(text).replace('"', "&quot;")
+}
+
+fn truncate_button_text(text: &str) -> String {
+    const MAX: usize = 48;
+    let text = text.trim();
+    if text.chars().count() <= MAX {
+        return text.to_string();
+    }
+    let mut output = text.chars().take(MAX.saturating_sub(1)).collect::<String>();
+    output.push('…');
+    output
+}
+
+fn telegram_text_chunks(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return vec![" ".to_string()];
+    }
+    if trimmed.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS {
+        return vec![trimmed.to_string()];
+    }
+
+    let chunks = split_message_for_telegram(trimmed);
+    let chunk_count = chunks.len();
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            if index == 0 {
+                format!("{chunk}\n\n(continues...)")
+            } else if index + 1 == chunk_count {
+                format!("(continued)\n\n{chunk}")
+            } else {
+                format!("(continued)\n\n{chunk}\n\n(continues...)")
+            }
+        })
+        .collect()
+}
+
+fn split_message_for_telegram(message: &str) -> Vec<String> {
+    let content_limit = TELEGRAM_MAX_MESSAGE_CHARS - TELEGRAM_CONTINUATION_OVERHEAD;
+
+    let mut chunks = Vec::new();
+    let mut remaining = message;
+    while !remaining.is_empty() {
+        if remaining.chars().count() <= content_limit {
+            chunks.push(remaining.to_string());
+            break;
+        }
+
+        let hard_split = remaining
+            .char_indices()
+            .nth(content_limit)
+            .map_or(remaining.len(), |(idx, _)| idx);
+        let search_area = &remaining[..hard_split];
+        let chunk_end = best_split_point(search_area, hard_split, content_limit);
+
+        chunks.push(remaining[..chunk_end].trim_end().to_string());
+        remaining = remaining[chunk_end..].trim_start();
+    }
+    chunks
+}
+
+fn best_split_point(search_area: &str, hard_split: usize, content_limit: usize) -> usize {
+    if let Some(pos) = search_area.rfind('\n')
+        && search_area[..pos].chars().count() >= content_limit / 2
+    {
+        return pos + 1;
+    }
+    if let Some(pos) = search_area.rfind(' ')
+        && search_area[..pos].chars().count() >= content_limit / 2
+    {
+        return pos + 1;
+    }
+    hard_split
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TELEGRAM_MAX_MESSAGE_CHARS, telegram_text_chunks};
+
+    #[test]
+    fn chunks_long_text_on_char_boundaries() {
+        let chunks = telegram_text_chunks(&"你好世界".repeat(1100));
+
+        assert!(chunks.len() > 1);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS)
+        );
+        assert!(chunks[0].ends_with("(continues...)"));
+        assert!(chunks[1].starts_with("(continued)"));
+    }
+
+    #[test]
+    fn keeps_single_message_when_within_limit() {
+        let text = "hello";
+        let chunks = telegram_text_chunks(text);
+
+        assert_eq!(chunks, vec!["hello"]);
+    }
+
+    #[test]
+    fn empty_message_uses_space_placeholder() {
+        let chunks = telegram_text_chunks("  \n ");
+
+        assert_eq!(chunks, vec![" "]);
+    }
+
+    #[test]
+    fn prefers_newline_split_for_long_text() {
+        let first = "a".repeat(3000);
+        let second = "b".repeat(3000);
+        let chunks = telegram_text_chunks(&format!("{first}\n{second}"));
+
+        assert!(chunks[0].contains("(continues...)"));
+        assert!(chunks[0].contains('\n'));
+        assert!(chunks[0].trim_start().starts_with('a'));
+        assert!(chunks[1].contains('b'));
+    }
+}

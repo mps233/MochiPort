@@ -2,9 +2,9 @@
 
 [中文说明](README.md)
 
-`codex-remote` is a local Codex App remote-control backend with a Feishu/Lark bridge.
+`codex-remote` is a local Codex App remote-control backend with a Feishu/Lark bridge and a Telegram Bot MVP.
 
-It has one job: after the user opens the GUI, Codex App connects to the local backend, and remote-control messages are bridged to Feishu.
+It has one job: after the user opens the GUI, Codex App connects to the local backend, and remote-control messages are bridged to IM channels.
 
 ## Quick Start
 
@@ -116,8 +116,10 @@ codex-remote local backend
   |
   | Feishu websocket events
   | Feishu message/card APIs
+  | Telegram long polling
+  | Telegram Bot API
   v
-Feishu IM
+IM channel
 ```
 
 The project implements the official remote-control endpoints:
@@ -148,7 +150,7 @@ codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider
 codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
 ```
 
-`on` / `off` enable or pause the Feishu bridge.
+`on` / `off` enable or pause the IM bridge.
 
 `configure-codex-app` is the CLI equivalent of enabling a provider in the GUI. If model provider config is written, the default provider is `ai-codex` and the default model is `gpt-5.5`.
 
@@ -167,11 +169,18 @@ mentionOnly = true
 allowedOpenIds = []
 allowedChatIds = []
 
+[telegram]
+botToken = ""
+mentionOnly = false
+allowedChatIds = []
+
 [bridge]
 enabled = true
 accountId = "default"
 sendStreaming = true
 ```
+
+The Telegram MVP is for the simple private-chat flow: create your own bot with BotFather, then chat with that bot in Telegram. Leave `allowedChatIds` empty at first, verify it works, then restrict it with the `chat=...` value from the event log.
 
 Codex App config is separate and usually lives at `~/.codex/config.toml`.
 
@@ -197,11 +206,11 @@ GET http://127.0.0.1:3847/api/events
 ## Security Notes
 
 - The daemon binds to `127.0.0.1` by default. Do not expose it publicly.
-- `config.toml` stores Feishu `appId` and `appSecret`; do not commit it.
+- `config.toml` stores Feishu `appId` / `appSecret` and Telegram `botToken`; do not commit it.
 - Codex App `auth.json` and third-party provider keys are local secrets; do not commit them.
 - Attachments from Feishu are downloaded to a local state-adjacent `.im/attachments/feishu/` directory.
 - Restrict access with `allowedOpenIds` and/or `allowedChatIds` for real usage.
-- The bridge can send approval decisions to Codex. Treat Feishu access as equivalent to local Codex approval access.
+- The bridge can send approval decisions to Codex. Treat Feishu / Telegram access as equivalent to local Codex approval access.
 
 ## More Docs
 

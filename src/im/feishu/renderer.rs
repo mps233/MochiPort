@@ -1,5 +1,6 @@
 use serde_json::Value as JsonValue;
 
+use crate::im::core::thread::ThreadCreateDefaults;
 use crate::im::feishu::types::FeishuUserInputQuestion;
 use crate::im_runtime::ApprovalDecisionOption;
 
@@ -447,25 +448,6 @@ pub struct FeishuThreadListEntry {
     pub title: String,
     pub summary: Option<String>,
     pub last_activity_text: Option<String>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct FeishuThreadModelChoice {
-    pub label: String,
-    pub value: String,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct FeishuThreadCreateDefaults {
-    pub remote_name: Option<String>,
-    pub cwd: Option<String>,
-    pub model_provider: Option<String>,
-    pub model: Option<String>,
-    pub effort: Option<String>,
-    pub permission: Option<String>,
-    pub projects: Vec<String>,
-    pub models: Vec<FeishuThreadModelChoice>,
-    pub efforts: Vec<String>,
 }
 
 fn build_interactive_choice_block(
@@ -1361,7 +1343,7 @@ pub fn build_thread_routing_choice_card(
 
 pub fn build_thread_create_settings_card(
     request_id: &str,
-    defaults: &FeishuThreadCreateDefaults,
+    defaults: &ThreadCreateDefaults,
 ) -> serde_json::Value {
     let cwd_options = thread_cwd_options(defaults);
     let model_options = thread_model_options(defaults);
@@ -1548,7 +1530,7 @@ fn select_static_element(
     })
 }
 
-fn thread_cwd_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, String)> {
+fn thread_cwd_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String)> {
     let mut options = vec![(
         "使用 Codex App 默认目录".to_string(),
         "__default__".to_string(),
@@ -1566,7 +1548,7 @@ fn thread_cwd_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, Str
     dedupe_options(options)
 }
 
-fn thread_model_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, String)> {
+fn thread_model_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String)> {
     let mut options = vec![("使用当前模型".to_string(), "__default__".to_string())];
     for model in defaults
         .models
@@ -1578,7 +1560,7 @@ fn thread_model_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, S
     dedupe_options(options)
 }
 
-fn thread_effort_options(defaults: &FeishuThreadCreateDefaults) -> Vec<(String, String)> {
+fn thread_effort_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String)> {
     let mut options = vec![(
         "使用模型默认推理强度".to_string(),
         "__default__".to_string(),

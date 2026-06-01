@@ -597,12 +597,12 @@ async fn start_bridge_task(
             .await;
         return false;
     }
-    if !feishu_configured(&config) {
+    if !im_bridge_configured(&config) {
         state
             .push_event(
                 "warn",
-                "bridge_waiting_for_feishu",
-                "bridge is waiting for Feishu configuration",
+                "bridge_waiting_for_im_config",
+                "bridge is waiting for Feishu or Telegram configuration",
             )
             .await;
         return false;
@@ -646,6 +646,14 @@ async fn start_bridge_task(
 
 fn feishu_configured(config: &AppConfig) -> bool {
     !config.feishu.app_id.trim().is_empty() && !config.feishu.app_secret.trim().is_empty()
+}
+
+fn telegram_configured(config: &AppConfig) -> bool {
+    !config.telegram.bot_token.trim().is_empty()
+}
+
+fn im_bridge_configured(config: &AppConfig) -> bool {
+    feishu_configured(config) || telegram_configured(config)
 }
 
 #[derive(Serialize)]

@@ -1,10 +1,32 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatType {
     Direct,
     Group,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImPlatformKind {
+    Feishu,
+    Telegram,
+}
+
+impl Default for ImPlatformKind {
+    fn default() -> Self {
+        Self::Feishu
+    }
+}
+
+impl ImPlatformKind {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Feishu => "feishu",
+            Self::Telegram => "telegram",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -17,7 +39,7 @@ pub struct InboundAttachment {
     pub local_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ThreadRouteDirection {
     Prev,
@@ -42,9 +64,32 @@ pub enum InboundAction {
     ThreadRouteCreateDefault {
         request_id: String,
     },
+    ThreadRouteCreateConfigured {
+        request_id: String,
+    },
+    ThreadRouteCreateEdit {
+        request_id: String,
+        field: String,
+    },
+    ThreadRouteCreateSetIndex {
+        request_id: String,
+        field: String,
+        page: usize,
+        index: usize,
+    },
+    ThreadRouteCreateOptionsPage {
+        request_id: String,
+        field: String,
+        direction: ThreadRouteDirection,
+    },
     ThreadRouteResumeSelected {
         request_id: String,
         thread_id: String,
+    },
+    ThreadRouteResumeIndex {
+        request_id: String,
+        page: usize,
+        index: usize,
     },
     ThreadRouteListPage {
         request_id: String,
@@ -55,6 +100,8 @@ pub enum InboundAction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InboundMessage {
+    #[serde(default)]
+    pub platform: ImPlatformKind,
     pub account_id: String,
     pub sender_id: String,
     pub chat_id: String,
@@ -73,7 +120,12 @@ pub struct InboundMessage {
 
 impl InboundMessage {
     pub fn conversation_key(&self) -> String {
-        format!("feishu:{}:{}", self.account_id, self.chat_id)
+        format!(
+            "{}:{}:{}",
+            self.platform.key(),
+            self.account_id,
+            self.chat_id
+        )
     }
 }
 

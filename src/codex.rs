@@ -641,7 +641,7 @@ mod tests {
                 super::decision_option("Yes", json!("accept")),
                 super::decision_option("No", json!("cancel")),
             ],
-            feishu_message_id: None,
+            message_id: None,
         };
 
         let (yes_index, yes) = approval_decision_by_input(&pending, "/y").expect("yes");

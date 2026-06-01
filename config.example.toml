@@ -8,6 +8,11 @@ mentionOnly = true
 allowedOpenIds = []
 allowedChatIds = []
 
+[telegram]
+botToken = ""
+mentionOnly = false
+allowedChatIds = []
+
 [bridge]
 enabled = true
 accountId = "default"

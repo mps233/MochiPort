@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
-use crate::im::feishu::FeishuStreamingCardState;
+use crate::{im::feishu::FeishuStreamingCardState, types::ImPlatformKind};
 
 #[derive(Debug, Clone)]
 pub struct RouteTarget {
+    pub platform: ImPlatformKind,
     pub conversation_key: String,
     pub account_id: String,
     pub chat_id: String,
@@ -19,7 +20,7 @@ pub struct PendingApproval {
     pub params: Value,
     pub summary: String,
     pub decisions: Vec<ApprovalDecisionOption>,
-    pub feishu_message_id: Option<String>,
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,13 +46,26 @@ pub struct ThreadRoutingRequestState {
     pub message_id: Option<String>,
     pub page: usize,
     pub page_cursors: Vec<Option<String>>,
+    pub thread_ids_by_page: Vec<Vec<String>>,
+    pub create_draft: ThreadCreateDraftState,
+    pub create_option_values_by_field_page: HashMap<String, Vec<Vec<String>>>,
     pub history_cursor: Option<String>,
     pub history_has_next: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ThreadCreateDraftState {
+    pub cwd_choice: Option<String>,
+    pub cwd_custom: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnOrigin {
     Feishu,
+    Telegram,
 }
 
 #[derive(Debug, Default)]
@@ -218,7 +232,7 @@ impl RuntimeState {
                 .iter_mut()
                 .find(|approval| approval.request_key() == request_key)
             {
-                approval.feishu_message_id = Some(message_id);
+                approval.message_id = Some(message_id);
                 return true;
             }
         }
@@ -292,12 +306,14 @@ impl RuntimeState {
         request_id: &str,
         page: usize,
         page_cursors: Vec<Option<String>>,
+        thread_ids_by_page: Vec<Vec<String>>,
         history_cursor: Option<String>,
         history_has_next: bool,
     ) -> Option<ThreadRoutingRequestState> {
         let request = self.thread_routing_requests.get_mut(request_id)?;
         request.page = page;
         request.page_cursors = page_cursors;
+        request.thread_ids_by_page = thread_ids_by_page;
         request.history_cursor = history_cursor;
         request.history_has_next = history_has_next;
         Some(request.clone())
@@ -328,12 +344,15 @@ pub fn approval_request_key(request_id: &Value) -> String {
 pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget> {
     let mut parts = conversation_key.splitn(3, ':');
     let channel = parts.next()?;
-    if channel != "feishu" {
-        return None;
-    }
+    let platform = match channel {
+        "feishu" => ImPlatformKind::Feishu,
+        "telegram" => ImPlatformKind::Telegram,
+        _ => return None,
+    };
     let account_id = parts.next()?.to_string();
     let chat_id = parts.next()?.to_string();
     Some(RouteTarget {
+        platform,
         conversation_key: conversation_key.to_string(),
         account_id,
         chat_id,
@@ -344,7 +363,9 @@ pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget
 mod tests {
     use serde_json::json;
 
-    use super::{PendingApproval, RuntimeState, TurnOrigin};
+    use crate::types::ImPlatformKind;
+
+    use super::{PendingApproval, RuntimeState, TurnOrigin, route_from_conversation_key};
 
     fn approval(id: i64) -> PendingApproval {
         PendingApproval {
@@ -360,7 +381,7 @@ mod tests {
             }),
             summary: "命令：`test`".to_string(),
             decisions: vec![],
-            feishu_message_id: None,
+            message_id: None,
         }
     }
 
@@ -439,5 +460,22 @@ mod tests {
         runtime.mark_turn_completed("thread-1", Some("turn-1"));
 
         assert_eq!(runtime.turn_origin("turn-1"), None);
+    }
+
+    #[test]
+    fn route_from_conversation_key_preserves_platform() {
+        let feishu =
+            route_from_conversation_key("feishu:default:open_id:ou_test").expect("feishu route");
+        assert_eq!(feishu.platform, ImPlatformKind::Feishu);
+        assert_eq!(feishu.account_id, "default");
+        assert_eq!(feishu.chat_id, "open_id:ou_test");
+
+        let telegram =
+            route_from_conversation_key("telegram:bot:chat:123").expect("telegram route");
+        assert_eq!(telegram.platform, ImPlatformKind::Telegram);
+        assert_eq!(telegram.account_id, "bot");
+        assert_eq!(telegram.chat_id, "chat:123");
+
+        assert!(route_from_conversation_key("slack:team:channel").is_none());
     }
 }

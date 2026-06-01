@@ -4,7 +4,7 @@
 
 ## 产品预览
 
-本地 GUI 负责启动 backend、接入飞书、写入 Codex App 和 Codex VS Code 插件所需的本地配置。
+本地 GUI 负责启动 backend、接入飞书，也可以通过配置启用 Telegram Bot 通道，并写入 Codex App 和 Codex VS Code 插件所需的本地配置。
 
 <p align="center">
   <img src="docs/assets/product/codex-remote-gui.png" alt="Codex Remote GUI 状态和配置界面" width="900">
@@ -22,7 +22,7 @@
   <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="520">
 </p>
 
-`codex-remote` 是一个本地 Codex remote-control backend，用来把 Codex App 和 Codex VS Code 插件的远程控制能力接到飞书 / Lark。
+`codex-remote` 是一个本地 Codex remote-control backend，用来把 Codex App 和 Codex VS Code 插件的远程控制能力接到飞书 / Lark，并提供 Telegram Bot MVP。
 
 它只做一件事：用户明确打开本地 GUI 后，让 Codex 客户端连接本机 backend，再把 remote-control 消息桥接到飞书。
 
@@ -199,11 +199,18 @@ mentionOnly = true
 allowedOpenIds = []
 allowedChatIds = []
 
+[telegram]
+botToken = ""
+mentionOnly = false
+allowedChatIds = []
+
 [bridge]
 enabled = true
 accountId = "default"
 sendStreaming = true
 ```
+
+Telegram MVP 面向的是“用 BotFather 创建一个自己的 bot，然后在 Telegram 里私聊这个 bot”。`allowedChatIds` 可以先留空，确认能用后再按事件日志里的 `chat=...` 限制可访问的私聊。
 
 Codex 客户端配置是另一份文件，通常在 `~/.codex/config.toml`。
 
@@ -229,11 +236,11 @@ GET http://127.0.0.1:3847/api/events
 ## 安全说明
 
 - daemon 默认只绑定 `127.0.0.1`，不要直接暴露到公网
-- `config.toml` 里保存飞书 `appId` 和 `appSecret`，不要提交
+- `config.toml` 里保存飞书 `appId` / `appSecret` 和 Telegram `botToken`，不要提交
 - Codex 的 `auth.json` 和第三方 provider key 都是本地 secret，不要提交
 - 飞书附件会下载到本地状态目录旁边的 `.im/attachments/feishu/`
 - 真正使用时建议配置 `allowedOpenIds` 和 / 或 `allowedChatIds`
-- bridge 可以替飞书用户向 Codex 提交审批决定，所以飞书访问权限应视为等价于本地 Codex 审批权限
+- bridge 可以替 IM 用户向 Codex 提交审批决定，所以飞书 / Telegram 访问权限应视为等价于本地 Codex 审批权限
 
 ## 更多文档
 

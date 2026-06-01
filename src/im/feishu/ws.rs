@@ -14,7 +14,10 @@ use tracing::{info, warn};
 
 use crate::{
     app_state::SharedState,
-    types::{ChatType, InboundAction, InboundAttachment, InboundMessage, ThreadRouteDirection},
+    types::{
+        ChatType, ImPlatformKind, InboundAction, InboundAttachment, InboundMessage,
+        ThreadRouteDirection,
+    },
 };
 
 use super::api::FeishuApi;
@@ -378,6 +381,7 @@ async fn handle_event(
     }
 
     tx.send(InboundMessage {
+        platform: ImPlatformKind::Feishu,
         account_id: account_id.to_string(),
         sender_id,
         chat_id: receive.message.chat_id,
@@ -588,6 +592,7 @@ async fn handle_card_action_event(
         }
     };
     tx.send(InboundMessage {
+        platform: ImPlatformKind::Feishu,
         account_id: account_id.to_string(),
         sender_id,
         chat_id,

@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub bind: String,
     pub state_path: PathBuf,
     pub feishu: FeishuConfig,
+    pub telegram: TelegramConfig,
     pub bridge: BridgeConfig,
 }
 
@@ -23,6 +24,17 @@ pub struct FeishuConfig {
     pub display_name: String,
     pub mention_only: bool,
     pub allowed_open_ids: Vec<String>,
+    pub allowed_chat_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TelegramConfig {
+    #[serde(alias = "bot_token")]
+    pub bot_token: String,
+    #[serde(alias = "mention_only")]
+    pub mention_only: bool,
+    #[serde(alias = "allowed_chat_ids")]
     pub allowed_chat_ids: Vec<String>,
 }
 
@@ -40,6 +52,7 @@ impl Default for AppConfig {
             bind: DEFAULT_BIND.to_string(),
             state_path: PathBuf::from("codex-remote-state.json"),
             feishu: FeishuConfig::default(),
+            telegram: TelegramConfig::default(),
             bridge: BridgeConfig::default(),
         }
     }
@@ -53,6 +66,16 @@ impl Default for FeishuConfig {
             display_name: String::new(),
             mention_only: true,
             allowed_open_ids: Vec::new(),
+            allowed_chat_ids: Vec::new(),
+        }
+    }
+}
+
+impl Default for TelegramConfig {
+    fn default() -> Self {
+        Self {
+            bot_token: String::new(),
+            mention_only: false,
             allowed_chat_ids: Vec::new(),
         }
     }

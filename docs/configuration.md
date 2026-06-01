@@ -28,6 +28,11 @@ mentionOnly = true
 allowedOpenIds = []
 allowedChatIds = []
 
+[telegram]
+botToken = ""
+mentionOnly = false
+allowedChatIds = []
+
 [bridge]
 enabled = true
 accountId = "default"
@@ -87,6 +92,33 @@ Optional allowlist of Feishu chat ids.
 
 Empty means no chat-level allowlist.
 
+## Telegram
+
+```toml
+[telegram]
+botToken = ""
+mentionOnly = false
+allowedChatIds = []
+```
+
+### `botToken`
+
+Telegram Bot token from BotFather. `bot_token` is also accepted for hand-written config.
+
+This is the private-chat bot flow: create your own bot with BotFather, then send messages to that bot from your Telegram account. It does not require Telegram `api_id`, `api_hash`, phone login, or an MTProto user session.
+
+### `mentionOnly`
+
+When `true`, group messages are ignored unless the bot mention is explicitly supported by the adapter. Direct messages are still accepted. The MVP is best used in direct chat or with `mentionOnly = false`.
+
+### `allowedChatIds`
+
+Optional allowlist of Telegram chat ids as strings.
+
+Empty means no chat-level allowlist.
+
+For first use, keep this empty. After you send `/status` to the bot, copy the `chat=...` value from the `telegram_message` event and put it here if you want to restrict access.
+
 ## Bridge
 
 ```toml
@@ -98,9 +130,9 @@ sendStreaming = true
 
 ### `enabled`
 
-Controls whether the Feishu bridge should run.
+Controls whether the IM bridge should run.
 
-When disabled, Feishu websocket listening stops and Feishu messages are not forwarded to Codex.
+When disabled, Feishu websocket listening and Telegram polling stop, and IM messages are not forwarded to Codex.
 
 ### `accountId`
 
