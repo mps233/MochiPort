@@ -32,6 +32,9 @@ pub struct AppState {
     pub events: Mutex<Vec<EventRecord>>,
     pub bridge_task: Mutex<Option<JoinHandle<()>>>,
     pub feishu_ws: Mutex<FeishuWsState>,
+    pub telegram: Mutex<TelegramState>,
+    pub wechat: Mutex<WechatState>,
+    pub wechat_onboard: Mutex<Option<WechatOnboardSession>>,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -114,6 +117,34 @@ pub struct FeishuWsState {
     pub last_error: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WechatState {
+    pub polling: bool,
+    pub connected: bool,
+    pub last_error: Option<String>,
+    pub last_event_at_ms: Option<u128>,
+    pub last_inbound_at_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TelegramState {
+    pub polling: bool,
+    pub connected: bool,
+    pub last_error: Option<String>,
+    pub last_event_at_ms: Option<u128>,
+    pub last_inbound_at_ms: Option<u128>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WechatOnboardSession {
+    pub session_key: String,
+    pub qrcode: String,
+    pub started_at_ms: u128,
+    pub current_api_base_url: String,
+}
+
 impl AppState {
     pub fn new(
         config_path: PathBuf,
@@ -130,6 +161,9 @@ impl AppState {
             events: Mutex::new(Vec::new()),
             bridge_task: Mutex::new(None),
             feishu_ws: Mutex::new(FeishuWsState::default()),
+            telegram: Mutex::new(TelegramState::default()),
+            wechat: Mutex::new(WechatState::default()),
+            wechat_onboard: Mutex::new(None),
             shutdown_tx: Mutex::new(shutdown_tx),
         })
     }

@@ -5,11 +5,15 @@ use tokio::{sync::mpsc, task::JoinSet};
 use crate::{
     app_state::SharedState,
     codex::{approval_request_view, notification_thread_id},
-    im::events,
     im::feishu::{FeishuApi, FeishuSettings, flow as feishu_flow, ws::listen_ws},
     im::telegram::{
         api::TelegramApi, flow as telegram_flow, polling::listen_polling, types::TelegramSettings,
     },
+    im::wechat::{
+        api::WechatApi, flow as wechat_flow, polling::listen_polling as listen_wechat_polling,
+        types::WechatSettings,
+    },
+    im::{core::outbound, events},
     im_runtime::{PendingApproval, RouteTarget},
     remote_control_backend,
     types::{ImPlatformKind, InboundMessage},
@@ -17,15 +21,18 @@ use crate::{
 
 pub async fn start_bridge(state: SharedState) {
     let config = state.config.lock().await.clone();
-    let feishu_configured =
-        !config.feishu.app_id.trim().is_empty() && !config.feishu.app_secret.trim().is_empty();
-    let telegram_configured = !config.telegram.bot_token.trim().is_empty();
-    if !feishu_configured && !telegram_configured {
+    let feishu_configured = config.feishu.enabled
+        && !config.feishu.app_id.trim().is_empty()
+        && !config.feishu.app_secret.trim().is_empty();
+    let telegram_configured =
+        config.telegram.enabled && !config.telegram.bot_token.trim().is_empty();
+    let wechat_configured = config.wechat.enabled && !config.wechat.bot_token.trim().is_empty();
+    if !feishu_configured && !telegram_configured && !wechat_configured {
         state
             .push_event(
                 "error",
                 "bridge_config_invalid",
-                "missing Feishu app_id/app_secret or Telegram bot_token",
+                "no enabled IM channel is configured",
             )
             .await;
         return;
@@ -45,12 +52,22 @@ pub async fn start_bridge(state: SharedState) {
     let (tx, mut rx) = mpsc::channel::<InboundMessage>(128);
     let api = FeishuApi::new(FeishuSettings::from_app_config(&config.feishu));
     let telegram_api = TelegramApi::new(TelegramSettings::from_app_config(&config.telegram));
+    let wechat_api = WechatApi::new(WechatSettings::from_app_config(&config.wechat));
     let generation = state.runtime.lock().await.start_bridge_generation();
+    let (outbound_tx, outbound_rx) = outbound::channel();
     let mut tasks = JoinSet::new();
+    tasks.spawn(outbound::run_worker(
+        state.clone(),
+        telegram_api.clone(),
+        wechat_api.clone(),
+        outbound_rx,
+    ));
     tasks.spawn(codex_event_router(
         state.clone(),
         api.clone(),
         telegram_api.clone(),
+        wechat_api.clone(),
+        outbound_tx.clone(),
         generation,
     ));
     if feishu_configured {
@@ -115,24 +132,23 @@ pub async fn start_bridge(state: SharedState) {
             }
         });
     } else {
-        state
-            .push_event(
-                "info",
-                "feishu_not_configured",
-                "feishu app_id/app_secret is empty",
-            )
-            .await;
+        let (kind, message) = if config.feishu.enabled {
+            ("feishu_not_configured", "feishu app_id/app_secret is empty")
+        } else {
+            ("feishu_disabled", "feishu channel is disabled")
+        };
+        state.push_event("info", kind, message).await;
     }
     if !telegram_configured {
-        state
-            .push_event(
-                "info",
-                "telegram_not_configured",
-                "telegram bot_token is empty",
-            )
-            .await;
+        let (kind, message) = if config.telegram.enabled {
+            ("telegram_not_configured", "telegram bot_token is empty")
+        } else {
+            ("telegram_disabled", "telegram channel is disabled")
+        };
+        state.push_event("info", kind, message).await;
     } else {
         let telegram_state = state.clone();
+        let telegram_tx = tx.clone();
         tasks.spawn(async move {
             loop {
                 if !is_current_generation(&telegram_state, generation).await {
@@ -141,7 +157,12 @@ pub async fn start_bridge(state: SharedState) {
                 telegram_state
                     .push_event("info", "telegram_polling_starting", "starting")
                     .await;
-                match listen_polling(telegram_state.clone(), telegram_api.clone(), tx.clone()).await
+                match listen_polling(
+                    telegram_state.clone(),
+                    telegram_api.clone(),
+                    telegram_tx.clone(),
+                )
+                .await
                 {
                     Ok(()) => {
                         telegram_state
@@ -151,6 +172,46 @@ pub async fn start_bridge(state: SharedState) {
                     Err(err) => {
                         telegram_state
                             .push_event("error", "telegram_polling_failed", err.to_string())
+                            .await;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+    if !wechat_configured {
+        let (kind, message) = if config.wechat.enabled {
+            ("wechat_not_configured", "wechat bot_token is empty")
+        } else {
+            ("wechat_disabled", "wechat channel is disabled")
+        };
+        state.push_event("info", kind, message).await;
+    } else {
+        let wechat_state = state.clone();
+        let wechat_tx = tx.clone();
+        tasks.spawn(async move {
+            loop {
+                if !is_current_generation(&wechat_state, generation).await {
+                    break;
+                }
+                wechat_state
+                    .push_event("info", "wechat_polling_starting", "starting")
+                    .await;
+                match listen_wechat_polling(
+                    wechat_state.clone(),
+                    wechat_api.clone(),
+                    wechat_tx.clone(),
+                )
+                .await
+                {
+                    Ok(()) => {
+                        wechat_state
+                            .push_event("warn", "wechat_polling_stopped", "polling stopped")
+                            .await;
+                    }
+                    Err(err) => {
+                        wechat_state
+                            .push_event("error", "wechat_polling_failed", err.to_string())
                             .await;
                     }
                 }
@@ -224,6 +285,9 @@ async fn handle_inbound(state: SharedState, api: FeishuApi, message: InboundMess
     if message.platform == ImPlatformKind::Telegram {
         return telegram_flow::handle_inbound(state, message).await;
     }
+    if message.platform == ImPlatformKind::Wechat {
+        return wechat_flow::handle_inbound(state, message).await;
+    }
     feishu_flow::handle_inbound(state, api, message).await
 }
 
@@ -240,6 +304,8 @@ async fn codex_event_router(
     state: SharedState,
     api: FeishuApi,
     telegram_api: TelegramApi,
+    wechat_api: WechatApi,
+    outbound_tx: outbound::ImOutboundSender,
     generation: u64,
 ) {
     let mut rx = remote_control_backend::subscribe(&state);
@@ -277,6 +343,8 @@ async fn codex_event_router(
             state.clone(),
             api.clone(),
             telegram_api.clone(),
+            wechat_api.clone(),
+            outbound_tx.clone(),
             &notification,
         )
         .await;
@@ -301,6 +369,7 @@ async fn codex_event_router(
                                 &state,
                                 &api,
                                 &telegram_api,
+                                &wechat_api,
                                 &conversation_key,
                                 &next_approval,
                             )
@@ -376,7 +445,15 @@ async fn codex_event_router(
                 (should_send_now, approval)
             };
             if should_send_now {
-                let _ = events::send_approval(&state, &api, &telegram_api, &route, &approval).await;
+                let _ = events::send_approval(
+                    &state,
+                    &api,
+                    &telegram_api,
+                    &wechat_api,
+                    &route,
+                    &approval,
+                )
+                .await;
             }
             let approval_details = approval_event_details(
                 &request_kind,

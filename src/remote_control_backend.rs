@@ -1331,15 +1331,22 @@ async fn handle_server_envelope(
     )
     .await?;
     if !is_current_remote_stream(state, connection_epoch, &client_id, &stream_id).await {
+        let should_process_stale_notification = stale_server_notification(&event);
         observe_stale_server_envelope(
             state,
             connection_epoch,
             seq_id,
             &client_id,
             &stream_id,
-            event,
+            &event,
+            should_process_stale_notification,
         )
         .await;
+        if should_process_stale_notification
+            && let IncomingServerEvent::ServerMessage { message } = event
+        {
+            observe_app_server_message(state, connection_epoch, &message).await;
+        }
         return Ok(());
     }
     match event {
@@ -1470,18 +1477,36 @@ async fn observe_stale_server_envelope(
     seq_id: u64,
     client_id: &str,
     stream_id: &str,
-    event: IncomingServerEvent,
+    event: &IncomingServerEvent,
+    processed: bool,
 ) {
     if !matches!(event, IncomingServerEvent::Pong { .. }) {
         chain_log::write_line(format!(
-            "[remote_control] event=stale_server_envelope connection_epoch={} seq_id={} client_id={} stream_id={} kind={} current_stream_id={}",
+            "[remote_control] event=stale_server_envelope connection_epoch={} seq_id={} client_id={} stream_id={} kind={} action={} current_stream_id={}",
             connection_epoch,
             seq_id,
             client_id,
             stream_id,
-            server_event_kind(&event),
+            server_event_kind(event),
+            if processed { "processed" } else { "ignored" },
             current_stream_id(state).await.unwrap_or_default()
         ));
+    }
+}
+
+fn stale_server_notification(event: &IncomingServerEvent) -> bool {
+    match event {
+        IncomingServerEvent::ServerMessage { message } => {
+            let message = message.get("message").unwrap_or(message);
+            message.get("id").is_none()
+                && message
+                    .get("method")
+                    .and_then(|value| value.as_str())
+                    .is_some()
+        }
+        IncomingServerEvent::ServerMessageChunk { .. }
+        | IncomingServerEvent::Ack
+        | IncomingServerEvent::Pong { .. } => false,
     }
 }
 
@@ -2139,6 +2164,7 @@ pub async fn thread_list(
         params["limit"] = json!(limit);
     }
     params["sortKey"] = json!("updated_at");
+    params["sourceKinds"] = json!(["cli", "vscode", "appServer"]);
     params["archived"] = json!(false);
     if let Some(cwd) = cwd {
         params["cwd"] = json!(cwd);

@@ -1,6 +1,10 @@
+use std::path::Path;
+
 use anyhow::{Context, Result, anyhow};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, multipart};
 use serde::{Deserialize, Serialize};
+
+use crate::chain_log;
 
 use super::types::TelegramSettings;
 
@@ -186,6 +190,42 @@ impl TelegramApi {
         Ok(message.message_id)
     }
 
+    pub async fn send_photo_file(
+        &self,
+        chat_id: &str,
+        local_path: &Path,
+        caption: Option<&str>,
+        parse_mode: Option<TelegramParseMode>,
+    ) -> Result<i64> {
+        self.post_media_file(
+            "sendPhoto",
+            chat_id,
+            "photo",
+            local_path,
+            caption,
+            parse_mode,
+        )
+        .await
+    }
+
+    pub async fn send_document_file(
+        &self,
+        chat_id: &str,
+        local_path: &Path,
+        caption: Option<&str>,
+        parse_mode: Option<TelegramParseMode>,
+    ) -> Result<i64> {
+        self.post_media_file(
+            "sendDocument",
+            chat_id,
+            "document",
+            local_path,
+            caption,
+            parse_mode,
+        )
+        .await
+    }
+
     pub async fn answer_callback_query(
         &self,
         callback_query_id: &str,
@@ -230,27 +270,143 @@ impl TelegramApi {
             self.settings.bot_token.trim(),
             method
         );
-        let response = self.client.post(url).json(body).send().await?;
+        let response = self
+            .client
+            .post(url)
+            .json(body)
+            .send()
+            .await
+            .map_err(|err| {
+                let message = self.sanitize_error(&err.to_string());
+                chain_log::write_line(format!(
+                    "[telegram_api] event=request_failed method={} err={}",
+                    method, message
+                ));
+                anyhow!("telegram api {method} request failed: {}", message)
+            })?;
         let status = response.status();
         let payload: TelegramResponse<T> = response
             .json()
             .await
             .with_context(|| format!("failed to decode telegram api {method} response"))?;
         if !status.is_success() || !payload.ok {
+            let description = payload.description.unwrap_or_default();
+            let retry_after = payload
+                .parameters
+                .and_then(|parameters| parameters.retry_after);
+            chain_log::write_line(format!(
+                "[telegram_api] event=response_error method={} status={} error_code={:?} retry_after={:?} description={}",
+                method, status, payload.error_code, retry_after, description
+            ));
             return Err(TelegramApiError {
                 method: method.to_string(),
                 status,
                 error_code: payload.error_code,
-                description: payload.description.unwrap_or_default(),
-                retry_after: payload
-                    .parameters
-                    .and_then(|parameters| parameters.retry_after),
+                description,
+                retry_after,
             }
             .into());
         }
         payload
             .result
             .ok_or_else(|| anyhow!("telegram api {method} returned empty result"))
+    }
+
+    async fn post_media_file(
+        &self,
+        method: &str,
+        chat_id: &str,
+        field_name: &str,
+        local_path: &Path,
+        caption: Option<&str>,
+        parse_mode: Option<TelegramParseMode>,
+    ) -> Result<i64> {
+        if !self.is_configured() {
+            return Err(anyhow!("telegram bot_token is empty"));
+        }
+        let bytes = std::fs::read(local_path)
+            .with_context(|| format!("failed to read {}", local_path.display()))?;
+        let file_name = local_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("image.png")
+            .to_string();
+        let mime = mime_guess::from_path(local_path)
+            .first_or_octet_stream()
+            .to_string();
+        let part = multipart::Part::bytes(bytes)
+            .file_name(file_name)
+            .mime_str(&mime)
+            .with_context(|| format!("invalid mime type for {}", local_path.display()))?;
+        let mut form = multipart::Form::new()
+            .text("chat_id", chat_id.to_string())
+            .part(field_name.to_string(), part);
+        if let Some(caption) = caption.map(str::trim).filter(|value| !value.is_empty()) {
+            form = form.text("caption", caption.to_string());
+        }
+        if let Some(parse_mode) = parse_mode {
+            let parse_mode = serde_json::to_value(parse_mode)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "HTML".to_string());
+            form = form.text("parse_mode", parse_mode);
+        }
+
+        let url = format!(
+            "{TELEGRAM_API_BASE}/bot{}/{}",
+            self.settings.bot_token.trim(),
+            method
+        );
+        let response = self
+            .client
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| {
+                let message = self.sanitize_error(&err.to_string());
+                chain_log::write_line(format!(
+                    "[telegram_api] event=request_failed method={} err={}",
+                    method, message
+                ));
+                anyhow!("telegram api {method} request failed: {}", message)
+            })?;
+        let status = response.status();
+        let payload: TelegramResponse<TelegramMessage> = response
+            .json()
+            .await
+            .with_context(|| format!("failed to decode telegram api {method} response"))?;
+        if !status.is_success() || !payload.ok {
+            let description = payload.description.unwrap_or_default();
+            let retry_after = payload
+                .parameters
+                .and_then(|parameters| parameters.retry_after);
+            chain_log::write_line(format!(
+                "[telegram_api] event=response_error method={} status={} error_code={:?} retry_after={:?} description={}",
+                method, status, payload.error_code, retry_after, description
+            ));
+            return Err(TelegramApiError {
+                method: method.to_string(),
+                status,
+                error_code: payload.error_code,
+                description,
+                retry_after,
+            }
+            .into());
+        }
+        payload
+            .result
+            .map(|message| message.message_id)
+            .ok_or_else(|| anyhow!("telegram api {method} returned empty result"))
+    }
+
+    fn sanitize_error(&self, message: &str) -> String {
+        let token = self.settings.bot_token.trim();
+        if token.is_empty() {
+            message.to_string()
+        } else {
+            message.replace(token, "***")
+        }
     }
 }
 

@@ -1,9 +1,13 @@
-use anyhow::Result;
+use std::path::PathBuf;
+
+use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose};
 
 use crate::{
     app_state::SharedState,
     codex::{extract_agent_message_text, extract_turn_reply_text},
     im::{
+        core::outbound::{ImOutboundKind, ImOutboundMessage, ImOutboundPayload, ImOutboundSender},
         feishu::{
             FeishuAdapter, FeishuApi, flow as feishu_flow, renderer,
             runtime::{
@@ -11,7 +15,8 @@ use crate::{
                 upsert_streaming_card_state,
             },
         },
-        telegram::{adapter::TelegramAdapter, api::TelegramApi},
+        telegram::{adapter::TelegramAdapter, api::TelegramApi, renderer as telegram_renderer},
+        wechat::{adapter::WechatAdapter, api::WechatApi},
     },
     im_runtime::{PendingApproval, RouteTarget, TurnOrigin},
     types::ImPlatformKind,
@@ -21,6 +26,7 @@ pub(crate) async fn send_next_approval(
     state: &SharedState,
     feishu_api: &FeishuApi,
     telegram_api: &TelegramApi,
+    wechat_api: &WechatApi,
     conversation_key: &str,
     approval: &PendingApproval,
 ) -> Result<()> {
@@ -34,13 +40,22 @@ pub(crate) async fn send_next_approval(
             .await;
         return Ok(());
     };
-    send_approval(state, feishu_api, telegram_api, &route, approval).await
+    send_approval(
+        state,
+        feishu_api,
+        telegram_api,
+        wechat_api,
+        &route,
+        approval,
+    )
+    .await
 }
 
 pub(crate) async fn send_approval(
     state: &SharedState,
     feishu_api: &FeishuApi,
     telegram_api: &TelegramApi,
+    wechat_api: &WechatApi,
     route: &RouteTarget,
     approval: &PendingApproval,
 ) -> Result<()> {
@@ -49,6 +64,10 @@ pub(crate) async fn send_approval(
         ImPlatformKind::Telegram => {
             let adapter = TelegramAdapter::new(telegram_api.clone());
             send_telegram_approval(state, &adapter, route, approval).await
+        }
+        ImPlatformKind::Wechat => {
+            let adapter = WechatAdapter::new(wechat_api.clone());
+            send_wechat_approval(state, &adapter, route, approval).await
         }
     }
 }
@@ -79,6 +98,8 @@ pub(crate) async fn send_turn_reply(
     state: &SharedState,
     feishu_api: &FeishuApi,
     telegram_api: &TelegramApi,
+    wechat_api: &WechatApi,
+    outbound_tx: Option<&ImOutboundSender>,
     thread_id: &str,
     route: &RouteTarget,
     text: &str,
@@ -94,6 +115,23 @@ pub(crate) async fn send_turn_reply(
         }
     };
     if !should_send {
+        if matches!(
+            route.platform,
+            ImPlatformKind::Telegram | ImPlatformKind::Wechat
+        ) {
+            let event_kind = format!("{}_turn_reply_skipped", route.platform.key());
+            state
+                .push_event(
+                    "info",
+                    &event_kind,
+                    format!(
+                        "thread={thread_id} chat={} reason=duplicate text_len={}",
+                        route.chat_id,
+                        text.chars().count()
+                    ),
+                )
+                .await;
+        }
         return;
     }
     match route.platform {
@@ -110,15 +148,98 @@ pub(crate) async fn send_turn_reply(
             }
         }
         ImPlatformKind::Telegram => {
-            let adapter = TelegramAdapter::new(telegram_api.clone());
-            if let Err(err) = adapter.send_turn_completed(&route.chat_id, text).await {
-                state
-                    .push_event(
-                        "error",
-                        "telegram_turn_completed_failed",
-                        format!("thread={thread_id} chat={} err={err}", route.chat_id),
-                    )
-                    .await;
+            let rendered = telegram_renderer::render_agent_message_text(text);
+            if let Some(outbound_tx) = outbound_tx {
+                if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
+                    thread_id: thread_id.to_string(),
+                    route: route.clone(),
+                    item_id: None,
+                    item_type: Some("agentMessage".to_string()),
+                    kind: ImOutboundKind::TurnReply,
+                    payload: ImOutboundPayload::Text(rendered),
+                }) {
+                    state
+                        .push_event(
+                            "error",
+                            "telegram_turn_enqueue_failed",
+                            format!("thread={thread_id} chat={} err={err}", route.chat_id),
+                        )
+                        .await;
+                }
+            } else {
+                let adapter = TelegramAdapter::new(telegram_api.clone());
+                match adapter.send_turn_completed(&route.chat_id, &rendered).await {
+                    Ok(message_id) => {
+                        state
+                            .push_event(
+                                "info",
+                                "telegram_turn_completed_sent",
+                                format!(
+                                    "thread={thread_id} chat={} message={message_id}",
+                                    route.chat_id
+                                ),
+                            )
+                            .await;
+                    }
+                    Err(err) => {
+                        state
+                            .push_event(
+                                "error",
+                                "telegram_turn_completed_failed",
+                                format!("thread={thread_id} chat={} err={err}", route.chat_id),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
+        ImPlatformKind::Wechat => {
+            let rendered = telegram_renderer::render_agent_message_text(text);
+            if let Some(outbound_tx) = outbound_tx {
+                if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
+                    thread_id: thread_id.to_string(),
+                    route: route.clone(),
+                    item_id: None,
+                    item_type: Some("agentMessage".to_string()),
+                    kind: ImOutboundKind::TurnReply,
+                    payload: ImOutboundPayload::Text(rendered),
+                }) {
+                    state
+                        .push_event(
+                            "error",
+                            "wechat_turn_enqueue_failed",
+                            format!("thread={thread_id} peer={} err={err}", route.chat_id),
+                        )
+                        .await;
+                }
+            } else {
+                let adapter = WechatAdapter::new(wechat_api.clone());
+                match adapter
+                    .send_turn_completed(state, &route.account_id, &route.chat_id, &rendered)
+                    .await
+                {
+                    Ok(message_id) => {
+                        state
+                            .push_event(
+                                "info",
+                                "wechat_turn_completed_sent",
+                                format!(
+                                    "thread={thread_id} peer={} message={message_id}",
+                                    route.chat_id
+                                ),
+                            )
+                            .await;
+                    }
+                    Err(err) => {
+                        state
+                            .push_event(
+                                "error",
+                                "wechat_turn_completed_failed",
+                                format!("thread={thread_id} peer={} err={err}", route.chat_id),
+                            )
+                            .await;
+                    }
+                }
             }
         }
     }
@@ -128,6 +249,8 @@ pub(crate) async fn handle_codex_notification(
     state: SharedState,
     api: FeishuApi,
     telegram_api: TelegramApi,
+    wechat_api: WechatApi,
+    outbound_tx: ImOutboundSender,
     notification: &crate::codex::CodexNotification,
 ) {
     let Some(params) = notification.params.as_ref() else {
@@ -399,11 +522,57 @@ pub(crate) async fn handle_codex_notification(
             let Some(route) = route else {
                 return;
             };
-            if route.platform == ImPlatformKind::Telegram {
+            if matches!(
+                route.platform,
+                ImPlatformKind::Telegram | ImPlatformKind::Wechat
+            ) {
                 if item_type == "agentMessage"
                     && let Some(text) = extract_agent_message_text(item)
                 {
-                    send_turn_reply(&state, &api, &telegram_api, thread_id, &route, &text).await;
+                    send_turn_reply(
+                        &state,
+                        &api,
+                        &telegram_api,
+                        &wechat_api,
+                        Some(&outbound_tx),
+                        thread_id,
+                        &route,
+                        &text,
+                    )
+                    .await;
+                } else if item_type == "userMessage" {
+                    let should_forward = if let Some(turn_id) = turn_id {
+                        state.runtime.lock().await.turn_origin(turn_id)
+                            != turn_origin_for_platform(route.platform)
+                    } else {
+                        true
+                    };
+                    if should_forward {
+                        let _ = send_text_im_codex_item(
+                            &state,
+                            &outbound_tx,
+                            thread_id,
+                            &route,
+                            item_id,
+                            item,
+                        )
+                        .await;
+                    }
+                } else if let Err(err) =
+                    send_text_im_codex_item(&state, &outbound_tx, thread_id, &route, item_id, item)
+                        .await
+                {
+                    let event_kind = format!("{}_item_failed", route.platform.key());
+                    state
+                        .push_event(
+                            "error",
+                            &event_kind,
+                            format!(
+                                "thread={thread_id} item={item_id} type={item_type} chat={} err={err}",
+                                route.chat_id
+                            ),
+                        )
+                        .await;
                 }
                 return;
             }
@@ -532,7 +701,17 @@ pub(crate) async fn handle_codex_notification(
             let Some(route) = route else {
                 return;
             };
-            send_turn_reply(&state, &api, &telegram_api, thread_id, &route, &text).await;
+            send_turn_reply(
+                &state,
+                &api,
+                &telegram_api,
+                &wechat_api,
+                Some(&outbound_tx),
+                thread_id,
+                &route,
+                &text,
+            )
+            .await;
         }
         _ => {}
     }
@@ -556,6 +735,14 @@ async fn feishu_route_for_codex_output(
 ) -> Option<RouteTarget> {
     let route = route_for_codex_output(state, thread_id, params).await?;
     (route.platform == ImPlatformKind::Feishu).then_some(route)
+}
+
+fn turn_origin_for_platform(platform: ImPlatformKind) -> Option<TurnOrigin> {
+    match platform {
+        ImPlatformKind::Feishu => Some(TurnOrigin::Feishu),
+        ImPlatformKind::Telegram => Some(TurnOrigin::Telegram),
+        ImPlatformKind::Wechat => Some(TurnOrigin::Wechat),
+    }
 }
 
 fn structured_streaming_kind(item_type: &str) -> Option<&'static str> {
@@ -677,4 +864,261 @@ async fn send_telegram_approval(
         )
         .await;
     Ok(())
+}
+
+async fn send_wechat_approval(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    route: &RouteTarget,
+    approval: &PendingApproval,
+) -> Result<()> {
+    let message_id = adapter
+        .send_approval(state, &route.account_id, &route.chat_id, approval)
+        .await?;
+    state
+        .runtime
+        .lock()
+        .await
+        .remember_approval_message_id(&approval.request_id, message_id.clone());
+    state
+        .push_event(
+            "info",
+            "wechat_approval_sent",
+            format!(
+                "conversation={} request_id={} message={}",
+                route.conversation_key, approval.request_id, message_id
+            ),
+        )
+        .await;
+    Ok(())
+}
+
+async fn send_text_im_codex_item(
+    state: &SharedState,
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    route: &RouteTarget,
+    item_id: &str,
+    item: &serde_json::Value,
+) -> Result<()> {
+    let item_type = item
+        .get("type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let platform = route.platform.key();
+    let dedupe_payload = item.to_string();
+    let should_send = {
+        let mut runtime = state.runtime.lock().await;
+        let key = format!("{}:item:{item_id}:{item_type}", route.conversation_key);
+        if runtime.should_skip_duplicate_text(&key, &dedupe_payload) {
+            false
+        } else {
+            runtime.remember_sent_text(&key, &dedupe_payload);
+            true
+        }
+    };
+    if !should_send {
+        let event_kind = format!("{platform}_item_skipped");
+        state
+            .push_event(
+                "info",
+                &event_kind,
+                format!(
+                    "thread={thread_id} item={item_id} type={item_type} chat={} reason=duplicate",
+                    route.chat_id
+                ),
+            )
+            .await;
+        return Ok(());
+    }
+
+    if matches!(item_type, "imageGeneration" | "imageView")
+        && let Some(path) =
+            text_im_image_path_for_item(state, platform, item_type, item, item_id).await?
+    {
+        let caption = telegram_renderer::image_item_caption(item);
+        let fallback_text = telegram_renderer::render_item_text(item);
+        outbound_tx.enqueue(ImOutboundMessage {
+            thread_id: thread_id.to_string(),
+            route: route.clone(),
+            item_id: Some(item_id.to_string()),
+            item_type: Some(item_type.to_string()),
+            kind: ImOutboundKind::ImageItem,
+            payload: ImOutboundPayload::Image {
+                path,
+                caption: Some(caption),
+                fallback_text,
+            },
+        })?;
+        let event_kind = format!("{platform}_image_queued");
+        state
+            .push_event(
+                "info",
+                &event_kind,
+                format!(
+                    "thread={thread_id} item={item_id} type={item_type} chat={}",
+                    route.chat_id
+                ),
+            )
+            .await;
+        return Ok(());
+    }
+
+    let Some(text) = telegram_renderer::render_item_text(item) else {
+        let event_kind = format!("{platform}_item_skipped");
+        state
+            .push_event(
+                "info",
+                &event_kind,
+                format!(
+                    "thread={thread_id} item={item_id} type={item_type} chat={} reason=empty_render",
+                    route.chat_id
+                ),
+            )
+            .await;
+        return Ok(());
+    };
+    outbound_tx.enqueue(ImOutboundMessage {
+        thread_id: thread_id.to_string(),
+        route: route.clone(),
+        item_id: Some(item_id.to_string()),
+        item_type: Some(item_type.to_string()),
+        kind: ImOutboundKind::Item,
+        payload: ImOutboundPayload::Text(text.clone()),
+    })?;
+    let event_kind = format!("{platform}_item_queued");
+    state
+        .push_event(
+            "info",
+            &event_kind,
+            format!(
+                "thread={thread_id} item={item_id} type={item_type} chat={} text_len={}",
+                route.chat_id,
+                text.chars().count()
+            ),
+        )
+        .await;
+    Ok(())
+}
+
+async fn text_im_image_path_for_item(
+    state: &SharedState,
+    platform: &str,
+    item_type: &str,
+    item: &serde_json::Value,
+    item_id: &str,
+) -> Result<Option<PathBuf>> {
+    if let Some(path) = telegram_renderer::image_item_path(item)
+        && path.is_file()
+    {
+        return Ok(Some(path));
+    }
+    if item_type != "imageGeneration" {
+        return Ok(None);
+    }
+    let Some(result) = item.get("result").and_then(|v| v.as_str()) else {
+        return Ok(None);
+    };
+    let Some(decoded) = decode_image_string(result) else {
+        return Ok(None);
+    };
+    let state_path = state.config.lock().await.state_path.clone();
+    let root = state_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".im")
+        .join("images");
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("failed to create image cache {}", root.display()))?;
+    let path = root.join(format!(
+        "{}-{}.{}",
+        platform,
+        safe_file_stem(item_id),
+        decoded.extension
+    ));
+    std::fs::write(&path, decoded.bytes)
+        .with_context(|| format!("failed to write image cache {}", path.display()))?;
+    Ok(Some(path))
+}
+
+struct DecodedImage {
+    bytes: Vec<u8>,
+    extension: &'static str,
+}
+
+fn decode_image_string(value: &str) -> Option<DecodedImage> {
+    let trimmed = value.trim();
+    if let Some((mime, payload)) = parse_image_data_url(trimmed) {
+        let bytes = general_purpose::STANDARD.decode(payload).ok()?;
+        let extension =
+            image_extension_from_mime(mime).or_else(|| image_extension_from_bytes(&bytes))?;
+        return Some(DecodedImage { bytes, extension });
+    }
+    if !looks_like_inline_image_base64(trimmed) {
+        return None;
+    }
+    let bytes = general_purpose::STANDARD.decode(trimmed).ok()?;
+    let extension = image_extension_from_bytes(&bytes)?;
+    Some(DecodedImage { bytes, extension })
+}
+
+fn parse_image_data_url(value: &str) -> Option<(&str, &str)> {
+    let (metadata, payload) = value.split_once(',')?;
+    let metadata = metadata.strip_prefix("data:")?;
+    let mut parts = metadata.split(';');
+    let mime = parts.next()?;
+    if !mime.starts_with("image/") || !parts.any(|part| part == "base64") {
+        return None;
+    }
+    Some((mime, payload))
+}
+
+fn looks_like_inline_image_base64(value: &str) -> bool {
+    value.len() > 1024
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '/' | '=' | '\r' | '\n'))
+}
+
+fn image_extension_from_mime(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+fn image_extension_from_bytes(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("png")
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("webp")
+    } else {
+        None
+    }
+}
+
+fn safe_file_stem(value: &str) -> String {
+    let stem = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if stem.trim_matches('_').is_empty() {
+        "image".to_string()
+    } else {
+        stem
+    }
 }

@@ -13,12 +13,14 @@ pub struct AppConfig {
     pub state_path: PathBuf,
     pub feishu: FeishuConfig,
     pub telegram: TelegramConfig,
+    pub wechat: WechatConfig,
     pub bridge: BridgeConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FeishuConfig {
+    pub enabled: bool,
     pub app_id: String,
     pub app_secret: String,
     pub display_name: String,
@@ -30,12 +32,27 @@ pub struct FeishuConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TelegramConfig {
+    pub enabled: bool,
     #[serde(alias = "bot_token")]
     pub bot_token: String,
+    pub display_name: String,
     #[serde(alias = "mention_only")]
     pub mention_only: bool,
     #[serde(alias = "allowed_chat_ids")]
     pub allowed_chat_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WechatConfig {
+    pub enabled: bool,
+    pub account_id: String,
+    pub bot_token: String,
+    pub display_name: String,
+    pub base_url: String,
+    pub user_id: String,
+    pub bot_type: String,
+    pub allowed_user_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +70,7 @@ impl Default for AppConfig {
             state_path: PathBuf::from("codex-remote-state.json"),
             feishu: FeishuConfig::default(),
             telegram: TelegramConfig::default(),
+            wechat: WechatConfig::default(),
             bridge: BridgeConfig::default(),
         }
     }
@@ -61,6 +79,7 @@ impl Default for AppConfig {
 impl Default for FeishuConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             app_id: String::new(),
             app_secret: String::new(),
             display_name: String::new(),
@@ -74,9 +93,26 @@ impl Default for FeishuConfig {
 impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             bot_token: String::new(),
+            display_name: String::new(),
             mention_only: false,
             allowed_chat_ids: Vec::new(),
+        }
+    }
+}
+
+impl Default for WechatConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            account_id: "wechat".to_string(),
+            bot_token: String::new(),
+            display_name: String::new(),
+            base_url: String::new(),
+            user_id: String::new(),
+            bot_type: "3".to_string(),
+            allowed_user_ids: Vec::new(),
         }
     }
 }

@@ -1288,7 +1288,7 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
     (year as i32, m as u32, d as u32)
 }
 
-fn default_codex_home() -> PathBuf {
+pub(crate) fn default_codex_home() -> PathBuf {
     // This helper configures the separately launched Codex App, not the
     // CODEX_HOME of the process that happens to run codex-remote.
     std::env::var_os("HOME")

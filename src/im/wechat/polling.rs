@@ -1,0 +1,249 @@
+use anyhow::{Result, anyhow};
+use tokio::{
+    sync::mpsc,
+    time::{Duration, sleep},
+};
+
+use crate::{
+    app_state::SharedState,
+    types::{ChatType, ImPlatformKind, InboundMessage, now_ms},
+};
+
+use super::{
+    api::{WechatApi, default_long_poll_timeout_ms},
+    store,
+    types::{WechatMessage, WechatMessageItem, WechatSettings},
+};
+
+const WECHAT_SESSION_EXPIRED_ERRCODE: i64 = -14;
+const WECHAT_RETRY_DELAY_MS: u64 = 2_000;
+const WECHAT_BACKOFF_DELAY_MS: u64 = 30_000;
+const WECHAT_MAX_CONSECUTIVE_FAILURES: usize = 3;
+
+pub async fn listen_polling(
+    state: SharedState,
+    api: WechatApi,
+    tx: mpsc::Sender<InboundMessage>,
+) -> Result<()> {
+    let account_id = api.settings().account_id();
+    let mut get_updates_buf = store::load_sync_buf(&state, &account_id).await;
+    let mut next_timeout_ms = default_long_poll_timeout_ms();
+    let mut consecutive_failures = 0usize;
+    set_polling_state(&state, true, false, None).await;
+    if let Err(err) = api.notify_start().await {
+        state
+            .push_event("warn", "wechat_notify_start_failed", err.to_string())
+            .await;
+    }
+
+    loop {
+        let response = match api.get_updates(&get_updates_buf, next_timeout_ms).await {
+            Ok(response) => response,
+            Err(err) => {
+                consecutive_failures += 1;
+                let delay = if consecutive_failures >= WECHAT_MAX_CONSECUTIVE_FAILURES {
+                    consecutive_failures = 0;
+                    WECHAT_BACKOFF_DELAY_MS
+                } else {
+                    WECHAT_RETRY_DELAY_MS
+                };
+                set_polling_state(&state, true, false, Some(err.to_string())).await;
+                state
+                    .push_event(
+                        "warn",
+                        "wechat_poll_failed",
+                        format!("retry_in_ms={delay} err={err}"),
+                    )
+                    .await;
+                sleep(Duration::from_millis(delay)).await;
+                continue;
+            }
+        };
+
+        if response.ret.unwrap_or(0) != 0 || response.errcode.unwrap_or(0) != 0 {
+            let errcode = response.errcode.or(response.ret).unwrap_or_default();
+            let errmsg = response.errmsg.unwrap_or_default();
+            if errcode == WECHAT_SESSION_EXPIRED_ERRCODE {
+                set_polling_state(
+                    &state,
+                    true,
+                    false,
+                    Some("wechat session expired".to_string()),
+                )
+                .await;
+                state
+                    .push_event(
+                        "error",
+                        "wechat_session_expired",
+                        "bot token expired or session paused; please scan WeChat again",
+                    )
+                    .await;
+                sleep(Duration::from_millis(WECHAT_BACKOFF_DELAY_MS)).await;
+                continue;
+            }
+            consecutive_failures += 1;
+            set_polling_state(&state, true, false, Some(format!("ret={errcode} {errmsg}"))).await;
+            state
+                .push_event(
+                    "warn",
+                    "wechat_poll_api_error",
+                    format!("ret={errcode} errmsg={errmsg}"),
+                )
+                .await;
+            sleep(Duration::from_millis(WECHAT_RETRY_DELAY_MS)).await;
+            continue;
+        }
+
+        consecutive_failures = 0;
+        set_polling_state(&state, true, true, None).await;
+        if let Some(timeout_ms) = response.longpolling_timeout_ms.filter(|value| *value > 0) {
+            next_timeout_ms = timeout_ms;
+        }
+        if let Some(next_buf) = response
+            .get_updates_buf
+            .filter(|value| !value.trim().is_empty())
+        {
+            get_updates_buf = next_buf.clone();
+            if let Err(err) = store::save_sync_buf(&state, &account_id, next_buf).await {
+                state
+                    .push_event("warn", "wechat_sync_buf_save_failed", err.to_string())
+                    .await;
+            }
+        }
+        let messages = response.msgs.unwrap_or_default();
+        let message_count = messages.len();
+        for message in messages {
+            if let Some(inbound) =
+                inbound_from_message(&state, api.settings(), &account_id, message).await?
+            {
+                tx.send(inbound)
+                    .await
+                    .map_err(|_| anyhow!("wechat inbound pump closed"))?;
+            }
+        }
+        if message_count > 0 {
+            state
+                .push_event(
+                    "info",
+                    "wechat_poll_ok",
+                    format!("messages={message_count}"),
+                )
+                .await;
+        }
+    }
+}
+
+async fn inbound_from_message(
+    state: &SharedState,
+    settings: &WechatSettings,
+    account_id: &str,
+    message: WechatMessage,
+) -> Result<Option<InboundMessage>> {
+    if message.message_type == Some(2) {
+        return Ok(None);
+    }
+    let Some(peer_id) = message
+        .from_user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return Ok(None);
+    };
+    if !user_allowed(settings, &peer_id) {
+        state
+            .push_event("info", "wechat_message_ignored", format!("peer={peer_id}"))
+            .await;
+        return Ok(None);
+    }
+    if let Some(context_token) = message.context_token.as_deref() {
+        store::remember_context_token(state, account_id, &peer_id, context_token).await?;
+    }
+    let text = message_text(&message);
+    if text.trim().is_empty() {
+        return Ok(None);
+    }
+    update_last_inbound(state).await;
+    let message_id = message
+        .message_id
+        .map(|value| value.to_string())
+        .or_else(|| message.seq.map(|value| format!("seq-{value}")))
+        .or(message.client_id)
+        .unwrap_or_else(|| now_ms().to_string());
+    Ok(Some(InboundMessage {
+        platform: ImPlatformKind::Wechat,
+        account_id: account_id.to_string(),
+        sender_id: peer_id.clone(),
+        chat_id: peer_id,
+        chat_type: ChatType::Direct,
+        message_id,
+        text,
+        mentioned: true,
+        approval_request_key: None,
+        action: None,
+        card_message_id: None,
+        attachments: vec![],
+    }))
+}
+
+fn message_text(message: &WechatMessage) -> String {
+    let Some(items) = message.item_list.as_ref() else {
+        return String::new();
+    };
+    items
+        .iter()
+        .filter_map(item_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn item_text(item: &WechatMessageItem) -> Option<String> {
+    match item.item_type {
+        Some(1) => item
+            .text_item
+            .as_ref()
+            .and_then(|text| text.text.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        Some(3) => item
+            .voice_item
+            .as_ref()
+            .and_then(|voice| voice.text.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn user_allowed(settings: &WechatSettings, peer_id: &str) -> bool {
+    settings.allowed_user_ids.is_empty()
+        || settings
+            .allowed_user_ids
+            .iter()
+            .any(|allowed| allowed == peer_id)
+}
+
+async fn set_polling_state(
+    state: &SharedState,
+    polling: bool,
+    connected: bool,
+    last_error: Option<String>,
+) {
+    let mut wechat = state.wechat.lock().await;
+    wechat.polling = polling;
+    wechat.connected = connected;
+    wechat.last_error = last_error;
+    wechat.last_event_at_ms = Some(now_ms());
+}
+
+async fn update_last_inbound(state: &SharedState) {
+    let mut wechat = state.wechat.lock().await;
+    let now = now_ms();
+    wechat.last_event_at_ms = Some(now);
+    wechat.last_inbound_at_ms = Some(now);
+}

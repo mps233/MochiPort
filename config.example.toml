@@ -2,16 +2,29 @@ bind = "127.0.0.1:3847"
 statePath = "codex-remote-state.json"
 
 [feishu]
+enabled = true
 appId = ""
 appSecret = ""
+displayName = ""
 mentionOnly = true
 allowedOpenIds = []
 allowedChatIds = []
 
 [telegram]
+enabled = true
 botToken = ""
-mentionOnly = false
+displayName = ""
 allowedChatIds = []
+
+[wechat]
+enabled = true
+accountId = "wechat"
+botToken = ""
+displayName = ""
+baseUrl = ""
+userId = ""
+botType = "3"
+allowedUserIds = []
 
 [bridge]
 enabled = true

@@ -4,15 +4,15 @@
 
 - Codex App / official Codex app-server remote-control protocol
 - A local ChatGPT backend-shaped base URL
-- Feishu IM websocket and message APIs
+- IM channel adapters: Feishu websocket/message APIs, Telegram Bot API, and WeChat iLink APIs
 
-It is not a Codex client replacement. It implements the remote-control backend that official Codex app-server connects to, then adapts those JSON-RPC messages to Feishu.
+It is not a Codex client replacement. It implements the remote-control backend that official Codex app-server connects to, then adapts those JSON-RPC messages to IM channels.
 
 The design target is strict:
 
 - Codex owns threads, turns, cwd, approvals, tools, and execution semantics.
 - `codex-remote` owns only bridge-local transport state.
-- Feishu is a remote interaction surface attached to selected Codex threads, not a second source of truth.
+- IM channels are remote interaction surfaces attached to selected Codex threads, not a second source of truth.
 
 ## Process Model
 
@@ -35,8 +35,10 @@ codex-remote daemon
   |
   | Feishu websocket listener
   | Feishu message/card APIs
+  | Telegram long polling / Bot API
+  | WeChat iLink long polling / sendmessage
   v
-Feishu IM
+IM channel
 ```
 
 The daemon runs separately:
@@ -50,7 +52,7 @@ It owns:
 - local web console
 - official remote-control backend endpoints
 - local ChatGPT backend compatibility endpoints needed by the app
-- Feishu websocket listener
+- IM channel listeners
 - in-memory route/thread/approval/card state
 
 ## Remote-Control Backend
@@ -115,9 +117,11 @@ The JWT only needs the ChatGPT-shaped claims Codex reads locally, especially:
 
 The third-party model key is separate. It belongs in the Codex model provider configuration and is used for model calls, not remote-control enrollment.
 
-## Feishu Bridge
+## IM Bridge
 
-The bridge receives Feishu events over Feishu websocket. It handles:
+The bridge has platform-specific adapters under `src/im`. Feishu receives websocket events, Telegram and WeChat use long polling. Platform adapters convert inbound messages into a shared `InboundMessage` shape before the bridge touches Codex remote-control.
+
+Feishu handles:
 
 - `im.message.receive_v1`
 - `card.action.trigger`
@@ -132,25 +136,27 @@ Outbound Codex events are rendered as Feishu messages/cards:
 - completion cards
 - approval cards
 
-The bridge only renders events for threads that are bound to a Feishu conversation.
+Telegram and WeChat use text-first renderers and inline/text actions instead of Feishu CardKit.
+
+The bridge only renders events for threads that are bound to an IM conversation.
 
 `userMessage` handling is asymmetric by design:
 
-- Codex-origin `userMessage` items may be rendered to Feishu for a Feishu-bound thread.
-- Feishu-origin turns are marked in bridge-local runtime state by `turnId`.
-- When Codex later emits `item/completed` for that same `userMessage`, the bridge suppresses it instead of echoing the Feishu message back into the same Feishu chat.
+- Codex-origin `userMessage` items may be rendered to IM for a bound thread.
+- IM-origin turns are marked in bridge-local runtime state by `turnId`.
+- When Codex later emits `item/completed` for that same `userMessage`, the bridge suppresses it instead of echoing the IM message back into the same chat.
 
-The bridge keeps a Feishu route per Codex thread. A route includes:
+The bridge keeps one route per Codex thread. Route keys are platform-prefixed:
 
 ```text
-conversation_key = feishu:<accountId>:<chatId>
-account_id
-chat_id
+feishu:<accountId>:<chatId>
+telegram:<accountId>:<chatId>
+wechat:<accountId>:<userId>
 ```
 
 ## Thread Subscription Model
 
-Feishu does not automatically subscribe to every Codex thread.
+IM channels do not automatically subscribe to every Codex thread.
 
 The bridge keeps a one-chat-to-one-thread binding and relies on official remote-control thread APIs:
 
@@ -162,11 +168,11 @@ This is an explicit subscription step, not hidden client logic. Without it, the 
 
 Behavior:
 
-1. Feishu sends a message.
-2. If that Feishu conversation is already bound to a live thread, the bridge calls `turn/start`.
-3. If it is not bound, the bridge sends a thread-selection card instead of guessing.
+1. An IM user sends a message.
+2. If that IM conversation is already bound to a live thread, the bridge calls `turn/start`.
+3. If it is not bound, the bridge asks the user to create or resume a thread instead of guessing.
 4. After the user selects a thread, `codex-remote` calls `thread/resume { excludeTurns: true }`.
-5. Future notifications for that thread are then eligible for Feishu rendering.
+5. Future notifications for that thread are then eligible for IM rendering.
 
 This keeps the implementation aligned with the official remote-control model instead of inventing a parallel thread store.
 
@@ -181,19 +187,19 @@ Codex app-server sends approval requests as JSON-RPC server requests over remote
 Important rules:
 
 - Request ids are preserved.
-- Feishu card actions answer the original JSON-RPC request id.
+- Platform actions answer the original JSON-RPC request id.
 - Decision payloads are built from the Codex app-server protocol.
 - If `availableDecisions` exists, the bridge uses it.
 - Otherwise compatibility decisions mirror Codex TUI behavior.
-- Feishu only displays one current approval per conversation.
+- The bridge only displays one current approval per conversation.
 - Additional approvals remain queued and are sent only after the current approval is resolved.
 
-When a Feishu approval card is selected:
+When an approval action is selected:
 
 1. The bridge sends `{ "decision": ... }` as the response to the original Codex server request.
-2. The original Feishu card is updated to an `已审批` state.
-3. The selected option is shown on the card.
-4. The next queued approval card is sent, if present.
+2. The platform message is updated when the platform supports update semantics.
+3. The selected option is shown in the platform-specific format.
+4. The next queued approval prompt is sent, if present.
 
 ## Local Web Console
 
@@ -206,7 +212,7 @@ http://127.0.0.1:3847
 It provides:
 
 - daemon status
-- Feishu onboarding and bridge on/off
+- Feishu/Telegram/WeChat onboarding and bridge on/off
 - remote-control status
 - Codex App config hints
 - recent event log
@@ -216,10 +222,10 @@ It provides:
 `codex-remote` owns only bridge-local state:
 
 - config path
-- Feishu app credentials
-- Feishu conversation to Codex thread binding
+- IM channel credentials
+- IM conversation to Codex thread binding
 - pending approvals
-- Feishu card ids/message ids
+- platform card ids/message ids
 - downloaded attachments
 
 Codex-owned state stays in Codex:

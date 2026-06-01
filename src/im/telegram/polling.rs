@@ -4,7 +4,9 @@ use tokio::time::{Duration, sleep};
 
 use crate::{
     app_state::SharedState,
-    types::{ChatType, ImPlatformKind, InboundAction, InboundMessage, ThreadRouteDirection},
+    types::{
+        ChatType, ImPlatformKind, InboundAction, InboundMessage, ThreadRouteDirection, now_ms,
+    },
 };
 
 use super::{
@@ -24,13 +26,9 @@ pub async fn listen_polling(
     tx: mpsc::Sender<InboundMessage>,
 ) -> Result<()> {
     let mut offset = None;
-    let mut bot_username = fetch_bot_username_if_needed(&state, &api).await;
+    set_polling_state(&state, true, false, None).await;
     claim_polling_slot(&state, &api, &mut offset).await;
     loop {
-        if api.settings().mention_only && bot_username.is_none() {
-            bot_username = fetch_bot_username_if_needed(&state, &api).await;
-        }
-
         let updates = match api
             .get_updates(offset, TELEGRAM_LONG_POLL_TIMEOUT_SECONDS)
             .await
@@ -41,6 +39,7 @@ pub async fn listen_polling(
                 continue;
             }
         };
+        set_polling_state(&state, true, true, None).await;
         let update_count = updates.len();
         for update in updates {
             offset = Some(update.update_id + 1);
@@ -53,6 +52,7 @@ pub async fn listen_polling(
                     tx.send(inbound)
                         .await
                         .map_err(|_| anyhow::anyhow!("telegram inbound pump closed"))?;
+                    update_last_inbound(&state).await;
                 } else {
                     let _ = api
                         .answer_callback_query(&callback_id, Some("这个操作不可用"))
@@ -61,13 +61,13 @@ pub async fn listen_polling(
                 continue;
             }
             if let Some(message) = update.message
-                && let Some(inbound) =
-                    inbound_from_message(api.settings(), bot_username.as_deref(), message)
+                && let Some(inbound) = inbound_from_message(api.settings(), message)
             {
                 let _ = api.send_chat_action(&inbound.chat_id, "typing").await;
                 tx.send(inbound)
                     .await
                     .map_err(|_| anyhow::anyhow!("telegram inbound pump closed"))?;
+                update_last_inbound(&state).await;
             }
         }
         if update_count > 0 {
@@ -89,6 +89,7 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
                 for update in updates {
                     *offset = Some(update.update_id + 1);
                 }
+                set_polling_state(state, true, true, None).await;
                 state
                     .push_event(
                         "info",
@@ -100,6 +101,7 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
             }
             Err(err) => {
                 let delay = retry_delay_seconds(&err, TELEGRAM_STARTUP_PROBE_RETRY_SECONDS);
+                set_polling_state(state, true, false, Some(err.to_string())).await;
                 state
                     .push_event(
                         "warn",
@@ -113,28 +115,6 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
     }
 }
 
-async fn fetch_bot_username_if_needed(state: &SharedState, api: &TelegramApi) -> Option<String> {
-    if !api.settings().mention_only {
-        return None;
-    }
-    match api.get_me().await {
-        Ok(user) => user
-            .username
-            .map(|username| username.trim_start_matches('@').to_string())
-            .filter(|username| !username.is_empty()),
-        Err(err) => {
-            state
-                .push_event(
-                    "warn",
-                    "telegram_get_me_failed",
-                    format!("mentionOnly fallback disabled until getMe succeeds: {err}"),
-                )
-                .await;
-            None
-        }
-    }
-}
-
 async fn handle_polling_error(state: &SharedState, err: &anyhow::Error) {
     let delay = retry_delay_seconds(err, TELEGRAM_GENERIC_RETRY_SECONDS);
     let kind = err
@@ -142,6 +122,7 @@ async fn handle_polling_error(state: &SharedState, err: &anyhow::Error) {
         .filter(|api_error| api_error.is_conflict())
         .map(|_| "telegram_poll_conflict")
         .unwrap_or("telegram_poll_failed");
+    set_polling_state(state, true, false, Some(err.to_string())).await;
     state
         .push_event("warn", kind, format!("retry_in={delay}s err={err}"))
         .await;
@@ -162,21 +143,17 @@ fn retry_delay_seconds(err: &anyhow::Error, default_delay: u64) -> u64 {
 
 fn inbound_from_message(
     settings: &TelegramSettings,
-    bot_username: Option<&str>,
     message: TelegramMessage,
 ) -> Option<InboundMessage> {
+    if message.chat.kind != "private" {
+        return None;
+    }
     let text = message.text?.trim().to_string();
     if text.is_empty() {
         return None;
     }
     let chat_id = message.chat.id.to_string();
     if !chat_allowed(settings, &chat_id) {
-        return None;
-    }
-    let mentioned = message.chat.kind == "private"
-        || !settings.mention_only
-        || bot_username.is_some_and(|username| text_mentions_bot(&text, username));
-    if settings.mention_only && !mentioned {
         return None;
     }
     let sender_id = message
@@ -190,14 +167,10 @@ fn inbound_from_message(
         account_id: TELEGRAM_ACCOUNT_ID.to_string(),
         sender_id,
         chat_id,
-        chat_type: if message.chat.kind == "private" {
-            ChatType::Direct
-        } else {
-            ChatType::Group
-        },
+        chat_type: ChatType::Direct,
         message_id: message.message_id.to_string(),
         text,
-        mentioned,
+        mentioned: true,
         approval_request_key: None,
         action: None,
         card_message_id: None,
@@ -212,6 +185,9 @@ fn inbound_from_callback(
     let data = callback.data?;
     let action = action_from_callback_data(&data)?;
     let message = callback.message?;
+    if message.chat.kind != "private" {
+        return None;
+    }
     let chat_id = message.chat.id.to_string();
     if !chat_allowed(settings, &chat_id) {
         return None;
@@ -222,11 +198,7 @@ fn inbound_from_callback(
         account_id: TELEGRAM_ACCOUNT_ID.to_string(),
         sender_id: callback.from.id.to_string(),
         chat_id,
-        chat_type: if message.chat.kind == "private" {
-            ChatType::Direct
-        } else {
-            ChatType::Group
-        },
+        chat_type: ChatType::Direct,
         message_id: message.message_id.to_string(),
         text: data,
         mentioned: true,
@@ -235,6 +207,26 @@ fn inbound_from_callback(
         card_message_id: Some(message.message_id.to_string()),
         attachments: vec![],
     })
+}
+
+async fn set_polling_state(
+    state: &SharedState,
+    polling: bool,
+    connected: bool,
+    last_error: Option<String>,
+) {
+    let mut telegram = state.telegram.lock().await;
+    telegram.polling = polling;
+    telegram.connected = connected;
+    telegram.last_error = last_error;
+    telegram.last_event_at_ms = Some(now_ms());
+}
+
+async fn update_last_inbound(state: &SharedState) {
+    let mut telegram = state.telegram.lock().await;
+    let now = now_ms();
+    telegram.last_event_at_ms = Some(now);
+    telegram.last_inbound_at_ms = Some(now);
 }
 
 fn chat_allowed(settings: &TelegramSettings, chat_id: &str) -> bool {
@@ -311,19 +303,6 @@ fn action_from_callback_data(data: &str) -> Option<InboundAction> {
     }
 }
 
-fn text_mentions_bot(text: &str, username: &str) -> bool {
-    let username = username.trim_start_matches('@').to_ascii_lowercase();
-    if username.is_empty() {
-        return false;
-    }
-    let needle = format!("@{username}");
-    let lower = text.to_ascii_lowercase();
-    lower.match_indices(&needle).any(|(index, _)| {
-        let after = lower[index + needle.len()..].chars().next();
-        after.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,7 +313,6 @@ mod tests {
         let settings = TelegramSettings::default();
         let inbound = inbound_from_message(
             &settings,
-            None,
             TelegramMessage {
                 message_id: 9,
                 from: Some(TelegramUser {
@@ -364,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn mention_only_group_requires_bot_mention() {
+    fn ignores_group_messages() {
         let settings = TelegramSettings {
             mention_only: true,
             ..TelegramSettings::default()
@@ -389,18 +367,17 @@ mod tests {
             text: Some("hello".to_string()),
         };
 
-        assert!(inbound_from_message(&settings, Some("codex_bot"), message).is_none());
+        assert!(inbound_from_message(&settings, message).is_none());
     }
 
     #[test]
-    fn mention_only_group_accepts_bot_mention() {
+    fn ignores_group_messages_even_when_mentioned() {
         let settings = TelegramSettings {
             mention_only: true,
             ..TelegramSettings::default()
         };
         let inbound = inbound_from_message(
             &settings,
-            Some("codex_bot"),
             TelegramMessage {
                 message_id: 11,
                 from: Some(TelegramUser {
@@ -420,18 +397,9 @@ mod tests {
                 },
                 text: Some("@codex_bot hello".to_string()),
             },
-        )
-        .expect("mentioned group message");
+        );
 
-        assert_eq!(inbound.chat_id, "-100");
-        assert!(inbound.mentioned);
-    }
-
-    #[test]
-    fn mention_match_respects_username_boundary() {
-        assert!(text_mentions_bot("hi @codex_bot", "codex_bot"));
-        assert!(text_mentions_bot("/status@codex_bot", "codex_bot"));
-        assert!(!text_mentions_bot("hi @codex_bot_backup", "codex_bot"));
+        assert!(inbound.is_none());
     }
 
     #[test]

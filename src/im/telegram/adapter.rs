@@ -1,8 +1,12 @@
 use anyhow::Result;
 use serde_json::json;
+use std::path::Path;
 use tokio::time::{Duration, sleep};
 
-use crate::im_runtime::{PendingApproval, approval_request_fingerprint};
+use crate::{
+    chain_log,
+    im_runtime::{PendingApproval, approval_request_fingerprint},
+};
 
 use super::api::{TelegramApi, TelegramParseMode};
 
@@ -36,25 +40,155 @@ impl TelegramAdapter {
     pub async fn send_text(&self, target: &str, text: &str) -> Result<String> {
         let mut last_message_id = 0;
         let chunks = telegram_text_chunks(text);
+        log_adapter(
+            "send_text_begin",
+            format!(
+                "chat={} chars={} chunks={}",
+                target,
+                text.chars().count(),
+                chunks.len()
+            ),
+        );
         for (index, chunk) in chunks.iter().enumerate() {
             let html = telegram_markdown_to_html(chunk);
+            log_adapter(
+                "send_text_chunk_begin",
+                format!(
+                    "chat={} chunk={}/{} chars={}",
+                    target,
+                    index + 1,
+                    chunks.len(),
+                    chunk.chars().count()
+                ),
+            );
             last_message_id = match self
                 .api
                 .send_text_parse_mode(target, &html, TelegramParseMode::Html)
                 .await
             {
-                Ok(message_id) => message_id,
-                Err(_) => self.api.send_text(target, &chunk).await?,
+                Ok(message_id) => {
+                    log_adapter(
+                        "send_text_chunk_sent",
+                        format!(
+                            "chat={} chunk={}/{} mode=html message={}",
+                            target,
+                            index + 1,
+                            chunks.len(),
+                            message_id
+                        ),
+                    );
+                    message_id
+                }
+                Err(err) => {
+                    log_adapter(
+                        "send_text_html_failed",
+                        format!(
+                            "chat={} chunk={}/{} fallback=plain err={}",
+                            target,
+                            index + 1,
+                            chunks.len(),
+                            err
+                        ),
+                    );
+                    let message_id = self.api.send_text(target, &chunk).await?;
+                    log_adapter(
+                        "send_text_chunk_sent",
+                        format!(
+                            "chat={} chunk={}/{} mode=plain message={}",
+                            target,
+                            index + 1,
+                            chunks.len(),
+                            message_id
+                        ),
+                    );
+                    message_id
+                }
             };
             if index + 1 < chunks.len() {
                 sleep(Duration::from_millis(TELEGRAM_CHUNK_DELAY_MS)).await;
             }
         }
+        log_adapter(
+            "send_text_done",
+            format!(
+                "chat={} chunks={} message={}",
+                target,
+                chunks.len(),
+                last_message_id
+            ),
+        );
         Ok(last_message_id.to_string())
     }
 
     pub async fn send_turn_completed(&self, target: &str, reply_text: &str) -> Result<String> {
         self.send_text(target, reply_text).await
+    }
+
+    pub async fn send_image_path(
+        &self,
+        target: &str,
+        local_path: &Path,
+        caption: Option<&str>,
+    ) -> Result<String> {
+        let caption_html = caption.map(telegram_markdown_to_html);
+        log_adapter(
+            "send_image_begin",
+            format!(
+                "chat={} path={} caption_chars={}",
+                target,
+                local_path.display(),
+                caption.map(|value| value.chars().count()).unwrap_or(0)
+            ),
+        );
+        match self
+            .api
+            .send_photo_file(
+                target,
+                local_path,
+                caption_html.as_deref(),
+                Some(TelegramParseMode::Html),
+            )
+            .await
+        {
+            Ok(message_id) => {
+                log_adapter(
+                    "send_image_sent",
+                    format!("chat={} method=sendPhoto message={}", target, message_id),
+                );
+                Ok(message_id.to_string())
+            }
+            Err(photo_err) => match self
+                .api
+                .send_document_file(
+                    target,
+                    local_path,
+                    caption_html.as_deref(),
+                    Some(TelegramParseMode::Html),
+                )
+                .await
+            {
+                Ok(message_id) => {
+                    log_adapter(
+                        "send_image_sent",
+                        format!("chat={} method=sendDocument message={}", target, message_id),
+                    );
+                    Ok(message_id.to_string())
+                }
+                Err(document_err) => {
+                    log_adapter(
+                        "send_image_failed",
+                        format!(
+                            "chat={} path={} photo_err={} document_err={}",
+                            target,
+                            local_path.display(),
+                            photo_err,
+                            document_err
+                        ),
+                    );
+                    Err(photo_err)
+                }
+            },
+        }
     }
 
     pub async fn send_approval(&self, target: &str, approval: &PendingApproval) -> Result<String> {
@@ -64,6 +198,17 @@ impl TelegramAdapter {
         };
         let chunks = telegram_text_chunks(&text);
         let mut last_message_id = 0;
+        log_adapter(
+            "send_approval_begin",
+            format!(
+                "chat={} request={} chars={} chunks={} decisions={}",
+                target,
+                approval.request_id,
+                text.chars().count(),
+                chunks.len(),
+                approval.decisions.len()
+            ),
+        );
         for (index, chunk) in chunks.iter().enumerate() {
             let is_last = index + 1 == chunks.len();
             if is_last {
@@ -79,7 +224,18 @@ impl TelegramAdapter {
                     .await
                 {
                     Ok(message_id) => message_id,
-                    Err(_) => {
+                    Err(err) => {
+                        log_adapter(
+                            "send_approval_html_failed",
+                            format!(
+                                "chat={} request={} chunk={}/{} fallback=plain err={}",
+                                target,
+                                approval.request_id,
+                                index + 1,
+                                chunks.len(),
+                                err
+                            ),
+                        );
                         self.api
                             .send_text_with_reply_markup(target, chunk, keyboard.clone())
                             .await?
@@ -93,18 +249,54 @@ impl TelegramAdapter {
                     .await
                 {
                     Ok(message_id) => message_id,
-                    Err(_) => self.api.send_text(target, chunk).await?,
+                    Err(err) => {
+                        log_adapter(
+                            "send_approval_html_failed",
+                            format!(
+                                "chat={} request={} chunk={}/{} fallback=plain err={}",
+                                target,
+                                approval.request_id,
+                                index + 1,
+                                chunks.len(),
+                                err
+                            ),
+                        );
+                        self.api.send_text(target, chunk).await?
+                    }
                 };
                 sleep(Duration::from_millis(TELEGRAM_CHUNK_DELAY_MS)).await;
             }
         }
+        log_adapter(
+            "send_approval_done",
+            format!(
+                "chat={} request={} chunks={} message={}",
+                target,
+                approval.request_id,
+                chunks.len(),
+                last_message_id
+            ),
+        );
         Ok(last_message_id.to_string())
     }
 
     pub async fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<()> {
+        log_adapter(
+            "answer_callback_begin",
+            format!(
+                "callback_query={} text_len={}",
+                callback_query_id,
+                text.chars().count()
+            ),
+        );
         self.api
             .answer_callback_query(callback_query_id, Some(text))
-            .await
+            .await?;
+        log_adapter(
+            "answer_callback_done",
+            format!("callback_query={}", callback_query_id),
+        );
+        Ok(())
     }
 
     pub async fn send_thread_routing_choice(
@@ -118,10 +310,21 @@ impl TelegramAdapter {
         ]);
         let text =
             "当前 Telegram 会话还没有接入 Codex thread。\n请选择创建新会话，或恢复一个历史会话。";
+        log_adapter(
+            "send_thread_routing_choice_begin",
+            format!("chat={} request={}", target, request_id),
+        );
         let message_id = self
             .api
             .send_text_with_reply_markup(target, text, keyboard)
             .await?;
+        log_adapter(
+            "send_thread_routing_choice_done",
+            format!(
+                "chat={} request={} message={}",
+                target, request_id, message_id
+            ),
+        );
         Ok(message_id.to_string())
     }
 
@@ -143,10 +346,26 @@ impl TelegramAdapter {
             vec![button("创建", &format!("tcc:{request_id}"))],
             vec![button("恢复历史会话", &format!("trc:{request_id}:load"))],
         ]);
+        log_adapter(
+            "send_thread_create_settings_begin",
+            format!(
+                "chat={} request={} text_len={}",
+                target,
+                request_id,
+                text.chars().count()
+            ),
+        );
         let message_id = self
             .api
             .send_text_with_reply_markup(target, text, keyboard)
             .await?;
+        log_adapter(
+            "send_thread_create_settings_done",
+            format!(
+                "chat={} request={} message={}",
+                target, request_id, message_id
+            ),
+        );
         Ok(message_id.to_string())
     }
 
@@ -196,6 +415,18 @@ impl TelegramAdapter {
         };
         let options_html = create_options_table_html(options);
         let text = create_options_html_text(title, body, page, &hint, &options_html);
+        log_adapter(
+            "send_thread_create_options_begin",
+            format!(
+                "chat={} request={} field={} page={} options={} text_len={}",
+                target,
+                request_id,
+                field,
+                page,
+                options.len(),
+                text.chars().count()
+            ),
+        );
         let message_id = self
             .api
             .send_text_with_reply_markup_parse_mode(
@@ -205,6 +436,13 @@ impl TelegramAdapter {
                 TelegramParseMode::Html,
             )
             .await?;
+        log_adapter(
+            "send_thread_create_options_done",
+            format!(
+                "chat={} request={} field={} page={} message={}",
+                target, request_id, field, page, message_id
+            ),
+        );
         Ok(message_id.to_string())
     }
 
@@ -243,6 +481,17 @@ impl TelegramAdapter {
             format!("点击或回复 /1 ~ /{} 选择会话。", entries.len())
         };
         let text = thread_list_html_text(title, body, page, &hint, &entries_html);
+        log_adapter(
+            "send_thread_list_begin",
+            format!(
+                "chat={} request={} page={} entries={} text_len={}",
+                target,
+                request_id,
+                page,
+                entries.len(),
+                text.chars().count()
+            ),
+        );
         let message_id = self
             .api
             .send_text_with_reply_markup_parse_mode(
@@ -252,6 +501,17 @@ impl TelegramAdapter {
                 TelegramParseMode::Html,
             )
             .await?;
+        log_adapter(
+            "send_thread_list_done",
+            format!(
+                "chat={} request={} page={} entries={} message={}",
+                target,
+                request_id,
+                page,
+                entries.len(),
+                message_id
+            ),
+        );
         Ok(message_id.to_string())
     }
 
@@ -307,6 +567,14 @@ fn approval_keyboard(approval: &PendingApproval) -> Option<serde_json::Value> {
 
 fn inline_keyboard(rows: Vec<Vec<serde_json::Value>>) -> serde_json::Value {
     json!({ "inline_keyboard": rows })
+}
+
+fn log_adapter(event: &str, message: impl AsRef<str>) {
+    chain_log::write_line(format!(
+        "[telegram_adapter] event={} {}",
+        event,
+        message.as_ref()
+    ));
 }
 
 fn button(text: &str, callback_data: &str) -> serde_json::Value {

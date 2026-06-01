@@ -70,6 +70,7 @@ pub struct ThreadCreateDraftState {
 pub enum TurnOrigin {
     Feishu,
     Telegram,
+    Wechat,
 }
 
 #[derive(Debug, Default)]
@@ -360,6 +361,7 @@ pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget
     let platform = match channel {
         "feishu" => ImPlatformKind::Feishu,
         "telegram" => ImPlatformKind::Telegram,
+        "wechat" => ImPlatformKind::Wechat,
         _ => return None,
     };
     let account_id = parts.next()?.to_string();

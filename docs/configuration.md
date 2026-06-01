@@ -5,7 +5,7 @@ There are two separate config surfaces:
 - `codex-remote` config, usually this repository's `config.toml`
 - Codex App config, usually `~/.codex/config.toml`
 
-Do not mix them. `codex-remote` stores Feishu and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
+Do not mix them. `codex-remote` stores IM channel and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
 
 ## `codex-remote` Config
 
@@ -30,8 +30,15 @@ allowedChatIds = []
 
 [telegram]
 botToken = ""
-mentionOnly = false
 allowedChatIds = []
+
+[wechat]
+accountId = "wechat"
+botToken = ""
+baseUrl = ""
+userId = ""
+botType = "3"
+allowedUserIds = []
 
 [bridge]
 enabled = true
@@ -57,7 +64,7 @@ Keep this on localhost. Do not expose it directly to a network.
 
 Path to the persisted state JSON file.
 
-This stores local bridge state such as Feishu conversation bindings. It should not be committed.
+This stores local bridge state such as IM conversation bindings. It should not be committed.
 
 ## Feishu
 
@@ -97,7 +104,6 @@ Empty means no chat-level allowlist.
 ```toml
 [telegram]
 botToken = ""
-mentionOnly = false
 allowedChatIds = []
 ```
 
@@ -107,17 +113,57 @@ Telegram Bot token from BotFather. `bot_token` is also accepted for hand-written
 
 This is the private-chat bot flow: create your own bot with BotFather, then send messages to that bot from your Telegram account. It does not require Telegram `api_id`, `api_hash`, phone login, or an MTProto user session.
 
-### `mentionOnly`
+Group chats are intentionally ignored for now. This prevents other group members from controlling the host machine through the bot.
 
-When `true`, group messages are ignored unless the bot mention is explicitly supported by the adapter. Direct messages are still accepted. The MVP is best used in direct chat or with `mentionOnly = false`.
+Existing configs may still contain `mentionOnly`; it is kept for compatibility but is not used while Telegram group chats are disabled.
 
 ### `allowedChatIds`
 
-Optional allowlist of Telegram chat ids as strings.
+Optional allowlist of Telegram private chat ids as strings.
 
-Empty means no chat-level allowlist.
+Empty means no private-chat allowlist.
 
 For first use, keep this empty. After you send `/status` to the bot, copy the `chat=...` value from the `telegram_message` event and put it here if you want to restrict access.
+
+## WeChat
+
+```toml
+[wechat]
+accountId = "wechat"
+botToken = ""
+baseUrl = ""
+userId = ""
+botType = "3"
+allowedUserIds = []
+```
+
+WeChat config is normally written by the GUI QR onboarding flow. The implementation follows the OpenClaw WeChat bot path: QR login through `https://ilinkai.weixin.qq.com`, bot type `3`, long polling through `ilink/bot/getupdates`, and text replies through `ilink/bot/sendmessage`.
+
+### `accountId`
+
+Local label for the WeChat bot account. It is used in route keys and persisted state.
+
+### `botToken`
+
+WeChat bot token returned by QR onboarding. Do not commit real tokens.
+
+### `baseUrl`
+
+WeChat iLink API base URL. Leave empty unless the QR flow returns a redirected host.
+
+### `userId`
+
+The WeChat user id returned by onboarding. It is stored for display and allowlist defaults.
+
+### `botType`
+
+Current bot type. The default is `3`.
+
+### `allowedUserIds`
+
+Optional allowlist of WeChat user ids.
+
+Empty means no user-level allowlist.
 
 ## Bridge
 
@@ -132,7 +178,7 @@ sendStreaming = true
 
 Controls whether the IM bridge should run.
 
-When disabled, Feishu websocket listening and Telegram polling stop, and IM messages are not forwarded to Codex.
+When disabled, Feishu websocket listening, Telegram polling, and WeChat polling stop, and IM messages are not forwarded to Codex.
 
 ### `accountId`
 
@@ -140,6 +186,8 @@ Local label used to build route keys:
 
 ```text
 feishu:<accountId>:<chatId>
+telegram:<accountId>:<chatId>
+wechat:<accountId>:<userId>
 ```
 
 ### `sendStreaming`

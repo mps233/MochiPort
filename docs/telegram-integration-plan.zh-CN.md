@@ -80,7 +80,7 @@ Telegram 使用 BotFather 创建的 Bot API，不使用 MTProto/userbot。
 - `getUpdates` 启动前先 `timeout=0` probe，避免旧 long-poll 连接残留后持续 409。
 - 主 polling 遇到 409 backoff 到大于 long-poll timeout 的时间。
 - `allowed_updates` 限定为 `message` / `callback_query`。
-- `getMe` 缓存 bot username，用于 group mention-only 和自循环保护。
+- `getMe` 获取 bot 展示名用于 GUI；当前阶段不接入群聊。
 - 文本按 Telegram 4096 字符限制切块，优先按换行/空格断开，并给多段消息加 continuation 标记。
 - 多段消息之间加短延迟，降低触发限流的概率。
 - 收到用户消息后发 `sendChatAction=typing`，降低“没响应”的体感。
@@ -103,7 +103,7 @@ Telegram 使用 BotFather 创建的 Bot API，不使用 MTProto/userbot。
 - `PendingApproval` 已使用平台中性的 `message_id`。
 - `config.rs` 已新增 `[telegram]`。
 - `bridge.rs` 仍保留较多业务编排逻辑，后续再考虑小型 `ImChannel` 抽象。
-- GUI 暂不管理 Telegram 配置。
+- GUI 已在“消息接入”页管理 Telegram Bot Token，并明确 Telegram 仅支持私聊。
 
 这些点需要分阶段处理，避免一次性重构影响飞书稳定性。
 
@@ -153,13 +153,12 @@ Telegram 使用 BotFather 创建的 Bot API，不使用 MTProto/userbot。
 [telegram]
 botToken = ""
 allowedChatIds = []
-mentionOnly = false
 ```
 
 MVP 功能：
 
 - 通过 long polling 接收 Telegram Bot 消息。
-- 文本消息转为 `InboundMessage`。
+- 私聊文本消息转为 `InboundMessage`；群聊消息和群聊按钮回调直接忽略。
 - `/q`、`/new`、`/threads`、`/status`、`/s` 命令可用。
 - 没有绑定 thread 时，先让用户选择新建会话或恢复历史会话，不自动创建。
 - approval 先用文本命令回复，后续再补 inline keyboard。
@@ -184,7 +183,7 @@ MVP 暂不做：
 - `TelegramApi` 暴露结构化错误，保留 `error_code`、`description`、`retry_after`。已完成。
 - `polling` 启动时执行 `timeout=0` probe，成功后再进入 long polling。已完成。
 - `polling` 遇到 409 conflict 时 backoff，避免旧连接未释放时高频重试。已完成。
-- `polling` 在 `mentionOnly=true` 时通过 `getMe` 获取 bot username，群聊只接收明确 @bot 的消息。已完成。
+- `polling` 只接受 private chat，群聊消息和群聊 callback_query 不进入 Codex。已完成。
 - 收到可处理消息后发送 `sendChatAction=typing`。已完成。
 - `TelegramAdapter` 按 4096 字符限制智能切块，优先在换行/空格处分段。已完成。
 - 多段消息加 continuation 标记，并在段之间短暂 sleep。已完成。
@@ -210,10 +209,10 @@ Telegram 不适合照搬飞书表单。当前表达方式：
 
 ## 第六阶段：GUI 和体验补齐
 
-- GUI 增加 Telegram 接入页。
-- 状态概览展示 Telegram Bot 是否启用、是否轮询中、最近错误。
-- 配置页支持 token 保存、测试连接、启停 Telegram bridge。
-- About/README 更新 Telegram 使用说明。
+- GUI 已在“消息接入”页增加 Telegram 接入区域。
+- 状态概览已合并为 IM 通道状态；Telegram 已增加 polling 运行态，按真实连接状态展示“已接入 / 连接中 / 等待连接”。
+- 配置页支持 token 保存，并通过全局 IM bridge 启停。
+- About/README 已更新 Telegram 使用说明。
 
 ## 风险
 

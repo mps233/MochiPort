@@ -12,6 +12,7 @@ pub enum ChatType {
 pub enum ImPlatformKind {
     Feishu,
     Telegram,
+    Wechat,
 }
 
 impl Default for ImPlatformKind {
@@ -25,6 +26,7 @@ impl ImPlatformKind {
         match self {
             Self::Feishu => "feishu",
             Self::Telegram => "telegram",
+            Self::Wechat => "wechat",
         }
     }
 }

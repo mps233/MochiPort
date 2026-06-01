@@ -3,7 +3,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::{app_state::SharedState, im_runtime::PendingApproval, remote_control_backend};
+use crate::{
+    app_state::SharedState, codex_app_config, im_runtime::PendingApproval, remote_control_backend,
+};
 
 static THREAD_ROUTING_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -661,9 +663,10 @@ fn load_codex_app_config_doc() -> Option<toml::Value> {
 
 fn codex_config_candidate_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        push_path_once(&mut paths, Path::new(&codex_home).join("config.toml"));
-    }
+    push_path_once(
+        &mut paths,
+        codex_app_config::default_codex_home().join("config.toml"),
+    );
     for home in home_env_candidates() {
         push_path_once(
             &mut paths,

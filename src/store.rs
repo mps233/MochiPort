@@ -6,6 +6,14 @@ use serde::{Deserialize, Serialize};
 #[serde(default, rename_all = "camelCase")]
 pub struct PersistedState {
     pub sessions: HashMap<String, String>,
+    pub wechat: WechatPersistedState,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WechatPersistedState {
+    pub sync_buf_by_account: HashMap<String, String>,
+    pub context_tokens: HashMap<String, String>,
 }
 
 impl PersistedState {

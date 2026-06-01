@@ -2,7 +2,7 @@
 
 [中文说明](README.md)
 
-`codex-remote` is a local Codex App remote-control backend with a Feishu/Lark bridge and a Telegram Bot MVP.
+`codex-remote` is a local Codex App remote-control backend with Feishu/Lark, Telegram Bot, and WeChat bot bridges.
 
 It has one job: after the user opens the GUI, Codex App connects to the local backend, and remote-control messages are bridged to IM channels.
 
@@ -22,11 +22,15 @@ Open `Codex Remote`. The GUI starts the local backend automatically and stops th
 
 Continue when the status overview shows the local service is running.
 
-### 3. Connect Feishu
+### 3. Connect An IM Channel
 
-On first use, click `扫码使用新机器人` and complete the QR onboarding flow.
+Open the `消息接入` page and choose one channel:
 
-After Feishu is connected, normal use does not require scanning again. Scan again only when switching bots.
+- Feishu: click `扫码使用新机器人` and complete QR onboarding.
+- Telegram: paste the BotFather token and click `保存并接入`. Telegram currently supports private bot chats only; group chats are ignored.
+- WeChat: click `扫码连接微信` and confirm in WeChat.
+
+After a channel is connected, the `IM 通道` status panel becomes available. Normal use does not require scanning or entering the token again unless you switch bots.
 
 ### 4. Fill Model Info
 
@@ -50,11 +54,11 @@ Open Codex App normally, then enable remote control in Codex App.
 
 When connected, `Codex Remote` shows Codex App as connected.
 
-### 7. Use Feishu
+### 7. Use IM
 
-Send a message to the bot in Feishu.
+Send a message to the bot in Feishu, a Telegram private chat, or WeChat.
 
-If the Feishu chat is not bound to a Codex thread yet, the bot first sends a selection card so you can create a new thread or resume an existing one. After selection, the chat is bridged to that Codex thread.
+If the IM chat is not bound to a Codex thread yet, the bot first asks you to create a new thread or resume an existing one. After selection, the chat is bridged to that Codex thread.
 
 ## Community And Support
 
@@ -66,7 +70,7 @@ The WeChat group is for issue feedback, usage discussion, and feature suggestion
 
 <img src="docs/assets/wechat-group.jpg" alt="AI-Agent technical discussion group" width="260">
 
-## Feishu Commands
+## IM Commands
 
 Only `/q` is needed in normal use. Follow the card prompts for other actions.
 
@@ -74,7 +78,7 @@ Only `/q` is needed in normal use. Follow the card prompts for other actions.
 /q         interrupt and clear the current binding
 ```
 
-Approval cards are updated after selection, so handled approvals are marked visually.
+Approval prompts are updated after selection where the platform supports it.
 
 ## Clear Codex Access
 
@@ -118,6 +122,8 @@ codex-remote local backend
   | Feishu message/card APIs
   | Telegram long polling
   | Telegram Bot API
+  | WeChat iLink long polling
+  | WeChat sendmessage API
   v
 IM channel
 ```
@@ -134,10 +140,10 @@ Codex remote-control requires a ChatGPT-compatible auth mode. This project write
 Thread binding model:
 
 - Codex app-server remains the source of truth for thread lifecycle and history.
-- A Feishu chat binds to one Codex thread at a time.
-- If Feishu has not bound a thread yet, the bridge sends a thread list card.
-- Resuming a thread from Feishu subscribes to that thread's future remote-control events.
-- Feishu-origin turns are tracked by turn id to avoid `userMessage` echo.
+- One IM chat binds to one Codex thread at a time.
+- If the IM chat has not bound a thread yet, the bridge asks whether to create or resume a thread.
+- Resuming a thread from IM subscribes to that thread's future remote-control events.
+- IM-origin turns are tracked by turn id to avoid `userMessage` echo.
 
 ## Commands
 
@@ -171,8 +177,15 @@ allowedChatIds = []
 
 [telegram]
 botToken = ""
-mentionOnly = false
 allowedChatIds = []
+
+[wechat]
+accountId = "wechat"
+botToken = ""
+baseUrl = ""
+userId = ""
+botType = "3"
+allowedUserIds = []
 
 [bridge]
 enabled = true
@@ -180,7 +193,9 @@ accountId = "default"
 sendStreaming = true
 ```
 
-The Telegram MVP is for the simple private-chat flow: create your own bot with BotFather, then chat with that bot in Telegram. Leave `allowedChatIds` empty at first, verify it works, then restrict it with the `chat=...` value from the event log.
+Telegram is for the simple private-chat flow: create your own bot with BotFather, then chat with that bot in Telegram. Group chats are intentionally ignored so group members cannot control the host machine through the bot. Leave `allowedChatIds` empty at first, verify it works, then restrict it with the `chat=...` value from the event log.
+
+WeChat config is normally written by GUI QR onboarding. `botType = "3"` follows the current OpenClaw WeChat bot path. Do not commit real `botToken` values.
 
 Codex App config is separate and usually lives at `~/.codex/config.toml`.
 
@@ -191,7 +206,7 @@ See [config.example.toml](config.example.toml) and [docs/configuration.md](docs/
 ```powershell
 cargo fmt
 cargo test
-cargo build
+cargo build --release --features gui --bin codex-remote
 ```
 
 Useful status endpoints while the daemon is running:
@@ -206,16 +221,17 @@ GET http://127.0.0.1:3847/api/events
 ## Security Notes
 
 - The daemon binds to `127.0.0.1` by default. Do not expose it publicly.
-- `config.toml` stores Feishu `appId` / `appSecret` and Telegram `botToken`; do not commit it.
+- `config.toml` stores Feishu `appId` / `appSecret`, Telegram `botToken`, and WeChat `botToken`; do not commit it.
 - Codex App `auth.json` and third-party provider keys are local secrets; do not commit them.
 - Attachments from Feishu are downloaded to a local state-adjacent `.im/attachments/feishu/` directory.
 - Restrict access with `allowedOpenIds` and/or `allowedChatIds` for real usage.
-- The bridge can send approval decisions to Codex. Treat Feishu / Telegram access as equivalent to local Codex approval access.
+- The bridge can send approval decisions to Codex. Treat Feishu / Telegram / WeChat access as equivalent to local Codex approval access.
 
 ## More Docs
 
 - [Architecture](docs/architecture.md)
 - [Configuration](docs/configuration.md)
+- [WeChat integration plan](docs/wechat-integration-plan.zh-CN.md)
 - [Auth notes](docs/auth-notes.md)
 - [Troubleshooting](docs/troubleshooting.md)
 

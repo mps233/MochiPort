@@ -22,11 +22,17 @@ use std::{
 };
 
 use crate::{
-    app_state::{FeishuWsState, SharedState},
+    app_state::{FeishuWsState, SharedState, TelegramState, WechatOnboardSession, WechatState},
     bridge, chain_log,
     codex_app_config::{self, ConfigureCodexAppOptions},
     config::AppConfig,
     im::feishu::{FeishuApi, FeishuSettings},
+    im::telegram::{api::TelegramApi, types::TelegramSettings},
+    im::wechat::{
+        api::WechatApi,
+        store as wechat_store,
+        types::{DEFAULT_WECHAT_API_BASE, WechatSettings},
+    },
     remote_control_backend,
 };
 
@@ -55,6 +61,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/codex-app/status", get(codex_app_status))
         .route("/api/bridge/start", post(start_bridge))
         .route("/api/bridge/stop", post(stop_bridge))
+        .route("/api/im-channel/enabled", post(set_im_channel_enabled))
         .route(
             "/api/remote-control/backend-status",
             get(remote_control_backend_status),
@@ -62,6 +69,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/feishu/onboard/start", post(feishu_onboard_start))
         .route("/api/feishu/onboard/poll", post(feishu_onboard_poll))
         .route("/api/feishu/bot", get(feishu_bot_status))
+        .route("/api/telegram/bot", get(telegram_bot_status))
+        .route("/api/telegram/configure", post(configure_telegram_bot))
+        .route("/api/wechat/onboard/start", post(wechat_onboard_start))
+        .route("/api/wechat/onboard/poll", post(wechat_onboard_poll))
+        .route("/api/wechat/bot", get(wechat_bot_status))
         .route("/backend-api/plugins/list", get(plugin_legacy_list))
         .route("/backend-api/plugins/featured", get(plugin_legacy_featured))
         .route(
@@ -232,6 +244,8 @@ struct StatusResponse {
     bind: String,
     state_path: String,
     feishu_ws: FeishuWsState,
+    telegram: TelegramState,
+    wechat: WechatState,
 }
 
 async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
@@ -244,11 +258,15 @@ async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
         .unwrap_or(false);
     let config = state.config.lock().await;
     let feishu_ws = state.feishu_ws.lock().await.clone();
+    let telegram = state.telegram.lock().await.clone();
+    let wechat = state.wechat.lock().await.clone();
     Json(StatusResponse {
         running,
         bind: config.bind.clone(),
         state_path: config.state_path.to_string_lossy().to_string(),
         feishu_ws,
+        telegram,
+        wechat,
     })
 }
 
@@ -563,6 +581,87 @@ async fn stop_bridge(State(state): State<SharedState>) -> impl IntoResponse {
     )
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetImChannelEnabledRequest {
+    channel: String,
+    enabled: bool,
+}
+
+async fn set_im_channel_enabled(
+    State(state): State<SharedState>,
+    Json(request): Json<SetImChannelEnabledRequest>,
+) -> impl IntoResponse {
+    let channel = request.channel.trim().to_ascii_lowercase();
+    let should_run = {
+        let mut config = state.config.lock().await;
+        match channel.as_str() {
+            "feishu" => {
+                if request.enabled && !feishu_configured(&config) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "ok": false, "error": "Feishu is not configured" })),
+                    );
+                }
+                config.feishu.enabled = request.enabled;
+            }
+            "telegram" => {
+                if request.enabled && !telegram_configured(&config) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "ok": false, "error": "Telegram is not configured" })),
+                    );
+                }
+                config.telegram.enabled = request.enabled;
+            }
+            "wechat" => {
+                if request.enabled && !wechat_configured(&config) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "ok": false, "error": "WeChat is not configured" })),
+                    );
+                }
+                config.wechat.enabled = request.enabled;
+            }
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "ok": false, "error": "unknown IM channel" })),
+                );
+            }
+        }
+        config.bridge.enabled = im_bridge_configured(&config);
+        if let Err(err) = config.save(&state.config_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            );
+        }
+        config.bridge.enabled
+    };
+
+    if should_run {
+        start_bridge_task(
+            &state,
+            BridgeStartMode::Restart,
+            "bridge restarted after IM channel toggle",
+        )
+        .await;
+    } else {
+        stop_bridge_task(&state).await;
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "channel": channel,
+            "enabled": request.enabled,
+            "running": should_run,
+        })),
+    )
+}
+
 async fn stop_bridge_task(state: &SharedState) {
     let mut task = state.bridge_task.lock().await;
     if let Some(handle) = task.take() {
@@ -573,6 +672,16 @@ async fn stop_bridge_task(state: &SharedState) {
         let mut ws = state.feishu_ws.lock().await;
         ws.connecting = false;
         ws.connected = false;
+    }
+    {
+        let mut wechat = state.wechat.lock().await;
+        wechat.polling = false;
+        wechat.connected = false;
+    }
+    {
+        let mut telegram = state.telegram.lock().await;
+        telegram.polling = false;
+        telegram.connected = false;
     }
     state
         .push_event("warn", "bridge_stopped", "bridge task aborted")
@@ -602,7 +711,7 @@ async fn start_bridge_task(
             .push_event(
                 "warn",
                 "bridge_waiting_for_im_config",
-                "bridge is waiting for Feishu or Telegram configuration",
+                "bridge is waiting for Feishu, Telegram, or WeChat configuration",
             )
             .await;
         return false;
@@ -637,6 +746,14 @@ async fn start_bridge_task(
         ws.connecting = false;
         ws.connected = false;
         ws.last_error = None;
+        let mut wechat = state.wechat.lock().await;
+        wechat.polling = false;
+        wechat.connected = false;
+        wechat.last_error = None;
+        let mut telegram = state.telegram.lock().await;
+        telegram.polling = false;
+        telegram.connected = false;
+        telegram.last_error = None;
     }
     state
         .push_event("info", "bridge_start_requested", event_message)
@@ -652,14 +769,31 @@ fn telegram_configured(config: &AppConfig) -> bool {
     !config.telegram.bot_token.trim().is_empty()
 }
 
+fn wechat_configured(config: &AppConfig) -> bool {
+    !config.wechat.bot_token.trim().is_empty()
+}
+
+fn feishu_active(config: &AppConfig) -> bool {
+    config.feishu.enabled && feishu_configured(config)
+}
+
+fn telegram_active(config: &AppConfig) -> bool {
+    config.telegram.enabled && telegram_configured(config)
+}
+
+fn wechat_active(config: &AppConfig) -> bool {
+    config.wechat.enabled && wechat_configured(config)
+}
+
 fn im_bridge_configured(config: &AppConfig) -> bool {
-    feishu_configured(config) || telegram_configured(config)
+    feishu_active(config) || telegram_active(config) || wechat_active(config)
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct FeishuBotStatus {
     configured: bool,
+    enabled: bool,
     app_id: Option<String>,
     display_name: Option<String>,
     allowed_open_ids: usize,
@@ -698,10 +832,208 @@ async fn feishu_bot_status(State(state): State<SharedState>) -> Json<FeishuBotSt
 
     Json(FeishuBotStatus {
         configured,
+        enabled: config.feishu.enabled,
         app_id,
         display_name,
         allowed_open_ids: config.feishu.allowed_open_ids.len(),
         error,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TelegramBotStatus {
+    configured: bool,
+    enabled: bool,
+    token_set: bool,
+    display_name: Option<String>,
+    username: Option<String>,
+    mention_only: bool,
+    allowed_chat_ids: usize,
+    polling: bool,
+    connected: bool,
+    last_error: Option<String>,
+    error: Option<String>,
+}
+
+async fn telegram_bot_status(State(state): State<SharedState>) -> Json<TelegramBotStatus> {
+    let config = state.config.lock().await.clone();
+    let telegram = state.telegram.lock().await.clone();
+    let configured = telegram_configured(&config);
+    let mut display_name = non_empty_string(&config.telegram.display_name);
+    let mut username = None;
+    let mut error = None;
+
+    if configured && display_name.is_none() {
+        let api = TelegramApi::new(TelegramSettings::from_app_config(&config.telegram));
+        match tokio::time::timeout(std::time::Duration::from_secs(3), api.get_me()).await {
+            Ok(Ok(user)) => {
+                username = user
+                    .username
+                    .as_deref()
+                    .map(|value| value.trim_start_matches('@').to_string())
+                    .filter(|value| !value.is_empty());
+                display_name = telegram_user_display_name(&user);
+                if let Some(name) = display_name.clone() {
+                    let mut config = state.config.lock().await;
+                    if config.telegram.display_name.trim().is_empty()
+                        && !config.telegram.bot_token.trim().is_empty()
+                    {
+                        config.telegram.display_name = name;
+                        if let Err(err) = config.save(&state.config_path) {
+                            error = Some(err.to_string());
+                        }
+                    }
+                }
+            }
+            Ok(Err(err)) => error = Some(err.to_string()),
+            Err(_) => error = Some("telegram getMe timeout".to_string()),
+        }
+    }
+
+    Json(TelegramBotStatus {
+        configured,
+        enabled: config.telegram.enabled,
+        token_set: !config.telegram.bot_token.trim().is_empty(),
+        display_name,
+        username,
+        mention_only: config.telegram.mention_only,
+        allowed_chat_ids: config.telegram.allowed_chat_ids.len(),
+        polling: telegram.polling,
+        connected: telegram.connected,
+        last_error: telegram.last_error,
+        error,
+    })
+}
+
+fn telegram_user_display_name(user: &crate::im::telegram::api::TelegramUser) -> Option<String> {
+    let username = user
+        .username
+        .as_deref()
+        .map(|value| value.trim_start_matches('@'))
+        .filter(|value| !value.is_empty());
+    let name = [user.first_name.as_deref(), user.last_name.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    match (name.is_empty(), username) {
+        (false, Some(username)) => Some(format!("{name} (@{username})")),
+        (false, None) => Some(name),
+        (true, Some(username)) => Some(format!("@{username}")),
+        (true, None) => None,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigureTelegramBotRequest {
+    bot_token: Option<String>,
+    mention_only: Option<bool>,
+}
+
+async fn configure_telegram_bot(
+    State(state): State<SharedState>,
+    Json(request): Json<ConfigureTelegramBotRequest>,
+) -> impl IntoResponse {
+    let token = request
+        .bot_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !is_masked_secret(value))
+        .map(str::to_string);
+    let telegram_config = {
+        let mut config = state.config.lock().await;
+        if let Some(token) = token {
+            config.telegram.bot_token = token;
+            config.telegram.display_name.clear();
+        }
+        if config.telegram.bot_token.trim().is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "missing botToken" })),
+            );
+        }
+        if let Some(mention_only) = request.mention_only {
+            config.telegram.mention_only = mention_only;
+        }
+        config.telegram.enabled = true;
+        config.bridge.enabled = true;
+        if let Err(err) = config.save(&state.config_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            );
+        }
+        config.telegram.clone()
+    };
+    if telegram_config.display_name.trim().is_empty() {
+        let api = TelegramApi::new(TelegramSettings::from_app_config(&telegram_config));
+        if let Ok(Ok(user)) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), api.get_me()).await
+            && let Some(name) = telegram_user_display_name(&user)
+        {
+            let mut config = state.config.lock().await;
+            if config.telegram.bot_token == telegram_config.bot_token {
+                config.telegram.display_name = name;
+                let _ = config.save(&state.config_path);
+            }
+        }
+    }
+    start_bridge_task(
+        &state,
+        BridgeStartMode::Restart,
+        "bridge restarted after Telegram configuration",
+    )
+    .await;
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "configured": true })),
+    )
+}
+
+fn is_masked_secret(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '*')
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WechatBotStatus {
+    configured: bool,
+    enabled: bool,
+    display_name: Option<String>,
+    account_id: Option<String>,
+    base_url: Option<String>,
+    user_id: Option<String>,
+    allowed_user_ids: usize,
+    polling: bool,
+    connected: bool,
+    last_error: Option<String>,
+    last_event_at_ms: Option<u128>,
+    last_inbound_at_ms: Option<u128>,
+}
+
+async fn wechat_bot_status(State(state): State<SharedState>) -> Json<WechatBotStatus> {
+    let config = state.config.lock().await.clone();
+    let wechat = state.wechat.lock().await.clone();
+    Json(WechatBotStatus {
+        configured: wechat_configured(&config),
+        enabled: config.wechat.enabled,
+        display_name: non_empty_string(&config.wechat.display_name)
+            .or_else(|| wechat_configured(&config).then(|| "微信机器人".to_string())),
+        account_id: non_empty_string(&config.wechat.account_id),
+        base_url: non_empty_string(&config.wechat.base_url),
+        user_id: non_empty_string(&config.wechat.user_id),
+        allowed_user_ids: config.wechat.allowed_user_ids.len(),
+        polling: wechat.polling,
+        connected: wechat.connected,
+        last_error: wechat.last_error,
+        last_event_at_ms: wechat.last_event_at_ms,
+        last_inbound_at_ms: wechat.last_inbound_at_ms,
     })
 }
 
@@ -723,6 +1055,8 @@ struct RemoteControlBackendStatusResponse {
     installation_id: Option<String>,
     current_thread_id: Option<String>,
     feishu_configured: bool,
+    telegram_configured: bool,
+    wechat_configured: bool,
     reason: Option<String>,
 }
 
@@ -732,15 +1066,18 @@ async fn remote_control_backend_status(
     let config = state.config.lock().await.clone();
     let remote = remote_control_backend::status_snapshot(&state).await;
     let feishu_configured = feishu_configured(&config);
+    let telegram_configured = telegram_configured(&config);
+    let wechat_configured = wechat_configured(&config);
+    let im_configured = im_bridge_configured(&config);
     let reason = if !config.bridge.enabled {
         Some("bridge disabled".to_string())
-    } else if !feishu_configured {
-        Some("Feishu is not configured".to_string())
+    } else if !im_configured {
+        Some("No enabled IM channel is configured".to_string())
     } else {
         None
     };
     Json(RemoteControlBackendStatusResponse {
-        available: config.bridge.enabled && feishu_configured,
+        available: config.bridge.enabled && im_configured,
         enabled: config.bridge.enabled,
         remote_control_base_url: config.remote_control_base_url(),
         remote_control_connected: remote.connected,
@@ -750,6 +1087,8 @@ async fn remote_control_backend_status(
         installation_id: remote.installation_id,
         current_thread_id: remote.current_thread_id,
         feishu_configured,
+        telegram_configured,
+        wechat_configured,
         reason,
     })
 }
@@ -1409,6 +1748,7 @@ async fn feishu_onboard_poll(
             if let (Some(app_id), Some(app_secret)) = (app_id.clone(), app_secret.clone()) {
                 let feishu_config = {
                     let mut config = state.config.lock().await;
+                    config.feishu.enabled = true;
                     config.feishu.app_id = app_id.clone();
                     config.feishu.app_secret = app_secret;
                     if let Some(open_id) = open_id.clone()
@@ -1475,6 +1815,230 @@ async fn feishu_onboard_poll(
     }
 }
 
+const WECHAT_ONBOARD_TTL_MS: u128 = 5 * 60_000;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WechatOnboardStartResponse {
+    session_key: String,
+    qrcode_url: String,
+    qr_svg: String,
+    expires_in: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WechatOnboardPollRequest {
+    session_key: String,
+    verify_code: Option<String>,
+}
+
+async fn wechat_onboard_start(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await.clone();
+    let api = WechatApi::new(WechatSettings::from_app_config(&config.wechat));
+    let local_tokens = wechat_store::local_bot_tokens(&state).await;
+    match api.start_qr_login(&local_tokens).await {
+        Ok(payload) => {
+            let session_key = format!("wechat-onboard-{}", unix_now_millis());
+            let qr_svg = build_qr_svg(&payload.qrcode_img_content).unwrap_or_default();
+            let session = WechatOnboardSession {
+                session_key: session_key.clone(),
+                qrcode: payload.qrcode,
+                started_at_ms: unix_now_millis(),
+                current_api_base_url: DEFAULT_WECHAT_API_BASE.to_string(),
+            };
+            *state.wechat_onboard.lock().await = Some(session);
+            state
+                .push_event("info", "wechat_onboard_started", "scan flow started")
+                .await;
+            (
+                StatusCode::OK,
+                Json(json!(WechatOnboardStartResponse {
+                    session_key,
+                    qrcode_url: payload.qrcode_img_content,
+                    qr_svg,
+                    expires_in: (WECHAT_ONBOARD_TTL_MS / 1000) as u64,
+                })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+async fn wechat_onboard_poll(
+    State(state): State<SharedState>,
+    Json(request): Json<WechatOnboardPollRequest>,
+) -> impl IntoResponse {
+    let session = {
+        let onboard = state.wechat_onboard.lock().await;
+        onboard.clone()
+    };
+    let Some(mut session) = session else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "done": false, "error": "missing_session" })),
+        );
+    };
+    if session.session_key != request.session_key {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "done": false, "error": "invalid_session" })),
+        );
+    }
+    if unix_now_millis().saturating_sub(session.started_at_ms) > WECHAT_ONBOARD_TTL_MS {
+        *state.wechat_onboard.lock().await = None;
+        return (
+            StatusCode::OK,
+            Json(json!({ "done": false, "status": "expired", "error": "expired" })),
+        );
+    }
+
+    let config = state.config.lock().await.clone();
+    let api = WechatApi::new(WechatSettings::from_app_config(&config.wechat));
+    let result = match api
+        .poll_qr_status(
+            &session.current_api_base_url,
+            &session.qrcode,
+            request.verify_code.as_deref(),
+        )
+        .await
+    {
+        Ok(result) => result,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "done": false, "error": err.to_string() })),
+            );
+        }
+    };
+
+    if result.status == "scaned_but_redirect" {
+        if let Some(redirect_host) = result
+            .redirect_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            session.current_api_base_url = normalize_wechat_base_url(redirect_host);
+            *state.wechat_onboard.lock().await = Some(session);
+        }
+        return (
+            StatusCode::OK,
+            Json(json!({ "done": false, "status": result.status })),
+        );
+    }
+
+    if result.status == "confirmed" {
+        let Some(bot_token) = result
+            .bot_token
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+        else {
+            return (
+                StatusCode::OK,
+                Json(
+                    json!({ "done": false, "status": result.status, "error": "missing_bot_token" }),
+                ),
+            );
+        };
+        let account_id = result
+            .ilink_bot_id
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| config.wechat.account_id.clone());
+        let base_url = result
+            .baseurl
+            .clone()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| session.current_api_base_url.clone());
+        let user_id = result.ilink_user_id.clone().unwrap_or_default();
+        {
+            let mut config = state.config.lock().await;
+            config.wechat.enabled = true;
+            config.wechat.account_id = if account_id.trim().is_empty() {
+                "wechat".to_string()
+            } else {
+                account_id.clone()
+            };
+            config.wechat.bot_token = bot_token;
+            if config.wechat.display_name.trim().is_empty() {
+                config.wechat.display_name = "微信机器人".to_string();
+            }
+            config.wechat.base_url = normalize_wechat_base_url(&base_url);
+            config.wechat.user_id = user_id.clone();
+            if !user_id.trim().is_empty() && !config.wechat.allowed_user_ids.contains(&user_id) {
+                config.wechat.allowed_user_ids.push(user_id.clone());
+            }
+            config.bridge.enabled = true;
+            if let Err(err) = config.save(&state.config_path) {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "done": false, "error": err.to_string() })),
+                );
+            }
+        }
+        *state.wechat_onboard.lock().await = None;
+        state
+            .push_event(
+                "info",
+                "wechat_onboard_completed",
+                format!("account={} user={}", account_id, user_id),
+            )
+            .await;
+        start_bridge_task(
+            &state,
+            BridgeStartMode::Restart,
+            "bridge restarted after WeChat onboarding",
+        )
+        .await;
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "done": true,
+                "status": result.status,
+                "accountId": account_id,
+                "userId": user_id,
+            })),
+        );
+    }
+
+    if result.status == "binded_redirect" {
+        *state.wechat_onboard.lock().await = None;
+        state
+            .push_event(
+                "info",
+                "wechat_onboard_already_connected",
+                "already connected",
+            )
+            .await;
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "done": true,
+                "alreadyConnected": true,
+                "status": result.status,
+            })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "done": false,
+            "status": result.status,
+            "needVerifyCode": result.status == "need_verifycode",
+            "error": match result.status.as_str() {
+                "expired" => Some("expired"),
+                "verify_code_blocked" => Some("verify_code_blocked"),
+                _ => None,
+            },
+        })),
+    )
+}
+
 fn build_qr_svg(content: &str) -> anyhow::Result<String> {
     let code = QrCode::new(content.as_bytes())?;
     Ok(code
@@ -1483,4 +2047,23 @@ fn build_qr_svg(content: &str) -> anyhow::Result<String> {
         .dark_color(svg::Color("#20242a"))
         .light_color(svg::Color("#ffffff"))
         .build())
+}
+
+fn unix_now_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
+}
+
+fn normalize_wechat_base_url(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        return DEFAULT_WECHAT_API_BASE.to_string();
+    }
+    if value.starts_with("http://") || value.starts_with("https://") {
+        value.trim_end_matches('/').to_string()
+    } else {
+        format!("https://{}", value.trim_end_matches('/'))
+    }
 }
