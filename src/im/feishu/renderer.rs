@@ -791,7 +791,7 @@ pub fn build_approval_card(
         {
             serde_json::json!({
                 "tag": "markdown",
-                "content": format!("**审批请求：{}**", normalize_card_markdown(kind_label))
+                "content": format!("**approval request: `{}`**", normalize_card_markdown(kind_label))
             })
         },
         {
@@ -807,7 +807,7 @@ pub fn build_approval_card(
         }));
         elements.push(build_approval_button_row(decisions, request_key));
     }
-    let mut card = build_markdown_card("", Some("待审批"), Some(APPROVAL_CARD_TEMPLATE));
+    let mut card = build_markdown_card("", Some("approval pending"), Some(APPROVAL_CARD_TEMPLATE));
     card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
     card["body"]["vertical_spacing"] = serde_json::json!("8px");
     card["body"]["elements"] = serde_json::Value::Array(elements);
@@ -821,11 +821,11 @@ pub fn build_resolved_approval_card(
     option_index: usize,
 ) -> serde_json::Value {
     let content = normalize_card_markdown(summary);
-    let selected = normalize_card_markdown(&compact_approval_label(decision_label));
+    let selected = normalize_card_markdown(decision_label.trim());
     let elements = vec![
         serde_json::json!({
             "tag": "markdown",
-            "content": format!("**审批请求：{}**", normalize_card_markdown(kind_label))
+            "content": format!("**approval request: `{}`**", normalize_card_markdown(kind_label))
         }),
         serde_json::json!({
             "tag": "markdown",
@@ -836,10 +836,10 @@ pub fn build_resolved_approval_card(
         }),
         serde_json::json!({
             "tag": "markdown",
-            "content": format!("**已选择 /{}：{}**", option_index, selected)
+            "content": format!("**selected /{}: {}**", option_index, selected)
         }),
     ];
-    let mut card = build_markdown_card("", Some("已审批"), Some("green"));
+    let mut card = build_markdown_card("", Some("approval resolved"), Some("green"));
     card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
     card["body"]["vertical_spacing"] = serde_json::json!("8px");
     card["body"]["elements"] = serde_json::Value::Array(elements);
@@ -866,7 +866,7 @@ fn build_approval_button_row(
                         "tag": "button",
                         "text": {
                             "tag": "plain_text",
-                            "content": compact_approval_label(&decision.label)
+                            "content": decision.label.trim()
                         },
                         "type": if primary { "primary_filled" } else { "default" },
                         "width": "default",
@@ -893,26 +893,6 @@ fn build_approval_button_row(
         "horizontal_align": "left",
         "columns": columns
     })
-}
-
-fn compact_approval_label(label: &str) -> String {
-    let label = label.trim();
-    if label == "Yes, proceed" {
-        return "Yes, proceed".to_string();
-    }
-    if label.starts_with("Yes, and don't ask again for commands that start with") {
-        return "Yes, don't ask again for this command".to_string();
-    }
-    if label == "Yes, and don't ask again for this command in this session" {
-        return "Yes, don't ask again this session".to_string();
-    }
-    if label == "Yes, and don't ask again for these files" {
-        return "Yes, don't ask again for these files".to_string();
-    }
-    if label == "No, and tell Codex what to do differently" {
-        return "No, tell Codex what to do differently".to_string();
-    }
-    truncate_single_line(label, 56)
 }
 
 fn decision_is_negative(decision: &JsonValue) -> bool {

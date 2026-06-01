@@ -1,6 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{im::feishu::FeishuStreamingCardState, types::ImPlatformKind};
 
@@ -341,6 +345,15 @@ pub fn approval_request_key(request_id: &Value) -> String {
     }
 }
 
+pub fn approval_request_fingerprint(request_key: &str) -> String {
+    let digest = Sha256::digest(request_key.as_bytes());
+    let mut fingerprint = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        let _ = write!(&mut fingerprint, "{byte:02x}");
+    }
+    fingerprint
+}
+
 pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget> {
     let mut parts = conversation_key.splitn(3, ':');
     let channel = parts.next()?;
@@ -379,7 +392,7 @@ mod tests {
                 "command": "test",
                 "cwd": "D:\\test"
             }),
-            summary: "命令：`test`".to_string(),
+            summary: "command: `test`".to_string(),
             decisions: vec![],
             message_id: None,
         }

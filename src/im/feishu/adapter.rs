@@ -67,7 +67,7 @@ impl FeishuAdapter {
             return Ok(());
         };
         let card = renderer::build_resolved_approval_card(
-            approval_kind_label(&pending.request_kind),
+            &pending.request_kind,
             &pending.summary,
             decision_label,
             option_index,
@@ -78,7 +78,7 @@ impl FeishuAdapter {
     pub async fn send_approval(&self, target: &str, approval: &PendingApproval) -> Result<String> {
         let request_key = approval.request_key();
         let card = renderer::build_approval_card(
-            approval_kind_label(&approval.request_kind),
+            &approval.request_kind,
             &approval.summary,
             &approval.decisions,
             &request_key,
@@ -194,13 +194,4 @@ fn thread_routing_choice_card(
             },
         ],
     )
-}
-
-pub fn approval_kind_label(kind: &str) -> &'static str {
-    match kind {
-        "command" => "命令执行",
-        "fileChange" => "文件修改",
-        "review" => "补丁审查",
-        _ => "操作审批",
-    }
 }

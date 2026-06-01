@@ -2,7 +2,7 @@ use anyhow::Result;
 use serde_json::json;
 use tokio::time::{Duration, sleep};
 
-use crate::im_runtime::PendingApproval;
+use crate::im_runtime::{PendingApproval, approval_request_fingerprint};
 
 use super::api::{TelegramApi, TelegramParseMode};
 
@@ -58,7 +58,47 @@ impl TelegramAdapter {
     }
 
     pub async fn send_approval(&self, target: &str, approval: &PendingApproval) -> Result<String> {
-        self.send_text(target, &approval_text(approval)).await
+        let text = approval_text(approval);
+        let Some(keyboard) = approval_keyboard(approval) else {
+            return self.send_text(target, &text).await;
+        };
+        let chunks = telegram_text_chunks(&text);
+        let mut last_message_id = 0;
+        for (index, chunk) in chunks.iter().enumerate() {
+            let is_last = index + 1 == chunks.len();
+            if is_last {
+                let html = telegram_markdown_to_html(chunk);
+                last_message_id = match self
+                    .api
+                    .send_text_with_reply_markup_parse_mode(
+                        target,
+                        &html,
+                        keyboard.clone(),
+                        TelegramParseMode::Html,
+                    )
+                    .await
+                {
+                    Ok(message_id) => message_id,
+                    Err(_) => {
+                        self.api
+                            .send_text_with_reply_markup(target, chunk, keyboard.clone())
+                            .await?
+                    }
+                };
+            } else {
+                let html = telegram_markdown_to_html(chunk);
+                last_message_id = match self
+                    .api
+                    .send_text_parse_mode(target, &html, TelegramParseMode::Html)
+                    .await
+                {
+                    Ok(message_id) => message_id,
+                    Err(_) => self.api.send_text(target, chunk).await?,
+                };
+                sleep(Duration::from_millis(TELEGRAM_CHUNK_DELAY_MS)).await;
+            }
+        }
+        Ok(last_message_id.to_string())
     }
 
     pub async fn answer_callback_query(&self, callback_query_id: &str, text: &str) -> Result<()> {
@@ -122,16 +162,7 @@ impl TelegramAdapter {
         has_prev: bool,
         has_next: bool,
     ) -> Result<String> {
-        let mut rows = options
-            .iter()
-            .enumerate()
-            .map(|(index, option)| {
-                vec![button(
-                    &option_button_label(index, option),
-                    &format!("tcs:{request_id}:{field}:{page}:{index}"),
-                )]
-            })
-            .collect::<Vec<_>>();
+        let mut rows = Vec::new();
         let mut nav = Vec::new();
         if has_prev {
             nav.push(button("上一页", &format!("tcp:{request_id}:{field}:prev")));
@@ -142,24 +173,37 @@ impl TelegramAdapter {
         if !nav.is_empty() {
             rows.push(nav);
         }
+        if field == "cwd" {
+            rows.push(vec![button(
+                "自定义或新建目录",
+                &format!("tcv:{request_id}:cwd:__custom__"),
+            )]);
+        }
         rows.push(vec![button(
             "返回创建设置",
             &format!("trc:{request_id}:new"),
         )]);
 
-        let option_text = options
-            .iter()
-            .enumerate()
-            .map(|(index, option)| option_entry_text(index, option))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let text = format!(
-            "{title}\n\n{body}\n\n第 {} 页\n\n{option_text}",
-            page.max(1)
-        );
+        let hint = if options.is_empty() {
+            "当前没有可选项。".to_string()
+        } else if field == "cwd" {
+            format!(
+                "回复 /1 ~ /{} 选择目录，或点击下方按钮输入新目录。",
+                options.len()
+            )
+        } else {
+            format!("回复 /1 ~ /{} 选择。", options.len())
+        };
+        let options_html = create_options_table_html(options);
+        let text = create_options_html_text(title, body, page, &hint, &options_html);
         let message_id = self
             .api
-            .send_text_with_reply_markup(target, &text, inline_keyboard(rows))
+            .send_text_with_reply_markup_parse_mode(
+                target,
+                &text,
+                inline_keyboard(rows),
+                TelegramParseMode::Html,
+            )
             .await?;
         Ok(message_id.to_string())
     }
@@ -223,15 +267,16 @@ impl TelegramAdapter {
 
 fn approval_text(approval: &PendingApproval) -> String {
     let mut lines = vec![
-        format!("审批请求：{}", approval_kind_label(&approval.request_kind)),
+        "approval request".to_string(),
+        format!("request_kind: `{}`", approval.request_kind),
         String::new(),
         approval.summary.trim().to_string(),
         String::new(),
-        "回复下面的命令处理：".to_string(),
+        "availableDecisions:".to_string(),
     ];
     if approval.decisions.is_empty() {
-        lines.push("/y 同意".to_string());
-        lines.push("/n 拒绝".to_string());
+        lines.push("/y".to_string());
+        lines.push("/n".to_string());
     } else {
         lines.extend(
             approval
@@ -244,13 +289,20 @@ fn approval_text(approval: &PendingApproval) -> String {
     lines.join("\n")
 }
 
-fn approval_kind_label(kind: &str) -> &'static str {
-    match kind {
-        "command" => "命令执行",
-        "fileChange" => "文件修改",
-        "review" => "补丁审查",
-        _ => "操作审批",
-    }
+fn approval_keyboard(approval: &PendingApproval) -> Option<serde_json::Value> {
+    let fingerprint = approval_request_fingerprint(&approval.request_key());
+    let rows = approval
+        .decisions
+        .iter()
+        .enumerate()
+        .map(|(index, decision)| {
+            vec![approval_button(
+                &decision.label,
+                &format!("ap:{fingerprint}:{}", index + 1),
+            )]
+        })
+        .collect::<Vec<_>>();
+    (!rows.is_empty()).then(|| inline_keyboard(rows))
 }
 
 fn inline_keyboard(rows: Vec<Vec<serde_json::Value>>) -> serde_json::Value {
@@ -264,21 +316,11 @@ fn button(text: &str, callback_data: &str) -> serde_json::Value {
     })
 }
 
-fn option_button_label(index: usize, option: &TelegramCreateOption) -> String {
-    format!("{}. {}", index + 1, truncate_button_text(&option.label))
-}
-
-fn option_entry_text(index: usize, option: &TelegramCreateOption) -> String {
-    let mut line = format!("{}. {}", index + 1, option.label.trim());
-    if let Some(summary) = option
-        .summary
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        line.push_str(&format!("\n   {summary}"));
-    }
-    line
+fn approval_button(text: &str, callback_data: &str) -> serde_json::Value {
+    json!({
+        "text": text.trim(),
+        "callback_data": callback_data,
+    })
 }
 
 fn thread_entries_table_html(entries: &[TelegramThreadListEntry]) -> String {
@@ -293,6 +335,51 @@ fn thread_entries_table_html(entries: &[TelegramThreadListEntry]) -> String {
             .map(|(index, entry)| thread_entry_table_html(index, entry)),
     );
     lines.join("\n")
+}
+
+fn create_options_table_html(options: &[TelegramCreateOption]) -> String {
+    let mut lines = vec!["<b>序号 | 选项</b>".to_string(), "---- | ----".to_string()];
+    lines.extend(
+        options
+            .iter()
+            .enumerate()
+            .map(|(index, option)| create_option_row_html(index, option)),
+    );
+    lines.join("\n")
+}
+
+fn create_option_row_html(index: usize, option: &TelegramCreateOption) -> String {
+    let label = truncate_display_text(option.label.trim(), 34);
+    let mut row = format!("/{} | <b>{}</b>", index + 1, telegram_html_escape(&label));
+    if let Some(summary) = option
+        .summary
+        .as_deref()
+        .map(telegram_cleanup_text)
+        .filter(|v| !v.is_empty())
+    {
+        row.push_str(&format!(
+            "\n    <code>{}</code>",
+            telegram_html_escape(&truncate_middle(&summary, 56))
+        ));
+    }
+    row
+}
+
+fn create_options_html_text(
+    title: &str,
+    body: &str,
+    page: usize,
+    hint: &str,
+    options_html: &str,
+) -> String {
+    format!(
+        "<b>{}</b>\n\n{}\n\n第 {} 页\n{}\n\n{}",
+        telegram_html_escape(title),
+        telegram_markdown_to_html(&telegram_cleanup_text(body)),
+        page.max(1),
+        telegram_html_escape(hint),
+        options_html
+    )
 }
 
 fn thread_entry_table_html(index: usize, entry: &TelegramThreadListEntry) -> String {

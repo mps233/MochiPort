@@ -233,6 +233,10 @@ pub(crate) async fn handle_inbound_action(
     action: InboundAction,
 ) -> Result<()> {
     match action {
+        InboundAction::ApprovalDecision { .. } => {
+            send_text_to_message(&api, &message, "Unsupported Telegram approval callback.").await?;
+            Ok(())
+        }
         InboundAction::ThreadRouteChoice { request_id, action } => {
             handle_thread_route_choice(state, api, message, &request_id, &action).await
         }
@@ -265,6 +269,7 @@ pub(crate) async fn handle_inbound_action(
         InboundAction::ThreadRouteCreateConfigured { .. }
         | InboundAction::ThreadRouteCreateEdit { .. }
         | InboundAction::ThreadRouteCreateSetIndex { .. }
+        | InboundAction::ThreadRouteCreateSetValue { .. }
         | InboundAction::ThreadRouteCreateOptionsPage { .. } => {
             send_text_to_message(&api, &message, "这个创建操作只支持 Telegram 按钮流程。").await?;
             Ok(())
@@ -528,14 +533,18 @@ async fn handle_approval_text_reply(
             .await?;
         }
         ApprovalReplyOutcome::NoPending => {
-            send_text_to_message(api, message, "当前没有待处理审批。").await?;
+            send_text_to_message(api, message, "No pending approval.").await?;
         }
         ApprovalReplyOutcome::NotCurrent => {
-            send_text_to_message(api, message, "请先处理当前显示的审批。").await?;
+            send_text_to_message(api, message, "This approval is no longer current.").await?;
         }
         ApprovalReplyOutcome::InvalidInput { hint } => {
-            send_text_to_message(api, message, &format!("无法识别审批选项。请回复 {hint}。"))
-                .await?;
+            send_text_to_message(
+                api,
+                message,
+                &format!("Invalid approval option. Reply {hint}."),
+            )
+            .await?;
         }
     }
     Ok(true)

@@ -4,7 +4,7 @@ use crate::{
     app_state::SharedState,
     codex::{approval_decision_by_input, approval_response},
     im::core::thread::approval_reply_hint,
-    im_runtime::{ApprovalDecisionOption, PendingApproval},
+    im_runtime::{ApprovalDecisionOption, PendingApproval, approval_request_fingerprint},
     remote_control_backend,
     types::InboundMessage,
 };
@@ -59,6 +59,41 @@ pub(crate) async fn resolve_approval_reply(
     };
     ApprovalReplyOutcome::Ready {
         conversation_key,
+        pending,
+        option_index,
+        decision,
+    }
+}
+
+pub(crate) async fn resolve_approval_button_reply(
+    state: &SharedState,
+    message: &InboundMessage,
+    request_fingerprint: &str,
+    option_index: usize,
+) -> ApprovalReplyOutcome {
+    let message_conversation_key = message.conversation_key();
+    let pending = {
+        let runtime = state.runtime.lock().await;
+        runtime.current_approval(&message_conversation_key)
+    };
+    let Some(pending) = pending else {
+        return ApprovalReplyOutcome::NoPending;
+    };
+    let current_fingerprint = approval_request_fingerprint(&pending.request_key());
+    if current_fingerprint != request_fingerprint {
+        return ApprovalReplyOutcome::NotCurrent;
+    }
+    let Some(decision) = option_index
+        .checked_sub(1)
+        .and_then(|index| pending.decisions.get(index))
+        .cloned()
+    else {
+        return ApprovalReplyOutcome::InvalidInput {
+            hint: approval_reply_hint(&pending),
+        };
+    };
+    ApprovalReplyOutcome::Ready {
+        conversation_key: message_conversation_key,
         pending,
         option_index,
         decision,

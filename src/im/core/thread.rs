@@ -170,7 +170,7 @@ pub(crate) fn build_thread_entries(
         .iter()
         .cloned()
         .collect::<std::collections::HashSet<_>>();
-    let mut entries = history_threads
+    history_threads
         .iter()
         .map(|thread| ThreadListEntry {
             thread_id: thread
@@ -186,15 +186,7 @@ pub(crate) fn build_thread_entries(
                 summarize_thread_cwd(thread)
             )),
         })
-        .collect::<Vec<_>>();
-    entries.sort_by_key(|entry| {
-        (
-            current_thread_id != Some(entry.thread_id.as_str()),
-            !loaded_set.contains(&entry.thread_id),
-            entry.thread_id.clone(),
-        )
-    });
-    entries
+        .collect::<Vec<_>>()
 }
 
 pub(crate) fn summarize_thread_title(thread: &serde_json::Value) -> String {
@@ -699,5 +691,44 @@ fn user_home_dir() -> Option<std::ffi::OsString> {
 fn push_path_once(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths.iter().any(|existing| existing == &path) {
         paths.push(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::build_thread_entries;
+
+    #[test]
+    fn thread_entries_preserve_history_order() {
+        let history_threads = vec![
+            json!({"id": "thread-z", "name": "Newest"}),
+            json!({"id": "thread-a", "name": "Loaded"}),
+            json!({"id": "thread-m", "name": "Current"}),
+        ];
+        let entries = build_thread_entries(
+            &["thread-a".to_string()],
+            &history_threads,
+            Some("thread-m"),
+        );
+
+        let ids = entries
+            .iter()
+            .map(|entry| entry.thread_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["thread-z", "thread-a", "thread-m"]);
+        assert!(
+            entries[1]
+                .last_activity_text
+                .as_deref()
+                .is_some_and(|text| text.contains("已加载"))
+        );
+        assert!(
+            entries[2]
+                .last_activity_text
+                .as_deref()
+                .is_some_and(|text| text.contains("当前会话"))
+        );
     }
 }

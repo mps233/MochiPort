@@ -737,6 +737,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     };
 
     doc["chatgpt_base_url"] = toml_edit::value(&options.backend_url);
+    disable_codex_apps_feature_if_unset(&mut doc);
 
     let provider_base_url = options.provider_base_url.as_deref().and_then(config_value);
     let provider_key = options.provider_key.as_deref().and_then(config_value);
@@ -774,6 +775,19 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
     std::fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn disable_codex_apps_feature_if_unset(doc: &mut toml_edit::DocumentMut) {
+    if !doc.contains_key("features") {
+        doc["features"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+
+    let Some(features) = doc["features"].as_table_mut() else {
+        return;
+    };
+    if features.get("apps").is_none() && features.get("connectors").is_none() {
+        features["apps"] = toml_edit::value(false);
+    }
 }
 
 fn normalize_config_toml_order(raw: &str) -> String {
@@ -1315,6 +1329,8 @@ mod tests {
         assert!(!config.contains("disable_response_storage"));
         assert!(!config.contains("network_access"));
         assert!(!config.contains("windows_wsl_setup_acknowledged"));
+        assert!(config.contains("[features]"));
+        assert!(config.contains("apps = false"));
         assert!(config.contains("[model_providers.ai-codex]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(config.contains("wire_api = \"responses\""));
@@ -1325,6 +1341,44 @@ mod tests {
         assert!(auth.contains(&format!("\"auth_mode\": \"{LOCAL_AUTH_MODE}\"")));
         assert!(auth.contains("\"account_id\": \"acct_test\""));
         assert!(report.remote_control_switch.configured);
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_preserves_explicit_apps_feature() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[features]
+apps = true
+
+[model_providers.old-provider]
+name = "old-provider"
+"#,
+        )
+        .expect("write config");
+
+        let report = configure_codex_app(ConfigureCodexAppOptions {
+            codex_home: Some(codex_home.clone()),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "local@example.test".to_string(),
+            plan_type: "pro".to_string(),
+            provider_name: None,
+            provider_base_url: None,
+            provider_key: None,
+            model: None,
+            activate_provider: true,
+        })
+        .expect("configure codex app");
+
+        let config = std::fs::read_to_string(report.config_path).expect("read config");
+        assert!(config.contains("[features]"));
+        assert!(config.contains("apps = true"));
+        assert!(!config.contains("apps = false"));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }

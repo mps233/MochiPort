@@ -49,6 +49,10 @@ pub enum ThreadRouteDirection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum InboundAction {
+    ApprovalDecision {
+        request_fingerprint: String,
+        option_index: usize,
+    },
     ThreadRouteChoice {
         request_id: String,
         action: String,
@@ -76,6 +80,11 @@ pub enum InboundAction {
         field: String,
         page: usize,
         index: usize,
+    },
+    ThreadRouteCreateSetValue {
+        request_id: String,
+        field: String,
+        value: String,
     },
     ThreadRouteCreateOptionsPage {
         request_id: String,

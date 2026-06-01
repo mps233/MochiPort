@@ -6,7 +6,10 @@ use tracing::info;
 use crate::{
     app_state::SharedState,
     im::core::{
-        approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
+        approval::{
+            ApprovalReplyOutcome, resolve_approval_button_reply, resolve_approval_reply,
+            submit_approval_decision,
+        },
         routing::{
             active_turn_for_message, clear_thread_binding, live_thread_for_route, route_for_message,
         },
@@ -69,6 +72,17 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     }
 
     let command = command(trimmed);
+    if let Some(command) = command.as_deref()
+        && handle_telegram_thread_create_option_text_reply(
+            state.clone(),
+            adapter.clone(),
+            message.clone(),
+            command,
+        )
+        .await?
+    {
+        return Ok(());
+    }
     if let Some(command) = command.as_deref()
         && is_approval_reply(command)
         && state
@@ -321,6 +335,20 @@ pub(crate) async fn handle_inbound_action(
     action: InboundAction,
 ) -> Result<()> {
     match action {
+        InboundAction::ApprovalDecision {
+            request_fingerprint,
+            option_index,
+        } => {
+            handle_telegram_approval_button_reply(
+                &state,
+                &adapter,
+                &message,
+                &request_fingerprint,
+                option_index,
+            )
+            .await?;
+            Ok(())
+        }
         InboundAction::ThreadRouteChoice { request_id, action } => {
             handle_telegram_thread_route_choice(state, adapter, message, &request_id, &action).await
         }
@@ -445,6 +473,35 @@ pub(crate) async fn handle_inbound_action(
                         &message.chat_id,
                         "这个创建选项已经失效，请重新打开创建设置。",
                     )
+                    .await?;
+                return Ok(());
+            };
+            apply_thread_create_draft_value(&mut request.create_draft, field, &value)?;
+            state
+                .runtime
+                .lock()
+                .await
+                .remember_thread_routing_request(request.clone());
+            if field == "cwd" && value == "__custom__" {
+                send_telegram_thread_create_custom_cwd_prompt(&adapter, &message).await?;
+                return Ok(());
+            }
+            send_telegram_thread_create_settings(&state, &adapter, &message, Some(request)).await
+        }
+        InboundAction::ThreadRouteCreateSetValue {
+            request_id,
+            field,
+            value,
+        } => {
+            let Some(mut request) =
+                checked_telegram_thread_routing_request(&state, &adapter, &message, &request_id)
+                    .await?
+            else {
+                return Ok(());
+            };
+            let Some(field) = normalize_thread_create_field(&field) else {
+                adapter
+                    .send_text(&message.chat_id, "这个创建选项不可用，请重新打开创建设置。")
                     .await?;
                 return Ok(());
             };
@@ -645,6 +702,68 @@ async fn handle_telegram_thread_list_text_reply(
     )
     .await?;
     Ok(true)
+}
+
+async fn handle_telegram_thread_create_option_text_reply(
+    state: SharedState,
+    adapter: TelegramAdapter,
+    message: InboundMessage,
+    command: &str,
+) -> Result<bool> {
+    let Some(index) = numeric_command_index(command) else {
+        return Ok(false);
+    };
+    let Some(mut request) =
+        pending_telegram_thread_create_options_request(&state, &message.conversation_key()).await
+    else {
+        return Ok(false);
+    };
+    let page = request.page.max(1);
+    let Some((field, value)) =
+        request
+            .create_option_values_by_field_page
+            .iter()
+            .find_map(|(field, pages)| {
+                pages
+                    .get(page.saturating_sub(1))
+                    .and_then(|values| values.get(index))
+                    .cloned()
+                    .map(|value| (field.clone(), value))
+            })
+    else {
+        adapter
+            .send_text(&message.chat_id, "这个选项序号不可用，请重新打开创建设置。")
+            .await?;
+        return Ok(true);
+    };
+    apply_thread_create_draft_value(&mut request.create_draft, &field, &value)?;
+    state
+        .runtime
+        .lock()
+        .await
+        .remember_thread_routing_request(request.clone());
+    if field == "cwd" && value == "__custom__" {
+        send_telegram_thread_create_custom_cwd_prompt(&adapter, &message).await?;
+        return Ok(true);
+    }
+    send_telegram_thread_create_settings(&state, &adapter, &message, Some(request)).await?;
+    Ok(true)
+}
+
+async fn pending_telegram_thread_create_options_request(
+    state: &SharedState,
+    conversation_key: &str,
+) -> Option<ThreadRoutingRequestState> {
+    state
+        .runtime
+        .lock()
+        .await
+        .thread_routing_requests
+        .values()
+        .filter(|request| request.conversation_key == conversation_key)
+        .filter(|request| !request.create_option_values_by_field_page.is_empty())
+        .max_by_key(|request| thread_routing_request_rank(&request.request_id))
+        .cloned()
 }
 
 async fn pending_telegram_thread_list_request(
@@ -873,6 +992,7 @@ async fn send_telegram_thread_create_options(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+    request.create_option_values_by_field_page.clear();
     request
         .create_option_values_by_field_page
         .insert(field.to_string(), value_pages);
@@ -1035,7 +1155,38 @@ async fn handle_telegram_approval_text_reply(
     message: &InboundMessage,
     command: &str,
 ) -> Result<bool> {
-    match resolve_approval_reply(state, message, command).await {
+    handle_telegram_approval_outcome(
+        state,
+        adapter,
+        message,
+        resolve_approval_reply(state, message, command).await,
+    )
+    .await
+}
+
+async fn handle_telegram_approval_button_reply(
+    state: &SharedState,
+    adapter: &TelegramAdapter,
+    message: &InboundMessage,
+    request_fingerprint: &str,
+    option_index: usize,
+) -> Result<bool> {
+    handle_telegram_approval_outcome(
+        state,
+        adapter,
+        message,
+        resolve_approval_button_reply(state, message, request_fingerprint, option_index).await,
+    )
+    .await
+}
+
+async fn handle_telegram_approval_outcome(
+    state: &SharedState,
+    adapter: &TelegramAdapter,
+    message: &InboundMessage,
+    outcome: ApprovalReplyOutcome,
+) -> Result<bool> {
+    match outcome {
         ApprovalReplyOutcome::Ready {
             conversation_key,
             pending,
@@ -1044,7 +1195,7 @@ async fn handle_telegram_approval_text_reply(
         } => {
             let next = submit_approval_decision(state, &pending, &decision).await?;
             adapter
-                .send_text(&message.chat_id, &format!("已提交审批：{}", decision.label))
+                .send_text(&message.chat_id, &format!("submitted: {}", decision.label))
                 .await?;
             state
                 .push_event(
@@ -1068,19 +1219,19 @@ async fn handle_telegram_approval_text_reply(
         }
         ApprovalReplyOutcome::NoPending => {
             adapter
-                .send_text(&message.chat_id, "当前没有待处理审批。")
+                .send_text(&message.chat_id, "No pending approval.")
                 .await?;
         }
         ApprovalReplyOutcome::NotCurrent => {
             adapter
-                .send_text(&message.chat_id, "请先处理当前显示的审批。")
+                .send_text(&message.chat_id, "This approval is no longer current.")
                 .await?;
         }
         ApprovalReplyOutcome::InvalidInput { hint } => {
             adapter
                 .send_text(
                     &message.chat_id,
-                    &format!("无法识别审批选项。请回复 {hint}。"),
+                    &format!("Invalid approval option. Reply {hint}."),
                 )
                 .await?;
         }
@@ -1234,13 +1385,6 @@ fn cwd_create_options(
             draft.cwd_custom.is_none() && draft.cwd_choice.as_deref() == Some(project),
         );
     }
-    push_create_option(
-        &mut options,
-        "__custom__",
-        "自定义或新建目录",
-        Some("点选后直接发送项目目录的绝对路径。".to_string()),
-        draft.cwd_choice.as_deref() == Some("__custom__"),
-    );
     (
         "选择项目目录".to_string(),
         format!("当前：{}", selected_cwd_text(defaults, draft)),

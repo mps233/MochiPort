@@ -248,6 +248,10 @@ fn chat_allowed(settings: &TelegramSettings, chat_id: &str) -> bool {
 fn action_from_callback_data(data: &str) -> Option<InboundAction> {
     let parts = data.split(':').collect::<Vec<_>>();
     match parts.as_slice() {
+        ["ap", request_fingerprint, option_index] => Some(InboundAction::ApprovalDecision {
+            request_fingerprint: (*request_fingerprint).to_string(),
+            option_index: option_index.parse().ok()?,
+        }),
         ["trc", request_id, action] => Some(InboundAction::ThreadRouteChoice {
             request_id: (*request_id).to_string(),
             action: match *action {
@@ -273,6 +277,11 @@ fn action_from_callback_data(data: &str) -> Option<InboundAction> {
             field: (*field).to_string(),
             page: page.parse().ok()?,
             index: index.parse().ok()?,
+        }),
+        ["tcv", request_id, field, value] => Some(InboundAction::ThreadRouteCreateSetValue {
+            request_id: (*request_id).to_string(),
+            field: (*field).to_string(),
+            value: (*value).to_string(),
         }),
         ["tcp", request_id, field, direction] => {
             Some(InboundAction::ThreadRouteCreateOptionsPage {
@@ -437,6 +446,18 @@ mod tests {
                 assert_eq!(request_id, "thread-route-7");
                 assert_eq!(page, 2);
                 assert_eq!(index, 3);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let action = action_from_callback_data("ap:abc123:2").expect("approval action");
+        match action {
+            InboundAction::ApprovalDecision {
+                request_fingerprint,
+                option_index,
+            } => {
+                assert_eq!(request_fingerprint, "abc123");
+                assert_eq!(option_index, 2);
             }
             other => panic!("unexpected action: {other:?}"),
         }

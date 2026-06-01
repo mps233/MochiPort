@@ -139,7 +139,7 @@ pub fn approval_request_view(notification: &CodexNotification) -> Option<Approva
             let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("");
             Some(ApprovalRequestView {
                 request_kind: "review".to_string(),
-                summary: format!("原因：{reason}"),
+                summary: format!("reason: {reason}"),
                 decisions: vec![
                     decision_option("Yes, proceed", json!("approved")),
                     decision_option("No, and tell Codex what to do differently", json!("denied")),
@@ -151,7 +151,7 @@ pub fn approval_request_view(notification: &CodexNotification) -> Option<Approva
             let cwd = params.get("cwd").and_then(|v| v.as_str()).unwrap_or("");
             Some(ApprovalRequestView {
                 request_kind: "review".to_string(),
-                summary: format!("命令：`{command}`\n目录：`{cwd}`"),
+                summary: format!("command: `{command}`\ncwd: `{cwd}`"),
                 decisions: vec![
                     decision_option("Yes, proceed", json!("approved")),
                     decision_option("No, and tell Codex what to do differently", json!("denied")),
@@ -210,7 +210,7 @@ fn command_approval_summary(params: &Value) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        lines.push(format!("原因：{reason}"));
+        lines.push(format!("reason: {reason}"));
     }
     if let Some(network) = params.get("networkApprovalContext") {
         let host = network
@@ -221,14 +221,14 @@ fn command_approval_summary(params: &Value) -> String {
             .get("protocol")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        lines.push(format!("网络：`{protocol}://{host}`"));
+        lines.push(format!("networkApprovalContext: `{protocol}://{host}`"));
     }
     let command = concise_command(params);
     if !command.trim().is_empty() {
-        lines.push(format!("命令：`{command}`"));
+        lines.push(format!("command: `{command}`"));
     }
     if let Some(cwd) = params.get("cwd").and_then(|v| v.as_str()) {
-        lines.push(format!("目录：`{cwd}`"));
+        lines.push(format!("cwd: `{cwd}`"));
     }
     if let Some(actions) = command_actions_summary(params) {
         lines.push(actions);
@@ -243,7 +243,7 @@ fn command_approval_summary(params: &Value) -> String {
         lines.push(amendments);
     }
     if lines.is_empty() {
-        "Codex 请求执行需要审批的操作。".to_string()
+        "approval requested".to_string()
     } else {
         lines.join("\n")
     }
@@ -252,7 +252,7 @@ fn command_approval_summary(params: &Value) -> String {
 fn file_change_approval_summary(params: &Value) -> String {
     let mut lines = Vec::new();
     if let Some(item_id) = params.get("itemId").and_then(|v| v.as_str()) {
-        lines.push(format!("项目：`{item_id}`"));
+        lines.push(format!("itemId: `{item_id}`"));
     }
     if let Some(reason) = params
         .get("reason")
@@ -260,7 +260,7 @@ fn file_change_approval_summary(params: &Value) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        lines.push(format!("原因：{reason}"));
+        lines.push(format!("reason: {reason}"));
     }
     if let Some(grant_root) = params
         .get("grantRoot")
@@ -268,10 +268,10 @@ fn file_change_approval_summary(params: &Value) -> String {
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        lines.push(format!("会话写入授权：`{grant_root}`"));
+        lines.push(format!("grantRoot: `{grant_root}`"));
     }
     if lines.is_empty() {
-        "Codex 请求修改文件。".to_string()
+        "fileChange approval requested".to_string()
     } else {
         lines.join("\n")
     }
@@ -306,7 +306,7 @@ fn command_actions_summary(params: &Value) -> Option<String> {
             }
         })
         .collect::<Vec<_>>();
-    (!lines.is_empty()).then(|| format!("命令动作：\n{}", lines.join("\n")))
+    (!lines.is_empty()).then(|| format!("commandActions:\n{}", lines.join("\n")))
 }
 
 fn additional_permissions_summary(params: &Value) -> Option<String> {
@@ -349,13 +349,13 @@ fn additional_permissions_summary(params: &Value) -> Option<String> {
             }
         }
     }
-    (!parts.is_empty()).then(|| format!("请求权限：{}", parts.join("; ")))
+    (!parts.is_empty()).then(|| format!("additionalPermissions: {}", parts.join("; ")))
 }
 
 fn execpolicy_amendment_summary(params: &Value) -> Option<String> {
     let amendment = params.get("proposedExecpolicyAmendment")?;
     let prefix = decision_prefix_from_execpolicy_amendment(amendment)?;
-    Some(format!("可记住命令前缀：`{prefix}`"))
+    Some(format!("proposedExecpolicyAmendment: `{prefix}`"))
 }
 
 fn network_policy_amendments_summary(params: &Value) -> Option<String> {
@@ -374,7 +374,7 @@ fn network_policy_amendments_summary(params: &Value) -> Option<String> {
             Some(format!("- `{action}` `{host}`"))
         })
         .collect::<Vec<_>>();
-    (!lines.is_empty()).then(|| format!("可记住网络规则：\n{}", lines.join("\n")))
+    (!lines.is_empty()).then(|| format!("proposedNetworkPolicyAmendments:\n{}", lines.join("\n")))
 }
 
 fn command_approval_decisions(params: &Value) -> Vec<ApprovalDecisionOption> {

@@ -433,11 +433,12 @@ fn approval_event_details(
             })
         })
         .or_else(|| {
-            summary
-                .lines()
-                .find_map(|line| line.strip_prefix("命令：`"))
-                .and_then(|line| line.strip_suffix('`'))
-                .map(str::to_string)
+            summary.lines().find_map(|line| {
+                line.strip_prefix("command: `")
+                    .or_else(|| line.strip_prefix("命令：`"))
+                    .and_then(|line| line.strip_suffix('`'))
+                    .map(str::to_string)
+            })
         })
         .unwrap_or_default();
     format!(
