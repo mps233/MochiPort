@@ -38,10 +38,11 @@ impl TelegramAdapter {
         log_adapter(
             "send_text_begin",
             format!(
-                "chat={} chars={} chunks={}",
+                "chat={} chars={} chunks={} preview={}",
                 target,
                 text.chars().count(),
-                chunks.len()
+                chunks.len(),
+                log_text_preview(text, 500)
             ),
         );
         for (index, chunk) in chunks.iter().enumerate() {
@@ -49,11 +50,12 @@ impl TelegramAdapter {
             log_adapter(
                 "send_text_chunk_begin",
                 format!(
-                    "chat={} chunk={}/{} chars={}",
+                    "chat={} chunk={}/{} chars={} preview={}",
                     target,
                     index + 1,
                     chunks.len(),
-                    chunk.chars().count()
+                    chunk.chars().count(),
+                    log_text_preview(chunk, 500)
                 ),
             );
             last_message_id = match self
@@ -565,11 +567,23 @@ fn inline_keyboard(rows: Vec<Vec<serde_json::Value>>) -> serde_json::Value {
 }
 
 fn log_adapter(event: &str, message: impl AsRef<str>) {
-    chain_log::write_line(format!(
+    chain_log::write_diagnostic_line(format!(
         "[telegram_adapter] event={} {}",
         event,
         message.as_ref()
     ));
+}
+
+fn log_text_preview(text: &str, limit: usize) -> String {
+    let compact = text.replace("\r\n", "\n").replace('\n', "\\n");
+    let mut out = String::new();
+    for ch in compact.chars().take(limit) {
+        out.push(ch);
+    }
+    if compact.chars().count() > limit {
+        out.push_str("...");
+    }
+    out
 }
 
 fn button(text: &str, callback_data: &str) -> serde_json::Value {

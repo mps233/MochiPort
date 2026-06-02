@@ -332,7 +332,12 @@ fn normalize_config_paths(config: &mut AppConfig, config_path: &Path) {
 
 fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
     let path = chain_log_path(config);
-    crate::chain_log::init(&path)?;
+    crate::chain_log::init(
+        &path,
+        config.logging.diagnostic,
+        config.logging.max_mb.saturating_mul(1024 * 1024),
+        config.logging.retention_days,
+    )?;
 
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env().add_directive("codex_remote=info".parse()?))

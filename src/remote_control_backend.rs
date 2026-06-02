@@ -1711,6 +1711,7 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
         return;
     }
     let message = message.get("message").unwrap_or(message);
+    log_codex_to_remote_message(connection_epoch, message);
     if let Some(id) = message.get("id") {
         if let Some(method) = message.get("method").and_then(|v| v.as_str()) {
             if method == "account/chatgptAuthTokens/refresh" {
@@ -2477,6 +2478,13 @@ pub async fn start_turn(
     text: &str,
     attachments: &[InboundAttachment],
 ) -> Result<String> {
+    chain_log::write_diagnostic_line(format!(
+        "[im_trace] event=remote_to_codex_turn_start thread={} text_len={} attachments={} preview={}",
+        thread_id,
+        text.chars().count(),
+        attachments.len(),
+        log_text_preview(text, 360)
+    ));
     let response = request(
         state,
         "turn/start",
@@ -2735,6 +2743,110 @@ fn json_preview(text: &str) -> String {
         out.push_str("...");
     }
     out
+}
+
+fn log_text_preview(text: &str, limit: usize) -> String {
+    let compact = text.replace("\r\n", "\n").replace('\n', "\\n");
+    let mut out = String::new();
+    for ch in compact.chars().take(limit) {
+        out.push(ch);
+    }
+    if compact.chars().count() > limit {
+        out.push_str("...");
+    }
+    out
+}
+
+fn log_codex_to_remote_message(connection_epoch: u64, message: &Value) {
+    let method = message.get("method").and_then(|v| v.as_str()).unwrap_or("");
+    if method.is_empty() {
+        return;
+    }
+    let params = message.get("params");
+    let thread_id = params
+        .and_then(thread_id_from_payload)
+        .or_else(|| thread_id_from_payload(message))
+        .unwrap_or_default();
+    let turn_id = params
+        .and_then(turn_id_from_payload)
+        .or_else(|| turn_id_from_payload(message))
+        .unwrap_or_default();
+    let item = params.and_then(|p| p.get("item"));
+    let item_id = item
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            params
+                .and_then(|p| p.get("itemId"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("");
+    let item_type = item
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let text = codex_message_text_for_log(method, params, item);
+    chain_log::write_diagnostic_line(format!(
+        "[im_trace] event=codex_to_remote connection_epoch={} method={} thread={} turn={} item={} type={} text_len={} preview={}",
+        connection_epoch,
+        method,
+        thread_id,
+        turn_id,
+        item_id,
+        item_type,
+        text.chars().count(),
+        log_text_preview(&text, 500)
+    ));
+}
+
+fn turn_id_from_payload(value: &Value) -> Option<String> {
+    value
+        .get("turnId")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            value
+                .get("turn")
+                .and_then(|turn| turn.get("id"))
+                .and_then(|v| v.as_str())
+        })
+        .map(str::to_string)
+}
+
+fn codex_message_text_for_log(
+    method: &str,
+    params: Option<&Value>,
+    item: Option<&Value>,
+) -> String {
+    if let Some(delta) = params.and_then(|p| p.get("delta")).and_then(|v| v.as_str()) {
+        return delta.to_string();
+    }
+    if let Some(message) = params
+        .and_then(|p| p.get("message"))
+        .and_then(|v| v.as_str())
+    {
+        return message.to_string();
+    }
+    if let Some(item) = item {
+        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+            return text.to_string();
+        }
+        if let Some(text) = item.get("aggregatedOutput").and_then(|v| v.as_str()) {
+            return text.to_string();
+        }
+        if method.contains("commandExecution")
+            && let Some(command) = item
+                .get("commandActions")
+                .and_then(|v| v.as_array())
+                .and_then(|actions| actions.first())
+                .and_then(|action| action.get("command"))
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("command").and_then(|v| v.as_str()))
+        {
+            return command.to_string();
+        }
+        return item.to_string();
+    }
+    params.map(Value::to_string).unwrap_or_default()
 }
 
 fn message_summary(value: &Value) -> String {

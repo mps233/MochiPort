@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     app_state::SharedState,
+    chain_log,
     im::{
         core::accounts::ImApiRegistry,
         telegram::{adapter::TelegramAdapter, api::TelegramApi},
@@ -69,6 +70,7 @@ pub(crate) async fn run_worker(
     mut receiver: ImOutboundReceiver,
 ) {
     while let Some(message) = receiver.receiver.recv().await {
+        log_outbound_message("worker_dequeue", &message, None);
         if !outbound_channel_enabled(&state, &message.route).await {
             state
                 .push_event(
@@ -238,6 +240,7 @@ async fn send_wechat_text(
             ),
         )
         .await;
+    log_outbound_message("send_wechat_text_begin", message, Some(text));
     match adapter
         .send_text(
             state,
@@ -248,6 +251,7 @@ async fn send_wechat_text(
         .await
     {
         Ok(message_id) => {
+            log_outbound_result("send_wechat_text_done", message, &message_id);
             state
                 .push_event(
                     "info",
@@ -264,6 +268,7 @@ async fn send_wechat_text(
                 .await;
         }
         Err(err) => {
+            log_outbound_result("send_wechat_text_failed", message, &err.to_string());
             let event_failed = match message.kind {
                 ImOutboundKind::TurnReply => "wechat_turn_completed_failed",
                 ImOutboundKind::Item | ImOutboundKind::ImageItem => "wechat_item_failed",
@@ -383,8 +388,10 @@ async fn send_telegram_text(
             ),
         )
         .await;
+    log_outbound_message("send_telegram_text_begin", message, Some(text));
     match adapter.send_text(&message.route.chat_id, text).await {
         Ok(message_id) => {
+            log_outbound_result("send_telegram_text_done", message, &message_id);
             state
                 .push_event(
                     "info",
@@ -401,6 +408,7 @@ async fn send_telegram_text(
                 .await;
         }
         Err(err) => {
+            log_outbound_result("send_telegram_text_failed", message, &err.to_string());
             let event_failed = match message.kind {
                 ImOutboundKind::TurnReply => "telegram_turn_completed_failed",
                 ImOutboundKind::Item | ImOutboundKind::ImageItem => "telegram_item_failed",
@@ -421,6 +429,76 @@ async fn send_telegram_text(
                 .await;
         }
     }
+}
+
+fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&str>) {
+    let (payload_kind, text_len, preview) = match (&message.payload, text) {
+        (_, Some(text)) => ("text", text.chars().count(), trace_preview(text, 500)),
+        (ImOutboundPayload::Text(text), None) => {
+            ("text", text.chars().count(), trace_preview(text, 500))
+        }
+        (
+            ImOutboundPayload::Image {
+                path,
+                caption,
+                fallback_text,
+            },
+            None,
+        ) => {
+            let image_text = format!(
+                "path={} caption={} fallback={}",
+                path.display(),
+                caption.as_deref().unwrap_or(""),
+                fallback_text.as_deref().unwrap_or("")
+            );
+            (
+                "image",
+                image_text.chars().count(),
+                trace_preview(&image_text, 500),
+            )
+        }
+    };
+    chain_log::write_diagnostic_line(format!(
+        "[im_trace] event=remote_to_im_outbound_{} platform={} account={} chat={} thread={} item={} type={} kind={:?} payload={} text_len={} preview={}",
+        event,
+        message.route.platform.key(),
+        message.route.account_id,
+        message.route.chat_id,
+        message.thread_id,
+        message.item_id.as_deref().unwrap_or(""),
+        message.item_type.as_deref().unwrap_or(""),
+        message.kind,
+        payload_kind,
+        text_len,
+        preview
+    ));
+}
+
+fn log_outbound_result(event: &str, message: &ImOutboundMessage, result: &str) {
+    chain_log::write_diagnostic_line(format!(
+        "[im_trace] event=remote_to_im_outbound_{} platform={} account={} chat={} thread={} item={} type={} kind={:?} result={}",
+        event,
+        message.route.platform.key(),
+        message.route.account_id,
+        message.route.chat_id,
+        message.thread_id,
+        message.item_id.as_deref().unwrap_or(""),
+        message.item_type.as_deref().unwrap_or(""),
+        message.kind,
+        trace_preview(result, 300)
+    ));
+}
+
+fn trace_preview(text: &str, limit: usize) -> String {
+    let compact = text.replace("\r\n", "\n").replace('\n', "\\n");
+    let mut out = String::new();
+    for ch in compact.chars().take(limit) {
+        out.push(ch);
+    }
+    if compact.chars().count() > limit {
+        out.push_str("...");
+    }
+    out
 }
 
 async fn send_telegram_image(

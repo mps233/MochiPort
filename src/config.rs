@@ -11,6 +11,7 @@ const LEGACY_DEFAULT_BIND: &str = "127.0.0.1:8000";
 pub struct AppConfig {
     pub bind: String,
     pub state_path: PathBuf,
+    pub logging: LoggingConfig,
     pub feishu: FeishuConfig,
     pub telegram: TelegramConfig,
     pub wechat: WechatConfig,
@@ -68,11 +69,20 @@ pub struct BridgeConfig {
     pub send_streaming: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct LoggingConfig {
+    pub diagnostic: bool,
+    pub max_mb: u64,
+    pub retention_days: u64,
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             bind: DEFAULT_BIND.to_string(),
             state_path: PathBuf::from("codex-remote-state.json"),
+            logging: LoggingConfig::default(),
             feishu: FeishuConfig::default(),
             telegram: TelegramConfig::default(),
             wechat: WechatConfig::default(),
@@ -133,6 +143,16 @@ impl Default for BridgeConfig {
             enabled: true,
             account_id: "default".to_string(),
             send_streaming: true,
+        }
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            diagnostic: cfg!(debug_assertions),
+            max_mb: 20,
+            retention_days: 7,
         }
     }
 }

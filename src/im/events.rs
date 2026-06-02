@@ -5,6 +5,7 @@ use base64::{Engine as _, engine::general_purpose};
 
 use crate::{
     app_state::SharedState,
+    chain_log,
     codex::{extract_agent_message_text, extract_turn_reply_text},
     im::{
         core::{
@@ -110,6 +111,14 @@ pub(crate) async fn send_turn_reply(
     route: &RouteTarget,
     text: &str,
 ) {
+    log_remote_to_im_enqueue(
+        "turn_reply_input",
+        thread_id,
+        route,
+        "",
+        "agentMessage",
+        text,
+    );
     let should_send = {
         let mut runtime = state.runtime.lock().await;
         let key = format!("{}:turn-reply", route.conversation_key);
@@ -160,6 +169,14 @@ pub(crate) async fn send_turn_reply(
         ImPlatformKind::Telegram => {
             let rendered = text_renderer::render_agent_message_text(text);
             if let Some(outbound_tx) = outbound_tx {
+                log_remote_to_im_enqueue(
+                    "turn_reply_enqueue",
+                    thread_id,
+                    route,
+                    "",
+                    "agentMessage",
+                    &rendered,
+                );
                 if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                     thread_id: thread_id.to_string(),
                     route: route.clone(),
@@ -210,6 +227,14 @@ pub(crate) async fn send_turn_reply(
         ImPlatformKind::Wechat => {
             let rendered = text_renderer::render_agent_message_text(text);
             if let Some(outbound_tx) = outbound_tx {
+                log_remote_to_im_enqueue(
+                    "turn_reply_enqueue",
+                    thread_id,
+                    route,
+                    "",
+                    "agentMessage",
+                    &rendered,
+                );
                 if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                     thread_id: thread_id.to_string(),
                     route: route.clone(),
@@ -272,6 +297,7 @@ pub(crate) async fn handle_codex_notification(
     let Some(params) = notification.params.as_ref() else {
         return;
     };
+    log_codex_to_im_handler(notification);
     match notification.method.as_str() {
         "turn/started" => {
             let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
@@ -1056,6 +1082,7 @@ async fn send_text_im_codex_item(
             .await;
         return Ok(());
     };
+    log_remote_to_im_enqueue("item_enqueue", thread_id, route, item_id, item_type, &text);
     outbound_tx.enqueue(ImOutboundMessage {
         thread_id: thread_id.to_string(),
         route: route.clone(),
@@ -1077,6 +1104,115 @@ async fn send_text_im_codex_item(
         )
         .await;
     Ok(())
+}
+
+fn log_codex_to_im_handler(notification: &crate::codex::CodexNotification) {
+    let Some(params) = notification.params.as_ref() else {
+        return;
+    };
+    let thread_id = params
+        .get("threadId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let turn_id = params
+        .get("turnId")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            params
+                .get("turn")
+                .and_then(|turn| turn.get("id"))
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("");
+    let item = params.get("item");
+    let item_id = item
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str())
+        .or_else(|| params.get("itemId").and_then(|v| v.as_str()))
+        .unwrap_or("");
+    let item_type = item
+        .and_then(|v| v.get("type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let text = trace_text_for_notification(&notification.method, params, item);
+    chain_log::write_diagnostic_line(format!(
+        "[im_trace] event=codex_to_im_handler method={} thread={} turn={} item={} type={} text_len={} preview={}",
+        notification.method,
+        thread_id,
+        turn_id,
+        item_id,
+        item_type,
+        text.chars().count(),
+        trace_preview(&text, 500)
+    ));
+}
+
+fn log_remote_to_im_enqueue(
+    event: &str,
+    thread_id: &str,
+    route: &RouteTarget,
+    item_id: &str,
+    item_type: &str,
+    text: &str,
+) {
+    chain_log::write_diagnostic_line(format!(
+        "[im_trace] event=remote_to_im_{} platform={} account={} chat={} thread={} item={} type={} text_len={} preview={}",
+        event,
+        route.platform.key(),
+        route.account_id,
+        route.chat_id,
+        thread_id,
+        item_id,
+        item_type,
+        text.chars().count(),
+        trace_preview(text, 500)
+    ));
+}
+
+fn trace_text_for_notification(
+    method: &str,
+    params: &serde_json::Value,
+    item: Option<&serde_json::Value>,
+) -> String {
+    if let Some(delta) = params.get("delta").and_then(|v| v.as_str()) {
+        return delta.to_string();
+    }
+    if let Some(message) = params.get("message").and_then(|v| v.as_str()) {
+        return message.to_string();
+    }
+    if let Some(item) = item {
+        if let Some(text) = item.get("text").and_then(|v| v.as_str()) {
+            return text.to_string();
+        }
+        if let Some(text) = item.get("aggregatedOutput").and_then(|v| v.as_str()) {
+            return text.to_string();
+        }
+        if method.contains("commandExecution")
+            && let Some(command) = item
+                .get("commandActions")
+                .and_then(|v| v.as_array())
+                .and_then(|actions| actions.first())
+                .and_then(|action| action.get("command"))
+                .and_then(|v| v.as_str())
+                .or_else(|| item.get("command").and_then(|v| v.as_str()))
+        {
+            return command.to_string();
+        }
+        return item.to_string();
+    }
+    params.to_string()
+}
+
+fn trace_preview(text: &str, limit: usize) -> String {
+    let compact = text.replace("\r\n", "\n").replace('\n', "\\n");
+    let mut out = String::new();
+    for ch in compact.chars().take(limit) {
+        out.push(ch);
+    }
+    if compact.chars().count() > limit {
+        out.push_str("...");
+    }
+    out
 }
 
 async fn text_im_image_path_for_item(
