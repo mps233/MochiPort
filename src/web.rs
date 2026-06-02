@@ -1127,9 +1127,27 @@ async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_
     let prefix = format!("{platform}:{account_id}:");
     {
         let mut runtime = state.runtime.lock().await;
+        let removed = runtime
+            .route_by_thread
+            .iter()
+            .filter_map(|(thread_id, route)| {
+                (route.platform.key() == platform && route.account_id == account_id)
+                    .then(|| (thread_id.clone(), route.clone()))
+            })
+            .collect::<Vec<_>>();
         runtime.route_by_thread.retain(|_, route| {
             !(route.platform.key() == platform && route.account_id == account_id)
         });
+        for (thread_id, route) in removed {
+            chain_log::write_line(format!(
+                "[im_route] level=warn event=unbind_account reason=clear_im_account_bindings thread={} platform={} account={} chat={} conversation={}",
+                thread_id,
+                route.platform.key(),
+                route.account_id,
+                route.chat_id,
+                route.conversation_key
+            ));
+        }
     }
     if let Some(kind) = im_platform_from_key(platform) {
         state

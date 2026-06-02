@@ -50,8 +50,14 @@ pub(crate) fn image_item_caption(item: &Value) -> String {
     if let Some(status) = string_field(item, "status") {
         lines.push(format!("status: `{status}`"));
     }
-    if let Some(path) = image_item_path(item).and_then(|path| path.to_str().map(str::to_string)) {
-        lines.push(format!("path: `{}`", truncate_middle(&path, 220)));
+    if item_type == "imageGeneration"
+        && let Some(prompt) =
+            string_field(item, "revisedPrompt").or_else(|| string_field(item, "revised_prompt"))
+    {
+        lines.push(format!(
+            "revisedPrompt:\n```text\n{}\n```",
+            truncate_summary(&prompt)
+        ));
     }
     lines.join("\n")
 }
@@ -118,9 +124,6 @@ fn render_image_generation(item: &Value) -> Option<String> {
     if let Some(status) = string_field(item, "status") {
         sections.push(format!("status: `{status}`"));
     }
-    if let Some(path) = image_item_path(item).and_then(|path| path.to_str().map(str::to_string)) {
-        sections.push(format!("path: `{}`", truncate_middle(&path, 260)));
-    }
     if let Some(prompt) =
         string_field(item, "revisedPrompt").or_else(|| string_field(item, "revised_prompt"))
     {
@@ -148,18 +151,8 @@ fn render_image_generation(item: &Value) -> Option<String> {
     }
 }
 
-fn render_image_view(item: &Value) -> Option<String> {
-    let path = item
-        .get("path")
-        .and_then(|v| v.as_str())
-        .or_else(|| item.get("savedPath").and_then(|v| v.as_str()))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())?;
-    Some(format!(
-        "{}\n\npath: `{}`",
-        type_header("imageView"),
-        truncate_middle(path, 260)
-    ))
+fn render_image_view(_item: &Value) -> Option<String> {
+    Some(type_header("imageView"))
 }
 
 fn render_reasoning(item: &Value) -> Option<String> {

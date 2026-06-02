@@ -3,7 +3,8 @@ use anyhow::Error;
 use crate::{
     app_state::SharedState,
     im::core::routing::{
-        clear_thread_binding, is_stale_thread_error, live_thread_for_route, persist_thread_binding,
+        clear_thread_binding_with_reason, is_stale_thread_error, live_thread_for_route,
+        persist_thread_binding,
     },
     im_runtime::{RouteTarget, TurnOrigin},
     remote_control_backend,
@@ -46,7 +47,9 @@ pub(crate) async fn start_turn_for_route(
             TurnStartOutcome::Started { thread_id, turn_id }
         }
         Err(error) if is_stale_thread_error(&error) => {
-            let _ = clear_thread_binding(state, &route.conversation_key).await;
+            let _ =
+                clear_thread_binding_with_reason(state, &route.conversation_key, "stale_thread")
+                    .await;
             TurnStartOutcome::Stale { thread_id }
         }
         Err(error) => TurnStartOutcome::Failed { error },

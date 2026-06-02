@@ -24,7 +24,7 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::{
-    app_state::{AuthorizedRemoteControlClient, RemoteControlInner, SharedState},
+    app_state::{AuthorizedRemoteControlClient, PendingRemoteRequest, RemoteControlInner, SharedState},
     chain_log,
     codex::CodexNotification,
     types::{InboundAttachment, now_ms},
@@ -38,6 +38,13 @@ const REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL: Duration = Duration::from_secs(10)
 const REMOTE_CONTROL_APP_PING_INTERVAL: Duration = Duration::from_secs(10);
 const REMOTE_CONTROL_PONG_TIMEOUT: Duration = Duration::from_secs(60);
 const REMOTE_CONTROL_STALE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+const REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_CONTROL_CLIENT_REINITIALIZED_ERROR: &str =
+    "remote-control client was reported unknown by app-server";
+const REMOTE_CONTROL_SEGMENT_TARGET_BYTES: usize = 100 * 1024;
+const REMOTE_CONTROL_SEGMENT_MAX_BYTES: usize = 150 * 1024;
+const REMOTE_CONTROL_REASSEMBLED_MAX_BYTES: usize = 100 * 1024 * 1024;
+const REMOTE_CONTROL_SEGMENT_COUNT_MAX: usize = 1024;
 const FEISHU_BRIDGE_CLIENT_ID: &str = "codex-remote-feishu";
 const FEISHU_BRIDGE_ENV_ID: &str = "env_codex_remote_feishu_bridge";
 const FEISHU_BRIDGE_INSTALLATION_ID: &str = "codex-remote-feishu-bridge";
@@ -153,6 +160,13 @@ struct EnrollResponse {
     environment_id: String,
     remote_control_token: String,
     expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct RefreshRequest {
+    server_id: Option<String>,
+    installation_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +295,10 @@ pub fn router() -> Router<SharedState> {
             post(enroll),
         )
         .route(
+            "/backend-api/wham/remote/control/server/refresh",
+            post(refresh),
+        )
+        .route(
             "/backend-api/codex/remote/control/client/enroll/start",
             post(remote_control_client_enroll_start),
         )
@@ -301,6 +319,7 @@ pub fn router() -> Router<SharedState> {
             get(client_websocket),
         )
         .route("/backend-api/remote/control/server/enroll", post(enroll))
+        .route("/backend-api/remote/control/server/refresh", post(refresh))
         .route("/backend-api/wham/remote/control/server", get(websocket))
         .route("/backend-api/remote/control/server", get(websocket))
         .route("/api/remote-control/status", get(status))
@@ -1153,6 +1172,179 @@ async fn enroll(
     )
 }
 
+async fn refresh(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    Json(request): Json<RefreshRequest>,
+) -> impl IntoResponse {
+    let installation_id = request
+        .installation_id
+        .clone()
+        .or_else(|| header_str(&headers, "x-codex-installation-id"))
+        .unwrap_or_else(|| "unknown-installation".to_string());
+    let expected_server_id = stable_id("srv", &installation_id);
+    let server_id = request.server_id.clone().unwrap_or(expected_server_id.clone());
+    if server_id != expected_server_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "remote control server refresh returned mismatched enrollment: expected server_id={expected_server_id}; got server_id={server_id}"
+                )
+            })),
+        );
+    }
+    let environment_id = stable_id("env", &installation_id);
+    let expires_at = iso8601_after(Duration::from_secs(24 * 60 * 60));
+    let remote_control_token = local_remote_control_server_token(&headers, &server_id);
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.server_id = Some(server_id.clone());
+        remote.environment_id = Some(environment_id.clone());
+        remote.installation_id = Some(installation_id.clone());
+        remote.account_id = header_str(&headers, "chatgpt-account-id").or(remote.account_id.clone());
+        remote.last_error = None;
+    }
+    state
+        .push_event(
+            "info",
+            "remote_control_refreshed",
+            format!("server={} env={}", server_id, environment_id),
+        )
+        .await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "server_id": server_id,
+            "environment_id": environment_id,
+            "remote_control_token": remote_control_token,
+            "expires_at": expires_at,
+        })),
+    )
+}
+
+async fn ensure_remote_control_client_initialized(
+    state: &SharedState,
+    connection_epoch: u64,
+) -> Result<()> {
+    let should_initialize = {
+        let remote = state.remote_control.inner.lock().await;
+        remote.connection_epoch == connection_epoch && !remote.initialized
+    };
+    if should_initialize {
+        send_initialize(state).await?;
+    } else {
+        replay_pending_requests(state, connection_epoch).await?;
+    }
+    Ok(())
+}
+
+async fn replay_pending_requests(state: &SharedState, connection_epoch: u64) -> Result<()> {
+    let pending = {
+        let remote = state.remote_control.inner.lock().await;
+        if remote.connection_epoch != connection_epoch || !remote.connected || !remote.initialized {
+            return Ok(());
+        }
+        remote
+            .pending
+            .values()
+            .filter(|pending| pending.method != "initialize")
+            .map(|pending| {
+                (
+                    pending.method.clone(),
+                    request_id_key(pending.message.get("id").unwrap_or(&Value::Null)),
+                    pending.envelopes.clone(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    for (method, request_key, envelopes) in pending {
+        chain_log::write_line(format!(
+            "[remote_control] event=pending_replay request_key={} method={} envelope_count={}",
+            request_key,
+            method,
+            envelopes.len()
+        ));
+        send_envelopes(state, envelopes).await?;
+    }
+    Ok(())
+}
+
+async fn reset_remote_control_client(state: &SharedState, connection_epoch: u64) -> Result<()> {
+    let pending = {
+        let mut remote = state.remote_control.inner.lock().await;
+        if remote.connection_epoch != connection_epoch {
+            return Ok(());
+        }
+        remote.initialized = false;
+        std::mem::take(&mut remote.pending)
+    };
+    for (_, pending) in pending {
+        let _ = pending
+            .response_tx
+            .send(Err(anyhow!(REMOTE_CONTROL_CLIENT_REINITIALIZED_ERROR)));
+    }
+    send_initialize(state).await.map(|_| ())
+}
+
+async fn mark_server_envelope_acked(
+    state: &SharedState,
+    client_id: &str,
+    stream_id: &str,
+    seq_id: u64,
+    segment_id: Option<usize>,
+) {
+    let mut remote = state.remote_control.inner.lock().await;
+    let key = server_ack_cursor_key(client_id, stream_id);
+    let next = (seq_id, segment_id);
+    let should_update = remote
+        .server_ack_cursors
+        .get(&key)
+        .is_none_or(|current| ack_cursor_gt(next, *current));
+    if should_update {
+        remote.server_ack_cursors.insert(key, next);
+    }
+}
+
+async fn is_duplicate_server_envelope(
+    state: &SharedState,
+    client_id: &str,
+    stream_id: &str,
+    seq_id: u64,
+    segment_id: Option<usize>,
+) -> bool {
+    let remote = state.remote_control.inner.lock().await;
+    let key = server_ack_cursor_key(client_id, stream_id);
+    remote
+        .server_ack_cursors
+        .get(&key)
+        .is_some_and(|current| !ack_cursor_gt((seq_id, segment_id), *current))
+}
+
+fn server_ack_cursor_key(client_id: &str, stream_id: &str) -> String {
+    format!("{client_id}\n{stream_id}")
+}
+
+fn ack_cursor_gt(left: (u64, Option<usize>), right: (u64, Option<usize>)) -> bool {
+    let left = (left.0, left.1.unwrap_or(usize::MAX));
+    let right = (right.0, right.1.unwrap_or(usize::MAX));
+    left > right
+}
+
+async fn next_client_envelope_parts(state: &SharedState) -> Result<(String, String, u64)> {
+    let mut remote = state.remote_control.inner.lock().await;
+    if !remote.connected {
+        return Err(anyhow!("remote-control websocket is not connected"));
+    }
+    let seq_id = remote.next_seq_id;
+    remote.next_seq_id = remote.next_seq_id.saturating_add(1);
+    Ok((remote.client_id.clone(), remote.stream_id.clone(), seq_id))
+}
+
+fn build_pending_message(method: &str, id: u64, params: Value) -> Value {
+    json!({ "id": id, "method": method, "params": params })
+}
+
 async fn websocket(
     State(state): State<SharedState>,
     headers: HeaderMap,
@@ -1175,12 +1367,8 @@ async fn websocket(
                 {
                     let mut remote = state.remote_control.inner.lock().await;
                     remote.connected = false;
-                    remote.initialized = false;
                     remote.outbound_tx = None;
                     remote.last_error = Some(message.clone());
-                    remote.pending.clear();
-                    remote.client_request_methods.clear();
-                    remote.client_request_thread_ids.clear();
                 }
                 state
                     .push_event("error", "remote_control_ws_failed", message)
@@ -1202,10 +1390,13 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         let mut remote = state.remote_control.inner.lock().await;
         let connected_at_ms = now_ms();
         remote.connected = true;
-        remote.initialized = false;
         remote.connection_epoch = remote.connection_epoch.saturating_add(1);
-        remote.stream_id = uuid_like();
-        remote.next_seq_id = 1;
+        if remote.stream_id.is_empty() {
+            remote.stream_id = uuid_like();
+        }
+        if remote.next_seq_id == 0 {
+            remote.next_seq_id = 1;
+        }
         remote.outbound_tx = Some(outbound_tx);
         remote.server_id = server_id.clone().or(remote.server_id.clone());
         remote.server_name = server_name.clone().or(remote.server_name.clone());
@@ -1218,7 +1409,9 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         remote.last_ws_pong_at_ms = None;
         remote.last_app_ping_at_ms = None;
         remote.last_app_pong_at_ms = None;
-        remote.last_app_pong_status = None;
+        if !remote.initialized {
+            remote.last_app_pong_status = None;
+        }
         remote.last_initialize_sent_at_ms = None;
         (
             remote.connection_epoch,
@@ -1263,7 +1456,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     );
 
     let (mut writer, mut reader) = socket.split();
-    send_initialize(&state).await?;
+    ensure_remote_control_client_initialized(&state, connection_epoch).await?;
 
     let mut writer_task = tokio::spawn(async move {
         while let Some(message) = outbound_rx.recv().await {
@@ -1313,6 +1506,9 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                     send_ws_control_ping(&reader_state).await?;
                 }
                 _ = app_ping_interval.tick() => {
+                    if !should_send_remote_app_ping(&reader_state, connection_epoch).await {
+                        continue;
+                    }
                     mark_remote_app_ping(&reader_state, connection_epoch).await;
                     let envelope = json!(OutgoingClientEnvelope {
                         event: OutgoingClientEvent::Ping,
@@ -1374,12 +1570,8 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         let mut remote = state.remote_control.inner.lock().await;
         if remote.connection_epoch == connection_epoch {
             remote.connected = false;
-            remote.initialized = false;
             remote.outbound_tx = None;
             remote.last_error = connection_result.as_ref().err().map(|err| err.to_string());
-            remote.pending.clear();
-            remote.client_request_methods.clear();
-            remote.client_request_thread_ids.clear();
         }
     }
     state
@@ -1427,16 +1619,8 @@ async fn handle_server_envelope(
         stream_id,
         seq_id,
     } = envelope;
-    ack_server_envelope(
-        state,
-        &client_id,
-        &stream_id,
-        seq_id,
-        server_event_segment_id(&event),
-    )
-    .await?;
+    let segment_id = server_event_segment_id(&event);
     if !is_current_remote_stream(state, connection_epoch, &client_id, &stream_id).await {
-        let should_process_stale_notification = stale_server_notification(&event);
         observe_stale_server_envelope(
             state,
             connection_epoch,
@@ -1444,14 +1628,22 @@ async fn handle_server_envelope(
             &client_id,
             &stream_id,
             &event,
-            should_process_stale_notification,
+            false,
         )
         .await;
-        if should_process_stale_notification
-            && let IncomingServerEvent::ServerMessage { message } = event
-        {
-            observe_app_server_message(state, connection_epoch, &message).await;
-        }
+        return Ok(());
+    }
+    if is_duplicate_server_envelope(state, &client_id, &stream_id, seq_id, segment_id).await {
+        chain_log::write_line(format!(
+            "[remote_control] event=server_envelope_duplicate connection_epoch={} seq_id={} client_id={} stream_id={} kind={} segment_id={}",
+            connection_epoch,
+            seq_id,
+            client_id,
+            stream_id,
+            server_event_kind(&event),
+            segment_id.map(|value| value.to_string()).unwrap_or_default()
+        ));
+        ack_server_envelope(state, &client_id, &stream_id, seq_id, segment_id).await?;
         return Ok(());
     }
     match event {
@@ -1475,6 +1667,8 @@ async fn handle_server_envelope(
                 "remote-control server message"
             );
             observe_app_server_message(state, connection_epoch, &message).await;
+            mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
+            ack_server_envelope(state, &client_id, &stream_id, seq_id, None).await?;
         }
         IncomingServerEvent::ServerMessageChunk {
             segment_id,
@@ -1516,6 +1710,8 @@ async fn handle_server_envelope(
             )? {
                 observe_app_server_message(state, connection_epoch, &message).await;
             }
+            mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, Some(segment_id)).await;
+            ack_server_envelope(state, &client_id, &stream_id, seq_id, Some(segment_id)).await?;
         }
         IncomingServerEvent::Ack => {
             chain_log::write_line(format!(
@@ -1534,6 +1730,8 @@ async fn handle_server_envelope(
             state
                 .push_event("info", "remote_control_ack", format!("seq={seq_id}"))
                 .await;
+            mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
+            ack_server_envelope(state, &client_id, &stream_id, seq_id, None).await?;
         }
         IncomingServerEvent::Pong { status } => {
             observe_remote_app_pong(state, connection_epoch, &status).await?;
@@ -1554,6 +1752,8 @@ async fn handle_server_envelope(
             state
                 .push_event("info", "remote_control_pong", format!("status={status}"))
                 .await;
+            mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
+            ack_server_envelope(state, &client_id, &stream_id, seq_id, None).await?;
         }
     }
     Ok(())
@@ -1597,22 +1797,6 @@ async fn observe_stale_server_envelope(
             if processed { "processed" } else { "ignored" },
             current_stream_id(state).await.unwrap_or_default()
         ));
-    }
-}
-
-fn stale_server_notification(event: &IncomingServerEvent) -> bool {
-    match event {
-        IncomingServerEvent::ServerMessage { message } => {
-            let message = message.get("message").unwrap_or(message);
-            message.get("id").is_none()
-                && message
-                    .get("method")
-                    .and_then(|value| value.as_str())
-                    .is_some()
-        }
-        IncomingServerEvent::ServerMessageChunk { .. }
-        | IncomingServerEvent::Ack
-        | IncomingServerEvent::Pong { .. } => false,
     }
 }
 
@@ -1678,7 +1862,6 @@ async fn observe_remote_app_pong(
         remote.last_app_pong_at_ms = Some(now);
         remote.last_app_pong_status = Some(normalized_status.clone());
         if normalized_status == "unknown" && remote.initialized {
-            remote.initialized = false;
             true
         } else {
             false
@@ -1693,9 +1876,14 @@ async fn observe_remote_app_pong(
                 "app-server reported current remote-control client as unknown; reinitializing",
             )
             .await;
-        send_initialize(state).await?;
+        reset_remote_control_client(state, connection_epoch).await?;
     }
     Ok(())
+}
+
+async fn should_send_remote_app_ping(state: &SharedState, connection_epoch: u64) -> bool {
+    let remote = state.remote_control.inner.lock().await;
+    remote.connection_epoch == connection_epoch && remote.initialized && remote.outbound_tx.is_some()
 }
 
 async fn remote_control_stale_reason(state: &SharedState, connection_epoch: u64) -> Option<String> {
@@ -1764,14 +1952,12 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
         }
 
         let request_key = request_id_key(id);
-        let client_method = {
+        let pending = {
             let mut remote = state.remote_control.inner.lock().await;
-            remote.client_request_methods.remove(&request_key)
+            remote.pending.remove(&request_key)
         };
-        let client_thread_id = {
-            let mut remote = state.remote_control.inner.lock().await;
-            remote.client_request_thread_ids.remove(&request_key)
-        };
+        let client_method = pending.as_ref().map(|pending| pending.method.clone());
+        let client_thread_id = pending.as_ref().and_then(|pending| pending.thread_id.clone());
         if let Some(method) = client_method.as_deref() {
             state
                 .push_event(
@@ -1794,6 +1980,14 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
                         .push_event(
                             "error",
                             "remote_control_initialized_send_failed",
+                            err.to_string(),
+                        )
+                        .await;
+                } else if let Err(err) = replay_pending_requests(state, connection_epoch).await {
+                    state
+                        .push_event(
+                            "error",
+                            "remote_control_pending_replay_failed",
                             err.to_string(),
                         )
                         .await;
@@ -1833,20 +2027,13 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
                 )
                 .await;
         }
-        if let Some(tx) = state
-            .remote_control
-            .inner
-            .lock()
-            .await
-            .pending
-            .remove(&request_key)
-        {
+        if let Some(pending) = pending {
             let result = if let Some(error) = message.get("error") {
                 Err(anyhow!("remote-control request failed: {error}"))
             } else {
                 Ok(message.get("result").cloned().unwrap_or(Value::Null))
             };
-            let _ = tx.send(result);
+            let _ = pending.response_tx.send(result);
         }
         return;
     }
@@ -2013,7 +2200,14 @@ fn observe_server_chunk(
 }
 
 pub async fn send_response(state: &SharedState, request_id: Value, result: Value) -> Result<()> {
-    send_raw_message(state, json!({ "id": request_id, "result": result })).await
+    let (client_id, stream_id, seq_id) = next_client_envelope_parts(state).await?;
+    let envelopes = build_client_message_envelopes(
+        &client_id,
+        &stream_id,
+        seq_id,
+        json!({ "id": request_id, "result": result }),
+    )?;
+    send_envelopes(state, envelopes).await
 }
 
 async fn local_chatgpt_auth_tokens_response(state: &SharedState) -> Result<Value> {
@@ -2144,57 +2338,64 @@ fn local_chatgpt_jwt(account_id: &str, plan_type: &str) -> String {
 async fn send_initialize(state: &SharedState) -> Result<u64> {
     let initialize_id = next_request_id();
     let request_key = initialize_id.to_string();
-    let (client_id, stream_id, seq_id) = {
+    let message = json!({
+        "id": initialize_id,
+        "method": "initialize",
+        "params": {
+            "clientInfo": {
+                "name": "codex-remote",
+                "title": "Codex Remote",
+                "version": env!("CARGO_PKG_VERSION")
+            },
+            "capabilities": {
+                "experimentalApi": true,
+                "requestAttestation": false
+            }
+        }
+    });
+    let envelopes = {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
         let mut remote = state.remote_control.inner.lock().await;
         remote.last_initialize_sent_at_ms = Some(now_ms());
-        remote
-            .client_request_methods
-            .insert(request_key.clone(), "initialize".to_string());
         let seq_id = remote.next_seq_id;
         remote.next_seq_id = remote.next_seq_id.saturating_add(1);
-        (remote.client_id.clone(), remote.stream_id.clone(), seq_id)
+        let envelopes = build_client_message_envelopes(
+            &remote.client_id,
+            &remote.stream_id,
+            seq_id,
+            message.clone(),
+        )?;
+        remote.pending.retain(|_, pending| pending.method != "initialize");
+        remote.pending.insert(
+            request_key.clone(),
+            PendingRemoteRequest {
+                method: "initialize".to_string(),
+                thread_id: None,
+                response_tx: tx,
+                message: message.clone(),
+                envelopes: envelopes.clone(),
+            },
+        );
+        envelopes
     };
-    let initialize = build_client_envelope(
-        &client_id,
-        Some(&stream_id),
-        seq_id,
-        json!({
-            "id": initialize_id,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "codex-remote",
-                    "title": "Codex Remote",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "experimentalApi": true,
-                    "requestAttestation": false
-                }
-            }
-        }),
-    );
-    if let Err(err) = send_envelope(state, initialize).await {
-        state
-            .remote_control
-            .inner
-            .lock()
-            .await
-            .client_request_methods
-            .remove(&request_key);
+    if let Err(err) = send_envelopes(state, envelopes).await {
+        state.remote_control.inner.lock().await.pending.remove(&request_key);
         return Err(err);
     }
     Ok(initialize_id)
 }
 
 async fn send_initialized(state: &SharedState) -> Result<()> {
-    send_raw_message(
-        state,
+    let (client_id, stream_id, seq_id) = next_client_envelope_parts(state).await?;
+    let envelopes = build_client_message_envelopes(
+        &client_id,
+        &stream_id,
+        seq_id,
         json!({
             "method": "initialized",
         }),
-    )
-    .await
+    )?;
+    send_envelopes(state, envelopes).await
 }
 
 fn thread_id_from_payload(value: &Value) -> Option<String> {
@@ -2239,11 +2440,45 @@ async fn request_with_timeout(
     params: Value,
     timeout: Duration,
 ) -> Result<Value> {
+    let mut retry_after_reinitialize = true;
+    loop {
+        match request_once_with_timeout(state, method, params.clone(), timeout).await {
+            Ok(value) => return Ok(value),
+            Err(err)
+                if retry_after_reinitialize
+                    && err
+                        .to_string()
+                        .contains(REMOTE_CONTROL_CLIENT_REINITIALIZED_ERROR) =>
+            {
+                retry_after_reinitialize = false;
+                wait_for_remote_control_initialized(state).await?;
+                state
+                    .push_event(
+                        "warn",
+                        "remote_control_request_retry_after_reinitialize",
+                        format!("method={method}"),
+                    )
+                    .await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+async fn request_once_with_timeout(
+    state: &SharedState,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
     let id = next_request_id();
     let request_key = id.to_string();
     let method_name = method.to_string();
+    let thread_id = params.get("threadId").and_then(|v| v.as_str()).map(str::to_string);
+    let message = build_pending_message(method, id, params);
     let (tx, rx) = tokio::sync::oneshot::channel();
-    {
+    let envelope = {
         let mut remote = state.remote_control.inner.lock().await;
         if !remote.connected {
             return Err(anyhow!(
@@ -2261,26 +2496,29 @@ async fn request_with_timeout(
                 "Codex app-server remote-control 连接已失活：{reason}。请稍等自动重连后重试。"
             ));
         }
-        remote.pending.insert(request_key.clone(), tx);
-        remote
-            .client_request_methods
-            .insert(request_key.clone(), method.to_string());
-        if let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) {
-            remote
-                .client_request_thread_ids
-                .insert(request_key.clone(), thread_id.to_string());
-        }
-    }
-    if let Err(err) = send_raw_message(
-        state,
-        json!({ "id": id, "method": method, "params": params }),
-    )
-    .await
-    {
+        let seq_id = remote.next_seq_id;
+        remote.next_seq_id = remote.next_seq_id.saturating_add(1);
+        let envelopes = build_client_message_envelopes(
+            &remote.client_id,
+            &remote.stream_id,
+            seq_id,
+            message.clone(),
+        )?;
+        remote.pending.insert(
+            request_key.clone(),
+            PendingRemoteRequest {
+                method: method.to_string(),
+                thread_id,
+                response_tx: tx,
+                message: message.clone(),
+                envelopes: envelopes.clone(),
+            },
+        );
+        envelopes
+    };
+    if let Err(err) = send_envelopes(state, envelope).await {
         let mut remote = state.remote_control.inner.lock().await;
         remote.pending.remove(&request_key);
-        remote.client_request_methods.remove(&request_key);
-        remote.client_request_thread_ids.remove(&request_key);
         return Err(err);
     }
     match tokio::time::timeout(timeout, rx).await {
@@ -2290,8 +2528,6 @@ async fn request_with_timeout(
             {
                 let mut remote = state.remote_control.inner.lock().await;
                 remote.pending.remove(&request_key);
-                remote.client_request_methods.remove(&request_key);
-                remote.client_request_thread_ids.remove(&request_key);
             }
             state
                 .push_event(
@@ -2312,6 +2548,30 @@ async fn request_with_timeout(
                 timeout.as_secs()
             ))
         }
+    }
+}
+
+async fn wait_for_remote_control_initialized(state: &SharedState) -> Result<()> {
+    let start = tokio::time::Instant::now();
+    loop {
+        {
+            let remote = state.remote_control.inner.lock().await;
+            if remote.connected && remote.initialized {
+                return Ok(());
+            }
+            if !remote.connected {
+                return Err(anyhow!(
+                    "Codex app-server remote-control disconnected during reinitialize"
+                ));
+            }
+        }
+        if start.elapsed() >= REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT {
+            return Err(anyhow!(
+                "remote-control reinitialize did not complete within {}s",
+                REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT.as_secs()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -2515,42 +2775,6 @@ pub async fn interrupt_turn(state: &SharedState, thread_id: &str, turn_id: &str)
     .map(|_| ())
 }
 
-async fn send_raw_message(state: &SharedState, message: Value) -> Result<()> {
-    let (client_id, stream_id, seq_id, outbound_tx) = {
-        let mut remote = state.remote_control.inner.lock().await;
-        let outbound_tx = remote
-            .outbound_tx
-            .clone()
-            .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?;
-        let seq_id = remote.next_seq_id;
-        remote.next_seq_id = remote.next_seq_id.saturating_add(1);
-        (
-            remote.client_id.clone(),
-            remote.stream_id.clone(),
-            seq_id,
-            outbound_tx,
-        )
-    };
-    chain_log::write_line(format!(
-        "[remote_control] event=client_message seq_id={} client_id={} stream_id={} summary={}",
-        seq_id,
-        client_id,
-        stream_id,
-        message_summary(&message)
-    ));
-    info!(
-        target: "codex_remote::remote_control",
-        event = "remote_control_client_message",
-        seq_id,
-        client_id,
-        stream_id,
-        summary = %message_summary(&message),
-        "remote-control client message"
-    );
-    send_client_message(&outbound_tx, &client_id, &stream_id, seq_id, message)?;
-    Ok(())
-}
-
 async fn ack_server_envelope(
     state: &SharedState,
     client_id: &str,
@@ -2617,6 +2841,35 @@ async fn send_envelope(state: &SharedState, envelope: Value) -> Result<()> {
     Ok(())
 }
 
+async fn send_envelopes(state: &SharedState, envelopes: Vec<Value>) -> Result<()> {
+    let outbound_tx = {
+        let remote = state.remote_control.inner.lock().await;
+        remote
+            .outbound_tx
+            .clone()
+            .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
+    };
+    let envelope_count = envelopes.len();
+    for envelope in envelopes {
+        chain_log::write_line(format!(
+            "[remote_control] event=client_envelope envelope_count={} summary={}",
+            envelope_count,
+            message_summary(&envelope)
+        ));
+        info!(
+            target: "codex_remote::remote_control",
+            event = "remote_control_client_envelope",
+            envelope_count,
+            summary = %message_summary(&envelope),
+            "remote-control client envelope"
+        );
+        outbound_tx
+            .send(OutboundWsMessage::Text(envelope))
+            .map_err(|_| anyhow!("remote-control outbound channel closed"))?;
+    }
+    Ok(())
+}
+
 async fn send_ws_control_ping(state: &SharedState) -> Result<()> {
     chain_log::write_line("[remote_control] event=client_ping payload_len=0".to_string());
     info!(
@@ -2662,74 +2915,170 @@ async fn send_ws_control_pong(state: &SharedState, data: axum::body::Bytes) -> R
     Ok(())
 }
 
-fn send_client_message(
-    outbound_tx: &tokio::sync::mpsc::UnboundedSender<OutboundWsMessage>,
+fn build_client_message_envelopes(
     client_id: &str,
     stream_id: &str,
     seq_id: u64,
     message: Value,
-) -> Result<()> {
-    const SEGMENT_TARGET_BYTES: usize = 100 * 1024;
-    const SEGMENT_COUNT_MAX: usize = 1024;
+) -> Result<Vec<Value>> {
+    let envelope = build_client_envelope(client_id, Some(stream_id), seq_id, message.clone());
+    if serialized_json_len(&envelope)? <= REMOTE_CONTROL_SEGMENT_MAX_BYTES {
+        return Ok(vec![envelope]);
+    }
 
     let raw = serde_json::to_vec(&message).context("failed to serialize remote-control message")?;
-    if raw.len() <= SEGMENT_TARGET_BYTES {
-        outbound_tx
-            .send(OutboundWsMessage::Text(build_client_envelope(
-                client_id,
-                Some(stream_id),
-                seq_id,
-                message,
-            )))
-            .map_err(|_| anyhow!("remote-control outbound channel closed"))?;
-        return Ok(());
-    }
-
-    let segment_count = raw.len().div_ceil(SEGMENT_TARGET_BYTES);
-    chain_log::write_line(format!(
-        "[remote_control] event=client_segmented client_id={} stream_id={} seq_id={} bytes={} segment_count={} summary={}",
-        client_id,
-        stream_id,
-        seq_id,
-        raw.len(),
-        segment_count,
-        message_summary(&message)
-    ));
-    warn!(
-        target: "codex_remote::remote_control",
-        event = "remote_control_client_segmented",
-        client_id,
-        stream_id,
-        seq_id,
-        bytes = raw.len(),
-        segment_count,
-        summary = %message_summary(&message),
-        "remote-control client message segmented"
-    );
-    if segment_count > SEGMENT_COUNT_MAX {
+    let message_size_bytes = raw.len();
+    if message_size_bytes > REMOTE_CONTROL_REASSEMBLED_MAX_BYTES {
         anyhow::bail!(
-            "remote-control message is too large to segment: {} bytes",
-            raw.len()
+            "remote-control message exceeds reassembled size limit: {} bytes",
+            message_size_bytes
         );
     }
-    for (segment_id, chunk) in raw.chunks(SEGMENT_TARGET_BYTES).enumerate() {
-        let envelope = json!(OutgoingClientEnvelope {
-            event: OutgoingClientEvent::ClientMessageChunk {
+
+    let minimal_segment_count =
+        usize::min(message_size_bytes.max(1), REMOTE_CONTROL_SEGMENT_COUNT_MAX);
+    let minimal_chunk = &raw[..usize::min(raw.len(), 1)];
+    if serialized_client_chunk_len(
+        client_id,
+        stream_id,
+        seq_id,
+        0,
+        minimal_segment_count,
+        message_size_bytes,
+        minimal_chunk,
+    )? > REMOTE_CONTROL_SEGMENT_MAX_BYTES
+    {
+        anyhow::bail!("remote-control message cannot fit within segment size limit");
+    }
+
+    let mut segment_count = usize::max(
+        2,
+        message_size_bytes.div_ceil(REMOTE_CONTROL_SEGMENT_TARGET_BYTES),
+    );
+    loop {
+        if segment_count > REMOTE_CONTROL_SEGMENT_COUNT_MAX {
+            anyhow::bail!(
+                "remote-control segment count exceeds maximum: {}",
+                segment_count
+            );
+        }
+        let chunk_size = usize::max(1, message_size_bytes.div_ceil(segment_count));
+        segment_count = message_size_bytes.div_ceil(chunk_size);
+        let segments_fit = raw.chunks(chunk_size).enumerate().all(|(segment_id, chunk)| {
+            serialized_client_chunk_len(
+                client_id,
+                stream_id,
+                seq_id,
                 segment_id,
                 segment_count,
-                message_size_bytes: raw.len(),
-                message_chunk_base64: base64::engine::general_purpose::STANDARD.encode(chunk),
-            },
-            client_id: client_id.to_string(),
-            stream_id: Some(stream_id.to_string()),
-            seq_id: Some(seq_id),
-            cursor: None,
+                message_size_bytes,
+                chunk,
+            )
+            .is_ok_and(|size| size <= REMOTE_CONTROL_SEGMENT_MAX_BYTES)
         });
-        outbound_tx
-            .send(OutboundWsMessage::Text(envelope))
-            .map_err(|_| anyhow!("remote-control outbound channel closed"))?;
+        if segments_fit {
+            chain_log::write_line(format!(
+                "[remote_control] event=client_segmented client_id={} stream_id={} seq_id={} bytes={} segment_count={} summary={}",
+                client_id,
+                stream_id,
+                seq_id,
+                message_size_bytes,
+                segment_count,
+                message_summary(&message)
+            ));
+            warn!(
+                target: "codex_remote::remote_control",
+                event = "remote_control_client_segmented",
+                client_id,
+                stream_id,
+                seq_id,
+                bytes = message_size_bytes,
+                segment_count,
+                summary = %message_summary(&message),
+                "remote-control client message segmented"
+            );
+            return raw
+                .chunks(chunk_size)
+                .enumerate()
+                .map(|(segment_id, chunk)| {
+                    build_client_chunk_envelope(
+                        client_id,
+                        stream_id,
+                        seq_id,
+                        segment_id,
+                        segment_count,
+                        message_size_bytes,
+                        chunk,
+                    )
+                })
+                .collect();
+        }
+        if chunk_size == 1 {
+            anyhow::bail!("remote-control message cannot fit within segment size limit");
+        }
+        let next_segment_count = segment_count + 1;
+        let next_chunk_size = usize::max(1, message_size_bytes.div_ceil(next_segment_count));
+        segment_count = if next_chunk_size == chunk_size {
+            message_size_bytes
+        } else {
+            next_segment_count
+        };
     }
-    Ok(())
+}
+
+fn serialized_client_chunk_len(
+    client_id: &str,
+    stream_id: &str,
+    seq_id: u64,
+    segment_id: usize,
+    segment_count: usize,
+    message_size_bytes: usize,
+    chunk: &[u8],
+) -> Result<usize> {
+    serialized_json_len(&build_client_chunk_envelope(
+        client_id,
+        stream_id,
+        seq_id,
+        segment_id,
+        segment_count,
+        message_size_bytes,
+        chunk,
+    )?)
+}
+
+fn build_client_chunk_envelope(
+    client_id: &str,
+    stream_id: &str,
+    seq_id: u64,
+    segment_id: usize,
+    segment_count: usize,
+    message_size_bytes: usize,
+    chunk: &[u8],
+) -> Result<Value> {
+    if segment_count > REMOTE_CONTROL_SEGMENT_COUNT_MAX {
+        anyhow::bail!(
+            "remote-control segment count exceeds maximum: {}",
+            segment_count
+        );
+    }
+    Ok(json!(OutgoingClientEnvelope {
+        event: OutgoingClientEvent::ClientMessageChunk {
+            segment_id,
+            segment_count,
+            message_size_bytes,
+            message_chunk_base64: base64::engine::general_purpose::STANDARD.encode(chunk),
+        },
+        client_id: client_id.to_string(),
+        stream_id: Some(stream_id.to_string()),
+        seq_id: Some(seq_id),
+        cursor: None,
+    }))
+}
+
+fn serialized_json_len(value: &Value) -> Result<usize> {
+    serde_json::to_vec(value)
+        .map(|bytes| bytes.len())
+        .context("failed to serialize remote-control envelope")
 }
 
 fn json_preview(text: &str) -> String {

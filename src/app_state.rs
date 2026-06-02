@@ -65,17 +65,23 @@ pub struct RemoteControlInner {
     pub last_app_pong_at_ms: Option<u128>,
     pub last_app_pong_status: Option<String>,
     pub last_initialize_sent_at_ms: Option<u128>,
+    pub server_ack_cursors: std::collections::HashMap<String, (u64, Option<usize>)>,
     pub outbound_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::remote_control_backend::OutboundWsMessage>,
     >,
     pub connection_epoch: u64,
     pub next_seq_id: u64,
-    pub pending:
-        std::collections::HashMap<String, tokio::sync::oneshot::Sender<anyhow::Result<Value>>>,
-    pub client_request_methods: std::collections::HashMap<String, String>,
-    pub client_request_thread_ids: std::collections::HashMap<String, String>,
+    pub pending: std::collections::HashMap<String, PendingRemoteRequest>,
     pub authorized_clients: HashMap<String, AuthorizedRemoteControlClient>,
     pub revoked_clients: HashSet<String>,
+}
+
+pub struct PendingRemoteRequest {
+    pub method: String,
+    pub thread_id: Option<String>,
+    pub response_tx: oneshot::Sender<anyhow::Result<Value>>,
+    pub message: Value,
+    pub envelopes: Vec<Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -112,12 +118,11 @@ impl RemoteControlState {
                 last_app_pong_at_ms: None,
                 last_app_pong_status: None,
                 last_initialize_sent_at_ms: None,
+                server_ack_cursors: std::collections::HashMap::new(),
                 outbound_tx: None,
                 connection_epoch: 0,
                 next_seq_id: 1,
                 pending: std::collections::HashMap::new(),
-                client_request_methods: std::collections::HashMap::new(),
-                client_request_thread_ids: std::collections::HashMap::new(),
                 authorized_clients: HashMap::new(),
                 revoked_clients: HashSet::new(),
             }),

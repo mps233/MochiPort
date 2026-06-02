@@ -1,14 +1,20 @@
 use std::{
+    fs,
+    path::Path,
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use aes::Aes128;
 use anyhow::{Context, Result, anyhow};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, header::CONTENT_TYPE};
 use base64::{Engine as _, engine::general_purpose};
+use cipher::{BlockEncryptMut, KeyInit, block_padding::Pkcs7};
+use ecb::Encryptor as Aes128EcbEnc;
 use reqwest::{Client, Url};
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::chain_log;
 
@@ -25,6 +31,8 @@ const ILINK_APP_ID: &str = "bot";
 const MESSAGE_TYPE_BOT: i64 = 2;
 const MESSAGE_STATE_FINISH: i64 = 2;
 const MESSAGE_ITEM_TYPE_TEXT: i64 = 1;
+const MESSAGE_ITEM_TYPE_IMAGE: i64 = 2;
+const WECHAT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 static WECHAT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -172,6 +180,24 @@ impl WechatApi {
         Ok(client_id)
     }
 
+    pub async fn send_image_file(
+        &self,
+        to_user_id: &str,
+        context_token: Option<&str>,
+        path: &Path,
+    ) -> Result<String> {
+        if !self.is_configured() {
+            return Err(anyhow!("wechat bot_token is empty"));
+        }
+        let context_token = context_token
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("wechat image message context_token is missing"))?;
+        let uploaded = self.upload_image(to_user_id, path).await?;
+        self.send_uploaded_image(to_user_id, context_token, &uploaded)
+            .await
+    }
+
     pub async fn notify_start(&self) -> Result<()> {
         if !self.is_configured() {
             return Ok(());
@@ -185,6 +211,110 @@ impl WechatApi {
             )
             .await?;
         Ok(())
+    }
+
+    async fn upload_image(&self, to_user_id: &str, path: &Path) -> Result<UploadedImage> {
+        let plaintext = fs::read(path)
+            .with_context(|| format!("wechat image file read failed: {}", path.display()))?;
+        let raw_size = plaintext.len();
+        let raw_md5 = format!("{:x}", md5::compute(&plaintext));
+        let file_size_ciphertext = aes_ecb_padded_size(raw_size);
+        let filekey = Uuid::new_v4().simple().to_string();
+        let aes_key = *Uuid::new_v4().as_bytes();
+        let aes_key_hex = hex::encode(aes_key);
+        let upload_param = self
+            .get_upload_url(
+                to_user_id,
+                &filekey,
+                raw_size,
+                &raw_md5,
+                file_size_ciphertext,
+                &aes_key_hex,
+            )
+            .await?;
+        let ciphertext = encrypt_aes_128_ecb_pkcs7(&plaintext, &aes_key)?;
+        let encrypt_query_param =
+            upload_encrypted_media_to_cdn(&upload_param, &filekey, ciphertext)
+                .await
+                .context("wechat image cdn upload failed")?;
+        Ok(UploadedImage {
+            encrypt_query_param,
+            aes_key_hex,
+            file_size_ciphertext,
+        })
+    }
+
+    async fn get_upload_url(
+        &self,
+        to_user_id: &str,
+        filekey: &str,
+        raw_size: usize,
+        raw_md5: &str,
+        file_size_ciphertext: usize,
+        aes_key_hex: &str,
+    ) -> Result<String> {
+        let response: UploadUrlResponse = self
+            .post_json(
+                "ilink/bot/getuploadurl",
+                json!({
+                    "filekey": filekey,
+                    "media_type": 1,
+                    "to_user_id": to_user_id,
+                    "rawsize": raw_size,
+                    "rawfilemd5": raw_md5,
+                    "filesize": file_size_ciphertext,
+                    "no_need_thumb": true,
+                    "aeskey": aes_key_hex,
+                    "base_info": base_info(),
+                }),
+                Duration::from_millis(20_000),
+                "wechat_get_upload_url",
+            )
+            .await?;
+        response
+            .upload_param
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow!("wechat getuploadurl missing upload_param"))
+    }
+
+    async fn send_uploaded_image(
+        &self,
+        to_user_id: &str,
+        context_token: &str,
+        uploaded: &UploadedImage,
+    ) -> Result<String> {
+        let client_id = next_client_id("codex-remote-wechat-image");
+        let msg = ImageMessage {
+            from_user_id: "",
+            to_user_id,
+            client_id: client_id.clone(),
+            message_type: MESSAGE_TYPE_BOT,
+            message_state: MESSAGE_STATE_FINISH,
+            context_token,
+            item_list: vec![ImageMessageItem {
+                item_type: MESSAGE_ITEM_TYPE_IMAGE,
+                image_item: ImagePayload {
+                    media: ImageMediaPayload {
+                        encrypt_query_param: &uploaded.encrypt_query_param,
+                        aes_key: general_purpose::STANDARD.encode(uploaded.aes_key_hex.as_bytes()),
+                        encrypt_type: 1,
+                    },
+                    mid_size: uploaded.file_size_ciphertext,
+                },
+            }],
+        };
+        let _: Value = self
+            .post_json(
+                "ilink/bot/sendmessage",
+                json!({
+                    "msg": msg,
+                    "base_info": base_info(),
+                }),
+                Duration::from_millis(20_000),
+                "wechat_send_image",
+            )
+            .await?;
+        Ok(client_id)
     }
 
     async fn post_json<T>(
@@ -267,6 +397,113 @@ impl WechatApi {
             .with_context(|| format!("wechat api {label} request failed"))?;
         decode_response(response, label).await
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct UploadUrlResponse {
+    upload_param: Option<String>,
+}
+
+#[derive(Debug)]
+struct UploadedImage {
+    encrypt_query_param: String,
+    aes_key_hex: String,
+    file_size_ciphertext: usize,
+}
+
+#[derive(Serialize)]
+struct ImageMessage<'a> {
+    from_user_id: &'a str,
+    to_user_id: &'a str,
+    client_id: String,
+    message_type: i64,
+    message_state: i64,
+    context_token: &'a str,
+    item_list: Vec<ImageMessageItem<'a>>,
+}
+
+#[derive(Serialize)]
+struct ImageMessageItem<'a> {
+    #[serde(rename = "type")]
+    item_type: i64,
+    image_item: ImagePayload<'a>,
+}
+
+#[derive(Serialize)]
+struct ImagePayload<'a> {
+    media: ImageMediaPayload<'a>,
+    mid_size: usize,
+}
+
+#[derive(Serialize)]
+struct ImageMediaPayload<'a> {
+    encrypt_query_param: &'a str,
+    aes_key: String,
+    encrypt_type: i64,
+}
+
+fn build_cdn_upload_url(upload_param: &str, filekey: &str) -> String {
+    format!(
+        "{}/upload?encrypted_query_param={}&filekey={}",
+        WECHAT_CDN_BASE_URL,
+        url::form_urlencoded::byte_serialize(upload_param.as_bytes()).collect::<String>(),
+        url::form_urlencoded::byte_serialize(filekey.as_bytes()).collect::<String>()
+    )
+}
+
+fn aes_ecb_padded_size(plaintext_size: usize) -> usize {
+    ((plaintext_size + 1).div_ceil(16)) * 16
+}
+
+fn encrypt_aes_128_ecb_pkcs7(plaintext: &[u8], key: &[u8; 16]) -> Result<Vec<u8>> {
+    let mut buf = plaintext.to_vec();
+    let msg_len = buf.len();
+    let padded_len = aes_ecb_padded_size(msg_len);
+    buf.resize(padded_len, 0);
+    let encrypted = Aes128EcbEnc::<Aes128>::new(key.into())
+        .encrypt_padded_mut::<Pkcs7>(&mut buf, msg_len)
+        .map_err(|err| anyhow!("wechat image encrypt failed: {err}"))?;
+    Ok(encrypted.to_vec())
+}
+
+async fn upload_encrypted_media_to_cdn(
+    upload_param: &str,
+    filekey: &str,
+    ciphertext: Vec<u8>,
+) -> Result<String> {
+    let url = build_cdn_upload_url(upload_param, filekey);
+    let response = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()?
+        .post(url)
+        .header(CONTENT_TYPE, "application/octet-stream")
+        .body(ciphertext)
+        .send()
+        .await?;
+    let status = response.status();
+    if !status.is_success() {
+        let err_header = response
+            .headers()
+            .get("x-error-message")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "wechat cdn upload failed: status={} err_header={} body={}",
+            status,
+            err_header,
+            truncate_log(&body, 300)
+        ));
+    }
+    response
+        .headers()
+        .get("x-encrypted-param")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("wechat cdn upload missing x-encrypted-param"))
 }
 
 async fn decode_response<T>(response: reqwest::Response, label: &str) -> Result<T>

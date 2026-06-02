@@ -55,9 +55,17 @@ pub(crate) async fn clear_thread_binding(
     state: &SharedState,
     conversation_key: &str,
 ) -> Result<()> {
+    clear_thread_binding_with_reason(state, conversation_key, "clear_thread_binding").await
+}
+
+pub(crate) async fn clear_thread_binding_with_reason(
+    state: &SharedState,
+    conversation_key: &str,
+    reason: &str,
+) -> Result<()> {
     {
         let mut runtime = state.runtime.lock().await;
-        runtime.unbind_routes_for_conversation(conversation_key);
+        runtime.unbind_routes_for_conversation_with_reason(conversation_key, reason);
     }
     let mut persisted = state.persisted.lock().await;
     persisted.sessions.remove(conversation_key);

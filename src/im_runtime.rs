@@ -6,7 +6,7 @@ use std::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{im::feishu::FeishuStreamingCardState, types::ImPlatformKind};
+use crate::{chain_log, im::feishu::FeishuStreamingCardState, types::ImPlatformKind};
 
 #[derive(Debug, Clone)]
 pub struct RouteTarget {
@@ -119,28 +119,46 @@ impl RuntimeState {
 
     pub fn bind_route(&mut self, thread_id: &str, route: RouteTarget) {
         self.last_route = Some(route.clone());
-        self.route_by_thread.insert(thread_id.to_string(), route);
+        let previous = self
+            .route_by_thread
+            .insert(thread_id.to_string(), route.clone());
+        log_route_bind(thread_id, &route, previous.as_ref());
     }
 
     pub fn unbind_route(&mut self, thread_id: &str) {
-        self.route_by_thread.remove(thread_id);
+        if let Some(route) = self.route_by_thread.remove(thread_id) {
+            log_route_unbind("unbind_thread", "direct", thread_id, &route);
+        }
     }
 
     pub fn unbind_routes_for_conversation(&mut self, conversation_key: &str) -> Vec<String> {
-        let thread_ids = self
+        self.unbind_routes_for_conversation_with_reason(conversation_key, "unspecified")
+    }
+
+    pub fn unbind_routes_for_conversation_with_reason(
+        &mut self,
+        conversation_key: &str,
+        reason: &str,
+    ) -> Vec<String> {
+        let entries = self
             .route_by_thread
             .iter()
             .filter_map(|(thread_id, route)| {
-                (route.conversation_key == conversation_key).then(|| thread_id.clone())
+                (route.conversation_key == conversation_key)
+                    .then(|| (thread_id.clone(), route.clone()))
             })
             .collect::<Vec<_>>();
-        for thread_id in &thread_ids {
+        for (thread_id, route) in &entries {
             self.route_by_thread.remove(thread_id);
             if let Some(turn_id) = self.current_turn_by_thread.remove(thread_id) {
                 self.turn_origin_by_id.remove(&turn_id);
             }
+            log_route_unbind("unbind_conversation", reason, thread_id, route);
         }
-        thread_ids
+        entries
+            .into_iter()
+            .map(|(thread_id, _)| thread_id)
+            .collect()
     }
 
     pub fn mark_turn_started(&mut self, thread_id: &str, turn_id: &str) {
@@ -339,6 +357,44 @@ impl RuntimeState {
     ) -> Option<ThreadRoutingRequestState> {
         self.thread_routing_requests.remove(request_id)
     }
+}
+
+fn log_route_bind(thread_id: &str, route: &RouteTarget, previous: Option<&RouteTarget>) {
+    match previous {
+        Some(previous) => chain_log::write_line(format!(
+            "[im_route] level=warn event=bind_overwrite thread={} platform={} account={} chat={} conversation={} previous_platform={} previous_account={} previous_chat={} previous_conversation={}",
+            thread_id,
+            route.platform.key(),
+            route.account_id,
+            route.chat_id,
+            route.conversation_key,
+            previous.platform.key(),
+            previous.account_id,
+            previous.chat_id,
+            previous.conversation_key
+        )),
+        None => chain_log::write_diagnostic_line(format!(
+            "[im_route] event=bind thread={} platform={} account={} chat={} conversation={}",
+            thread_id,
+            route.platform.key(),
+            route.account_id,
+            route.chat_id,
+            route.conversation_key
+        )),
+    }
+}
+
+fn log_route_unbind(event: &str, reason: &str, thread_id: &str, route: &RouteTarget) {
+    chain_log::write_line(format!(
+        "[im_route] level=warn event={} reason={} thread={} platform={} account={} chat={} conversation={}",
+        event,
+        reason,
+        thread_id,
+        route.platform.key(),
+        route.account_id,
+        route.chat_id,
+        route.conversation_key
+    ));
 }
 
 impl PendingApproval {

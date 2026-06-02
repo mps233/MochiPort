@@ -311,7 +311,7 @@ pub(crate) async fn handle_codex_notification(
             else {
                 return;
             };
-            if route_for_codex_output(&state, thread_id, params)
+            if route_for_codex_output(&state, &notification.method, thread_id, params)
                 .await
                 .is_some()
             {
@@ -340,7 +340,9 @@ pub(crate) async fn handle_codex_notification(
             let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = feishu_route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
+                    .await;
             let Some(route) = route else {
                 return;
             };
@@ -376,7 +378,9 @@ pub(crate) async fn handle_codex_notification(
             let Some(delta) = params.get("delta").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = feishu_route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
+                    .await;
             let Some(route) = route else {
                 state
                     .push_event(
@@ -414,7 +418,9 @@ pub(crate) async fn handle_codex_notification(
             let Some(delta) = params.get("delta").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = feishu_route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
+                    .await;
             let Some(route) = route else {
                 return;
             };
@@ -445,7 +451,9 @@ pub(crate) async fn handle_codex_notification(
             let Some(delta) = params.get("delta").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = feishu_route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
+                    .await;
             let Some(route) = route else {
                 return;
             };
@@ -484,7 +492,9 @@ pub(crate) async fn handle_codex_notification(
             } else {
                 "fileChange"
             };
-            let route = feishu_route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
+                    .await;
             let Some(route) = route else {
                 return;
             };
@@ -515,7 +525,9 @@ pub(crate) async fn handle_codex_notification(
             let Some(message) = params.get("message").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = feishu_route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
+                    .await;
             let Some(route) = route else {
                 return;
             };
@@ -552,7 +564,9 @@ pub(crate) async fn handle_codex_notification(
             let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = feishu_route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
+                    .await;
             let Some(route) = route else {
                 return;
             };
@@ -591,7 +605,8 @@ pub(crate) async fn handle_codex_notification(
             let Some(item_id) = item.get("id").and_then(|v| v.as_str()) else {
                 return;
             };
-            let route = route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -772,7 +787,8 @@ pub(crate) async fn handle_codex_notification(
             let Some(text) = extract_turn_reply_text(params) else {
                 return;
             };
-            let route = route_for_codex_output(&state, thread_id, params).await;
+            let route =
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
@@ -792,12 +808,26 @@ pub(crate) async fn handle_codex_notification(
 
 async fn route_for_codex_output(
     state: &SharedState,
+    method: &str,
     thread_id: &str,
     _params: &serde_json::Value,
 ) -> Option<RouteTarget> {
     if let Some(route) = state.runtime.lock().await.route_for_thread(thread_id) {
+        chain_log::write_diagnostic_line(format!(
+            "[im_route] event=codex_route_hit method={} thread={} platform={} account={} chat={} conversation={}",
+            method,
+            thread_id,
+            route.platform.key(),
+            route.account_id,
+            route.chat_id,
+            route.conversation_key
+        ));
         return Some(route);
     }
+    chain_log::write_line(format!(
+        "[im_route] level=warn event=codex_route_missing method={} thread={}",
+        method, thread_id
+    ));
     None
 }
 
@@ -819,11 +849,24 @@ async fn log_missing_api(state: &SharedState, route: &RouteTarget, context: &str
 
 async fn feishu_route_for_codex_output(
     state: &SharedState,
+    method: &str,
     thread_id: &str,
     params: &serde_json::Value,
 ) -> Option<RouteTarget> {
-    let route = route_for_codex_output(state, thread_id, params).await?;
-    (route.platform == ImPlatformKind::Feishu).then_some(route)
+    let route = route_for_codex_output(state, method, thread_id, params).await?;
+    if route.platform != ImPlatformKind::Feishu {
+        chain_log::write_diagnostic_line(format!(
+            "[im_route] event=codex_route_platform_skip method={} thread={} wanted=feishu actual={} account={} chat={} conversation={}",
+            method,
+            thread_id,
+            route.platform.key(),
+            route.account_id,
+            route.chat_id,
+            route.conversation_key
+        ));
+        return None;
+    }
+    Some(route)
 }
 
 fn turn_origin_for_platform(platform: ImPlatformKind) -> Option<TurnOrigin> {

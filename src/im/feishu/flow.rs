@@ -155,7 +155,10 @@ async fn handle_control_message(
             }
             {
                 let mut runtime = state.runtime.lock().await;
-                runtime.unbind_routes_for_conversation(&message.conversation_key());
+                runtime.unbind_routes_for_conversation_with_reason(
+                    &message.conversation_key(),
+                    "feishu_new_command",
+                );
             }
             let mut persisted = state.persisted.lock().await;
             persisted.sessions.remove(&message.conversation_key());
@@ -212,7 +215,10 @@ async fn handle_control_message(
             }
             {
                 let mut runtime = state.runtime.lock().await;
-                runtime.unbind_routes_for_conversation(&message.conversation_key());
+                runtime.unbind_routes_for_conversation_with_reason(
+                    &message.conversation_key(),
+                    "feishu_quit_command",
+                );
             }
             let mut persisted = state.persisted.lock().await;
             persisted.sessions.remove(&message.conversation_key());

@@ -43,7 +43,10 @@ pub(crate) async fn bind_thread_to_route(
 ) -> Result<()> {
     {
         let mut runtime = state.runtime.lock().await;
-        runtime.unbind_routes_for_conversation(&route.conversation_key);
+        runtime.unbind_routes_for_conversation_with_reason(
+            &route.conversation_key,
+            "bind_thread_to_route",
+        );
         runtime.bind_route(thread_id, route.clone());
         if let Some(request_id) = request_id {
             runtime.clear_thread_routing_request(request_id);

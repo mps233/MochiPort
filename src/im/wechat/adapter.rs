@@ -101,20 +101,44 @@ impl WechatAdapter {
         caption: Option<&str>,
         fallback_text: Option<&str>,
     ) -> Result<String> {
-        let mut text = String::new();
-        if let Some(caption) = caption.map(str::trim).filter(|value| !value.is_empty()) {
-            text.push_str(caption);
-            text.push_str("\n\n");
-        }
-        if let Some(fallback_text) = fallback_text
+        let context_token = store::context_token(state, account_id, target).await;
+        if let Some(text) = caption
             .map(str::trim)
             .filter(|value| !value.is_empty())
+            .or_else(|| {
+                fallback_text
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+            })
         {
-            text.push_str(fallback_text);
-            text.push_str("\n\n");
+            self.send_text(state, account_id, target, text).await?;
         }
-        text.push_str(&format!("图片文件已生成在本机：{}", local_path.display()));
-        self.send_text(state, account_id, target, &text).await
+        log_adapter(
+            "send_image_begin",
+            format!(
+                "account={} target={} path={} context_token={}",
+                account_id,
+                target,
+                local_path.display(),
+                if context_token.is_some() {
+                    "present"
+                } else {
+                    "missing"
+                }
+            ),
+        );
+        let message_id = self
+            .api
+            .send_image_file(target, context_token.as_deref(), local_path)
+            .await?;
+        log_adapter(
+            "send_image_sent",
+            format!(
+                "account={} target={} message={}",
+                account_id, target, message_id
+            ),
+        );
+        Ok(message_id)
     }
 }
 
