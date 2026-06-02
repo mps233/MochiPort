@@ -316,6 +316,45 @@ fn build_ui() {
     feishu_page.set_background_color(Colour::rgb(250, 251, 253));
     let feishu_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
+    let im_accounts_static_box = StaticBox::builder(&feishu_page)
+        .with_label("已接入机器人")
+        .build();
+    let im_accounts_box =
+        StaticBoxSizerBuilder::new_with_box(&im_accounts_static_box, Orientation::Vertical).build();
+    let im_account_list = ListCtrl::builder(&im_accounts_static_box)
+        .with_style(ListCtrlStyle::Report | ListCtrlStyle::SingleSel | ListCtrlStyle::HRules)
+        .with_size(Size::new(-1, 132))
+        .build();
+    im_account_list.insert_column(0, "平台", ListColumnFormat::Left, 90);
+    im_account_list.insert_column(1, "机器人", ListColumnFormat::Left, 220);
+    im_account_list.insert_column(2, "状态", ListColumnFormat::Left, 120);
+    im_account_list.insert_column(3, "账号", ListColumnFormat::Left, 220);
+    im_accounts_box.add(
+        &im_account_list,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        10,
+    );
+    let im_account_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    im_account_actions.add_stretch_spacer(1);
+    let toggle_im_account_button = Button::builder(&im_accounts_static_box)
+        .with_label("暂停选中")
+        .build();
+    toggle_im_account_button.set_tooltip("暂停或恢复当前选中的机器人接入");
+    let delete_im_account_button = Button::builder(&im_accounts_static_box)
+        .with_label("删除选中")
+        .build();
+    delete_im_account_button.set_tooltip("删除当前选中的机器人接入配置");
+    im_account_actions.add(&toggle_im_account_button, 0, SizerFlag::Right, 8);
+    im_account_actions.add(&delete_im_account_button, 0, SizerFlag::Right, 0);
+    im_accounts_box.add_sizer(
+        &im_account_actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        10,
+    );
+    feishu_sizer.add_sizer(&im_accounts_box, 0, SizerFlag::Expand | SizerFlag::All, 12);
+
     let feishu_static_box = StaticBox::builder(&feishu_page)
         .with_label("飞书机器人")
         .build();
@@ -557,6 +596,9 @@ fn build_ui() {
         telegram_state,
         telegram_detail,
         telegram_token,
+        im_account_list,
+        toggle_im_account_button,
+        delete_im_account_button,
         telegram_toggle_button,
         save_telegram_button,
         wechat_state,
@@ -860,6 +902,87 @@ fn build_ui() {
         let handles = handles;
         let im_action_result = im_action_result.clone();
         let im_action_in_flight = im_action_in_flight.clone();
+        toggle_im_account_button.on_click(move |_| {
+            if im_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let Some(account) = selected_im_account(&handles, &dashboard_refresh) else {
+                im_action_in_flight.store(false, Ordering::SeqCst);
+                show_error(&frame, "请先选择一个机器人。");
+                return;
+            };
+            handles.toggle_im_account_button.set_label("处理中...");
+            handles.toggle_im_account_button.enable(false);
+            let request = SetImAccountEnabledRequest {
+                platform: account.platform,
+                account_id: account.account_id,
+                enabled: !account.enabled,
+            };
+            let thread_api = api.clone();
+            let im_action_result = im_action_result.clone();
+            let im_action_in_flight = im_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = thread_api.set_im_account_enabled(&request);
+                if let Ok(mut slot) = im_action_result.lock() {
+                    slot.replace(ImActionResult::AccountToggle(outcome));
+                }
+                im_action_in_flight.store(false, Ordering::SeqCst);
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
+        let handles = handles;
+        let im_action_result = im_action_result.clone();
+        let im_action_in_flight = im_action_in_flight.clone();
+        delete_im_account_button.on_click(move |_| {
+            if im_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let Some(account) = selected_im_account(&handles, &dashboard_refresh) else {
+                im_action_in_flight.store(false, Ordering::SeqCst);
+                show_error(&frame, "请先选择一个机器人。");
+                return;
+            };
+            let name = account
+                .display_name
+                .clone()
+                .unwrap_or_else(|| account.account_id.clone());
+            if !confirm_delete_im_account(&frame, &name) {
+                im_action_in_flight.store(false, Ordering::SeqCst);
+                return;
+            }
+            handles.delete_im_account_button.set_label("删除中...");
+            handles.delete_im_account_button.enable(false);
+            let request = DeleteImAccountRequest {
+                platform: account.platform,
+                account_id: account.account_id,
+            };
+            let thread_api = api.clone();
+            let im_action_result = im_action_result.clone();
+            let im_action_in_flight = im_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = thread_api.delete_im_account(&request);
+                if let Ok(mut slot) = im_action_result.lock() {
+                    slot.replace(ImActionResult::AccountDelete(outcome));
+                }
+                im_action_in_flight.store(false, Ordering::SeqCst);
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
+        let handles = handles;
+        let im_action_result = im_action_result.clone();
+        let im_action_in_flight = im_action_in_flight.clone();
         save_telegram_button.on_click(move |_| {
             if im_action_in_flight.swap(true, Ordering::SeqCst) {
                 return;
@@ -873,11 +996,7 @@ fn build_ui() {
             } else {
                 Some(token)
             };
-            if token.is_none()
-                && !cached_dashboard_snapshot(&dashboard_refresh)
-                    .as_ref()
-                    .is_some_and(telegram_configured)
-            {
+            if token.is_none() {
                 im_action_in_flight.store(false, Ordering::SeqCst);
                 show_error(&frame, "请输入 Telegram Bot Token。");
                 return;
@@ -1804,6 +1923,7 @@ impl ApiClient {
         let feishu_bot = self.get_quick_optional_async::<FeishuBotStatus>("/api/feishu/bot");
         let telegram_bot = self.get_quick_optional_async::<TelegramBotStatus>("/api/telegram/bot");
         let wechat_bot = self.get_quick_optional_async::<WechatBotStatus>("/api/wechat/bot");
+        let im_accounts = self.get_quick_optional_async::<ImAccountsResponse>("/api/im/accounts");
 
         DashboardSnapshot {
             service_online: true,
@@ -1814,6 +1934,7 @@ impl ApiClient {
             feishu_bot: join_optional(feishu_bot),
             telegram_bot: join_optional(telegram_bot),
             wechat_bot: join_optional(wechat_bot),
+            im_accounts: join_optional(im_accounts),
             status: Some(status),
         }
     }
@@ -1858,6 +1979,20 @@ impl ApiClient {
         request: &SetImChannelEnabledRequest,
     ) -> Result<serde_json::Value, String> {
         self.post_json_with_timeout("/api/im-channel/enabled", request, GUI_CONFIG_TIMEOUT)
+    }
+
+    fn set_im_account_enabled(
+        &self,
+        request: &SetImAccountEnabledRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout("/api/im/account/enabled", request, GUI_CONFIG_TIMEOUT)
+    }
+
+    fn delete_im_account(
+        &self,
+        request: &DeleteImAccountRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout("/api/im/account/delete", request, GUI_CONFIG_TIMEOUT)
     }
 
     fn shutdown(&self) -> Result<serde_json::Value, String> {
@@ -1960,6 +2095,9 @@ struct UiHandles {
     telegram_state: StaticText,
     telegram_detail: StaticText,
     telegram_token: TextCtrl,
+    im_account_list: ListCtrl,
+    toggle_im_account_button: Button,
+    delete_im_account_button: Button,
     telegram_toggle_button: Button,
     save_telegram_button: Button,
     wechat_state: StaticText,
@@ -2017,6 +2155,7 @@ struct DashboardSnapshot {
     feishu_bot: Option<FeishuBotStatus>,
     telegram_bot: Option<TelegramBotStatus>,
     wechat_bot: Option<WechatBotStatus>,
+    im_accounts: Option<ImAccountsResponse>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2027,6 +2166,27 @@ struct ServerStatus {
     #[serde(default)]
     telegram: TelegramState,
     wechat: WechatState,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImAccountsResponse {
+    accounts: Vec<ImAccountItem>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ImAccountItem {
+    platform: String,
+    account_id: String,
+    display_name: Option<String>,
+    enabled: bool,
+    configured: bool,
+    secret_set: bool,
+    connecting: bool,
+    polling: bool,
+    connected: bool,
+    last_error: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2153,6 +2313,9 @@ struct RemoteControlStatus {
     connected: bool,
     initialized: bool,
     last_error: Option<String>,
+    healthy: Option<bool>,
+    stale: Option<bool>,
+    last_app_pong_status: Option<String>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2202,6 +2365,8 @@ enum ConfigActionResult {
 
 enum ImActionResult {
     TelegramConfigure(Result<serde_json::Value, String>),
+    AccountToggle(Result<serde_json::Value, String>),
+    AccountDelete(Result<serde_json::Value, String>),
 }
 
 #[derive(Serialize)]
@@ -2215,6 +2380,21 @@ struct ConfigureTelegramBotRequest {
 struct SetImChannelEnabledRequest {
     channel: &'static str,
     enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetImAccountEnabledRequest {
+    platform: String,
+    account_id: String,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteImAccountRequest {
+    platform: String,
+    account_id: String,
 }
 
 #[derive(Deserialize, Clone)]
@@ -2991,6 +3171,10 @@ fn apply_pending_im_action(
 
     handles.save_telegram_button.set_label("保存并接入");
     handles.save_telegram_button.enable(true);
+    handles.toggle_im_account_button.set_label("暂停选中");
+    handles.toggle_im_account_button.enable(true);
+    handles.delete_im_account_button.set_label("删除选中");
+    handles.delete_im_account_button.enable(true);
 
     match result {
         ImActionResult::TelegramConfigure(Ok(_)) => {
@@ -2999,6 +3183,21 @@ fn apply_pending_im_action(
             schedule_dashboard_refresh(api, refresh);
         }
         ImActionResult::TelegramConfigure(Err(err)) => {
+            show_error(frame, &err);
+            schedule_dashboard_refresh(api, refresh);
+        }
+        ImActionResult::AccountToggle(Ok(_)) => {
+            schedule_dashboard_refresh(api, refresh);
+        }
+        ImActionResult::AccountToggle(Err(err)) => {
+            show_error(frame, &err);
+            schedule_dashboard_refresh(api, refresh);
+        }
+        ImActionResult::AccountDelete(Ok(_)) => {
+            show_info(frame, "机器人接入已删除。");
+            schedule_dashboard_refresh(api, refresh);
+        }
+        ImActionResult::AccountDelete(Err(err)) => {
             show_error(frame, &err);
             schedule_dashboard_refresh(api, refresh);
         }
@@ -3218,6 +3417,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     let is_telegram_enabled = telegram_enabled(snapshot);
     let is_wechat_enabled = wechat_enabled(snapshot);
     let bridge_enabled = bridge_enabled(snapshot);
+    refresh_im_account_list(handles, snapshot);
 
     let remote_connected = snapshot
         .remote
@@ -3689,6 +3889,61 @@ fn toggle_im_channel(
     }
 }
 
+#[derive(Clone)]
+struct SelectedImAccount {
+    platform: String,
+    account_id: String,
+    display_name: Option<String>,
+    enabled: bool,
+}
+
+fn selected_im_account(
+    handles: &UiHandles,
+    refresh: &DashboardRefresh,
+) -> Option<SelectedImAccount> {
+    let selected = handles.im_account_list.get_first_selected_item();
+    if selected < 0 {
+        return None;
+    }
+    let platform = im_platform_key(&handles.im_account_list.get_item_text(selected as i64, 0))?;
+    let account_id = handles.im_account_list.get_item_text(selected as i64, 3);
+    if account_id.trim().is_empty() {
+        return None;
+    }
+    cached_dashboard_snapshot(refresh)
+        .and_then(|snapshot| snapshot.im_accounts)
+        .and_then(|accounts| {
+            accounts
+                .accounts
+                .into_iter()
+                .find(|account| account.platform == platform && account.account_id == account_id)
+        })
+        .map(|account| SelectedImAccount {
+            platform: account.platform,
+            account_id: account.account_id,
+            display_name: account.display_name,
+            enabled: account.enabled,
+        })
+}
+
+fn im_platform_label(platform: &str) -> &'static str {
+    match platform {
+        "feishu" => "飞书",
+        "telegram" => "Telegram",
+        "wechat" => "微信",
+        _ => "IM",
+    }
+}
+
+fn im_platform_key(label: &str) -> Option<String> {
+    match label.trim() {
+        "飞书" | "feishu" => Some("feishu".to_string()),
+        "Telegram" | "telegram" => Some("telegram".to_string()),
+        "微信" | "wechat" => Some("wechat".to_string()),
+        _ => None,
+    }
+}
+
 fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot) {
     let Some(status) = snapshot.codex_app.as_ref() else {
         handles
@@ -3789,6 +4044,100 @@ fn refresh_provider_list(handles: &UiHandles, status: Option<&CodexAppStatus>) {
             handles.provider_list.ensure_visible(row as i64);
         }
     }
+}
+
+fn refresh_im_account_list(handles: &UiHandles, snapshot: &DashboardSnapshot) {
+    let rows = im_account_list_rows(snapshot);
+    if im_account_list_matches(&handles.im_account_list, &rows) {
+        return;
+    }
+    handles.im_account_list.delete_all_items();
+    for (index, row_data) in rows.iter().enumerate() {
+        let row = handles
+            .im_account_list
+            .insert_item(index as i64, &row_data[0], None);
+        handles
+            .im_account_list
+            .set_item_text_by_column(row as i64, 1, row_data[1].as_str());
+        handles
+            .im_account_list
+            .set_item_text_by_column(row as i64, 2, row_data[2].as_str());
+        handles
+            .im_account_list
+            .set_item_text_by_column(row as i64, 3, row_data[3].as_str());
+    }
+}
+
+fn im_account_list_rows(snapshot: &DashboardSnapshot) -> Vec<[String; 4]> {
+    if !snapshot.service_online {
+        return vec![[
+            "等待服务".to_string(),
+            "本地服务启动后读取".to_string(),
+            String::new(),
+            String::new(),
+        ]];
+    }
+    let Some(accounts) = snapshot.im_accounts.as_ref() else {
+        return vec![[
+            "读取中".to_string(),
+            "正在读取机器人列表".to_string(),
+            String::new(),
+            String::new(),
+        ]];
+    };
+    if accounts.accounts.is_empty() {
+        return vec![[
+            "未接入".to_string(),
+            "请扫码或填写 Bot Token".to_string(),
+            String::new(),
+            String::new(),
+        ]];
+    }
+    accounts
+        .accounts
+        .iter()
+        .map(|account| {
+            [
+                im_platform_label(&account.platform).to_string(),
+                account
+                    .display_name
+                    .clone()
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| account.account_id.clone()),
+                im_account_state_label(account).to_string(),
+                account.account_id.clone(),
+            ]
+        })
+        .collect()
+}
+
+fn im_account_state_label(account: &ImAccountItem) -> &'static str {
+    if !account.configured || !account.secret_set {
+        "未配置"
+    } else if !account.enabled {
+        "已暂停"
+    } else if account.connected {
+        "已接入"
+    } else if account.connecting || account.polling {
+        "连接中"
+    } else if account
+        .last_error
+        .as_deref()
+        .is_some_and(|err| !err.trim().is_empty())
+    {
+        "异常"
+    } else {
+        "等待连接"
+    }
+}
+
+fn im_account_list_matches(list: &ListCtrl, rows: &[[String; 4]]) -> bool {
+    if list.get_item_count() != rows.len() as i32 {
+        return false;
+    }
+    rows.iter().enumerate().all(|(index, row)| {
+        (0..4).all(|column| list.get_item_text(index as i64, column) == row[column as usize])
+    })
 }
 
 fn provider_list_rows(status: Option<&CodexAppStatus>) -> Vec<[String; 4]> {
@@ -4170,6 +4519,8 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.telegram_toggle_button.enable(enabled);
     handles.wechat_toggle_button.enable(enabled);
     handles.save_telegram_button.enable(enabled);
+    handles.toggle_im_account_button.enable(enabled);
+    handles.delete_im_account_button.enable(enabled);
     handles.configure_button.enable(enabled);
     handles.new_provider_button.enable(enabled);
     handles.save_provider_button.enable(enabled);
@@ -4323,8 +4674,16 @@ fn feishu_state_label(state: &str, bot_name: Option<&str>) -> String {
 }
 
 fn codex_remote_detail(remote: &RemoteControlStatus) -> String {
+    if remote.stale.unwrap_or(false) {
+        return "remote-control 心跳失活，等待 Codex App 自动重连。".to_string();
+    }
     if let Some(err) = &remote.last_error {
         return format!("最近错误: {err}");
+    }
+    if remote.healthy.unwrap_or(false) {
+        if let Some(status) = remote.last_app_pong_status.as_deref() {
+            return format!("remote-control 已连接，心跳 {status}。");
+        }
     }
     "remote-control 已连接。".to_string()
 }
@@ -4782,6 +5141,18 @@ fn confirm_delete_provider(parent: &dyn WxWidget, provider_name: &str) -> bool {
         parent,
         &format!("删除 provider `{provider_name}`？如果它正在使用中，也会取消当前 provider 设置。"),
         "删除 Provider",
+    )
+    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+    .build()
+    .show_modal()
+        == ID_YES
+}
+
+fn confirm_delete_im_account(parent: &dyn WxWidget, account_name: &str) -> bool {
+    MessageDialog::builder(
+        parent,
+        &format!("删除机器人 `{account_name}`？相关会话绑定也会一起清理。"),
+        "删除机器人接入",
     )
     .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
     .build()

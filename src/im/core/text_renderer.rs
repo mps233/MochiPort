@@ -181,31 +181,15 @@ fn render_plain_text_item(item: &Value, tag: &str) -> Option<String> {
 }
 
 fn render_command_execution(item: &Value) -> Option<String> {
-    let command = command_text(item);
-    let mut lines = Vec::new();
-    let mut meta = Vec::new();
-    if let Some(status) = string_field(item, "status") {
-        meta.push(format!("status `{status}`"));
-    }
-    if let Some(exit_code) = item.get("exitCode").and_then(|v| v.as_i64()) {
-        meta.push(format!("exit `{exit_code}`"));
-    }
-    if let Some(duration_ms) = item.get("durationMs").and_then(|v| v.as_u64()) {
-        meta.push(format!("{duration_ms}ms"));
-    }
-    if !meta.is_empty() {
-        lines.push(meta.join(" · "));
-    }
-    if let Some(command) = command {
-        lines.push(format!("```bash\n{}\n```", truncate_summary(&command)));
-    }
-    (!lines.is_empty()).then(|| {
-        format!(
-            "{}\n\n{}",
-            type_header("commandExecution"),
-            lines.join("\n\n")
-        )
-    })
+    let command = command_text(item)?;
+    let status_icon = command_status_icon(item)
+        .map(|icon| format!(" {icon}"))
+        .unwrap_or_default();
+    Some(format!(
+        "💻 Ran: `{}`{}",
+        truncate_middle(&single_line_text(&command), 180),
+        status_icon
+    ))
 }
 
 fn render_file_change(item: &Value) -> Option<String> {
@@ -387,20 +371,21 @@ fn render_unknown_item(item: &Value, item_type: &str) -> Option<String> {
 }
 
 fn type_header(item_type: &str) -> String {
-    let icon = match item_type {
-        "agentMessage" => "💬",
-        "userMessage" => "👤",
-        "todoList" => "☑",
-        "imageGeneration" | "imageView" => "🖼",
-        "reasoning" => "🧠",
-        "plan" => "📋",
-        "commandExecution" => "💻",
-        "fileChange" => "📝",
-        "mcpToolCall" | "dynamicToolCall" | "functionToolCall" | "collabAgentToolCall" => "🛠",
-        "webSearch" => "🔎",
-        _ => "•",
-    };
-    format!("{icon} {item_type}")
+    match item_type {
+        "agentMessage" => "🤖 Codex".to_string(),
+        "userMessage" => "👤 用户".to_string(),
+        "todoList" => "✅ 待办".to_string(),
+        "imageGeneration" | "imageView" => "🖼 图片".to_string(),
+        "reasoning" => "🧠 思考".to_string(),
+        "plan" => "📋 计划".to_string(),
+        "commandExecution" => "💻 命令".to_string(),
+        "fileChange" => "📝 文件".to_string(),
+        "mcpToolCall" => "🧩 MCP 工具".to_string(),
+        "dynamicToolCall" | "functionToolCall" => "🛠 工具".to_string(),
+        "collabAgentToolCall" => "🤝 协作".to_string(),
+        "webSearch" => "🔎 搜索".to_string(),
+        other => format!("• {other}"),
+    }
 }
 
 fn command_text(item: &Value) -> Option<String> {
@@ -408,11 +393,50 @@ fn command_text(item: &Value) -> Option<String> {
         .and_then(|v| v.as_array())
         .and_then(|actions| actions.first())
         .and_then(|action| action.get("command"))
-        .and_then(|v| v.as_str())
-        .or_else(|| item.get("command").and_then(|v| v.as_str()))
-        .map(str::trim)
+        .and_then(command_value_text)
+        .or_else(|| item.get("command").and_then(command_value_text))
         .filter(|v| !v.is_empty())
-        .map(str::to_string)
+}
+
+fn command_value_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.trim().to_string());
+    }
+    value.as_array().map(|parts| {
+        parts
+            .iter()
+            .filter_map(|part| part.as_str().map(str::trim))
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    })
+}
+
+fn command_status_icon(item: &Value) -> Option<&'static str> {
+    if let Some(exit_code) = item.get("exitCode").and_then(|v| v.as_i64()) {
+        return Some(if exit_code == 0 { "✅" } else { "❌" });
+    }
+    match item
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some("completed" | "succeeded" | "success") => Some("✅"),
+        Some("failed" | "error" | "canceled" | "cancelled" | "timed_out" | "timedout") => {
+            Some("❌")
+        }
+        Some("running" | "in_progress" | "inProgress") => Some("⏳"),
+        _ => None,
+    }
+}
+
+fn single_line_text(text: &str) -> String {
+    text.replace("\r\n", " ")
+        .replace('\n', " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn collect_reasoning_text(item: &Value) -> Option<String> {
@@ -556,7 +580,8 @@ mod tests {
         let text = "hello\n".repeat(3000);
         let rendered = render_agent_message_text(&text);
 
-        assert!(rendered.starts_with("💬 agentMessage"));
+        assert!(rendered.starts_with("🤖 Codex"));
+        assert!(!rendered.contains("agentMessage"));
         assert!(rendered.contains(&"hello\n".repeat(100)));
         assert!(!rendered.contains("[truncated]"));
     }
@@ -572,7 +597,8 @@ mod tests {
         });
         let rendered = render_item_text(&item).expect("todo list");
 
-        assert!(rendered.starts_with("☑ todoList"));
+        assert!(rendered.starts_with("✅ 待办"));
+        assert!(!rendered.contains("todoList"));
         assert!(rendered.contains("- [x] one"));
         assert!(rendered.contains("- [ ] two"));
     }
@@ -591,10 +617,24 @@ mod tests {
         });
         let rendered = render_item_text(&item).expect("command item");
 
-        assert!(rendered.starts_with("💻 commandExecution"));
-        assert!(rendered.contains("```bash\ncargo test\n```"));
-        assert!(rendered.contains("status `completed`"));
+        assert_eq!(rendered, "💻 Ran: `cargo test` ✅");
         assert!(!rendered.contains("line 0"));
         assert!(!rendered.contains("output:"));
+    }
+
+    #[test]
+    fn command_execution_uses_command_actions_and_failure_icon() {
+        let item = json!({
+            "type": "commandExecution",
+            "exitCode": 2,
+            "commandActions": [
+                {"command": ["git", "diff", "--stat"]}
+            ],
+            "aggregatedOutput": "large output"
+        });
+        let rendered = render_item_text(&item).expect("command item");
+
+        assert_eq!(rendered, "💻 Ran: `git diff --stat` ❌");
+        assert!(!rendered.contains("large output"));
     }
 }

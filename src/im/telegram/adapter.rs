@@ -5,6 +5,7 @@ use tokio::time::{Duration, sleep};
 
 use crate::{
     chain_log,
+    im::core::thread::ThreadCreateOption,
     im_runtime::{PendingApproval, approval_request_fingerprint},
 };
 
@@ -24,12 +25,6 @@ pub struct TelegramThreadListEntry {
     pub title: String,
     pub summary: Option<String>,
     pub detail: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-pub struct TelegramCreateOption {
-    pub label: String,
-    pub summary: Option<String>,
 }
 
 impl TelegramAdapter {
@@ -376,7 +371,7 @@ impl TelegramAdapter {
         field: &str,
         title: &str,
         body: &str,
-        options: &[TelegramCreateOption],
+        options: &[ThreadCreateOption],
         page: usize,
         has_prev: bool,
         has_next: bool,
@@ -605,7 +600,7 @@ fn thread_entries_table_html(entries: &[TelegramThreadListEntry]) -> String {
     lines.join("\n")
 }
 
-fn create_options_table_html(options: &[TelegramCreateOption]) -> String {
+fn create_options_table_html(options: &[ThreadCreateOption]) -> String {
     let mut lines = vec!["<b>序号 | 选项</b>".to_string(), "---- | ----".to_string()];
     lines.extend(
         options
@@ -616,7 +611,7 @@ fn create_options_table_html(options: &[TelegramCreateOption]) -> String {
     lines.join("\n")
 }
 
-fn create_option_row_html(index: usize, option: &TelegramCreateOption) -> String {
+fn create_option_row_html(index: usize, option: &ThreadCreateOption) -> String {
     let label = truncate_display_text(option.label.trim(), 34);
     let mut row = format!("/{} | <b>{}</b>", index + 1, telegram_html_escape(&label));
     if let Some(summary) = option

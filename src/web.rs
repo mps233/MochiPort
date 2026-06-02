@@ -16,13 +16,16 @@ use qrcode::{QrCode, render::svg};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
 };
 
 use crate::{
-    app_state::{FeishuWsState, SharedState, TelegramState, WechatOnboardSession, WechatState},
+    app_state::{
+        FeishuWsState, ImAccountRuntimeState, SharedState, TelegramState, WechatOnboardSession,
+        WechatState, im_account_key,
+    },
     bridge, chain_log,
     codex_app_config::{self, ConfigureCodexAppOptions},
     config::AppConfig,
@@ -34,6 +37,7 @@ use crate::{
         types::{DEFAULT_WECHAT_API_BASE, WechatSettings},
     },
     remote_control_backend,
+    types::ImPlatformKind,
 };
 
 pub async fn start_bridge_if_ready(state: &SharedState, event_message: &'static str) -> bool {
@@ -62,6 +66,9 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/bridge/start", post(start_bridge))
         .route("/api/bridge/stop", post(stop_bridge))
         .route("/api/im-channel/enabled", post(set_im_channel_enabled))
+        .route("/api/im/accounts", get(im_accounts))
+        .route("/api/im/account/enabled", post(set_im_account_enabled))
+        .route("/api/im/account/delete", post(delete_im_account))
         .route(
             "/api/remote-control/backend-status",
             get(remote_control_backend_status),
@@ -246,6 +253,7 @@ struct StatusResponse {
     feishu_ws: FeishuWsState,
     telegram: TelegramState,
     wechat: WechatState,
+    im_accounts: Vec<ImAccountRuntimeState>,
 }
 
 async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
@@ -260,6 +268,13 @@ async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
     let feishu_ws = state.feishu_ws.lock().await.clone();
     let telegram = state.telegram.lock().await.clone();
     let wechat = state.wechat.lock().await.clone();
+    let im_accounts = state
+        .im_accounts
+        .lock()
+        .await
+        .values()
+        .cloned()
+        .collect::<Vec<_>>();
     Json(StatusResponse {
         running,
         bind: config.bind.clone(),
@@ -267,6 +282,7 @@ async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
         feishu_ws,
         telegram,
         wechat,
+        im_accounts,
     })
 }
 
@@ -603,6 +619,9 @@ async fn set_im_channel_enabled(
                         Json(json!({ "ok": false, "error": "Feishu is not configured" })),
                     );
                 }
+                for account in &mut config.feishu_accounts {
+                    account.enabled = request.enabled;
+                }
                 config.feishu.enabled = request.enabled;
             }
             "telegram" => {
@@ -612,6 +631,9 @@ async fn set_im_channel_enabled(
                         Json(json!({ "ok": false, "error": "Telegram is not configured" })),
                     );
                 }
+                for account in &mut config.telegram_accounts {
+                    account.enabled = request.enabled;
+                }
                 config.telegram.enabled = request.enabled;
             }
             "wechat" => {
@@ -620,6 +642,9 @@ async fn set_im_channel_enabled(
                         StatusCode::BAD_REQUEST,
                         Json(json!({ "ok": false, "error": "WeChat is not configured" })),
                     );
+                }
+                for account in &mut config.wechat_accounts {
+                    account.enabled = request.enabled;
                 }
                 config.wechat.enabled = request.enabled;
             }
@@ -662,6 +687,150 @@ async fn set_im_channel_enabled(
     )
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImAccountItem {
+    platform: String,
+    account_id: String,
+    display_name: Option<String>,
+    enabled: bool,
+    configured: bool,
+    secret_set: bool,
+    connecting: bool,
+    polling: bool,
+    connected: bool,
+    last_error: Option<String>,
+    last_event_at_ms: Option<u128>,
+    last_inbound_at_ms: Option<u128>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImAccountsResponse {
+    accounts: Vec<ImAccountItem>,
+}
+
+async fn im_accounts(State(state): State<SharedState>) -> Json<ImAccountsResponse> {
+    let config = state.config.lock().await.clone();
+    let runtime = state.im_accounts.lock().await.clone();
+    Json(ImAccountsResponse {
+        accounts: im_account_items(&config, &runtime),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetImAccountEnabledRequest {
+    platform: String,
+    account_id: String,
+    enabled: bool,
+}
+
+async fn set_im_account_enabled(
+    State(state): State<SharedState>,
+    Json(request): Json<SetImAccountEnabledRequest>,
+) -> impl IntoResponse {
+    let platform = request.platform.trim().to_ascii_lowercase();
+    let account_id = request.account_id.trim().to_string();
+    if account_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing accountId" })),
+        );
+    }
+    let should_run = {
+        let mut config = state.config.lock().await;
+        config.migrate_legacy_im_accounts();
+        if !config.set_im_account_enabled(&platform, &account_id, request.enabled) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": "IM account not found" })),
+            );
+        }
+        set_legacy_im_account_enabled(&mut config, &platform, &account_id, request.enabled);
+        config.bridge.enabled = im_bridge_configured(&config);
+        if let Err(err) = config.save(&state.config_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            );
+        }
+        config.bridge.enabled
+    };
+    if should_run {
+        start_bridge_task(
+            &state,
+            BridgeStartMode::Restart,
+            "bridge restarted after IM account toggle",
+        )
+        .await;
+    } else {
+        stop_bridge_task(&state).await;
+    }
+    (
+        StatusCode::OK,
+        Json(
+            json!({ "ok": true, "platform": platform, "accountId": account_id, "enabled": request.enabled }),
+        ),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeleteImAccountRequest {
+    platform: String,
+    account_id: String,
+}
+
+async fn delete_im_account(
+    State(state): State<SharedState>,
+    Json(request): Json<DeleteImAccountRequest>,
+) -> impl IntoResponse {
+    let platform = request.platform.trim().to_ascii_lowercase();
+    let account_id = request.account_id.trim().to_string();
+    if account_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing accountId" })),
+        );
+    }
+    let should_run = {
+        let mut config = state.config.lock().await;
+        config.migrate_legacy_im_accounts();
+        let removed = config.remove_im_account(&platform, &account_id);
+        clear_legacy_im_account(&mut config, &platform, &account_id);
+        if !removed {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": "IM account not found" })),
+            );
+        }
+        config.bridge.enabled = im_bridge_configured(&config);
+        if let Err(err) = config.save(&state.config_path) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            );
+        }
+        config.bridge.enabled
+    };
+    clear_im_account_bindings(&state, &platform, &account_id).await;
+    if should_run {
+        start_bridge_task(
+            &state,
+            BridgeStartMode::Restart,
+            "bridge restarted after IM account deletion",
+        )
+        .await;
+    } else {
+        stop_bridge_task(&state).await;
+    }
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "platform": platform, "accountId": account_id })),
+    )
+}
+
 async fn stop_bridge_task(state: &SharedState) {
     let mut task = state.bridge_task.lock().await;
     if let Some(handle) = task.take() {
@@ -682,6 +851,14 @@ async fn stop_bridge_task(state: &SharedState) {
         let mut telegram = state.telegram.lock().await;
         telegram.polling = false;
         telegram.connected = false;
+    }
+    {
+        let mut accounts = state.im_accounts.lock().await;
+        for account in accounts.values_mut() {
+            account.connecting = false;
+            account.polling = false;
+            account.connected = false;
+        }
     }
     state
         .push_event("warn", "bridge_stopped", "bridge task aborted")
@@ -754,6 +931,13 @@ async fn start_bridge_task(
         telegram.polling = false;
         telegram.connected = false;
         telegram.last_error = None;
+        let mut accounts = state.im_accounts.lock().await;
+        for account in accounts.values_mut() {
+            account.connecting = false;
+            account.polling = false;
+            account.connected = false;
+            account.last_error = None;
+        }
     }
     state
         .push_event("info", "bridge_start_requested", event_message)
@@ -762,31 +946,197 @@ async fn start_bridge_task(
 }
 
 fn feishu_configured(config: &AppConfig) -> bool {
-    !config.feishu.app_id.trim().is_empty() && !config.feishu.app_secret.trim().is_empty()
+    config
+        .effective_feishu_accounts()
+        .iter()
+        .any(|account| account.is_configured())
 }
 
 fn telegram_configured(config: &AppConfig) -> bool {
-    !config.telegram.bot_token.trim().is_empty()
+    config
+        .effective_telegram_accounts()
+        .iter()
+        .any(|account| account.is_configured())
 }
 
 fn wechat_configured(config: &AppConfig) -> bool {
-    !config.wechat.bot_token.trim().is_empty()
+    config
+        .effective_wechat_accounts()
+        .iter()
+        .any(|account| account.is_configured())
 }
 
 fn feishu_active(config: &AppConfig) -> bool {
-    config.feishu.enabled && feishu_configured(config)
+    config
+        .effective_feishu_accounts()
+        .iter()
+        .any(|account| account.is_active())
 }
 
 fn telegram_active(config: &AppConfig) -> bool {
-    config.telegram.enabled && telegram_configured(config)
+    config
+        .effective_telegram_accounts()
+        .iter()
+        .any(|account| account.is_active())
 }
 
 fn wechat_active(config: &AppConfig) -> bool {
-    config.wechat.enabled && wechat_configured(config)
+    config
+        .effective_wechat_accounts()
+        .iter()
+        .any(|account| account.is_active())
 }
 
 fn im_bridge_configured(config: &AppConfig) -> bool {
     feishu_active(config) || telegram_active(config) || wechat_active(config)
+}
+
+fn im_account_items(
+    config: &AppConfig,
+    runtime: &HashMap<String, ImAccountRuntimeState>,
+) -> Vec<ImAccountItem> {
+    let mut accounts = Vec::new();
+    for account in config.effective_feishu_accounts() {
+        accounts.push(im_account_item(
+            ImPlatformKind::Feishu,
+            &account.account_id,
+            non_empty_string(&account.display_name)
+                .or_else(|| non_empty_string(&account.app_id))
+                .or_else(|| Some("飞书机器人".to_string())),
+            account.enabled,
+            account.is_configured(),
+            account.is_configured(),
+            runtime,
+        ));
+    }
+    for account in config.effective_telegram_accounts() {
+        accounts.push(im_account_item(
+            ImPlatformKind::Telegram,
+            &account.account_id,
+            non_empty_string(&account.display_name).or_else(|| Some("Telegram 机器人".to_string())),
+            account.enabled,
+            account.is_configured(),
+            !account.bot_token.trim().is_empty(),
+            runtime,
+        ));
+    }
+    for account in config.effective_wechat_accounts() {
+        accounts.push(im_account_item(
+            ImPlatformKind::Wechat,
+            &account.account_id,
+            non_empty_string(&account.display_name).or_else(|| Some("微信机器人".to_string())),
+            account.enabled,
+            account.is_configured(),
+            !account.bot_token.trim().is_empty(),
+            runtime,
+        ));
+    }
+    accounts
+}
+
+fn im_account_item(
+    platform: ImPlatformKind,
+    account_id: &str,
+    display_name: Option<String>,
+    enabled: bool,
+    configured: bool,
+    secret_set: bool,
+    runtime: &HashMap<String, ImAccountRuntimeState>,
+) -> ImAccountItem {
+    let runtime = runtime.get(&im_account_key(platform, account_id));
+    ImAccountItem {
+        platform: platform.key().to_string(),
+        account_id: account_id.to_string(),
+        display_name,
+        enabled,
+        configured,
+        secret_set,
+        connecting: runtime.is_some_and(|state| state.connecting),
+        polling: runtime.is_some_and(|state| state.polling),
+        connected: runtime.is_some_and(|state| state.connected),
+        last_error: runtime.and_then(|state| state.last_error.clone()),
+        last_event_at_ms: runtime.and_then(|state| state.last_event_at_ms),
+        last_inbound_at_ms: runtime.and_then(|state| state.last_inbound_at_ms),
+    }
+}
+
+fn set_legacy_im_account_enabled(
+    config: &mut AppConfig,
+    platform: &str,
+    account_id: &str,
+    enabled: bool,
+) {
+    match platform {
+        "feishu"
+            if config.feishu.account_id.trim() == account_id
+                || (config.feishu.account_id.trim().is_empty()
+                    && config.bridge.account_id.trim() == account_id) =>
+        {
+            config.feishu.enabled = enabled
+        }
+        "telegram" if config.telegram.account_id.trim() == account_id => {
+            config.telegram.enabled = enabled
+        }
+        "wechat" if config.wechat.account_id.trim() == account_id => {
+            config.wechat.enabled = enabled
+        }
+        _ => {}
+    }
+}
+
+fn clear_legacy_im_account(config: &mut AppConfig, platform: &str, account_id: &str) {
+    match platform {
+        "feishu"
+            if config.feishu.account_id.trim() == account_id
+                || (config.feishu.account_id.trim().is_empty()
+                    && (config.feishu.app_id.trim() == account_id
+                        || config.bridge.account_id.trim() == account_id)) =>
+        {
+            config.feishu = Default::default();
+        }
+        "telegram"
+            if config.telegram.account_id.trim() == account_id
+                || (config.telegram.account_id.trim().is_empty() && account_id == "telegram") =>
+        {
+            config.telegram = Default::default();
+        }
+        "wechat" if config.wechat.account_id.trim() == account_id => {
+            config.wechat = Default::default();
+        }
+        _ => {}
+    }
+}
+
+async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_id: &str) {
+    let prefix = format!("{platform}:{account_id}:");
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.route_by_thread.retain(|_, route| {
+            !(route.platform.key() == platform && route.account_id == account_id)
+        });
+    }
+    if let Some(kind) = im_platform_from_key(platform) {
+        state
+            .im_accounts
+            .lock()
+            .await
+            .remove(&im_account_key(kind, account_id));
+    }
+    let mut persisted = state.persisted.lock().await;
+    persisted
+        .sessions
+        .retain(|conversation_key, _| !conversation_key.starts_with(&prefix));
+    let config = state.config.lock().await.clone();
+    let _ = persisted.save(&config.state_path);
+}
+
+fn im_platform_from_key(platform: &str) -> Option<ImPlatformKind> {
+    match platform {
+        "feishu" => Some(ImPlatformKind::Feishu),
+        "telegram" => Some(ImPlatformKind::Telegram),
+        "wechat" => Some(ImPlatformKind::Wechat),
+        _ => None,
+    }
 }
 
 #[derive(Serialize)]
@@ -802,13 +1152,23 @@ struct FeishuBotStatus {
 
 async fn feishu_bot_status(State(state): State<SharedState>) -> Json<FeishuBotStatus> {
     let config = state.config.lock().await.clone();
-    let app_id = non_empty_string(&config.feishu.app_id);
-    let mut display_name = non_empty_string(&config.feishu.display_name);
-    let configured = feishu_configured(&config);
+    let account = config.effective_feishu_accounts().into_iter().next();
+    let app_id = account
+        .as_ref()
+        .and_then(|account| non_empty_string(&account.app_id));
+    let mut display_name = account
+        .as_ref()
+        .and_then(|account| non_empty_string(&account.display_name));
+    let configured = account
+        .as_ref()
+        .is_some_and(|account| account.is_configured());
     let mut error = None;
 
-    if configured && display_name.is_none() {
-        let api = FeishuApi::new(FeishuSettings::from_app_config(&config.feishu));
+    if let Some(account) = account.as_ref()
+        && configured
+        && display_name.is_none()
+    {
+        let api = FeishuApi::new(FeishuSettings::from_app_config(account));
         match api
             .get_application_display_name(app_id.as_deref().unwrap_or_default())
             .await
@@ -816,10 +1176,11 @@ async fn feishu_bot_status(State(state): State<SharedState>) -> Json<FeishuBotSt
             Ok(Some(name)) => {
                 display_name = Some(name.clone());
                 let mut config = state.config.lock().await;
-                if config.feishu.display_name.trim().is_empty()
-                    && config.feishu.app_id.trim() == app_id.as_deref().unwrap_or_default()
+                if let Some(mut account) = config.feishu_account(&account.account_id)
+                    && account.display_name.trim().is_empty()
                 {
-                    config.feishu.display_name = name;
+                    account.display_name = name;
+                    config.upsert_feishu_account(account);
                     if let Err(err) = config.save(&state.config_path) {
                         error = Some(err.to_string());
                     }
@@ -832,10 +1193,13 @@ async fn feishu_bot_status(State(state): State<SharedState>) -> Json<FeishuBotSt
 
     Json(FeishuBotStatus {
         configured,
-        enabled: config.feishu.enabled,
+        enabled: account.as_ref().is_some_and(|account| account.enabled),
         app_id,
         display_name,
-        allowed_open_ids: config.feishu.allowed_open_ids.len(),
+        allowed_open_ids: account
+            .as_ref()
+            .map(|account| account.allowed_open_ids.len())
+            .unwrap_or_default(),
         error,
     })
 }
@@ -859,13 +1223,21 @@ struct TelegramBotStatus {
 async fn telegram_bot_status(State(state): State<SharedState>) -> Json<TelegramBotStatus> {
     let config = state.config.lock().await.clone();
     let telegram = state.telegram.lock().await.clone();
-    let configured = telegram_configured(&config);
-    let mut display_name = non_empty_string(&config.telegram.display_name);
+    let account = config.effective_telegram_accounts().into_iter().next();
+    let configured = account
+        .as_ref()
+        .is_some_and(|account| account.is_configured());
+    let mut display_name = account
+        .as_ref()
+        .and_then(|account| non_empty_string(&account.display_name));
     let mut username = None;
     let mut error = None;
 
-    if configured && display_name.is_none() {
-        let api = TelegramApi::new(TelegramSettings::from_app_config(&config.telegram));
+    if let Some(account) = account.as_ref()
+        && configured
+        && display_name.is_none()
+    {
+        let api = TelegramApi::new(TelegramSettings::from_app_config(account));
         match tokio::time::timeout(std::time::Duration::from_secs(3), api.get_me()).await {
             Ok(Ok(user)) => {
                 username = user
@@ -876,10 +1248,11 @@ async fn telegram_bot_status(State(state): State<SharedState>) -> Json<TelegramB
                 display_name = telegram_user_display_name(&user);
                 if let Some(name) = display_name.clone() {
                     let mut config = state.config.lock().await;
-                    if config.telegram.display_name.trim().is_empty()
-                        && !config.telegram.bot_token.trim().is_empty()
+                    if let Some(mut account) = config.telegram_account(&account.account_id)
+                        && account.display_name.trim().is_empty()
                     {
-                        config.telegram.display_name = name;
+                        account.display_name = name;
+                        config.upsert_telegram_account(account);
                         if let Err(err) = config.save(&state.config_path) {
                             error = Some(err.to_string());
                         }
@@ -893,12 +1266,17 @@ async fn telegram_bot_status(State(state): State<SharedState>) -> Json<TelegramB
 
     Json(TelegramBotStatus {
         configured,
-        enabled: config.telegram.enabled,
-        token_set: !config.telegram.bot_token.trim().is_empty(),
+        enabled: account.as_ref().is_some_and(|account| account.enabled),
+        token_set: account
+            .as_ref()
+            .is_some_and(|account| !account.bot_token.trim().is_empty()),
         display_name,
         username,
-        mention_only: config.telegram.mention_only,
-        allowed_chat_ids: config.telegram.allowed_chat_ids.len(),
+        mention_only: account.as_ref().is_some_and(|account| account.mention_only),
+        allowed_chat_ids: account
+            .as_ref()
+            .map(|account| account.allowed_chat_ids.len())
+            .unwrap_or_default(),
         polling: telegram.polling,
         connected: telegram.connected,
         last_error: telegram.last_error,
@@ -939,48 +1317,70 @@ async fn configure_telegram_bot(
     State(state): State<SharedState>,
     Json(request): Json<ConfigureTelegramBotRequest>,
 ) -> impl IntoResponse {
-    let token = request
+    let Some(token) = request
         .bot_token
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty() && !is_masked_secret(value))
-        .map(str::to_string);
-    let telegram_config = {
-        let mut config = state.config.lock().await;
-        if let Some(token) = token {
-            config.telegram.bot_token = token;
-            config.telegram.display_name.clear();
-        }
-        if config.telegram.bot_token.trim().is_empty() {
+        .map(str::to_string)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing botToken" })),
+        );
+    };
+    let mention_only = request.mention_only.unwrap_or(false);
+    let mut telegram_config = crate::config::TelegramConfig {
+        enabled: true,
+        account_id: String::new(),
+        bot_token: token,
+        display_name: String::new(),
+        mention_only,
+        allowed_chat_ids: Vec::new(),
+    };
+    let api = TelegramApi::new(TelegramSettings::from_app_config(&telegram_config));
+    let user = match tokio::time::timeout(std::time::Duration::from_secs(5), api.get_me()).await {
+        Ok(Ok(user)) => user,
+        Ok(Err(err)) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "ok": false, "error": "missing botToken" })),
+                Json(json!({ "ok": false, "error": err.to_string() })),
             );
         }
-        if let Some(mention_only) = request.mention_only {
-            config.telegram.mention_only = mention_only;
+        Err(_) => {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(json!({ "ok": false, "error": "telegram getMe timeout" })),
+            );
         }
-        config.telegram.enabled = true;
+    };
+    telegram_config.account_id = format!("tg_{}", user.id);
+    telegram_config.display_name = telegram_user_display_name(&user).unwrap_or_else(|| {
+        user.username
+            .as_deref()
+            .map(|value| format!("@{}", value.trim_start_matches('@')))
+            .unwrap_or_else(|| format!("Telegram {}", user.id))
+    });
+    {
+        let mut config = state.config.lock().await;
+        config.migrate_legacy_im_accounts();
+        let token = telegram_config.bot_token.trim().to_string();
+        config.telegram_accounts.retain(|account| {
+            account.account_id.trim() == telegram_config.account_id
+                || account.bot_token.trim() != token
+        });
+        config.upsert_telegram_account(telegram_config.clone());
+        if !config.telegram.is_configured()
+            || config.telegram.account_id.trim() == telegram_config.account_id
+        {
+            config.telegram = telegram_config.clone();
+        }
         config.bridge.enabled = true;
         if let Err(err) = config.save(&state.config_path) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "ok": false, "error": err.to_string() })),
             );
-        }
-        config.telegram.clone()
-    };
-    if telegram_config.display_name.trim().is_empty() {
-        let api = TelegramApi::new(TelegramSettings::from_app_config(&telegram_config));
-        if let Ok(Ok(user)) =
-            tokio::time::timeout(std::time::Duration::from_secs(5), api.get_me()).await
-            && let Some(name) = telegram_user_display_name(&user)
-        {
-            let mut config = state.config.lock().await;
-            if config.telegram.bot_token == telegram_config.bot_token {
-                config.telegram.display_name = name;
-                let _ = config.save(&state.config_path);
-            }
         }
     }
     start_bridge_task(
@@ -991,7 +1391,7 @@ async fn configure_telegram_bot(
     .await;
     (
         StatusCode::OK,
-        Json(json!({ "ok": true, "configured": true })),
+        Json(json!({ "ok": true, "configured": true, "accountId": telegram_config.account_id })),
     )
 }
 
@@ -1020,15 +1420,29 @@ struct WechatBotStatus {
 async fn wechat_bot_status(State(state): State<SharedState>) -> Json<WechatBotStatus> {
     let config = state.config.lock().await.clone();
     let wechat = state.wechat.lock().await.clone();
+    let account = config.effective_wechat_accounts().into_iter().next();
     Json(WechatBotStatus {
-        configured: wechat_configured(&config),
-        enabled: config.wechat.enabled,
-        display_name: non_empty_string(&config.wechat.display_name)
-            .or_else(|| wechat_configured(&config).then(|| "微信机器人".to_string())),
-        account_id: non_empty_string(&config.wechat.account_id),
-        base_url: non_empty_string(&config.wechat.base_url),
-        user_id: non_empty_string(&config.wechat.user_id),
-        allowed_user_ids: config.wechat.allowed_user_ids.len(),
+        configured: account
+            .as_ref()
+            .is_some_and(|account| account.is_configured()),
+        enabled: account.as_ref().is_some_and(|account| account.enabled),
+        display_name: account
+            .as_ref()
+            .and_then(|account| non_empty_string(&account.display_name))
+            .or_else(|| account.is_some().then(|| "微信机器人".to_string())),
+        account_id: account
+            .as_ref()
+            .and_then(|account| non_empty_string(&account.account_id)),
+        base_url: account
+            .as_ref()
+            .and_then(|account| non_empty_string(&account.base_url)),
+        user_id: account
+            .as_ref()
+            .and_then(|account| non_empty_string(&account.user_id)),
+        allowed_user_ids: account
+            .as_ref()
+            .map(|account| account.allowed_user_ids.len())
+            .unwrap_or_default(),
         polling: wechat.polling,
         connected: wechat.connected,
         last_error: wechat.last_error,
@@ -1748,13 +2162,24 @@ async fn feishu_onboard_poll(
             if let (Some(app_id), Some(app_secret)) = (app_id.clone(), app_secret.clone()) {
                 let feishu_config = {
                     let mut config = state.config.lock().await;
-                    config.feishu.enabled = true;
-                    config.feishu.app_id = app_id.clone();
-                    config.feishu.app_secret = app_secret;
+                    config.migrate_legacy_im_accounts();
+                    config.feishu_accounts.retain(|account| {
+                        account.account_id.trim() == app_id || account.app_id.trim() != app_id
+                    });
+                    let mut account = config.feishu_account(&app_id).unwrap_or_default();
+                    account.enabled = true;
+                    account.account_id = app_id.clone();
+                    account.app_id = app_id.clone();
+                    account.app_secret = app_secret;
                     if let Some(open_id) = open_id.clone()
-                        && !config.feishu.allowed_open_ids.contains(&open_id)
+                        && !account.allowed_open_ids.contains(&open_id)
                     {
-                        config.feishu.allowed_open_ids.push(open_id);
+                        account.allowed_open_ids.push(open_id);
+                    }
+                    config.upsert_feishu_account(account.clone());
+                    let saved_account = account.clone();
+                    if !config.feishu.is_configured() || config.feishu.app_id == app_id {
+                        config.feishu = account.clone();
                     }
                     config.bridge.enabled = true;
                     if let Err(err) = config.save(&state.config_path) {
@@ -1763,7 +2188,7 @@ async fn feishu_onboard_poll(
                             Json(json!({ "error": err.to_string() })),
                         );
                     }
-                    config.feishu.clone()
+                    saved_account
                 };
                 let api = FeishuApi::new(FeishuSettings::from_app_config(&feishu_config));
                 display_name = api
@@ -1773,8 +2198,12 @@ async fn feishu_onboard_poll(
                     .flatten();
                 if let Some(name) = display_name.clone() {
                     let mut config = state.config.lock().await;
-                    if config.feishu.app_id == app_id {
-                        config.feishu.display_name = name;
+                    if let Some(mut account) = config.feishu_account(&app_id) {
+                        account.display_name = name.clone();
+                        config.upsert_feishu_account(account.clone());
+                        if config.feishu.app_id == app_id {
+                            config.feishu = account;
+                        }
                         let _ = config.save(&state.config_path);
                     }
                 }
@@ -1948,7 +2377,13 @@ async fn wechat_onboard_poll(
             .ilink_bot_id
             .clone()
             .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| config.wechat.account_id.clone());
+            .unwrap_or_else(|| {
+                if config.wechat.account_id.trim().is_empty() {
+                    "wechat".to_string()
+                } else {
+                    config.wechat.account_id.clone()
+                }
+            });
         let base_url = result
             .baseurl
             .clone()
@@ -1957,20 +2392,34 @@ async fn wechat_onboard_poll(
         let user_id = result.ilink_user_id.clone().unwrap_or_default();
         {
             let mut config = state.config.lock().await;
-            config.wechat.enabled = true;
-            config.wechat.account_id = if account_id.trim().is_empty() {
+            config.migrate_legacy_im_accounts();
+            let token = bot_token.trim().to_string();
+            let resolved_account_id = if account_id.trim().is_empty() {
                 "wechat".to_string()
             } else {
                 account_id.clone()
             };
-            config.wechat.bot_token = bot_token;
-            if config.wechat.display_name.trim().is_empty() {
-                config.wechat.display_name = "微信机器人".to_string();
+            config.wechat_accounts.retain(|account| {
+                account.account_id.trim() == resolved_account_id
+                    || account.bot_token.trim() != token
+            });
+            let mut account = config
+                .wechat_account(&resolved_account_id)
+                .unwrap_or_default();
+            account.enabled = true;
+            account.account_id = resolved_account_id.clone();
+            account.bot_token = bot_token;
+            if account.display_name.trim().is_empty() {
+                account.display_name = "微信机器人".to_string();
             }
-            config.wechat.base_url = normalize_wechat_base_url(&base_url);
-            config.wechat.user_id = user_id.clone();
-            if !user_id.trim().is_empty() && !config.wechat.allowed_user_ids.contains(&user_id) {
-                config.wechat.allowed_user_ids.push(user_id.clone());
+            account.base_url = normalize_wechat_base_url(&base_url);
+            account.user_id = user_id.clone();
+            if !user_id.trim().is_empty() && !account.allowed_user_ids.contains(&user_id) {
+                account.allowed_user_ids.push(user_id.clone());
+            }
+            config.upsert_wechat_account(account.clone());
+            if !config.wechat.is_configured() || config.wechat.account_id == resolved_account_id {
+                config.wechat = account;
             }
             config.bridge.enabled = true;
             if let Err(err) = config.save(&state.config_path) {

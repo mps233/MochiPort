@@ -18,7 +18,7 @@ use crate::{
     config::AppConfig,
     im_runtime::RuntimeState,
     store::PersistedState,
-    types::{EventRecord, now_ms},
+    types::{EventRecord, ImPlatformKind, now_ms},
 };
 
 pub type SharedState = Arc<AppState>;
@@ -34,6 +34,7 @@ pub struct AppState {
     pub feishu_ws: Mutex<FeishuWsState>,
     pub telegram: Mutex<TelegramState>,
     pub wechat: Mutex<WechatState>,
+    pub im_accounts: Mutex<HashMap<String, ImAccountRuntimeState>>,
     pub wechat_onboard: Mutex<Option<WechatOnboardSession>>,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
@@ -56,6 +57,14 @@ pub struct RemoteControlInner {
     pub current_thread_id: Option<String>,
     pub current_turn_id: Option<String>,
     pub last_error: Option<String>,
+    pub connected_at_ms: Option<u128>,
+    pub last_ws_inbound_at_ms: Option<u128>,
+    pub last_ws_ping_at_ms: Option<u128>,
+    pub last_ws_pong_at_ms: Option<u128>,
+    pub last_app_ping_at_ms: Option<u128>,
+    pub last_app_pong_at_ms: Option<u128>,
+    pub last_app_pong_status: Option<String>,
+    pub last_initialize_sent_at_ms: Option<u128>,
     pub outbound_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::remote_control_backend::OutboundWsMessage>,
     >,
@@ -95,6 +104,14 @@ impl RemoteControlState {
                 current_thread_id: None,
                 current_turn_id: None,
                 last_error: None,
+                connected_at_ms: None,
+                last_ws_inbound_at_ms: None,
+                last_ws_ping_at_ms: None,
+                last_ws_pong_at_ms: None,
+                last_app_ping_at_ms: None,
+                last_app_pong_at_ms: None,
+                last_app_pong_status: None,
+                last_initialize_sent_at_ms: None,
                 outbound_tx: None,
                 connection_epoch: 0,
                 next_seq_id: 1,
@@ -137,6 +154,34 @@ pub struct TelegramState {
     pub last_inbound_at_ms: Option<u128>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImAccountRuntimeState {
+    pub platform: ImPlatformKind,
+    pub account_id: String,
+    pub connecting: bool,
+    pub polling: bool,
+    pub connected: bool,
+    pub last_error: Option<String>,
+    pub last_event_at_ms: Option<u128>,
+    pub last_inbound_at_ms: Option<u128>,
+}
+
+impl ImAccountRuntimeState {
+    pub fn new(platform: ImPlatformKind, account_id: impl Into<String>) -> Self {
+        Self {
+            platform,
+            account_id: account_id.into(),
+            connecting: false,
+            polling: false,
+            connected: false,
+            last_error: None,
+            last_event_at_ms: None,
+            last_inbound_at_ms: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WechatOnboardSession {
     pub session_key: String,
@@ -163,6 +208,7 @@ impl AppState {
             feishu_ws: Mutex::new(FeishuWsState::default()),
             telegram: Mutex::new(TelegramState::default()),
             wechat: Mutex::new(WechatState::default()),
+            im_accounts: Mutex::new(HashMap::new()),
             wechat_onboard: Mutex::new(None),
             shutdown_tx: Mutex::new(shutdown_tx),
         })
@@ -216,4 +262,8 @@ impl AppState {
             false
         }
     }
+}
+
+pub fn im_account_key(platform: ImPlatformKind, account_id: &str) -> String {
+    format!("{}:{}", platform.key(), account_id.trim())
 }

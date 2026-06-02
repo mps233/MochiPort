@@ -7,6 +7,9 @@ use crate::im_runtime::ApprovalDecisionOption;
 const DEFAULT_CARD_TEMPLATE: &str = "blue";
 const APPROVAL_CARD_TEMPLATE: &str = "orange";
 pub const FEISHU_CARDKIT_STREAMING_ELEMENT_ID: &str = "streaming_content";
+const FEISHU_STREAMING_COMMAND_COMMAND_CHARS: usize = 600;
+const FEISHU_STREAMING_COMMAND_OUTPUT_CHARS: usize = 2400;
+const FEISHU_STREAMING_COMMAND_META_CHARS: usize = 320;
 
 fn normalize_card_markdown(text: &str) -> String {
     text.replace("\r\n", "\n").trim().to_string()
@@ -1994,7 +1997,8 @@ pub fn build_streaming_command_card(text: &str, is_completed: bool) -> serde_jso
         command_text
     };
     let title = summarize_command_header(&command_line);
-    let output = output_text;
+    let command_line = truncate_text(&command_line, FEISHU_STREAMING_COMMAND_COMMAND_CHARS);
+    let output = truncate_text(&output_text, FEISHU_STREAMING_COMMAND_OUTPUT_CHARS);
     let status_text = if !meta_text.is_empty() {
         meta_text
     } else if is_completed {
@@ -2002,6 +2006,7 @@ pub fn build_streaming_command_card(text: &str, is_completed: bool) -> serde_jso
     } else {
         "Status: in_progress".to_string()
     };
+    let status_text = truncate_text(&status_text, FEISHU_STREAMING_COMMAND_META_CHARS);
     serde_json::json!({
         "schema": "2.0",
         "config": {

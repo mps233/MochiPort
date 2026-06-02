@@ -14,6 +14,9 @@ pub struct AppConfig {
     pub feishu: FeishuConfig,
     pub telegram: TelegramConfig,
     pub wechat: WechatConfig,
+    pub feishu_accounts: Vec<FeishuConfig>,
+    pub telegram_accounts: Vec<TelegramConfig>,
+    pub wechat_accounts: Vec<WechatConfig>,
     pub bridge: BridgeConfig,
 }
 
@@ -21,6 +24,7 @@ pub struct AppConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct FeishuConfig {
     pub enabled: bool,
+    pub account_id: String,
     pub app_id: String,
     pub app_secret: String,
     pub display_name: String,
@@ -33,6 +37,7 @@ pub struct FeishuConfig {
 #[serde(default, rename_all = "camelCase")]
 pub struct TelegramConfig {
     pub enabled: bool,
+    pub account_id: String,
     #[serde(alias = "bot_token")]
     pub bot_token: String,
     pub display_name: String,
@@ -71,6 +76,9 @@ impl Default for AppConfig {
             feishu: FeishuConfig::default(),
             telegram: TelegramConfig::default(),
             wechat: WechatConfig::default(),
+            feishu_accounts: Vec::new(),
+            telegram_accounts: Vec::new(),
+            wechat_accounts: Vec::new(),
             bridge: BridgeConfig::default(),
         }
     }
@@ -80,6 +88,7 @@ impl Default for FeishuConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            account_id: String::new(),
             app_id: String::new(),
             app_secret: String::new(),
             display_name: String::new(),
@@ -94,6 +103,7 @@ impl Default for TelegramConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            account_id: String::new(),
             bot_token: String::new(),
             display_name: String::new(),
             mention_only: false,
@@ -129,12 +139,17 @@ impl Default for BridgeConfig {
 
 impl AppConfig {
     pub fn apply_platform_defaults(&mut self) -> bool {
+        let mut changed = false;
         if self.bind == LEGACY_DEFAULT_BIND {
             self.bind = DEFAULT_BIND.to_string();
-            return true;
+            changed = true;
         }
 
-        false
+        if self.migrate_legacy_im_accounts() {
+            changed = true;
+        }
+
+        changed
     }
 
     pub fn remote_control_base_url(&self) -> String {
@@ -173,4 +188,269 @@ impl AppConfig {
         std::fs::write(path, raw)
             .with_context(|| format!("failed to write config {}", path.display()))
     }
+
+    pub fn migrate_legacy_im_accounts(&mut self) -> bool {
+        let mut changed = false;
+        if self.feishu_accounts.is_empty() && self.feishu.is_configured() {
+            let mut account = self.feishu.clone();
+            if account.account_id.trim().is_empty() {
+                account.account_id = non_empty(&self.bridge.account_id)
+                    .or_else(|| non_empty(&account.app_id))
+                    .unwrap_or_else(|| "default".to_string());
+            }
+            self.feishu_accounts.push(account);
+            changed = true;
+        }
+        if self.telegram_accounts.is_empty() && self.telegram.is_configured() {
+            let mut account = self.telegram.clone();
+            if account.account_id.trim().is_empty() {
+                account.account_id = "telegram".to_string();
+            }
+            self.telegram_accounts.push(account);
+            changed = true;
+        }
+        if self.wechat_accounts.is_empty() && self.wechat.is_configured() {
+            let mut account = self.wechat.clone();
+            if account.account_id.trim().is_empty() {
+                account.account_id = "wechat".to_string();
+            }
+            self.wechat_accounts.push(account);
+            changed = true;
+        }
+        changed
+    }
+
+    pub fn effective_feishu_accounts(&self) -> Vec<FeishuConfig> {
+        effective_accounts(&self.feishu_accounts, &self.feishu, |account| {
+            account.is_configured()
+        })
+        .into_iter()
+        .map(|mut account| {
+            if account.account_id.trim().is_empty() {
+                account.account_id =
+                    non_empty(&account.app_id).unwrap_or_else(|| "default".to_string());
+            }
+            account
+        })
+        .collect()
+    }
+
+    pub fn feishu_account(&self, account_id: &str) -> Option<FeishuConfig> {
+        find_account(&self.effective_feishu_accounts(), account_id, |account| {
+            account.account_id.as_str()
+        })
+    }
+
+    pub fn effective_telegram_accounts(&self) -> Vec<TelegramConfig> {
+        effective_accounts(&self.telegram_accounts, &self.telegram, |account| {
+            account.is_configured()
+        })
+        .into_iter()
+        .map(|mut account| {
+            if account.account_id.trim().is_empty() {
+                account.account_id = "telegram".to_string();
+            }
+            account
+        })
+        .collect()
+    }
+
+    pub fn telegram_account(&self, account_id: &str) -> Option<TelegramConfig> {
+        find_account(&self.effective_telegram_accounts(), account_id, |account| {
+            account.account_id.as_str()
+        })
+    }
+
+    pub fn effective_wechat_accounts(&self) -> Vec<WechatConfig> {
+        effective_accounts(&self.wechat_accounts, &self.wechat, |account| {
+            account.is_configured()
+        })
+        .into_iter()
+        .map(|mut account| {
+            if account.account_id.trim().is_empty() {
+                account.account_id = "wechat".to_string();
+            }
+            account
+        })
+        .collect()
+    }
+
+    pub fn wechat_account(&self, account_id: &str) -> Option<WechatConfig> {
+        find_account(&self.effective_wechat_accounts(), account_id, |account| {
+            account.account_id.as_str()
+        })
+    }
+
+    pub fn upsert_feishu_account(&mut self, account: FeishuConfig) {
+        upsert_account(&mut self.feishu_accounts, account, |account| {
+            account.account_id.as_str()
+        });
+    }
+
+    pub fn upsert_telegram_account(&mut self, account: TelegramConfig) {
+        upsert_account(&mut self.telegram_accounts, account, |account| {
+            account.account_id.as_str()
+        });
+    }
+
+    pub fn upsert_wechat_account(&mut self, account: WechatConfig) {
+        upsert_account(&mut self.wechat_accounts, account, |account| {
+            account.account_id.as_str()
+        });
+    }
+
+    pub fn remove_im_account(&mut self, platform: &str, account_id: &str) -> bool {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return false;
+        }
+        match platform.trim().to_ascii_lowercase().as_str() {
+            "feishu" => remove_account(&mut self.feishu_accounts, account_id, |account| {
+                account.account_id.as_str()
+            }),
+            "telegram" => remove_account(&mut self.telegram_accounts, account_id, |account| {
+                account.account_id.as_str()
+            }),
+            "wechat" => remove_account(&mut self.wechat_accounts, account_id, |account| {
+                account.account_id.as_str()
+            }),
+            _ => false,
+        }
+    }
+
+    pub fn set_im_account_enabled(
+        &mut self,
+        platform: &str,
+        account_id: &str,
+        enabled: bool,
+    ) -> bool {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return false;
+        }
+        match platform.trim().to_ascii_lowercase().as_str() {
+            "feishu" => set_account_enabled(
+                &mut self.feishu_accounts,
+                account_id,
+                enabled,
+                |account| account.account_id.as_str(),
+                |account| &mut account.enabled,
+            ),
+            "telegram" => set_account_enabled(
+                &mut self.telegram_accounts,
+                account_id,
+                enabled,
+                |account| account.account_id.as_str(),
+                |account| &mut account.enabled,
+            ),
+            "wechat" => set_account_enabled(
+                &mut self.wechat_accounts,
+                account_id,
+                enabled,
+                |account| account.account_id.as_str(),
+                |account| &mut account.enabled,
+            ),
+            _ => false,
+        }
+    }
+}
+
+impl FeishuConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.app_id.trim().is_empty() && !self.app_secret.trim().is_empty()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.is_configured()
+    }
+}
+
+impl TelegramConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.bot_token.trim().is_empty()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.is_configured()
+    }
+}
+
+impl WechatConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.bot_token.trim().is_empty()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.is_configured()
+    }
+}
+
+fn effective_accounts<T: Clone>(
+    accounts: &[T],
+    legacy: &T,
+    configured: impl Fn(&T) -> bool,
+) -> Vec<T> {
+    if !accounts.is_empty() {
+        accounts.to_vec()
+    } else if configured(legacy) {
+        vec![legacy.clone()]
+    } else {
+        Vec::new()
+    }
+}
+
+fn upsert_account<T>(accounts: &mut Vec<T>, account: T, account_id: impl Fn(&T) -> &str) {
+    let id = account_id(&account).trim().to_string();
+    if let Some(existing) = accounts
+        .iter_mut()
+        .find(|existing| account_id(existing).trim() == id)
+    {
+        *existing = account;
+    } else {
+        accounts.push(account);
+    }
+}
+
+fn remove_account<T>(
+    accounts: &mut Vec<T>,
+    account_id: &str,
+    get_account_id: impl Fn(&T) -> &str,
+) -> bool {
+    let before = accounts.len();
+    accounts.retain(|account| get_account_id(account).trim() != account_id);
+    accounts.len() != before
+}
+
+fn set_account_enabled<T>(
+    accounts: &mut [T],
+    account_id: &str,
+    enabled: bool,
+    get_account_id: impl Fn(&T) -> &str,
+    get_enabled: impl Fn(&mut T) -> &mut bool,
+) -> bool {
+    let Some(account) = accounts
+        .iter_mut()
+        .find(|account| get_account_id(account).trim() == account_id)
+    else {
+        return false;
+    };
+    *get_enabled(account) = enabled;
+    true
+}
+
+fn find_account<T: Clone>(
+    accounts: &[T],
+    account_id: &str,
+    get_account_id: impl Fn(&T) -> &str,
+) -> Option<T> {
+    let account_id = account_id.trim();
+    accounts
+        .iter()
+        .find(|account| get_account_id(account).trim() == account_id)
+        .cloned()
+}
+
+fn non_empty(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }

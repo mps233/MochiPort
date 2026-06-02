@@ -4,5 +4,4 @@ pub mod adapter;
 pub mod api;
 pub mod flow;
 pub mod polling;
-pub mod renderer;
 pub mod types;

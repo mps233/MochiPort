@@ -13,10 +13,10 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use tracing::{info, warn};
 
 use crate::{
-    app_state::SharedState,
+    app_state::{ImAccountRuntimeState, SharedState, im_account_key},
     types::{
         ChatType, ImPlatformKind, InboundAction, InboundAttachment, InboundMessage,
-        ThreadRouteDirection,
+        ThreadRouteDirection, now_ms,
     },
 };
 
@@ -153,6 +153,7 @@ pub async fn listen_ws(
         ws.connected = true;
         ws.last_error = None;
     }
+    set_account_ws_state(&state, &account_id, false, true, None).await;
     state
         .push_event(
             "info",
@@ -331,7 +332,12 @@ async fn handle_event(
         )
         .await;
 
-    let settings = state.config.lock().await.feishu.clone();
+    let settings = state
+        .config
+        .lock()
+        .await
+        .feishu_account(account_id)
+        .unwrap_or_default();
     if !settings.allowed_open_ids.is_empty() && !settings.allowed_open_ids.contains(&sender_id) {
         state
             .push_event(
@@ -380,6 +386,7 @@ async fn handle_event(
         return Ok(());
     }
 
+    update_last_inbound(state, account_id).await;
     tx.send(InboundMessage {
         platform: ImPlatformKind::Feishu,
         account_id: account_id.to_string(),
@@ -414,7 +421,12 @@ async fn handle_card_action_event(
         .open_id
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
-    let settings = state.config.lock().await.feishu.clone();
+    let settings = state
+        .config
+        .lock()
+        .await
+        .feishu_account(account_id)
+        .unwrap_or_default();
     if !settings.allowed_open_ids.is_empty() && !settings.allowed_open_ids.contains(&sender_id) {
         state
             .push_event(
@@ -591,6 +603,7 @@ async fn handle_card_action_event(
             return Ok(());
         }
     };
+    update_last_inbound(state, account_id).await;
     tx.send(InboundMessage {
         platform: ImPlatformKind::Feishu,
         account_id: account_id.to_string(),
@@ -641,6 +654,37 @@ fn first_form_string(value: &serde_json::Value) -> Option<String> {
     value
         .as_array()
         .and_then(|items| items.iter().find_map(first_form_string))
+}
+
+pub(crate) async fn set_account_ws_state(
+    state: &SharedState,
+    account_id: &str,
+    connecting: bool,
+    connected: bool,
+    last_error: Option<String>,
+) {
+    let now = now_ms();
+    let key = im_account_key(ImPlatformKind::Feishu, account_id);
+    let mut accounts = state.im_accounts.lock().await;
+    let entry = accounts
+        .entry(key)
+        .or_insert_with(|| ImAccountRuntimeState::new(ImPlatformKind::Feishu, account_id));
+    entry.connecting = connecting;
+    entry.polling = false;
+    entry.connected = connected;
+    entry.last_error = last_error;
+    entry.last_event_at_ms = Some(now);
+}
+
+async fn update_last_inbound(state: &SharedState, account_id: &str) {
+    let now = now_ms();
+    let key = im_account_key(ImPlatformKind::Feishu, account_id);
+    let mut accounts = state.im_accounts.lock().await;
+    let entry = accounts
+        .entry(key)
+        .or_insert_with(|| ImAccountRuntimeState::new(ImPlatformKind::Feishu, account_id));
+    entry.last_event_at_ms = Some(now);
+    entry.last_inbound_at_ms = Some(now);
 }
 
 fn service_id_from_ws_url(wss_url: &str) -> i32 {

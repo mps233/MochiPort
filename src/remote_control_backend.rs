@@ -24,21 +24,27 @@ use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
 use crate::{
-    app_state::{AuthorizedRemoteControlClient, SharedState},
+    app_state::{AuthorizedRemoteControlClient, RemoteControlInner, SharedState},
     chain_log,
     codex::CodexNotification,
-    types::InboundAttachment,
+    types::{InboundAttachment, now_ms},
 };
 
 static REMOTE_REQUEST_ID: AtomicU64 = AtomicU64::new(200_000);
 const PROTOCOL_VERSION: &str = "3";
 const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
+const REMOTE_DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL: Duration = Duration::from_secs(10);
+const REMOTE_CONTROL_APP_PING_INTERVAL: Duration = Duration::from_secs(10);
+const REMOTE_CONTROL_PONG_TIMEOUT: Duration = Duration::from_secs(60);
+const REMOTE_CONTROL_STALE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const FEISHU_BRIDGE_CLIENT_ID: &str = "codex-remote-feishu";
 const FEISHU_BRIDGE_ENV_ID: &str = "env_codex_remote_feishu_bridge";
 const FEISHU_BRIDGE_INSTALLATION_ID: &str = "codex-remote-feishu-bridge";
 
 pub(crate) enum OutboundWsMessage {
     Text(Value),
+    Ping(axum::body::Bytes),
     Pong(axum::body::Bytes),
 }
 
@@ -57,6 +63,16 @@ pub struct RemoteControlStatusResponse {
     pub current_thread_id: Option<String>,
     pub current_turn_id: Option<String>,
     pub last_error: Option<String>,
+    pub healthy: bool,
+    pub stale: bool,
+    pub connected_at_ms: Option<u128>,
+    pub last_ws_inbound_at_ms: Option<u128>,
+    pub last_ws_ping_at_ms: Option<u128>,
+    pub last_ws_pong_at_ms: Option<u128>,
+    pub last_app_ping_at_ms: Option<u128>,
+    pub last_app_pong_at_ms: Option<u128>,
+    pub last_app_pong_status: Option<String>,
+    pub last_initialize_sent_at_ms: Option<u128>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,6 +316,8 @@ pub async fn status(State(state): State<SharedState>) -> Json<RemoteControlStatu
 
 pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse {
     let remote = state.remote_control.inner.lock().await;
+    let stale = remote_control_stale_reason_locked(&remote, now_ms()).is_some();
+    let healthy = remote.connected && remote.initialized && !stale;
     RemoteControlStatusResponse {
         connected: remote.connected,
         initialized: remote.initialized,
@@ -313,7 +331,63 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
         current_thread_id: remote.current_thread_id.clone(),
         current_turn_id: remote.current_turn_id.clone(),
         last_error: remote.last_error.clone(),
+        healthy,
+        stale,
+        connected_at_ms: remote.connected_at_ms,
+        last_ws_inbound_at_ms: remote.last_ws_inbound_at_ms,
+        last_ws_ping_at_ms: remote.last_ws_ping_at_ms,
+        last_ws_pong_at_ms: remote.last_ws_pong_at_ms,
+        last_app_ping_at_ms: remote.last_app_ping_at_ms,
+        last_app_pong_at_ms: remote.last_app_pong_at_ms,
+        last_app_pong_status: remote.last_app_pong_status.clone(),
+        last_initialize_sent_at_ms: remote.last_initialize_sent_at_ms,
     }
+}
+
+fn remote_control_stale_reason_locked(remote: &RemoteControlInner, now_ms: u128) -> Option<String> {
+    if !remote.connected {
+        return None;
+    }
+    let timeout_ms = REMOTE_CONTROL_PONG_TIMEOUT.as_millis();
+    let initialize_started_at_ms = remote.last_initialize_sent_at_ms.or(remote.connected_at_ms);
+    if !remote.initialized
+        && initialize_started_at_ms
+            .is_some_and(|started_at_ms| now_ms.saturating_sub(started_at_ms) >= timeout_ms)
+    {
+        return Some(format!(
+            "remote-control initialize timed out after {}s",
+            REMOTE_CONTROL_PONG_TIMEOUT.as_secs()
+        ));
+    }
+    if let Some(last_ping_at_ms) = remote.last_ws_ping_at_ms {
+        let last_pong_or_connect_at_ms = remote
+            .last_ws_pong_at_ms
+            .or(remote.connected_at_ms)
+            .unwrap_or(last_ping_at_ms);
+        if last_ping_at_ms > last_pong_or_connect_at_ms
+            && now_ms.saturating_sub(last_pong_or_connect_at_ms) >= timeout_ms
+        {
+            return Some(format!(
+                "websocket pong timed out after {}s",
+                REMOTE_CONTROL_PONG_TIMEOUT.as_secs()
+            ));
+        }
+    }
+    if let Some(last_ping_at_ms) = remote.last_app_ping_at_ms {
+        let last_pong_or_connect_at_ms = remote
+            .last_app_pong_at_ms
+            .or(remote.connected_at_ms)
+            .unwrap_or(last_ping_at_ms);
+        if last_ping_at_ms > last_pong_or_connect_at_ms
+            && now_ms.saturating_sub(last_pong_or_connect_at_ms) >= timeout_ms
+        {
+            return Some(format!(
+                "remote-control app ping timed out after {}s",
+                REMOTE_CONTROL_PONG_TIMEOUT.as_secs()
+            ));
+        }
+    }
+    None
 }
 
 async fn accounts_check() -> Json<Value> {
@@ -1104,6 +1178,9 @@ async fn websocket(
                     remote.initialized = false;
                     remote.outbound_tx = None;
                     remote.last_error = Some(message.clone());
+                    remote.pending.clear();
+                    remote.client_request_methods.clear();
+                    remote.client_request_thread_ids.clear();
                 }
                 state
                     .push_event("error", "remote_control_ws_failed", message)
@@ -1121,9 +1198,9 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     let account_id = header_str(&headers, "chatgpt-account-id");
     let (outbound_tx, mut outbound_rx) =
         tokio::sync::mpsc::unbounded_channel::<OutboundWsMessage>();
-    let initial_outbound_tx = outbound_tx.clone();
     let (connection_epoch, client_id, stream_id) = {
         let mut remote = state.remote_control.inner.lock().await;
+        let connected_at_ms = now_ms();
         remote.connected = true;
         remote.initialized = false;
         remote.connection_epoch = remote.connection_epoch.saturating_add(1);
@@ -1135,6 +1212,14 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         remote.installation_id = installation_id.clone().or(remote.installation_id.clone());
         remote.account_id = account_id.clone().or(remote.account_id.clone());
         remote.last_error = None;
+        remote.connected_at_ms = Some(connected_at_ms);
+        remote.last_ws_inbound_at_ms = Some(connected_at_ms);
+        remote.last_ws_ping_at_ms = None;
+        remote.last_ws_pong_at_ms = None;
+        remote.last_app_ping_at_ms = None;
+        remote.last_app_pong_at_ms = None;
+        remote.last_app_pong_status = None;
+        remote.last_initialize_sent_at_ms = None;
         (
             remote.connection_epoch,
             remote.client_id.clone(),
@@ -1178,36 +1263,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     );
 
     let (mut writer, mut reader) = socket.split();
-    let initialize_id = next_request_id();
-    {
-        let mut remote = state.remote_control.inner.lock().await;
-        remote
-            .client_request_methods
-            .insert(initialize_id.to_string(), "initialize".to_string());
-    }
-    let initialize = build_client_envelope(
-        &client_id,
-        Some(&stream_id),
-        next_client_seq_id(&state).await,
-        json!({
-            "id": initialize_id,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {
-                    "name": "codex-remote",
-                    "title": "Codex Remote",
-                    "version": env!("CARGO_PKG_VERSION")
-                },
-                "capabilities": {
-                    "experimentalApi": true,
-                    "requestAttestation": false
-                }
-            }
-        }),
-    );
-    initial_outbound_tx
-        .send(OutboundWsMessage::Text(initialize))
-        .map_err(|_| anyhow!("remote-control outbound channel closed"))?;
+    send_initialize(&state).await?;
 
     let mut writer_task = tokio::spawn(async move {
         while let Some(message) = outbound_rx.recv().await {
@@ -1215,6 +1271,12 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 OutboundWsMessage::Text(value) => {
                     writer
                         .send(Message::Text(value.to_string().into()))
+                        .await
+                        .map_err(|err| anyhow!("remote-control websocket writer failed: {err}"))?;
+                }
+                OutboundWsMessage::Ping(data) => {
+                    writer
+                        .send(Message::Ping(data))
                         .await
                         .map_err(|err| anyhow!("remote-control websocket writer failed: {err}"))?;
                 }
@@ -1231,11 +1293,27 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
 
     let reader_state = state.clone();
     let mut reader_task = tokio::spawn(async move {
-        let mut ping_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut ws_ping_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
+            REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
+        );
+        ws_ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut app_ping_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + REMOTE_CONTROL_APP_PING_INTERVAL,
+            REMOTE_CONTROL_APP_PING_INTERVAL,
+        );
+        app_ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut stale_check_interval = tokio::time::interval(REMOTE_CONTROL_STALE_CHECK_INTERVAL);
+        stale_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut chunks = HashMap::<(String, String, u64), ServerChunkAssembly>::new();
         loop {
             tokio::select! {
-                _ = ping_interval.tick() => {
+                _ = ws_ping_interval.tick() => {
+                    mark_remote_ws_ping(&reader_state, connection_epoch).await;
+                    send_ws_control_ping(&reader_state).await?;
+                }
+                _ = app_ping_interval.tick() => {
+                    mark_remote_app_ping(&reader_state, connection_epoch).await;
                     let envelope = json!(OutgoingClientEnvelope {
                         event: OutgoingClientEvent::Ping,
                         client_id: client_id.clone(),
@@ -1245,18 +1323,30 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                     });
                     send_envelope(&reader_state, envelope).await?;
                 }
+                _ = stale_check_interval.tick() => {
+                    if let Some(reason) = remote_control_stale_reason(&reader_state, connection_epoch).await {
+                        reader_state
+                            .push_event("warn", "remote_control_heartbeat_timeout", reason.clone())
+                            .await;
+                        return Err(anyhow!("remote-control websocket stale: {reason}"));
+                    }
+                }
                 incoming = reader.next() => {
                     let Some(incoming) = incoming else {
                         return Ok(());
                     };
                     match incoming.context("failed to read remote-control websocket")? {
                         Message::Text(text) => {
+                            mark_remote_ws_inbound(&reader_state, connection_epoch).await;
                             handle_server_envelope(&reader_state, connection_epoch, &text, &mut chunks).await?;
                         }
                         Message::Ping(data) => {
+                            mark_remote_ws_inbound(&reader_state, connection_epoch).await;
                             send_ws_control_pong(&reader_state, data).await?;
                         }
-                        Message::Pong(_) => {}
+                        Message::Pong(_) => {
+                            mark_remote_ws_pong(&reader_state, connection_epoch).await;
+                        }
                         Message::Binary(_) => {}
                         Message::Close(_) => return Ok::<(), anyhow::Error>(()),
                     }
@@ -1267,10 +1357,16 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         Ok::<(), anyhow::Error>(())
     });
 
-    tokio::select! {
-        result = &mut writer_task => result??,
-        result = &mut reader_task => result??,
-    }
+    let connection_result: Result<()> = tokio::select! {
+        result = &mut writer_task => match result {
+            Ok(inner) => inner,
+            Err(err) => Err(anyhow!("remote-control websocket writer task failed: {err}")),
+        },
+        result = &mut reader_task => match result {
+            Ok(inner) => inner,
+            Err(err) => Err(anyhow!("remote-control websocket reader task failed: {err}")),
+        },
+    };
 
     writer_task.abort();
     reader_task.abort();
@@ -1280,15 +1376,24 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
             remote.connected = false;
             remote.initialized = false;
             remote.outbound_tx = None;
+            remote.last_error = connection_result.as_ref().err().map(|err| err.to_string());
             remote.pending.clear();
             remote.client_request_methods.clear();
             remote.client_request_thread_ids.clear();
         }
     }
     state
-        .push_event("warn", "remote_control_disconnected", "websocket closed")
+        .push_event(
+            "warn",
+            "remote_control_disconnected",
+            connection_result
+                .as_ref()
+                .err()
+                .map(|err| err.to_string())
+                .unwrap_or_else(|| "websocket closed".to_string()),
+        )
         .await;
-    Ok(())
+    connection_result
 }
 
 async fn handle_server_envelope(
@@ -1431,6 +1536,7 @@ async fn handle_server_envelope(
                 .await;
         }
         IncomingServerEvent::Pong { status } => {
+            observe_remote_app_pong(state, connection_epoch, &status).await?;
             chain_log::write_line(format!(
                 "[remote_control] event=server_pong connection_epoch={} seq_id={} client_id={} stream_id={} status={}",
                 connection_epoch, seq_id, client_id, stream_id, status
@@ -1527,6 +1633,79 @@ async fn current_stream_id(state: &SharedState) -> Option<String> {
     (!stream_id.is_empty()).then_some(stream_id)
 }
 
+async fn mark_remote_ws_inbound(state: &SharedState, connection_epoch: u64) {
+    let mut remote = state.remote_control.inner.lock().await;
+    if remote.connection_epoch == connection_epoch {
+        remote.last_ws_inbound_at_ms = Some(now_ms());
+    }
+}
+
+async fn mark_remote_ws_ping(state: &SharedState, connection_epoch: u64) {
+    let mut remote = state.remote_control.inner.lock().await;
+    if remote.connection_epoch == connection_epoch {
+        remote.last_ws_ping_at_ms = Some(now_ms());
+    }
+}
+
+async fn mark_remote_ws_pong(state: &SharedState, connection_epoch: u64) {
+    let mut remote = state.remote_control.inner.lock().await;
+    if remote.connection_epoch == connection_epoch {
+        let now = now_ms();
+        remote.last_ws_inbound_at_ms = Some(now);
+        remote.last_ws_pong_at_ms = Some(now);
+    }
+}
+
+async fn mark_remote_app_ping(state: &SharedState, connection_epoch: u64) {
+    let mut remote = state.remote_control.inner.lock().await;
+    if remote.connection_epoch == connection_epoch {
+        remote.last_app_ping_at_ms = Some(now_ms());
+    }
+}
+
+async fn observe_remote_app_pong(
+    state: &SharedState,
+    connection_epoch: u64,
+    status: &str,
+) -> Result<()> {
+    let normalized_status = status.trim().to_ascii_lowercase();
+    let should_reinitialize = {
+        let mut remote = state.remote_control.inner.lock().await;
+        if remote.connection_epoch != connection_epoch {
+            return Ok(());
+        }
+        let now = now_ms();
+        remote.last_app_pong_at_ms = Some(now);
+        remote.last_app_pong_status = Some(normalized_status.clone());
+        if normalized_status == "unknown" && remote.initialized {
+            remote.initialized = false;
+            true
+        } else {
+            false
+        }
+    };
+
+    if should_reinitialize {
+        state
+            .push_event(
+                "warn",
+                "remote_control_client_unknown",
+                "app-server reported current remote-control client as unknown; reinitializing",
+            )
+            .await;
+        send_initialize(state).await?;
+    }
+    Ok(())
+}
+
+async fn remote_control_stale_reason(state: &SharedState, connection_epoch: u64) -> Option<String> {
+    let remote = state.remote_control.inner.lock().await;
+    if remote.connection_epoch != connection_epoch {
+        return None;
+    }
+    remote_control_stale_reason_locked(&remote, now_ms())
+}
+
 async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, message: &Value) {
     if !is_active_connection_epoch(state, connection_epoch).await {
         return;
@@ -1603,7 +1782,12 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
         }
         if let Some(result) = message.get("result") {
             if client_method.as_deref() == Some("initialize") {
-                state.remote_control.inner.lock().await.initialized = true;
+                {
+                    let mut remote = state.remote_control.inner.lock().await;
+                    remote.initialized = true;
+                    remote.last_error = None;
+                    remote.last_app_pong_status = Some("active".to_string());
+                }
                 if let Err(err) = send_initialized(state).await {
                     state
                         .push_event(
@@ -1668,10 +1852,18 @@ async fn observe_app_server_message(state: &SharedState, connection_epoch: u64, 
 
     if let Some(method) = message.get("method").and_then(|v| v.as_str()) {
         if method == "initialized" {
-            state.remote_control.inner.lock().await.initialized = true;
+            {
+                let mut remote = state.remote_control.inner.lock().await;
+                remote.initialized = true;
+                remote.last_error = None;
+                remote.last_app_pong_status = Some("active".to_string());
+            }
             state
                 .push_event("info", "remote_control_initialized", "initialized")
                 .await;
+            return;
+        }
+        if method == "item/commandExecution/outputDelta" {
             return;
         }
         let params = message.get("params").cloned();
@@ -1948,6 +2140,52 @@ fn local_chatgpt_jwt(account_id: &str, plan_type: &str) -> String {
     )
 }
 
+async fn send_initialize(state: &SharedState) -> Result<u64> {
+    let initialize_id = next_request_id();
+    let request_key = initialize_id.to_string();
+    let (client_id, stream_id, seq_id) = {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.last_initialize_sent_at_ms = Some(now_ms());
+        remote
+            .client_request_methods
+            .insert(request_key.clone(), "initialize".to_string());
+        let seq_id = remote.next_seq_id;
+        remote.next_seq_id = remote.next_seq_id.saturating_add(1);
+        (remote.client_id.clone(), remote.stream_id.clone(), seq_id)
+    };
+    let initialize = build_client_envelope(
+        &client_id,
+        Some(&stream_id),
+        seq_id,
+        json!({
+            "id": initialize_id,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "codex-remote",
+                    "title": "Codex Remote",
+                    "version": env!("CARGO_PKG_VERSION")
+                },
+                "capabilities": {
+                    "experimentalApi": true,
+                    "requestAttestation": false
+                }
+            }
+        }),
+    );
+    if let Err(err) = send_envelope(state, initialize).await {
+        state
+            .remote_control
+            .inner
+            .lock()
+            .await
+            .client_request_methods
+            .remove(&request_key);
+        return Err(err);
+    }
+    Ok(initialize_id)
+}
+
 async fn send_initialized(state: &SharedState) -> Result<()> {
     send_raw_message(
         state,
@@ -1991,6 +2229,15 @@ async fn mark_thread_active(state: &SharedState, thread_id: &str) {
 }
 
 pub async fn request(state: &SharedState, method: &str, params: Value) -> Result<Value> {
+    request_with_timeout(state, method, params, REMOTE_REQUEST_TIMEOUT).await
+}
+
+async fn request_with_timeout(
+    state: &SharedState,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
     let id = next_request_id();
     let request_key = id.to_string();
     let method_name = method.to_string();
@@ -2005,6 +2252,12 @@ pub async fn request(state: &SharedState, method: &str, params: Value) -> Result
         if !remote.initialized {
             return Err(anyhow!(
                 "Codex app-server remote-control 已连接，但还没有完成初始化。请稍等几秒后重试；如果一直如此，请在 Codex App 里关闭再打开 remote-control。"
+            ));
+        }
+        if let Some(reason) = remote_control_stale_reason_locked(&remote, now_ms()) {
+            remote.last_error = Some(reason.clone());
+            return Err(anyhow!(
+                "Codex app-server remote-control 连接已失活：{reason}。请稍等自动重连后重试。"
             ));
         }
         remote.pending.insert(request_key.clone(), tx);
@@ -2029,7 +2282,7 @@ pub async fn request(state: &SharedState, method: &str, params: Value) -> Result
         remote.client_request_thread_ids.remove(&request_key);
         return Err(err);
     }
-    match tokio::time::timeout(REMOTE_REQUEST_TIMEOUT, rx).await {
+    match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(result)) => result,
         Ok(Err(_)) => Err(anyhow!("remote-control response channel closed")),
         Err(_) => {
@@ -2047,7 +2300,7 @@ pub async fn request(state: &SharedState, method: &str, params: Value) -> Result
                         "method={} id={} timeout_secs={}",
                         method_name,
                         id,
-                        REMOTE_REQUEST_TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ),
                 )
                 .await;
@@ -2055,7 +2308,7 @@ pub async fn request(state: &SharedState, method: &str, params: Value) -> Result
                 "remote-control request timed out: method={} id={} after {}s",
                 method_name,
                 id,
-                REMOTE_REQUEST_TIMEOUT.as_secs()
+                timeout.as_secs()
             ))
         }
     }
@@ -2172,7 +2425,13 @@ pub async fn thread_list(
     if let Some(model_provider) = non_empty(model_provider) {
         params["modelProviders"] = json!([model_provider]);
     }
-    request(state, "thread/list", params).await
+    request_with_timeout(
+        state,
+        "thread/list",
+        params,
+        REMOTE_DISCOVERY_REQUEST_TIMEOUT,
+    )
+    .await
 }
 
 pub async fn thread_loaded_list(
@@ -2187,7 +2446,13 @@ pub async fn thread_loaded_list(
     if let Some(limit) = limit {
         params["limit"] = json!(limit);
     }
-    request(state, "thread/loaded/list", params).await
+    request_with_timeout(
+        state,
+        "thread/loaded/list",
+        params,
+        REMOTE_DISCOVERY_REQUEST_TIMEOUT,
+    )
+    .await
 }
 
 pub async fn resume_thread(
@@ -2344,6 +2609,27 @@ async fn send_envelope(state: &SharedState, envelope: Value) -> Result<()> {
     Ok(())
 }
 
+async fn send_ws_control_ping(state: &SharedState) -> Result<()> {
+    chain_log::write_line("[remote_control] event=client_ping payload_len=0".to_string());
+    info!(
+        target: "codex_remote::remote_control",
+        event = "remote_control_client_ping",
+        payload_len = 0usize,
+        "remote-control client ping"
+    );
+    let outbound_tx = {
+        let remote = state.remote_control.inner.lock().await;
+        remote
+            .outbound_tx
+            .clone()
+            .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
+    };
+    outbound_tx
+        .send(OutboundWsMessage::Ping(axum::body::Bytes::new()))
+        .map_err(|_| anyhow!("remote-control outbound channel closed"))?;
+    Ok(())
+}
+
 async fn send_ws_control_pong(state: &SharedState, data: axum::body::Bytes) -> Result<()> {
     chain_log::write_line(format!(
         "[remote_control] event=client_pong payload_len={}",
@@ -2366,13 +2652,6 @@ async fn send_ws_control_pong(state: &SharedState, data: axum::body::Bytes) -> R
         .send(OutboundWsMessage::Pong(data))
         .map_err(|_| anyhow!("remote-control outbound channel closed"))?;
     Ok(())
-}
-
-async fn next_client_seq_id(state: &SharedState) -> u64 {
-    let mut remote = state.remote_control.inner.lock().await;
-    let seq_id = remote.next_seq_id;
-    remote.next_seq_id = remote.next_seq_id.saturating_add(1);
-    seq_id
 }
 
 fn send_client_message(

@@ -5,8 +5,11 @@ use tokio::sync::mpsc;
 
 use crate::{
     app_state::SharedState,
-    im::telegram::{adapter::TelegramAdapter, api::TelegramApi},
-    im::wechat::{adapter::WechatAdapter, api::WechatApi},
+    im::{
+        core::accounts::ImApiRegistry,
+        telegram::{adapter::TelegramAdapter, api::TelegramApi},
+        wechat::{adapter::WechatAdapter, api::WechatApi},
+    },
     im_runtime::RouteTarget,
     types::ImPlatformKind,
 };
@@ -62,19 +65,19 @@ impl ImOutboundSender {
 
 pub(crate) async fn run_worker(
     state: SharedState,
-    telegram_api: TelegramApi,
-    wechat_api: WechatApi,
+    api_registry: ImApiRegistry,
     mut receiver: ImOutboundReceiver,
 ) {
     while let Some(message) = receiver.receiver.recv().await {
-        if !outbound_channel_enabled(&state, message.route.platform).await {
+        if !outbound_channel_enabled(&state, &message.route).await {
             state
                 .push_event(
                     "warn",
-                    "im_outbound_channel_disabled",
+                    "im_outbound_account_disabled",
                     format!(
-                        "platform={} thread={} chat={}",
+                        "platform={} account={} thread={} chat={}",
                         message.route.platform.key(),
+                        message.route.account_id,
                         message.thread_id,
                         message.route.chat_id
                     ),
@@ -84,10 +87,18 @@ pub(crate) async fn run_worker(
         }
         match message.route.platform {
             ImPlatformKind::Telegram => {
-                send_telegram_outbound(&state, &telegram_api, message).await;
+                let Some(api) = api_registry.telegram_for_route(&message.route) else {
+                    log_missing_api(&state, &message).await;
+                    continue;
+                };
+                send_telegram_outbound(&state, &api, message).await;
             }
             ImPlatformKind::Wechat => {
-                send_wechat_outbound(&state, &wechat_api, message).await;
+                let Some(api) = api_registry.wechat_for_route(&message.route) else {
+                    log_missing_api(&state, &message).await;
+                    continue;
+                };
+                send_wechat_outbound(&state, &api, message).await;
             }
             ImPlatformKind::Feishu => {
                 state
@@ -112,13 +123,35 @@ pub(crate) async fn run_worker(
         .await;
 }
 
-async fn outbound_channel_enabled(state: &SharedState, platform: ImPlatformKind) -> bool {
+async fn outbound_channel_enabled(state: &SharedState, route: &RouteTarget) -> bool {
     let config = state.config.lock().await;
-    match platform {
-        ImPlatformKind::Feishu => config.feishu.enabled,
-        ImPlatformKind::Telegram => config.telegram.enabled,
-        ImPlatformKind::Wechat => config.wechat.enabled,
+    match route.platform {
+        ImPlatformKind::Feishu => config
+            .feishu_account(&route.account_id)
+            .is_some_and(|account| account.is_active()),
+        ImPlatformKind::Telegram => config
+            .telegram_account(&route.account_id)
+            .is_some_and(|account| account.is_active()),
+        ImPlatformKind::Wechat => config
+            .wechat_account(&route.account_id)
+            .is_some_and(|account| account.is_active()),
     }
+}
+
+async fn log_missing_api(state: &SharedState, message: &ImOutboundMessage) {
+    state
+        .push_event(
+            "error",
+            "im_outbound_api_missing",
+            format!(
+                "platform={} account={} thread={} chat={}",
+                message.route.platform.key(),
+                message.route.account_id,
+                message.thread_id,
+                message.route.chat_id
+            ),
+        )
+        .await;
 }
 
 async fn send_telegram_outbound(

@@ -5,14 +5,21 @@ use crate::app_state::SharedState;
 pub(crate) async fn local_bot_tokens(state: &SharedState) -> Vec<String> {
     let config = state.config.lock().await;
     config
-        .wechat
-        .bot_token
-        .trim()
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .effective_wechat_accounts()
+        .into_iter()
+        .flat_map(|account| {
+            account
+                .bot_token
+                .trim()
+                .split(',')
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter_map(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        })
         .take(10)
-        .map(str::to_string)
         .collect()
 }
 

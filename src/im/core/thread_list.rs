@@ -6,7 +6,9 @@ use crate::{
         ThreadListEntry, build_thread_entries, load_codex_app_model_provider,
         next_thread_routing_request_id,
     },
-    im_runtime::{RouteTarget, ThreadCreateDraftState, ThreadRoutingRequestState},
+    im_runtime::{
+        RouteTarget, ThreadCreateDraftState, ThreadRoutingRequestState, ThreadRoutingStage,
+    },
     remote_control_backend,
 };
 
@@ -38,6 +40,7 @@ impl ThreadRoutingPage {
             account_id: route.account_id.clone(),
             chat_id: route.chat_id.clone(),
             message_id: Some(message_id),
+            stage: ThreadRoutingStage::ResumeList,
             page: self.page,
             page_cursors: self.page_cursors,
             thread_ids_by_page: self.thread_ids_by_page,
@@ -70,8 +73,24 @@ pub(crate) async fn load_thread_routing_page(
     }
     page_cursors[page - 1] = cursor.map(str::to_string);
 
-    let loaded =
-        remote_control_backend::thread_loaded_list(state, None, Some(THREAD_LOADED_LIMIT)).await?;
+    let loaded_ids =
+        match remote_control_backend::thread_loaded_list(state, None, Some(THREAD_LOADED_LIMIT))
+            .await
+        {
+            Ok(loaded) => loaded
+                .get("data")
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str().map(str::to_string))
+                .collect::<Vec<_>>(),
+            Err(err) => {
+                state
+                    .push_event("warn", "thread_loaded_list_failed", err.to_string())
+                    .await;
+                Vec::new()
+            }
+        };
     let model_provider_filter = load_codex_app_model_provider();
     let history = remote_control_backend::thread_list(
         state,
@@ -81,13 +100,6 @@ pub(crate) async fn load_thread_routing_page(
         model_provider_filter.as_deref(),
     )
     .await?;
-    let loaded_ids = loaded
-        .get("data")
-        .and_then(|v| v.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.as_str().map(str::to_string))
-        .collect::<Vec<_>>();
     let history_threads = history
         .get("data")
         .and_then(|v| v.as_array())
@@ -144,6 +156,7 @@ pub(crate) fn empty_thread_routing_request(
         account_id: route.account_id.clone(),
         chat_id: route.chat_id.clone(),
         message_id: Some(message_id),
+        stage: ThreadRoutingStage::Choice,
         page: 1,
         page_cursors: vec![None],
         thread_ids_by_page: vec![vec![]],

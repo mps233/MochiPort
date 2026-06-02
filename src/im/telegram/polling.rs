@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    app_state::SharedState,
+    app_state::{ImAccountRuntimeState, SharedState, im_account_key},
     types::{
         ChatType, ImPlatformKind, InboundAction, InboundMessage, ThreadRouteDirection, now_ms,
     },
@@ -14,7 +14,6 @@ use super::{
     types::TelegramSettings,
 };
 
-const TELEGRAM_ACCOUNT_ID: &str = "telegram";
 const TELEGRAM_LONG_POLL_TIMEOUT_SECONDS: u32 = 25;
 const TELEGRAM_STARTUP_PROBE_RETRY_SECONDS: u64 = 5;
 const TELEGRAM_CONFLICT_BACKOFF_SECONDS: u64 = 35;
@@ -25,8 +24,9 @@ pub async fn listen_polling(
     api: TelegramApi,
     tx: mpsc::Sender<InboundMessage>,
 ) -> Result<()> {
+    let account_id = api.settings().account_id();
     let mut offset = None;
-    set_polling_state(&state, true, false, None).await;
+    set_polling_state(&state, &account_id, true, false, None).await;
     claim_polling_slot(&state, &api, &mut offset).await;
     loop {
         let updates = match api
@@ -35,11 +35,11 @@ pub async fn listen_polling(
         {
             Ok(updates) => updates,
             Err(err) => {
-                handle_polling_error(&state, &err).await;
+                handle_polling_error(&state, &account_id, &err).await;
                 continue;
             }
         };
-        set_polling_state(&state, true, true, None).await;
+        set_polling_state(&state, &account_id, true, true, None).await;
         let update_count = updates.len();
         for update in updates {
             offset = Some(update.update_id + 1);
@@ -52,7 +52,7 @@ pub async fn listen_polling(
                     tx.send(inbound)
                         .await
                         .map_err(|_| anyhow::anyhow!("telegram inbound pump closed"))?;
-                    update_last_inbound(&state).await;
+                    update_last_inbound(&state, &account_id).await;
                 } else {
                     let _ = api
                         .answer_callback_query(&callback_id, Some("这个操作不可用"))
@@ -67,7 +67,7 @@ pub async fn listen_polling(
                 tx.send(inbound)
                     .await
                     .map_err(|_| anyhow::anyhow!("telegram inbound pump closed"))?;
-                update_last_inbound(&state).await;
+                update_last_inbound(&state, &account_id).await;
             }
         }
         if update_count > 0 {
@@ -89,7 +89,7 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
                 for update in updates {
                     *offset = Some(update.update_id + 1);
                 }
-                set_polling_state(state, true, true, None).await;
+                set_polling_state(state, &api.settings().account_id(), true, true, None).await;
                 state
                     .push_event(
                         "info",
@@ -101,7 +101,14 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
             }
             Err(err) => {
                 let delay = retry_delay_seconds(&err, TELEGRAM_STARTUP_PROBE_RETRY_SECONDS);
-                set_polling_state(state, true, false, Some(err.to_string())).await;
+                set_polling_state(
+                    state,
+                    &api.settings().account_id(),
+                    true,
+                    false,
+                    Some(err.to_string()),
+                )
+                .await;
                 state
                     .push_event(
                         "warn",
@@ -115,14 +122,14 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
     }
 }
 
-async fn handle_polling_error(state: &SharedState, err: &anyhow::Error) {
+async fn handle_polling_error(state: &SharedState, account_id: &str, err: &anyhow::Error) {
     let delay = retry_delay_seconds(err, TELEGRAM_GENERIC_RETRY_SECONDS);
     let kind = err
         .downcast_ref::<TelegramApiError>()
         .filter(|api_error| api_error.is_conflict())
         .map(|_| "telegram_poll_conflict")
         .unwrap_or("telegram_poll_failed");
-    set_polling_state(state, true, false, Some(err.to_string())).await;
+    set_polling_state(state, account_id, true, false, Some(err.to_string())).await;
     state
         .push_event("warn", kind, format!("retry_in={delay}s err={err}"))
         .await;
@@ -164,7 +171,7 @@ fn inbound_from_message(
 
     Some(InboundMessage {
         platform: ImPlatformKind::Telegram,
-        account_id: TELEGRAM_ACCOUNT_ID.to_string(),
+        account_id: settings.account_id(),
         sender_id,
         chat_id,
         chat_type: ChatType::Direct,
@@ -195,7 +202,7 @@ fn inbound_from_callback(
 
     Some(InboundMessage {
         platform: ImPlatformKind::Telegram,
-        account_id: TELEGRAM_ACCOUNT_ID.to_string(),
+        account_id: settings.account_id(),
         sender_id: callback.from.id.to_string(),
         chat_id,
         chat_type: ChatType::Direct,
@@ -211,22 +218,41 @@ fn inbound_from_callback(
 
 async fn set_polling_state(
     state: &SharedState,
+    account_id: &str,
     polling: bool,
     connected: bool,
     last_error: Option<String>,
 ) {
+    let now = now_ms();
     let mut telegram = state.telegram.lock().await;
     telegram.polling = polling;
     telegram.connected = connected;
-    telegram.last_error = last_error;
-    telegram.last_event_at_ms = Some(now_ms());
+    telegram.last_error = last_error.clone();
+    telegram.last_event_at_ms = Some(now);
+    let key = im_account_key(ImPlatformKind::Telegram, account_id);
+    let mut accounts = state.im_accounts.lock().await;
+    let entry = accounts
+        .entry(key)
+        .or_insert_with(|| ImAccountRuntimeState::new(ImPlatformKind::Telegram, account_id));
+    entry.polling = polling;
+    entry.connecting = false;
+    entry.connected = connected;
+    entry.last_error = last_error;
+    entry.last_event_at_ms = Some(now);
 }
 
-async fn update_last_inbound(state: &SharedState) {
+async fn update_last_inbound(state: &SharedState, account_id: &str) {
     let mut telegram = state.telegram.lock().await;
     let now = now_ms();
     telegram.last_event_at_ms = Some(now);
     telegram.last_inbound_at_ms = Some(now);
+    let key = im_account_key(ImPlatformKind::Telegram, account_id);
+    let mut accounts = state.im_accounts.lock().await;
+    let entry = accounts
+        .entry(key)
+        .or_insert_with(|| ImAccountRuntimeState::new(ImPlatformKind::Telegram, account_id));
+    entry.last_event_at_ms = Some(now);
+    entry.last_inbound_at_ms = Some(now);
 }
 
 fn chat_allowed(settings: &TelegramSettings, chat_id: &str) -> bool {

@@ -4,7 +4,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result, anyhow};
 
 use crate::{
-    app_state::SharedState, codex_app_config, im_runtime::PendingApproval, remote_control_backend,
+    app_state::SharedState,
+    codex_app_config,
+    im_runtime::{PendingApproval, ThreadCreateDraftState},
+    remote_control_backend,
 };
 
 static THREAD_ROUTING_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -37,6 +40,12 @@ pub struct ThreadCreateDefaults {
     pub efforts: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ThreadCreateOption {
+    pub(crate) label: String,
+    pub(crate) summary: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 struct ThreadModelCatalogEntry {
     model: String,
@@ -45,6 +54,16 @@ struct ThreadModelCatalogEntry {
     is_default: bool,
     supported_efforts: Vec<String>,
     default_effort: Option<String>,
+}
+
+pub(crate) fn thread_create_form_from_draft(draft: &ThreadCreateDraftState) -> ThreadCreateForm {
+    ThreadCreateForm {
+        cwd_choice: draft.cwd_choice.clone(),
+        cwd_custom: draft.cwd_custom.clone(),
+        model: draft.model.clone(),
+        effort: draft.effort.clone(),
+        permission: draft.permission.clone(),
+    }
 }
 
 pub(crate) async fn thread_start_options_from_form(
@@ -261,6 +280,418 @@ pub(crate) fn approval_reply_hint(pending: &PendingApproval) -> String {
         "`/y` 或 `/n`".to_string()
     } else {
         options.join("、")
+    }
+}
+
+pub(crate) fn thread_create_help_text(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+) -> String {
+    let lines = vec![
+        "创建新 Codex thread".to_string(),
+        String::new(),
+        "当前设置：".to_string(),
+        format!("目录：{}", selected_cwd_text(defaults, draft)),
+        format!(
+            "Provider：{}",
+            defaults
+                .model_provider
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("使用 Codex App 当前 provider")
+        ),
+        format!("模型：{}", selected_model_text(defaults, draft)),
+        format!("推理强度：{}", selected_effort_text(defaults, draft)),
+        format!("权限：{}", selected_permission_text(defaults, draft)),
+        String::new(),
+        "请选择要修改的设置，确认后创建。".to_string(),
+    ];
+    lines.join("\n")
+}
+
+pub(crate) fn create_options_for_field(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+    field: &str,
+) -> Result<(String, String, Vec<(String, ThreadCreateOption)>)> {
+    match field {
+        "cwd" => Ok(cwd_create_options(defaults, draft)),
+        "model" => Ok(model_create_options(defaults, draft)),
+        "effort" => Ok(effort_create_options(defaults, draft)),
+        "perm" => Ok(permission_create_options(defaults, draft)),
+        _ => Err(anyhow!("不支持的创建字段：{field}")),
+    }
+}
+
+pub(crate) fn apply_thread_create_draft_value(
+    draft: &mut ThreadCreateDraftState,
+    field: &str,
+    value: &str,
+) -> Result<()> {
+    let Some(field) = normalize_thread_create_field(field) else {
+        return Err(anyhow!("不支持的创建字段：{field}"));
+    };
+    let value = value.trim();
+    match field {
+        "cwd" => {
+            draft.cwd_custom = None;
+            draft.cwd_choice = (!is_default_value(value)).then(|| value.to_string());
+        }
+        "model" => {
+            draft.model = (!is_default_value(value)).then(|| value.to_string());
+        }
+        "effort" => {
+            draft.effort = (!is_default_value(value)).then(|| value.to_string());
+        }
+        "perm" => {
+            draft.permission = (!is_default_value(value)).then(|| value.to_string());
+        }
+        _ => return Err(anyhow!("不支持的创建字段：{field}")),
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_thread_create_field(field: &str) -> Option<&'static str> {
+    match field.trim().to_ascii_lowercase().as_str() {
+        "cwd" | "dir" | "path" => Some("cwd"),
+        "model" => Some("model"),
+        "effort" | "reasoning" | "reasoning_effort" => Some("effort"),
+        "perm" | "permission" | "permissions" => Some("perm"),
+        _ => None,
+    }
+}
+
+fn cwd_create_options(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+) -> (String, String, Vec<(String, ThreadCreateOption)>) {
+    let mut options = Vec::new();
+    push_create_option(
+        &mut options,
+        "__default__",
+        "使用 Codex App 默认目录",
+        Some(
+            defaults
+                .cwd
+                .as_deref()
+                .map(|cwd| format!("当前默认：{cwd}"))
+                .unwrap_or_else(|| "不覆盖 cwd，由 Codex App 决定".to_string()),
+        ),
+        draft.cwd_custom.is_none() && is_default_selection(draft.cwd_choice.as_deref()),
+    );
+    for project in defaults
+        .projects
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        push_create_option(
+            &mut options,
+            project,
+            &project_option_label(project),
+            Some(project.to_string()),
+            draft.cwd_custom.is_none() && draft.cwd_choice.as_deref() == Some(project),
+        );
+    }
+    (
+        "选择项目目录".to_string(),
+        format!("当前：{}", selected_cwd_text(defaults, draft)),
+        options,
+    )
+}
+
+fn model_create_options(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+) -> (String, String, Vec<(String, ThreadCreateOption)>) {
+    let mut options = Vec::new();
+    push_create_option(
+        &mut options,
+        "__default__",
+        "使用当前模型",
+        Some(
+            defaults
+                .model
+                .as_deref()
+                .map(|model| format!("当前默认：{model}"))
+                .unwrap_or_else(|| "不覆盖模型，由 Codex App 决定".to_string()),
+        ),
+        is_default_selection(draft.model.as_deref()),
+    );
+    for model in defaults
+        .models
+        .iter()
+        .filter(|model| !model.value.trim().is_empty())
+    {
+        push_create_option(
+            &mut options,
+            &model.value,
+            &model.label,
+            None,
+            draft.model.as_deref() == Some(model.value.as_str()),
+        );
+    }
+    (
+        "选择模型".to_string(),
+        format!("当前：{}", selected_model_text(defaults, draft)),
+        options,
+    )
+}
+
+fn effort_create_options(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+) -> (String, String, Vec<(String, ThreadCreateOption)>) {
+    let mut options = Vec::new();
+    push_create_option(
+        &mut options,
+        "__default__",
+        "使用模型默认推理强度",
+        Some(
+            defaults
+                .effort
+                .as_deref()
+                .map(|effort| format!("当前默认：{}", reasoning_effort_label(effort)))
+                .unwrap_or_else(|| "不覆盖推理强度，由模型决定".to_string()),
+        ),
+        is_default_selection(draft.effort.as_deref()),
+    );
+    if let Some(effort) = defaults
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        push_create_option(
+            &mut options,
+            effort,
+            &reasoning_effort_label(effort),
+            None,
+            draft.effort.as_deref() == Some(effort),
+        );
+    }
+    for effort in defaults
+        .efforts
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        push_create_option(
+            &mut options,
+            effort,
+            &reasoning_effort_label(effort),
+            None,
+            draft.effort.as_deref() == Some(effort),
+        );
+    }
+    (
+        "选择推理强度".to_string(),
+        format!("当前：{}", selected_effort_text(defaults, draft)),
+        options,
+    )
+}
+
+fn permission_create_options(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+) -> (String, String, Vec<(String, ThreadCreateOption)>) {
+    let mut options = Vec::new();
+    push_create_option(
+        &mut options,
+        "__default__",
+        "使用 Codex App 当前权限",
+        Some(
+            defaults
+                .permission
+                .as_deref()
+                .map(|permission| format!("当前：{permission}"))
+                .unwrap_or_else(|| "不覆盖权限配置".to_string()),
+        ),
+        is_default_selection(draft.permission.as_deref()),
+    );
+    for (value, label, summary) in [
+        (
+            "workspace_user",
+            "默认权限",
+            "适合常规项目，需要时由用户确认。",
+        ),
+        ("auto_review", "自动审查", "需要审批时优先交给自动审查。"),
+        (
+            "full_access",
+            "完全访问权限",
+            "不再请求确认，允许完整本机访问。",
+        ),
+    ] {
+        push_create_option(
+            &mut options,
+            value,
+            label,
+            Some(summary.to_string()),
+            draft.permission.as_deref() == Some(value),
+        );
+    }
+    (
+        "选择权限".to_string(),
+        format!("当前：{}", selected_permission_text(defaults, draft)),
+        options,
+    )
+}
+
+fn push_create_option(
+    options: &mut Vec<(String, ThreadCreateOption)>,
+    value: &str,
+    label: &str,
+    summary: Option<String>,
+    selected: bool,
+) {
+    let value = value.trim();
+    if value.is_empty() || options.iter().any(|(existing, _)| existing == value) {
+        return;
+    }
+    let label = if selected {
+        format!("已选：{}", label.trim())
+    } else {
+        label.trim().to_string()
+    };
+    let summary = match (selected, summary) {
+        (true, Some(summary)) if !summary.trim().is_empty() => {
+            Some(format!("已选 - {}", summary.trim()))
+        }
+        (true, _) => Some("已选".to_string()),
+        (false, Some(summary)) if !summary.trim().is_empty() => Some(summary.trim().to_string()),
+        _ => None,
+    };
+    options.push((value.to_string(), ThreadCreateOption { label, summary }));
+}
+
+fn is_default_selection(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none_or(is_default_value)
+}
+
+fn is_default_value(value: &str) -> bool {
+    matches!(value.trim(), "" | "__default__" | "default" | "默认")
+}
+
+fn selected_cwd_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraftState) -> String {
+    if let Some(cwd) = draft
+        .cwd_custom
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return cwd.to_string();
+    }
+    if let Some(cwd) = draft
+        .cwd_choice
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && !is_default_value(v))
+    {
+        if cwd == "__custom__" {
+            return "等待输入自定义目录".to_string();
+        }
+        return cwd.to_string();
+    }
+    defaults
+        .cwd
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|cwd| format!("使用 Codex App 默认目录（{cwd}）"))
+        .unwrap_or_else(|| "使用 Codex App 默认目录".to_string())
+}
+
+fn selected_model_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraftState) -> String {
+    if let Some(model) = draft
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !is_default_value(value))
+    {
+        return model.to_string();
+    }
+    defaults
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|model| format!("使用当前模型（{model}）"))
+        .unwrap_or_else(|| "使用当前模型".to_string())
+}
+
+fn selected_effort_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraftState) -> String {
+    if let Some(effort) = draft
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !is_default_value(value))
+    {
+        return reasoning_effort_label(effort);
+    }
+    defaults
+        .effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|effort| format!("使用默认推理强度（{}）", reasoning_effort_label(effort)))
+        .unwrap_or_else(|| "使用模型默认推理强度".to_string())
+}
+
+fn selected_permission_text(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+) -> String {
+    if let Some(permission) = draft
+        .permission
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !is_default_value(value))
+    {
+        return permission_label(permission);
+    }
+    defaults
+        .permission
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|permission| format!("使用 Codex App 当前权限（{permission}）"))
+        .unwrap_or_else(|| "使用 Codex App 当前权限".to_string())
+}
+
+fn project_option_label(path: &str) -> String {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match name {
+        Some(name) => format!("{name} - {path}"),
+        None => path.to_string(),
+    }
+}
+
+fn reasoning_effort_label(effort: &str) -> String {
+    match effort.trim() {
+        "none" => "无 (none)".to_string(),
+        "minimal" => "极低 (minimal)".to_string(),
+        "low" => "低 (low)".to_string(),
+        "medium" => "中 (medium)".to_string(),
+        "high" => "高 (high)".to_string(),
+        "xhigh" => "超高 (xhigh)".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn permission_label(permission: &str) -> String {
+    match permission.trim() {
+        "workspace_user" | "default" | "default_permissions" | "auto" => "默认权限".to_string(),
+        "auto_review" | "guardian-approvals" | "guardian_approvals" => "自动审查".to_string(),
+        "full_access" | "full-access" => "完全访问权限".to_string(),
+        other => other.to_string(),
     }
 }
 

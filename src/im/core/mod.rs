@@ -1,7 +1,9 @@
+pub mod accounts;
 pub mod approval;
 pub mod outbound;
 pub mod routing;
 pub mod session;
+pub mod text_renderer;
 pub mod thread;
 pub mod thread_list;
 pub mod turn;

@@ -12,19 +12,24 @@ use crate::{
             },
             session::{create_and_bind_thread, resume_and_bind_thread},
             thread::{
-                is_approval_reply, next_thread_routing_request_id, summarize_thread_cwd,
-                summarize_thread_start_options, summarize_thread_title,
-                thread_start_options_with_current_provider,
+                ThreadCreateOption, apply_thread_create_draft_value, create_options_for_field,
+                expand_home_prefix, is_approval_reply, load_thread_create_defaults,
+                next_thread_routing_request_id, normalize_thread_create_field,
+                summarize_thread_cwd, summarize_thread_start_options, summarize_thread_title,
+                thread_create_form_from_draft, thread_create_help_text,
+                thread_start_options_from_form,
             },
             thread_list::{empty_thread_routing_request, load_thread_routing_page},
             turn::{TurnStartOutcome, start_turn_for_route},
         },
         wechat::{adapter::WechatAdapter, api::WechatApi, types::WechatSettings},
     },
-    im_runtime::{RouteTarget, ThreadRoutingRequestState, TurnOrigin},
+    im_runtime::{RouteTarget, ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
     remote_control_backend,
     types::InboundMessage,
 };
+
+const WECHAT_CREATE_OPTION_PAGE_SIZE: usize = 8;
 
 pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) -> Result<()> {
     info!(
@@ -45,7 +50,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         .await;
 
     let config = state.config.lock().await.clone();
-    let settings = WechatSettings::from_app_config(&config.wechat);
+    let wechat_config = config
+        .wechat_account(&message.account_id)
+        .unwrap_or_else(|| config.wechat.clone());
+    let settings = WechatSettings::from_app_config(&wechat_config);
     let api = WechatApi::new(settings);
     let adapter = WechatAdapter::new(api);
     let account_id = message.account_id.clone();
@@ -57,8 +65,9 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
 
     let trimmed = message.text.trim();
     let normalized = command(trimmed);
+    let menu_command = menu_command(trimmed);
 
-    if let Some(command) = normalized.as_deref()
+    if let Some(command) = menu_command.as_deref()
         && is_approval_reply(command)
         && state
             .runtime
@@ -70,7 +79,41 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         return Ok(());
     }
 
-    if let Some(command) = normalized.as_deref()
+    if handle_thread_create_custom_cwd_text_input(&state, &adapter, &message, trimmed).await? {
+        return Ok(());
+    }
+
+    if handle_thread_create_option_text_reply(
+        &state,
+        &adapter,
+        &message,
+        trimmed,
+        menu_command.as_deref(),
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
+    if handle_thread_create_settings_text_reply(
+        &state,
+        &adapter,
+        &message,
+        trimmed,
+        menu_command.as_deref(),
+    )
+    .await?
+    {
+        return Ok(());
+    }
+
+    if let Some(command) = menu_command.as_deref()
+        && handle_thread_route_choice_text_reply(&state, &adapter, &message, command).await?
+    {
+        return Ok(());
+    }
+
+    if let Some(command) = menu_command.as_deref()
         && handle_thread_list_text_reply(&state, &adapter, &message, command).await?
     {
         return Ok(());
@@ -106,7 +149,22 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                     .await?;
                 return Ok(());
             }
-            create_wechat_thread_for_route(&state, &adapter, &route).await?;
+            if !remote_control_backend::status_snapshot(&state)
+                .await
+                .connected
+            {
+                clear_thread_binding(&state, &route.conversation_key).await?;
+                adapter
+                    .send_text(
+                        &state,
+                        &account_id,
+                        &message.chat_id,
+                        "已解除当前绑定，但 Codex remote-control 还没有连接。请在项目目录运行 Codex，并打开 remote-control 后再发送 /new。",
+                    )
+                    .await?;
+                return Ok(());
+            }
+            send_thread_create_settings(&state, &adapter, &message, None).await?;
             return Ok(());
         }
         Some("/threads") | Some("/load") => {
@@ -116,6 +174,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         Some("/next") => {
             if let Some(request) =
                 latest_thread_request_for_conversation(&state, &message.conversation_key()).await
+                && request.stage == ThreadRoutingStage::ResumeList
             {
                 if request.history_has_next {
                     let next_page = request.page + 1;
@@ -153,6 +212,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         Some("/prev") => {
             if let Some(request) =
                 latest_thread_request_for_conversation(&state, &message.conversation_key()).await
+                && request.stage == ThreadRoutingStage::ResumeList
             {
                 if request.page > 1 {
                     let previous_page = request.page - 1;
@@ -341,19 +401,18 @@ async fn create_wechat_thread_for_route(
     state: &SharedState,
     adapter: &WechatAdapter,
     route: &RouteTarget,
+    options: remote_control_backend::ThreadStartOptions,
+    request_id: Option<&str>,
 ) -> Result<String> {
     adapter
         .send_text(
             state,
             &route.account_id,
             &route.chat_id,
-            "正在创建新的 Codex thread...",
+            "正在创建新的 Codex 会话...",
         )
         .await?;
-    let options = thread_start_options_with_current_provider(
-        remote_control_backend::ThreadStartOptions::default(),
-    );
-    let thread_id = create_and_bind_thread(state, route, options.clone(), None).await?;
+    let thread_id = create_and_bind_thread(state, route, options.clone(), request_id).await?;
     adapter
         .send_text(
             state,
@@ -375,6 +434,483 @@ async fn create_wechat_thread_for_route(
     Ok(thread_id)
 }
 
+async fn send_thread_create_settings(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    message: &InboundMessage,
+    existing_request: Option<ThreadRoutingRequestState>,
+) -> Result<()> {
+    let route = route_for_message(message);
+    let request_id = existing_request
+        .as_ref()
+        .map(|request| request.request_id.clone())
+        .unwrap_or_else(next_thread_routing_request_id);
+    let create_draft = existing_request
+        .as_ref()
+        .map(|request| request.create_draft.clone())
+        .unwrap_or_default();
+    let defaults = load_thread_create_defaults(state).await;
+    let mut text = thread_create_help_text(&defaults, &create_draft);
+    text.push_str(
+        "\n\n1. 修改目录\n2. 修改模型\n3. 修改推理强度\n4. 修改权限\n5. 创建会话\n6. 恢复历史会话\n\n回复数字选择。也可以回复 y 创建，n 取消。",
+    );
+    let message_id = adapter
+        .send_text(state, &message.account_id, &message.chat_id, &text)
+        .await?;
+    state
+        .runtime
+        .lock()
+        .await
+        .remember_thread_routing_request(ThreadRoutingRequestState {
+            request_id,
+            conversation_key: route.conversation_key,
+            account_id: route.account_id,
+            chat_id: route.chat_id,
+            message_id: Some(message_id),
+            stage: ThreadRoutingStage::CreateSettings,
+            page: 1,
+            page_cursors: vec![None],
+            thread_ids_by_page: vec![vec![]],
+            create_draft,
+            create_option_values_by_field_page: Default::default(),
+            history_cursor: None,
+            history_has_next: false,
+        });
+    Ok(())
+}
+
+async fn handle_thread_create_settings_text_reply(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    message: &InboundMessage,
+    text: &str,
+    command: Option<&str>,
+) -> Result<bool> {
+    let Some(request) =
+        latest_thread_request_for_conversation(state, &message.conversation_key()).await
+    else {
+        return Ok(false);
+    };
+    if request.stage != ThreadRoutingStage::CreateSettings {
+        return Ok(false);
+    }
+
+    let lowered = text.trim().to_ascii_lowercase();
+    if matches!(
+        lowered.as_str(),
+        "y" | "yes" | "ok" | "确认" | "创建" | "开始" | "开始创建"
+    ) {
+        create_wechat_thread_from_request(state, adapter, message, request).await?;
+        return Ok(true);
+    }
+    if matches!(lowered.as_str(), "n" | "no" | "取消" | "cancel") {
+        state
+            .runtime
+            .lock()
+            .await
+            .clear_thread_routing_request(&request.request_id);
+        adapter
+            .send_text(
+                state,
+                &message.account_id,
+                &message.chat_id,
+                "已取消创建会话。",
+            )
+            .await?;
+        return Ok(true);
+    }
+
+    match command.and_then(numeric_command_index) {
+        Some(0) => {
+            send_thread_create_options(state, adapter, message, request, "cwd", 1).await?;
+            Ok(true)
+        }
+        Some(1) => {
+            send_thread_create_options(state, adapter, message, request, "model", 1).await?;
+            Ok(true)
+        }
+        Some(2) => {
+            send_thread_create_options(state, adapter, message, request, "effort", 1).await?;
+            Ok(true)
+        }
+        Some(3) => {
+            send_thread_create_options(state, adapter, message, request, "perm", 1).await?;
+            Ok(true)
+        }
+        Some(4) => {
+            create_wechat_thread_from_request(state, adapter, message, request).await?;
+            Ok(true)
+        }
+        Some(5) => {
+            send_thread_routing_list(state, adapter, message, Some(request), None, 1).await?;
+            Ok(true)
+        }
+        Some(_) => {
+            adapter
+                .send_text(
+                    state,
+                    &message.account_id,
+                    &message.chat_id,
+                    "请回复 1~6，或回复 y 创建、n 取消。",
+                )
+                .await?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+async fn create_wechat_thread_from_request(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    message: &InboundMessage,
+    request: ThreadRoutingRequestState,
+) -> Result<()> {
+    let options = match thread_start_options_from_form(
+        state,
+        thread_create_form_from_draft(&request.create_draft),
+    )
+    .await
+    {
+        Ok(options) => options,
+        Err(err) => {
+            adapter
+                .send_text(
+                    state,
+                    &message.account_id,
+                    &message.chat_id,
+                    &format!("新建会话参数不正确：{err}"),
+                )
+                .await?;
+            return Ok(());
+        }
+    };
+    let route = route_for_message(message);
+    create_wechat_thread_for_route(state, adapter, &route, options, Some(&request.request_id))
+        .await?;
+    Ok(())
+}
+
+async fn send_thread_create_options(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    message: &InboundMessage,
+    mut request: ThreadRoutingRequestState,
+    field: &str,
+    page: usize,
+) -> Result<()> {
+    let Some(field) = normalize_thread_create_field(field) else {
+        adapter
+            .send_text(
+                state,
+                &message.account_id,
+                &message.chat_id,
+                "这个创建选项不可用，请重新打开创建设置。",
+            )
+            .await?;
+        return Ok(());
+    };
+    let defaults = load_thread_create_defaults(state).await;
+    let (title, body, mut options) =
+        create_options_for_field(&defaults, &request.create_draft, field)?;
+    if field == "cwd" {
+        insert_custom_cwd_option(&mut options);
+    }
+    let total_pages = ((options.len() + WECHAT_CREATE_OPTION_PAGE_SIZE - 1)
+        / WECHAT_CREATE_OPTION_PAGE_SIZE)
+        .max(1);
+    let page = page.clamp(1, total_pages);
+    let start = (page - 1) * WECHAT_CREATE_OPTION_PAGE_SIZE;
+    let end = (start + WECHAT_CREATE_OPTION_PAGE_SIZE).min(options.len());
+    let page_options = options[start..end]
+        .iter()
+        .map(|(_, option)| option.clone())
+        .collect::<Vec<_>>();
+    let value_pages = options
+        .chunks(WECHAT_CREATE_OPTION_PAGE_SIZE)
+        .map(|chunk| {
+            chunk
+                .iter()
+                .map(|(value, _)| value.clone())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    request.create_option_values_by_field_page.clear();
+    request
+        .create_option_values_by_field_page
+        .insert(field.to_string(), value_pages);
+    request.stage = ThreadRoutingStage::CreateOptions;
+    request.page = page;
+
+    let text = thread_create_options_text(
+        &title,
+        &body,
+        &page_options,
+        page,
+        page > 1,
+        page < total_pages,
+    );
+    let message_id = adapter
+        .send_text(state, &message.account_id, &message.chat_id, &text)
+        .await?;
+    request.message_id = Some(message_id);
+    state
+        .runtime
+        .lock()
+        .await
+        .remember_thread_routing_request(request);
+    Ok(())
+}
+
+async fn handle_thread_create_option_text_reply(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    message: &InboundMessage,
+    text: &str,
+    command: Option<&str>,
+) -> Result<bool> {
+    let Some(mut request) =
+        latest_thread_request_for_conversation(state, &message.conversation_key()).await
+    else {
+        return Ok(false);
+    };
+    if request.stage != ThreadRoutingStage::CreateOptions {
+        return Ok(false);
+    }
+
+    let Some(field) = request
+        .create_option_values_by_field_page
+        .keys()
+        .next()
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    let lowered = text.trim().to_ascii_lowercase();
+    if matches!(lowered.as_str(), "0" | "back" | "返回" | "返回设置") {
+        send_thread_create_settings(state, adapter, message, Some(request)).await?;
+        return Ok(true);
+    }
+    if matches!(lowered.as_str(), "取消" | "cancel") {
+        state
+            .runtime
+            .lock()
+            .await
+            .clear_thread_routing_request(&request.request_id);
+        adapter
+            .send_text(
+                state,
+                &message.account_id,
+                &message.chat_id,
+                "已取消创建会话。",
+            )
+            .await?;
+        return Ok(true);
+    }
+    if command == Some("/prev") {
+        let page = request.page.saturating_sub(1).max(1);
+        send_thread_create_options(state, adapter, message, request, &field, page).await?;
+        return Ok(true);
+    }
+    if command == Some("/next") {
+        let page = request.page.saturating_add(1);
+        send_thread_create_options(state, adapter, message, request, &field, page).await?;
+        return Ok(true);
+    }
+
+    let Some(index) = command.and_then(numeric_command_index) else {
+        return Ok(false);
+    };
+    let page = request.page.max(1);
+    let Some(value) = request
+        .create_option_values_by_field_page
+        .get(&field)
+        .and_then(|pages| pages.get(page.saturating_sub(1)))
+        .and_then(|values| values.get(index))
+        .cloned()
+    else {
+        adapter
+            .send_text(
+                state,
+                &message.account_id,
+                &message.chat_id,
+                "这个选项序号不可用，请按当前列表里的数字选择。",
+            )
+            .await?;
+        return Ok(true);
+    };
+
+    apply_thread_create_draft_value(&mut request.create_draft, &field, &value)?;
+    state
+        .runtime
+        .lock()
+        .await
+        .remember_thread_routing_request(request.clone());
+    if field == "cwd" && value == "__custom__" {
+        send_thread_create_custom_cwd_prompt(state, adapter, message).await?;
+        return Ok(true);
+    }
+    send_thread_create_settings(state, adapter, message, Some(request)).await?;
+    Ok(true)
+}
+
+async fn handle_thread_create_custom_cwd_text_input(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    message: &InboundMessage,
+    text: &str,
+) -> Result<bool> {
+    let Some(mut request) =
+        pending_thread_create_custom_cwd_request(state, &message.conversation_key()).await
+    else {
+        return Ok(false);
+    };
+    let lowered = text.trim().to_ascii_lowercase();
+    if matches!(lowered.as_str(), "n" | "no" | "取消" | "cancel") {
+        request.create_draft.cwd_choice = None;
+        request.create_draft.cwd_custom = None;
+        state
+            .runtime
+            .lock()
+            .await
+            .remember_thread_routing_request(request.clone());
+        send_thread_create_settings(state, adapter, message, Some(request)).await?;
+        return Ok(true);
+    }
+    if command(text).is_some_and(|command| is_control_command(&command)) {
+        request.create_draft.cwd_choice = None;
+        request.create_draft.cwd_custom = None;
+        state
+            .runtime
+            .lock()
+            .await
+            .remember_thread_routing_request(request);
+        return Ok(false);
+    }
+
+    let path = text.trim();
+    if path.is_empty() {
+        send_thread_create_custom_cwd_prompt(state, adapter, message).await?;
+        return Ok(true);
+    }
+    if !expand_home_prefix(path).is_absolute() {
+        adapter
+            .send_text(
+                state,
+                &message.account_id,
+                &message.chat_id,
+                "项目目录需要是绝对路径。请重新发送绝对路径，或回复 n 取消。",
+            )
+            .await?;
+        return Ok(true);
+    }
+    request.create_draft.cwd_choice = None;
+    request.create_draft.cwd_custom = Some(path.to_string());
+    state
+        .runtime
+        .lock()
+        .await
+        .remember_thread_routing_request(request.clone());
+    send_thread_create_settings(state, adapter, message, Some(request)).await?;
+    Ok(true)
+}
+
+async fn send_thread_create_custom_cwd_prompt(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    message: &InboundMessage,
+) -> Result<()> {
+    adapter
+        .send_text(
+            state,
+            &message.account_id,
+            &message.chat_id,
+            "请发送项目目录的绝对路径。目录不存在时，创建会话时会自动创建。\n\n回复 n 取消。",
+        )
+        .await?;
+    Ok(())
+}
+
+async fn pending_thread_create_custom_cwd_request(
+    state: &SharedState,
+    conversation_key: &str,
+) -> Option<ThreadRoutingRequestState> {
+    state
+        .runtime
+        .lock()
+        .await
+        .thread_routing_requests
+        .values()
+        .filter(|request| request.conversation_key == conversation_key)
+        .filter(|request| request.stage == ThreadRoutingStage::CreateOptions)
+        .filter(|request| {
+            request.create_draft.cwd_choice.as_deref() == Some("__custom__")
+                && request.create_draft.cwd_custom.is_none()
+        })
+        .max_by_key(|request| thread_routing_request_rank(&request.request_id))
+        .cloned()
+}
+
+fn insert_custom_cwd_option(options: &mut Vec<(String, ThreadCreateOption)>) {
+    if options.iter().any(|(value, _)| value == "__custom__") {
+        return;
+    }
+    let custom = (
+        "__custom__".to_string(),
+        ThreadCreateOption {
+            label: "自定义或新建目录".to_string(),
+            summary: Some("选择后发送绝对路径。目录不存在时会自动创建。".to_string()),
+        },
+    );
+    if options.is_empty() {
+        options.push(custom);
+    } else {
+        options.insert(1, custom);
+    }
+}
+
+fn thread_create_options_text(
+    title: &str,
+    body: &str,
+    options: &[ThreadCreateOption],
+    page: usize,
+    has_prev: bool,
+    has_next: bool,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(title.to_string());
+    lines.push(String::new());
+    lines.push(body.to_string());
+    lines.push(format!("第 {} 页", page.max(1)));
+    let mut hints = vec![format!("回复 1~{} 选择", options.len())];
+    if has_prev {
+        hints.push("p 上一页".to_string());
+    }
+    if has_next {
+        hints.push("n 下一页".to_string());
+    }
+    hints.push("0 返回设置".to_string());
+    lines.push(hints.join("，"));
+    lines.push(String::new());
+    for (index, option) in options.iter().enumerate() {
+        lines.push(format!(
+            "{}. {}",
+            index + 1,
+            truncate_line(option.label.trim(), 72)
+        ));
+        if let Some(summary) = option
+            .summary
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lines.push(truncate_line(summary, 96));
+        }
+        lines.push(String::new());
+    }
+    lines.join("\n").trim_end().to_string()
+}
+
 async fn send_thread_routing_choice(
     state: &SharedState,
     adapter: &WechatAdapter,
@@ -387,7 +923,7 @@ async fn send_thread_routing_choice(
             state,
             &message.account_id,
             &message.chat_id,
-            "当前微信会话还没有接入 Codex thread。\n\n回复 /new 创建新会话，或回复 /load 恢复历史会话。",
+            "当前微信会话还没有接入 Codex 会话。\n\n1. 新建会话\n2. 恢复历史会话\n\n回复 1 或 2。",
         )
         .await?;
     state
@@ -400,6 +936,45 @@ async fn send_thread_routing_choice(
     Ok(())
 }
 
+async fn handle_thread_route_choice_text_reply(
+    state: &SharedState,
+    adapter: &WechatAdapter,
+    message: &InboundMessage,
+    command: &str,
+) -> Result<bool> {
+    let Some(request) =
+        latest_thread_request_for_conversation(state, &message.conversation_key()).await
+    else {
+        return Ok(false);
+    };
+    if !is_thread_choice_request(&request) {
+        return Ok(false);
+    }
+
+    match command {
+        "/1" => {
+            send_thread_create_settings(state, adapter, message, Some(request)).await?;
+            Ok(true)
+        }
+        "/2" => {
+            send_thread_routing_list(state, adapter, message, Some(request), None, 1).await?;
+            Ok(true)
+        }
+        command if numeric_command_index(command).is_some() => {
+            adapter
+                .send_text(
+                    state,
+                    &message.account_id,
+                    &message.chat_id,
+                    "请回复 1 新建会话，或回复 2 恢复历史会话。",
+                )
+                .await?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 async fn send_thread_routing_list(
     state: &SharedState,
     adapter: &WechatAdapter,
@@ -410,14 +985,34 @@ async fn send_thread_routing_list(
 ) -> Result<()> {
     let route = route_for_message(message);
     let loaded_page =
-        load_thread_routing_page(state, existing_request.as_ref(), cursor, page).await?;
+        match load_thread_routing_page(state, existing_request.as_ref(), cursor, page).await {
+            Ok(page) => page,
+            Err(err) => {
+                state
+                    .push_event(
+                        "error",
+                        "wechat_thread_list_failed",
+                        format!("conversation={} err={err}", route.conversation_key),
+                    )
+                    .await;
+                adapter
+                    .send_text(
+                        state,
+                        &message.account_id,
+                        &message.chat_id,
+                        "会话列表加载失败：Codex App 暂时没有响应，请稍后重试。",
+                    )
+                    .await?;
+                return Ok(());
+            }
+        };
     if loaded_page.entries.is_empty() {
         let message_id = adapter
             .send_text(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "当前没有可恢复的历史会话。\n\n回复 /new 创建新会话。",
+                "当前没有可恢复的历史会话。\n\n回复 1 创建新会话。",
             )
             .await?;
         state
@@ -465,6 +1060,9 @@ async fn handle_thread_list_text_reply(
     else {
         return Ok(false);
     };
+    if request.stage != ThreadRoutingStage::ResumeList {
+        return Ok(false);
+    }
     let Some(thread_id) = request
         .thread_ids_by_page
         .get(request.page.saturating_sub(1))
@@ -476,7 +1074,7 @@ async fn handle_thread_list_text_reply(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "这个序号不在当前会话列表里，请按列表里的 /1、/2 选择。",
+                "这个序号不在当前会话列表里，请按列表里的 1、2 选择。",
             )
             .await?;
         return Ok(true);
@@ -584,6 +1182,17 @@ async fn latest_thread_request_for_conversation(
         .cloned()
 }
 
+fn is_thread_choice_request(request: &ThreadRoutingRequestState) -> bool {
+    request.stage == ThreadRoutingStage::Choice
+}
+
+fn numeric_command_index(command: &str) -> Option<usize> {
+    command
+        .strip_prefix('/')
+        .and_then(|value| value.parse::<usize>().ok())
+        .and_then(|value| value.checked_sub(1))
+}
+
 fn thread_routing_request_rank(request_id: &str) -> u64 {
     request_id
         .rsplit('-')
@@ -594,29 +1203,24 @@ fn thread_routing_request_rank(request_id: &str) -> u64 {
 
 fn thread_list_text(page: &crate::im::core::thread_list::ThreadRoutingPage) -> String {
     let mut lines = Vec::new();
-    lines.push("选择 Codex 会话".to_string());
+    lines.push("恢复历史会话".to_string());
     if let Some(provider) = page.model_provider_filter.as_deref() {
         lines.push(format!("已按当前 Codex App provider `{provider}` 过滤。"));
     }
     lines.push(format!("第 {} 页", page.page.max(1)));
-    lines.push(format!(
-        "回复 /1 ~ /{} 选择会话。{}{} 也可以回复 /new 创建新会话。",
-        page.entries.len(),
-        if page.page > 1 {
-            " /prev 上一页。"
-        } else {
-            ""
-        },
-        if page.next_cursor.is_some() {
-            " /next 下一页。"
-        } else {
-            ""
-        },
-    ));
+    let mut actions = vec![format!("回复 1~{} 选择会话", page.entries.len())];
+    if page.page > 1 {
+        actions.push("p 上一页".to_string());
+    }
+    if page.next_cursor.is_some() {
+        actions.push("n 下一页".to_string());
+    }
+    actions.push("new 新建会话".to_string());
+    lines.push(actions.join("，"));
     lines.push(String::new());
     for (index, entry) in page.entries.iter().enumerate() {
         lines.push(format!(
-            "/{} {}",
+            "{}. {}",
             index + 1,
             truncate_line(entry.title.trim(), 64)
         ));
@@ -641,9 +1245,53 @@ fn thread_list_text(page: &crate::im::core::thread_list::ThreadRoutingPage) -> S
     lines.join("\n").trim_end().to_string()
 }
 
+fn is_control_command(command: &str) -> bool {
+    matches!(
+        command,
+        "/start"
+            | "/help"
+            | "/status"
+            | "/new"
+            | "/threads"
+            | "/load"
+            | "/next"
+            | "/prev"
+            | "/s"
+            | "/stop"
+            | "/q"
+    )
+}
+
 fn command(text: &str) -> Option<String> {
     let first = text.split_whitespace().next()?.trim();
-    first.starts_with('/').then(|| first.to_ascii_lowercase())
+    let lower = first.to_ascii_lowercase();
+    if lower.starts_with('/') {
+        return Some(lower);
+    }
+    match lower.as_str() {
+        "n" | "next" | "下一页" => Some("/next".to_string()),
+        "p" | "prev" | "previous" | "上一页" => Some("/prev".to_string()),
+        "new" | "新建" | "新建会话" => Some("/new".to_string()),
+        "load" | "threads" | "resume" | "恢复" | "恢复历史" | "历史会话" => {
+            Some("/load".to_string())
+        }
+        "q" | "quit" | "exit" | "退出" | "取消" => Some("/q".to_string()),
+        "s" | "stop" | "中断" => Some("/s".to_string()),
+        _ => None,
+    }
+}
+
+fn menu_command(text: &str) -> Option<String> {
+    let first = text.split_whitespace().next()?.trim();
+    if first
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .is_some()
+    {
+        return Some(format!("/{first}"));
+    }
+    command(text)
 }
 
 fn truncate_line(text: &str, max_chars: usize) -> String {
@@ -657,4 +1305,27 @@ fn truncate_line(text: &str, max_chars: usize) -> String {
         .collect::<String>();
     output.push('…');
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{command, menu_command};
+
+    #[test]
+    fn command_keeps_bare_numbers_as_user_text() {
+        assert_eq!(command("1"), None);
+        assert_eq!(command("n"), Some("/next".to_string()));
+        assert_eq!(command("p"), Some("/prev".to_string()));
+        assert_eq!(command("new"), Some("/new".to_string()));
+        assert_eq!(command("恢复历史"), Some("/load".to_string()));
+        assert_eq!(command("/n"), Some("/n".to_string()));
+    }
+
+    #[test]
+    fn menu_command_accepts_wechat_text_menu_replies() {
+        assert_eq!(menu_command("1"), Some("/1".to_string()));
+        assert_eq!(menu_command(" 2 "), Some("/2".to_string()));
+        assert_eq!(menu_command("n"), Some("/next".to_string()));
+        assert_eq!(menu_command("p"), Some("/prev".to_string()));
+    }
 }

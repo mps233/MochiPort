@@ -745,8 +745,32 @@ async fn send_thread_routing_list(
     page: usize,
 ) -> Result<()> {
     let route = route_for_message(message);
+    let existing_message_id = existing_request
+        .as_ref()
+        .and_then(|request| request.message_id.as_deref());
+    let adapter = FeishuAdapter::new(api.clone());
     let loaded_page =
-        load_thread_routing_page(state, existing_request.as_ref(), cursor, page).await?;
+        match load_thread_routing_page(state, existing_request.as_ref(), cursor, page).await {
+            Ok(page) => page,
+            Err(err) => {
+                state
+                    .push_event(
+                        "error",
+                        "thread_route_list_failed",
+                        format!("conversation={} err={err}", route.conversation_key),
+                    )
+                    .await;
+                let _ = adapter
+                    .send_thread_routing_result(
+                        &route.chat_id,
+                        "会话列表加载失败",
+                        "Codex App 暂时没有响应，请稍后重试。",
+                        existing_message_id,
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
     let feishu_entries = loaded_page
         .entries
         .iter()
@@ -759,10 +783,6 @@ async fn send_thread_routing_list(
         .collect::<Vec<_>>();
 
     let body = thread_list_body(loaded_page.model_provider_filter.as_deref());
-    let existing_message_id = existing_request
-        .as_ref()
-        .and_then(|request| request.message_id.as_deref());
-    let adapter = FeishuAdapter::new(api.clone());
     let message_id = adapter
         .send_thread_list(
             &route.chat_id,

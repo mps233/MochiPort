@@ -48,6 +48,7 @@ pub struct ThreadRoutingRequestState {
     pub account_id: String,
     pub chat_id: String,
     pub message_id: Option<String>,
+    pub stage: ThreadRoutingStage,
     pub page: usize,
     pub page_cursors: Vec<Option<String>>,
     pub thread_ids_by_page: Vec<Vec<String>>,
@@ -55,6 +56,14 @@ pub struct ThreadRoutingRequestState {
     pub create_option_values_by_field_page: HashMap<String, Vec<Vec<String>>>,
     pub history_cursor: Option<String>,
     pub history_has_next: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadRoutingStage {
+    Choice,
+    ResumeList,
+    CreateSettings,
+    CreateOptions,
 }
 
 #[derive(Debug, Clone, Default)]

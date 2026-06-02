@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-const FEISHU_CARDKIT_THROTTLE_MS: u64 = 100;
+const FEISHU_CARDKIT_THROTTLE_MS: u64 = 120;
 const FEISHU_CARDKIT_LONG_GAP_THRESHOLD_MS: u64 = 2000;
 const FEISHU_CARDKIT_BATCH_AFTER_GAP_MS: u64 = 300;
 const FEISHU_LOG_PREVIEW_CHARS: usize = 240;
@@ -534,12 +534,21 @@ async fn send_agent_message_cardkit(
     let (card_id, message_id, next_sequence) =
         ensure_cardkit_streaming_card(api, state_snapshot).await?;
     if state_snapshot.completed {
-        let final_card = build_streaming_card(&state_snapshot.kind, &state_snapshot.text, true);
-        api.update_cardkit_card(&card_id, &final_card, next_sequence)
+        let mut sequence = next_sequence;
+        if !state_snapshot.text.trim().is_empty() && state_snapshot.sent_text != state_snapshot.text
+        {
+            api.stream_cardkit_element_content(
+                &card_id,
+                FEISHU_CARDKIT_STREAMING_ELEMENT_ID,
+                &state_snapshot.text,
+                sequence,
+            )
             .await?;
-        api.set_cardkit_streaming_mode(&card_id, false, next_sequence.saturating_add(1))
+            sequence = sequence.saturating_add(1);
+        }
+        api.set_cardkit_streaming_mode(&card_id, false, sequence)
             .await?;
-        Ok((message_id, Some(card_id), next_sequence.saturating_add(1)))
+        Ok((message_id, Some(card_id), sequence))
     } else if state_snapshot.text.trim().is_empty() {
         Ok((message_id, Some(card_id), next_sequence))
     } else {

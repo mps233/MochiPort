@@ -7,7 +7,11 @@ use crate::{
     app_state::SharedState,
     codex::{extract_agent_message_text, extract_turn_reply_text},
     im::{
-        core::outbound::{ImOutboundKind, ImOutboundMessage, ImOutboundPayload, ImOutboundSender},
+        core::{
+            accounts::ImApiRegistry,
+            outbound::{ImOutboundKind, ImOutboundMessage, ImOutboundPayload, ImOutboundSender},
+            text_renderer,
+        },
         feishu::{
             FeishuAdapter, FeishuApi, flow as feishu_flow, renderer,
             runtime::{
@@ -15,18 +19,18 @@ use crate::{
                 upsert_streaming_card_state,
             },
         },
-        telegram::{adapter::TelegramAdapter, api::TelegramApi, renderer as telegram_renderer},
-        wechat::{adapter::WechatAdapter, api::WechatApi},
+        telegram::adapter::TelegramAdapter,
+        wechat::adapter::WechatAdapter,
     },
     im_runtime::{PendingApproval, RouteTarget, TurnOrigin},
     types::ImPlatformKind,
 };
 
+const COMMAND_OUTPUT_PREVIEW_CHARS: usize = 2400;
+
 pub(crate) async fn send_next_approval(
     state: &SharedState,
-    feishu_api: &FeishuApi,
-    telegram_api: &TelegramApi,
-    wechat_api: &WechatApi,
+    api_registry: &ImApiRegistry,
     conversation_key: &str,
     approval: &PendingApproval,
 ) -> Result<()> {
@@ -40,33 +44,37 @@ pub(crate) async fn send_next_approval(
             .await;
         return Ok(());
     };
-    send_approval(
-        state,
-        feishu_api,
-        telegram_api,
-        wechat_api,
-        &route,
-        approval,
-    )
-    .await
+    send_approval(state, api_registry, &route, approval).await
 }
 
 pub(crate) async fn send_approval(
     state: &SharedState,
-    feishu_api: &FeishuApi,
-    telegram_api: &TelegramApi,
-    wechat_api: &WechatApi,
+    api_registry: &ImApiRegistry,
     route: &RouteTarget,
     approval: &PendingApproval,
 ) -> Result<()> {
     match route.platform {
-        ImPlatformKind::Feishu => send_feishu_approval(state, feishu_api, route, approval).await,
+        ImPlatformKind::Feishu => {
+            let Some(api) = api_registry.feishu_for_route(route) else {
+                log_missing_api(state, route, "approval").await;
+                return Ok(());
+            };
+            send_feishu_approval(state, &api, route, approval).await
+        }
         ImPlatformKind::Telegram => {
-            let adapter = TelegramAdapter::new(telegram_api.clone());
+            let Some(api) = api_registry.telegram_for_route(route) else {
+                log_missing_api(state, route, "approval").await;
+                return Ok(());
+            };
+            let adapter = TelegramAdapter::new(api);
             send_telegram_approval(state, &adapter, route, approval).await
         }
         ImPlatformKind::Wechat => {
-            let adapter = WechatAdapter::new(wechat_api.clone());
+            let Some(api) = api_registry.wechat_for_route(route) else {
+                log_missing_api(state, route, "approval").await;
+                return Ok(());
+            };
+            let adapter = WechatAdapter::new(api);
             send_wechat_approval(state, &adapter, route, approval).await
         }
     }
@@ -96,9 +104,7 @@ pub(crate) async fn send_next_telegram_approval(
 
 pub(crate) async fn send_turn_reply(
     state: &SharedState,
-    feishu_api: &FeishuApi,
-    telegram_api: &TelegramApi,
-    wechat_api: &WechatApi,
+    api_registry: &ImApiRegistry,
     outbound_tx: Option<&ImOutboundSender>,
     thread_id: &str,
     route: &RouteTarget,
@@ -136,7 +142,11 @@ pub(crate) async fn send_turn_reply(
     }
     match route.platform {
         ImPlatformKind::Feishu => {
-            let adapter = FeishuAdapter::new(feishu_api.clone());
+            let Some(api) = api_registry.feishu_for_route(route) else {
+                log_missing_api(state, route, "turn_reply").await;
+                return;
+            };
+            let adapter = FeishuAdapter::new(api);
             if let Err(err) = adapter.send_turn_completed(&route.chat_id, text).await {
                 state
                     .push_event(
@@ -148,7 +158,7 @@ pub(crate) async fn send_turn_reply(
             }
         }
         ImPlatformKind::Telegram => {
-            let rendered = telegram_renderer::render_agent_message_text(text);
+            let rendered = text_renderer::render_agent_message_text(text);
             if let Some(outbound_tx) = outbound_tx {
                 if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                     thread_id: thread_id.to_string(),
@@ -167,7 +177,11 @@ pub(crate) async fn send_turn_reply(
                         .await;
                 }
             } else {
-                let adapter = TelegramAdapter::new(telegram_api.clone());
+                let Some(api) = api_registry.telegram_for_route(route) else {
+                    log_missing_api(state, route, "turn_reply").await;
+                    return;
+                };
+                let adapter = TelegramAdapter::new(api);
                 match adapter.send_turn_completed(&route.chat_id, &rendered).await {
                     Ok(message_id) => {
                         state
@@ -194,7 +208,7 @@ pub(crate) async fn send_turn_reply(
             }
         }
         ImPlatformKind::Wechat => {
-            let rendered = telegram_renderer::render_agent_message_text(text);
+            let rendered = text_renderer::render_agent_message_text(text);
             if let Some(outbound_tx) = outbound_tx {
                 if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                     thread_id: thread_id.to_string(),
@@ -213,7 +227,11 @@ pub(crate) async fn send_turn_reply(
                         .await;
                 }
             } else {
-                let adapter = WechatAdapter::new(wechat_api.clone());
+                let Some(api) = api_registry.wechat_for_route(route) else {
+                    log_missing_api(state, route, "turn_reply").await;
+                    return;
+                };
+                let adapter = WechatAdapter::new(api);
                 match adapter
                     .send_turn_completed(state, &route.account_id, &route.chat_id, &rendered)
                     .await
@@ -247,9 +265,7 @@ pub(crate) async fn send_turn_reply(
 
 pub(crate) async fn handle_codex_notification(
     state: SharedState,
-    api: FeishuApi,
-    telegram_api: TelegramApi,
-    wechat_api: WechatApi,
+    api_registry: ImApiRegistry,
     outbound_tx: ImOutboundSender,
     notification: &crate::codex::CodexNotification,
 ) {
@@ -302,6 +318,10 @@ pub(crate) async fn handle_codex_notification(
             let Some(route) = route else {
                 return;
             };
+            let Some(api) = api_registry.feishu_for_route(&route) else {
+                log_missing_api(&state, &route, "item_started").await;
+                return;
+            };
             let initial_text = if kind == "commandExecution" {
                 command_execution_started_text(item)
                     .or_else(|| renderer::item_markdown_summary(item))
@@ -341,6 +361,10 @@ pub(crate) async fn handle_codex_notification(
                     .await;
                 return;
             };
+            let Some(api) = api_registry.feishu_for_route(&route) else {
+                log_missing_api(&state, &route, "agent_delta").await;
+                return;
+            };
             upsert_streaming_card_state(
                 state,
                 api,
@@ -366,6 +390,10 @@ pub(crate) async fn handle_codex_notification(
             };
             let route = feishu_route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
+                return;
+            };
+            let Some(api) = api_registry.feishu_for_route(&route) else {
+                log_missing_api(&state, &route, "reasoning_delta").await;
                 return;
             };
             upsert_streaming_card_state(
@@ -395,6 +423,10 @@ pub(crate) async fn handle_codex_notification(
             let Some(route) = route else {
                 return;
             };
+            let Some(api) = api_registry.feishu_for_route(&route) else {
+                log_missing_api(&state, &route, "plan_delta").await;
+                return;
+            };
             upsert_streaming_card_state(
                 state,
                 api,
@@ -415,6 +447,9 @@ pub(crate) async fn handle_codex_notification(
             let Some(item_id) = params.get("itemId").and_then(|v| v.as_str()) else {
                 return;
             };
+            if notification.method == "item/commandExecution/outputDelta" {
+                return;
+            }
             let Some(delta) = params.get("delta").and_then(|v| v.as_str()) else {
                 return;
             };
@@ -425,6 +460,10 @@ pub(crate) async fn handle_codex_notification(
             };
             let route = feishu_route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
+                return;
+            };
+            let Some(api) = api_registry.feishu_for_route(&route) else {
+                log_missing_api(&state, &route, "output_delta").await;
                 return;
             };
             upsert_streaming_card_state(
@@ -452,6 +491,10 @@ pub(crate) async fn handle_codex_notification(
             };
             let route = feishu_route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
+                return;
+            };
+            let Some(api) = api_registry.feishu_for_route(&route) else {
+                log_missing_api(&state, &route, "mcp_progress").await;
                 return;
             };
             upsert_streaming_card_state(
@@ -485,6 +528,10 @@ pub(crate) async fn handle_codex_notification(
             };
             let route = feishu_route_for_codex_output(&state, thread_id, params).await;
             let Some(route) = route else {
+                return;
+            };
+            let Some(api) = api_registry.feishu_for_route(&route) else {
+                log_missing_api(&state, &route, "item_updated").await;
                 return;
             };
             let initial_text = if item_type == "commandExecution" {
@@ -531,9 +578,7 @@ pub(crate) async fn handle_codex_notification(
                 {
                     send_turn_reply(
                         &state,
-                        &api,
-                        &telegram_api,
-                        &wechat_api,
+                        &api_registry,
                         Some(&outbound_tx),
                         thread_id,
                         &route,
@@ -576,6 +621,10 @@ pub(crate) async fn handle_codex_notification(
                 }
                 return;
             }
+            let Some(api) = api_registry.feishu_for_route(&route) else {
+                log_missing_api(&state, &route, "item_completed").await;
+                return;
+            };
             if matches!(item_type, "imageGeneration" | "imageView")
                 && feishu_flow::send_image_item_card(
                     &state, &api, &route, item_type, item, thread_id, item_id,
@@ -703,9 +752,7 @@ pub(crate) async fn handle_codex_notification(
             };
             send_turn_reply(
                 &state,
-                &api,
-                &telegram_api,
-                &wechat_api,
+                &api_registry,
                 Some(&outbound_tx),
                 thread_id,
                 &route,
@@ -726,6 +773,22 @@ async fn route_for_codex_output(
         return Some(route);
     }
     None
+}
+
+async fn log_missing_api(state: &SharedState, route: &RouteTarget, context: &str) {
+    state
+        .push_event(
+            "error",
+            "im_api_missing",
+            format!(
+                "context={} platform={} account={} chat={}",
+                context,
+                route.platform.key(),
+                route.account_id,
+                route.chat_id
+            ),
+        )
+        .await;
 }
 
 async fn feishu_route_for_codex_output(
@@ -790,6 +853,7 @@ fn command_execution_full_text(item: &serde_json::Value) -> Option<String> {
         .unwrap_or_default()
         .trim()
         .to_string();
+    let output = truncate_command_output_preview(&output);
 
     let mut meta = Vec::new();
     if let Some(status) = item
@@ -813,6 +877,20 @@ fn command_execution_full_text(item: &serde_json::Value) -> Option<String> {
         output,
         meta.join(" · ")
     ))
+}
+
+fn truncate_command_output_preview(text: &str) -> String {
+    let mut out = String::new();
+    let mut count = 0usize;
+    for ch in text.chars() {
+        if count >= COMMAND_OUTPUT_PREVIEW_CHARS {
+            out.push_str("\n... output truncated ...");
+            break;
+        }
+        out.push(ch);
+        count += 1;
+    }
+    out
 }
 
 async fn send_feishu_approval(
@@ -936,8 +1014,8 @@ async fn send_text_im_codex_item(
         && let Some(path) =
             text_im_image_path_for_item(state, platform, item_type, item, item_id).await?
     {
-        let caption = telegram_renderer::image_item_caption(item);
-        let fallback_text = telegram_renderer::render_item_text(item);
+        let caption = text_renderer::image_item_caption(item);
+        let fallback_text = text_renderer::render_item_text(item);
         outbound_tx.enqueue(ImOutboundMessage {
             thread_id: thread_id.to_string(),
             route: route.clone(),
@@ -964,7 +1042,7 @@ async fn send_text_im_codex_item(
         return Ok(());
     }
 
-    let Some(text) = telegram_renderer::render_item_text(item) else {
+    let Some(text) = text_renderer::render_item_text(item) else {
         let event_kind = format!("{platform}_item_skipped");
         state
             .push_event(
@@ -1008,7 +1086,7 @@ async fn text_im_image_path_for_item(
     item: &serde_json::Value,
     item_id: &str,
 ) -> Result<Option<PathBuf>> {
-    if let Some(path) = telegram_renderer::image_item_path(item)
+    if let Some(path) = text_renderer::image_item_path(item)
         && path.is_file()
     {
         return Ok(Some(path));

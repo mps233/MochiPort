@@ -5,7 +5,7 @@ use tokio::{
 };
 
 use crate::{
-    app_state::SharedState,
+    app_state::{ImAccountRuntimeState, SharedState, im_account_key},
     types::{ChatType, ImPlatformKind, InboundMessage, now_ms},
 };
 
@@ -29,7 +29,7 @@ pub async fn listen_polling(
     let mut get_updates_buf = store::load_sync_buf(&state, &account_id).await;
     let mut next_timeout_ms = default_long_poll_timeout_ms();
     let mut consecutive_failures = 0usize;
-    set_polling_state(&state, true, false, None).await;
+    set_polling_state(&state, &account_id, true, false, None).await;
     if let Err(err) = api.notify_start().await {
         state
             .push_event("warn", "wechat_notify_start_failed", err.to_string())
@@ -47,7 +47,7 @@ pub async fn listen_polling(
                 } else {
                     WECHAT_RETRY_DELAY_MS
                 };
-                set_polling_state(&state, true, false, Some(err.to_string())).await;
+                set_polling_state(&state, &account_id, true, false, Some(err.to_string())).await;
                 state
                     .push_event(
                         "warn",
@@ -66,6 +66,7 @@ pub async fn listen_polling(
             if errcode == WECHAT_SESSION_EXPIRED_ERRCODE {
                 set_polling_state(
                     &state,
+                    &account_id,
                     true,
                     false,
                     Some("wechat session expired".to_string()),
@@ -82,7 +83,14 @@ pub async fn listen_polling(
                 continue;
             }
             consecutive_failures += 1;
-            set_polling_state(&state, true, false, Some(format!("ret={errcode} {errmsg}"))).await;
+            set_polling_state(
+                &state,
+                &account_id,
+                true,
+                false,
+                Some(format!("ret={errcode} {errmsg}")),
+            )
+            .await;
             state
                 .push_event(
                     "warn",
@@ -95,7 +103,7 @@ pub async fn listen_polling(
         }
 
         consecutive_failures = 0;
-        set_polling_state(&state, true, true, None).await;
+        set_polling_state(&state, &account_id, true, true, None).await;
         if let Some(timeout_ms) = response.longpolling_timeout_ms.filter(|value| *value > 0) {
             next_timeout_ms = timeout_ms;
         }
@@ -164,7 +172,7 @@ async fn inbound_from_message(
     if text.trim().is_empty() {
         return Ok(None);
     }
-    update_last_inbound(state).await;
+    update_last_inbound(state, account_id).await;
     let message_id = message
         .message_id
         .map(|value| value.to_string())
@@ -230,20 +238,39 @@ fn user_allowed(settings: &WechatSettings, peer_id: &str) -> bool {
 
 async fn set_polling_state(
     state: &SharedState,
+    account_id: &str,
     polling: bool,
     connected: bool,
     last_error: Option<String>,
 ) {
+    let now = now_ms();
     let mut wechat = state.wechat.lock().await;
     wechat.polling = polling;
     wechat.connected = connected;
-    wechat.last_error = last_error;
-    wechat.last_event_at_ms = Some(now_ms());
+    wechat.last_error = last_error.clone();
+    wechat.last_event_at_ms = Some(now);
+    let key = im_account_key(ImPlatformKind::Wechat, account_id);
+    let mut accounts = state.im_accounts.lock().await;
+    let entry = accounts
+        .entry(key)
+        .or_insert_with(|| ImAccountRuntimeState::new(ImPlatformKind::Wechat, account_id));
+    entry.polling = polling;
+    entry.connecting = false;
+    entry.connected = connected;
+    entry.last_error = last_error;
+    entry.last_event_at_ms = Some(now);
 }
 
-async fn update_last_inbound(state: &SharedState) {
+async fn update_last_inbound(state: &SharedState, account_id: &str) {
     let mut wechat = state.wechat.lock().await;
     let now = now_ms();
     wechat.last_event_at_ms = Some(now);
     wechat.last_inbound_at_ms = Some(now);
+    let key = im_account_key(ImPlatformKind::Wechat, account_id);
+    let mut accounts = state.im_accounts.lock().await;
+    let entry = accounts
+        .entry(key)
+        .or_insert_with(|| ImAccountRuntimeState::new(ImPlatformKind::Wechat, account_id));
+    entry.last_event_at_ms = Some(now);
+    entry.last_inbound_at_ms = Some(now);
 }
