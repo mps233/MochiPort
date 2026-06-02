@@ -185,6 +185,11 @@ impl AppConfig {
 
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
         let raw = toml::to_string_pretty(self)?;
+        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory {}", parent.display())
+            })?;
+        }
         std::fs::write(path, raw)
             .with_context(|| format!("failed to write config {}", path.display()))
     }

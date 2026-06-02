@@ -29,11 +29,15 @@ pub async fn listen_polling(
     let mut get_updates_buf = store::load_sync_buf(&state, &account_id).await;
     let mut next_timeout_ms = default_long_poll_timeout_ms();
     let mut consecutive_failures = 0usize;
-    set_polling_state(&state, &account_id, true, false, None).await;
-    if let Err(err) = api.notify_start().await {
-        state
-            .push_event("warn", "wechat_notify_start_failed", err.to_string())
-            .await;
+    set_polling_state(&state, &account_id, true, true, None).await;
+    match api.notify_start().await {
+        Ok(()) => {}
+        Err(err) => {
+            set_polling_state(&state, &account_id, true, false, Some(err.to_string())).await;
+            state
+                .push_event("warn", "wechat_notify_start_failed", err.to_string())
+                .await;
+        }
     }
 
     loop {

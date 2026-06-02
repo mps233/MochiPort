@@ -18,6 +18,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(target_os = "windows")]
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
+use crate::chain_log;
+
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
@@ -131,19 +133,50 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
         .codex_home
         .clone()
         .unwrap_or_else(default_codex_home);
+    chain_log::write_line(format!(
+        "[codex_app_config] event=configure_start codex_home={} provider={} activate_provider={}",
+        codex_home.display(),
+        options.provider_name.as_deref().unwrap_or_default(),
+        options.activate_provider
+    ));
     std::fs::create_dir_all(&codex_home)
         .with_context(|| format!("failed to create Codex home {}", codex_home.display()))?;
 
     let config_path = codex_home.join("config.toml");
+    chain_log::write_line(format!(
+        "[codex_app_config] event=write_config_start path={}",
+        config_path.display()
+    ));
     write_config_toml(&config_path, &options)?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=write_config_done path={}",
+        config_path.display()
+    ));
 
     let auth_path = codex_home.join("auth.json");
+    chain_log::write_line(format!(
+        "[codex_app_config] event=write_auth_start path={}",
+        auth_path.display()
+    ));
     write_auth_json(&auth_path, &options)?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=write_auth_done path={}",
+        auth_path.display()
+    ));
 
+    chain_log::write_line("[codex_app_config] event=remote_control_switch_start");
     let remote_control_switch = enable_remote_control_switch_in_home(&codex_home)?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=remote_control_switch_done configured={}",
+        remote_control_switch.configured
+    ));
 
     #[cfg(not(test))]
+    chain_log::write_line("[codex_app_config] event=gui_environment_start");
+    #[cfg(not(test))]
     let _ = configure_gui_environment(&options.backend_url);
+    #[cfg(not(test))]
+    chain_log::write_line("[codex_app_config] event=gui_environment_done");
 
     Ok(ConfigureCodexAppReport {
         codex_home,
@@ -488,7 +521,19 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
 }
 
 pub fn configure_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "windows")]
+    {
+        let login_issuer = oauth_issuer_url(backend_url);
+        let env_result = gui_setenv_many(&[
+            (CODEX_API_BASE_URL_ENV, backend_url),
+            (CODEX_APP_SERVER_LOGIN_ISSUER_ENV, &login_issuer),
+        ]);
+        let mut status = inspect_gui_api_base_url(backend_url);
+        status.error = env_result.err();
+        status
+    }
+
+    #[cfg(target_os = "macos")]
     {
         let login_issuer = oauth_issuer_url(backend_url);
         let api_result = gui_setenv(CODEX_API_BASE_URL_ENV, backend_url);
@@ -530,12 +575,14 @@ fn gui_getenv(name: &str) -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
+fn gui_setenv_many(values: &[(&str, &str)]) -> Result<(), String> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (env, _) = hkcu
         .create_subkey("Environment")
         .map_err(|err| err.to_string())?;
-    env.set_value(name, &value).map_err(|err| err.to_string())?;
+    for (name, value) in values {
+        env.set_value(name, value).map_err(|err| err.to_string())?;
+    }
     broadcast_windows_environment_change();
     Ok(())
 }
@@ -551,7 +598,7 @@ fn broadcast_windows_environment_change() {
             0,
             message.as_ptr() as isize,
             SMTO_ABORTIFHUNG,
-            5000,
+            1000,
             &mut result,
         );
     }

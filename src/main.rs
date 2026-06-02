@@ -241,6 +241,14 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
         return absolutize(path);
     }
 
+    if env::var_os("CODEX_REMOTE_HOME").is_some() {
+        return app_support_config_path();
+    }
+
+    if let Some(path) = adjacent_config_from_current_exe() {
+        return path;
+    }
+
     if env::var_os("CODEX_REMOTE_USE_REPO_CONFIG").is_none() {
         return app_support_config_path();
     }
@@ -256,13 +264,33 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
 }
 
 fn app_support_config_path() -> PathBuf {
-    let base = env::var_os("CODEX_REMOTE_HOME")
+    if let Some(base) = env::var_os("CODEX_REMOTE_HOME").map(PathBuf::from) {
+        return base.join("config.toml");
+    }
+    platform_app_support_config_path()
+}
+
+#[cfg(target_os = "windows")]
+fn platform_app_support_config_path() -> PathBuf {
+    let legacy = env::var_os("HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join("Library/Application Support/Codex Remote"))
-        })
+        .map(|home| home.join("Library/Application Support/Codex Remote/config.toml"));
+    if let Some(path) = legacy.filter(|path| path.exists()) {
+        return path;
+    }
+    let base = env::var_os("LOCALAPPDATA")
+        .or_else(|| env::var_os("APPDATA"))
+        .map(PathBuf::from)
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("Codex Remote").join("config.toml")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_app_support_config_path() -> PathBuf {
+    let base = env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support/Codex Remote"))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("config.toml")
@@ -281,6 +309,13 @@ fn inferred_repo_config_from_target_exe() -> Option<PathBuf> {
     }
     let config = target_dir.parent()?.join("config.toml");
     config.exists().then_some(config)
+}
+
+fn adjacent_config_from_current_exe() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("config.toml")))
+        .filter(|path| path.exists())
 }
 
 fn normalize_config_paths(config: &mut AppConfig, config_path: &Path) {

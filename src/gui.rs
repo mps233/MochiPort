@@ -12,10 +12,17 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
 use image::imageops::FilterType;
 use qrcode::{Color, QrCode};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use wxdragon::widgets::dataview::{
+    CustomDataViewVirtualListModel, DataViewAlign, DataViewColumnFlags, DataViewCtrl,
+    DataViewItemAttr, DataViewStyle, Variant,
+};
 use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
@@ -37,11 +44,17 @@ const GUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
 const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 const GUI_CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
+const GUI_STARTUP_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
-const TELEGRAM_TOKEN_MASK: &str = "********";
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 const ID_MENU_CLOSE_WINDOW: i32 = 10_001;
 const ID_MENU_MINIMIZE: i32 = 10_002;
 const ID_MENU_CHECK_UPDATE: i32 = 10_003;
+
+type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
+type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
+type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type ConfigActionResultStore = Arc<Mutex<Option<ConfigActionResult>>>;
@@ -317,18 +330,104 @@ fn build_ui() {
     let feishu_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let im_accounts_static_box = StaticBox::builder(&feishu_page)
-        .with_label("已接入机器人")
+        .with_label("IM 机器人池")
         .build();
     let im_accounts_box =
         StaticBoxSizerBuilder::new_with_box(&im_accounts_static_box, Orientation::Vertical).build();
-    let im_account_list = ListCtrl::builder(&im_accounts_static_box)
-        .with_style(ListCtrlStyle::Report | ListCtrlStyle::SingleSel | ListCtrlStyle::HRules)
-        .with_size(Size::new(-1, 132))
+    let im_account_rows: ImAccountRows = Rc::new(RefCell::new(Vec::new()));
+    let pending_im_toggle: PendingImToggle = Rc::new(RefCell::new(None));
+    let pending_im_toggle_for_model = pending_im_toggle.clone();
+    let im_account_model: ImAccountModel =
+        Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
+            0,
+            im_account_rows.clone(),
+            |rows: &ImAccountRows, row, col| -> Variant {
+                if col == 4 {
+                    return rows
+                        .borrow()
+                        .get(row)
+                        .and_then(|row_data| row_data.get(4))
+                        .map(|value| value == "true")
+                        .unwrap_or(false)
+                        .into();
+                }
+                rows.borrow()
+                    .get(row)
+                    .and_then(|row_data| row_data.get(col))
+                    .cloned()
+                    .unwrap_or_default()
+                    .into()
+            },
+            Some(
+                move |rows: &ImAccountRows, row, col, value: &Variant| -> bool {
+                    if col != 4 {
+                        return false;
+                    }
+                    let Some(enabled) = value.get_bool() else {
+                        return false;
+                    };
+                    let mut rows = std::cell::RefCell::borrow_mut(std::rc::Rc::as_ref(rows));
+                    let Some(row_data): Option<&mut [String; 5]> = rows.get_mut(row) else {
+                        return false;
+                    };
+                    let Some(platform) = im_platform_key(&row_data[1]) else {
+                        return false;
+                    };
+                    let account_id = row_data[3].clone();
+                    if account_id.trim().is_empty() {
+                        return false;
+                    }
+                    pending_im_toggle_for_model
+                        .borrow_mut()
+                        .replace((platform, account_id, enabled));
+                    false
+                },
+            ),
+            None::<fn(&ImAccountRows, usize, usize) -> Option<DataViewItemAttr>>,
+            None::<fn(&ImAccountRows, usize, usize) -> bool>,
+        )));
+    let im_account_list = DataViewCtrl::builder(&im_accounts_static_box)
+        .with_style(
+            DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
+        )
+        .with_size(Size::new(-1, 300))
         .build();
-    im_account_list.insert_column(0, "平台", ListColumnFormat::Left, 90);
-    im_account_list.insert_column(1, "机器人", ListColumnFormat::Left, 220);
-    im_account_list.insert_column(2, "状态", ListColumnFormat::Left, 120);
-    im_account_list.insert_column(3, "账号", ListColumnFormat::Left, 220);
+    im_account_list.append_text_column(
+        "机器人",
+        0,
+        280,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    im_account_list.append_text_column(
+        "平台",
+        1,
+        90,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    im_account_list.append_text_column(
+        "状态",
+        2,
+        120,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    im_account_list.append_text_column(
+        "账号",
+        3,
+        260,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    im_account_list.append_toggle_column(
+        "接入",
+        4,
+        70,
+        DataViewAlign::Center,
+        DataViewColumnFlags::Resizable,
+    );
+    im_account_list.associate_model(&*im_account_model.borrow());
     im_accounts_box.add(
         &im_account_list,
         0,
@@ -337,15 +436,10 @@ fn build_ui() {
     );
     let im_account_actions = BoxSizer::builder(Orientation::Horizontal).build();
     im_account_actions.add_stretch_spacer(1);
-    let toggle_im_account_button = Button::builder(&im_accounts_static_box)
-        .with_label("暂停选中")
-        .build();
-    toggle_im_account_button.set_tooltip("暂停或恢复当前选中的机器人接入");
     let delete_im_account_button = Button::builder(&im_accounts_static_box)
         .with_label("删除选中")
         .build();
     delete_im_account_button.set_tooltip("删除当前选中的机器人接入配置");
-    im_account_actions.add(&toggle_im_account_button, 0, SizerFlag::Right, 8);
     im_account_actions.add(&delete_im_account_button, 0, SizerFlag::Right, 0);
     im_accounts_box.add_sizer(
         &im_account_actions,
@@ -355,208 +449,34 @@ fn build_ui() {
     );
     feishu_sizer.add_sizer(&im_accounts_box, 0, SizerFlag::Expand | SizerFlag::All, 12);
 
-    let feishu_static_box = StaticBox::builder(&feishu_page)
-        .with_label("飞书机器人")
+    let add_im_static_box = StaticBox::builder(&feishu_page)
+        .with_label("新增机器人")
         .build();
-    let feishu_box =
-        StaticBoxSizerBuilder::new_with_box(&feishu_static_box, Orientation::Vertical).build();
-    let feishu_state = StaticText::builder(&feishu_static_box)
-        .with_label("检测中")
-        .build();
-    feishu_state.set_foreground_color(Colour::rgb(73, 83, 96));
-    feishu_box.add(
-        &feishu_state,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
-
-    let feishu_detail = StaticText::builder(&feishu_static_box)
-        .with_label("正在读取飞书接入状态")
-        .build();
-    feishu_detail.set_foreground_color(Colour::rgb(82, 91, 105));
-    feishu_detail.wrap(760);
-    feishu_box.add(
-        &feishu_detail,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
-
-    let feishu_meta = StaticText::builder(&feishu_static_box)
-        .with_label("")
-        .build();
-    feishu_meta.set_foreground_color(Colour::rgb(103, 111, 124));
-    feishu_meta.wrap(760);
-
-    let feishu_buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    feishu_buttons.add_stretch_spacer(1);
-    let stop_bridge_button = Button::builder(&feishu_static_box)
-        .with_label("暂停接入")
-        .build();
-    stop_bridge_button.set_tooltip("暂停或恢复飞书接入，不删除已保存的机器人配置");
-    let change_bot_button = Button::builder(&feishu_static_box)
-        .with_label("扫码使用新机器人")
+    let add_im_box =
+        StaticBoxSizerBuilder::new_with_box(&add_im_static_box, Orientation::Vertical).build();
+    let add_im_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    let change_bot_button = Button::builder(&add_im_static_box)
+        .with_label("添加飞书机器人")
         .build();
     change_bot_button.set_tooltip("扫码接入一个新的飞书机器人");
-    feishu_buttons.add(&stop_bridge_button, 0, SizerFlag::Right, 8);
-    feishu_buttons.add(&change_bot_button, 0, SizerFlag::Right, 0);
-    feishu_box.add_sizer(&feishu_buttons, 0, SizerFlag::Expand | SizerFlag::All, 12);
-    feishu_sizer.add_sizer(
-        &feishu_box,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        14,
-    );
-
-    let telegram_static_box = StaticBox::builder(&feishu_page)
-        .with_label("Telegram 机器人")
+    let save_telegram_button = Button::builder(&add_im_static_box)
+        .with_label("添加 Telegram 机器人")
         .build();
-    let telegram_box =
-        StaticBoxSizerBuilder::new_with_box(&telegram_static_box, Orientation::Vertical).build();
-    let telegram_state = StaticText::builder(&telegram_static_box)
-        .with_label("检测中")
-        .build();
-    telegram_state.set_foreground_color(Colour::rgb(73, 83, 96));
-    telegram_box.add(
-        &telegram_state,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
-
-    let telegram_detail = StaticText::builder(&telegram_static_box)
-        .with_label("正在读取 Telegram 接入状态")
-        .build();
-    telegram_detail.set_foreground_color(Colour::rgb(82, 91, 105));
-    telegram_detail.wrap(760);
-    telegram_box.add(
-        &telegram_detail,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
-
-    let telegram_divider = StaticLine::builder(&telegram_static_box).build();
-    telegram_box.add(
-        &telegram_divider,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        14,
-    );
-
-    let telegram_form = FlexGridSizer::builder(0, 2)
-        .with_gap(Size::new(12, 10))
-        .build();
-    telegram_form.add_growable_col(1, 1);
-    let telegram_token = text_field_row(&telegram_static_box, &telegram_form, "Bot Token", "");
-    let telegram_token_hint = StaticText::builder(&telegram_static_box)
-        .with_label("已配置时显示 ********；需要更换机器人时粘贴新 token 后保存。")
-        .build();
-    telegram_token_hint.set_foreground_color(Colour::rgb(103, 111, 124));
-    telegram_form.add_spacer(1);
-    telegram_form.add(&telegram_token_hint, 1, SizerFlag::Expand, 0);
-    telegram_box.add_sizer(
-        &telegram_form,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
-
-    let telegram_private_hint = StaticText::builder(&telegram_static_box)
-        .with_label("仅支持与机器人私聊；群聊暂不接入。")
-        .build();
-    telegram_private_hint.set_foreground_color(Colour::rgb(103, 111, 124));
-    telegram_box.add(
-        &telegram_private_hint,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
-
-    let telegram_buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    telegram_buttons.add_stretch_spacer(1);
-    let telegram_toggle_button = Button::builder(&telegram_static_box)
-        .with_label("暂停接入")
-        .build();
-    telegram_toggle_button.set_tooltip("暂停或恢复 Telegram 接入，不删除已保存的机器人配置");
-    let save_telegram_button = Button::builder(&telegram_static_box)
-        .with_label("保存并接入")
-        .build();
-    save_telegram_button.set_tooltip("保存 Telegram Bot Token 并重启桥接");
-    telegram_buttons.add(&telegram_toggle_button, 0, SizerFlag::Right, 8);
-    telegram_buttons.add(&save_telegram_button, 0, SizerFlag::Right, 0);
-    telegram_box.add_sizer(
-        &telegram_buttons,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom | SizerFlag::Top,
-        12,
-    );
-    feishu_sizer.add_sizer(
-        &telegram_box,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        14,
-    );
-
-    let wechat_static_box = StaticBox::builder(&feishu_page)
-        .with_label("微信机器人")
-        .build();
-    let wechat_box =
-        StaticBoxSizerBuilder::new_with_box(&wechat_static_box, Orientation::Vertical).build();
-    let wechat_state = StaticText::builder(&wechat_static_box)
-        .with_label("检测中")
-        .build();
-    wechat_state.set_foreground_color(Colour::rgb(73, 83, 96));
-    wechat_box.add(
-        &wechat_state,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
-
-    let wechat_detail = StaticText::builder(&wechat_static_box)
-        .with_label("正在读取微信接入状态")
-        .build();
-    wechat_detail.set_foreground_color(Colour::rgb(82, 91, 105));
-    wechat_detail.wrap(760);
-    wechat_box.add(
-        &wechat_detail,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        12,
-    );
-
-    let wechat_meta = StaticText::builder(&wechat_static_box)
-        .with_label("")
-        .build();
-    wechat_meta.set_foreground_color(Colour::rgb(103, 111, 124));
-    wechat_meta.wrap(760);
-
-    let wechat_buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    wechat_buttons.add_stretch_spacer(1);
-    let wechat_toggle_button = Button::builder(&wechat_static_box)
-        .with_label("暂停接入")
-        .build();
-    wechat_toggle_button.set_tooltip("暂停或恢复微信接入，不删除已保存的机器人配置");
-    let connect_wechat_button = Button::builder(&wechat_static_box)
-        .with_label("扫码连接微信")
+    save_telegram_button.set_tooltip("填写 Telegram Bot Token 并接入");
+    let connect_wechat_button = Button::builder(&add_im_static_box)
+        .with_label("添加微信机器人")
         .build();
     connect_wechat_button.set_tooltip("使用微信扫码接入机器人");
-    wechat_buttons.add(&wechat_toggle_button, 0, SizerFlag::Right, 8);
-    wechat_buttons.add(&connect_wechat_button, 0, SizerFlag::Right, 0);
-    wechat_box.add_sizer(
-        &wechat_buttons,
+    add_im_actions.add(&change_bot_button, 0, SizerFlag::Right, 10);
+    add_im_actions.add(&save_telegram_button, 0, SizerFlag::Right, 10);
+    add_im_actions.add(&connect_wechat_button, 0, SizerFlag::Right, 0);
+    add_im_box.add_sizer(
+        &add_im_actions,
         0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom | SizerFlag::Top,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
     );
-    feishu_sizer.add_sizer(
-        &wechat_box,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        14,
-    );
+    feishu_sizer.add_sizer(&add_im_box, 0, SizerFlag::Expand | SizerFlag::All, 12);
     feishu_sizer.add_stretch_spacer(1);
     feishu_page.set_sizer(feishu_sizer, true);
     let feishu_best_size = feishu_page.get_best_size();
@@ -590,24 +510,14 @@ fn build_ui() {
         im_status,
         codex_status,
         vscode_status,
-        feishu_state,
-        feishu_detail,
-        feishu_meta,
-        telegram_state,
-        telegram_detail,
-        telegram_token,
         im_account_list,
-        toggle_im_account_button,
+        im_account_rows,
+        im_account_model,
+        pending_im_toggle,
         delete_im_account_button,
-        telegram_toggle_button,
         save_telegram_button,
-        wechat_state,
-        wechat_detail,
-        wechat_meta,
-        wechat_toggle_button,
         connect_wechat_button,
         change_bot_button,
-        stop_bridge_button,
         uninstall_button,
         new_provider_button,
         save_provider_button,
@@ -628,7 +538,7 @@ fn build_ui() {
     show_local_codex_app_config_preview(&handles, &api, &dashboard_refresh);
 
     {
-        let handles = handles;
+        let handles = handles.clone();
         new_provider_button.on_click(move |_| {
             clear_provider_list_selection(&handles.provider_list);
             set_combo_value_if_changed(&handles.provider_name, "");
@@ -645,36 +555,19 @@ fn build_ui() {
     {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
-        let frame = frame;
-        telegram_toggle_button.on_click(move |_| {
-            let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) else {
-                show_error(&frame, "状态尚未加载，请稍后再试。");
-                return;
-            };
-            toggle_im_channel(
-                &api,
-                &frame,
-                &dashboard_refresh,
-                "telegram",
-                "Telegram",
-                telegram_configured(&snapshot),
-                telegram_enabled(&snapshot) && bridge_enabled(&snapshot),
-            );
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
         let provider_name = provider_name;
         let provider_base_url = provider_base_url;
         let provider_key = provider_key;
         let frame = frame;
-        let handles = handles;
+        let handles = handles.clone();
         let config_action_result = config_action_result.clone();
         let config_action_in_flight = config_action_in_flight.clone();
         save_provider_button.on_click(move |_| {
             if config_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                config_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
             handles
@@ -715,11 +608,15 @@ fn build_ui() {
         let dashboard_refresh = dashboard_refresh.clone();
         let provider_name = provider_name;
         let frame = frame;
-        let handles = handles;
+        let handles = handles.clone();
         let config_action_result = config_action_result.clone();
         let config_action_in_flight = config_action_in_flight.clone();
         delete_provider_button.on_click(move |_| {
             if config_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                config_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
             let provider_name = provider_name_from_ui(
@@ -767,11 +664,15 @@ fn build_ui() {
         let provider_base_url = provider_base_url;
         let provider_key = provider_key;
         let frame = frame;
-        let handles = handles;
+        let handles = handles.clone();
         let config_action_result = config_action_result.clone();
         let config_action_in_flight = config_action_in_flight.clone();
         configure_button.on_click(move |_| {
             if config_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                config_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
             handles.provider_catalog.set_label("正在启用，请稍候...");
@@ -809,8 +710,11 @@ fn build_ui() {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
-        let handles = handles;
+        let handles = handles.clone();
         uninstall_button.on_click(move |_| {
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                return;
+            }
             if !confirm_uninstall_codex_app_config(&frame) {
                 return;
             }
@@ -830,7 +734,7 @@ fn build_ui() {
     }
 
     {
-        let handles = handles;
+        let handles = handles.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         provider_name.on_selection_changed(move |_| {
             let selected = clean_provider_text(&provider_name.get_value());
@@ -844,7 +748,7 @@ fn build_ui() {
     }
 
     {
-        let handles = handles;
+        let handles = handles.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         provider_list.on_item_selected(move |event| {
             let index = event.get_item_index();
@@ -865,28 +769,10 @@ fn build_ui() {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
-        stop_bridge_button.on_click(move |_| {
-            let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) else {
-                show_error(&frame, "状态尚未加载，请稍后再试。");
-                return;
-            };
-            toggle_im_channel(
-                &api,
-                &frame,
-                &dashboard_refresh,
-                "feishu",
-                "飞书",
-                feishu_configured(&snapshot),
-                feishu_enabled(&snapshot) && bridge_enabled(&snapshot),
-            );
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let frame = frame;
         change_bot_button.on_click(move |_| {
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                return;
+            }
             show_feishu_onboard_dialog(&frame, api.clone());
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
@@ -899,48 +785,15 @@ fn build_ui() {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
-        let handles = handles;
-        let im_action_result = im_action_result.clone();
-        let im_action_in_flight = im_action_in_flight.clone();
-        toggle_im_account_button.on_click(move |_| {
-            if im_action_in_flight.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            let Some(account) = selected_im_account(&handles, &dashboard_refresh) else {
-                im_action_in_flight.store(false, Ordering::SeqCst);
-                show_error(&frame, "请先选择一个机器人。");
-                return;
-            };
-            handles.toggle_im_account_button.set_label("处理中...");
-            handles.toggle_im_account_button.enable(false);
-            let request = SetImAccountEnabledRequest {
-                platform: account.platform,
-                account_id: account.account_id,
-                enabled: !account.enabled,
-            };
-            let thread_api = api.clone();
-            let im_action_result = im_action_result.clone();
-            let im_action_in_flight = im_action_in_flight.clone();
-            thread::spawn(move || {
-                let outcome = thread_api.set_im_account_enabled(&request);
-                if let Ok(mut slot) = im_action_result.lock() {
-                    slot.replace(ImActionResult::AccountToggle(outcome));
-                }
-                im_action_in_flight.store(false, Ordering::SeqCst);
-            });
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let frame = frame;
-        let handles = handles;
+        let handles = handles.clone();
         let im_action_result = im_action_result.clone();
         let im_action_in_flight = im_action_in_flight.clone();
         delete_im_account_button.on_click(move |_| {
             if im_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                im_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
             let Some(account) = selected_im_account(&handles, &dashboard_refresh) else {
@@ -980,34 +833,31 @@ fn build_ui() {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
-        let handles = handles;
+        let handles = handles.clone();
         let im_action_result = im_action_result.clone();
         let im_action_in_flight = im_action_in_flight.clone();
         save_telegram_button.on_click(move |_| {
             if im_action_in_flight.swap(true, Ordering::SeqCst) {
                 return;
             }
-
-            let token = strip_nul(&handles.telegram_token.get_value())
-                .trim()
-                .to_string();
-            let token = if token.is_empty() || token == TELEGRAM_TOKEN_MASK {
-                None
-            } else {
-                Some(token)
-            };
-            if token.is_none() {
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
                 im_action_in_flight.store(false, Ordering::SeqCst);
-                show_error(&frame, "请输入 Telegram Bot Token。");
                 return;
             }
 
-            handles.save_telegram_button.set_label("保存中...");
+            let Some(token) = prompt_telegram_bot_token(&frame) else {
+                im_action_in_flight.store(false, Ordering::SeqCst);
+                return;
+            };
+
+            handles.save_telegram_button.set_label("添加中...");
             handles.save_telegram_button.enable(false);
             frame.refresh(true, None);
             frame.update();
 
-            let request = ConfigureTelegramBotRequest { bot_token: token };
+            let request = ConfigureTelegramBotRequest {
+                bot_token: Some(token),
+            };
             let thread_api = api.clone();
             let im_action_result = im_action_result.clone();
             let im_action_in_flight = im_action_in_flight.clone();
@@ -1027,36 +877,18 @@ fn build_ui() {
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         connect_wechat_button.on_click(move |_| {
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                return;
+            }
             show_wechat_onboard_dialog(&frame, api.clone());
             schedule_dashboard_refresh(&api, &dashboard_refresh);
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let frame = frame;
-        wechat_toggle_button.on_click(move |_| {
-            let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) else {
-                show_error(&frame, "状态尚未加载，请稍后再试。");
-                return;
-            };
-            toggle_im_channel(
-                &api,
-                &frame,
-                &dashboard_refresh,
-                "wechat",
-                "微信",
-                wechat_configured(&snapshot),
-                wechat_enabled(&snapshot) && bridge_enabled(&snapshot),
-            );
         });
     }
 
     let result_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let result_timer = Timer::new(&frame);
     {
-        let handles = handles;
+        let handles = handles.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         result_timer.on_tick(move |_| {
             apply_pending_dashboard(&handles, &dashboard_refresh);
@@ -1070,7 +902,7 @@ fn build_ui() {
     let config_action_timer = Timer::new(&frame);
     {
         let api = api.clone();
-        let handles = handles;
+        let handles = handles.clone();
         let frame = frame;
         let dashboard_refresh = dashboard_refresh.clone();
         let config_action_result = config_action_result.clone();
@@ -1094,11 +926,38 @@ fn build_ui() {
     let im_action_timer = Timer::new(&frame);
     {
         let api = api.clone();
-        let handles = handles;
+        let handles = handles.clone();
         let frame = frame;
         let dashboard_refresh = dashboard_refresh.clone();
         let im_action_result = im_action_result.clone();
+        let im_action_in_flight = im_action_in_flight.clone();
         im_action_timer.on_tick(move |_| {
+            if !im_action_in_flight.load(Ordering::SeqCst)
+                && let Some((platform, account_id, enabled)) =
+                    handles.pending_im_toggle.borrow_mut().take()
+            {
+                if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                    force_dashboard_refresh(&api, &dashboard_refresh);
+                    return;
+                }
+                im_action_in_flight.store(true, Ordering::SeqCst);
+                set_actions_enabled(&handles, false);
+                let request = SetImAccountEnabledRequest {
+                    platform,
+                    account_id,
+                    enabled,
+                };
+                let thread_api = api.clone();
+                let im_action_result = im_action_result.clone();
+                let im_action_in_flight = im_action_in_flight.clone();
+                thread::spawn(move || {
+                    let outcome = thread_api.set_im_account_enabled(&request);
+                    if let Ok(mut slot) = im_action_result.lock() {
+                        slot.replace(ImActionResult::AccountToggle(outcome));
+                    }
+                    im_action_in_flight.store(false, Ordering::SeqCst);
+                });
+            }
             apply_pending_im_action(
                 &api,
                 &handles,
@@ -1482,6 +1341,7 @@ fn open_url_in_browser(url: &str) -> Result<(), String> {
     let mut command = {
         let mut command = Command::new("cmd");
         command.args(["/C", "start", "", url]);
+        hide_command_window(&mut command);
         command
     };
     #[cfg(target_os = "macos")]
@@ -1524,10 +1384,10 @@ fn restart_daemon_for_gui(api: &ApiClient) -> Result<Child, String> {
 fn stop_existing_daemon(api: &ApiClient) {
     if api.is_online() {
         let _ = api.shutdown();
-        wait_for_daemon_offline(api, 15);
+        wait_for_daemon_offline(api, 5);
     }
     stop_daemon_by_port(api);
-    wait_for_daemon_offline(api, 15);
+    wait_for_daemon_offline(api, 5);
 }
 
 fn stop_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>) {
@@ -1590,13 +1450,28 @@ fn start_daemon_for_gui_async(
     let startup_timer = Timer::new(frame);
     {
         let api = api.clone();
-        let handles = *handles;
+        let handles = handles.clone();
         let daemon_child = daemon_child.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let startup_timer_store = startup_timer_store.clone();
+        let startup_started_at = Instant::now();
+        let startup_timeout_reported = Rc::new(RefCell::new(false));
         startup_timer.on_tick(move |_| {
             let startup = result.lock().ok().and_then(|mut slot| slot.take());
             let Some(startup) = startup else {
+                if !*startup_timeout_reported.borrow()
+                    && startup_started_at.elapsed() >= GUI_STARTUP_WATCHDOG_TIMEOUT
+                {
+                    *startup_timeout_reported.borrow_mut() = true;
+                    dashboard_refresh
+                        .daemon_starting
+                        .store(false, Ordering::SeqCst);
+                    show_dashboard_startup_error(
+                        &handles,
+                        "本地服务启动超过 30 秒仍未完成。请检查旧进程占用或 logs/codex-remote-chain.log。",
+                    );
+                    force_dashboard_refresh(&api, &dashboard_refresh);
+                }
                 return;
             };
 
@@ -1611,21 +1486,27 @@ fn start_daemon_for_gui_async(
             dashboard_refresh
                 .daemon_starting
                 .store(false, Ordering::SeqCst);
-            match startup {
+            let should_refresh = match startup {
                 Ok(_) if dashboard_refresh.closing.load(Ordering::SeqCst) => {
                     stop_pending_startup_daemon(&dashboard_refresh);
+                    false
                 }
                 Ok(_) => {
                     if let Some(child) = take_pending_startup_daemon(&dashboard_refresh) {
                         replace_managed_daemon(&daemon_child, child);
                     }
                     repair_codex_app_gui_environment_async(&api, &dashboard_refresh);
+                    true
                 }
-                Err(_) => {
+                Err(err) => {
+                    show_dashboard_startup_error(&handles, &err);
                     set_actions_enabled(&handles, false);
+                    false
                 }
+            };
+            if should_refresh {
+                force_dashboard_refresh(&api, &dashboard_refresh);
             }
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
     startup_timer.start(100, false);
@@ -1737,11 +1618,74 @@ fn stop_daemon_by_port(api: &ApiClient) {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn stop_daemon_by_port(api: &ApiClient) {
+    let Some(port) = api.local_port() else {
+        return;
+    };
+    let mut command = Command::new("netstat");
+    command.args(["-ano", "-p", "TCP"]);
+    hide_command_window(&mut command);
+    let Ok(output) = command.output() else {
+        return;
+    };
+
+    let current_pid = std::process::id().to_string();
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        if parts.len() < 5 {
+            continue;
+        }
+        if !parts[3].eq_ignore_ascii_case("LISTENING") {
+            continue;
+        }
+        if !netstat_addr_has_port(parts[1], port) {
+            continue;
+        }
+        let pid = parts[4].to_string();
+        if pid != current_pid && !pids.iter().any(|value| value == &pid) {
+            pids.push(pid);
+        }
+    }
+
+    for pid in pids {
+        if windows_pid_is_codex_remote(&pid) {
+            let mut command = Command::new("taskkill");
+            command.args(["/PID", &pid, "/F", "/T"]);
+            hide_command_window(&mut command);
+            let _ = command.status();
+        }
+    }
+}
+
+#[cfg(windows)]
+fn netstat_addr_has_port(addr: &str, port: u16) -> bool {
+    addr.rsplit_once(':')
+        .and_then(|(_, value)| value.parse::<u16>().ok())
+        == Some(port)
+}
+
+#[cfg(windows)]
+fn windows_pid_is_codex_remote(pid: &str) -> bool {
+    let filter = format!("PID eq {pid}");
+    let mut command = Command::new("tasklist");
+    command.args(["/FI", &filter, "/FO", "CSV", "/NH"]);
+    hide_command_window(&mut command);
+    let Ok(output) = command.output() else {
+        return false;
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .to_ascii_lowercase()
+        .contains("codex-remote")
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn stop_daemon_by_port(_api: &ApiClient) {}
 
 fn spawn_daemon() -> Result<Child, String> {
     let mut command = daemon_command()?;
+    hide_command_window(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -1765,6 +1709,12 @@ fn append_daemon_args(command: &mut Command) {
 }
 
 fn daemon_config_path() -> Option<PathBuf> {
+    if env::var_os("CODEX_REMOTE_HOME").is_some() {
+        return Some(app_support_config_path());
+    }
+    if let Some(path) = adjacent_config_from_current_exe() {
+        return Some(path);
+    }
     if env::var_os("CODEX_REMOTE_USE_REPO_CONFIG").is_some() {
         return std::env::current_dir()
             .ok()
@@ -1780,13 +1730,33 @@ fn daemon_config_path() -> Option<PathBuf> {
 }
 
 fn app_support_config_path() -> PathBuf {
-    let base = env::var_os("CODEX_REMOTE_HOME")
+    if let Some(base) = env::var_os("CODEX_REMOTE_HOME").map(PathBuf::from) {
+        return base.join("config.toml");
+    }
+    platform_app_support_config_path()
+}
+
+#[cfg(target_os = "windows")]
+fn platform_app_support_config_path() -> PathBuf {
+    let legacy = env::var_os("HOME")
         .map(PathBuf::from)
-        .or_else(|| {
-            env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join("Library/Application Support/Codex Remote"))
-        })
+        .map(|home| home.join("Library/Application Support/Codex Remote/config.toml"));
+    if let Some(path) = legacy.filter(|path| path.exists()) {
+        return path;
+    }
+    let base = env::var_os("LOCALAPPDATA")
+        .or_else(|| env::var_os("APPDATA"))
+        .map(PathBuf::from)
+        .or_else(|| env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("Codex Remote").join("config.toml")
+}
+
+#[cfg(not(target_os = "windows"))]
+fn platform_app_support_config_path() -> PathBuf {
+    let base = env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support/Codex Remote"))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("config.toml")
@@ -1803,9 +1773,24 @@ fn repo_root_from_target_exe() -> Option<PathBuf> {
     has_manifest(&repo_root).then_some(repo_root)
 }
 
+fn adjacent_config_from_current_exe() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join("config.toml")))
+        .filter(|path| path.exists())
+}
+
 fn has_manifest(path: &Path) -> bool {
     path.join("Cargo.toml").exists()
 }
+
+#[cfg(target_os = "windows")]
+fn hide_command_window(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hide_command_window(_command: &mut Command) {}
 
 #[derive(Clone)]
 struct ApiClient {
@@ -1895,7 +1880,6 @@ impl ApiClient {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
     }
 
-    #[cfg(unix)]
     fn local_port(&self) -> Option<u16> {
         let url = reqwest::Url::parse(&self.base_url).ok()?;
         let host = url.host_str()?;
@@ -1913,27 +1897,15 @@ impl ApiClient {
             }
         };
 
-        let config = self.get_quick_optional_async::<AppConfig>("/api/config");
-        let backend = self.get_quick_optional_async::<RemoteControlBackendStatus>(
-            "/api/remote-control/backend-status",
-        );
         let remote =
             self.get_quick_optional_async::<RemoteControlStatus>("/api/remote-control/status");
         let codex_app = self.get_quick_optional_async::<CodexAppStatus>("/api/codex-app/status");
-        let feishu_bot = self.get_quick_optional_async::<FeishuBotStatus>("/api/feishu/bot");
-        let telegram_bot = self.get_quick_optional_async::<TelegramBotStatus>("/api/telegram/bot");
-        let wechat_bot = self.get_quick_optional_async::<WechatBotStatus>("/api/wechat/bot");
         let im_accounts = self.get_quick_optional_async::<ImAccountsResponse>("/api/im/accounts");
 
         DashboardSnapshot {
             service_online: true,
-            config: join_optional(config),
-            backend: join_optional(backend),
             remote: join_optional(remote),
             codex_app: join_optional(codex_app),
-            feishu_bot: join_optional(feishu_bot),
-            telegram_bot: join_optional(telegram_bot),
-            wechat_bot: join_optional(wechat_bot),
             im_accounts: join_optional(im_accounts),
             status: Some(status),
         }
@@ -1972,13 +1944,6 @@ impl ApiClient {
 
     fn repair_codex_app_gui_environment(&self) -> Result<serde_json::Value, String> {
         self.post_empty_with_timeout("/api/codex-app/repair-gui-environment", GUI_CONFIG_TIMEOUT)
-    }
-
-    fn set_im_channel_enabled(
-        &self,
-        request: &SetImChannelEnabledRequest,
-    ) -> Result<serde_json::Value, String> {
-        self.post_json_with_timeout("/api/im-channel/enabled", request, GUI_CONFIG_TIMEOUT)
     }
 
     fn set_im_account_enabled(
@@ -2083,30 +2048,20 @@ enum StatusIconKind {
     VsCodeCodex,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct UiHandles {
     service_status: StatusPanel,
     im_status: ImStatusPanel,
     codex_status: StatusPanel,
     vscode_status: StatusPanel,
-    feishu_state: StaticText,
-    feishu_detail: StaticText,
-    feishu_meta: StaticText,
-    telegram_state: StaticText,
-    telegram_detail: StaticText,
-    telegram_token: TextCtrl,
-    im_account_list: ListCtrl,
-    toggle_im_account_button: Button,
+    im_account_list: DataViewCtrl,
+    im_account_rows: ImAccountRows,
+    im_account_model: ImAccountModel,
+    pending_im_toggle: PendingImToggle,
     delete_im_account_button: Button,
-    telegram_toggle_button: Button,
     save_telegram_button: Button,
-    wechat_state: StaticText,
-    wechat_detail: StaticText,
-    wechat_meta: StaticText,
-    wechat_toggle_button: Button,
     connect_wechat_button: Button,
     change_bot_button: Button,
-    stop_bridge_button: Button,
     uninstall_button: Button,
     new_provider_button: Button,
     save_provider_button: Button,
@@ -2148,13 +2103,8 @@ impl DashboardRefresh {
 struct DashboardSnapshot {
     service_online: bool,
     status: Option<ServerStatus>,
-    config: Option<AppConfig>,
-    backend: Option<RemoteControlBackendStatus>,
     remote: Option<RemoteControlStatus>,
     codex_app: Option<CodexAppStatus>,
-    feishu_bot: Option<FeishuBotStatus>,
-    telegram_bot: Option<TelegramBotStatus>,
-    wechat_bot: Option<WechatBotStatus>,
     im_accounts: Option<ImAccountsResponse>,
 }
 
@@ -2162,10 +2112,6 @@ struct DashboardSnapshot {
 #[serde(rename_all = "camelCase")]
 struct ServerStatus {
     bind: String,
-    feishu_ws: FeishuWsState,
-    #[serde(default)]
-    telegram: TelegramState,
-    wechat: WechatState,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -2187,124 +2133,6 @@ struct ImAccountItem {
     polling: bool,
     connected: bool,
     last_error: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FeishuWsState {
-    connecting: bool,
-    connected: bool,
-}
-
-#[derive(Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TelegramState {
-    #[serde(default)]
-    polling: bool,
-    #[serde(default)]
-    connected: bool,
-    last_error: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AppConfig {
-    feishu: FeishuConfig,
-    telegram: TelegramConfig,
-    wechat: WechatConfig,
-    bridge: BridgeConfig,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FeishuConfig {
-    #[serde(default = "default_true")]
-    enabled: bool,
-    app_id: String,
-    display_name: String,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TelegramConfig {
-    #[serde(default = "default_true")]
-    enabled: bool,
-    bot_token: String,
-    #[serde(default)]
-    display_name: String,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WechatConfig {
-    #[serde(default = "default_true")]
-    enabled: bool,
-    bot_token: String,
-    #[serde(default)]
-    display_name: String,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FeishuBotStatus {
-    configured: bool,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    display_name: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TelegramBotStatus {
-    configured: bool,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    token_set: bool,
-    display_name: Option<String>,
-    #[serde(default)]
-    polling: bool,
-    #[serde(default)]
-    connected: bool,
-    last_error: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WechatBotStatus {
-    configured: bool,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    display_name: Option<String>,
-    polling: bool,
-    connected: bool,
-    last_error: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WechatState {
-    polling: bool,
-    connected: bool,
-    last_error: Option<String>,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BridgeConfig {
-    enabled: bool,
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RemoteControlBackendStatus {
-    enabled: bool,
-    feishu_configured: bool,
-    telegram_configured: bool,
-    wechat_configured: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -2373,13 +2201,6 @@ enum ImActionResult {
 #[serde(rename_all = "camelCase")]
 struct ConfigureTelegramBotRequest {
     bot_token: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SetImChannelEnabledRequest {
-    channel: &'static str,
-    enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -2956,18 +2777,35 @@ fn schedule_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh) -> bo
         return false;
     }
 
+    let generation = refresh.generation.load(Ordering::SeqCst);
+    spawn_dashboard_refresh(api, refresh, generation);
+    true
+}
+
+fn force_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh) -> bool {
+    let generation = refresh.generation.fetch_add(1, Ordering::SeqCst) + 1;
+    if let Ok(mut result) = refresh.result.lock() {
+        result.take();
+    }
+    refresh.in_flight.store(true, Ordering::SeqCst);
+    spawn_dashboard_refresh(api, refresh, generation);
+    true
+}
+
+fn spawn_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh, generation: u64) {
     let api = api.clone();
     let result = refresh.result.clone();
     let in_flight = refresh.in_flight.clone();
-    let generation = refresh.generation.load(Ordering::SeqCst);
+    let current_generation = refresh.generation.clone();
     thread::spawn(move || {
         let snapshot = api.dashboard();
-        if let Ok(mut slot) = result.lock() {
+        if generation == current_generation.load(Ordering::SeqCst)
+            && let Ok(mut slot) = result.lock()
+        {
             slot.replace((generation, snapshot));
         }
         in_flight.store(false, Ordering::SeqCst);
     });
-    true
 }
 
 fn apply_pending_dashboard(handles: &UiHandles, refresh: &DashboardRefresh) -> bool {
@@ -2993,6 +2831,27 @@ fn cached_dashboard_snapshot(refresh: &DashboardRefresh) -> Option<DashboardSnap
         .lock()
         .ok()
         .and_then(|snapshot| snapshot.clone())
+}
+
+fn ensure_service_ready_for_action(
+    api: &ApiClient,
+    frame: &Frame,
+    refresh: &DashboardRefresh,
+) -> bool {
+    if refresh.daemon_starting.load(Ordering::SeqCst) {
+        show_info(frame, "本地服务正在启动，请稍后再试。");
+        return false;
+    }
+    if api.is_online() {
+        return true;
+    }
+
+    force_dashboard_refresh(api, refresh);
+    show_error(
+        frame,
+        "本地服务还没有启动完成，请稍后再试。如果一直未运行，请重启 Codex Remote。",
+    );
+    false
 }
 
 fn configure_codex_app_and_verify(
@@ -3169,16 +3028,15 @@ fn apply_pending_im_action(
         return false;
     };
 
-    handles.save_telegram_button.set_label("保存并接入");
+    handles
+        .save_telegram_button
+        .set_label("添加 Telegram 机器人");
     handles.save_telegram_button.enable(true);
-    handles.toggle_im_account_button.set_label("暂停选中");
-    handles.toggle_im_account_button.enable(true);
     handles.delete_im_account_button.set_label("删除选中");
     handles.delete_im_account_button.enable(true);
 
     match result {
         ImActionResult::TelegramConfigure(Ok(_)) => {
-            handles.telegram_token.change_value(TELEGRAM_TOKEN_MASK);
             show_info(frame, "Telegram 已保存并接入。");
             schedule_dashboard_refresh(api, refresh);
         }
@@ -3187,15 +3045,15 @@ fn apply_pending_im_action(
             schedule_dashboard_refresh(api, refresh);
         }
         ImActionResult::AccountToggle(Ok(_)) => {
-            schedule_dashboard_refresh(api, refresh);
+            force_dashboard_refresh(api, refresh);
         }
         ImActionResult::AccountToggle(Err(err)) => {
             show_error(frame, &err);
-            schedule_dashboard_refresh(api, refresh);
+            force_dashboard_refresh(api, refresh);
         }
         ImActionResult::AccountDelete(Ok(_)) => {
             show_info(frame, "机器人接入已删除。");
-            schedule_dashboard_refresh(api, refresh);
+            force_dashboard_refresh(api, refresh);
         }
         ImActionResult::AccountDelete(Err(err)) => {
             show_error(frame, &err);
@@ -3277,20 +3135,34 @@ fn show_dashboard_starting(handles: &UiHandles) {
         "服务启动后可连接 VS Code 插件。",
         StateTone::Muted,
     );
-    handles.feishu_state.set_label("本地服务启动中");
-    handles
-        .feishu_detail
-        .set_label("服务启动完成后会刷新飞书状态。");
-    handles.feishu_meta.set_label("");
-    handles.telegram_state.set_label("本地服务启动中");
-    handles
-        .telegram_detail
-        .set_label("服务启动完成后会刷新 Telegram 状态。");
-    handles.wechat_state.set_label("本地服务启动中");
-    handles
-        .wechat_detail
-        .set_label("服务启动完成后会刷新微信状态。");
-    handles.wechat_meta.set_label("");
+    set_actions_enabled(handles, false);
+}
+
+fn show_dashboard_startup_error(handles: &UiHandles, detail: &str) {
+    set_status_panel(
+        &handles.service_status,
+        "启动失败",
+        detail,
+        StateTone::Error,
+    );
+    set_im_channel_row(
+        &handles.im_status.feishu,
+        "等待服务",
+        "服务启动后读取状态",
+        StateTone::Muted,
+    );
+    set_im_channel_row(
+        &handles.im_status.telegram,
+        "等待服务",
+        "服务启动后读取状态",
+        StateTone::Muted,
+    );
+    set_im_channel_row(
+        &handles.im_status.wechat,
+        "等待服务",
+        "服务启动后读取状态",
+        StateTone::Muted,
+    );
     set_actions_enabled(handles, false);
 }
 
@@ -3381,20 +3253,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             "本地服务未运行",
             StateTone::Muted,
         );
-        handles.feishu_state.set_label("本地服务未运行");
-        handles
-            .feishu_detail
-            .set_label("请重启 Codex Remote，或查看 logs/codex-remote-chain.log。");
-        handles.feishu_meta.set_label("");
-        handles.telegram_state.set_label("本地服务未运行");
-        handles
-            .telegram_detail
-            .set_label("请重启 Codex Remote，或查看 logs/codex-remote-chain.log。");
-        handles.wechat_state.set_label("本地服务未运行");
-        handles
-            .wechat_detail
-            .set_label("请重启 Codex Remote，或查看 logs/codex-remote-chain.log。");
-        handles.wechat_meta.set_label("");
         set_actions_enabled(handles, false);
         return;
     }
@@ -3410,13 +3268,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         );
     }
 
-    let feishu_configured = feishu_configured(snapshot);
-    let telegram_configured = telegram_configured(snapshot);
-    let wechat_configured = wechat_configured(snapshot);
-    let is_feishu_enabled = feishu_enabled(snapshot);
-    let is_telegram_enabled = telegram_enabled(snapshot);
-    let is_wechat_enabled = wechat_enabled(snapshot);
-    let bridge_enabled = bridge_enabled(snapshot);
     refresh_im_account_list(handles, snapshot);
 
     let remote_connected = snapshot
@@ -3435,287 +3286,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         .as_ref()
         .map(|status| status.configured)
         .unwrap_or(false);
-
-    let feishu_ws = snapshot.status.as_ref().map(|status| &status.feishu_ws);
-    let telegram_runtime = snapshot.status.as_ref().map(|status| &status.telegram);
-    let wechat_runtime = snapshot.status.as_ref().map(|status| &status.wechat);
-    let feishu_bot_name = feishu_bot_display_name(snapshot);
-    let (feishu_state, feishu_detail, feishu_tone) = if !feishu_configured {
-        (
-            "未接入",
-            "扫码接入飞书机器人后才会启动飞书桥接。",
-            StateTone::Warn,
-        )
-    } else if !bridge_enabled || !is_feishu_enabled {
-        ("已暂停", "机器人已保存，可随时恢复接入。", StateTone::Muted)
-    } else if feishu_ws.is_some_and(|ws| ws.connected) {
-        let detail = if codex_control_ready {
-            "飞书桥接运行中。"
-        } else if remote_connected {
-            "飞书桥接运行中，Codex App 控制通道正在初始化。"
-        } else {
-            "飞书桥接运行中，等待 Codex App 打开“控制这台 Mac”。"
-        };
-        ("已接入", detail, StateTone::Ok)
-    } else if feishu_ws.is_some_and(|ws| ws.connecting) {
-        ("连接中", "正在连接飞书。", StateTone::Warn)
-    } else {
-        (
-            "等待连接",
-            "机器人已保存，等待飞书桥接启动。",
-            StateTone::Warn,
-        )
-    };
-
-    let feishu_top_detail = feishu_bot_name
-        .as_deref()
-        .filter(|name| !name.is_empty())
-        .unwrap_or(match feishu_state {
-            "未接入" => "扫码接入机器人",
-            "已暂停" => "机器人已保存",
-            "连接中" => "正在连接 websocket",
-            "等待连接" => "等待 bridge 启动",
-            _ => "飞书机器人",
-        });
-    set_im_channel_row(
-        &handles.im_status.feishu,
-        feishu_state,
-        feishu_top_detail,
-        feishu_tone,
-    );
-    let feishu_state_label = feishu_state_label(feishu_state, feishu_bot_name.as_deref());
-    handles.feishu_state.set_label(&feishu_state_label);
-    handles
-        .feishu_state
-        .set_foreground_color(feishu_tone.colour());
-    handles.feishu_detail.set_label(feishu_detail);
-    handles.feishu_detail.wrap(300);
-    if feishu_configured && is_feishu_enabled && bridge_enabled {
-        handles.stop_bridge_button.set_label("暂停接入");
-        handles
-            .stop_bridge_button
-            .set_tooltip("暂停飞书接入，不删除已保存的机器人配置");
-    } else if feishu_configured {
-        handles.stop_bridge_button.set_label("恢复接入");
-        handles
-            .stop_bridge_button
-            .set_tooltip("使用已保存的飞书机器人配置恢复接入");
-    } else {
-        handles.stop_bridge_button.set_label("暂停接入");
-        handles
-            .stop_bridge_button
-            .set_tooltip("扫码接入飞书机器人后可暂停或恢复");
-    }
-    handles.stop_bridge_button.enable(feishu_configured);
-    handles.feishu_meta.set_label("");
-
-    let telegram_token_saved = snapshot
-        .telegram_bot
-        .as_ref()
-        .map(|bot| bot.token_set)
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| !config.telegram.bot_token.trim().is_empty())
-        })
-        .unwrap_or(false);
-    if !handles.telegram_token.has_focus() {
-        let desired = if telegram_token_saved {
-            TELEGRAM_TOKEN_MASK
-        } else {
-            ""
-        };
-        if handles.telegram_token.get_value() != desired {
-            handles.telegram_token.change_value(desired);
-        }
-    }
-    let telegram_connected = snapshot
-        .telegram_bot
-        .as_ref()
-        .map(|bot| bot.connected)
-        .or_else(|| telegram_runtime.map(|runtime| runtime.connected))
-        .unwrap_or(false);
-    let telegram_polling = snapshot
-        .telegram_bot
-        .as_ref()
-        .map(|bot| bot.polling)
-        .or_else(|| telegram_runtime.map(|runtime| runtime.polling))
-        .unwrap_or(false);
-    let telegram_last_error = snapshot
-        .telegram_bot
-        .as_ref()
-        .and_then(|bot| bot.last_error.as_deref())
-        .or_else(|| telegram_runtime.and_then(|runtime| runtime.last_error.as_deref()));
-    let telegram_bot_name = telegram_bot_display_name(snapshot);
-    let (telegram_state, telegram_detail, telegram_tone) = if !telegram_configured {
-        (
-            "未接入",
-            "填写 BotFather 提供的 Bot Token 后保存即可接入。".to_string(),
-            StateTone::Warn,
-        )
-    } else if !bridge_enabled || !is_telegram_enabled {
-        (
-            "已暂停",
-            "机器人配置已保存，可随时恢复接入。".to_string(),
-            StateTone::Muted,
-        )
-    } else if telegram_connected {
-        let mut detail_parts = Vec::new();
-        if let Some(name) = telegram_bot_name.as_deref() {
-            detail_parts.push(format!("机器人：{name}"));
-        }
-        detail_parts.push("私聊轮询正常".to_string());
-        detail_parts.push("群聊暂不接入".to_string());
-        (
-            "已接入",
-            format!("{}。", detail_parts.join("；")),
-            StateTone::Ok,
-        )
-    } else if telegram_polling {
-        let detail = telegram_last_error
-            .filter(|err| !err.trim().is_empty())
-            .map(|err| format!("正在重试 Telegram 轮询：{err}"))
-            .unwrap_or_else(|| "正在连接 Telegram 长轮询。".to_string());
-        ("连接中", detail, StateTone::Warn)
-    } else {
-        (
-            "等待连接",
-            "机器人配置已保存，等待 bridge 启动 Telegram 轮询。".to_string(),
-            StateTone::Warn,
-        )
-    };
-    handles.telegram_state.set_label(telegram_state);
-    handles
-        .telegram_state
-        .set_foreground_color(telegram_tone.colour());
-    handles.telegram_detail.set_label(&telegram_detail);
-    handles.telegram_detail.wrap(520);
-    let telegram_top_detail = telegram_bot_name.unwrap_or_else(|| {
-        if !telegram_configured {
-            "填写 Bot Token".to_string()
-        } else if !bridge_enabled || !is_telegram_enabled {
-            "机器人已保存".to_string()
-        } else if telegram_connected {
-            "私聊轮询正常".to_string()
-        } else if telegram_polling {
-            "正在轮询".to_string()
-        } else {
-            "Telegram 机器人".to_string()
-        }
-    });
-    set_im_channel_row(
-        &handles.im_status.telegram,
-        telegram_state,
-        &telegram_top_detail,
-        telegram_tone,
-    );
-    if telegram_configured && is_telegram_enabled && bridge_enabled {
-        handles.telegram_toggle_button.set_label("暂停接入");
-        handles
-            .telegram_toggle_button
-            .set_tooltip("暂停 Telegram 接入，不删除已保存的 Bot Token");
-    } else if telegram_configured {
-        handles.telegram_toggle_button.set_label("恢复接入");
-        handles
-            .telegram_toggle_button
-            .set_tooltip("使用已保存的 Telegram Bot Token 恢复接入");
-    } else {
-        handles.telegram_toggle_button.set_label("暂停接入");
-        handles
-            .telegram_toggle_button
-            .set_tooltip("保存 Telegram Bot Token 后可暂停或恢复");
-    }
-    handles.telegram_toggle_button.enable(telegram_configured);
-
-    let wechat_connected = snapshot
-        .wechat_bot
-        .as_ref()
-        .map(|bot| bot.connected)
-        .or_else(|| wechat_runtime.map(|runtime| runtime.connected))
-        .unwrap_or(false);
-    let wechat_polling = snapshot
-        .wechat_bot
-        .as_ref()
-        .map(|bot| bot.polling)
-        .or_else(|| wechat_runtime.map(|runtime| runtime.polling))
-        .unwrap_or(false);
-    let wechat_last_error = snapshot
-        .wechat_bot
-        .as_ref()
-        .and_then(|bot| bot.last_error.as_deref())
-        .or_else(|| wechat_runtime.and_then(|runtime| runtime.last_error.as_deref()));
-    let wechat_bot_name = wechat_bot_display_name(snapshot);
-    let (wechat_state, wechat_detail, wechat_tone) = if !wechat_configured {
-        (
-            "未接入",
-            "点击“扫码连接微信”，使用微信扫码完成机器人接入。",
-            StateTone::Warn,
-        )
-    } else if !bridge_enabled || !is_wechat_enabled {
-        (
-            "已暂停",
-            "微信机器人已保存，可随时恢复接入。",
-            StateTone::Muted,
-        )
-    } else if wechat_connected {
-        ("已接入", "微信消息轮询正常。", StateTone::Ok)
-    } else if wechat_polling {
-        ("连接中", "正在轮询微信消息。", StateTone::Warn)
-    } else {
-        (
-            "等待连接",
-            "微信凭据已保存，等待 bridge 启动轮询。",
-            StateTone::Warn,
-        )
-    };
-    handles.wechat_state.set_label(wechat_state);
-    handles
-        .wechat_state
-        .set_foreground_color(wechat_tone.colour());
-    handles.wechat_detail.set_label(wechat_detail);
-    handles.wechat_detail.wrap(520);
-    if let Some(err) = wechat_last_error.filter(|err| !err.trim().is_empty()) {
-        handles.wechat_meta.set_label(&format!("最近错误：{err}"));
-    } else {
-        handles.wechat_meta.set_label("");
-    }
-    let wechat_top_detail = wechat_bot_name.unwrap_or_else(|| {
-        if !wechat_configured {
-            "扫码连接微信".to_string()
-        } else if !bridge_enabled || !is_wechat_enabled {
-            "机器人已保存".to_string()
-        } else if wechat_connected {
-            "轮询正常".to_string()
-        } else if wechat_polling {
-            "正在轮询".to_string()
-        } else {
-            "微信机器人".to_string()
-        }
-    });
-    set_im_channel_row(
-        &handles.im_status.wechat,
-        wechat_state,
-        &wechat_top_detail,
-        wechat_tone,
-    );
-    if wechat_configured && is_wechat_enabled && bridge_enabled {
-        handles.wechat_toggle_button.set_label("暂停接入");
-        handles
-            .wechat_toggle_button
-            .set_tooltip("暂停微信接入，不删除已保存的机器人配置");
-    } else if wechat_configured {
-        handles.wechat_toggle_button.set_label("恢复接入");
-        handles
-            .wechat_toggle_button
-            .set_tooltip("使用已保存的微信机器人配置恢复接入");
-    } else {
-        handles.wechat_toggle_button.set_label("暂停接入");
-        handles
-            .wechat_toggle_button
-            .set_tooltip("扫码连接微信后可暂停或恢复");
-    }
-    handles.wechat_toggle_button.enable(wechat_configured);
 
     if CODEX_APP_GUI_UNSUPPORTED {
         set_disabled_status_panel(
@@ -3770,143 +3340,21 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     }
 }
 
-fn feishu_configured(snapshot: &DashboardSnapshot) -> bool {
-    snapshot
-        .backend
-        .as_ref()
-        .map(|backend| backend.feishu_configured)
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| !config.feishu.app_id.is_empty())
-        })
-        .or_else(|| snapshot.feishu_bot.as_ref().map(|bot| bot.configured))
-        .unwrap_or(false)
-}
-
-fn telegram_configured(snapshot: &DashboardSnapshot) -> bool {
-    snapshot
-        .backend
-        .as_ref()
-        .map(|backend| backend.telegram_configured)
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| !config.telegram.bot_token.is_empty())
-        })
-        .or_else(|| snapshot.telegram_bot.as_ref().map(|bot| bot.configured))
-        .unwrap_or(false)
-}
-
-fn wechat_configured(snapshot: &DashboardSnapshot) -> bool {
-    snapshot
-        .backend
-        .as_ref()
-        .map(|backend| backend.wechat_configured)
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| !config.wechat.bot_token.is_empty())
-        })
-        .or_else(|| snapshot.wechat_bot.as_ref().map(|bot| bot.configured))
-        .unwrap_or(false)
-}
-
-fn bridge_enabled(snapshot: &DashboardSnapshot) -> bool {
-    snapshot
-        .backend
-        .as_ref()
-        .map(|backend| backend.enabled)
-        .or_else(|| snapshot.config.as_ref().map(|config| config.bridge.enabled))
-        .unwrap_or(false)
-}
-
-fn feishu_enabled(snapshot: &DashboardSnapshot) -> bool {
-    snapshot
-        .feishu_bot
-        .as_ref()
-        .map(|bot| bot.enabled)
-        .or_else(|| snapshot.config.as_ref().map(|config| config.feishu.enabled))
-        .unwrap_or(true)
-}
-
-fn telegram_enabled(snapshot: &DashboardSnapshot) -> bool {
-    snapshot
-        .telegram_bot
-        .as_ref()
-        .map(|bot| bot.enabled)
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| config.telegram.enabled)
-        })
-        .unwrap_or(true)
-}
-
-fn wechat_enabled(snapshot: &DashboardSnapshot) -> bool {
-    snapshot
-        .wechat_bot
-        .as_ref()
-        .map(|bot| bot.enabled)
-        .or_else(|| snapshot.config.as_ref().map(|config| config.wechat.enabled))
-        .unwrap_or(true)
-}
-
-fn toggle_im_channel(
-    api: &ApiClient,
-    frame: &Frame,
-    refresh: &DashboardRefresh,
-    channel: &'static str,
-    label: &str,
-    configured: bool,
-    enabled: bool,
-) {
-    if !configured {
-        show_error(frame, &format!("请先接入{label}机器人。"));
-        return;
-    }
-
-    let target_enabled = !enabled;
-    let request = SetImChannelEnabledRequest {
-        channel,
-        enabled: target_enabled,
-    };
-    match api.set_im_channel_enabled(&request) {
-        Ok(_) => {
-            let message = if target_enabled {
-                format!("{label} 接入已恢复。")
-            } else {
-                format!("{label} 接入已暂停。")
-            };
-            show_info(frame, &message);
-            schedule_dashboard_refresh(api, refresh);
-        }
-        Err(err) => show_error(frame, &err),
-    }
-}
-
 #[derive(Clone)]
 struct SelectedImAccount {
     platform: String,
     account_id: String,
     display_name: Option<String>,
-    enabled: bool,
 }
 
 fn selected_im_account(
     handles: &UiHandles,
     refresh: &DashboardRefresh,
 ) -> Option<SelectedImAccount> {
-    let selected = handles.im_account_list.get_first_selected_item();
-    if selected < 0 {
-        return None;
-    }
-    let platform = im_platform_key(&handles.im_account_list.get_item_text(selected as i64, 0))?;
-    let account_id = handles.im_account_list.get_item_text(selected as i64, 3);
+    let selected = handles.im_account_list.get_selected_row()?;
+    let row_data = handles.im_account_rows.borrow().get(selected).cloned()?;
+    let platform = im_platform_key(&row_data[1])?;
+    let account_id = row_data[3].clone();
     if account_id.trim().is_empty() {
         return None;
     }
@@ -3922,7 +3370,6 @@ fn selected_im_account(
             platform: account.platform,
             account_id: account.account_id,
             display_name: account.display_name,
-            enabled: account.enabled,
         })
 }
 
@@ -4047,50 +3494,65 @@ fn refresh_provider_list(handles: &UiHandles, status: Option<&CodexAppStatus>) {
 }
 
 fn refresh_im_account_list(handles: &UiHandles, snapshot: &DashboardSnapshot) {
-    let rows = im_account_list_rows(snapshot);
-    if im_account_list_matches(&handles.im_account_list, &rows) {
+    if snapshot.service_online
+        && snapshot.im_accounts.is_none()
+        && !handles.im_account_rows.borrow().is_empty()
+    {
         return;
     }
-    handles.im_account_list.delete_all_items();
-    for (index, row_data) in rows.iter().enumerate() {
-        let row = handles
-            .im_account_list
-            .insert_item(index as i64, &row_data[0], None);
-        handles
-            .im_account_list
-            .set_item_text_by_column(row as i64, 1, row_data[1].as_str());
-        handles
-            .im_account_list
-            .set_item_text_by_column(row as i64, 2, row_data[2].as_str());
-        handles
-            .im_account_list
-            .set_item_text_by_column(row as i64, 3, row_data[3].as_str());
+
+    let rows = im_account_list_rows(snapshot);
+    refresh_im_status_from_rows(&handles.im_status, &rows);
+    let mut current_rows = handles.im_account_rows.borrow_mut();
+    if *current_rows == rows {
+        return;
+    }
+
+    let previous_len = current_rows.len();
+    let selected_row = handles.im_account_list.get_selected_row();
+    let new_len = rows.len();
+    *current_rows = rows;
+    drop(current_rows);
+
+    if previous_len != new_len {
+        handles.im_account_model.borrow_mut().reset(new_len);
+        if let Some(row) = selected_row.filter(|row| *row < new_len) {
+            handles.im_account_list.select_row(row);
+        }
+    } else {
+        let model = handles.im_account_model.borrow();
+        for row in 0..new_len {
+            model.row_changed(row);
+        }
     }
 }
 
-fn im_account_list_rows(snapshot: &DashboardSnapshot) -> Vec<[String; 4]> {
+fn im_account_list_rows(snapshot: &DashboardSnapshot) -> Vec<[String; 5]> {
     if !snapshot.service_online {
         return vec![[
             "等待服务".to_string(),
+            "IM".to_string(),
             "本地服务启动后读取".to_string(),
             String::new(),
-            String::new(),
+            "false".to_string(),
         ]];
     }
     let Some(accounts) = snapshot.im_accounts.as_ref() else {
         return vec![[
             "读取中".to_string(),
+            "IM".to_string(),
             "正在读取机器人列表".to_string(),
             String::new(),
-            String::new(),
+            "false".to_string(),
         ]];
     };
     if accounts.accounts.is_empty() {
         return vec![[
             "未接入".to_string(),
+            "IM".to_string(),
             "请扫码或填写 Bot Token".to_string(),
             String::new(),
-            String::new(),
+            "false".to_string(),
         ]];
     }
     accounts
@@ -4098,46 +3560,131 @@ fn im_account_list_rows(snapshot: &DashboardSnapshot) -> Vec<[String; 4]> {
         .iter()
         .map(|account| {
             [
-                im_platform_label(&account.platform).to_string(),
                 account
                     .display_name
                     .clone()
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or_else(|| account.account_id.clone()),
+                im_platform_label(&account.platform).to_string(),
                 im_account_state_label(account).to_string(),
                 account.account_id.clone(),
+                account.enabled.to_string(),
             ]
         })
         .collect()
 }
 
 fn im_account_state_label(account: &ImAccountItem) -> &'static str {
+    let has_error = account
+        .last_error
+        .as_deref()
+        .is_some_and(|err| !err.trim().is_empty());
+    let long_polling_ready =
+        matches!(account.platform.as_str(), "telegram" | "wechat") && account.polling && !has_error;
+
     if !account.configured || !account.secret_set {
         "未配置"
     } else if !account.enabled {
         "已暂停"
-    } else if account.connected {
+    } else if account.connected || long_polling_ready {
         "已接入"
+    } else if has_error {
+        "异常"
     } else if account.connecting || account.polling {
         "连接中"
-    } else if account
-        .last_error
-        .as_deref()
-        .is_some_and(|err| !err.trim().is_empty())
-    {
-        "异常"
     } else {
         "等待连接"
     }
 }
 
-fn im_account_list_matches(list: &ListCtrl, rows: &[[String; 4]]) -> bool {
-    if list.get_item_count() != rows.len() as i32 {
-        return false;
+fn refresh_im_status_from_rows(status: &ImStatusPanel, rows: &[[String; 5]]) {
+    let (state, detail, tone) = im_channel_summary_from_rows(rows, "feishu");
+    set_im_channel_row(&status.feishu, state, &detail, tone);
+    let (state, detail, tone) = im_channel_summary_from_rows(rows, "telegram");
+    set_im_channel_row(&status.telegram, state, &detail, tone);
+    let (state, detail, tone) = im_channel_summary_from_rows(rows, "wechat");
+    set_im_channel_row(&status.wechat, state, &detail, tone);
+}
+
+fn im_channel_summary_from_rows<'a>(
+    rows: &'a [[String; 5]],
+    platform: &str,
+) -> (&'static str, String, StateTone) {
+    let platform_rows = rows
+        .iter()
+        .filter(|row| im_platform_key(&row[1]).as_deref() == Some(platform))
+        .collect::<Vec<_>>();
+    if platform_rows.is_empty() {
+        return ("未接入", im_channel_empty_detail(platform), StateTone::Warn);
     }
-    rows.iter().enumerate().all(|(index, row)| {
-        (0..4).all(|column| list.get_item_text(index as i64, column) == row[column as usize])
-    })
+
+    let enabled_rows = platform_rows
+        .iter()
+        .copied()
+        .filter(|row| row[4] == "true")
+        .collect::<Vec<_>>();
+    if enabled_rows.is_empty() {
+        return (
+            "已暂停",
+            im_channel_first_name(&platform_rows)
+                .map(|name| format!("{name} 已保存"))
+                .unwrap_or_else(|| "机器人已保存".to_string()),
+            StateTone::Muted,
+        );
+    }
+
+    for (state, tone) in [
+        ("已接入", StateTone::Ok),
+        ("连接中", StateTone::Warn),
+        ("等待连接", StateTone::Warn),
+        ("异常", StateTone::Error),
+    ] {
+        if let Some(row) = enabled_rows.iter().find(|row| row[2] == state) {
+            return (state, im_channel_row_detail(platform, row), tone);
+        }
+    }
+
+    (
+        "等待连接",
+        im_channel_first_name(&enabled_rows)
+            .map(|name| format!("{name} 等待连接"))
+            .unwrap_or_else(|| "等待机器人连接".to_string()),
+        StateTone::Warn,
+    )
+}
+
+fn im_channel_empty_detail(platform: &str) -> String {
+    match platform {
+        "feishu" => "扫码添加飞书机器人".to_string(),
+        "telegram" => "添加 Telegram Bot Token".to_string(),
+        "wechat" => "扫码添加微信机器人".to_string(),
+        _ => "添加机器人".to_string(),
+    }
+}
+
+fn im_channel_row_detail(platform: &str, row: &[String; 5]) -> String {
+    let name = row[0].trim();
+    let fallback = match platform {
+        "feishu" => "飞书机器人",
+        "telegram" => "Telegram 机器人",
+        "wechat" => "微信机器人",
+        _ => "机器人",
+    };
+    let name = if name.is_empty() { fallback } else { name };
+    match row[2].as_str() {
+        "已接入" => name.to_string(),
+        "连接中" => format!("{name} 正在连接"),
+        "等待连接" => format!("{name} 等待连接"),
+        "异常" => format!("{name} 异常"),
+        _ => name.to_string(),
+    }
+}
+
+fn im_channel_first_name(rows: &[&[String; 5]]) -> Option<String> {
+    rows.iter()
+        .map(|row| row[0].trim())
+        .find(|name| !name.is_empty())
+        .map(str::to_string)
 }
 
 fn provider_list_rows(status: Option<&CodexAppStatus>) -> Vec<[String; 4]> {
@@ -4516,16 +4063,12 @@ fn clear_provider_list_selection(list: &ListCtrl) {
 fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.change_bot_button.enable(enabled);
     handles.connect_wechat_button.enable(enabled);
-    handles.telegram_toggle_button.enable(enabled);
-    handles.wechat_toggle_button.enable(enabled);
     handles.save_telegram_button.enable(enabled);
-    handles.toggle_im_account_button.enable(enabled);
     handles.delete_im_account_button.enable(enabled);
     handles.configure_button.enable(enabled);
     handles.new_provider_button.enable(enabled);
     handles.save_provider_button.enable(enabled);
     handles.delete_provider_button.enable(enabled);
-    handles.stop_bridge_button.enable(enabled);
     handles.uninstall_button.enable(enabled);
 }
 
@@ -4618,61 +4161,6 @@ fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail: &str) {
     panel.detail.wrap(190);
 }
 
-fn feishu_bot_display_name(snapshot: &DashboardSnapshot) -> Option<String> {
-    snapshot
-        .feishu_bot
-        .as_ref()
-        .and_then(|bot| bot.display_name.as_deref())
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| config.feishu.display_name.as_str())
-        })
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-}
-
-fn telegram_bot_display_name(snapshot: &DashboardSnapshot) -> Option<String> {
-    snapshot
-        .telegram_bot
-        .as_ref()
-        .and_then(|bot| bot.display_name.as_deref())
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| config.telegram.display_name.as_str())
-        })
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-}
-
-fn wechat_bot_display_name(snapshot: &DashboardSnapshot) -> Option<String> {
-    snapshot
-        .wechat_bot
-        .as_ref()
-        .and_then(|bot| bot.display_name.as_deref())
-        .or_else(|| {
-            snapshot
-                .config
-                .as_ref()
-                .map(|config| config.wechat.display_name.as_str())
-        })
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-        .map(str::to_string)
-        .or_else(|| wechat_configured(snapshot).then(|| "微信机器人".to_string()))
-}
-
-fn feishu_state_label(state: &str, bot_name: Option<&str>) -> String {
-    bot_name
-        .map(|name| format!("{state} · {name}"))
-        .unwrap_or_else(|| state.to_string())
-}
-
 fn codex_remote_detail(remote: &RemoteControlStatus) -> String {
     if remote.stale.unwrap_or(false) {
         return "remote-control 心跳失活，等待 Codex App 自动重连。".to_string();
@@ -4718,6 +4206,93 @@ fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {
 
     Bitmap::from_rgba(&rgba, image_size as u32, image_size as u32)
         .map(|bitmap| (bitmap, image_size as i32))
+}
+
+fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
+    let dialog = Dialog::builder(parent, "添加 Telegram 机器人")
+        .with_style(DialogStyle::DefaultDialogStyle)
+        .with_size(520, 220)
+        .build();
+    dialog.set_background_color(Colour::rgb(255, 255, 255));
+
+    let panel = Panel::builder(&dialog).build();
+    panel.set_background_color(Colour::rgb(255, 255, 255));
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let title = StaticText::builder(&panel)
+        .with_label("填写 BotFather 提供的 Bot Token")
+        .build();
+    title.set_foreground_color(Colour::rgb(21, 25, 31));
+    sizer.add(
+        &title,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let input = TextCtrl::builder(&panel)
+        .with_value("")
+        .with_style(TextCtrlStyle::Default)
+        .build();
+    input.set_min_size(Size::new(460, 30));
+    sizer.add(
+        &input,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let hint = StaticText::builder(&panel)
+        .with_label("仅支持与机器人私聊；群聊暂不接入。")
+        .build();
+    hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    sizer.add(
+        &hint,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+    let cancel_button = Button::builder(&panel).with_label("取消").build();
+    let save_button = Button::builder(&panel).with_label("保存并接入").build();
+    buttons.add_stretch_spacer(1);
+    buttons.add(&cancel_button, 0, SizerFlag::Right, 8);
+    buttons.add(&save_button, 0, SizerFlag::Right, 0);
+    sizer.add_sizer(
+        &buttons,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom | SizerFlag::Top,
+        18,
+    );
+
+    panel.set_sizer(sizer, true);
+    let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer(dialog_sizer, true);
+    dialog.center();
+
+    {
+        let dialog = dialog;
+        cancel_button.on_click(move |_| dialog.end_modal(ID_CANCEL));
+    }
+    {
+        let dialog = dialog;
+        save_button.on_click(move |_| dialog.end_modal(ID_OK));
+    }
+
+    let result = dialog.show_modal();
+    let token = strip_nul(&input.get_value()).trim().to_string();
+    dialog.destroy();
+
+    if result != ID_OK {
+        return None;
+    }
+    if token.is_empty() {
+        show_error(parent, "请输入 Telegram Bot Token。");
+        return None;
+    }
+    Some(token)
 }
 
 fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {

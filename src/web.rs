@@ -374,6 +374,17 @@ async fn configure_codex_app(
         .unwrap_or(true);
 
     let backend_url = config.remote_control_base_url();
+    state
+        .push_event(
+            "info",
+            "codex_app_configure_start",
+            format!(
+                "provider={} activate_provider={}",
+                provider_name.as_deref().unwrap_or_default(),
+                activate_provider
+            ),
+        )
+        .await;
     match codex_app_config::configure_codex_app(ConfigureCodexAppOptions {
         codex_home,
         backend_url: backend_url.clone(),
@@ -417,10 +428,15 @@ async fn configure_codex_app(
                 })),
             )
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": err.to_string() })),
-        ),
+        Err(err) => {
+            state
+                .push_event("error", "codex_app_configure_failed", err.to_string())
+                .await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            )
+        }
     }
 }
 
