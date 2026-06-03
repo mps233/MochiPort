@@ -378,6 +378,69 @@ impl AppConfig {
             _ => false,
         }
     }
+
+    pub fn ensure_telegram_allowed_chat_id(
+        &mut self,
+        account_id: &str,
+        chat_id: &str,
+    ) -> TelegramChatAllowResult {
+        let account_id = account_id.trim();
+        let chat_id = chat_id.trim();
+        if account_id.is_empty() || chat_id.is_empty() {
+            return TelegramChatAllowResult::AccountNotFound;
+        }
+        self.migrate_legacy_im_accounts();
+        let Some(account) = self.telegram_accounts.iter_mut().find(|account| {
+            account.account_id.trim() == account_id
+                || (account.account_id.trim().is_empty() && account_id == "telegram")
+        }) else {
+            if self.telegram.account_id.trim() == account_id
+                || (self.telegram.account_id.trim().is_empty() && account_id == "telegram")
+            {
+                return ensure_telegram_chat_id_on_account(&mut self.telegram, chat_id);
+            }
+            return TelegramChatAllowResult::AccountNotFound;
+        };
+        let result = ensure_telegram_chat_id_on_account(account, chat_id);
+        if self.telegram.account_id.trim() == account_id
+            || (self.telegram.account_id.trim().is_empty() && account_id == "telegram")
+        {
+            self.telegram.allowed_chat_ids = account.allowed_chat_ids.clone();
+        }
+        result
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramChatAllowResult {
+    Allowed,
+    Bound,
+    Denied,
+    AccountNotFound,
+}
+
+impl TelegramChatAllowResult {
+    pub fn should_save(self) -> bool {
+        matches!(self, Self::Bound)
+    }
+}
+
+fn ensure_telegram_chat_id_on_account(
+    account: &mut TelegramConfig,
+    chat_id: &str,
+) -> TelegramChatAllowResult {
+    if account
+        .allowed_chat_ids
+        .iter()
+        .any(|allowed| allowed.trim() == chat_id)
+    {
+        return TelegramChatAllowResult::Allowed;
+    }
+    if !account.allowed_chat_ids.is_empty() {
+        return TelegramChatAllowResult::Denied;
+    }
+    account.allowed_chat_ids.push(chat_id.to_string());
+    TelegramChatAllowResult::Bound
 }
 
 impl FeishuConfig {
@@ -478,4 +541,52 @@ fn find_account<T: Clone>(
 fn non_empty(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppConfig, TelegramChatAllowResult, TelegramConfig};
+
+    #[test]
+    fn telegram_empty_allowlist_binds_first_private_chat() {
+        let mut config = AppConfig::default();
+        config.telegram_accounts.push(TelegramConfig {
+            account_id: "tg_1".to_string(),
+            bot_token: "token".to_string(),
+            ..TelegramConfig::default()
+        });
+
+        assert_eq!(
+            config.ensure_telegram_allowed_chat_id("tg_1", "123"),
+            TelegramChatAllowResult::Bound
+        );
+        assert_eq!(
+            config.telegram_accounts[0].allowed_chat_ids,
+            vec!["123".to_string()]
+        );
+        assert_eq!(
+            config.ensure_telegram_allowed_chat_id("tg_1", "123"),
+            TelegramChatAllowResult::Allowed
+        );
+        assert_eq!(
+            config.ensure_telegram_allowed_chat_id("tg_1", "456"),
+            TelegramChatAllowResult::Denied
+        );
+    }
+
+    #[test]
+    fn telegram_legacy_default_account_can_bind_first_chat() {
+        let mut config = AppConfig::default();
+        config.telegram.bot_token = "token".to_string();
+
+        assert_eq!(
+            config.ensure_telegram_allowed_chat_id("telegram", "123"),
+            TelegramChatAllowResult::Bound
+        );
+        assert_eq!(config.telegram.allowed_chat_ids, vec!["123".to_string()]);
+        assert_eq!(
+            config.telegram_accounts[0].allowed_chat_ids,
+            vec!["123".to_string()]
+        );
+    }
 }

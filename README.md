@@ -222,7 +222,7 @@ accountId = "default"
 sendStreaming = true
 ```
 
-Telegram 面向的是“用 BotFather 创建一个自己的 bot，然后在 Telegram 里私聊这个 bot”。群聊暂不接入，避免群成员通过机器人操控宿主本机。`allowedChatIds` 可以先留空，确认能用后再按事件日志里的 `chat=...` 限制可访问的私聊。
+Telegram 面向的是“用 BotFather 创建一个自己的 bot，然后在 Telegram 里私聊这个 bot”。群聊暂不接入，避免群成员通过机器人操控宿主本机。`allowedChatIds = []` 表示等待首次私聊绑定；第一个私聊这个 bot 的聊天会自动写入白名单，后续其它私聊会被拒绝。也可以提前手写 `allowedChatIds = ["123456789"]` 锁定自己的 Telegram 私聊。
 
 微信配置通常由 GUI 扫码写入。`botType = "3"` 对应当前 OpenClaw 微信机器人链路；手写配置时不要提交真实 `botToken`。
 

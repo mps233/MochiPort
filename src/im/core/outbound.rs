@@ -9,7 +9,7 @@ use crate::{
     im::{
         core::accounts::ImApiRegistry,
         telegram::{adapter::TelegramAdapter, api::TelegramApi},
-        wechat::{adapter::WechatAdapter, api::WechatApi},
+        wechat::{adapter::WechatAdapter, api::WechatApi, store as wechat_store},
     },
     im_runtime::RouteTarget,
     types::ImPlatformKind,
@@ -100,6 +100,9 @@ pub(crate) async fn run_worker(
                     log_missing_api(&state, &message).await;
                     continue;
                 };
+                if defer_wechat_outbound_if_waiting(&state, &message).await {
+                    continue;
+                }
                 send_wechat_outbound(&state, &api, message).await;
             }
             ImPlatformKind::Feishu => {
@@ -123,6 +126,51 @@ pub(crate) async fn run_worker(
             "outbound queue closed",
         )
         .await;
+}
+
+pub(crate) async fn replay_wechat_pending_for_peer(
+    state: &SharedState,
+    outbound_tx: &ImOutboundSender,
+    account_id: &str,
+    peer_id: &str,
+) -> usize {
+    let key = wechat_recovery_key(account_id, peer_id);
+    let pending = {
+        let mut recovery = state.wechat_recovery.lock().await;
+        recovery.awaiting_fresh_context_token.remove(&key);
+        recovery
+            .pending_outbound_by_peer
+            .remove(&key)
+            .map(|queue| queue.into_iter().collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    if pending.is_empty() {
+        return 0;
+    }
+    let count = pending.len();
+    state
+        .push_event(
+            "info",
+            "wechat_context_token_refreshed",
+            format!("account={account_id} peer={peer_id} replaying={count}"),
+        )
+        .await;
+    for message in pending {
+        if let Err(err) = outbound_tx.enqueue(message.clone()) {
+            log_outbound_result("wechat_replay_enqueue_failed", &message, &err.to_string());
+            state
+                .push_event(
+                    "error",
+                    "wechat_replay_enqueue_failed",
+                    format!(
+                        "account={} peer={} thread={} err={}",
+                        account_id, peer_id, message.thread_id, err
+                    ),
+                )
+                .await;
+        }
+    }
+    count
 }
 
 async fn outbound_channel_enabled(state: &SharedState, route: &RouteTarget) -> bool {
@@ -269,6 +317,9 @@ async fn send_wechat_text(
         }
         Err(err) => {
             log_outbound_result("send_wechat_text_failed", message, &err.to_string());
+            if defer_wechat_outbound_on_context_error(state, message, &err.to_string()).await {
+                return;
+            }
             let event_failed = match message.kind {
                 ImOutboundKind::TurnReply => "wechat_turn_completed_failed",
                 ImOutboundKind::Item | ImOutboundKind::ImageItem => "wechat_item_failed",
@@ -342,6 +393,9 @@ async fn send_wechat_image(
                 .await;
         }
         Err(err) => {
+            if defer_wechat_outbound_on_context_error(state, message, &err.to_string()).await {
+                return;
+            }
             state
                 .push_event(
                     "error",
@@ -358,6 +412,102 @@ async fn send_wechat_image(
                 .await;
         }
     }
+}
+
+async fn defer_wechat_outbound_if_waiting(
+    state: &SharedState,
+    message: &ImOutboundMessage,
+) -> bool {
+    let key = wechat_recovery_key(&message.route.account_id, &message.route.chat_id);
+    let waiting = {
+        let recovery = state.wechat_recovery.lock().await;
+        recovery.awaiting_fresh_context_token.contains(&key)
+    };
+    if waiting {
+        queue_wechat_pending_outbound(state, message, "waiting_for_fresh_context_token").await;
+        return true;
+    }
+    if wechat_store::context_token(state, &message.route.account_id, &message.route.chat_id)
+        .await
+        .is_none()
+    {
+        queue_wechat_pending_outbound(state, message, "missing_context_token").await;
+        return true;
+    }
+    false
+}
+
+async fn defer_wechat_outbound_on_context_error(
+    state: &SharedState,
+    message: &ImOutboundMessage,
+    err: &str,
+) -> bool {
+    if is_wechat_context_token_error(err) {
+        if let Err(forget_err) = wechat_store::forget_context_token(
+            state,
+            &message.route.account_id,
+            &message.route.chat_id,
+        )
+        .await
+        {
+            state
+                .push_event(
+                    "warn",
+                    "wechat_context_token_forget_failed",
+                    format!(
+                        "account={} peer={} err={}",
+                        message.route.account_id, message.route.chat_id, forget_err
+                    ),
+                )
+                .await;
+        }
+        queue_wechat_pending_outbound(state, message, "ret_minus_2").await;
+        return true;
+    }
+    false
+}
+
+async fn queue_wechat_pending_outbound(
+    state: &SharedState,
+    message: &ImOutboundMessage,
+    reason: &str,
+) {
+    let key = wechat_recovery_key(&message.route.account_id, &message.route.chat_id);
+    let pending_len = {
+        let mut recovery = state.wechat_recovery.lock().await;
+        recovery.awaiting_fresh_context_token.insert(key.clone());
+        let queue = recovery.pending_outbound_by_peer.entry(key).or_default();
+        queue.push_back(message.clone());
+        queue.len()
+    };
+    log_outbound_result("wechat_pending_until_fresh_context_token", message, reason);
+    state
+        .push_event(
+            "warn",
+            "wechat_waiting_for_fresh_context_token",
+            format!(
+                "account={} peer={} thread={} reason={} pending={}",
+                message.route.account_id,
+                message.route.chat_id,
+                message.thread_id,
+                reason,
+                pending_len
+            ),
+        )
+        .await;
+}
+
+fn is_wechat_context_token_error(err: &str) -> bool {
+    err.contains("ret_minus_2")
+        || err.contains("ret=-2")
+        || err.contains("ret\":-2")
+        || err.contains("errcode=-2")
+        || err.contains("code=-2")
+        || err.contains("wechat image message context_token is missing")
+}
+
+fn wechat_recovery_key(account_id: &str, peer_id: &str) -> String {
+    format!("{account_id}:{peer_id}")
 }
 
 async fn send_telegram_text(
@@ -432,6 +582,9 @@ async fn send_telegram_text(
 }
 
 fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&str>) {
+    if !chain_log::diagnostic_enabled() {
+        return;
+    }
     let (payload_kind, text_len, preview) = match (&message.payload, text) {
         (_, Some(text)) => ("text", text.chars().count(), trace_preview(text, 500)),
         (ImOutboundPayload::Text(text), None) => {
@@ -458,35 +611,39 @@ fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&
             )
         }
     };
-    chain_log::write_diagnostic_line(format!(
-        "[im_trace] event=remote_to_im_outbound_{} platform={} account={} chat={} thread={} item={} type={} kind={:?} payload={} text_len={} preview={}",
-        event,
-        message.route.platform.key(),
-        message.route.account_id,
-        message.route.chat_id,
-        message.thread_id,
-        message.item_id.as_deref().unwrap_or(""),
-        message.item_type.as_deref().unwrap_or(""),
-        message.kind,
-        payload_kind,
-        text_len,
-        preview
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[im_trace] event=remote_to_im_outbound_{} platform={} account={} chat={} thread={} item={} type={} kind={:?} payload={} text_len={} preview={}",
+            event,
+            message.route.platform.key(),
+            message.route.account_id,
+            message.route.chat_id,
+            message.thread_id,
+            message.item_id.as_deref().unwrap_or(""),
+            message.item_type.as_deref().unwrap_or(""),
+            message.kind,
+            payload_kind,
+            text_len,
+            preview
+        )
+    });
 }
 
 fn log_outbound_result(event: &str, message: &ImOutboundMessage, result: &str) {
-    chain_log::write_diagnostic_line(format!(
-        "[im_trace] event=remote_to_im_outbound_{} platform={} account={} chat={} thread={} item={} type={} kind={:?} result={}",
-        event,
-        message.route.platform.key(),
-        message.route.account_id,
-        message.route.chat_id,
-        message.thread_id,
-        message.item_id.as_deref().unwrap_or(""),
-        message.item_type.as_deref().unwrap_or(""),
-        message.kind,
-        trace_preview(result, 300)
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[im_trace] event=remote_to_im_outbound_{} platform={} account={} chat={} thread={} item={} type={} kind={:?} result={}",
+            event,
+            message.route.platform.key(),
+            message.route.account_id,
+            message.route.chat_id,
+            message.thread_id,
+            message.item_id.as_deref().unwrap_or(""),
+            message.item_type.as_deref().unwrap_or(""),
+            message.kind,
+            trace_preview(result, 300)
+        )
+    });
 }
 
 fn trace_preview(text: &str, limit: usize) -> String {

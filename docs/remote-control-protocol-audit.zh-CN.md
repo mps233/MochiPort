@@ -234,15 +234,24 @@ ACK 的提交点：
 
 - `remote_control_client_unknown` 前，backend 收到 app-server 的 `pong status:"unknown"`。
 - 这个 `unknown` 是 app-server 返回的，不是 IM 层生成的。
-- 出现时当前 `(client_id, stream_id)` 为：
+- clean case 中出现时当前 `(client_id, stream_id)` 为：
   - `client_id = codex-remote-feishu`
-  - `stream_id = 000000000000000018b56a718a8eb078-0000000000030d40`
-- 该现象发生在 imagegen 读取 skill 期间，前面出现大量 `item/commandExecution/outputDelta`。
+  - `stream_id = stream_3d922febc185190d`
+- 该现象发生在 `computer-use` 读取技能说明期间，前面出现大量 `item/commandExecution/outputDelta`。
+- 当前实现没有在 transport ACK 后跳过 `item/commandExecution/outputDelta`；日志显示它会进入 `server_work_begin` / `server_message_in` / `im_trace`，随后才在通知分发前返回。
+- IM 层已经忽略 `item/commandExecution/outputDelta`，所以它对用户侧展示没有价值，但会制造 transport、worker 和诊断日志压力。
 - 现有日志还不能单独证明是 slow connection disconnect，因为没有 app-server 自己的 `disconnecting slow connection after outbound queue filled` 日志。
 
 因此当前合理结论是：
 
-`unknown` 表明 app-server 已经丢失当前 remote-control logical client；大量 outputDelta 与 ACK/日志压力是高风险相关因素，但最终原因需要继续通过协议级日志证明。
+`unknown` 表明 app-server 已经丢失当前 remote-control logical client；大量 outputDelta 与 ACK/日志压力是高风险相关因素，但不是已确认根因。需要继续用协议级日志证明 ACK 是否变慢、worker 队列是否堆积、app-server 是否主动关闭 logical client。
+
+当前版本已增加诊断点：
+
+- `command_output_delta_pressure`：按 `(client_id, stream_id)` 聚合 `item/commandExecution/outputDelta` 计数、最近 thread/item、worker 队列剩余容量。
+- `server_ack_slow`：记录 ACK 耗时超过阈值的 server envelope。
+- `remote_control_client_unknown_context`：在 `pong status=unknown` 时打印该 stream 的 outputDelta/ACK 摘要和当前已注册 streams。
+- `stale_server_envelope`：不再只打印 default stream，而是打印真实 resolved client key 和注册 stream 列表，避免误判多 stream 状态。
 
 ## 11. 下一步排查顺序
 
@@ -264,6 +273,14 @@ ACK 的提交点：
    - 是否收到 `server_pong status=unknown`。
    - 每次 initialize 的 `client_id/stream_id/seq_id`。
    - app-server 是否发生 process restart 或 remote-control reconnect。
+
+   如果下一次复现时 `remote_control_client_unknown_context` 显示：
+
+   - `output_delta_count` 在短时间内持续升高；
+   - `last_ack_seq_id` 已接近 `output_delta_last_seq_id`，但 app-server 仍返回 `unknown`；
+   - `last_ack_elapsed_ms` / `max_ack_elapsed_ms` 没有明显升高；
+
+   那么可以排除“remote ACK 慢导致 app-server 丢 client”，继续查 app-server outbound/connection close。反之，如果 ACK 延迟或 worker capacity 异常，就可以把 outputDelta/backpressure 作为实证根因推进修复。
 
 4. 用 mock app-server 复现协议链路。
 

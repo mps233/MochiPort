@@ -83,6 +83,20 @@ pub(crate) async fn context_token(
         .cloned()
 }
 
+pub(crate) async fn forget_context_token(
+    state: &SharedState,
+    account_id: &str,
+    peer_id: &str,
+) -> Result<()> {
+    let mut persisted = state.persisted.lock().await;
+    persisted
+        .wechat
+        .context_tokens
+        .remove(&context_token_key(account_id, peer_id));
+    let config = state.config.lock().await.clone();
+    persisted.save(&config.state_path)
+}
+
 fn context_token_key(account_id: &str, peer_id: &str) -> String {
     format!("{account_id}:{peer_id}")
 }

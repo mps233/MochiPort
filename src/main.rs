@@ -334,7 +334,7 @@ fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
     let path = chain_log_path(config);
     crate::chain_log::init(
         &path,
-        config.logging.diagnostic,
+        effective_chain_log_diagnostic(config),
         config.logging.max_mb.saturating_mul(1024 * 1024),
         config.logging.retention_days,
     )?;
@@ -344,6 +344,18 @@ fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
         .with_ansi(false)
         .init();
     Ok(path)
+}
+
+fn effective_chain_log_diagnostic(config: &AppConfig) -> bool {
+    if !config.logging.diagnostic {
+        return false;
+    }
+    if cfg!(debug_assertions) {
+        return true;
+    }
+    std::env::var("CODEX_REMOTE_DIAGNOSTIC")
+        .ok()
+        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
 }
 
 fn chain_log_path(config: &AppConfig) -> PathBuf {

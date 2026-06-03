@@ -193,7 +193,7 @@ accountId = "default"
 sendStreaming = true
 ```
 
-Telegram is for the simple private-chat flow: create your own bot with BotFather, then chat with that bot in Telegram. Group chats are intentionally ignored so group members cannot control the host machine through the bot. Leave `allowedChatIds` empty at first, verify it works, then restrict it with the `chat=...` value from the event log.
+Telegram is for the simple private-chat flow: create your own bot with BotFather, then chat with that bot in Telegram. Group chats are intentionally ignored so group members cannot control the host machine through the bot. `allowedChatIds = []` means "bind the first private chat"; the first private chat that messages the bot is written to the allowlist automatically, and later private chats are rejected. You can also prefill `allowedChatIds = ["123456789"]` to lock it to your own Telegram private chat.
 
 WeChat config is normally written by GUI QR onboarding. `botType = "3"` follows the current OpenClaw WeChat bot path. Do not commit real `botToken` values.
 

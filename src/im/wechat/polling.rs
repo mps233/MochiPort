@@ -6,6 +6,7 @@ use tokio::{
 
 use crate::{
     app_state::{ImAccountRuntimeState, SharedState, im_account_key},
+    im::core::outbound::ImOutboundSender,
     types::{ChatType, ImPlatformKind, InboundMessage, now_ms},
 };
 
@@ -24,6 +25,7 @@ pub async fn listen_polling(
     state: SharedState,
     api: WechatApi,
     tx: mpsc::Sender<InboundMessage>,
+    outbound_tx: ImOutboundSender,
 ) -> Result<()> {
     let account_id = api.settings().account_id();
     let mut get_updates_buf = store::load_sync_buf(&state, &account_id).await;
@@ -126,7 +128,8 @@ pub async fn listen_polling(
         let message_count = messages.len();
         for message in messages {
             if let Some(inbound) =
-                inbound_from_message(&state, api.settings(), &account_id, message).await?
+                inbound_from_message(&state, &outbound_tx, api.settings(), &account_id, message)
+                    .await?
             {
                 tx.send(inbound)
                     .await
@@ -147,6 +150,7 @@ pub async fn listen_polling(
 
 async fn inbound_from_message(
     state: &SharedState,
+    outbound_tx: &ImOutboundSender,
     settings: &WechatSettings,
     account_id: &str,
     message: WechatMessage,
@@ -171,6 +175,24 @@ async fn inbound_from_message(
     }
     if let Some(context_token) = message.context_token.as_deref() {
         store::remember_context_token(state, account_id, &peer_id, context_token).await?;
+        let replayed = crate::im::core::outbound::replay_wechat_pending_for_peer(
+            state,
+            outbound_tx,
+            account_id,
+            &peer_id,
+        )
+        .await;
+        if replayed > 0 {
+            update_last_inbound(state, account_id).await;
+            state
+                .push_event(
+                    "info",
+                    "wechat_refresh_message_consumed",
+                    format!("account={account_id} peer={peer_id} replayed={replayed}"),
+                )
+                .await;
+            return Ok(None);
+        }
     }
     let text = message_text(&message);
     if text.trim().is_empty() {

@@ -236,6 +236,7 @@ pub async fn start_bridge(state: SharedState) {
         let account_id = account.account_id.clone();
         let wechat_state = state.clone();
         let wechat_tx = tx.clone();
+        let wechat_outbound_tx = outbound_tx.clone();
         tasks.spawn(async move {
             loop {
                 if !is_current_generation(&wechat_state, generation).await {
@@ -252,6 +253,7 @@ pub async fn start_bridge(state: SharedState) {
                     wechat_state.clone(),
                     wechat_api.clone(),
                     wechat_tx.clone(),
+                    wechat_outbound_tx.clone(),
                 )
                 .await
                 {

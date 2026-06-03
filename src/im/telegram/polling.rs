@@ -25,6 +25,7 @@ pub async fn listen_polling(
     tx: mpsc::Sender<InboundMessage>,
 ) -> Result<()> {
     let account_id = api.settings().account_id();
+    let mut chat_access = TelegramChatAccess::new(api.settings().allowed_chat_ids.clone());
     let mut offset = None;
     set_polling_state(&state, &account_id, true, false, None).await;
     claim_polling_slot(&state, &api, &mut offset).await;
@@ -45,7 +46,20 @@ pub async fn listen_polling(
             offset = Some(update.update_id + 1);
             if let Some(callback) = update.callback_query {
                 let callback_id = callback.id.clone();
-                if let Some(inbound) = inbound_from_callback(api.settings(), callback) {
+                let access = ensure_callback_chat_allowed(
+                    &state,
+                    &api,
+                    &mut chat_access,
+                    callback.message.as_ref().map(|message| &message.chat),
+                )
+                .await;
+                if access == TelegramChatAccessDecision::Allowed
+                    && let Some(inbound) = inbound_from_callback(
+                        api.settings(),
+                        &chat_access.allowed_chat_ids,
+                        callback,
+                    )
+                {
                     let _ = api
                         .answer_callback_query(&callback_id, Some("已收到"))
                         .await;
@@ -54,20 +68,40 @@ pub async fn listen_polling(
                         .map_err(|_| anyhow::anyhow!("telegram inbound pump closed"))?;
                     update_last_inbound(&state, &account_id).await;
                 } else {
-                    let _ = api
-                        .answer_callback_query(&callback_id, Some("这个操作不可用"))
-                        .await;
+                    let message = match access {
+                        TelegramChatAccessDecision::Denied => "当前聊天未授权",
+                        _ => "这个操作不可用",
+                    };
+                    let _ = api.answer_callback_query(&callback_id, Some(message)).await;
                 }
                 continue;
             }
-            if let Some(message) = update.message
-                && let Some(inbound) = inbound_from_message(api.settings(), message)
-            {
-                let _ = api.send_chat_action(&inbound.chat_id, "typing").await;
-                tx.send(inbound)
-                    .await
-                    .map_err(|_| anyhow::anyhow!("telegram inbound pump closed"))?;
-                update_last_inbound(&state, &account_id).await;
+            if let Some(message) = update.message {
+                match ensure_message_chat_allowed(&state, &api, &mut chat_access, &message).await {
+                    TelegramChatAccessDecision::Allowed => {
+                        if let Some(inbound) = inbound_from_message(
+                            api.settings(),
+                            &chat_access.allowed_chat_ids,
+                            message,
+                        ) {
+                            let _ = api.send_chat_action(&inbound.chat_id, "typing").await;
+                            tx.send(inbound)
+                                .await
+                                .map_err(|_| anyhow::anyhow!("telegram inbound pump closed"))?;
+                            update_last_inbound(&state, &account_id).await;
+                        }
+                    }
+                    TelegramChatAccessDecision::Denied => {
+                        let chat_id = message.chat.id.to_string();
+                        let _ = api
+                            .send_text(
+                                &chat_id,
+                                "当前 Telegram 私聊未授权。请在本机 Codex Remote 配置 allowedChatIds。",
+                            )
+                            .await;
+                    }
+                    TelegramChatAccessDecision::Ignored => {}
+                }
             }
         }
         if update_count > 0 {
@@ -150,6 +184,7 @@ fn retry_delay_seconds(err: &anyhow::Error, default_delay: u64) -> u64 {
 
 fn inbound_from_message(
     settings: &TelegramSettings,
+    allowed_chat_ids: &[String],
     message: TelegramMessage,
 ) -> Option<InboundMessage> {
     if message.chat.kind != "private" {
@@ -160,7 +195,7 @@ fn inbound_from_message(
         return None;
     }
     let chat_id = message.chat.id.to_string();
-    if !chat_allowed(settings, &chat_id) {
+    if !chat_allowed(allowed_chat_ids, &chat_id) {
         return None;
     }
     let sender_id = message
@@ -187,6 +222,7 @@ fn inbound_from_message(
 
 fn inbound_from_callback(
     settings: &TelegramSettings,
+    allowed_chat_ids: &[String],
     callback: TelegramCallbackQuery,
 ) -> Option<InboundMessage> {
     let data = callback.data?;
@@ -196,7 +232,7 @@ fn inbound_from_callback(
         return None;
     }
     let chat_id = message.chat.id.to_string();
-    if !chat_allowed(settings, &chat_id) {
+    if !chat_allowed(allowed_chat_ids, &chat_id) {
         return None;
     }
 
@@ -255,12 +291,144 @@ async fn update_last_inbound(state: &SharedState, account_id: &str) {
     entry.last_inbound_at_ms = Some(now);
 }
 
-fn chat_allowed(settings: &TelegramSettings, chat_id: &str) -> bool {
-    settings.allowed_chat_ids.is_empty()
-        || settings
-            .allowed_chat_ids
-            .iter()
-            .any(|allowed| allowed == chat_id)
+#[derive(Debug, Clone)]
+struct TelegramChatAccess {
+    allowed_chat_ids: Vec<String>,
+}
+
+impl TelegramChatAccess {
+    fn new(allowed_chat_ids: Vec<String>) -> Self {
+        Self { allowed_chat_ids }
+    }
+
+    fn is_allowed(&self, chat_id: &str) -> bool {
+        chat_allowed(&self.allowed_chat_ids, chat_id)
+    }
+
+    fn remember(&mut self, chat_id: &str) {
+        if !self.is_allowed(chat_id) {
+            self.allowed_chat_ids.push(chat_id.to_string());
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramChatAccessDecision {
+    Allowed,
+    Denied,
+    Ignored,
+}
+
+async fn ensure_message_chat_allowed(
+    state: &SharedState,
+    api: &TelegramApi,
+    access: &mut TelegramChatAccess,
+    message: &TelegramMessage,
+) -> TelegramChatAccessDecision {
+    ensure_chat_allowed(state, api, access, &message.chat).await
+}
+
+async fn ensure_callback_chat_allowed(
+    state: &SharedState,
+    api: &TelegramApi,
+    access: &mut TelegramChatAccess,
+    chat: Option<&super::api::TelegramChat>,
+) -> TelegramChatAccessDecision {
+    let Some(chat) = chat else {
+        return TelegramChatAccessDecision::Ignored;
+    };
+    ensure_chat_allowed(state, api, access, chat).await
+}
+
+async fn ensure_chat_allowed(
+    state: &SharedState,
+    api: &TelegramApi,
+    access: &mut TelegramChatAccess,
+    chat: &super::api::TelegramChat,
+) -> TelegramChatAccessDecision {
+    if chat.kind != "private" {
+        return TelegramChatAccessDecision::Ignored;
+    }
+    let account_id = api.settings().account_id();
+    let chat_id = chat.id.to_string();
+    if access.is_allowed(&chat_id) {
+        return TelegramChatAccessDecision::Allowed;
+    }
+    if !access.allowed_chat_ids.is_empty() {
+        log_denied_chat(state, &account_id, &chat_id).await;
+        return TelegramChatAccessDecision::Denied;
+    }
+
+    let (bind_result, save_error) = {
+        let mut config = state.config.lock().await;
+        let result = config.ensure_telegram_allowed_chat_id(&account_id, &chat_id);
+        let save_error = if result.should_save() {
+            config
+                .save(&state.config_path)
+                .err()
+                .map(|err| err.to_string())
+        } else {
+            None
+        };
+        (result, save_error)
+    };
+    if let Some(err) = save_error {
+        state
+            .push_event(
+                "error",
+                "telegram_chat_bind_failed",
+                format!("account={account_id} chat={chat_id} err={err}"),
+            )
+            .await;
+        return TelegramChatAccessDecision::Denied;
+    }
+
+    match bind_result {
+        crate::config::TelegramChatAllowResult::Allowed
+        | crate::config::TelegramChatAllowResult::Bound => {
+            access.remember(&chat_id);
+            if bind_result == crate::config::TelegramChatAllowResult::Bound {
+                state
+                    .push_event(
+                        "info",
+                        "telegram_chat_bound",
+                        format!("account={account_id} chat={chat_id}"),
+                    )
+                    .await;
+            }
+            TelegramChatAccessDecision::Allowed
+        }
+        crate::config::TelegramChatAllowResult::Denied => {
+            log_denied_chat(state, &account_id, &chat_id).await;
+            TelegramChatAccessDecision::Denied
+        }
+        crate::config::TelegramChatAllowResult::AccountNotFound => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_chat_bind_account_missing",
+                    format!("account={account_id} chat={chat_id}"),
+                )
+                .await;
+            TelegramChatAccessDecision::Denied
+        }
+    }
+}
+
+async fn log_denied_chat(state: &SharedState, account_id: &str, chat_id: &str) {
+    state
+        .push_event(
+            "warn",
+            "telegram_chat_denied",
+            format!("account={account_id} chat={chat_id}"),
+        )
+        .await;
+}
+
+fn chat_allowed(allowed_chat_ids: &[String], chat_id: &str) -> bool {
+    allowed_chat_ids
+        .iter()
+        .any(|allowed| allowed.trim() == chat_id)
 }
 
 fn action_from_callback_data(data: &str) -> Option<InboundAction> {
@@ -339,6 +507,7 @@ mod tests {
         let settings = TelegramSettings::default();
         let inbound = inbound_from_message(
             &settings,
+            &["42".to_string()],
             TelegramMessage {
                 message_id: 9,
                 from: Some(TelegramUser {
@@ -368,6 +537,66 @@ mod tests {
     }
 
     #[test]
+    fn empty_allowed_chat_ids_do_not_pass_message_conversion() {
+        let settings = TelegramSettings::default();
+        let inbound = inbound_from_message(
+            &settings,
+            &[],
+            TelegramMessage {
+                message_id: 9,
+                from: Some(TelegramUser {
+                    id: 42,
+                    is_bot: false,
+                    username: Some("ada".to_string()),
+                    first_name: Some("Ada".to_string()),
+                    last_name: None,
+                }),
+                chat: TelegramChat {
+                    id: 42,
+                    kind: "private".to_string(),
+                    title: None,
+                    username: Some("ada".to_string()),
+                    first_name: Some("Ada".to_string()),
+                    last_name: None,
+                },
+                text: Some("/status".to_string()),
+            },
+        );
+
+        assert!(inbound.is_none());
+    }
+
+    #[test]
+    fn rejects_private_message_from_unlisted_chat() {
+        let settings = TelegramSettings::default();
+        let inbound = inbound_from_message(
+            &settings,
+            &["99".to_string()],
+            TelegramMessage {
+                message_id: 9,
+                from: Some(TelegramUser {
+                    id: 42,
+                    is_bot: false,
+                    username: Some("ada".to_string()),
+                    first_name: Some("Ada".to_string()),
+                    last_name: None,
+                }),
+                chat: TelegramChat {
+                    id: 42,
+                    kind: "private".to_string(),
+                    title: None,
+                    username: Some("ada".to_string()),
+                    first_name: Some("Ada".to_string()),
+                    last_name: None,
+                },
+                text: Some("/status".to_string()),
+            },
+        );
+
+        assert!(inbound.is_none());
+    }
+
+    #[test]
     fn ignores_group_messages() {
         let settings = TelegramSettings {
             mention_only: true,
@@ -393,7 +622,7 @@ mod tests {
             text: Some("hello".to_string()),
         };
 
-        assert!(inbound_from_message(&settings, message).is_none());
+        assert!(inbound_from_message(&settings, &["42".to_string()], message).is_none());
     }
 
     #[test]
@@ -404,6 +633,7 @@ mod tests {
         };
         let inbound = inbound_from_message(
             &settings,
+            &["42".to_string()],
             TelegramMessage {
                 message_id: 11,
                 from: Some(TelegramUser {

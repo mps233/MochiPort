@@ -26,7 +26,7 @@ use tracing::{info, warn};
 use crate::{
     app_state::{
         AuthorizedRemoteControlClient, PendingRemoteRequest, RemoteControlClientState,
-        RemoteControlInner, SharedState,
+        RemoteControlInner, RemoteControlStreamDiagnostics, SharedState,
     },
     chain_log,
     codex::CodexNotification,
@@ -465,7 +465,10 @@ fn ensure_client_state_locked<'a>(
             }
             remote.stream_id.clone()
         } else {
-            stable_id("stream", &client_key)
+            if remote.stream_id.is_empty() {
+                remote.stream_id = uuid_like();
+            }
+            stable_id("stream", &format!("{}:{client_key}", remote.stream_id))
         };
         remote.clients.insert(
             client_key.clone(),
@@ -1609,6 +1612,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         for key in ack_cursor_keys {
             remote.server_ack_cursors.remove(&key);
         }
+        remote.stream_diagnostics.clear();
         let default_client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
         let client_id = default_client.client_id.clone();
         let stream_id = default_client.stream_id.clone();
@@ -1836,6 +1840,7 @@ async fn handle_server_envelope(
         stream_id,
         seq_id,
     } = envelope;
+    let received_at_ms = now_ms();
     let segment_id = server_event_segment_id(&event);
     if !matches!(event, IncomingServerEvent::Pong { .. }) {
         chain_log::write_line(format!(
@@ -1852,6 +1857,17 @@ async fn handle_server_envelope(
         ));
     }
     if !is_current_remote_stream(state, connection_epoch, &client_id, &stream_id).await {
+        ack_server_envelope(state, &client_id, &stream_id, seq_id, segment_id).await?;
+        record_server_ack_diagnostics(
+            state,
+            connection_epoch,
+            &client_id,
+            &stream_id,
+            seq_id,
+            received_at_ms,
+        )
+        .await;
+        mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, segment_id).await;
         observe_stale_server_envelope(
             state,
             connection_epoch,
@@ -1859,29 +1875,43 @@ async fn handle_server_envelope(
             &client_id,
             &stream_id,
             &event,
-            false,
+            true,
         )
         .await;
         return Ok(());
     }
     if is_duplicate_server_envelope(state, &client_id, &stream_id, seq_id, segment_id).await {
         ack_server_envelope(state, &client_id, &stream_id, seq_id, segment_id).await?;
-        chain_log::write_diagnostic_line(format!(
-            "[remote_control] event=server_envelope_duplicate connection_epoch={} seq_id={} client_id={} stream_id={} kind={} segment_id={}",
-            connection_epoch,
-            seq_id,
-            client_id,
-            stream_id,
-            server_event_kind(&event),
-            segment_id
-                .map(|value| value.to_string())
-                .unwrap_or_default()
-        ));
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[remote_control] event=server_envelope_duplicate connection_epoch={} seq_id={} client_id={} stream_id={} kind={} segment_id={}",
+                connection_epoch,
+                seq_id,
+                client_id,
+                stream_id,
+                server_event_kind(&event),
+                segment_id
+                    .map(|value| value.to_string())
+                    .unwrap_or_default()
+            )
+        });
         return Ok(());
     }
     match event {
         IncomingServerEvent::ServerMessage { message } => {
             let summary = message_summary(&message);
+            if is_command_execution_output_delta_message(&message) {
+                observe_command_output_delta_received(
+                    state,
+                    connection_epoch,
+                    &client_id,
+                    &stream_id,
+                    seq_id,
+                    &message,
+                    server_work_tx.capacity(),
+                )
+                .await;
+            }
             enqueue_remote_server_work(
                 server_work_tx,
                 RemoteServerWorkItem::ServerMessage {
@@ -1893,6 +1923,15 @@ async fn handle_server_envelope(
                 },
             )?;
             ack_server_envelope(state, &client_id, &stream_id, seq_id, None).await?;
+            record_server_ack_diagnostics(
+                state,
+                connection_epoch,
+                &client_id,
+                &stream_id,
+                seq_id,
+                received_at_ms,
+            )
+            .await;
             mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
             log_server_envelope_handoff(
                 connection_epoch,
@@ -1934,6 +1973,15 @@ async fn handle_server_envelope(
                 )?;
             }
             ack_server_envelope(state, &client_id, &stream_id, seq_id, Some(segment_id)).await?;
+            record_server_ack_diagnostics(
+                state,
+                connection_epoch,
+                &client_id,
+                &stream_id,
+                seq_id,
+                received_at_ms,
+            )
+            .await;
             mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, Some(segment_id))
                 .await;
             log_server_envelope_handoff(
@@ -1957,6 +2005,15 @@ async fn handle_server_envelope(
                 },
             )?;
             ack_server_envelope(state, &client_id, &stream_id, seq_id, None).await?;
+            record_server_ack_diagnostics(
+                state,
+                connection_epoch,
+                &client_id,
+                &stream_id,
+                seq_id,
+                received_at_ms,
+            )
+            .await;
             mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
             log_server_envelope_handoff(
                 connection_epoch,
@@ -1984,6 +2041,15 @@ async fn handle_server_envelope(
                 },
             )?;
             ack_server_envelope(state, &client_id, &stream_id, seq_id, None).await?;
+            record_server_ack_diagnostics(
+                state,
+                connection_epoch,
+                &client_id,
+                &stream_id,
+                seq_id,
+                received_at_ms,
+            )
+            .await;
             mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
             log_server_envelope_handoff(
                 connection_epoch,
@@ -2107,10 +2173,12 @@ fn log_server_envelope_handoff(
     segment: &str,
     summary: &str,
 ) {
-    chain_log::write_diagnostic_line(format!(
-        "[remote_control] event=server_envelope_acked connection_epoch={} seq_id={} client_id={} stream_id={} kind={} segment={} summary={}",
-        connection_epoch, seq_id, client_id, stream_id, kind, segment, summary
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[remote_control] event=server_envelope_acked connection_epoch={} seq_id={} client_id={} stream_id={} kind={} segment={} summary={}",
+            connection_epoch, seq_id, client_id, stream_id, kind, segment, summary
+        )
+    });
 }
 
 fn log_server_work_begin(
@@ -2121,10 +2189,12 @@ fn log_server_work_begin(
     kind: &str,
     summary: &str,
 ) {
-    chain_log::write_diagnostic_line(format!(
-        "[remote_control] event=server_work_begin connection_epoch={} seq_id={} client_id={} stream_id={} kind={} summary={}",
-        connection_epoch, seq_id, client_id, stream_id, kind, summary
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[remote_control] event=server_work_begin connection_epoch={} seq_id={} client_id={} stream_id={} kind={} summary={}",
+            connection_epoch, seq_id, client_id, stream_id, kind, summary
+        )
+    });
 }
 
 fn server_event_segment_id(event: &IncomingServerEvent) -> Option<usize> {
@@ -2155,15 +2225,18 @@ async fn observe_stale_server_envelope(
     processed: bool,
 ) {
     if !matches!(event, IncomingServerEvent::Pong { .. }) {
+        let (resolved_client_key, registered_streams) =
+            remote_stream_diagnostic_context(state, connection_epoch, client_id, stream_id).await;
         chain_log::write_line(format!(
-            "[remote_control] event=stale_server_envelope connection_epoch={} seq_id={} client_id={} stream_id={} kind={} action={} current_stream_id={}",
+            "[remote_control] event=stale_server_envelope connection_epoch={} seq_id={} client_id={} stream_id={} kind={} action={} resolved_client_key={} registered_streams={}",
             connection_epoch,
             seq_id,
             client_id,
             stream_id,
             server_event_kind(event),
             if processed { "processed" } else { "ignored" },
-            current_stream_id(state).await.unwrap_or_default()
+            resolved_client_key.unwrap_or_default(),
+            registered_streams
         ));
     }
 }
@@ -2179,14 +2252,26 @@ async fn is_current_remote_stream(
         && remote_client_key_for_stream_locked(&remote, client_id, stream_id).is_some()
 }
 
-async fn current_stream_id(state: &SharedState) -> Option<String> {
+async fn remote_stream_diagnostic_context(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_id: &str,
+    stream_id: &str,
+) -> (Option<String>, String) {
     let remote = state.remote_control.inner.lock().await;
-    let stream_id = remote
+    if remote.connection_epoch != connection_epoch {
+        return (None, String::new());
+    }
+    let resolved_client_key = remote_client_key_for_stream_locked(&remote, client_id, stream_id);
+    let registered_streams = remote
         .clients
-        .get(DEFAULT_REMOTE_CLIENT_KEY)
-        .map(|client| client.stream_id.clone())
-        .unwrap_or_else(|| remote.stream_id.clone());
-    (!stream_id.is_empty()).then_some(stream_id)
+        .iter()
+        .map(|(client_key, client)| {
+            format!("{}:{}:{}", client_key, client.client_id, client.stream_id)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    (resolved_client_key, registered_streams)
 }
 
 async fn mark_remote_ws_inbound(state: &SharedState, connection_epoch: u64) {
@@ -2306,6 +2391,14 @@ async fn handle_remote_app_pong_after_ack(
         let Some(client_key) = client_key else {
             return Ok(());
         };
+        log_remote_control_unknown_context(
+            state,
+            connection_epoch,
+            &client_key,
+            client_id,
+            stream_id,
+        )
+        .await;
         state
             .push_event(
                 "warn",
@@ -2319,6 +2412,185 @@ async fn handle_remote_app_pong_after_ack(
         reset_remote_control_client_for_key(state, connection_epoch, &client_key).await?;
     }
     Ok(())
+}
+
+async fn observe_command_output_delta_received(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_id: &str,
+    stream_id: &str,
+    seq_id: u64,
+    message: &Value,
+    worker_capacity: usize,
+) {
+    let message = message.get("message").unwrap_or(message);
+    let params = message.get("params");
+    let thread_id = params
+        .and_then(thread_id_from_payload)
+        .or_else(|| thread_id_from_payload(message));
+    let item_id = params
+        .and_then(|params| params.get("itemId"))
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    let summary = {
+        let mut remote = state.remote_control.inner.lock().await;
+        if remote.connection_epoch != connection_epoch {
+            return;
+        }
+        let key = server_ack_cursor_key(client_id, stream_id);
+        let diagnostics = remote.stream_diagnostics.entry(key).or_default();
+        diagnostics.output_delta_count = diagnostics.output_delta_count.saturating_add(1);
+        diagnostics.output_delta_last_seq_id = Some(seq_id);
+        diagnostics.output_delta_last_item_id = item_id.clone();
+        diagnostics.output_delta_last_thread_id = thread_id.clone();
+        diagnostics.output_delta_last_seen_at_ms = Some(now_ms());
+        diagnostics.output_delta_last_worker_capacity = Some(worker_capacity);
+        command_output_delta_log_summary(diagnostics, worker_capacity)
+    };
+
+    if let Some(summary) = summary {
+        chain_log::write_line(format!(
+            "[remote_control] event=command_output_delta_pressure connection_epoch={} client_id={} stream_id={} seq_id={} thread={} item={} {}",
+            connection_epoch,
+            client_id,
+            stream_id,
+            seq_id,
+            thread_id.as_deref().unwrap_or_default(),
+            item_id.as_deref().unwrap_or_default(),
+            summary
+        ));
+    }
+}
+
+fn command_output_delta_log_summary(
+    diagnostics: &RemoteControlStreamDiagnostics,
+    worker_capacity: usize,
+) -> Option<String> {
+    let count = diagnostics.output_delta_count;
+    let should_log = count == 1
+        || count % 50 == 0
+        || worker_capacity <= REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY / 8;
+    should_log.then(|| {
+        format!(
+            "output_delta_count={} worker_capacity={} ack_count={} last_ack_seq_id={} last_ack_elapsed_ms={} max_ack_elapsed_ms={}",
+            count,
+            worker_capacity,
+            diagnostics.ack_count,
+            diagnostics
+                .last_ack_seq_id
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            diagnostics
+                .last_ack_elapsed_ms
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            diagnostics.max_ack_elapsed_ms
+        )
+    })
+}
+
+async fn record_server_ack_diagnostics(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_id: &str,
+    stream_id: &str,
+    seq_id: u64,
+    received_at_ms: u128,
+) {
+    let elapsed_ms = now_ms().saturating_sub(received_at_ms);
+    let should_log = {
+        let mut remote = state.remote_control.inner.lock().await;
+        if remote.connection_epoch != connection_epoch {
+            return;
+        }
+        let key = server_ack_cursor_key(client_id, stream_id);
+        let diagnostics = remote.stream_diagnostics.entry(key).or_default();
+        diagnostics.ack_count = diagnostics.ack_count.saturating_add(1);
+        diagnostics.last_ack_elapsed_ms = Some(elapsed_ms);
+        diagnostics.last_ack_seq_id = Some(seq_id);
+        if elapsed_ms > diagnostics.max_ack_elapsed_ms {
+            diagnostics.max_ack_elapsed_ms = elapsed_ms;
+        }
+        elapsed_ms >= 50
+    };
+    if should_log {
+        chain_log::write_line(format!(
+            "[remote_control] event=server_ack_slow connection_epoch={} client_id={} stream_id={} seq_id={} elapsed_ms={}",
+            connection_epoch, client_id, stream_id, seq_id, elapsed_ms
+        ));
+    }
+}
+
+async fn log_remote_control_unknown_context(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_key: &str,
+    client_id: &str,
+    stream_id: &str,
+) {
+    let (diagnostics, registered_streams) = {
+        let remote = state.remote_control.inner.lock().await;
+        if remote.connection_epoch != connection_epoch {
+            return;
+        }
+        let key = server_ack_cursor_key(client_id, stream_id);
+        let diagnostics = remote
+            .stream_diagnostics
+            .get(&key)
+            .map(format_stream_diagnostics)
+            .unwrap_or_else(|| "no_stream_diagnostics=true".to_string());
+        let registered_streams = remote
+            .clients
+            .iter()
+            .map(|(client_key, client)| {
+                format!("{}:{}:{}", client_key, client.client_id, client.stream_id)
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        (diagnostics, registered_streams)
+    };
+    chain_log::write_line(format!(
+        "[remote_control] event=remote_control_client_unknown_context connection_epoch={} client_key={} client_id={} stream_id={} {} registered_streams={}",
+        connection_epoch, client_key, client_id, stream_id, diagnostics, registered_streams
+    ));
+}
+
+fn format_stream_diagnostics(diagnostics: &RemoteControlStreamDiagnostics) -> String {
+    format!(
+        "output_delta_count={} output_delta_last_seq_id={} output_delta_last_thread={} output_delta_last_item={} output_delta_last_seen_at_ms={} output_delta_last_worker_capacity={} ack_count={} last_ack_seq_id={} last_ack_elapsed_ms={} max_ack_elapsed_ms={}",
+        diagnostics.output_delta_count,
+        diagnostics
+            .output_delta_last_seq_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        diagnostics
+            .output_delta_last_thread_id
+            .as_deref()
+            .unwrap_or_default(),
+        diagnostics
+            .output_delta_last_item_id
+            .as_deref()
+            .unwrap_or_default(),
+        diagnostics
+            .output_delta_last_seen_at_ms
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        diagnostics
+            .output_delta_last_worker_capacity
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        diagnostics.ack_count,
+        diagnostics
+            .last_ack_seq_id
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        diagnostics
+            .last_ack_elapsed_ms
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        diagnostics.max_ack_elapsed_ms
+    )
 }
 
 async fn remote_control_stale_reason(state: &SharedState, connection_epoch: u64) -> Option<String> {
@@ -3461,14 +3733,16 @@ pub async fn start_turn_for_client(
     text: &str,
     attachments: &[InboundAttachment],
 ) -> Result<String> {
-    chain_log::write_diagnostic_line(format!(
-        "[im_trace] event=remote_to_codex_turn_start client_key={} thread={} text_len={} attachments={} preview={}",
-        client_key,
-        thread_id,
-        text.chars().count(),
-        attachments.len(),
-        log_text_preview(text, 360)
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[im_trace] event=remote_to_codex_turn_start client_key={} thread={} text_len={} attachments={} preview={}",
+            client_key,
+            thread_id,
+            text.chars().count(),
+            attachments.len(),
+            log_text_preview(text, 360)
+        )
+    });
     let response = request_for_client(
         state,
         client_key,
@@ -3909,6 +4183,9 @@ fn log_text_preview(text: &str, limit: usize) -> String {
 }
 
 fn log_codex_to_remote_message(connection_epoch: u64, message: &Value) {
+    if !chain_log::diagnostic_enabled() {
+        return;
+    }
     let method = message.get("method").and_then(|v| v.as_str()).unwrap_or("");
     if method.is_empty() {
         return;
@@ -3937,17 +4214,19 @@ fn log_codex_to_remote_message(connection_epoch: u64, message: &Value) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let text = codex_message_text_for_log(method, params, item);
-    chain_log::write_diagnostic_line(format!(
-        "[im_trace] event=codex_to_remote connection_epoch={} method={} thread={} turn={} item={} type={} text_len={} preview={}",
-        connection_epoch,
-        method,
-        thread_id,
-        turn_id,
-        item_id,
-        item_type,
-        text.chars().count(),
-        log_text_preview(&text, 500)
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[im_trace] event=codex_to_remote connection_epoch={} method={} thread={} turn={} item={} type={} text_len={} preview={}",
+            connection_epoch,
+            method,
+            thread_id,
+            turn_id,
+            item_id,
+            item_type,
+            text.chars().count(),
+            log_text_preview(&text, 500)
+        )
+    });
 }
 
 fn turn_id_from_payload(value: &Value) -> Option<String> {
@@ -3998,6 +4277,12 @@ fn codex_message_text_for_log(
         return item.to_string();
     }
     params.map(Value::to_string).unwrap_or_default()
+}
+
+fn is_command_execution_output_delta_message(message: &Value) -> bool {
+    let message = message.get("message").unwrap_or(message);
+    message.get("method").and_then(|value| value.as_str())
+        == Some("item/commandExecution/outputDelta")
 }
 
 fn message_summary(value: &Value) -> String {
@@ -4143,6 +4428,38 @@ mod tests {
     use super::*;
     use crate::{app_state::AppState, config::AppConfig};
 
+    fn remote_inner_for_test(stream_id: &str) -> RemoteControlInner {
+        RemoteControlInner {
+            connected: false,
+            initialized: false,
+            client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
+            stream_id: stream_id.to_string(),
+            server_id: None,
+            environment_id: None,
+            server_name: None,
+            installation_id: None,
+            account_id: None,
+            current_thread_id: None,
+            current_turn_id: None,
+            last_error: None,
+            connected_at_ms: None,
+            last_ws_inbound_at_ms: None,
+            last_ws_ping_at_ms: None,
+            last_ws_pong_at_ms: None,
+            last_app_ping_at_ms: None,
+            last_app_pong_at_ms: None,
+            last_app_pong_status: None,
+            last_initialize_sent_at_ms: None,
+            server_ack_cursors: HashMap::new(),
+            outbound_tx: None,
+            connection_epoch: 0,
+            clients: HashMap::new(),
+            authorized_clients: HashMap::new(),
+            revoked_clients: std::collections::HashSet::new(),
+            stream_diagnostics: HashMap::new(),
+        }
+    }
+
     #[test]
     fn ack_cursor_orders_whole_message_after_chunks() {
         assert!(ack_cursor_gt((2, None), (1, None)));
@@ -4207,34 +4524,7 @@ mod tests {
 
     #[test]
     fn virtual_remote_clients_share_enrolled_client_id_and_use_distinct_streams() {
-        let mut remote = RemoteControlInner {
-            connected: false,
-            initialized: false,
-            client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
-            stream_id: "default-stream".to_string(),
-            server_id: None,
-            environment_id: None,
-            server_name: None,
-            installation_id: None,
-            account_id: None,
-            current_thread_id: None,
-            current_turn_id: None,
-            last_error: None,
-            connected_at_ms: None,
-            last_ws_inbound_at_ms: None,
-            last_ws_ping_at_ms: None,
-            last_ws_pong_at_ms: None,
-            last_app_ping_at_ms: None,
-            last_app_pong_at_ms: None,
-            last_app_pong_status: None,
-            last_initialize_sent_at_ms: None,
-            server_ack_cursors: HashMap::new(),
-            outbound_tx: None,
-            connection_epoch: 0,
-            clients: HashMap::new(),
-            authorized_clients: HashMap::new(),
-            revoked_clients: std::collections::HashSet::new(),
-        };
+        let mut remote = remote_inner_for_test("default-stream");
 
         let feishu = ensure_client_state_locked(&mut remote, "feishu:default:chat-1");
         let feishu_client_id = feishu.client_id.clone();
@@ -4256,6 +4546,21 @@ mod tests {
                 .as_deref(),
             Some("wechat:bot:user-1")
         );
+    }
+
+    #[test]
+    fn virtual_remote_client_stream_is_namespaced_by_connection_stream() {
+        let mut first = remote_inner_for_test("default-stream-1");
+        let mut second = remote_inner_for_test("default-stream-2");
+        let client_key = "wechat:bot:user-1";
+        let first_stream = ensure_client_state_locked(&mut first, client_key)
+            .stream_id
+            .clone();
+        let second_stream = ensure_client_state_locked(&mut second, client_key)
+            .stream_id
+            .clone();
+
+        assert_ne!(first_stream, second_stream);
     }
 
     #[test]
@@ -4287,6 +4592,7 @@ mod tests {
             clients: HashMap::new(),
             authorized_clients: HashMap::new(),
             revoked_clients: std::collections::HashSet::new(),
+            stream_diagnostics: HashMap::new(),
         };
         let client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
         client.initialized = true;

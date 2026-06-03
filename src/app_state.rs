@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
 };
@@ -34,6 +34,7 @@ pub struct AppState {
     pub feishu_ws: Mutex<FeishuWsState>,
     pub telegram: Mutex<TelegramState>,
     pub wechat: Mutex<WechatState>,
+    pub wechat_recovery: Mutex<WechatRecoveryState>,
     pub im_accounts: Mutex<HashMap<String, ImAccountRuntimeState>>,
     pub wechat_onboard: Mutex<Option<WechatOnboardSession>>,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
@@ -73,6 +74,7 @@ pub struct RemoteControlInner {
     pub clients: HashMap<String, RemoteControlClientState>,
     pub authorized_clients: HashMap<String, AuthorizedRemoteControlClient>,
     pub revoked_clients: HashSet<String>,
+    pub stream_diagnostics: HashMap<String, RemoteControlStreamDiagnostics>,
 }
 
 pub struct PendingRemoteRequest {
@@ -95,6 +97,20 @@ pub struct RemoteControlClientState {
     pub last_app_pong_at_ms: Option<u128>,
     pub last_app_pong_status: Option<String>,
     pub last_initialize_sent_at_ms: Option<u128>,
+}
+
+#[derive(Default)]
+pub struct RemoteControlStreamDiagnostics {
+    pub output_delta_count: u64,
+    pub output_delta_last_seq_id: Option<u64>,
+    pub output_delta_last_item_id: Option<String>,
+    pub output_delta_last_thread_id: Option<String>,
+    pub output_delta_last_seen_at_ms: Option<u128>,
+    pub output_delta_last_worker_capacity: Option<usize>,
+    pub ack_count: u64,
+    pub max_ack_elapsed_ms: u128,
+    pub last_ack_elapsed_ms: Option<u128>,
+    pub last_ack_seq_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +153,7 @@ impl RemoteControlState {
                 clients: HashMap::new(),
                 authorized_clients: HashMap::new(),
                 revoked_clients: HashSet::new(),
+                stream_diagnostics: HashMap::new(),
             }),
             notifications,
         }
@@ -159,6 +176,13 @@ pub struct WechatState {
     pub last_error: Option<String>,
     pub last_event_at_ms: Option<u128>,
     pub last_inbound_at_ms: Option<u128>,
+}
+
+#[derive(Debug, Default)]
+pub struct WechatRecoveryState {
+    pub awaiting_fresh_context_token: HashSet<String>,
+    pub pending_outbound_by_peer:
+        HashMap<String, VecDeque<crate::im::core::outbound::ImOutboundMessage>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -225,6 +249,7 @@ impl AppState {
             feishu_ws: Mutex::new(FeishuWsState::default()),
             telegram: Mutex::new(TelegramState::default()),
             wechat: Mutex::new(WechatState::default()),
+            wechat_recovery: Mutex::new(WechatRecoveryState::default()),
             im_accounts: Mutex::new(HashMap::new()),
             wechat_onboard: Mutex::new(None),
             shutdown_tx: Mutex::new(shutdown_tx),

@@ -516,10 +516,11 @@ where
         .await
         .with_context(|| format!("wechat api {label} response body read failed"))?;
     chain_log::write_line(format!(
-        "[wechat_api] event=response label={} status={} body_len={}",
+        "[wechat_api] event=response label={} status={} body_len={}{}",
         label,
         status.as_u16(),
-        text.len()
+        text.len(),
+        response_preview_suffix(label, &text)
     ));
     if !status.is_success() {
         return Err(anyhow!(
@@ -528,12 +529,72 @@ where
             truncate_log(&text, 300)
         ));
     }
-    serde_json::from_str(&text).with_context(|| {
+    let value: Value = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "wechat api {label} response decode failed: {}",
+            truncate_log(&text, 300)
+        )
+    })?;
+    ensure_business_success(label, &value)?;
+    serde_json::from_value(value).with_context(|| {
         format!(
             "wechat api {label} response decode failed: {}",
             truncate_log(&text, 300)
         )
     })
+}
+
+fn ensure_business_success(label: &str, value: &Value) -> Result<()> {
+    let Some(code) = response_business_code(value) else {
+        return Ok(());
+    };
+    if code == 0 {
+        return Ok(());
+    }
+    let errmsg = value
+        .get("errmsg")
+        .or_else(|| value.get("errMsg"))
+        .or_else(|| value.get("message"))
+        .and_then(|item| item.as_str())
+        .unwrap_or_default();
+    let body = serde_json::to_string(value).unwrap_or_else(|_| value.to_string());
+    Err(anyhow!(
+        "wechat api {label} business error code={} ret={} errmsg={} body={}",
+        classify_business_code(code),
+        code,
+        errmsg,
+        truncate_log(&body, 300)
+    ))
+}
+
+fn response_business_code(value: &Value) -> Option<i64> {
+    value
+        .get("ret")
+        .or_else(|| value.get("errcode"))
+        .or_else(|| value.get("errCode"))
+        .or_else(|| value.get("code"))
+        .and_then(|item| item.as_i64())
+}
+
+fn classify_business_code(code: i64) -> &'static str {
+    match code {
+        -2 => "ret_minus_2",
+        -14 => "session_timeout",
+        _ => "protocol_error",
+    }
+}
+
+fn response_preview_suffix(label: &str, text: &str) -> String {
+    if !matches!(
+        label,
+        "wechat_send_message" | "wechat_send_image" | "wechat_notify_start"
+    ) {
+        return String::new();
+    }
+    format!(
+        " body_preview={}",
+        truncate_log(&text.replace('\n', "\\n"), 300)
+    )
 }
 
 fn build_headers(token: Option<&str>) -> Result<HeaderMap> {
@@ -653,4 +714,28 @@ fn truncate_log(text: &str, max_chars: usize) -> String {
 
 pub(crate) fn default_long_poll_timeout_ms() -> u64 {
     LONG_POLL_TIMEOUT_MS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn business_success_accepts_empty_or_zero_code() {
+        ensure_business_success("wechat_send_message", &json!({})).unwrap();
+        ensure_business_success("wechat_send_message", &json!({ "ret": 0 })).unwrap();
+        ensure_business_success("wechat_send_message", &json!({ "errcode": 0 })).unwrap();
+    }
+
+    #[test]
+    fn business_error_classifies_expired_context_token() {
+        let err = ensure_business_success(
+            "wechat_send_message",
+            &json!({ "ret": -2, "errmsg": "context token expired" }),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("ret_minus_2"));
+        assert!(err.contains("ret=-2"));
+    }
 }

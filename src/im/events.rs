@@ -29,7 +29,6 @@ use crate::{
 };
 
 const COMMAND_OUTPUT_PREVIEW_CHARS: usize = 2400;
-
 pub(crate) async fn send_next_approval(
     state: &SharedState,
     api_registry: &ImApiRegistry,
@@ -883,15 +882,17 @@ async fn route_for_codex_output(
     _params: &serde_json::Value,
 ) -> Option<RouteTarget> {
     if let Some(route) = state.runtime.lock().await.route_for_thread(thread_id) {
-        chain_log::write_diagnostic_line(format!(
-            "[im_route] event=codex_route_hit method={} thread={} platform={} account={} chat={} conversation={}",
-            method,
-            thread_id,
-            route.platform.key(),
-            route.account_id,
-            route.chat_id,
-            route.conversation_key
-        ));
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[im_route] event=codex_route_hit method={} thread={} platform={} account={} chat={} conversation={}",
+                method,
+                thread_id,
+                route.platform.key(),
+                route.account_id,
+                route.chat_id,
+                route.conversation_key
+            )
+        });
         return Some(route);
     }
     chain_log::write_line(format!(
@@ -925,15 +926,17 @@ async fn feishu_route_for_codex_output(
 ) -> Option<RouteTarget> {
     let route = route_for_codex_output(state, method, thread_id, params).await?;
     if route.platform != ImPlatformKind::Feishu {
-        chain_log::write_diagnostic_line(format!(
-            "[im_route] event=codex_route_platform_skip method={} thread={} wanted=feishu actual={} account={} chat={} conversation={}",
-            method,
-            thread_id,
-            route.platform.key(),
-            route.account_id,
-            route.chat_id,
-            route.conversation_key
-        ));
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[im_route] event=codex_route_platform_skip method={} thread={} wanted=feishu actual={} account={} chat={} conversation={}",
+                method,
+                thread_id,
+                route.platform.key(),
+                route.account_id,
+                route.chat_id,
+                route.conversation_key
+            )
+        });
         return None;
     }
     Some(route)
@@ -1195,6 +1198,12 @@ async fn send_text_im_codex_item(
             .await;
         return Ok(());
     };
+    let mcp_tool_image_paths = if item_type == "mcpToolCall" {
+        mcp_tool_image_paths_for_item(state, platform, item, item_id).await?
+    } else {
+        Vec::new()
+    };
+
     log_remote_to_im_enqueue("item_enqueue", thread_id, route, item_id, item_type, &text);
     outbound_tx.enqueue(ImOutboundMessage {
         thread_id: thread_id.to_string(),
@@ -1204,6 +1213,8 @@ async fn send_text_im_codex_item(
         kind: ImOutboundKind::Item,
         payload: ImOutboundPayload::Text(text.clone()),
     })?;
+    let mcp_tool_image_count =
+        queue_mcp_tool_images(outbound_tx, thread_id, route, item_id, mcp_tool_image_paths)?;
     let event_kind = format!("{platform}_item_queued");
     state
         .push_event(
@@ -1216,10 +1227,51 @@ async fn send_text_im_codex_item(
             ),
         )
         .await;
+    if mcp_tool_image_count > 0 {
+        let event_kind = format!("{platform}_mcp_tool_images_queued");
+        state
+            .push_event(
+                "info",
+                &event_kind,
+                format!(
+                    "thread={thread_id} item={item_id} type=mcpToolCall chat={} image_count={mcp_tool_image_count}",
+                    route.chat_id
+                ),
+            )
+            .await;
+    }
     Ok(())
 }
 
+fn queue_mcp_tool_images(
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    route: &RouteTarget,
+    item_id: &str,
+    paths: Vec<PathBuf>,
+) -> Result<usize> {
+    let image_count = paths.len();
+    for path in paths {
+        outbound_tx.enqueue(ImOutboundMessage {
+            thread_id: thread_id.to_string(),
+            route: route.clone(),
+            item_id: Some(item_id.to_string()),
+            item_type: Some("mcpToolCall".to_string()),
+            kind: ImOutboundKind::ImageItem,
+            payload: ImOutboundPayload::Image {
+                path,
+                caption: None,
+                fallback_text: None,
+            },
+        })?;
+    }
+    Ok(image_count)
+}
+
 fn log_codex_to_im_handler(notification: &crate::codex::CodexNotification) {
+    if !chain_log::diagnostic_enabled() {
+        return;
+    }
     let Some(params) = notification.params.as_ref() else {
         return;
     };
@@ -1248,16 +1300,18 @@ fn log_codex_to_im_handler(notification: &crate::codex::CodexNotification) {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let text = trace_text_for_notification(&notification.method, params, item);
-    chain_log::write_diagnostic_line(format!(
-        "[im_trace] event=codex_to_im_handler method={} thread={} turn={} item={} type={} text_len={} preview={}",
-        notification.method,
-        thread_id,
-        turn_id,
-        item_id,
-        item_type,
-        text.chars().count(),
-        trace_preview(&text, 500)
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[im_trace] event=codex_to_im_handler method={} thread={} turn={} item={} type={} text_len={} preview={}",
+            notification.method,
+            thread_id,
+            turn_id,
+            item_id,
+            item_type,
+            text.chars().count(),
+            trace_preview(&text, 500)
+        )
+    });
 }
 
 fn log_remote_to_im_enqueue(
@@ -1268,18 +1322,20 @@ fn log_remote_to_im_enqueue(
     item_type: &str,
     text: &str,
 ) {
-    chain_log::write_diagnostic_line(format!(
-        "[im_trace] event=remote_to_im_{} platform={} account={} chat={} thread={} item={} type={} text_len={} preview={}",
-        event,
-        route.platform.key(),
-        route.account_id,
-        route.chat_id,
-        thread_id,
-        item_id,
-        item_type,
-        text.chars().count(),
-        trace_preview(text, 500)
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[im_trace] event=remote_to_im_{} platform={} account={} chat={} thread={} item={} type={} text_len={} preview={}",
+            event,
+            route.platform.key(),
+            route.account_id,
+            route.chat_id,
+            thread_id,
+            item_id,
+            item_type,
+            text.chars().count(),
+            trace_preview(text, 500)
+        )
+    });
 }
 
 fn trace_text_for_notification(
@@ -1349,6 +1405,52 @@ async fn text_im_image_path_for_item(
     let Some(decoded) = decode_image_string(result) else {
         return Ok(None);
     };
+    Ok(Some(
+        write_im_image_cache(state, platform, item_id, decoded).await?,
+    ))
+}
+
+async fn mcp_tool_image_paths_for_item(
+    state: &SharedState,
+    platform: &str,
+    item: &serde_json::Value,
+    item_id: &str,
+) -> Result<Vec<PathBuf>> {
+    let Some(content) = item
+        .get("result")
+        .and_then(|result| result.get("content"))
+        .and_then(|value| value.as_array())
+    else {
+        return Ok(Vec::new());
+    };
+    let mut paths = Vec::new();
+    for (index, entry) in content
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|value| value.as_str()) == Some("image"))
+        .enumerate()
+    {
+        let Some(data) = entry.get("data").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let mime_type = entry
+            .get("mimeType")
+            .or_else(|| entry.get("mime_type"))
+            .and_then(|value| value.as_str());
+        let Some(decoded) = decode_image_content(data, mime_type) else {
+            continue;
+        };
+        let cache_key = format!("{item_id}-mcp-{index}");
+        paths.push(write_im_image_cache(state, platform, &cache_key, decoded).await?);
+    }
+    Ok(paths)
+}
+
+async fn write_im_image_cache(
+    state: &SharedState,
+    platform: &str,
+    item_id: &str,
+    decoded: DecodedImage,
+) -> Result<PathBuf> {
     let state_path = state.config.lock().await.state_path.clone();
     let root = state_path
         .parent()
@@ -1366,7 +1468,7 @@ async fn text_im_image_path_for_item(
     ));
     std::fs::write(&path, decoded.bytes)
         .with_context(|| format!("failed to write image cache {}", path.display()))?;
-    Ok(Some(path))
+    Ok(path)
 }
 
 struct DecodedImage {
@@ -1387,6 +1489,21 @@ fn decode_image_string(value: &str) -> Option<DecodedImage> {
     }
     let bytes = general_purpose::STANDARD.decode(trimmed).ok()?;
     let extension = image_extension_from_bytes(&bytes)?;
+    Some(DecodedImage { bytes, extension })
+}
+
+fn decode_image_content(value: &str, mime_type: Option<&str>) -> Option<DecodedImage> {
+    let trimmed = value.trim();
+    if let Some((mime, payload)) = parse_image_data_url(trimmed) {
+        let bytes = general_purpose::STANDARD.decode(payload).ok()?;
+        let extension =
+            image_extension_from_mime(mime).or_else(|| image_extension_from_bytes(&bytes))?;
+        return Some(DecodedImage { bytes, extension });
+    }
+    let bytes = general_purpose::STANDARD.decode(trimmed).ok()?;
+    let extension = mime_type
+        .and_then(image_extension_from_mime)
+        .or_else(|| image_extension_from_bytes(&bytes))?;
     Some(DecodedImage { bytes, extension })
 }
 

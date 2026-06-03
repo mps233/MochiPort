@@ -4221,9 +4221,10 @@ fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {
 
 fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
     let dialog = Dialog::builder(parent, "添加 Telegram 机器人")
-        .with_style(DialogStyle::DefaultDialogStyle)
-        .with_size(520, 220)
+        .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
+        .with_size(520, 300)
         .build();
+    dialog.set_min_size(Size::new(520, 280));
     dialog.set_background_color(Colour::rgb(255, 255, 255));
 
     let panel = Panel::builder(&dialog).build();
@@ -4243,7 +4244,7 @@ fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
 
     let input = TextCtrl::builder(&panel)
         .with_value("")
-        .with_style(TextCtrlStyle::Default)
+        .with_style(TextCtrlStyle::Default | TextCtrlStyle::ProcessEnter)
         .build();
     input.set_min_size(Size::new(460, 30));
     sizer.add(
@@ -4265,8 +4266,15 @@ fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
     );
 
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    let cancel_button = Button::builder(&panel).with_label("取消").build();
-    let save_button = Button::builder(&panel).with_label("保存并接入").build();
+    let cancel_button = Button::builder(&panel)
+        .with_id(ID_CANCEL)
+        .with_label("取消")
+        .build();
+    let save_button = Button::builder(&panel)
+        .with_id(ID_OK)
+        .with_label("保存并接入")
+        .build();
+    save_button.set_default();
     buttons.add_stretch_spacer(1);
     buttons.add(&cancel_button, 0, SizerFlag::Right, 8);
     buttons.add(&save_button, 0, SizerFlag::Right, 0);
@@ -4291,7 +4299,12 @@ fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
         let dialog = dialog;
         save_button.on_click(move |_| dialog.end_modal(ID_OK));
     }
+    {
+        let dialog = dialog;
+        input.on_text_enter(move |_| dialog.end_modal(ID_OK));
+    }
 
+    input.set_focus();
     let result = dialog.show_modal();
     let token = strip_nul(&input.get_value()).trim().to_string();
     dialog.destroy();

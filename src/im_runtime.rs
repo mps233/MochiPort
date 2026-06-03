@@ -374,14 +374,16 @@ fn log_route_bind(thread_id: &str, route: &RouteTarget, previous: Option<&RouteT
             previous.chat_id,
             previous.conversation_key
         )),
-        None => chain_log::write_diagnostic_line(format!(
-            "[im_route] event=bind thread={} platform={} account={} chat={} conversation={}",
-            thread_id,
-            route.platform.key(),
-            route.account_id,
-            route.chat_id,
-            route.conversation_key
-        )),
+        None => chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[im_route] event=bind thread={} platform={} account={} chat={} conversation={}",
+                thread_id,
+                route.platform.key(),
+                route.account_id,
+                route.chat_id,
+                route.conversation_key
+            )
+        }),
     }
 }
 

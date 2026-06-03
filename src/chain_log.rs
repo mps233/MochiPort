@@ -12,8 +12,15 @@ use once_cell::sync::OnceCell;
 static CHAIN_LOG: OnceCell<ChainLog> = OnceCell::new();
 
 struct ChainLog {
-    file: Mutex<File>,
+    inner: Mutex<ChainLogInner>,
     diagnostic: bool,
+    max_bytes: u64,
+}
+
+struct ChainLogInner {
+    file: Option<File>,
+    path: PathBuf,
+    written_bytes: u64,
 }
 
 pub fn init(
@@ -39,9 +46,15 @@ pub fn init(
         "\n===== codex-remote start {} =====",
         timestamp_secs()
     );
+    let written_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
     let _ = CHAIN_LOG.set(ChainLog {
-        file: Mutex::new(file),
+        inner: Mutex::new(ChainLogInner {
+            file: Some(file),
+            path: path.to_path_buf(),
+            written_bytes,
+        }),
         diagnostic,
+        max_bytes,
     });
     Ok(())
 }
@@ -54,26 +67,67 @@ pub fn write_line(line: impl AsRef<str>) {
     write_line_inner(line, should_flush(line));
 }
 
-pub fn write_diagnostic_line(line: impl AsRef<str>) {
-    let Some(log) = CHAIN_LOG.get() else {
+pub fn write_diagnostic_lazy(build: impl FnOnce() -> String) {
+    if !diagnostic_enabled() {
         return;
-    };
-    if !log.diagnostic {
-        return;
-    };
-    write_line_inner(line.as_ref(), false);
+    }
+    let line = build();
+    write_line_inner(&line, false);
+}
+
+pub fn diagnostic_enabled() -> bool {
+    CHAIN_LOG.get().is_some_and(|log| log.diagnostic)
 }
 
 fn write_line_inner(line: &str, flush: bool) {
     let Some(log) = CHAIN_LOG.get() else {
         return;
     };
-    let Ok(mut file) = log.file.lock() else {
+    let Ok(mut inner) = log.inner.lock() else {
         return;
     };
-    let _ = writeln!(file, "{line}");
-    if flush {
+    if log.max_bytes > 0 && inner.written_bytes >= log.max_bytes {
+        rotate_open_log(&mut inner);
+    }
+    let wrote = if let Some(file) = inner.file.as_mut() {
+        let _ = writeln!(file, "{line}");
+        if flush {
+            let _ = file.flush();
+        }
+        true
+    } else {
+        false
+    };
+    if wrote {
+        inner.written_bytes = inner
+            .written_bytes
+            .saturating_add(line.len() as u64)
+            .saturating_add(2);
+    }
+}
+
+fn rotate_open_log(inner: &mut ChainLogInner) {
+    if let Some(mut file) = inner.file.take() {
         let _ = file.flush();
+    }
+    let rotated = rotated_path(&inner.path);
+    let _ = std::fs::remove_file(&rotated);
+    if inner.path.exists() {
+        let _ = std::fs::rename(&inner.path, &rotated);
+    }
+    match OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&inner.path)
+    {
+        Ok(file) => {
+            inner.file = Some(file);
+            inner.written_bytes = 0;
+        }
+        Err(_) => {
+            inner.file = None;
+            inner.written_bytes = 0;
+        }
     }
 }
 
@@ -176,4 +230,43 @@ fn timestamp_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rotate_open_log_replaces_active_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("codex-remote-chain-log-test-{unique}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("codex-remote-chain.log");
+        std::fs::write(&path, "old\n").unwrap();
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let mut inner = ChainLogInner {
+            file: Some(file),
+            path: path.clone(),
+            written_bytes: 4,
+        };
+
+        rotate_open_log(&mut inner);
+        writeln!(inner.file.as_mut().unwrap(), "new").unwrap();
+        drop(inner);
+
+        assert!(rotated_path(&path).exists());
+        assert_eq!(
+            std::fs::read_to_string(rotated_path(&path)).unwrap(),
+            "old\n"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

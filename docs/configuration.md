@@ -119,11 +119,15 @@ Existing configs may still contain `mentionOnly`; it is kept for compatibility b
 
 ### `allowedChatIds`
 
-Optional allowlist of Telegram private chat ids as strings.
+Allowlist of Telegram private chat ids as strings.
 
-Empty means no private-chat allowlist.
+Empty means "bind the first private chat". After the first private Telegram message is accepted, `codex-remote` writes that chat id into `allowedChatIds` and rejects other private chats.
 
-For first use, keep this empty. After you send `/status` to the bot, copy the `chat=...` value from the `telegram_message` event and put it here if you want to restrict access.
+For stricter setup, prefill this list before starting the bridge:
+
+```toml
+allowedChatIds = ["123456789"]
+```
 
 ## WeChat
 

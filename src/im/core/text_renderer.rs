@@ -233,23 +233,76 @@ fn render_file_change(item: &Value) -> Option<String> {
 fn render_mcp_tool_call(item: &Value) -> Option<String> {
     let mut lines = Vec::new();
     if let Some(server) = string_field(item, "server") {
-        lines.push(format!("server: `{server}`"));
+        lines.push(format!("server: `{}`", truncate_middle(&server, 120)));
     }
     if let Some(tool) = string_field(item, "tool") {
-        lines.push(format!("tool: `{tool}`"));
+        lines.push(format!("tool: `{}`", truncate_middle(&tool, 120)));
+    }
+    if let Some(title) = mcp_tool_title(item) {
+        lines.push(format!(
+            "title: {}",
+            truncate_text(&single_line_text(&title), 240)
+        ));
     }
     if let Some(status) = string_field(item, "status") {
-        lines.push(format!("status: `{status}`"));
+        let status_icon = mcp_status_icon(&status)
+            .map(|icon| format!("{icon} "))
+            .unwrap_or_default();
+        lines.push(format!("status: `{status_icon}{status}`"));
     }
-    push_json_section(
-        &mut lines,
-        "arguments",
-        item.get("arguments"),
-        JSON_CHAR_LIMIT,
-    );
-    push_json_section(&mut lines, "result", item.get("result"), JSON_CHAR_LIMIT);
-    push_json_section(&mut lines, "error", item.get("error"), JSON_CHAR_LIMIT);
+    if let Some(summary) = mcp_result_summary(item) {
+        lines.push(summary);
+    }
+    if let Some(error) = item.get("error").filter(|v| !v.is_null()) {
+        let text = error.as_str().map(str::to_string).unwrap_or_else(|| {
+            serde_json::to_string_pretty(error).unwrap_or_else(|_| error.to_string())
+        });
+        lines.push(format!(
+            "error: {}",
+            truncate_text(&single_line_text(&text), 600)
+        ));
+    }
     (!lines.is_empty()).then(|| format!("{}\n\n{}", type_header("mcpToolCall"), lines.join("\n\n")))
+}
+
+fn mcp_tool_title(item: &Value) -> Option<String> {
+    item.get("arguments")
+        .and_then(|arguments| arguments.get("title"))
+        .and_then(|v| v.as_str())
+        .or_else(|| item.get("title").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn mcp_result_summary(item: &Value) -> Option<String> {
+    let result = item.get("result")?;
+    let content = result.get("content").and_then(|v| v.as_array())?;
+    let image_count = content
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("image"))
+        .count();
+    let text_count = content
+        .iter()
+        .filter(|entry| entry.get("type").and_then(|v| v.as_str()) == Some("text"))
+        .count();
+    match (image_count, text_count) {
+        (0, 0) => None,
+        (images, 0) => Some(format!("result: 已获取 {images} 张图片。")),
+        (0, texts) => Some(format!("result: 已获取 {texts} 段文本结果。")),
+        (images, texts) => Some(format!(
+            "result: 已获取 {texts} 段文本结果和 {images} 张图片。"
+        )),
+    }
+}
+
+fn mcp_status_icon(status: &str) -> Option<&'static str> {
+    match status {
+        "completed" | "succeeded" | "success" => Some("✅"),
+        "failed" | "error" | "canceled" | "cancelled" | "timed_out" | "timedout" => Some("❌"),
+        "running" | "in_progress" | "inProgress" => Some("⏳"),
+        _ => None,
+    }
 }
 
 fn render_dynamic_tool_call(item: &Value) -> Option<String> {
@@ -629,5 +682,42 @@ mod tests {
 
         assert_eq!(rendered, "💻 Ran: `git diff --stat` ❌");
         assert!(!rendered.contains("large output"));
+    }
+
+    #[test]
+    fn mcp_tool_call_renders_summary_without_raw_payloads() {
+        let item = json!({
+            "type": "mcpToolCall",
+            "server": "node_repl",
+            "tool": "js",
+            "status": "completed",
+            "arguments": {
+                "code": "nodeRepl.write(JSON.stringify(largeWindowTree))",
+                "title": "重新读取微信内容"
+            },
+            "result": {
+                "content": [
+                    {"type": "text", "text": "{\"window\":{\"app\":\"D:\\\\Weixin\\\\Weixin.exe\"}}"},
+                    {
+                        "_meta": {"codex/imageDetail": "original"},
+                        "type": "image",
+                        "mimeType": "image/jpeg",
+                        "data": "/9j/4AAQSkZJRgABAQAAAQABAAD"
+                    }
+                ]
+            }
+        });
+        let rendered = render_item_text(&item).expect("mcp item");
+
+        assert!(rendered.starts_with("🧩 MCP 工具"));
+        assert!(rendered.contains("server: `node_repl`"));
+        assert!(rendered.contains("tool: `js`"));
+        assert!(rendered.contains("title: 重新读取微信内容"));
+        assert!(rendered.contains("status: `✅ completed`"));
+        assert!(rendered.contains("已获取 1 段文本结果和 1 张图片"));
+        assert!(!rendered.contains("arguments:"));
+        assert!(!rendered.contains("nodeRepl.write"));
+        assert!(!rendered.contains("/9j/4AAQ"));
+        assert!(!rendered.contains("Weixin.exe"));
     }
 }

@@ -567,11 +567,9 @@ fn inline_keyboard(rows: Vec<Vec<serde_json::Value>>) -> serde_json::Value {
 }
 
 fn log_adapter(event: &str, message: impl AsRef<str>) {
-    chain_log::write_diagnostic_line(format!(
-        "[telegram_adapter] event={} {}",
-        event,
-        message.as_ref()
-    ));
+    chain_log::write_diagnostic_lazy(|| {
+        format!("[telegram_adapter] event={} {}", event, message.as_ref())
+    });
 }
 
 fn log_text_preview(text: &str, limit: usize) -> String {
