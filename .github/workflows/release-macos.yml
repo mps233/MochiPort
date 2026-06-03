@@ -75,6 +75,7 @@ jobs:
           set -euo pipefail
           APP="target/dist/Codex Remote.app"
           DMG="target/dist/Codex Remote.dmg"
+          DMG_STAGING="target/dist/dmg"
           ZIP="target/dist/Codex Remote.zip"
           ENTITLEMENTS="packaging/macos/entitlements.plist"
 
@@ -114,7 +115,12 @@ jobs:
           notary_submit "$ZIP"
           xcrun stapler staple "$APP"
 
-          hdiutil create -volname "Codex Remote" -srcfolder "$APP" -ov -format UDZO "$DMG"
+          rm -rf "$DMG_STAGING"
+          mkdir -p "$DMG_STAGING"
+          ditto "$APP" "$DMG_STAGING/Codex Remote.app"
+          ln -s /Applications "$DMG_STAGING/Applications"
+
+          hdiutil create -volname "Codex Remote" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
           codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$DMG"
           notary_submit "$DMG"
           xcrun stapler staple "$DMG"
