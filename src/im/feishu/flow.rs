@@ -11,10 +11,10 @@ use crate::{
         routing::{active_turn_for_message, live_thread_for_route, route_for_message},
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
-            ThreadCreateForm, is_approval_reply, load_thread_create_defaults,
+            ThreadCreateForm, is_approval_reply, load_thread_create_defaults_for_client,
             next_thread_routing_request_id, summarize_thread_cwd, summarize_thread_start_options,
-            summarize_thread_status, summarize_thread_title, thread_start_options_from_form,
-            thread_start_options_with_current_provider,
+            summarize_thread_status, summarize_thread_title,
+            thread_start_options_from_form_for_client, thread_start_options_with_current_provider,
         },
         thread_list::{empty_thread_routing_request, load_thread_routing_page},
         turn::{TurnStartOutcome, start_turn_for_route},
@@ -195,7 +195,20 @@ async fn handle_control_message(
                 send_text_to_message(api, message, "当前没有运行中的 turn。").await?;
                 return Ok(true);
             };
-            remote_control_backend::interrupt_turn(state, &thread_id, &turn_id).await?;
+            let route = route_for_message(message);
+            remote_control_backend::interrupt_turn_for_client(
+                state,
+                &route.conversation_key,
+                &thread_id,
+                &turn_id,
+            )
+            .await?;
+            remote_control_backend::clear_turn_for_client(
+                state,
+                &route.conversation_key,
+                Some(&turn_id),
+            )
+            .await;
             state
                 .runtime
                 .lock()
@@ -206,7 +219,20 @@ async fn handle_control_message(
         }
         "/q" => {
             if let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await {
-                let _ = remote_control_backend::interrupt_turn(state, &thread_id, &turn_id).await;
+                let route = route_for_message(message);
+                let _ = remote_control_backend::interrupt_turn_for_client(
+                    state,
+                    &route.conversation_key,
+                    &thread_id,
+                    &turn_id,
+                )
+                .await;
+                remote_control_backend::clear_thread_for_client(
+                    state,
+                    &route.conversation_key,
+                    Some(&thread_id),
+                )
+                .await;
                 state
                     .runtime
                     .lock()
@@ -385,13 +411,16 @@ async fn handle_thread_route_create_submit(
     else {
         return Ok(());
     };
-    let options = match thread_start_options_from_form(&state, form).await {
-        Ok(options) => options,
-        Err(err) => {
-            send_text_to_message(&api, &message, &format!("新建会话参数不正确：{err}")).await?;
-            return Ok(());
-        }
-    };
+    let options =
+        match thread_start_options_from_form_for_client(&state, &message.conversation_key(), form)
+            .await
+        {
+            Ok(options) => options,
+            Err(err) => {
+                send_text_to_message(&api, &message, &format!("新建会话参数不正确：{err}")).await?;
+                return Ok(());
+            }
+        };
     create_new_thread_for_route(&state, &api, &message, request_id, request, options).await
 }
 
@@ -430,7 +459,8 @@ async fn send_thread_create_settings_card(
     message: &InboundMessage,
     request: ThreadRoutingRequestState,
 ) -> Result<()> {
-    let defaults = load_thread_create_defaults(state).await;
+    let route = route_for_message(message);
+    let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
     let adapter = FeishuAdapter::new(api.clone());
     if let Some(message_id) = request
         .message_id
@@ -755,28 +785,35 @@ async fn send_thread_routing_list(
         .as_ref()
         .and_then(|request| request.message_id.as_deref());
     let adapter = FeishuAdapter::new(api.clone());
-    let loaded_page =
-        match load_thread_routing_page(state, existing_request.as_ref(), cursor, page).await {
-            Ok(page) => page,
-            Err(err) => {
-                state
-                    .push_event(
-                        "error",
-                        "thread_route_list_failed",
-                        format!("conversation={} err={err}", route.conversation_key),
-                    )
-                    .await;
-                let _ = adapter
-                    .send_thread_routing_result(
-                        &route.chat_id,
-                        "会话列表加载失败",
-                        "Codex App 暂时没有响应，请稍后重试。",
-                        existing_message_id,
-                    )
-                    .await;
-                return Ok(());
-            }
-        };
+    let loaded_page = match load_thread_routing_page(
+        state,
+        &route,
+        existing_request.as_ref(),
+        cursor,
+        page,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(err) => {
+            state
+                .push_event(
+                    "error",
+                    "thread_route_list_failed",
+                    format!("conversation={} err={err}", route.conversation_key),
+                )
+                .await;
+            let _ = adapter
+                .send_thread_routing_result(
+                    &route.chat_id,
+                    "会话列表加载失败",
+                    "Codex App 暂时没有响应，请稍后重试。",
+                    existing_message_id,
+                )
+                .await;
+            return Ok(());
+        }
+    };
     let feishu_entries = loaded_page
         .entries
         .iter()

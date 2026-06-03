@@ -66,15 +66,21 @@ pub(crate) fn thread_create_form_from_draft(draft: &ThreadCreateDraftState) -> T
     }
 }
 
-pub(crate) async fn thread_start_options_from_form(
+pub(crate) async fn thread_start_options_from_form_for_client(
     state: &SharedState,
+    client_key: &str,
     form: ThreadCreateForm,
 ) -> Result<remote_control_backend::ThreadStartOptions> {
     let cwd = normalize_thread_cwd(form.cwd_choice, form.cwd_custom)?;
     let model = normalize_optional_selection(form.model);
     let reasoning_effort = normalize_reasoning_effort(form.effort)?;
-    validate_reasoning_effort_for_model(state, model.as_deref(), reasoning_effort.as_deref())
-        .await?;
+    validate_reasoning_effort_for_model_for_client(
+        state,
+        client_key,
+        model.as_deref(),
+        reasoning_effort.as_deref(),
+    )
+    .await?;
     let (permissions, approval_policy, approvals_reviewer) =
         permission_mode_to_thread_start(form.permission)?;
 
@@ -120,14 +126,20 @@ pub(crate) fn summarize_thread_start_options(
     lines.join("\n")
 }
 
-pub(crate) async fn load_thread_create_defaults(state: &SharedState) -> ThreadCreateDefaults {
+pub(crate) async fn load_thread_create_defaults_for_client(
+    state: &SharedState,
+    client_key: &str,
+) -> ThreadCreateDefaults {
     let local_doc = load_codex_app_config_doc();
     let remote_status = remote_control_backend::status_snapshot(state).await;
-    let remote_config = remote_control_backend::config_read(state, None, false)
+    let remote_config =
+        remote_control_backend::config_read_for_client(state, client_key, None, false)
+            .await
+            .ok()
+            .and_then(|value| value.get("config").cloned());
+    let catalog = load_model_catalog_for_client(state, client_key)
         .await
-        .ok()
-        .and_then(|value| value.get("config").cloned());
-    let catalog = load_model_catalog(state).await.unwrap_or_default();
+        .unwrap_or_default();
     let catalog_default_model = catalog
         .iter()
         .find(|entry| entry.is_default)
@@ -845,8 +857,12 @@ fn thread_start_permission_label(options: &remote_control_backend::ThreadStartOp
     }
 }
 
-async fn load_model_catalog(state: &SharedState) -> Result<Vec<ThreadModelCatalogEntry>> {
-    let response = remote_control_backend::model_list(state, true, Some(100)).await?;
+async fn load_model_catalog_for_client(
+    state: &SharedState,
+    client_key: &str,
+) -> Result<Vec<ThreadModelCatalogEntry>> {
+    let response =
+        remote_control_backend::model_list_for_client(state, client_key, true, Some(100)).await?;
     Ok(parse_model_catalog(&response))
 }
 
@@ -969,15 +985,16 @@ fn thread_reasoning_effort_choices(
     sort_reasoning_efforts(dedupe_strings(efforts))
 }
 
-async fn validate_reasoning_effort_for_model(
+async fn validate_reasoning_effort_for_model_for_client(
     state: &SharedState,
+    client_key: &str,
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<()> {
     let (Some(model), Some(effort)) = (model, effort) else {
         return Ok(());
     };
-    let Ok(catalog) = load_model_catalog(state).await else {
+    let Ok(catalog) = load_model_catalog_for_client(state, client_key).await else {
         return Ok(());
     };
     let Some(entry) = catalog.iter().find(|entry| entry.model == model) else {

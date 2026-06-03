@@ -508,6 +508,10 @@ async fn codex_event_router(
                     summary: summary.clone(),
                     decisions: decisions.clone(),
                     message_id: None,
+                    remote_client_key: notification
+                        .remote_client_key
+                        .clone()
+                        .or_else(|| Some(route.conversation_key.clone())),
                 };
                 if !runtime.push_approval(route.conversation_key.clone(), approval.clone()) {
                     drop(runtime);

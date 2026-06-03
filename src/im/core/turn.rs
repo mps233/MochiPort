@@ -32,7 +32,15 @@ pub(crate) async fn start_turn_for_route(
         return TurnStartOutcome::Failed { error };
     }
 
-    match remote_control_backend::start_turn(state, &thread_id, text, attachments).await {
+    match remote_control_backend::start_turn_for_client(
+        state,
+        &route.conversation_key,
+        &thread_id,
+        text,
+        attachments,
+    )
+    .await
+    {
         Ok(turn_id) => {
             state
                 .runtime

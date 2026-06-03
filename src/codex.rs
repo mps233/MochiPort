@@ -9,6 +9,9 @@ pub struct CodexNotification {
     pub method: String,
     pub params: Option<Value>,
     pub request_id: Option<Value>,
+    pub remote_client_key: Option<String>,
+    pub remote_client_id: Option<String>,
+    pub remote_stream_id: Option<String>,
 }
 
 pub fn extract_agent_delta(notification: &CodexNotification) -> Option<String> {
@@ -565,6 +568,9 @@ mod tests {
             method: method.to_string(),
             params: Some(params),
             request_id: Some(json!(1)),
+            remote_client_key: None,
+            remote_client_id: None,
+            remote_stream_id: None,
         }
     }
 
@@ -642,6 +648,7 @@ mod tests {
                 super::decision_option("No", json!("cancel")),
             ],
             message_id: None,
+            remote_client_key: None,
         };
 
         let (yes_index, yes) = approval_decision_by_input(&pending, "/y").expect("yes");

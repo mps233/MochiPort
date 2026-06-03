@@ -58,6 +58,7 @@ impl ThreadRoutingPage {
 
 pub(crate) async fn load_thread_routing_page(
     state: &SharedState,
+    route: &RouteTarget,
     existing_request: Option<&ThreadRoutingRequestState>,
     cursor: Option<&str>,
     page: usize,
@@ -73,27 +74,35 @@ pub(crate) async fn load_thread_routing_page(
     }
     page_cursors[page - 1] = cursor.map(str::to_string);
 
-    let loaded_ids =
-        match remote_control_backend::thread_loaded_list(state, None, Some(THREAD_LOADED_LIMIT))
-            .await
-        {
-            Ok(loaded) => loaded
-                .get("data")
-                .and_then(|v| v.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|value| value.as_str().map(str::to_string))
-                .collect::<Vec<_>>(),
-            Err(err) => {
-                state
-                    .push_event("warn", "thread_loaded_list_failed", err.to_string())
-                    .await;
-                Vec::new()
-            }
-        };
-    let model_provider_filter = load_codex_app_model_provider();
-    let history = remote_control_backend::thread_list(
+    let client_key = existing_request
+        .map(|request| request.conversation_key.as_str())
+        .unwrap_or(route.conversation_key.as_str());
+    let loaded_ids = match remote_control_backend::thread_loaded_list_for_client(
         state,
+        client_key,
+        None,
+        Some(THREAD_LOADED_LIMIT),
+    )
+    .await
+    {
+        Ok(loaded) => loaded
+            .get("data")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            state
+                .push_event("warn", "thread_loaded_list_failed", err.to_string())
+                .await;
+            Vec::new()
+        }
+    };
+    let model_provider_filter = load_codex_app_model_provider();
+    let history = remote_control_backend::thread_list_for_client(
+        state,
+        client_key,
         cursor,
         Some(THREAD_HISTORY_PAGE_SIZE),
         None,
@@ -105,13 +114,8 @@ pub(crate) async fn load_thread_routing_page(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let current_thread_id = state
-        .remote_control
-        .inner
-        .lock()
-        .await
-        .current_thread_id
-        .clone();
+    let current_thread_id =
+        remote_control_backend::current_thread_for_client(state, client_key).await;
     let entries = build_thread_entries(&loaded_ids, &history_threads, current_thread_id.as_deref());
     let thread_ids = entries
         .iter()

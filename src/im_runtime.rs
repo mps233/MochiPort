@@ -25,6 +25,7 @@ pub struct PendingApproval {
     pub summary: String,
     pub decisions: Vec<ApprovalDecisionOption>,
     pub message_id: Option<String>,
+    pub remote_client_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -462,6 +463,7 @@ mod tests {
             summary: "command: `test`".to_string(),
             decisions: vec![],
             message_id: None,
+            remote_client_key: None,
         }
     }
 

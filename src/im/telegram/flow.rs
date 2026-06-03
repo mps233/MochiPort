@@ -14,11 +14,11 @@ use crate::{
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
             ThreadCreateForm, apply_thread_create_draft_value, create_options_for_field,
-            expand_home_prefix, is_approval_reply, load_thread_create_defaults,
+            expand_home_prefix, is_approval_reply, load_thread_create_defaults_for_client,
             next_thread_routing_request_id, normalize_thread_create_field, summarize_thread_cwd,
             summarize_thread_start_options, summarize_thread_status, summarize_thread_title,
-            thread_create_form_from_draft, thread_create_help_text, thread_start_options_from_form,
-            thread_start_options_with_current_provider,
+            thread_create_form_from_draft, thread_create_help_text,
+            thread_start_options_from_form_for_client, thread_start_options_with_current_provider,
         },
         thread_list::{empty_thread_routing_request, load_thread_routing_page},
         turn::{TurnStartOutcome, start_turn_for_route},
@@ -195,7 +195,19 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                     .await?;
                 return Ok(());
             };
-            remote_control_backend::interrupt_turn(&state, &thread_id, &turn_id).await?;
+            remote_control_backend::interrupt_turn_for_client(
+                &state,
+                &route.conversation_key,
+                &thread_id,
+                &turn_id,
+            )
+            .await?;
+            remote_control_backend::clear_turn_for_client(
+                &state,
+                &route.conversation_key,
+                Some(&turn_id),
+            )
+            .await;
             state
                 .runtime
                 .lock()
@@ -208,7 +220,19 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         }
         Some("/q") => {
             if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
-                let _ = remote_control_backend::interrupt_turn(&state, &thread_id, &turn_id).await;
+                let _ = remote_control_backend::interrupt_turn_for_client(
+                    &state,
+                    &route.conversation_key,
+                    &thread_id,
+                    &turn_id,
+                )
+                .await;
+                remote_control_backend::clear_thread_for_client(
+                    &state,
+                    &route.conversation_key,
+                    Some(&thread_id),
+                )
+                .await;
                 state
                     .runtime
                     .lock()
@@ -369,8 +393,9 @@ pub(crate) async fn handle_inbound_action(
             else {
                 return Ok(());
             };
-            let options = match thread_start_options_from_form(
+            let options = match thread_start_options_from_form_for_client(
                 &state,
+                &message.conversation_key(),
                 ThreadCreateForm {
                     cwd_choice,
                     cwd_custom,
@@ -417,8 +442,9 @@ pub(crate) async fn handle_inbound_action(
             else {
                 return Ok(());
             };
-            let options = match thread_start_options_from_form(
+            let options = match thread_start_options_from_form_for_client(
                 &state,
+                &message.conversation_key(),
                 thread_create_form_from_draft(&request.create_draft),
             )
             .await
@@ -924,7 +950,7 @@ async fn send_telegram_thread_create_settings(
         .as_ref()
         .map(|request| request.create_draft.clone())
         .unwrap_or_default();
-    let defaults = load_thread_create_defaults(state).await;
+    let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
     let text = thread_create_help_text(&defaults, &create_draft);
     let message_id = adapter
         .send_thread_create_settings(&route.chat_id, &request_id, &text)
@@ -965,7 +991,8 @@ async fn send_telegram_thread_create_options(
             .await?;
         return Ok(());
     };
-    let defaults = load_thread_create_defaults(state).await;
+    let route = route_for_message(message);
+    let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
     let (title, body, options) = create_options_for_field(&defaults, &request.create_draft, field)?;
     let total_pages = ((options.len() + TELEGRAM_CREATE_OPTION_PAGE_SIZE - 1)
         / TELEGRAM_CREATE_OPTION_PAGE_SIZE)
@@ -1035,26 +1062,33 @@ async fn send_telegram_thread_routing_list(
     page: usize,
 ) -> Result<()> {
     let route = route_for_message(message);
-    let loaded_page =
-        match load_thread_routing_page(state, existing_request.as_ref(), cursor, page).await {
-            Ok(page) => page,
-            Err(err) => {
-                state
-                    .push_event(
-                        "error",
-                        "telegram_thread_list_failed",
-                        format!("conversation={} err={err}", route.conversation_key),
-                    )
-                    .await;
-                adapter
-                    .send_text(
-                        &route.chat_id,
-                        "会话列表加载失败：Codex App 暂时没有响应，请稍后重试。",
-                    )
-                    .await?;
-                return Ok(());
-            }
-        };
+    let loaded_page = match load_thread_routing_page(
+        state,
+        &route,
+        existing_request.as_ref(),
+        cursor,
+        page,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(err) => {
+            state
+                .push_event(
+                    "error",
+                    "telegram_thread_list_failed",
+                    format!("conversation={} err={err}", route.conversation_key),
+                )
+                .await;
+            adapter
+                .send_text(
+                    &route.chat_id,
+                    "会话列表加载失败：Codex App 暂时没有响应，请稍后重试。",
+                )
+                .await?;
+            return Ok(());
+        }
+    };
     let telegram_entries = loaded_page
         .entries
         .iter()
