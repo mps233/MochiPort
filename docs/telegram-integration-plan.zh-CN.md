@@ -103,7 +103,7 @@ Telegram 使用 BotFather 创建的 Bot API，不使用 MTProto/userbot。
 - `PendingApproval` 已使用平台中性的 `message_id`。
 - `config.rs` 已新增 `[telegram]`。
 - `bridge.rs` 仍保留较多业务编排逻辑，后续再考虑小型 `ImChannel` 抽象。
-- GUI 已在“消息接入”页管理 Telegram Bot Token，并明确 Telegram 仅支持私聊。
+- GUI 已在“聊天工具接入”页管理 Telegram Bot Token，并明确 Telegram 仅支持私聊。
 
 这些点需要分阶段处理，避免一次性重构影响飞书稳定性。
 
@@ -209,7 +209,7 @@ Telegram 不适合照搬飞书表单。当前表达方式：
 
 ## 第六阶段：GUI 和体验补齐
 
-- GUI 已在“消息接入”页增加 Telegram 接入区域。
+- GUI 已在“聊天工具接入”页增加 Telegram 接入区域。
 - 状态概览已合并为 IM 通道状态；Telegram 已增加 polling 运行态，按真实连接状态展示“已接入 / 连接中 / 等待连接”。
 - 配置页支持 token 保存，并通过全局 IM bridge 启停。
 - About/README 已更新 Telegram 使用说明。

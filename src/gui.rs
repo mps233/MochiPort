@@ -329,8 +329,20 @@ fn build_ui() {
     feishu_page.set_background_color(Colour::rgb(250, 251, 253));
     let feishu_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
+    let im_access_hint = StaticText::builder(&feishu_page)
+        .with_label("多个机器人/agent 可以分别管理多个 Codex 会话；暂不支持多个机器人管理同一个会话。例如飞书 1 管理会话 1、飞书 2 管理会话 2、Telegram 1 管理会话 3；并行数量取决于本机能同时承载多少 Codex 任务。")
+        .build();
+    im_access_hint.set_foreground_color(Colour::rgb(64, 72, 86));
+    im_access_hint.wrap(1180);
+    feishu_sizer.add(
+        &im_access_hint,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        12,
+    );
+
     let im_accounts_static_box = StaticBox::builder(&feishu_page)
-        .with_label("IM 机器人池")
+        .with_label("聊天工具机器人池")
         .build();
     let im_accounts_box =
         StaticBoxSizerBuilder::new_with_box(&im_accounts_static_box, Orientation::Vertical).build();
@@ -390,7 +402,7 @@ fn build_ui() {
         .with_style(
             DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
         )
-        .with_size(Size::new(-1, 300))
+        .with_size(Size::new(-1, 190))
         .build();
     im_account_list.append_text_column(
         "机器人",
@@ -447,8 +459,6 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         10,
     );
-    feishu_sizer.add_sizer(&im_accounts_box, 0, SizerFlag::Expand | SizerFlag::All, 12);
-
     let add_im_static_box = StaticBox::builder(&feishu_page)
         .with_label("新增机器人")
         .build();
@@ -476,7 +486,8 @@ fn build_ui() {
         SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
     );
-    feishu_sizer.add_sizer(&add_im_box, 0, SizerFlag::Expand | SizerFlag::All, 12);
+    feishu_sizer.add_sizer(&add_im_box, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    feishu_sizer.add_sizer(&im_accounts_box, 0, SizerFlag::Expand | SizerFlag::All, 8);
     feishu_sizer.add_stretch_spacer(1);
     feishu_page.set_sizer(feishu_sizer, true);
     let feishu_best_size = feishu_page.get_best_size();
@@ -491,7 +502,7 @@ fn build_ui() {
     });
 
     notebook.add_page(&codex_page, "Codex 接入", true, None);
-    notebook.add_page(&feishu_page, "消息接入", false, None);
+    notebook.add_page(&feishu_page, "聊天工具接入", false, None);
 
     root_sizer.add(
         &notebook,

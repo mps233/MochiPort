@@ -12,7 +12,7 @@
 ## 当前实现
 
 - 配置新增 `[wechat]`，包含 `accountId`、`botToken`、`baseUrl`、`userId`、`botType`、`allowedUserIds`。
-- GUI 的“消息接入”页新增微信扫码入口和状态展示。
+- GUI 的“聊天工具接入”页新增微信扫码入口和状态展示。
 - 后端新增：
   - `POST /api/wechat/onboard/start`
   - `POST /api/wechat/onboard/poll`
