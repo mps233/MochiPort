@@ -17,7 +17,7 @@ use crate::{
             thread_start_options_from_form_for_client, thread_start_options_with_current_provider,
         },
         thread_list::{empty_thread_routing_request, load_thread_routing_page},
-        turn::{TurnStartOutcome, start_turn_for_route},
+        turn::{TurnStartOutcome, start_turn_for_route, turn_busy_notice},
     },
     im::feishu::{FeishuAdapter, FeishuApi, renderer},
     im_runtime::{PendingApproval, RouteTarget, ThreadRoutingRequestState, TurnOrigin},
@@ -58,6 +58,10 @@ pub(crate) async fn handle_inbound(
         return handle_inbound_action(state, api, message, action).await;
     }
     if handle_control_message(&state, &api, &message, trimmed).await? {
+        return Ok(());
+    }
+    if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
+        send_text_to_message(&api, &message, turn_busy_notice(&thread_id, &turn_id)).await?;
         return Ok(());
     }
     let remote_status = remote_control_backend::status_snapshot(&state).await;

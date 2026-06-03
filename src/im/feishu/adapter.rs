@@ -157,6 +157,11 @@ impl FeishuAdapter {
         let card = renderer::build_turn_completed_card(reply_text);
         self.send_interactive(target, &card).await
     }
+
+    pub async fn send_turn_completed_mark(&self, target: &str, state_text: &str) -> Result<String> {
+        let card = renderer::build_turn_terminal_mark_card(state_text);
+        self.send_interactive(target, &card).await
+    }
 }
 
 fn thread_routing_choice_card(

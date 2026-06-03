@@ -535,6 +535,25 @@ fn sync_default_client_legacy_locked(remote: &mut RemoteControlInner) {
     remote.last_initialize_sent_at_ms = last_initialize_sent_at_ms;
 }
 
+fn reset_remote_clients_for_connection_locked(remote: &mut RemoteControlInner) -> Vec<String> {
+    let ack_cursor_keys = remote
+        .clients
+        .values()
+        .map(|client| server_ack_cursor_key(&client.client_id, &client.stream_id))
+        .collect::<Vec<_>>();
+    for client in remote.clients.values_mut() {
+        client.initialized = false;
+        client.last_app_ping_at_ms = None;
+        client.last_app_pong_at_ms = None;
+        client.last_app_pong_status = None;
+        client.last_initialize_sent_at_ms = None;
+        client
+            .pending
+            .retain(|_, pending| pending.method != "initialize");
+    }
+    ack_cursor_keys
+}
+
 async fn accounts_check() -> Json<Value> {
     Json(json!({
         "account_ordering": ["acct_codex_remote_local"],
@@ -1586,15 +1605,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         if remote.stream_id.is_empty() {
             remote.stream_id = uuid_like();
         }
-        let ack_cursor_keys = remote
-            .clients
-            .values()
-            .map(|client| server_ack_cursor_key(&client.client_id, &client.stream_id))
-            .collect::<Vec<_>>();
-        for client in remote.clients.values_mut() {
-            client.initialized = false;
-            client.last_app_pong_status = None;
-        }
+        let ack_cursor_keys = reset_remote_clients_for_connection_locked(&mut remote);
         for key in ack_cursor_keys {
             remote.server_ack_cursors.remove(&key);
         }
@@ -4245,6 +4256,81 @@ mod tests {
                 .as_deref(),
             Some("wechat:bot:user-1")
         );
+    }
+
+    #[test]
+    fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests() {
+        let mut remote = RemoteControlInner {
+            connected: false,
+            initialized: false,
+            client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
+            stream_id: "default-stream".to_string(),
+            server_id: None,
+            environment_id: None,
+            server_name: None,
+            installation_id: None,
+            account_id: None,
+            current_thread_id: None,
+            current_turn_id: None,
+            last_error: None,
+            connected_at_ms: None,
+            last_ws_inbound_at_ms: None,
+            last_ws_ping_at_ms: None,
+            last_ws_pong_at_ms: None,
+            last_app_ping_at_ms: None,
+            last_app_pong_at_ms: None,
+            last_app_pong_status: None,
+            last_initialize_sent_at_ms: None,
+            server_ack_cursors: HashMap::new(),
+            outbound_tx: None,
+            connection_epoch: 0,
+            clients: HashMap::new(),
+            authorized_clients: HashMap::new(),
+            revoked_clients: std::collections::HashSet::new(),
+        };
+        let client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
+        client.initialized = true;
+        client.last_app_ping_at_ms = Some(10);
+        client.last_app_pong_at_ms = Some(11);
+        client.last_app_pong_status = Some("active".to_string());
+        client.last_initialize_sent_at_ms = Some(12);
+        let (initialize_tx, _initialize_rx) = tokio::sync::oneshot::channel();
+        client.pending.insert(
+            "1".to_string(),
+            PendingRemoteRequest {
+                method: "initialize".to_string(),
+                thread_id: None,
+                response_tx: initialize_tx,
+                message: json!({"id": 1, "method": "initialize"}),
+                envelopes: Vec::new(),
+            },
+        );
+        let (request_tx, _request_rx) = tokio::sync::oneshot::channel();
+        client.pending.insert(
+            "2".to_string(),
+            PendingRemoteRequest {
+                method: "thread/list".to_string(),
+                thread_id: None,
+                response_tx: request_tx,
+                message: json!({"id": 2, "method": "thread/list"}),
+                envelopes: Vec::new(),
+            },
+        );
+
+        let ack_keys = reset_remote_clients_for_connection_locked(&mut remote);
+        let client = remote
+            .clients
+            .get(DEFAULT_REMOTE_CLIENT_KEY)
+            .expect("default client");
+
+        assert_eq!(ack_keys.len(), 1);
+        assert!(!client.initialized);
+        assert!(client.last_app_ping_at_ms.is_none());
+        assert!(client.last_app_pong_at_ms.is_none());
+        assert!(client.last_app_pong_status.is_none());
+        assert!(client.last_initialize_sent_at_ms.is_none());
+        assert!(!client.pending.contains_key("1"));
+        assert!(client.pending.contains_key("2"));
     }
 
     #[tokio::test]

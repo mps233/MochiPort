@@ -12,6 +12,7 @@ use crate::{
             accounts::ImApiRegistry,
             outbound::{ImOutboundKind, ImOutboundMessage, ImOutboundPayload, ImOutboundSender},
             text_renderer,
+            turn::turn_completed_notice,
         },
         feishu::{
             FeishuAdapter, FeishuApi, flow as feishu_flow, renderer,
@@ -283,6 +284,70 @@ pub(crate) async fn send_turn_reply(
                             .await;
                     }
                 }
+            }
+        }
+    }
+}
+
+async fn send_turn_completed_mark(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    route: &RouteTarget,
+) {
+    let text = turn_completed_notice();
+    match route.platform {
+        ImPlatformKind::Feishu => {
+            let Some(api) = api_registry.feishu_for_route(route) else {
+                log_missing_api(state, route, "turn_completed_mark").await;
+                return;
+            };
+            let adapter = FeishuAdapter::new(api);
+            match adapter.send_turn_completed_mark(&route.chat_id, text).await {
+                Ok(message_id) => {
+                    state
+                        .push_event(
+                            "info",
+                            "feishu_turn_completed_mark_sent",
+                            format!(
+                                "thread={thread_id} chat={} message={message_id}",
+                                route.chat_id
+                            ),
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    state
+                        .push_event(
+                            "error",
+                            "feishu_turn_completed_mark_failed",
+                            format!("thread={thread_id} chat={} err={err}", route.chat_id),
+                        )
+                        .await;
+                }
+            }
+        }
+        ImPlatformKind::Telegram | ImPlatformKind::Wechat => {
+            if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
+                thread_id: thread_id.to_string(),
+                route: route.clone(),
+                item_id: None,
+                item_type: Some("turnCompleted".to_string()),
+                kind: ImOutboundKind::TurnReply,
+                payload: ImOutboundPayload::Text(text.to_string()),
+            }) {
+                state
+                    .push_event(
+                        "error",
+                        "im_turn_completed_mark_enqueue_failed",
+                        format!(
+                            "thread={thread_id} platform={} chat={} err={err}",
+                            route.platform.key(),
+                            route.chat_id
+                        ),
+                    )
+                    .await;
             }
         }
     }
@@ -779,28 +844,33 @@ pub(crate) async fn handle_codex_notification(
                 .and_then(|turn| turn.get("id"))
                 .and_then(|v| v.as_str())
                 .or_else(|| params.get("turnId").and_then(|v| v.as_str()));
+            let route =
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
+            let Some(route) = route else {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .mark_turn_completed(thread_id, turn_id);
+                return;
+            };
+            if let Some(text) = extract_turn_reply_text(params) {
+                send_turn_reply(
+                    &state,
+                    &api_registry,
+                    Some(&outbound_tx),
+                    thread_id,
+                    &route,
+                    &text,
+                )
+                .await;
+            }
             state
                 .runtime
                 .lock()
                 .await
                 .mark_turn_completed(thread_id, turn_id);
-            let Some(text) = extract_turn_reply_text(params) else {
-                return;
-            };
-            let route =
-                route_for_codex_output(&state, &notification.method, thread_id, params).await;
-            let Some(route) = route else {
-                return;
-            };
-            send_turn_reply(
-                &state,
-                &api_registry,
-                Some(&outbound_tx),
-                thread_id,
-                &route,
-                &text,
-            )
-            .await;
+            send_turn_completed_mark(&state, &api_registry, &outbound_tx, thread_id, &route).await;
         }
         _ => {}
     }

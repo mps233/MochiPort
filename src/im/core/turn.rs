@@ -18,6 +18,14 @@ pub(crate) enum TurnStartOutcome {
     Failed { error: Error },
 }
 
+pub(crate) fn turn_busy_notice(_thread_id: &str, _turn_id: &str) -> &'static str {
+    "任务还在进行中，打断 /s，退出会话 /q。"
+}
+
+pub(crate) fn turn_completed_notice() -> &'static str {
+    "✅ 已完成"
+}
+
 pub(crate) async fn start_turn_for_route(
     state: &SharedState,
     route: &RouteTarget,

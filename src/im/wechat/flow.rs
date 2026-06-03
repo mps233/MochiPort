@@ -20,7 +20,7 @@ use crate::{
                 thread_start_options_from_form_for_client,
             },
             thread_list::{empty_thread_routing_request, load_thread_routing_page},
-            turn::{TurnStartOutcome, start_turn_for_route},
+            turn::{TurnStartOutcome, start_turn_for_route, turn_busy_notice},
         },
         wechat::{adapter::WechatAdapter, api::WechatApi, types::WechatSettings},
     },
@@ -321,6 +321,18 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             return Ok(());
         }
         None => {}
+    }
+
+    if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
+        adapter
+            .send_text(
+                &state,
+                &account_id,
+                &message.chat_id,
+                turn_busy_notice(&thread_id, &turn_id),
+            )
+            .await?;
+        return Ok(());
     }
 
     let remote_status = remote_control_backend::status_snapshot(&state).await;
