@@ -347,15 +347,7 @@ fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
 }
 
 fn effective_chain_log_diagnostic(config: &AppConfig) -> bool {
-    if !config.logging.diagnostic {
-        return false;
-    }
-    if cfg!(debug_assertions) {
-        return true;
-    }
-    std::env::var("CODEX_REMOTE_DIAGNOSTIC")
-        .ok()
-        .is_some_and(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    config.logging.diagnostic
 }
 
 fn chain_log_path(config: &AppConfig) -> PathBuf {

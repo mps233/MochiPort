@@ -43,8 +43,8 @@ pub fn init(
         .with_context(|| format!("failed to open chain log {}", path.display()))?;
     let _ = writeln!(
         file,
-        "\n===== codex-remote start {} =====",
-        timestamp_secs()
+        "\n===== codex-remote start ts_ms={} =====",
+        timestamp_ms()
     );
     let written_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
     let _ = CHAIN_LOG.set(ChainLog {
@@ -90,7 +90,7 @@ fn write_line_inner(line: &str, flush: bool) {
         rotate_open_log(&mut inner);
     }
     let wrote = if let Some(file) = inner.file.as_mut() {
-        let _ = writeln!(file, "{line}");
+        let _ = writeln!(file, "[ts_ms={}] {line}", timestamp_ms());
         if flush {
             let _ = file.flush();
         }
@@ -102,7 +102,7 @@ fn write_line_inner(line: &str, flush: bool) {
         inner.written_bytes = inner
             .written_bytes
             .saturating_add(line.len() as u64)
-            .saturating_add(2);
+            .saturating_add(24);
     }
 }
 
@@ -225,11 +225,11 @@ fn rotated_path(path: &Path) -> PathBuf {
     rotated
 }
 
-fn timestamp_secs() -> u64 {
+fn timestamp_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs()
+        .as_millis()
 }
 
 #[cfg(test)]

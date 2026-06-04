@@ -66,6 +66,7 @@ pub struct RemoteControlInner {
     pub last_app_pong_at_ms: Option<u128>,
     pub last_app_pong_status: Option<String>,
     pub last_initialize_sent_at_ms: Option<u128>,
+    pub subscribe_cursor: Option<String>,
     pub server_ack_cursors: std::collections::HashMap<String, (u64, Option<usize>)>,
     pub outbound_tx: Option<
         tokio::sync::mpsc::UnboundedSender<crate::remote_control_backend::OutboundWsMessage>,
@@ -75,6 +76,7 @@ pub struct RemoteControlInner {
     pub authorized_clients: HashMap<String, AuthorizedRemoteControlClient>,
     pub revoked_clients: HashSet<String>,
     pub stream_diagnostics: HashMap<String, RemoteControlStreamDiagnostics>,
+    pub recent_events: VecDeque<RemoteControlRecentEvent>,
 }
 
 pub struct PendingRemoteRequest {
@@ -97,6 +99,19 @@ pub struct RemoteControlClientState {
     pub last_app_pong_at_ms: Option<u128>,
     pub last_app_pong_status: Option<String>,
     pub last_initialize_sent_at_ms: Option<u128>,
+    pub recovery_attempt: u64,
+    pub recovery_started_at_ms: Option<u128>,
+}
+
+pub struct RemoteControlRecentEvent {
+    pub ts_ms: u128,
+    pub direction: &'static str,
+    pub connection_epoch: u64,
+    pub client_id: String,
+    pub stream_id: String,
+    pub seq_id: Option<u64>,
+    pub kind: String,
+    pub summary: String,
 }
 
 #[derive(Default)]
@@ -107,6 +122,17 @@ pub struct RemoteControlStreamDiagnostics {
     pub output_delta_last_thread_id: Option<String>,
     pub output_delta_last_seen_at_ms: Option<u128>,
     pub output_delta_last_worker_capacity: Option<usize>,
+    pub window_started_at_ms: Option<u128>,
+    pub window_server_in_count: u64,
+    pub window_output_delta_count: u64,
+    pub window_ack_count: u64,
+    pub window_first_seq_id: Option<u64>,
+    pub window_last_seq_id: Option<u64>,
+    pub max_window_server_in_count: u64,
+    pub max_window_output_delta_count: u64,
+    pub max_window_ack_count: u64,
+    pub max_window_started_at_ms: Option<u128>,
+    pub max_window_last_at_ms: Option<u128>,
     pub ack_count: u64,
     pub max_ack_elapsed_ms: u128,
     pub last_ack_elapsed_ms: Option<u128>,
@@ -147,6 +173,7 @@ impl RemoteControlState {
                 last_app_pong_at_ms: None,
                 last_app_pong_status: None,
                 last_initialize_sent_at_ms: None,
+                subscribe_cursor: None,
                 server_ack_cursors: std::collections::HashMap::new(),
                 outbound_tx: None,
                 connection_epoch: 0,
@@ -154,6 +181,7 @@ impl RemoteControlState {
                 authorized_clients: HashMap::new(),
                 revoked_clients: HashSet::new(),
                 stream_diagnostics: HashMap::new(),
+                recent_events: VecDeque::new(),
             }),
             notifications,
         }

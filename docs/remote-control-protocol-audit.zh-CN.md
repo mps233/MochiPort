@@ -1,6 +1,6 @@
 # Codex Remote-Control 协议审计
 
-更新时间：2026-06-03
+更新时间：2026-06-04
 
 本文只记录 Codex 官方 remote-control 协议事实、当前 `codex-remote` 的对接现状，以及下一步排查方向。不把 IM 绑定兜底、图片发送、Telegram/微信/飞书渲染作为协议原因。
 
@@ -228,6 +228,43 @@ ACK 的提交点：
 
    官方 app-server 会把 backend 发来的 `cursor` 保存，并在后续 WebSocket reconnect 时通过 `x-codex-subscribe-cursor` 发给 backend。当前本地 backend 没有 backend-command replay 需求，可以不支持，但文档上要明确这是未实现能力，而不是遗漏了还能假装完整协议。
 
+### 9.3 `unknown` 后的协议对齐恢复策略
+
+`pong status=unknown` 的恢复必须以官方 `ClientTracker` 行为为准，不能为了绕开问题默认生成新的 `stream_id`。
+
+官方事实：
+
+- `(client_id, stream_id)` 是 remote-control logical client 的身份。
+- `initialize` 是创建 logical client 的唯一入口。
+- 同一个 `(client_id, stream_id)` 再次发送 `initialize` 时，官方会先关闭旧 client，再创建新的 app-server connection。
+- 非 `initialize` 的 client message 在 logical client 不存在时会被忽略。
+- `ping -> unknown` 只说明官方 `ClientTracker.clients` 里没有当前 `(client_id, stream_id)`，不说明 WebSocket 一定断开，也不说明业务 thread 订阅一定还有效。
+- 官方测试只把 `unknown` 当作 `ClientTracker` 缺失 logical client 的状态回包；没有“收到 unknown 后自动恢复 thread/turn 订阅”的专门协议分支或测试用例。
+
+因此补救顺序应为：
+
+1. 收到 `unknown` 后，保持同一个 `(client_id, stream_id)`，立即重新发送 `initialize`。
+2. reinitialize 期间暂停普通业务请求继续投递到旧状态；已有 pending 请求可以失败一次，由请求层在初始化恢复后按幂等性决定是否重试。
+3. 如果同 stream reinitialize 在短超时内没有完成，再主动关闭当前 WebSocket，让官方 app-server 走自己的 reconnect loop。
+4. 新 WebSocket 建立后继续使用当前 logical client 状态重新 `initialize`，并清理当前 stream 的 server ACK cursor，避免 app-server 侧 seq 从 1 重新开始时被误判为 duplicate。
+5. 不默认发送 `client_closed`。`client_closed` 是明确关闭 logical client 的协议动作，只应在我们主动废弃 client 或 shutdown 时使用。
+6. 不默认换 `stream_id`。换 stream 会创建另一个 logical client，可能绕开官方状态机，并让现有 thread/turn 状态更难判断。
+7. 不自动重放非幂等请求，尤其是 `turn/start`、`turn/steer`、`thread/start`、`thread/fork`。这些请求如果在 unknown/reinitialize 窗口中失败，应暴露为失败或由上层显式决定下一步，不能悄悄重复用户输入。
+
+业务订阅补救：
+
+- `initialize` 只恢复 remote-control JSON-RPC logical connection，不保证原 connection 上的 thread 实时订阅还能继续。
+- transport recovery 完成后，如果本地 client 仍记录 `current_thread_id`，可以立即发一次 `thread/resume { threadId, excludeTurns: true }`。官方 app-server 对 loaded/running thread 会通过 thread listener 把当前 connection 重新加入 subscriber 集合。
+- 这一步是业务层补救，不是官方 `unknown` transport 协议的一部分；它不能恢复已经丢失的 connection-scoped `outputDelta`，也不能保证旧 turn 还在运行。
+- 如果 `thread/resume` 响应或后续 `thread/status/changed` 显示 `idle`、`notLoaded`、`systemError`，本地应清掉该 thread 的 current turn，避免后续 IM 消息继续误判为可 `turn/steer` 的活跃 turn。
+
+`cursor` 的对齐边界：
+
+- backend 发出的 `cursor` 是给 app-server 保存的订阅位置。
+- app-server reconnect 时会通过 `x-codex-subscribe-cursor` 把最后看到的 cursor 带回 backend。
+- 当前本地 backend 可以先做到“记录 header、为发出的 client envelope 填 cursor、写日志”，但如果没有持久化 backend command log，就不能宣称支持完整 replay。
+- `cursor` 不是 `unknown` 的根修复；`unknown` 仍然必须靠 `initialize` 恢复 `ClientTracker`。
+
 ## 10. 当前日志能确认的事实
 
 从现有 release 日志能确认：
@@ -318,3 +355,240 @@ ACK 的提交点：
 8. 是否出现 app-server 慢连接断开日志。
 
 只有确认 transport/client_tracker 正常后，才继续看 IM thread 绑定或平台发送问题。
+
+## 13. 官方测试用例对照
+
+这一节把官方 `references/codex-main/codex-rs/app-server-transport/src/transport/remote_control/**` 的测试当作协议契约，而不是只看实现细节。后续修复 `unknown`、重连、ACK 压力时，优先按这里补本地 mock app-server 测试。
+
+### 13.1 连接生命周期、initialize 与 unknown
+
+官方覆盖：
+
+- `tests.rs::remote_control_transport_manages_virtual_clients_and_routes_messages`
+  - initialize 前 `ping` 返回 `pong status=unknown`。
+  - initialize 前的非 initialize `client_message` 被忽略。
+  - `client_message(method=initialize)` 是创建 logical client 的唯一入口，会产生 `ConnectionOpened`，随后转发 initialize 到 app-server transport。
+  - initialize 后 `ping` 返回 `active`。
+  - app-server transport writer 发送的消息会被包装为 `server_message` 发给 backend。
+  - `client_closed` 会删除该 logical client，随后 `ping` 再次变成 `unknown`。
+- `tests.rs::remote_control_transport_reconnects_after_disconnect`
+  - WebSocket 断开后官方 remote-control loop 会重新连接 backend。
+  - 新 WebSocket 上仍然通过 initialize 创建 logical client。
+  - WebSocket 握手携带 `authorization: Bearer <remote_control_server_token>`。
+- `tests.rs::remote_control_handle_enable_disable_stops_and_restarts_connections`
+  - enable/disable 是 remote-control loop 的外层状态开关，disable 会停止连接，enable 后重新进入连接流程。
+
+我们当前状态：
+
+- 新 WebSocket 建立后会重新发送所有已知 logical client 的 initialize，不再只依赖本地 `initialized=true`。
+- 收到 `pong status=unknown` 后，当前实现按同一个 `(client_id, stream_id)` 触发 reinitialize；短超时内未恢复则主动关闭 WebSocket，让官方 app-server 走 reconnect loop。
+- 默认不发送 `client_closed`，避免把“恢复 logical client”误做成“主动关闭 logical client”。
+- 已支持多 virtual client 共用 `client_id`、区分 `stream_id`，符合官方 `initialize_with_new_stream_id_opens_new_connection_for_same_client` 的身份模型。
+
+缺口和后续动作：
+
+- 还缺一个本地 mock app-server 生命周期测试：WS open -> backend initialize -> app-server response -> backend initialized -> app-server pong active/unknown -> backend same-stream reinitialize。
+- 还缺测试证明 unknown 恢复期间不会默认换 `stream_id`，也不会发送 `client_closed`。
+- 还缺测试覆盖 reinitialize 超时后 backend 主动 close WebSocket，随后 app-server reconnect 时 backend 会重新 initialize 所有已知 clients。
+
+### 13.2 `ClientTracker` 删除路径与队列超时
+
+官方覆盖：
+
+- `client_tracker.rs::cancelled_outbound_task_emits_connection_closed`
+  - logical client 的 outbound task 退出后，`bookkeep_join_set()` 会发现该 client，并通过 `close_client()` 发出 `ConnectionClosed`。
+- `client_tracker.rs::shutdown_cancels_blocked_outbound_forwarding`
+  - 即使 server_event queue 被堵住，shutdown 也不能卡死。
+- `client_tracker.rs::non_close_transport_event_send_times_out_when_queue_stays_full`
+  - `IncomingMessage` 这类非 close transport event 发送到 app-server transport queue 时，如果队列一直满，会超时并返回错误。
+- `client_tracker.rs::incoming_message_timeout_does_not_advance_seq_id`
+  - inbound message 只有成功送进 app-server transport 后，才会推进 inbound seq dedupe 游标；失败后允许同 seq 重试。
+- `client_tracker.rs::initialize_timeout_closes_open_connection`
+  - initialize 已创建 connection 但 initialize message 转发超时时，官方会回滚并关闭刚创建的 connection。
+- `client_tracker.rs::close_client_waits_for_transport_event_queue_capacity`
+  - close 事件会等待 transport event queue 有容量，不会悄悄丢。
+- `client_tracker.rs::close_client_keeps_forwarding_after_caller_is_aborted`
+  - close 已开始后，即使调用方 task 被 abort，也要继续把 `ConnectionClosed` 送出去。
+- `client_tracker.rs::legacy_initialize_without_stream_id_resets_inbound_seq_id`
+  - legacy 无 `stream_id` initialize 有兼容路径，但现代协议不应依赖这个 fallback。
+
+我们当前状态：
+
+- 我们是 backend，不实现官方 app-server 的 `ClientTracker`，但必须把对端这些删除路径视为真实可能发生的 `unknown` 来源。
+- 当前恢复逻辑已经把 `unknown` 解释为“官方 `ClientTracker.clients` 缺失当前 key”，而不是 IM/thread 丢失。
+- 新 WebSocket reset 会清掉本地 initialize 状态和对应 server ACK cursor，但保留可重放的普通 pending request。
+
+缺口和后续动作：
+
+- 本地测试需要模拟 app-server transport queue 满导致 initialize 或普通 inbound message 失败，再确认 backend 对同 seq / 同 stream 的重试策略。
+- 需要把“outbound task 退出 / idle sweep / client_closed / initialize rollback”作为 `unknown` 日志判断维度，日志里不要只看 WebSocket 是否还连着。
+- `legacy stream_id=None` 只应作为兼容知识记录；我们自己的 outbound envelope 应继续携带 `stream_id`。
+
+### 13.3 ACK、backpressure 与 `CHANNEL_CAPACITY=128`
+
+官方覆盖：
+
+- `tests.rs::remote_control_transport_clears_outgoing_buffer_when_backend_acks`
+  - backend ACK 后，官方 app-server 的 outbound buffer 会清理对应 `(client_id, stream_id, seq_id, segment_id)`。
+- `websocket.rs::outbound_buffer_acks_by_stream_id`
+  - ACK 只清当前 `(client_id, stream_id)`，不会误清其他 client 或其他 stream。
+- `websocket.rs::outbound_buffer_retains_unacked_messages_until_ack_advances`
+  - ACK 游标没有推进到的 envelope 必须保留。
+- `websocket.rs::outbound_buffer_advances_segmented_acks_by_wire_cursor`
+  - 分片 ACK 按 `(seq_id, segment_id)` 推进。
+- `websocket.rs::outbound_buffer_treats_segmentless_acks_as_seq_level_acks`
+  - `segment_id=None` 表示确认整个 `seq_id`。
+- `websocket.rs::run_server_writer_inner_assigns_contiguous_seq_ids_per_stream`
+  - 官方发给 backend 的 `ServerEnvelope.seq_id` 是按 `(client_id, stream_id)` 连续递增的。
+- `websocket.rs::run_server_writer_inner_sends_periodic_ping_frames`
+  - 官方 writer 会定期发 WebSocket ping，reader 要及时 pong。
+
+关键推论：
+
+- 官方 `BoundedOutboundBuffer` 容量是 `CHANNEL_CAPACITY=128`。它满了以后，writer 暂停从 `server_event_rx` 取新 envelope。
+- 如果 backend ACK 慢，官方 app-server 的 remote-control connection writer 可能继续被上游写入压满，最终走 app-server transport 的 slow connection disconnect 路径。
+- 这条路径是源码和测试支持的风险链路，但真实复现是否命中它，仍要靠日志中的 ACK 延迟、queue capacity、WebSocket close 原因来证明。
+
+我们当前状态：
+
+- `server_message`、`server_message_chunk`、`pong` 已调整为 transport 接管后快速 ACK，IM 分发不再阻塞 ACK。
+- `server_message_chunk` 成功记录 chunk 后立即 ACK；最后一个 chunk 重组完成后再把完整 JSON-RPC message 放入内部 work queue。
+- 已有 `ack_cursor_gt` 和 chunk 重组基础单测，但还没有 flood 压测级别的 ACK 时延回归。
+- 本地 server work queue 容量是 `4096`，它是 backend 内部消费队列，不等于官方 app-server 的 `CHANNEL_CAPACITY=128`；不能用它证明官方 buffer 不会满。
+
+缺口和后续动作：
+
+- 补 mock app-server flood 测试：在 50ms 内发送至少 300 条 `server_message` / `outputDelta`，断言 backend 对每条有效 envelope 都及时 ACK，且 ACK 不等待 IM 日志、图片、平台发送。
+- 补分片 ACK 测试：app-server 发送多 chunk server message，backend 应逐 chunk ACK，最终只投递一次完整 message。
+- 补 reconnect seq reset 测试：app-server reconnect 后 server `seq_id` 从 1 开始，backend 不应被旧 ACK cursor 误判为 duplicate。
+
+### 13.4 WebSocket 连接维护、cursor 与鉴权
+
+官方覆盖：
+
+- `websocket.rs::connect_remote_control_websocket_recovers_after_unauthorized_enrollment`
+  - enroll 或 connect 遇到 unauthorized 时，会尝试 auth recovery。
+- `websocket.rs::connect_remote_control_websocket_recovers_after_unauthorized_refresh`
+  - refresh unauthorized 也走恢复链路。
+- `websocket.rs::connect_remote_control_websocket_requires_sqlite_state_db`
+  - remote-control 启用时要求 state db；缺失时会报 disabled/不可用状态。
+- `websocket.rs::connect_remote_control_websocket_requires_chatgpt_auth`
+  - 官方 remote-control 依赖 ChatGPT auth，不支持只靠 API key。
+- `websocket.rs::run_remote_control_websocket_loop_shutdown_cancels_reconnect_backoff`
+  - shutdown 可以打断 reconnect backoff，不会卡住退出。
+- `websocket.rs::run_websocket_reader_inner_times_out_without_pong_frames`
+  - WebSocket pong 超时会断开当前连接。
+- `websocket.rs::build_remote_control_websocket_request`
+  - 连接 backend 时带 `x-codex-server-id`、`x-codex-name`、`x-codex-protocol-version=3`、`authorization`、`x-codex-installation-id`，有 cursor 时带 `x-codex-subscribe-cursor`。
+
+我们当前状态：
+
+- server 端会读取并记录 `x-codex-subscribe-cursor`，也会给发出的 `ClientEnvelope` 填基础 `cursor`。
+- 当前 cursor 只是“记录 header + 透传/生成 cursor + 日志可见”，没有持久化 backend command log，因此不支持完整 replay 语义。
+- WebSocket recovery 超时后会主动 close，让官方 app-server reconnect。
+- WebSocket token 和 protocol version 当前仍偏宽松：协议版本不匹配只是 warning；`authorization` 没有按 enroll/refresh 颁发的 server token 严格校验。
+
+缺口和后续动作：
+
+- 补 WebSocket header 测试：缺失/错误 `x-codex-protocol-version`、缺失/错误 bearer token 时，应按我们最终决定的兼容策略处理，并写清楚是否严格拒绝。
+- 补 cursor 测试：收到 `x-codex-subscribe-cursor` 只更新状态和日志，不宣称 replay；发出的 client envelope 带当前 cursor。
+- 如果要完整对齐官方 cursor，需要新增 backend command log，并按 cursor replay；这不是修 `unknown` 的前置条件。
+
+### 13.5 分片、重复包与 stream invalidation
+
+官方覆盖：
+
+- `segment_tests.rs::reassembles_client_message_chunks`
+  - backend 发给 app-server 的 client chunks 能重组为完整 JSON-RPC message。
+- `segment_tests.rs::splits_large_server_messages_into_wire_chunks`
+  - app-server 发给 backend 的大 server message 会被拆成 `server_message_chunk`。
+- `segment_tests.rs::invalidates_incomplete_stream_assemblies`
+  - stream 被关闭或失效后，未完成分片 assembly 必须失效。
+- `segment_tests.rs::resets_incomplete_client_assembly_when_stream_changes`
+  - 同 client 切换 stream 时，旧 stream 未完成 assembly 不应污染新 stream。
+- `segment_tests.rs::ignores_stale_chunks_without_dropping_newer_assembly`
+  - 旧 seq 的 stale chunk 不能破坏当前更新的 assembly。
+- `segment_tests.rs::ignores_invalid_stale_chunks_without_dropping_newer_assembly`
+  - 无效 stale chunk 也不能破坏当前 assembly。
+- `segment_tests.rs::ignores_invalid_duplicate_chunks_without_dropping_current_assembly`
+  - 无效 duplicate chunk 不能破坏当前 assembly。
+- `websocket.rs::websocket_state_*`
+  - 覆盖 duplicate/replay/oversize/out-of-order chunk，以及 stream invalidation 后清 cursor。
+
+我们当前状态：
+
+- 已支持 backend outbound `client_message` 分片。
+- 已支持接收 app-server inbound `server_message_chunk` 并顺序重组。
+- 当前 server chunk 处理更像“严格顺序 assembly”：duplicate、stale、invalid stale 是否完全按官方 nuance 处理，还需要专门测试确认。
+
+缺口和后续动作：
+
+- 补 server chunk duplicate/stale/out-of-order/oversize 测试，尤其要确认无效旧 chunk 不会清掉当前有效 assembly。
+- 补 stream reset 测试：WebSocket reconnect、`unknown` 恢复、client stream 更换时，未完成 chunk assembly 不能跨 stream 继续生效。
+- 补大消息 outbound 分片大小测试，确保每个 client chunk 序列化后不超过官方 `150 KiB` 上限。
+
+### 13.6 enroll、pairing 与 client management 周边测试
+
+官方覆盖：
+
+- `tests.rs::remote_control_http_mode_enrolls_before_connecting`
+  - HTTP mode 先 enroll，再连接 WebSocket。
+- `tests.rs::remote_control_http_mode_refreshes_persisted_enrollment_before_connecting`
+  - 已持久化 enrollment 时先 refresh。
+- `tests.rs::remote_control_http_mode_reenrolls_when_refresh_reports_stale_enrollment`
+  - refresh 发现 stale enrollment 时会重新 enroll。
+- `tests.rs::remote_control_http_mode_clears_stale_persisted_enrollment_after_404`
+  - 404 会清理匹配的 stale enrollment。
+- `tests.rs::remote_control_stdio_mode_waits_for_client_name_before_connecting`
+  - stdio mode 等 app-server client name 后再连接。
+- `clients_tests.rs`
+  - list/revoke clients 覆盖 disabled 状态、unauthorized retry、forbidden 不重试、decode error 保留上下文。
+- `pairing_tests.rs`
+  - start pairing、auth recovery、backend error/decode error 上下文、mismatched enrollment、disable 清 current enrollment。
+- `enroll.rs` 单测
+  - server token 到期前 refresh、响应体 token 脱敏、按 target/account 持久化、多条 enrollment 精确清理。
+- `protocol.rs` 单测
+  - remote-control URL 只接受官方 ChatGPT host 和 localhost；拒绝 unsupported URL。
+
+我们当前状态：
+
+- 本地 backend 已模拟 enroll/refresh/client list/client enroll finish 等必要接口，主要目标是让 Codex Desktop/App 能连上本地服务。
+- 这些周边测试不是本次 `unknown` 的直接根因，但它们决定 WebSocket 能否稳定建立和重建。
+
+缺口和后续动作：
+
+- 如果后续严格校验 token，需要补 enroll/refresh -> WS authorization 的闭环测试。
+- client management/list/revoke 目前更多是兼容 UI 需要，优先级低于 transport lifecycle、ACK、chunk、reconnect。
+- URL normalization 和 ChatGPT auth 是官方 app-server 侧约束；本地 backend 文档应继续声明兼容边界，不把第三方 key 说成官方 remote-control 完整能力。
+
+### 13.7 本地最小回归套件建议
+
+优先补下面这些测试，再继续动实现：
+
+1. `unknown_reinitializes_same_stream`
+
+   mock app-server 连接 backend，完成 initialize 后返回 `pong status=unknown`；断言 backend 使用同一 `(client_id, stream_id)` 重新发送 initialize，不发送 `client_closed`，不更换 stream。
+
+2. `unknown_reinitialize_timeout_closes_ws`
+
+   mock app-server 对 reinitialize 不响应；断言 backend 在短超时后 close 当前 WebSocket。
+
+3. `ws_reconnect_reinitializes_all_clients`
+
+   注册多个 virtual clients，断开后用新 WebSocket 重连；断言每个 known client 都重新 initialize，且旧 server ACK cursor 被清理。
+
+4. `server_flood_fast_ack`
+
+   mock app-server 在短窗口内发送大量 `item/commandExecution/outputDelta`；断言 ACK 路径不等待 IM 分发，ACK 延迟保持在可接受阈值内。
+
+5. `server_chunk_ack_and_reassembly`
+
+   多 chunk server message 每个 chunk 都得到 ACK；最后一个 chunk 才投递完整 message；duplicate/stale/oversize chunk 不破坏当前 assembly。
+
+6. `subscribe_cursor_is_recorded_but_not_replayed`
+
+   WebSocket header 带 `x-codex-subscribe-cursor` 时，backend 记录并打日志；后续发出的 client envelope 带新 cursor；文档和测试都不宣称 replay。
+
+7. `strict_ws_headers_when_enabled`
+
+   按最终兼容策略验证 protocol version 和 bearer token。若短期仍允许宽松模式，测试名和断言要明确这是兼容模式，不是官方完整协议。
