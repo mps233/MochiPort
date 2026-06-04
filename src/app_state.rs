@@ -16,7 +16,7 @@ use crate::{
     chain_log,
     codex::CodexNotification,
     config::AppConfig,
-    im_runtime::RuntimeState,
+    im_runtime::{RuntimeState, route_from_conversation_key},
     store::PersistedState,
     types::{EventRecord, ImPlatformKind, now_ms},
 };
@@ -266,11 +266,24 @@ impl AppState {
         shutdown_tx: Option<oneshot::Sender<()>>,
     ) -> SharedState {
         let persisted = PersistedState::load(&config.state_path);
+        let mut runtime = RuntimeState::default();
+        for (conversation_key, thread_id) in &persisted.sessions {
+            let Some(route) = route_from_conversation_key(conversation_key) else {
+                chain_log::write_line(format!(
+                    "[im_route] level=warn event=restore_persisted_binding_skipped reason=invalid_conversation conversation={conversation_key} thread={thread_id}"
+                ));
+                continue;
+            };
+            runtime.bind_route(thread_id, route);
+            chain_log::write_line(format!(
+                "[im_route] level=warn event=restore_persisted_binding direction=startup thread={thread_id} conversation={conversation_key}"
+            ));
+        }
         Arc::new(Self {
             config_path,
             config: Mutex::new(config),
             persisted: Mutex::new(persisted),
-            runtime: Mutex::new(RuntimeState::default()),
+            runtime: Mutex::new(runtime),
             remote_control: RemoteControlState::new(),
             events: Mutex::new(Vec::new()),
             bridge_task: Mutex::new(None),

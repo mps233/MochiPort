@@ -3504,7 +3504,12 @@ async fn observe_app_server_message(
         }
         if method == "thread/started" {
             if let Some(thread_id) = params.as_ref().and_then(thread_id_from_payload) {
-                mark_thread_active_for_client(state, client_key.as_deref(), &thread_id).await;
+                mark_notification_thread_active_for_client(
+                    state,
+                    client_key.as_deref(),
+                    &thread_id,
+                )
+                .await;
             }
         } else if method == "thread/status/changed" {
             if let Some(params) = params.as_ref()
@@ -3532,37 +3537,60 @@ async fn observe_app_server_message(
                         .or_else(|| p.get("turnId").and_then(|v| v.as_str()))
                 })
                 .map(str::to_string);
-            let mut remote = state.remote_control.inner.lock().await;
-            if let Some(client_key) = client_key.as_deref() {
-                if let Some(client) = remote.clients.get_mut(client_key) {
-                    if let Some(thread_id) = thread_id.clone() {
-                        client.current_thread_id = Some(thread_id);
-                    }
-                    if let Some(turn_id) = turn_id.clone() {
-                        client.current_turn_id = Some(turn_id);
-                    }
-                }
-                if client_key == DEFAULT_REMOTE_CLIENT_KEY {
-                    sync_default_client_legacy_locked(&mut remote);
-                }
+            let should_track = if let Some(thread_id) = thread_id.as_deref() {
+                should_track_notification_thread_for_client(state, client_key.as_deref(), thread_id)
+                    .await
             } else {
-                if let Some(thread_id) = thread_id {
-                    remote.current_thread_id = Some(thread_id);
-                }
-                if let Some(turn_id) = turn_id {
-                    remote.current_turn_id = Some(turn_id);
+                true
+            };
+            if should_track {
+                let mut remote = state.remote_control.inner.lock().await;
+                if let Some(client_key) = client_key.as_deref() {
+                    if let Some(client) = remote.clients.get_mut(client_key) {
+                        if let Some(thread_id) = thread_id.clone() {
+                            client.current_thread_id = Some(thread_id);
+                        }
+                        if let Some(turn_id) = turn_id.clone() {
+                            client.current_turn_id = Some(turn_id);
+                        }
+                    }
+                    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                        sync_default_client_legacy_locked(&mut remote);
+                    }
+                } else {
+                    if let Some(thread_id) = thread_id {
+                        remote.current_thread_id = Some(thread_id);
+                    }
+                    if let Some(turn_id) = turn_id {
+                        remote.current_turn_id = Some(turn_id);
+                    }
                 }
             }
         } else if method == "turn/completed" {
+            let thread_id = params.as_ref().and_then(thread_id_from_payload);
+            let turn_id = params.as_ref().and_then(turn_id_from_payload);
+            if let Some(thread_id) = thread_id.as_deref() {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .mark_turn_completed(thread_id, turn_id.as_deref());
+            }
             let mut remote = state.remote_control.inner.lock().await;
             if let Some(client_key) = client_key.as_deref() {
                 if let Some(client) = remote.clients.get_mut(client_key) {
-                    client.current_turn_id = None;
+                    if thread_id.is_none()
+                        || client.current_thread_id.as_deref() == thread_id.as_deref()
+                    {
+                        client.current_turn_id = None;
+                    }
                 }
                 if client_key == DEFAULT_REMOTE_CLIENT_KEY {
                     sync_default_client_legacy_locked(&mut remote);
                 }
-            } else {
+            } else if thread_id.is_none()
+                || remote.current_thread_id.as_deref() == thread_id.as_deref()
+            {
                 remote.current_turn_id = None;
             }
         } else if method == "thread/closed"
@@ -3611,6 +3639,11 @@ async fn observe_thread_status_changed(
     if !is_terminal_or_inactive_thread_status(status_type) {
         return;
     }
+    state
+        .runtime
+        .lock()
+        .await
+        .mark_turn_completed(thread_id, None);
     let normalized_client_key = client_key.map(normalize_remote_client_key);
     let cleared_turn_id = {
         let mut remote = state.remote_control.inner.lock().await;
@@ -4150,6 +4183,69 @@ async fn mark_thread_active_for_client(
         return;
     }
     mark_thread_active(state, thread_id).await;
+}
+
+async fn mark_notification_thread_active_for_client(
+    state: &SharedState,
+    client_key: Option<&str>,
+    thread_id: &str,
+) {
+    if should_track_notification_thread_for_client(state, client_key, thread_id).await {
+        mark_thread_active_for_client(state, client_key, thread_id).await;
+    } else {
+        chain_log::write_line(format!(
+            "[remote_control] level=warn event=notification_thread_active_skipped reason=unbound_thread client_key={} thread={}",
+            client_key.unwrap_or(""),
+            thread_id
+        ));
+    }
+}
+
+async fn should_track_notification_thread_for_client(
+    state: &SharedState,
+    client_key: Option<&str>,
+    thread_id: &str,
+) -> bool {
+    let Some(client_key) = client_key else {
+        return true;
+    };
+    let client_key = normalize_remote_client_key(client_key);
+    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        return true;
+    }
+    let is_bound_thread = {
+        let runtime = state.runtime.lock().await;
+        runtime.route_for_thread(thread_id).is_some()
+    };
+    if is_bound_thread {
+        return true;
+    }
+    let is_persisted_thread = {
+        let persisted = state.persisted.lock().await;
+        persisted
+            .sessions
+            .get(&client_key)
+            .is_some_and(|persisted_thread_id| persisted_thread_id == thread_id)
+    };
+    if is_persisted_thread {
+        return true;
+    }
+    let is_pending_request_thread = {
+        let remote = state.remote_control.inner.lock().await;
+        remote
+            .clients
+            .get(&client_key)
+            .map(|client| {
+                client.pending.values().any(|pending| {
+                    pending
+                        .thread_id
+                        .as_deref()
+                        .is_some_and(|pending_thread_id| pending_thread_id == thread_id)
+                })
+            })
+            .unwrap_or(false)
+    };
+    is_pending_request_thread
 }
 
 pub async fn request_for_client(

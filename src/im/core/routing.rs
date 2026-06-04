@@ -1,6 +1,11 @@
 use anyhow::Result;
 
-use crate::{app_state::SharedState, im_runtime::RouteTarget, types::InboundMessage};
+use crate::{
+    app_state::SharedState,
+    chain_log,
+    im_runtime::{RouteTarget, route_from_conversation_key},
+    types::InboundMessage,
+};
 
 pub(crate) fn route_for_message(message: &InboundMessage) -> RouteTarget {
     RouteTarget {
@@ -15,15 +20,73 @@ pub(crate) async fn live_thread_for_route(
     state: &SharedState,
     route: &RouteTarget,
 ) -> Option<String> {
-    state
-        .runtime
-        .lock()
-        .await
-        .route_by_thread
-        .iter()
-        .find_map(|(thread_id, existing_route)| {
-            (existing_route.conversation_key == route.conversation_key).then(|| thread_id.clone())
-        })
+    if let Some(thread_id) =
+        state
+            .runtime
+            .lock()
+            .await
+            .route_by_thread
+            .iter()
+            .find_map(|(thread_id, existing_route)| {
+                (existing_route.conversation_key == route.conversation_key)
+                    .then(|| thread_id.clone())
+            })
+    {
+        return Some(thread_id);
+    }
+
+    let thread_id = {
+        let persisted = state.persisted.lock().await;
+        persisted.sessions.get(&route.conversation_key).cloned()
+    }?;
+
+    {
+        let mut runtime = state.runtime.lock().await;
+        if runtime.route_for_thread(&thread_id).is_none() {
+            runtime.bind_route(&thread_id, route.clone());
+            chain_log::write_line(format!(
+                "[im_route] level=warn event=restore_persisted_binding direction=inbound thread={} platform={} account={} chat={} conversation={}",
+                thread_id,
+                route.platform.key(),
+                route.account_id,
+                route.chat_id,
+                route.conversation_key
+            ));
+        }
+    }
+
+    Some(thread_id)
+}
+
+pub(crate) async fn route_for_persisted_thread(
+    state: &SharedState,
+    thread_id: &str,
+) -> Option<RouteTarget> {
+    let conversation_key = {
+        let persisted = state.persisted.lock().await;
+        persisted
+            .sessions
+            .iter()
+            .find_map(|(conversation_key, persisted_thread_id)| {
+                (persisted_thread_id == thread_id).then(|| conversation_key.clone())
+            })
+    }?;
+    let route = route_from_conversation_key(&conversation_key)?;
+    {
+        let mut runtime = state.runtime.lock().await;
+        if runtime.route_for_thread(thread_id).is_none() {
+            runtime.bind_route(thread_id, route.clone());
+            chain_log::write_line(format!(
+                "[im_route] level=warn event=restore_persisted_binding direction=outbound thread={} platform={} account={} chat={} conversation={}",
+                thread_id,
+                route.platform.key(),
+                route.account_id,
+                route.chat_id,
+                route.conversation_key
+            ));
+        }
+    }
+    Some(route)
 }
 
 pub(crate) async fn active_turn_for_message(
