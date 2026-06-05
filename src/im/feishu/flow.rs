@@ -80,6 +80,7 @@ pub(crate) async fn handle_inbound(
         &route,
         trimmed,
         &message.attachments,
+        message.received_at_ms,
         TurnOrigin::Feishu,
     )
     .await
@@ -92,6 +93,34 @@ pub(crate) async fn handle_inbound(
                     format!(
                         "chat={} thread={} turn={turn_id}",
                         message.chat_id, thread_id
+                    ),
+                )
+                .await;
+            Ok(())
+        }
+        TurnStartOutcome::Busy { thread_id, turn_id } => {
+            send_text_to_message(
+                &api,
+                &message,
+                turn_busy_notice(&thread_id, turn_id.as_deref().unwrap_or("")),
+            )
+            .await?;
+            Ok(())
+        }
+        TurnStartOutcome::Expired { thread_id } => {
+            send_text_to_message(
+                &api,
+                &message,
+                "这条消息是在上一轮任务期间收到的，已跳过。请重新发送最新指令。",
+            )
+            .await?;
+            state
+                .push_event(
+                    "warn",
+                    "feishu_inbound_expired",
+                    format!(
+                        "chat={} thread={thread_id} message={}",
+                        message.chat_id, message.message_id
                     ),
                 )
                 .await;

@@ -398,6 +398,7 @@ async fn handle_event(
             ChatType::Group
         },
         message_id: receive.message.message_id,
+        received_at_ms: now_ms(),
         text,
         mentioned,
         approval_request_key: None,
@@ -615,6 +616,7 @@ async fn handle_card_action_event(
             .as_ref()
             .and_then(|context| context.open_message_id.clone())
             .unwrap_or_else(|| format!("card-action-{kind}")),
+        received_at_ms: now_ms(),
         text,
         mentioned: true,
         approval_request_key,

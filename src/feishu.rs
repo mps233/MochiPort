@@ -18,7 +18,7 @@ use tracing::{info, warn};
 use crate::{
     app_state::SharedState,
     config::FeishuConfig,
-    types::{ChatType, InboundAttachment, InboundMessage},
+    types::{ChatType, ImPlatformKind, InboundAttachment, InboundMessage, now_ms},
 };
 
 const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
@@ -715,6 +715,7 @@ async fn handle_event(
         return Ok(());
     }
     tx.send(InboundMessage {
+        platform: ImPlatformKind::Feishu,
         account_id: account_id.to_string(),
         sender_id,
         chat_id: receive.message.chat_id,
@@ -724,9 +725,12 @@ async fn handle_event(
             ChatType::Group
         },
         message_id: receive.message.message_id,
+        received_at_ms: now_ms(),
         text,
         mentioned,
         approval_request_key: None,
+        action: None,
+        card_message_id: None,
         attachments,
     })
     .await

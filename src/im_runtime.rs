@@ -83,10 +83,19 @@ pub enum TurnOrigin {
     Wechat,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ThreadTurnState {
+    Starting,
+    Running(String),
+}
+
 #[derive(Debug, Default)]
 pub struct RuntimeState {
     pub bridge_generation: u64,
     pub current_turn_by_thread: HashMap<String, String>,
+    pub starting_turn_by_thread: HashSet<String>,
+    pub turn_started_at_by_thread: HashMap<String, u128>,
+    pub turn_finished_at_by_thread: HashMap<String, u128>,
     pub turn_origin_by_id: HashMap<String, TurnOrigin>,
     pub last_sent_text_by_route: HashMap<String, String>,
     pub route_by_thread: HashMap<String, RouteTarget>,
@@ -154,6 +163,9 @@ impl RuntimeState {
             if let Some(turn_id) = self.current_turn_by_thread.remove(thread_id) {
                 self.turn_origin_by_id.remove(&turn_id);
             }
+            self.starting_turn_by_thread.remove(thread_id);
+            self.turn_started_at_by_thread.remove(thread_id);
+            self.turn_finished_at_by_thread.remove(thread_id);
             log_route_unbind("unbind_conversation", reason, thread_id, route);
         }
         entries
@@ -163,8 +175,38 @@ impl RuntimeState {
     }
 
     pub fn mark_turn_started(&mut self, thread_id: &str, turn_id: &str) {
+        self.starting_turn_by_thread.remove(thread_id);
         self.current_turn_by_thread
             .insert(thread_id.to_string(), turn_id.to_string());
+        self.turn_started_at_by_thread
+            .insert(thread_id.to_string(), crate::types::now_ms());
+    }
+
+    pub fn try_mark_turn_starting(&mut self, thread_id: &str) -> Result<(), ThreadTurnState> {
+        if let Some(turn_id) = self.current_turn_by_thread.get(thread_id) {
+            return Err(ThreadTurnState::Running(turn_id.clone()));
+        }
+        if self.starting_turn_by_thread.contains(thread_id) {
+            return Err(ThreadTurnState::Starting);
+        }
+        self.starting_turn_by_thread.insert(thread_id.to_string());
+        Ok(())
+    }
+
+    pub fn clear_turn_starting(&mut self, thread_id: &str) {
+        self.starting_turn_by_thread.remove(thread_id);
+    }
+
+    pub fn message_is_stale_for_latest_turn(&self, thread_id: &str, received_at_ms: u128) -> bool {
+        received_at_ms > 0
+            && (self
+                .turn_finished_at_by_thread
+                .get(thread_id)
+                .is_some_and(|finished_at_ms| received_at_ms < *finished_at_ms)
+                || self
+                    .turn_started_at_by_thread
+                    .get(thread_id)
+                    .is_some_and(|started_at_ms| received_at_ms < *started_at_ms))
     }
 
     pub fn remember_turn_origin(&mut self, turn_id: &str, origin: TurnOrigin) {
@@ -188,10 +230,13 @@ impl RuntimeState {
     }
 
     pub fn mark_turn_completed(&mut self, thread_id: &str, _turn_id: Option<&str>) {
+        self.starting_turn_by_thread.remove(thread_id);
         let completed_turn_id = self.current_turn_by_thread.remove(thread_id);
         if let Some(turn_id) = _turn_id.or(completed_turn_id.as_deref()) {
             self.turn_origin_by_id.remove(turn_id);
         }
+        self.turn_finished_at_by_thread
+            .insert(thread_id.to_string(), crate::types::now_ms());
     }
 
     pub fn route_for_thread(&self, thread_id: &str) -> Option<RouteTarget> {
@@ -448,7 +493,9 @@ mod tests {
 
     use crate::types::ImPlatformKind;
 
-    use super::{PendingApproval, RuntimeState, TurnOrigin, route_from_conversation_key};
+    use super::{
+        PendingApproval, RuntimeState, ThreadTurnState, TurnOrigin, route_from_conversation_key,
+    };
 
     fn approval(id: i64) -> PendingApproval {
         PendingApproval {
@@ -544,6 +591,27 @@ mod tests {
         runtime.mark_turn_completed("thread-1", Some("turn-1"));
 
         assert_eq!(runtime.turn_origin("turn-1"), None);
+    }
+
+    #[test]
+    fn turn_starting_blocks_parallel_starts_and_expires_old_messages() {
+        let mut runtime = RuntimeState::default();
+        assert!(runtime.try_mark_turn_starting("thread-1").is_ok());
+        assert_eq!(
+            runtime.try_mark_turn_starting("thread-1"),
+            Err(ThreadTurnState::Starting)
+        );
+
+        let before_turn = 1;
+        runtime.mark_turn_started("thread-1", "turn-1");
+        assert_eq!(
+            runtime.try_mark_turn_starting("thread-1"),
+            Err(ThreadTurnState::Running("turn-1".to_string()))
+        );
+
+        runtime.mark_turn_completed("thread-1", Some("turn-1"));
+        assert!(runtime.message_is_stale_for_latest_turn("thread-1", before_turn));
+        assert!(runtime.try_mark_turn_starting("thread-1").is_ok());
     }
 
     #[test]

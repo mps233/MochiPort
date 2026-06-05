@@ -212,6 +212,7 @@ async fn inbound_from_message(
         chat_id: peer_id,
         chat_type: ChatType::Direct,
         message_id,
+        received_at_ms: now_ms(),
         text,
         mentioned: true,
         approval_request_key: None,

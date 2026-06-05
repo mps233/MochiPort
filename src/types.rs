@@ -118,6 +118,8 @@ pub struct InboundMessage {
     pub chat_id: String,
     pub chat_type: ChatType,
     pub message_id: String,
+    #[serde(default)]
+    pub received_at_ms: u128,
     pub text: String,
     pub mentioned: bool,
     pub approval_request_key: Option<String>,

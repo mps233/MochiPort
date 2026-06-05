@@ -6,16 +6,30 @@ use crate::{
         clear_thread_binding_with_reason, is_stale_thread_error, live_thread_for_route,
         persist_thread_binding,
     },
-    im_runtime::{RouteTarget, TurnOrigin},
+    im_runtime::{RouteTarget, ThreadTurnState, TurnOrigin},
     remote_control_backend,
     types::InboundAttachment,
 };
 
 pub(crate) enum TurnStartOutcome {
-    Started { thread_id: String, turn_id: String },
+    Started {
+        thread_id: String,
+        turn_id: String,
+    },
+    Busy {
+        thread_id: String,
+        turn_id: Option<String>,
+    },
+    Expired {
+        thread_id: String,
+    },
     NoThread,
-    Stale { thread_id: String },
-    Failed { error: Error },
+    Stale {
+        thread_id: String,
+    },
+    Failed {
+        error: Error,
+    },
 }
 
 pub(crate) fn turn_busy_notice(_thread_id: &str, _turn_id: &str) -> &'static str {
@@ -31,6 +45,7 @@ pub(crate) async fn start_turn_for_route(
     route: &RouteTarget,
     text: &str,
     attachments: &[InboundAttachment],
+    received_at_ms: u128,
     origin: TurnOrigin,
 ) -> TurnStartOutcome {
     let Some(thread_id) = live_thread_for_route(state, route).await else {
@@ -38,6 +53,28 @@ pub(crate) async fn start_turn_for_route(
     };
     if let Err(error) = persist_thread_binding(state, route, &thread_id).await {
         return TurnStartOutcome::Failed { error };
+    }
+    let blocked = {
+        let mut runtime = state.runtime.lock().await;
+        match runtime.try_mark_turn_starting(&thread_id) {
+            Ok(()) if runtime.message_is_stale_for_latest_turn(&thread_id, received_at_ms) => {
+                runtime.clear_turn_starting(&thread_id);
+                Some(TurnStartOutcome::Expired {
+                    thread_id: thread_id.clone(),
+                })
+            }
+            Ok(()) => None,
+            Err(active_turn) => Some(TurnStartOutcome::Busy {
+                thread_id: thread_id.clone(),
+                turn_id: match active_turn {
+                    ThreadTurnState::Starting => None,
+                    ThreadTurnState::Running(turn_id) => Some(turn_id),
+                },
+            }),
+        }
+    };
+    if let Some(blocked) = blocked {
+        return blocked;
     }
 
     match remote_control_backend::start_turn_for_client(
@@ -50,16 +87,11 @@ pub(crate) async fn start_turn_for_route(
     .await
     {
         Ok(turn_id) => {
-            state
-                .runtime
-                .lock()
-                .await
-                .mark_turn_started(&thread_id, &turn_id);
-            state
-                .runtime
-                .lock()
-                .await
-                .remember_turn_origin(&turn_id, origin);
+            {
+                let mut runtime = state.runtime.lock().await;
+                runtime.mark_turn_started(&thread_id, &turn_id);
+                runtime.remember_turn_origin(&turn_id, origin);
+            }
             TurnStartOutcome::Started { thread_id, turn_id }
         }
         Err(error) if is_stale_thread_error(&error) => {
@@ -68,6 +100,9 @@ pub(crate) async fn start_turn_for_route(
                     .await;
             TurnStartOutcome::Stale { thread_id }
         }
-        Err(error) => TurnStartOutcome::Failed { error },
+        Err(error) => {
+            state.runtime.lock().await.clear_turn_starting(&thread_id);
+            TurnStartOutcome::Failed { error }
+        }
     }
 }
