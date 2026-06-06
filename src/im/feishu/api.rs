@@ -99,6 +99,7 @@ impl FeishuApi {
         format!("{FEISHU_WS_BASE}/callback/ws/endpoint")
     }
 
+    #[allow(dead_code)]
     pub(super) fn oauth_device_authorization_url(&self) -> String {
         "https://accounts.feishu.cn/oauth/v1/device_authorization".to_string()
     }
@@ -107,6 +108,7 @@ impl FeishuApi {
         "https://accounts.feishu.cn/oauth/v1/app/registration".to_string()
     }
 
+    #[allow(dead_code)]
     pub(super) fn send_message_url(&self) -> String {
         format!("{FEISHU_API_BASE}/im/v1/messages?receive_id_type=chat_id")
     }
@@ -139,6 +141,7 @@ impl FeishuApi {
         format!("{FEISHU_API_BASE}/im/v1/images")
     }
 
+    #[allow(dead_code)]
     pub(super) fn upload_file_url(&self) -> String {
         format!("{FEISHU_API_BASE}/im/v1/files")
     }
@@ -155,6 +158,7 @@ impl FeishuApi {
         format!("{FEISHU_API_BASE}/im/v1/messages/{message_id}/resources/{image_key}?type=image")
     }
 
+    #[allow(dead_code)]
     pub async fn request_device_authorization(
         &self,
         scope: Option<&str>,
@@ -530,6 +534,7 @@ impl FeishuApi {
             .ok_or_else(|| anyhow!("feishu interactive send missing message_id"))
     }
 
+    #[allow(dead_code)]
     pub async fn send_cardkit_message(&self, chat_id: &str, card_id: &str) -> Result<String> {
         self.send_cardkit_message_to("chat_id", chat_id, card_id)
             .await
@@ -787,6 +792,7 @@ impl FeishuApi {
             .ok_or_else(|| anyhow!("feishu upload image missing image_key"))
     }
 
+    #[allow(dead_code)]
     pub async fn upload_file(&self, local_path: &str, file_name: Option<&str>) -> Result<String> {
         let token = self.get_tenant_access_token().await?;
         let bytes = fs::read(local_path)?;
@@ -826,6 +832,7 @@ impl FeishuApi {
             .ok_or_else(|| anyhow!("feishu upload file missing file_key"))
     }
 
+    #[allow(dead_code)]
     pub async fn send_image_message(&self, chat_id: &str, image_key: &str) -> Result<()> {
         let token = self.get_tenant_access_token().await?;
         let body = serde_json::json!({
@@ -854,6 +861,7 @@ impl FeishuApi {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn send_file_message(&self, chat_id: &str, file_key: &str) -> Result<()> {
         let token = self.get_tenant_access_token().await?;
         let body = serde_json::json!({

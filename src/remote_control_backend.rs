@@ -136,6 +136,7 @@ enum OutgoingClientEvent {
         segment_id: Option<usize>,
     },
     Ping,
+    #[allow(dead_code)]
     ClientClosed,
 }
 
@@ -187,8 +188,10 @@ struct RenameEnvironmentRequest {
 #[derive(Debug, Deserialize)]
 struct RemoteControlClientFinishRequest {
     client_id: String,
+    #[allow(dead_code)]
     step_up_token: Option<String>,
     device_identity: Option<RemoteControlDeviceIdentity>,
+    #[allow(dead_code)]
     device_key_proof: Option<Value>,
 }
 

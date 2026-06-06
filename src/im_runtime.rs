@@ -20,6 +20,7 @@ pub struct RouteTarget {
 pub struct PendingApproval {
     pub request_id: Value,
     pub request_kind: String,
+    #[allow(dead_code)]
     pub method: String,
     pub params: Value,
     pub summary: String,
@@ -37,6 +38,7 @@ pub struct ApprovalDecisionOption {
 #[derive(Debug, Clone)]
 pub struct ResolvedApproval {
     pub conversation_key: String,
+    #[allow(dead_code)]
     pub approval: PendingApproval,
     pub was_current: bool,
     pub next_current: Option<PendingApproval>,
@@ -46,6 +48,7 @@ pub struct ResolvedApproval {
 pub struct ThreadRoutingRequestState {
     pub request_id: String,
     pub conversation_key: String,
+    #[allow(dead_code)]
     pub account_id: String,
     pub chat_id: String,
     pub message_id: Option<String>,
@@ -55,6 +58,7 @@ pub struct ThreadRoutingRequestState {
     pub thread_ids_by_page: Vec<Vec<String>>,
     pub create_draft: ThreadCreateDraftState,
     pub create_option_values_by_field_page: HashMap<String, Vec<Vec<String>>>,
+    #[allow(dead_code)]
     pub history_cursor: Option<String>,
     pub history_has_next: bool,
 }
@@ -118,6 +122,7 @@ impl RuntimeState {
         self.feishu_streaming_cards_by_item.clear();
     }
 
+    #[allow(dead_code)]
     pub fn clear_pending_approvals(&mut self) {
         self.pending_approvals_by_conversation.clear();
         self.pending_approval_request_keys.clear();
@@ -135,12 +140,14 @@ impl RuntimeState {
         log_route_bind(thread_id, &route, previous.as_ref());
     }
 
+    #[allow(dead_code)]
     pub fn unbind_route(&mut self, thread_id: &str) {
         if let Some(route) = self.route_by_thread.remove(thread_id) {
             log_route_unbind("unbind_thread", "direct", thread_id, &route);
         }
     }
 
+    #[allow(dead_code)]
     pub fn unbind_routes_for_conversation(&mut self, conversation_key: &str) -> Vec<String> {
         self.unbind_routes_for_conversation_with_reason(conversation_key, "unspecified")
     }
@@ -273,6 +280,7 @@ impl RuntimeState {
             .is_some_and(|approval| approval.request_key() == request_key)
     }
 
+    #[allow(dead_code)]
     pub fn approval_by_request_key(
         &self,
         conversation_key: &str,
@@ -317,6 +325,7 @@ impl RuntimeState {
         false
     }
 
+    #[allow(dead_code)]
     pub fn resolve_approval_request(&mut self, request_id: &Value) -> Option<PendingApproval> {
         self.resolve_approval_request_with_context(request_id)
             .map(|resolved| resolved.approval)
@@ -379,6 +388,7 @@ impl RuntimeState {
         true
     }
 
+    #[allow(dead_code)]
     pub fn update_thread_routing_request_page(
         &mut self,
         request_id: &str,

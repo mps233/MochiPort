@@ -400,6 +400,7 @@ fn build_collab_agent_tool_call_card(item: &JsonValue) -> serde_json::Value {
     })
 }
 
+#[allow(dead_code)]
 pub fn build_image_generation_summary_card(
     status: &str,
     revised_prompt: Option<&str>,
@@ -768,14 +769,17 @@ fn extract_plan_title_and_steps(text: &str) -> (Option<String>, Vec<String>) {
     (title, steps)
 }
 
+#[allow(dead_code)]
 fn request_input_field_name(index: usize) -> String {
     format!("q_{}", index + 1)
 }
 
+#[allow(dead_code)]
 fn request_input_other_field_name(index: usize) -> String {
     format!("q_{}_other", index + 1)
 }
 
+#[allow(dead_code)]
 pub fn should_render_as_card(text: &str) -> bool {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -960,6 +964,7 @@ fn decision_is_negative(decision: &JsonValue) -> bool {
             .is_some_and(|value| value == "deny")
 }
 
+#[allow(dead_code)]
 pub fn build_oauth_device_card(
     verification_uri: &str,
     verification_uri_complete: &str,
@@ -1041,6 +1046,7 @@ pub fn build_oauth_device_card(
     card
 }
 
+#[allow(dead_code)]
 pub fn build_oauth_device_explanation(operation_label: &str) -> String {
     format!(
         "这一步需要你先授权一下，我才能继续完成“{}”。\n\n我已经发了一张授权卡，点击里面的按钮完成授权后，回来继续发消息就行。",
@@ -1048,6 +1054,7 @@ pub fn build_oauth_device_explanation(operation_label: &str) -> String {
     )
 }
 
+#[allow(dead_code)]
 pub fn build_permission_required_explanation(operation_label: &str) -> String {
     format!(
         "当前这一步要完成“{}”，但飞书应用侧的权限还没开通。\n\n这个不是你操作错了，需要应用管理员先补权限，之后再重试。",
@@ -1055,6 +1062,7 @@ pub fn build_permission_required_explanation(operation_label: &str) -> String {
     )
 }
 
+#[allow(dead_code)]
 pub fn build_permission_required_card(operation_label: &str) -> serde_json::Value {
     let content = format!(
         "当前飞书应用缺少完成“{}”所需的应用权限。\n\n请应用管理员先在飞书开放平台完成权限开通，随后再重试当前操作。",
@@ -1077,6 +1085,7 @@ pub fn build_permission_required_card(operation_label: &str) -> serde_json::Valu
     card
 }
 
+#[allow(dead_code)]
 pub fn build_request_user_input_card(
     request_id: &str,
     question: &FeishuUserInputQuestion,
@@ -1283,6 +1292,7 @@ pub fn build_request_user_input_card(
     card
 }
 
+#[allow(dead_code)]
 pub fn build_status_card(text: &str) -> serde_json::Value {
     let content = normalize_card_markdown(text);
     build_markdown_card(&content, None, None)
@@ -1797,6 +1807,7 @@ pub fn build_thread_list_card(
     card
 }
 
+#[allow(dead_code)]
 pub fn build_thread_list_loading_card(title: &str, page: usize) -> serde_json::Value {
     let body = format!(
         "正在加载历史会话...\n\n<font color='grey'>第 {} 页</font>",
@@ -1817,6 +1828,7 @@ pub fn build_thread_routing_result_card(title: &str, body: &str) -> serde_json::
     card
 }
 
+#[allow(dead_code)]
 pub fn build_history_summary_card(text: &str) -> serde_json::Value {
     let content = normalize_card_markdown(text);
     let mut card = build_markdown_card(&content, Some("历史摘要"), Some("grey"));
@@ -1824,6 +1836,7 @@ pub fn build_history_summary_card(text: &str) -> serde_json::Value {
     card
 }
 
+#[allow(dead_code)]
 pub fn build_plan_implement_prompt_card() -> serde_json::Value {
     serde_json::json!({
         "schema": "2.0",

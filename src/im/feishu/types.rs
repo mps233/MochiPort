@@ -64,6 +64,7 @@ pub struct FeishuStreamingCardState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct FeishuUserInputOption {
     pub label: String,
     pub description: String,
@@ -71,6 +72,7 @@ pub struct FeishuUserInputOption {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct FeishuUserInputQuestion {
     pub id: String,
     pub header: String,

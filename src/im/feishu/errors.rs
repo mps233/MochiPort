@@ -43,6 +43,7 @@ pub enum FeishuApiError {
 }
 
 impl FeishuApiError {
+    #[allow(dead_code)]
     pub fn code(&self) -> i64 {
         match self {
             FeishuApiError::AppScopeMissing { code, .. }
@@ -52,6 +53,7 @@ impl FeishuApiError {
         }
     }
 
+    #[allow(dead_code)]
     pub fn operation(&self) -> &str {
         match self {
             FeishuApiError::AppScopeMissing { operation, .. }
@@ -61,6 +63,7 @@ impl FeishuApiError {
         }
     }
 
+    #[allow(dead_code)]
     pub fn body(&self) -> &JsonValue {
         match self {
             FeishuApiError::AppScopeMissing { body, .. }
