@@ -23,8 +23,8 @@ pub struct TelegramAdapter {
 #[derive(Debug, Clone)]
 pub struct TelegramThreadListEntry {
     pub title: String,
-    pub summary: Option<String>,
-    pub detail: Option<String>,
+    pub state: String,
+    pub cwd: Option<String>,
 }
 
 impl TelegramAdapter {
@@ -472,12 +472,7 @@ impl TelegramAdapter {
         } else {
             thread_entries_table_html(entries)
         };
-        let hint = if entries.is_empty() {
-            "可以新建一个会话。".to_string()
-        } else {
-            format!("点击或回复 /1 ~ /{} 选择会话。", entries.len())
-        };
-        let text = thread_list_html_text(title, body, page, &hint, &entries_html);
+        let text = thread_list_html_text(title, body, page, &entries_html);
         log_adapter(
             "send_thread_list_begin",
             format!(
@@ -599,16 +594,23 @@ fn approval_button(text: &str, callback_data: &str) -> serde_json::Value {
 }
 
 fn thread_entries_table_html(entries: &[TelegramThreadListEntry]) -> String {
-    let mut lines = vec![
-        "<b>序号 | 状态 | 会话</b>".to_string(),
-        "---- | ---- | ----".to_string(),
-    ];
-    lines.extend(
-        entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| thread_entry_table_html(index, entry)),
-    );
+    let mut lines = Vec::new();
+    let mut current_cwd: Option<&str> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        let cwd = entry
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if current_cwd != cwd {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push(project_header_html(cwd));
+            current_cwd = cwd;
+        }
+        lines.push(thread_entry_table_html(index, entry));
+    }
     lines.join("\n")
 }
 
@@ -664,71 +666,49 @@ fn thread_entry_table_html(index: usize, entry: &TelegramThreadListEntry) -> Str
     } else {
         title
     };
-    let summary = entry
-        .summary
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty());
-    let (state, cwd) = thread_detail_parts(entry.detail.as_deref());
-    let state = truncate_display_text(state.as_deref().unwrap_or("可接入"), 8);
     let title = truncate_display_text(title, 22);
-    let mut row = format!(
-        "/{} | <code>{}</code> | <b>{}</b>",
-        index + 1,
-        telegram_html_escape(&state),
-        telegram_html_escape(&title)
-    );
-    if let Some(cwd) = cwd {
-        row.push_str(&format!(
-            "\n    目录 <code>{}</code>",
-            telegram_html_escape(&truncate_middle(&cwd, 44))
-        ));
-    }
-    if let Some(summary) = summary {
-        let summary = telegram_cleanup_text(summary);
-        let summary = truncate_display_text(&summary, 42);
-        if !summary.is_empty() && summary != title {
-            row.push_str(&format!("\n    {}", telegram_markdown_to_html(&summary)));
-        }
-    }
-    row
-}
-
-fn thread_list_html_text(
-    title: &str,
-    body: &str,
-    page: usize,
-    hint: &str,
-    entries_html: &str,
-) -> String {
+    let state = thread_state_suffix(&entry.state)
+        .map(|state| format!(" <code>{}</code>", telegram_html_escape(state)))
+        .unwrap_or_default();
     format!(
-        "<b>{}</b>\n\n{}\n\n第 {} 页\n{}\n\n{}",
-        telegram_html_escape(title),
-        telegram_markdown_to_html(&telegram_cleanup_text(body)),
-        page.max(1),
-        telegram_html_escape(hint),
-        entries_html
+        "/{} <b>{}</b>{state}",
+        index + 1,
+        telegram_html_escape(&title)
     )
 }
 
-fn thread_detail_parts(detail: Option<&str>) -> (Option<String>, Option<String>) {
-    let Some(detail) = detail.map(telegram_cleanup_text) else {
-        return (None, None);
-    };
-    let mut state = None;
-    let mut cwd = None;
-    for part in detail
-        .split('·')
-        .map(str::trim)
-        .filter(|part| !part.is_empty())
-    {
-        if let Some(value) = part.strip_prefix("目录：") {
-            cwd = Some(value.trim().trim_matches('`').to_string());
-        } else if state.is_none() {
-            state = Some(part.to_string());
+fn project_header_html(cwd: Option<&str>) -> String {
+    match cwd {
+        Some(cwd) => {
+            let name = project_name(cwd);
+            format!(
+                "<b>项目：{}</b>\n<code>{}</code>",
+                telegram_html_escape(&truncate_display_text(&name, 32)),
+                telegram_html_escape(&truncate_middle(cwd, 68))
+            )
         }
+        None => "<b>项目：未知目录</b>".to_string(),
     }
-    (state, cwd)
+}
+
+fn thread_state_suffix(state: &str) -> Option<&'static str> {
+    if state.contains("当前会话") {
+        Some("当前")
+    } else if state.contains("已加载") {
+        Some("已加载")
+    } else {
+        None
+    }
+}
+
+fn thread_list_html_text(title: &str, body: &str, page: usize, entries_html: &str) -> String {
+    format!(
+        "<b>{}</b>\n{}\n\n{}\n\n<code>第 {} 页</code>",
+        telegram_html_escape(title),
+        telegram_markdown_to_html(&telegram_cleanup_text(body)),
+        entries_html,
+        page.max(1)
+    )
 }
 
 fn truncate_display_text(text: &str, max_chars: usize) -> String {
@@ -747,6 +727,16 @@ fn truncate_display_text(text: &str, max_chars: usize) -> String {
         .collect::<String>();
     output.push('…');
     output
+}
+
+fn project_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn truncate_middle(text: &str, max_chars: usize) -> String {

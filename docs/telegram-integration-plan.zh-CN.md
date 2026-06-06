@@ -159,7 +159,7 @@ MVP 功能：
 
 - 通过 long polling 接收 Telegram Bot 消息。
 - 私聊文本消息转为 `InboundMessage`；群聊消息和群聊按钮回调直接忽略。
-- `/q`、`/new`、`/threads`、`/status`、`/s` 命令可用。
+- 全局命令只保留 `/s` 中断当前任务、`/q` 退出当前会话。
 - 没有绑定 thread 时，先让用户选择新建会话或恢复历史会话，不自动创建。
 - approval 先用文本命令回复，后续再补 inline keyboard。
 - Codex 最终回复用普通文本发送。
@@ -190,17 +190,17 @@ MVP 暂不做：
 
 ## 第五阶段：Telegram Thread 管理
 
-状态：基础能力已完成，`/new` 已改为按钮式设置主流程。
+状态：基础能力已完成，会话创建/恢复已改为未绑定时自动触发的按钮式流程。
 
 Telegram 不适合照搬飞书表单。当前表达方式：
 
-- `/threads` 或 `/load`：发送一个 inline keyboard 主菜单，用户选择“创建新会话”或“恢复历史会话”。
+- 没有绑定 thread 时，自动发送 inline keyboard 主菜单，用户选择“创建新会话”或“恢复历史会话”。
 - 恢复历史会话：发送历史 thread 文本列表，每个 thread 使用 `/1`、`/2` 这类短命令选择，底部只提供“上一页 / 下一页 / 创建新会话”等导航按钮。
 - callback data 不直接塞长 thread id，而是使用 `request_id + page + index`，实际 thread id 存在 runtime 的 `ThreadRoutingRequestState` 里，避免 Telegram 64 字节 callback data 限制。
-- `/new`：发送创建设置面板，用户通过按钮选择目录、模型、推理强度和权限，最后点“创建”。
+- 创建新会话：发送创建设置面板，用户通过按钮选择目录、模型、推理强度和权限，最后点“创建”。
 - 目录/模型/推理强度/权限选择都使用 inline keyboard；callback data 只带 `request_id + field + page + index`，实际选项值存在 runtime，避免 Telegram 64 字节 callback data 限制。
 - 目录支持“自定义或新建目录”：用户点按钮后直接发送绝对路径，不需要写 `cwd=` 参数。
-- 不支持 `/new key=value ...` 这类手填参数入口，避免普通用户需要理解内部字段名。
+- 不支持斜杠命令式新建参数入口，避免普通用户需要理解内部字段名。
 
 后续可优化：
 

@@ -8,9 +8,7 @@ use crate::{
             ApprovalReplyOutcome, resolve_approval_button_reply, resolve_approval_reply,
             submit_approval_decision,
         },
-        routing::{
-            active_turn_for_message, clear_thread_binding, live_thread_for_route, route_for_message,
-        },
+        routing::{active_turn_for_message, clear_thread_binding, route_for_message},
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
             ThreadCreateForm, apply_thread_create_draft_value, create_options_for_field,
@@ -116,79 +114,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     }
 
     match command.as_deref() {
-        Some("/start") | Some("/help") => {
-            adapter
-                .send_text(
-                    &message.chat_id,
-                    "Codex Remote 已连接 Telegram。\n\n直接发送消息会进入 Codex。常用命令：\n/status 查看状态\n/new 创建新会话\n/s 中断当前任务\n/q 退出当前会话",
-                )
-                .await?;
-            return Ok(());
-        }
-        Some("/status") => {
-            let remote = remote_control_backend::status_snapshot(&state).await;
-            let bridge_status = if config.bridge.enabled {
-                "启用"
-            } else {
-                "停用"
-            };
-            let remote_status = if remote.connected {
-                "已连接"
-            } else {
-                "未连接"
-            };
-            let thread_status = if let Some((thread_id, turn_id)) =
-                active_turn_for_message(&state, &message).await
-            {
-                format!("thread: {thread_id}\n执行: 执行中\nturn: {turn_id}")
-            } else if let Some(thread_id) = live_thread_for_route(&state, &route).await {
-                format!("thread: {thread_id}\n执行: 空闲")
-            } else {
-                "thread: 未绑定".to_string()
-            };
-            adapter
-                .send_text(
-                    &message.chat_id,
-                    &format!(
-                        "Codex Remote\nbridge: {bridge_status}\nremote-control: {remote_status}\n{thread_status}"
-                    ),
-                )
-                .await?;
-            return Ok(());
-        }
-        Some("/new") => {
-            if let Some((_, turn_id)) = active_turn_for_message(&state, &message).await {
-                adapter
-                    .send_text(
-                        &message.chat_id,
-                        &format!(
-                            "当前任务仍在执行中（turn: {turn_id}）。请先发送 /s 中断，或等待完成。"
-                        ),
-                    )
-                    .await?;
-                return Ok(());
-            }
-            if !remote_control_backend::status_snapshot(&state)
-                .await
-                .connected
-            {
-                clear_thread_binding(&state, &route.conversation_key).await?;
-                adapter
-                    .send_text(
-                        &message.chat_id,
-                        "已解除当前绑定，但 Codex remote-control 还没有连接。请在项目目录运行 codex 后再发送消息。",
-                    )
-                    .await?;
-                return Ok(());
-            }
-            send_telegram_thread_create_settings(&state, &adapter, &message, None).await?;
-            return Ok(());
-        }
-        Some("/threads") | Some("/load") => {
-            send_telegram_thread_routing_choice(&state, &adapter, &message, None).await?;
-            return Ok(());
-        }
-        Some("/s") | Some("/stop") => {
+        Some("/s") => {
             let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await else {
                 adapter
                     .send_text(&message.chat_id, "当前没有运行中的 turn。")
@@ -247,7 +173,12 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         }
         Some(other) => {
             adapter
-                .send_text(&message.chat_id, &format!("不支持的命令：{other}"))
+                .send_text(
+                    &message.chat_id,
+                    &format!(
+                        "不支持的命令：{other}。当前只支持 /s 中断当前任务、/q 退出当前会话。"
+                    ),
+                )
                 .await?;
             return Ok(());
         }
@@ -351,10 +282,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                 .send_text(
                     &message.chat_id,
                     &format!(
-                        "Codex App 没有接收这条消息：{error}\n\n请确认 Codex App 还打开着 remote-control。"
-                    ),
-                )
-                .await?;
+                    "Codex App 没有接收这条消息：{error}\n\n请确认 Codex App 还打开着 remote-control。"
+                ),
+            )
+            .await?;
             Err(error)
         }
     }
@@ -715,7 +646,7 @@ async fn checked_telegram_thread_routing_request(
         adapter
             .send_text(
                 &message.chat_id,
-                "这个 thread 操作已经失效，请重新发送 /threads。",
+                "这个 thread 操作已经失效，请重新发送一条消息触发会话选择。",
             )
             .await?;
         return Ok(None);
@@ -753,7 +684,7 @@ async fn handle_telegram_thread_list_text_reply(
         adapter
             .send_text(
                 &message.chat_id,
-                "这个会话序号不可用，请重新打开 /threads。",
+                "这个会话序号不可用，请重新发送一条消息触发会话选择。",
             )
             .await?;
         return Ok(true);
@@ -881,7 +812,7 @@ async fn handle_telegram_thread_create_text_input(
         send_telegram_thread_create_settings(state, adapter, message, Some(request)).await?;
         return Ok(true);
     }
-    if command(text).is_some_and(|command| is_control_command(&command)) {
+    if command(text).is_some() {
         request.create_draft.cwd_choice = None;
         request.create_draft.cwd_custom = None;
         state
@@ -1130,8 +1061,8 @@ async fn send_telegram_thread_routing_list(
         .iter()
         .map(|entry| TelegramThreadListEntry {
             title: entry.title.clone(),
-            summary: entry.summary.clone(),
-            detail: entry.last_activity_text.clone(),
+            state: entry.state.clone(),
+            cwd: entry.cwd.clone(),
         })
         .collect::<Vec<_>>();
 
@@ -1140,7 +1071,7 @@ async fn send_telegram_thread_routing_list(
         .send_thread_list(
             &route.chat_id,
             &loaded_page.request_id,
-            "选择 Codex 会话",
+            "恢复历史会话",
             &body,
             &telegram_entries,
             loaded_page.page,
@@ -1333,13 +1264,6 @@ pub(crate) fn command(text: &str) -> Option<String> {
         .unwrap_or(first)
         .to_ascii_lowercase();
     Some(command)
-}
-
-pub(crate) fn is_control_command(command: &str) -> bool {
-    matches!(
-        command,
-        "/start" | "/help" | "/status" | "/new" | "/threads" | "/load" | "/s" | "/stop" | "/q"
-    )
 }
 
 pub(crate) fn numeric_command_index(command: &str) -> Option<usize> {

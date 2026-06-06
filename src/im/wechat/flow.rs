@@ -6,10 +6,7 @@ use crate::{
     im::{
         core::{
             approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
-            routing::{
-                active_turn_for_message, clear_thread_binding, live_thread_for_route,
-                route_for_message,
-            },
+            routing::{active_turn_for_message, clear_thread_binding, route_for_message},
             session::{create_and_bind_thread, resume_and_bind_thread},
             thread::{
                 ThreadCreateOption, apply_thread_create_draft_value, create_options_for_field,
@@ -120,134 +117,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     }
 
     match normalized.as_deref() {
-        Some("/start") | Some("/help") => {
-            adapter
-                .send_text(
-                    &state,
-                    &account_id,
-                    &message.chat_id,
-                    "Codex Remote 已连接微信。\n\n直接发送消息会进入 Codex。常用命令：\n/status 查看状态\n/new 创建新会话\n/load 恢复历史会话\n/s 中断当前任务\n/q 退出当前会话",
-                )
-                .await?;
-            return Ok(());
-        }
-        Some("/status") => {
-            send_status(&state, &adapter, &message, &route).await?;
-            return Ok(());
-        }
-        Some("/new") => {
-            if let Some((_, turn_id)) = active_turn_for_message(&state, &message).await {
-                adapter
-                    .send_text(
-                        &state,
-                        &account_id,
-                        &message.chat_id,
-                        &format!(
-                            "当前任务仍在执行中（turn: {turn_id}）。请先发送 /s 中断，或等待完成。"
-                        ),
-                    )
-                    .await?;
-                return Ok(());
-            }
-            if !remote_control_backend::status_snapshot(&state)
-                .await
-                .connected
-            {
-                clear_thread_binding(&state, &route.conversation_key).await?;
-                adapter
-                    .send_text(
-                        &state,
-                        &account_id,
-                        &message.chat_id,
-                        "已解除当前绑定，但 Codex remote-control 还没有连接。请在项目目录运行 Codex，并打开 remote-control 后再发送 /new。",
-                    )
-                    .await?;
-                return Ok(());
-            }
-            send_thread_create_settings(&state, &adapter, &message, None).await?;
-            return Ok(());
-        }
-        Some("/threads") | Some("/load") => {
-            send_thread_routing_list(&state, &adapter, &message, None, None, 1).await?;
-            return Ok(());
-        }
-        Some("/next") => {
-            if let Some(request) =
-                latest_thread_request_for_conversation(&state, &message.conversation_key()).await
-                && request.stage == ThreadRoutingStage::ResumeList
-            {
-                if request.history_has_next {
-                    let next_page = request.page + 1;
-                    let cursor = request
-                        .page_cursors
-                        .get(request.page)
-                        .and_then(|value| value.as_ref())
-                        .cloned();
-                    send_thread_routing_list(
-                        &state,
-                        &adapter,
-                        &message,
-                        Some(request),
-                        cursor.as_deref(),
-                        next_page,
-                    )
-                    .await?;
-                } else {
-                    adapter
-                        .send_text(&state, &account_id, &message.chat_id, "已经是最后一页。")
-                        .await?;
-                }
-            } else {
-                adapter
-                    .send_text(
-                        &state,
-                        &account_id,
-                        &message.chat_id,
-                        "没有可翻页的会话列表，请先发送 /load。",
-                    )
-                    .await?;
-            }
-            return Ok(());
-        }
-        Some("/prev") => {
-            if let Some(request) =
-                latest_thread_request_for_conversation(&state, &message.conversation_key()).await
-                && request.stage == ThreadRoutingStage::ResumeList
-            {
-                if request.page > 1 {
-                    let previous_page = request.page - 1;
-                    let cursor = request
-                        .page_cursors
-                        .get(previous_page.saturating_sub(1))
-                        .and_then(|value| value.as_ref())
-                        .cloned();
-                    send_thread_routing_list(
-                        &state,
-                        &adapter,
-                        &message,
-                        Some(request),
-                        cursor.as_deref(),
-                        previous_page,
-                    )
-                    .await?;
-                } else {
-                    adapter
-                        .send_text(&state, &account_id, &message.chat_id, "已经是第一页。")
-                        .await?;
-                }
-            } else {
-                adapter
-                    .send_text(
-                        &state,
-                        &account_id,
-                        &message.chat_id,
-                        "没有可翻页的会话列表，请先发送 /load。",
-                    )
-                    .await?;
-            }
-            return Ok(());
-        }
-        Some("/s") | Some("/stop") => {
+        Some("/s") => {
             let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await else {
                 adapter
                     .send_text(
@@ -315,7 +185,9 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                     &state,
                     &account_id,
                     &message.chat_id,
-                    &format!("不支持的命令：{other}"),
+                    &format!(
+                        "不支持的命令：{other}。当前只支持 /s 中断当前任务、/q 退出当前会话。"
+                    ),
                 )
                 .await?;
             return Ok(());
@@ -429,41 +301,6 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             Err(error)
         }
     }
-}
-
-async fn send_status(
-    state: &SharedState,
-    adapter: &WechatAdapter,
-    message: &InboundMessage,
-    route: &RouteTarget,
-) -> Result<()> {
-    let remote = remote_control_backend::status_snapshot(state).await;
-    let bridge_enabled = state.config.lock().await.bridge.enabled;
-    let bridge_status = if bridge_enabled { "启用" } else { "停用" };
-    let remote_status = if remote.connected {
-        "已连接"
-    } else {
-        "未连接"
-    };
-    let thread_status =
-        if let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await {
-            format!("thread: {thread_id}\n执行: 执行中\nturn: {turn_id}")
-        } else if let Some(thread_id) = live_thread_for_route(state, route).await {
-            format!("thread: {thread_id}\n执行: 空闲")
-        } else {
-            "thread: 未绑定".to_string()
-        };
-    adapter
-        .send_text(
-            state,
-            &message.account_id,
-            &message.chat_id,
-            &format!(
-                "Codex Remote\nbridge: {bridge_status}\nremote-control: {remote_status}\n{thread_status}"
-            ),
-        )
-        .await?;
-    Ok(())
 }
 
 async fn create_wechat_thread_for_route(
@@ -848,7 +685,7 @@ async fn handle_thread_create_custom_cwd_text_input(
         send_thread_create_settings(state, adapter, message, Some(request)).await?;
         return Ok(true);
     }
-    if command(text).is_some_and(|command| is_control_command(&command)) {
+    if command(text).is_some() {
         request.create_draft.cwd_choice = None;
         request.create_draft.cwd_custom = None;
         state
@@ -1127,12 +964,6 @@ async fn handle_thread_list_text_reply(
     message: &InboundMessage,
     command: &str,
 ) -> Result<bool> {
-    let Some(index) = command
-        .strip_prefix('/')
-        .and_then(|value| value.parse::<usize>().ok())
-    else {
-        return Ok(false);
-    };
     let Some(request) =
         latest_thread_request_for_conversation(state, &message.conversation_key()).await
     else {
@@ -1141,6 +972,73 @@ async fn handle_thread_list_text_reply(
     if request.stage != ThreadRoutingStage::ResumeList {
         return Ok(false);
     }
+    match command {
+        "/next" => {
+            if request.history_has_next {
+                let next_page = request.page + 1;
+                let cursor = request
+                    .page_cursors
+                    .get(request.page)
+                    .and_then(|value| value.as_ref())
+                    .cloned();
+                send_thread_routing_list(
+                    state,
+                    adapter,
+                    message,
+                    Some(request),
+                    cursor.as_deref(),
+                    next_page,
+                )
+                .await?;
+            } else {
+                adapter
+                    .send_text(
+                        state,
+                        &message.account_id,
+                        &message.chat_id,
+                        "已经是最后一页。",
+                    )
+                    .await?;
+            }
+            return Ok(true);
+        }
+        "/prev" => {
+            if request.page > 1 {
+                let previous_page = request.page - 1;
+                let cursor = request
+                    .page_cursors
+                    .get(previous_page.saturating_sub(1))
+                    .and_then(|value| value.as_ref())
+                    .cloned();
+                send_thread_routing_list(
+                    state,
+                    adapter,
+                    message,
+                    Some(request),
+                    cursor.as_deref(),
+                    previous_page,
+                )
+                .await?;
+            } else {
+                adapter
+                    .send_text(
+                        state,
+                        &message.account_id,
+                        &message.chat_id,
+                        "已经是第一页。",
+                    )
+                    .await?;
+            }
+            return Ok(true);
+        }
+        _ => {}
+    }
+    let Some(index) = command
+        .strip_prefix('/')
+        .and_then(|value| value.parse::<usize>().ok())
+    else {
+        return Ok(false);
+    };
     let Some(thread_id) = request
         .thread_ids_by_page
         .get(request.page.saturating_sub(1))
@@ -1281,82 +1179,84 @@ fn thread_routing_request_rank(request_id: &str) -> u64 {
 
 fn thread_list_text(page: &crate::im::core::thread_list::ThreadRoutingPage) -> String {
     let mut lines = Vec::new();
-    lines.push("恢复历史会话".to_string());
+    lines.push("**恢复历史会话**".to_string());
     if let Some(provider) = page.model_provider_filter.as_deref() {
         lines.push(format!("已按当前 Codex App provider `{provider}` 过滤。"));
     }
-    lines.push(format!("第 {} 页", page.page.max(1)));
+    lines.push("---".to_string());
     let mut actions = vec![format!("回复 1~{} 选择会话", page.entries.len())];
     if page.page > 1 {
-        actions.push("p 上一页".to_string());
+        actions.push("**p** 上一页".to_string());
     }
     if page.next_cursor.is_some() {
-        actions.push("n 下一页".to_string());
+        actions.push("**n** 下一页".to_string());
     }
-    actions.push("new 新建会话".to_string());
-    lines.push(actions.join("，"));
-    lines.push(String::new());
+    let navigation_hint = format!("第 {} 页 · {}", page.page.max(1), actions.join("，"));
+    let mut current_cwd: Option<&str> = None;
     for (index, entry) in page.entries.iter().enumerate() {
+        let cwd = entry
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if current_cwd != cwd {
+            if !lines.last().is_some_and(|line| line.is_empty()) {
+                lines.push(String::new());
+            }
+            lines.extend(thread_project_header_lines(cwd));
+            current_cwd = cwd;
+        }
+        let state = thread_state_suffix(&entry.state);
         lines.push(format!(
-            "{}. {}",
+            "{}. **{}**{}",
             index + 1,
-            truncate_line(entry.title.trim(), 64)
+            truncate_line(entry.title.trim(), 64),
+            state.unwrap_or_default()
         ));
-        if let Some(summary) = entry
-            .summary
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            lines.push(truncate_line(summary, 96));
-        }
-        if let Some(detail) = entry
-            .last_activity_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            lines.push(detail.to_string());
-        }
         lines.push(String::new());
     }
+    if !lines.last().is_some_and(|line| line.is_empty()) {
+        lines.push(String::new());
+    }
+    lines.push("---".to_string());
+    lines.push(navigation_hint);
     lines.join("\n").trim_end().to_string()
 }
 
-fn is_control_command(command: &str) -> bool {
-    matches!(
-        command,
-        "/start"
-            | "/help"
-            | "/status"
-            | "/new"
-            | "/threads"
-            | "/load"
-            | "/next"
-            | "/prev"
-            | "/s"
-            | "/stop"
-            | "/q"
-    )
+fn thread_project_header_lines(cwd: Option<&str>) -> Vec<String> {
+    match cwd {
+        Some(cwd) => vec![
+            format!("**项目：{}**", project_name(cwd)),
+            format!("`{cwd}`"),
+        ],
+        None => vec!["**项目：未知目录**".to_string()],
+    }
+}
+
+fn thread_state_suffix(state: &str) -> Option<&'static str> {
+    if state.contains("当前会话") {
+        Some(" · 当前")
+    } else if state.contains("已加载") {
+        Some(" · 已加载")
+    } else {
+        None
+    }
+}
+
+fn project_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn command(text: &str) -> Option<String> {
     let first = text.split_whitespace().next()?.trim();
     let lower = first.to_ascii_lowercase();
-    if lower.starts_with('/') {
-        return Some(lower);
-    }
-    match lower.as_str() {
-        "n" | "next" | "下一页" => Some("/next".to_string()),
-        "p" | "prev" | "previous" | "上一页" => Some("/prev".to_string()),
-        "new" | "新建" | "新建会话" => Some("/new".to_string()),
-        "load" | "threads" | "resume" | "恢复" | "恢复历史" | "历史会话" => {
-            Some("/load".to_string())
-        }
-        "q" | "quit" | "exit" | "退出" | "取消" => Some("/q".to_string()),
-        "s" | "stop" | "中断" => Some("/s".to_string()),
-        _ => None,
-    }
+    lower.starts_with('/').then_some(lower)
 }
 
 fn menu_command(text: &str) -> Option<String> {
@@ -1369,7 +1269,15 @@ fn menu_command(text: &str) -> Option<String> {
     {
         return Some(format!("/{first}"));
     }
-    command(text)
+    let lower = first.to_ascii_lowercase();
+    if lower.starts_with('/') {
+        return Some(lower);
+    }
+    match lower.as_str() {
+        "n" | "next" | "下一页" => Some("/next".to_string()),
+        "p" | "prev" | "previous" | "上一页" => Some("/prev".to_string()),
+        _ => None,
+    }
 }
 
 fn truncate_line(text: &str, max_chars: usize) -> String {
@@ -1392,10 +1300,10 @@ mod tests {
     #[test]
     fn command_keeps_bare_numbers_as_user_text() {
         assert_eq!(command("1"), None);
-        assert_eq!(command("n"), Some("/next".to_string()));
-        assert_eq!(command("p"), Some("/prev".to_string()));
-        assert_eq!(command("new"), Some("/new".to_string()));
-        assert_eq!(command("恢复历史"), Some("/load".to_string()));
+        assert_eq!(command("n"), None);
+        assert_eq!(command("p"), None);
+        assert_eq!(command("new"), None);
+        assert_eq!(command("恢复历史"), None);
         assert_eq!(command("/n"), Some("/n".to_string()));
     }
 
@@ -1405,5 +1313,7 @@ mod tests {
         assert_eq!(menu_command(" 2 "), Some("/2".to_string()));
         assert_eq!(menu_command("n"), Some("/next".to_string()));
         assert_eq!(menu_command("p"), Some("/prev".to_string()));
+        assert_eq!(menu_command("new"), None);
+        assert_eq!(menu_command("恢复历史"), None);
     }
 }

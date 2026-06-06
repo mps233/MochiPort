@@ -8,7 +8,7 @@ use crate::{
     app_state::SharedState,
     im::core::{
         approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
-        routing::{active_turn_for_message, live_thread_for_route, route_for_message},
+        routing::{active_turn_for_message, route_for_message},
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
             ThreadCreateForm, is_approval_reply, load_thread_create_defaults_for_client,
@@ -148,7 +148,7 @@ pub(crate) async fn handle_inbound(
                 &api,
                 &message,
                 &format!(
-                    "Codex App 没有接收这条消息：{error}\n\n请确认 Codex App 还打开着 remote-control，或发送 /threads 重新选择会话。"
+                    "Codex App 没有接收这条消息：{error}\n\n请确认 Codex App 还打开着 remote-control。"
                 ),
             )
             .await?;
@@ -174,52 +174,7 @@ async fn handle_control_message(
         return handle_approval_text_reply(state, api, message, command).await;
     }
     match normalized.as_str() {
-        "/new" => {
-            if let Some((_, turn_id)) = active_turn_for_message(state, message).await {
-                send_text_to_message(
-                    api,
-                    message,
-                    &format!(
-                        "当前任务仍在执行中（turn: {turn_id}）。请先发送 /s 中断，或等待完成。"
-                    ),
-                )
-                .await?;
-                return Ok(true);
-            }
-            {
-                let mut runtime = state.runtime.lock().await;
-                runtime.unbind_routes_for_conversation_with_reason(
-                    &message.conversation_key(),
-                    "feishu_new_command",
-                );
-            }
-            send_text_to_message(
-                api,
-                message,
-                "已解除当前绑定。下一条消息会先让你选择要接入的 thread。",
-            )
-            .await?;
-            return Ok(true);
-        }
-        "/status" => {
-            let text =
-                if let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await {
-                    format!("thread: {thread_id}\n执行: 执行中\nturn: {turn_id}")
-                } else if let Some(thread_id) =
-                    live_thread_for_route(state, &route_for_message(message)).await
-                {
-                    format!("thread: {thread_id}\n执行: 空闲")
-                } else {
-                    "当前飞书会话还没有绑定任何 thread。".to_string()
-                };
-            send_text_to_message(api, message, &text).await?;
-            return Ok(true);
-        }
-        "/threads" => {
-            send_thread_routing_list(state, api, message, None, None, 1).await?;
-            return Ok(true);
-        }
-        "/s" | "/stop" => {
+        "/s" => {
             let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await else {
                 send_text_to_message(api, message, "当前没有运行中的 turn。").await?;
                 return Ok(true);
@@ -276,6 +231,15 @@ async fn handle_control_message(
                 );
             }
             send_text_to_message(api, message, "已退出当前会话。").await?;
+            return Ok(true);
+        }
+        other if other.starts_with('/') => {
+            send_text_to_message(
+                api,
+                message,
+                &format!("不支持的命令：{other}。当前只支持 /s 中断当前任务、/q 退出当前会话。"),
+            )
+            .await?;
             return Ok(true);
         }
         _ => {}
@@ -845,8 +809,8 @@ async fn send_thread_routing_list(
         .map(|entry| renderer::FeishuThreadListEntry {
             thread_id: entry.thread_id.clone(),
             title: entry.title.clone(),
-            summary: entry.summary.clone(),
-            last_activity_text: entry.last_activity_text.clone(),
+            state: entry.state.clone(),
+            cwd: entry.cwd.clone(),
         })
         .collect::<Vec<_>>();
 

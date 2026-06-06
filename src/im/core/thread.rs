@@ -190,8 +190,8 @@ pub(crate) fn next_thread_routing_request_id() -> String {
 pub(crate) struct ThreadListEntry {
     pub(crate) thread_id: String,
     pub(crate) title: String,
-    pub(crate) summary: Option<String>,
-    pub(crate) last_activity_text: Option<String>,
+    pub(crate) state: String,
+    pub(crate) cwd: Option<String>,
 }
 
 pub(crate) fn build_thread_entries(
@@ -205,21 +205,30 @@ pub(crate) fn build_thread_entries(
         .collect::<std::collections::HashSet<_>>();
     history_threads
         .iter()
-        .map(|thread| ThreadListEntry {
-            thread_id: thread
+        .map(|thread| {
+            let thread_id = thread
                 .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
-                .to_string(),
-            title: summarize_thread_title(thread),
-            summary: Some(summarize_thread_preview(thread)),
-            last_activity_text: Some(format!(
-                "{} · {}",
-                summarize_thread_route_state(thread, &loaded_set, current_thread_id),
-                summarize_thread_cwd(thread)
-            )),
+                .to_string();
+            let title = summarize_thread_title(thread);
+            ThreadListEntry {
+                thread_id,
+                title,
+                state: summarize_thread_route_state(thread, &loaded_set, current_thread_id),
+                cwd: thread_cwd(thread),
+            }
         })
         .collect::<Vec<_>>()
+}
+
+pub(crate) fn thread_cwd(thread: &serde_json::Value) -> Option<String> {
+    thread
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) fn summarize_thread_title(thread: &serde_json::Value) -> String {
@@ -247,15 +256,9 @@ pub(crate) fn summarize_thread_title(thread: &serde_json::Value) -> String {
 }
 
 pub(crate) fn summarize_thread_cwd(thread: &serde_json::Value) -> String {
-    let cwd = thread
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default();
-    if cwd.is_empty() {
-        "目录未知".to_string()
-    } else {
-        format!("目录：`{cwd}`")
-    }
+    thread_cwd(thread)
+        .map(|cwd| format!("目录：`{cwd}`"))
+        .unwrap_or_else(|| "目录未知".to_string())
 }
 
 pub(crate) fn summarize_thread_status(thread: &serde_json::Value) -> String {
@@ -705,16 +708,6 @@ fn permission_label(permission: &str) -> String {
         "full_access" | "full-access" => "完全访问权限".to_string(),
         other => other.to_string(),
     }
-}
-
-fn summarize_thread_preview(thread: &serde_json::Value) -> String {
-    thread
-        .get("preview")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(|v| truncate_text(v, 120))
-        .unwrap_or_else(|| "无预览".to_string())
 }
 
 fn summarize_thread_route_state(
@@ -1169,17 +1162,7 @@ mod tests {
             .map(|entry| entry.thread_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["thread-z", "thread-a", "thread-m"]);
-        assert!(
-            entries[1]
-                .last_activity_text
-                .as_deref()
-                .is_some_and(|text| text.contains("已加载"))
-        );
-        assert!(
-            entries[2]
-                .last_activity_text
-                .as_deref()
-                .is_some_and(|text| text.contains("当前会话"))
-        );
+        assert!(entries[1].state.contains("已加载"));
+        assert!(entries[2].state.contains("当前会话"));
     }
 }

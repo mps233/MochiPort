@@ -449,8 +449,8 @@ pub struct FeishuThreadRoutingAction {
 pub struct FeishuThreadListEntry {
     pub thread_id: String,
     pub title: String,
-    pub summary: Option<String>,
-    pub last_activity_text: Option<String>,
+    pub state: String,
+    pub cwd: Option<String>,
 }
 
 fn build_interactive_choice_block(
@@ -508,27 +508,14 @@ fn build_interactive_choice_block(
 }
 
 fn build_thread_list_row(request_id: &str, entry: &FeishuThreadListEntry) -> serde_json::Value {
-    let primary_text = entry
-        .summary
-        .as_ref()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-        .map(normalize_card_markdown)
-        .unwrap_or_else(|| {
-            if entry.title.trim().is_empty() {
-                format!("会话 {}", normalize_card_markdown(&entry.thread_id))
-            } else {
-                normalize_card_markdown(&entry.title)
-            }
-        });
+    let primary_text = if entry.title.trim().is_empty() {
+        format!("会话 {}", normalize_card_markdown(&entry.thread_id))
+    } else {
+        normalize_card_markdown(&entry.title)
+    };
     let mut details = Vec::new();
-    if let Some(last_activity) = entry
-        .last_activity_text
-        .as_ref()
-        .map(|v| v.trim())
-        .filter(|v| !v.is_empty())
-    {
-        details.push(format!("最近活动：{last_activity}"));
+    if let Some(state) = thread_state_suffix(&entry.state) {
+        details.push(state.to_string());
     }
     let mut text_elements = vec![serde_json::json!({
         "tag": "markdown",
@@ -562,6 +549,44 @@ fn build_thread_list_row(request_id: &str, entry: &FeishuThreadListEntry) -> ser
             }
         ]
     })
+}
+
+fn thread_project_header(cwd: Option<&str>) -> serde_json::Value {
+    let content = match cwd {
+        Some(cwd) => {
+            let name = project_name(cwd);
+            format!(
+                "**项目：{}**\n<font color='grey'>{}</font>",
+                normalize_card_markdown(&name),
+                normalize_card_markdown(cwd)
+            )
+        }
+        None => "**项目：未知目录**".to_string(),
+    };
+    serde_json::json!({
+        "tag": "markdown",
+        "content": content
+    })
+}
+
+fn thread_state_suffix(state: &str) -> Option<&'static str> {
+    if state.contains("当前会话") {
+        Some("当前")
+    } else if state.contains("已加载") {
+        Some("已加载")
+    } else {
+        None
+    }
+}
+
+fn project_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn file_change_kind_label(change: &JsonValue) -> &'static str {
@@ -1635,7 +1660,17 @@ pub fn build_thread_list_card(
             "content": "<font color='grey'>当前工作区下没有可恢复的历史会话。</font>"
         }));
     } else {
+        let mut current_cwd: Option<&str> = None;
         for entry in entries.iter() {
+            let cwd = entry
+                .cwd
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            if current_cwd != cwd {
+                elements.push(thread_project_header(cwd));
+                current_cwd = cwd;
+            }
             elements.push(build_thread_list_row(request_id, entry));
         }
     }
