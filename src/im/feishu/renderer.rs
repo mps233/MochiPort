@@ -1,6 +1,6 @@
 use serde_json::Value as JsonValue;
 
-use crate::im::core::thread::ThreadCreateDefaults;
+use crate::im::core::{i18n::ImText, thread::ThreadCreateDefaults};
 use crate::im::feishu::types::FeishuUserInputQuestion;
 use crate::im_runtime::ApprovalDecisionOption;
 
@@ -460,11 +460,12 @@ fn build_interactive_choice_block(
     _primary: bool,
     selected: bool,
     resolved: bool,
+    text: ImText,
 ) -> serde_json::Value {
     let title_content = if selected {
         format!(
-            "**<font color='blue'>已选择 · {}</font>**",
-            normalize_card_markdown(label)
+            "**<font color='blue'>{}</font>**",
+            normalize_card_markdown(&text.selected_prefix_feishu(label))
         )
     } else {
         normalize_card_markdown(label)
@@ -507,14 +508,18 @@ fn build_interactive_choice_block(
     container
 }
 
-fn build_thread_list_row(request_id: &str, entry: &FeishuThreadListEntry) -> serde_json::Value {
+fn build_thread_list_row(
+    request_id: &str,
+    entry: &FeishuThreadListEntry,
+    text: ImText,
+) -> serde_json::Value {
     let primary_text = if entry.title.trim().is_empty() {
-        format!("会话 {}", normalize_card_markdown(&entry.thread_id))
+        normalize_card_markdown(&text.thread_title_fallback(&entry.thread_id))
     } else {
         normalize_card_markdown(&entry.title)
     };
     let mut details = Vec::new();
-    if let Some(state) = thread_state_suffix(&entry.state) {
+    if let Some(state) = thread_state_suffix(&entry.state, text) {
         details.push(state.to_string());
     }
     let mut text_elements = vec![serde_json::json!({
@@ -551,17 +556,20 @@ fn build_thread_list_row(request_id: &str, entry: &FeishuThreadListEntry) -> ser
     })
 }
 
-fn thread_project_header(cwd: Option<&str>) -> serde_json::Value {
+fn thread_project_header(cwd: Option<&str>, text: ImText) -> serde_json::Value {
     let content = match cwd {
         Some(cwd) => {
             let name = project_name(cwd);
             format!(
-                "**项目：{}**\n<font color='grey'>{}</font>",
-                normalize_card_markdown(&name),
+                "**{}**\n<font color='grey'>{}</font>",
+                normalize_card_markdown(&text.project_header(&name)),
                 normalize_card_markdown(cwd)
             )
         }
-        None => "**项目：未知目录**".to_string(),
+        None => format!(
+            "**{}**",
+            normalize_card_markdown(text.unknown_project_header())
+        ),
     };
     serde_json::json!({
         "tag": "markdown",
@@ -569,11 +577,11 @@ fn thread_project_header(cwd: Option<&str>) -> serde_json::Value {
     })
 }
 
-fn thread_state_suffix(state: &str) -> Option<&'static str> {
-    if state.contains("当前会话") {
-        Some("当前")
-    } else if state.contains("已加载") {
-        Some("已加载")
+fn thread_state_suffix(state: &str, text: ImText) -> Option<&'static str> {
+    if state.contains("当前会话") || state.contains("Current session") {
+        Some(text.current_short())
+    } else if state.contains("已加载") || state.contains("Loaded") {
+        Some(text.loaded_short())
     } else {
         None
     }
@@ -813,13 +821,18 @@ pub fn build_approval_card(
     summary: &str,
     decisions: &[ApprovalDecisionOption],
     request_key: &str,
+    text: ImText,
 ) -> serde_json::Value {
     let content = normalize_card_markdown(summary);
     let mut elements = vec![
         {
             serde_json::json!({
                 "tag": "markdown",
-                "content": format!("**approval request: `{}`**", normalize_card_markdown(kind_label))
+                "content": format!(
+                    "**{}: `{}`**",
+                    normalize_card_markdown(text.approval_request_heading()),
+                    normalize_card_markdown(kind_label)
+                )
             })
         },
         {
@@ -835,7 +848,11 @@ pub fn build_approval_card(
         }));
         elements.push(build_approval_button_row(decisions, request_key));
     }
-    let mut card = build_markdown_card("", Some("approval pending"), Some(APPROVAL_CARD_TEMPLATE));
+    let mut card = build_markdown_card(
+        "",
+        Some(text.approval_pending_title()),
+        Some(APPROVAL_CARD_TEMPLATE),
+    );
     card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
     card["body"]["vertical_spacing"] = serde_json::json!("8px");
     card["body"]["elements"] = serde_json::Value::Array(elements);
@@ -847,13 +864,18 @@ pub fn build_resolved_approval_card(
     summary: &str,
     decision_label: &str,
     option_index: usize,
+    text: ImText,
 ) -> serde_json::Value {
     let content = normalize_card_markdown(summary);
     let selected = normalize_card_markdown(decision_label.trim());
     let elements = vec![
         serde_json::json!({
             "tag": "markdown",
-            "content": format!("**approval request: `{}`**", normalize_card_markdown(kind_label))
+            "content": format!(
+                "**{}: `{}`**",
+                normalize_card_markdown(text.approval_request_heading()),
+                normalize_card_markdown(kind_label)
+            )
         }),
         serde_json::json!({
             "tag": "markdown",
@@ -864,10 +886,13 @@ pub fn build_resolved_approval_card(
         }),
         serde_json::json!({
             "tag": "markdown",
-            "content": format!("**selected /{}: {}**", option_index, selected)
+            "content": format!(
+                "**{}**",
+                normalize_card_markdown(&text.approval_selected_label(option_index, &selected))
+            )
         }),
     ];
-    let mut card = build_markdown_card("", Some("approval resolved"), Some("green"));
+    let mut card = build_markdown_card("", Some(text.approval_resolved_title()), Some("green"));
     card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
     card["body"]["vertical_spacing"] = serde_json::json!("8px");
     card["body"]["elements"] = serde_json::Value::Array(elements);
@@ -1320,6 +1345,7 @@ pub fn build_thread_routing_choice_card(
     title: &str,
     body: &str,
     actions: &[FeishuThreadRoutingAction],
+    text: ImText,
 ) -> serde_json::Value {
     let mut elements = vec![
         serde_json::json!({
@@ -1328,7 +1354,7 @@ pub fn build_thread_routing_choice_card(
         }),
         serde_json::json!({
             "tag": "markdown",
-            "content": "<font color='orange'>提示：回复 `/q` 可退出当前会话，回复 `/s` 可中断当前任务。</font>"
+            "content": format!("<font color='orange'>{}</font>", normalize_card_markdown(text.create_choice_tip_feishu()))
         }),
     ];
     for action in actions {
@@ -1339,6 +1365,7 @@ pub fn build_thread_routing_choice_card(
             action.primary,
             action.selected,
             action.resolved,
+            text,
         ));
     }
 
@@ -1352,45 +1379,52 @@ pub fn build_thread_routing_choice_card(
 pub fn build_thread_create_settings_card(
     request_id: &str,
     defaults: &ThreadCreateDefaults,
+    text: ImText,
 ) -> serde_json::Value {
-    let cwd_options = thread_cwd_options(defaults);
-    let model_options = thread_model_options(defaults);
-    let effort_options = thread_effort_options(defaults);
-    let permission_options = thread_permission_options();
-    let default_line = |label: &str, value: Option<&String>| {
-        format!(
-            "{}：{}",
+    let cwd_options = thread_cwd_options(defaults, text);
+    let model_options = thread_model_options(defaults, text);
+    let effort_options = thread_effort_options(defaults, text);
+    let permission_options = thread_permission_options(text);
+    let default_line = |label: &str, value: Option<String>| {
+        text.field_line(
             label,
-            value
-                .map(|value| normalize_card_markdown(value))
+            &value
+                .as_deref()
+                .map(normalize_card_markdown)
                 .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| "使用 Codex App 默认值".to_string())
+                .unwrap_or_else(|| text.codex_app_default_value().to_string()),
         )
     };
-    let remote_line = format!(
-        "远端：{}",
-        defaults
+    let remote_line = text.field_line(
+        text.remote_label(),
+        &defaults
             .remote_name
             .as_ref()
             .map(|value| normalize_card_markdown(value))
             .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "未连接".to_string())
+            .unwrap_or_else(|| text.not_connected().to_string()),
     );
     let mut elements = vec![
         serde_json::json!({
             "tag": "markdown",
-            "content": "选择这次新会话的属性。Provider 固定使用 Codex App 当前配置。"
+            "content": text.create_settings_card_intro()
         }),
         serde_json::json!({
             "tag": "markdown",
             "content": format!(
                 "<font color='grey'>{}\n{}\n{}\n{}\n{}\n{}</font>",
                 remote_line,
-                default_line("目录", defaults.cwd.as_ref()),
-                default_line("Provider", defaults.model_provider.as_ref()),
-                default_line("模型", defaults.model.as_ref()),
-                default_line("推理强度", defaults.effort.as_ref()),
-                default_line("权限", defaults.permission.as_ref())
+                default_line(text.cwd_label(), defaults.cwd.clone()),
+                default_line(text.provider_label(), defaults.model_provider.clone()),
+                default_line(text.model_label(), defaults.model.clone()),
+                default_line(text.effort_label(), defaults.effort.clone()),
+                default_line(
+                    text.permission_label_title(),
+                    defaults
+                        .permission
+                        .as_deref()
+                        .map(|permission| text.permission_label(permission))
+                )
             )
         }),
         serde_json::json!({
@@ -1402,11 +1436,11 @@ pub fn build_thread_create_settings_card(
             "elements": [
                 {
                     "tag": "markdown",
-                    "content": "**项目目录**"
+                    "content": format!("**{}**", text.cwd_section())
                 },
                 select_static_element(
                     "cwd_choice",
-                    "选择已有项目目录",
+                    text.cwd_select_placeholder(),
                     cwd_options
                 ),
                 {
@@ -1415,34 +1449,34 @@ pub fn build_thread_create_settings_card(
                     "required": false,
                     "placeholder": {
                         "tag": "plain_text",
-                        "content": "可选：填绝对路径；不存在会自动创建"
+                        "content": text.cwd_custom_placeholder()
                     }
                 },
                 {
                     "tag": "markdown",
-                    "content": "**模型**"
+                    "content": format!("**{}**", text.model_section())
                 },
                 select_static_element(
                     "model",
-                    "选择模型",
+                    text.model_select_placeholder(),
                     model_options
                 ),
                 {
                     "tag": "markdown",
-                    "content": "**推理强度**"
+                    "content": format!("**{}**", text.effort_section())
                 },
                 select_static_element(
                     "effort",
-                    "选择推理强度",
+                    text.effort_select_placeholder(),
                     effort_options
                 ),
                 {
                     "tag": "markdown",
-                    "content": "**权限**"
+                    "content": format!("**{}**", text.permission_section())
                 },
                 select_static_element(
                     "permission",
-                    "选择权限",
+                    text.permission_select_placeholder(),
                     permission_options
                 ),
                 {
@@ -1458,7 +1492,7 @@ pub fn build_thread_create_settings_card(
                                     "type": "primary",
                                     "text": {
                                         "tag": "plain_text",
-                                        "content": "确认创建"
+                                        "content": text.confirm_create_button()
                                     },
                                     "name": "submit_thread_create",
                                     "form_action_type": "submit",
@@ -1480,8 +1514,8 @@ pub fn build_thread_create_settings_card(
         }),
     ];
     elements.push(build_interactive_choice_block(
-        "使用默认配置创建",
-        "使用当前 provider，不指定目录、模型和推理强度。",
+        text.create_default_button(),
+        text.create_default_description(),
         serde_json::json!({
             "kind": "thread_route_create_default",
             "requestId": request_id
@@ -1489,10 +1523,11 @@ pub fn build_thread_create_settings_card(
         false,
         false,
         false,
+        text,
     ));
     elements.push(build_interactive_choice_block(
-        "返回",
-        "回到新建/恢复会话选择。",
+        text.back_button(),
+        text.back_description(),
         serde_json::json!({
             "kind": "thread_route_choice",
             "requestId": request_id,
@@ -1501,9 +1536,10 @@ pub fn build_thread_create_settings_card(
         false,
         false,
         false,
+        text,
     ));
 
-    let mut card = build_markdown_card("", Some("新建会话设置"), Some("indigo"));
+    let mut card = build_markdown_card("", Some(text.create_settings_card_title()), Some("indigo"));
     card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
     card["body"]["vertical_spacing"] = serde_json::json!("8px");
     card["body"]["elements"] = serde_json::Value::Array(elements);
@@ -1538,9 +1574,9 @@ fn select_static_element(
     })
 }
 
-fn thread_cwd_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String)> {
+fn thread_cwd_options(defaults: &ThreadCreateDefaults, text: ImText) -> Vec<(String, String)> {
     let mut options = vec![(
-        "使用 Codex App 默认目录".to_string(),
+        text.use_default_cwd().to_string(),
         "__default__".to_string(),
     )];
     for project in defaults
@@ -1550,14 +1586,20 @@ fn thread_cwd_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String)> 
         .filter(|value| !value.is_empty())
         .take(20)
     {
-        options.push((project_option_label(project), project.to_string()));
+        options.push((project_option_label_with_path(project), project.to_string()));
     }
-    options.push(("自定义或新建目录".to_string(), "__custom__".to_string()));
+    options.push((
+        text.custom_cwd_label().to_string(),
+        "__custom__".to_string(),
+    ));
     dedupe_options(options)
 }
 
-fn thread_model_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String)> {
-    let mut options = vec![("使用当前模型".to_string(), "__default__".to_string())];
+fn thread_model_options(defaults: &ThreadCreateDefaults, text: ImText) -> Vec<(String, String)> {
+    let mut options = vec![(
+        text.use_current_model().to_string(),
+        "__default__".to_string(),
+    )];
     for model in defaults
         .models
         .iter()
@@ -1568,15 +1610,15 @@ fn thread_model_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String)
     dedupe_options(options)
 }
 
-fn thread_effort_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String)> {
+fn thread_effort_options(defaults: &ThreadCreateDefaults, text: ImText) -> Vec<(String, String)> {
     let mut options = vec![(
-        "使用模型默认推理强度".to_string(),
+        text.use_model_default_effort().to_string(),
         "__default__".to_string(),
     )];
     if let Some(effort) = defaults.effort.as_deref().map(str::trim)
         && !effort.is_empty()
     {
-        options.push((reasoning_effort_label(effort), effort.to_string()));
+        options.push((text.reasoning_effort_label(effort), effort.to_string()));
     }
     for effort in defaults
         .efforts
@@ -1584,29 +1626,26 @@ fn thread_effort_options(defaults: &ThreadCreateDefaults) -> Vec<(String, String
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
     {
-        options.push((reasoning_effort_label(effort), effort.to_string()));
+        options.push((text.reasoning_effort_label(effort), effort.to_string()));
     }
     dedupe_options(options)
 }
 
-fn thread_permission_options() -> Vec<(String, String)> {
+fn thread_permission_options(text: ImText) -> Vec<(String, String)> {
     vec![
-        ("默认权限".to_string(), "workspace_user".to_string()),
-        ("自动审查".to_string(), "auto_review".to_string()),
-        ("完全访问权限".to_string(), "full_access".to_string()),
+        (
+            text.default_permission_label().to_string(),
+            "workspace_user".to_string(),
+        ),
+        (
+            text.auto_review_label().to_string(),
+            "auto_review".to_string(),
+        ),
+        (
+            text.full_access_label().to_string(),
+            "full_access".to_string(),
+        ),
     ]
-}
-
-fn reasoning_effort_label(effort: &str) -> String {
-    match effort {
-        "none" => "无".to_string(),
-        "minimal" => "极低".to_string(),
-        "low" => "低".to_string(),
-        "medium" => "中".to_string(),
-        "high" => "高".to_string(),
-        "xhigh" => "超高".to_string(),
-        other => other.to_string(),
-    }
 }
 
 fn dedupe_options(options: Vec<(String, String)>) -> Vec<(String, String)> {
@@ -1632,6 +1671,15 @@ fn project_option_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+fn project_option_label_with_path(path: &str) -> String {
+    let name = project_option_label(path);
+    if name == path {
+        path.to_string()
+    } else {
+        format!("{name} - {path}")
+    }
+}
+
 pub fn build_thread_list_card(
     request_id: &str,
     title: &str,
@@ -1640,6 +1688,7 @@ pub fn build_thread_list_card(
     page: usize,
     has_prev: bool,
     has_next: bool,
+    text: ImText,
 ) -> serde_json::Value {
     let mut elements = vec![
         serde_json::json!({
@@ -1648,14 +1697,20 @@ pub fn build_thread_list_card(
         }),
         serde_json::json!({
             "tag": "markdown",
-            "content": format!("<font color='grey'>第 {} 页</font>", page.max(1))
+            "content": format!(
+                "<font color='grey'>{}</font>",
+                text.page_label(page)
+            )
         }),
     ];
 
     if entries.is_empty() {
         elements.push(serde_json::json!({
             "tag": "markdown",
-            "content": "<font color='grey'>当前工作区下没有可恢复的历史会话。</font>"
+            "content": format!(
+                "<font color='grey'>{}</font>",
+                text.no_restorable_history_workspace()
+            )
         }));
     } else {
         let mut current_cwd: Option<&str> = None;
@@ -1666,10 +1721,10 @@ pub fn build_thread_list_card(
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
             if current_cwd != cwd {
-                elements.push(thread_project_header(cwd));
+                elements.push(thread_project_header(cwd, text));
                 current_cwd = cwd;
             }
-            elements.push(build_thread_list_row(request_id, entry));
+            elements.push(build_thread_list_row(request_id, entry, text));
         }
     }
 
@@ -1684,7 +1739,7 @@ pub fn build_thread_list_card(
                     "type": "default",
                     "text": {
                         "tag": "plain_text",
-                        "content": "上一页"
+                        "content": text.previous_page_button()
                     },
                     "behaviors": [
                         {
@@ -1710,7 +1765,7 @@ pub fn build_thread_list_card(
                     "type": "default",
                     "text": {
                         "tag": "plain_text",
-                        "content": "下一页"
+                        "content": text.next_page_button()
                     },
                     "behaviors": [
                         {

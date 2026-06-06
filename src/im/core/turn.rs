@@ -5,38 +5,18 @@ use crate::{
     im::core::routing::{
         clear_thread_binding_with_reason, is_stale_thread_error, live_thread_for_route,
     },
-    im_runtime::{RouteTarget, ThreadTurnState, TurnOrigin},
+    im_runtime::{RouteTarget, TurnOrigin},
     remote_control_backend,
     types::InboundAttachment,
 };
 
 pub(crate) enum TurnStartOutcome {
-    Started {
-        thread_id: String,
-        turn_id: String,
-    },
-    Busy {
-        thread_id: String,
-        turn_id: Option<String>,
-    },
-    Expired {
-        thread_id: String,
-    },
+    Started { thread_id: String, turn_id: String },
+    Busy,
+    Expired { thread_id: String },
     NoThread,
-    Stale {
-        thread_id: String,
-    },
-    Failed {
-        error: Error,
-    },
-}
-
-pub(crate) fn turn_busy_notice(_thread_id: &str, _turn_id: &str) -> &'static str {
-    "任务还在进行中，打断 /s，退出会话 /q。"
-}
-
-pub(crate) fn turn_completed_notice() -> &'static str {
-    "✅ 已完成"
+    Stale { thread_id: String },
+    Failed { error: Error },
 }
 
 pub(crate) async fn start_turn_for_route(
@@ -60,13 +40,7 @@ pub(crate) async fn start_turn_for_route(
                 })
             }
             Ok(()) => None,
-            Err(active_turn) => Some(TurnStartOutcome::Busy {
-                thread_id: thread_id.clone(),
-                turn_id: match active_turn {
-                    ThreadTurnState::Starting => None,
-                    ThreadTurnState::Running(turn_id) => Some(turn_id),
-                },
-            }),
+            Err(_active_turn) => Some(TurnStartOutcome::Busy),
         }
     };
     if let Some(blocked) = blocked {

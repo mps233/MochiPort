@@ -4,10 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result, anyhow};
 
 use crate::{
-    app_state::SharedState,
-    codex_app_config,
-    im_runtime::{PendingApproval, ThreadCreateDraftState},
-    remote_control_backend,
+    app_state::SharedState, codex_app_config, im::core::i18n::ImText,
+    im_runtime::ThreadCreateDraftState, remote_control_backend,
 };
 
 static THREAD_ROUTING_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -106,23 +104,27 @@ pub(crate) fn thread_start_options_with_current_provider(
 
 pub(crate) fn summarize_thread_start_options(
     options: &remote_control_backend::ThreadStartOptions,
+    text: ImText,
 ) -> String {
     let mut lines = Vec::new();
     if let Some(cwd) = options.cwd.as_ref() {
-        lines.push(format!("目录：`{cwd}`"));
+        lines.push(text.field_line(text.cwd_label(), &format!("`{cwd}`")));
     } else {
-        lines.push("目录：使用 Codex App 默认值".to_string());
+        lines.push(text.field_line(text.cwd_label(), text.codex_app_default_value()));
     }
     if let Some(provider) = options.model_provider.as_ref() {
-        lines.push(format!("Provider：`{provider}`"));
+        lines.push(text.field_line(text.provider_label(), &format!("`{provider}`")));
     }
     if let Some(model) = options.model.as_ref() {
-        lines.push(format!("模型：`{model}`"));
+        lines.push(text.field_line(text.model_label(), &format!("`{model}`")));
     }
     if let Some(effort) = options.reasoning_effort.as_ref() {
-        lines.push(format!("推理强度：`{effort}`"));
+        lines.push(text.field_line(text.effort_label(), &format!("`{effort}`")));
     }
-    lines.push(format!("权限：{}", thread_start_permission_label(options)));
+    lines.push(text.field_line(
+        text.permission_label_title(),
+        &thread_start_permission_label(options, text),
+    ));
     lines.join("\n")
 }
 
@@ -164,7 +166,7 @@ pub(crate) async fn load_thread_create_defaults_for_client(
             .or_else(|| local_config_string(local_doc.as_ref(), "model_provider")),
         model: model.clone(),
         effort: effort.clone(),
-        permission: infer_permission_label(remote_config.as_ref()),
+        permission: infer_permission_mode(remote_config.as_ref()),
         projects: codex_project_paths(local_doc.as_ref()),
         models: thread_model_choices(model.as_deref(), &catalog),
         efforts: thread_reasoning_effort_choices(model.as_deref(), &catalog, effort.as_deref()),
@@ -198,6 +200,7 @@ pub(crate) fn build_thread_entries(
     loaded_ids: &[String],
     history_threads: &[serde_json::Value],
     current_thread_id: Option<&str>,
+    text: ImText,
 ) -> Vec<ThreadListEntry> {
     let loaded_set = loaded_ids
         .iter()
@@ -211,11 +214,11 @@ pub(crate) fn build_thread_entries(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
-            let title = summarize_thread_title(thread);
+            let title = summarize_thread_title(thread, text);
             ThreadListEntry {
                 thread_id,
                 title,
-                state: summarize_thread_route_state(thread, &loaded_set, current_thread_id),
+                state: summarize_thread_route_state(thread, &loaded_set, current_thread_id, text),
                 cwd: thread_cwd(thread),
             }
         })
@@ -231,7 +234,7 @@ pub(crate) fn thread_cwd(thread: &serde_json::Value) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn summarize_thread_title(thread: &serde_json::Value) -> String {
+pub(crate) fn summarize_thread_title(thread: &serde_json::Value, text: ImText) -> String {
     thread
         .get("name")
         .and_then(|v| v.as_str())
@@ -251,29 +254,22 @@ pub(crate) fn summarize_thread_title(thread: &serde_json::Value) -> String {
                 .get("id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            format!("会话 {thread_id}")
+            text.thread_title_fallback(thread_id)
         })
 }
 
-pub(crate) fn summarize_thread_cwd(thread: &serde_json::Value) -> String {
-    thread_cwd(thread)
-        .map(|cwd| format!("目录：`{cwd}`"))
-        .unwrap_or_else(|| "目录未知".to_string())
+pub(crate) fn summarize_thread_cwd(thread: &serde_json::Value, text: ImText) -> String {
+    text.thread_cwd_summary(thread_cwd(thread))
 }
 
-pub(crate) fn summarize_thread_status(thread: &serde_json::Value) -> String {
-    match thread
-        .get("status")
-        .and_then(|v| v.get("type"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-    {
-        "active" => "运行中".to_string(),
-        "idle" => "空闲".to_string(),
-        "notLoaded" => "未加载".to_string(),
-        "systemError" => "系统错误".to_string(),
-        other => other.to_string(),
-    }
+pub(crate) fn summarize_thread_status(thread: &serde_json::Value, text: ImText) -> String {
+    text.thread_status(
+        thread
+            .get("status")
+            .and_then(|v| v.get("type"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown"),
+    )
 }
 
 pub(crate) fn is_approval_reply(command: &str) -> bool {
@@ -284,43 +280,39 @@ pub(crate) fn is_approval_reply(command: &str) -> bool {
             .is_some()
 }
 
-pub(crate) fn approval_reply_hint(pending: &PendingApproval) -> String {
-    let options = pending
-        .decisions
-        .iter()
-        .enumerate()
-        .map(|(index, _)| format!("/{}", index + 1))
-        .collect::<Vec<_>>();
-    if options.is_empty() {
-        "`/y` 或 `/n`".to_string()
-    } else {
-        options.join("、")
-    }
-}
-
 pub(crate) fn thread_create_help_text(
     defaults: &ThreadCreateDefaults,
     draft: &ThreadCreateDraftState,
+    text: ImText,
 ) -> String {
     let lines = vec![
-        "创建新 Codex thread".to_string(),
+        text.create_thread_heading().to_string(),
         String::new(),
-        "当前设置：".to_string(),
-        format!("目录：{}", selected_cwd_text(defaults, draft)),
-        format!(
-            "Provider：{}",
+        text.current_settings_heading().to_string(),
+        text.field_line(text.cwd_label(), &selected_cwd_text(defaults, draft, text)),
+        text.field_line(
+            text.provider_label(),
             defaults
                 .model_provider
                 .as_deref()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .unwrap_or("使用 Codex App 当前 provider")
+                .unwrap_or(text.use_current_provider()),
         ),
-        format!("模型：{}", selected_model_text(defaults, draft)),
-        format!("推理强度：{}", selected_effort_text(defaults, draft)),
-        format!("权限：{}", selected_permission_text(defaults, draft)),
+        text.field_line(
+            text.model_label(),
+            &selected_model_text(defaults, draft, text),
+        ),
+        text.field_line(
+            text.effort_label(),
+            &selected_effort_text(defaults, draft, text),
+        ),
+        text.field_line(
+            text.permission_label_title(),
+            &selected_permission_text(defaults, draft, text),
+        ),
         String::new(),
-        "请选择要修改的设置，确认后创建。".to_string(),
+        text.create_help_footer().to_string(),
     ];
     lines.join("\n")
 }
@@ -329,12 +321,13 @@ pub(crate) fn create_options_for_field(
     defaults: &ThreadCreateDefaults,
     draft: &ThreadCreateDraftState,
     field: &str,
+    text: ImText,
 ) -> Result<(String, String, Vec<(String, ThreadCreateOption)>)> {
     match field {
-        "cwd" => Ok(cwd_create_options(defaults, draft)),
-        "model" => Ok(model_create_options(defaults, draft)),
-        "effort" => Ok(effort_create_options(defaults, draft)),
-        "perm" => Ok(permission_create_options(defaults, draft)),
+        "cwd" => Ok(cwd_create_options(defaults, draft, text)),
+        "model" => Ok(model_create_options(defaults, draft, text)),
+        "effort" => Ok(effort_create_options(defaults, draft, text)),
+        "perm" => Ok(permission_create_options(defaults, draft, text)),
         _ => Err(anyhow!("不支持的创建字段：{field}")),
     }
 }
@@ -380,14 +373,16 @@ pub(crate) fn normalize_thread_create_field(field: &str) -> Option<&'static str>
 fn cwd_create_options(
     defaults: &ThreadCreateDefaults,
     draft: &ThreadCreateDraftState,
+    text: ImText,
 ) -> (String, String, Vec<(String, ThreadCreateOption)>) {
     let mut options = Vec::new();
     push_create_option(
         &mut options,
         "__default__",
-        "使用 Codex App 默认目录",
+        text.use_default_cwd(),
         None,
         draft.cwd_custom.is_none() && is_default_selection(draft.cwd_choice.as_deref()),
+        text,
     );
     for project in defaults
         .projects
@@ -401,11 +396,12 @@ fn cwd_create_options(
             &project_option_label(project),
             Some(project.to_string()),
             draft.cwd_custom.is_none() && draft.cwd_choice.as_deref() == Some(project),
+            text,
         );
     }
     (
-        "选择项目目录".to_string(),
-        format!("当前：{}", selected_cwd_text(defaults, draft)),
+        text.select_project_dir_title().to_string(),
+        text.current_prefix(&selected_cwd_text(defaults, draft, text)),
         options,
     )
 }
@@ -413,20 +409,22 @@ fn cwd_create_options(
 fn model_create_options(
     defaults: &ThreadCreateDefaults,
     draft: &ThreadCreateDraftState,
+    text: ImText,
 ) -> (String, String, Vec<(String, ThreadCreateOption)>) {
     let mut options = Vec::new();
     push_create_option(
         &mut options,
         "__default__",
-        "使用当前模型",
+        text.use_current_model(),
         Some(
             defaults
                 .model
                 .as_deref()
-                .map(|model| format!("当前默认：{model}"))
-                .unwrap_or_else(|| "不覆盖模型，由 Codex App 决定".to_string()),
+                .map(|model| text.current_default_prefix(model))
+                .unwrap_or_else(|| text.do_not_override_model().to_string()),
         ),
         is_default_selection(draft.model.as_deref()),
+        text,
     );
     for model in defaults
         .models
@@ -439,11 +437,12 @@ fn model_create_options(
             &model.label,
             None,
             draft.model.as_deref() == Some(model.value.as_str()),
+            text,
         );
     }
     (
-        "选择模型".to_string(),
-        format!("当前：{}", selected_model_text(defaults, draft)),
+        text.select_model_title().to_string(),
+        text.current_prefix(&selected_model_text(defaults, draft, text)),
         options,
     )
 }
@@ -451,20 +450,22 @@ fn model_create_options(
 fn effort_create_options(
     defaults: &ThreadCreateDefaults,
     draft: &ThreadCreateDraftState,
+    text: ImText,
 ) -> (String, String, Vec<(String, ThreadCreateOption)>) {
     let mut options = Vec::new();
     push_create_option(
         &mut options,
         "__default__",
-        "使用模型默认推理强度",
+        text.use_model_default_effort(),
         Some(
             defaults
                 .effort
                 .as_deref()
-                .map(|effort| format!("当前默认：{}", reasoning_effort_label(effort)))
-                .unwrap_or_else(|| "不覆盖推理强度，由模型决定".to_string()),
+                .map(|effort| text.current_default_prefix(&text.reasoning_effort_label(effort)))
+                .unwrap_or_else(|| text.do_not_override_effort().to_string()),
         ),
         is_default_selection(draft.effort.as_deref()),
+        text,
     );
     if let Some(effort) = defaults
         .effort
@@ -475,9 +476,10 @@ fn effort_create_options(
         push_create_option(
             &mut options,
             effort,
-            &reasoning_effort_label(effort),
+            &text.reasoning_effort_label(effort),
             None,
             draft.effort.as_deref() == Some(effort),
+            text,
         );
     }
     for effort in defaults
@@ -489,14 +491,15 @@ fn effort_create_options(
         push_create_option(
             &mut options,
             effort,
-            &reasoning_effort_label(effort),
+            &text.reasoning_effort_label(effort),
             None,
             draft.effort.as_deref() == Some(effort),
+            text,
         );
     }
     (
-        "选择推理强度".to_string(),
-        format!("当前：{}", selected_effort_text(defaults, draft)),
+        text.select_effort_title().to_string(),
+        text.current_prefix(&selected_effort_text(defaults, draft, text)),
         options,
     )
 }
@@ -504,32 +507,38 @@ fn effort_create_options(
 fn permission_create_options(
     defaults: &ThreadCreateDefaults,
     draft: &ThreadCreateDraftState,
+    text: ImText,
 ) -> (String, String, Vec<(String, ThreadCreateOption)>) {
     let mut options = Vec::new();
     push_create_option(
         &mut options,
         "__default__",
-        "使用 Codex App 当前权限",
+        text.use_current_permission(),
         Some(
             defaults
                 .permission
                 .as_deref()
-                .map(|permission| format!("当前：{permission}"))
-                .unwrap_or_else(|| "不覆盖权限配置".to_string()),
+                .map(|permission| text.current_prefix(&text.permission_label(permission)))
+                .unwrap_or_else(|| text.do_not_override_permission().to_string()),
         ),
         is_default_selection(draft.permission.as_deref()),
+        text,
     );
     for (value, label, summary) in [
         (
             "workspace_user",
-            "默认权限",
-            "适合常规项目，需要时由用户确认。",
+            text.default_permission_label(),
+            text.default_permission_summary(),
         ),
-        ("auto_review", "自动审查", "需要审批时优先交给自动审查。"),
+        (
+            "auto_review",
+            text.auto_review_label(),
+            text.auto_review_summary(),
+        ),
         (
             "full_access",
-            "完全访问权限",
-            "不再请求确认，允许完整本机访问。",
+            text.full_access_label(),
+            text.full_access_summary(),
         ),
     ] {
         push_create_option(
@@ -538,11 +547,12 @@ fn permission_create_options(
             label,
             Some(summary.to_string()),
             draft.permission.as_deref() == Some(value),
+            text,
         );
     }
     (
-        "选择权限".to_string(),
-        format!("当前：{}", selected_permission_text(defaults, draft)),
+        text.select_permission_title().to_string(),
+        text.current_prefix(&selected_permission_text(defaults, draft, text)),
         options,
     )
 }
@@ -553,19 +563,20 @@ fn push_create_option(
     label: &str,
     summary: Option<String>,
     selected: bool,
+    text: ImText,
 ) {
     let value = value.trim();
     if value.is_empty() || options.iter().any(|(existing, _)| existing == value) {
         return;
     }
     let label = if selected {
-        format!("已选：{}", label.trim())
+        text.selected_prefix(label.trim())
     } else {
         label.trim().to_string()
     };
     let summary = match (selected, summary) {
         (true, Some(summary)) if !summary.trim().is_empty() => Some(summary.trim().to_string()),
-        (true, _) => Some("已选".to_string()),
+        (true, _) => Some(text.selected().to_string()),
         (false, Some(summary)) if !summary.trim().is_empty() => Some(summary.trim().to_string()),
         _ => None,
     };
@@ -583,7 +594,11 @@ fn is_default_value(value: &str) -> bool {
     matches!(value.trim(), "" | "__default__" | "default" | "默认")
 }
 
-fn selected_cwd_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraftState) -> String {
+fn selected_cwd_text(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+    text: ImText,
+) -> String {
     if let Some(cwd) = draft
         .cwd_custom
         .as_deref()
@@ -599,7 +614,7 @@ fn selected_cwd_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraftS
         .filter(|v| !v.is_empty() && !is_default_value(v))
     {
         if cwd == "__custom__" {
-            return "等待输入自定义目录".to_string();
+            return text.waiting_custom_cwd().to_string();
         }
         return cwd.to_string();
     }
@@ -608,11 +623,15 @@ fn selected_cwd_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraftS
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|cwd| format!("使用 Codex App 默认目录（{cwd}）"))
-        .unwrap_or_else(|| "使用 Codex App 默认目录".to_string())
+        .map(|cwd| text.use_default_cwd_with_path(cwd))
+        .unwrap_or_else(|| text.use_default_cwd().to_string())
 }
 
-fn selected_model_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraftState) -> String {
+fn selected_model_text(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+    text: ImText,
+) -> String {
     if let Some(model) = draft
         .model
         .as_deref()
@@ -626,31 +645,36 @@ fn selected_model_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraf
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|model| format!("使用当前模型（{model}）"))
-        .unwrap_or_else(|| "使用当前模型".to_string())
+        .map(|model| text.use_current_model_with_value(model))
+        .unwrap_or_else(|| text.use_current_model().to_string())
 }
 
-fn selected_effort_text(defaults: &ThreadCreateDefaults, draft: &ThreadCreateDraftState) -> String {
+fn selected_effort_text(
+    defaults: &ThreadCreateDefaults,
+    draft: &ThreadCreateDraftState,
+    text: ImText,
+) -> String {
     if let Some(effort) = draft
         .effort
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty() && !is_default_value(value))
     {
-        return reasoning_effort_label(effort);
+        return text.reasoning_effort_label(effort);
     }
     defaults
         .effort
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|effort| format!("使用默认推理强度（{}）", reasoning_effort_label(effort)))
-        .unwrap_or_else(|| "使用模型默认推理强度".to_string())
+        .map(|effort| text.use_default_effort_with_value(&text.reasoning_effort_label(effort)))
+        .unwrap_or_else(|| text.use_model_default_effort().to_string())
 }
 
 fn selected_permission_text(
     defaults: &ThreadCreateDefaults,
     draft: &ThreadCreateDraftState,
+    text: ImText,
 ) -> String {
     if let Some(permission) = draft
         .permission
@@ -658,15 +682,17 @@ fn selected_permission_text(
         .map(str::trim)
         .filter(|value| !value.is_empty() && !is_default_value(value))
     {
-        return permission_label(permission);
+        return text.permission_label(permission);
     }
     defaults
         .permission
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|permission| format!("使用 Codex App 当前权限（{permission}）"))
-        .unwrap_or_else(|| "使用 Codex App 当前权限".to_string())
+        .map(|permission| {
+            text.use_current_permission_with_value(&text.permission_label(permission))
+        })
+        .unwrap_or_else(|| text.use_current_permission().to_string())
 }
 
 fn project_option_label(path: &str) -> String {
@@ -679,43 +705,23 @@ fn project_option_label(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
-fn reasoning_effort_label(effort: &str) -> String {
-    match effort.trim() {
-        "none" => "无 (none)".to_string(),
-        "minimal" => "极低 (minimal)".to_string(),
-        "low" => "低 (low)".to_string(),
-        "medium" => "中 (medium)".to_string(),
-        "high" => "高 (high)".to_string(),
-        "xhigh" => "超高 (xhigh)".to_string(),
-        other => other.to_string(),
-    }
-}
-
-fn permission_label(permission: &str) -> String {
-    match permission.trim() {
-        "workspace_user" | "default" | "default_permissions" | "auto" => "默认权限".to_string(),
-        "auto_review" | "guardian-approvals" | "guardian_approvals" => "自动审查".to_string(),
-        "full_access" | "full-access" => "完全访问权限".to_string(),
-        other => other.to_string(),
-    }
-}
-
 fn summarize_thread_route_state(
     thread: &serde_json::Value,
     loaded_set: &std::collections::HashSet<String>,
     current_thread_id: Option<&str>,
+    text: ImText,
 ) -> String {
     let thread_id = thread
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     if current_thread_id == Some(thread_id) {
-        return "当前会话".to_string();
+        return text.route_state_current().to_string();
     }
     if loaded_set.contains(thread_id) {
-        return "已加载，可接入".to_string();
+        return text.route_state_loaded().to_string();
     }
-    "历史会话，可接入".to_string()
+    text.route_state_history().to_string()
 }
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
@@ -824,19 +830,26 @@ pub(crate) fn expand_home_prefix(value: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-fn thread_start_permission_label(options: &remote_control_backend::ThreadStartOptions) -> String {
+fn thread_start_permission_label(
+    options: &remote_control_backend::ThreadStartOptions,
+    text: ImText,
+) -> String {
     match (
         options.permissions.as_deref(),
         options.approval_policy.as_deref(),
         options.approvals_reviewer.as_deref(),
     ) {
-        (Some(":workspace"), Some("on-request"), Some("user")) => "默认权限".to_string(),
-        (Some(":workspace"), Some("on-request"), Some("auto_review" | "guardian_subagent")) => {
-            "自动审查".to_string()
+        (Some(":workspace"), Some("on-request"), Some("user")) => {
+            text.default_permission_label().to_string()
         }
-        (Some(":danger-full-access"), Some("never"), Some("user")) => "完全访问权限".to_string(),
-        (None, None, None) => "使用 Codex App 默认值".to_string(),
-        _ => "自定义".to_string(),
+        (Some(":workspace"), Some("on-request"), Some("auto_review" | "guardian_subagent")) => {
+            text.auto_review_label().to_string()
+        }
+        (Some(":danger-full-access"), Some("never"), Some("user")) => {
+            text.full_access_label().to_string()
+        }
+        (None, None, None) => text.codex_app_default_value().to_string(),
+        _ => text.custom_label().to_string(),
     }
 }
 
@@ -1041,19 +1054,19 @@ fn local_config_string(doc: Option<&toml::Value>, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn infer_permission_label(config: Option<&serde_json::Value>) -> Option<String> {
+fn infer_permission_mode(config: Option<&serde_json::Value>) -> Option<String> {
     let sandbox = config_string(config, "sandbox_mode");
     let approval = config_string(config, "approval_policy");
     let reviewer = config_string(config, "approvals_reviewer");
     match (sandbox.as_deref(), approval.as_deref(), reviewer.as_deref()) {
-        (Some("danger-full-access"), Some("never") | None, _) => Some("完全访问权限".to_string()),
+        (Some("danger-full-access"), Some("never") | None, _) => Some("full_access".to_string()),
         (Some("workspace-write"), _, Some("auto_review" | "guardian_subagent")) => {
-            Some("自动审查".to_string())
+            Some("auto_review".to_string())
         }
         (Some("workspace-write") | None, Some("on-request") | None, _) => {
-            Some("默认权限".to_string())
+            Some("workspace_user".to_string())
         }
-        (Some("read-only"), _, _) => Some("只读".to_string()),
+        (Some("read-only"), _, _) => Some("read_only".to_string()),
         _ => None,
     }
 }
@@ -1133,6 +1146,7 @@ mod tests {
     use serde_json::json;
 
     use super::build_thread_entries;
+    use crate::im::core::i18n::ImText;
 
     #[test]
     fn thread_entries_preserve_history_order() {
@@ -1145,6 +1159,7 @@ mod tests {
             &["thread-a".to_string()],
             &history_threads,
             Some("thread-m"),
+            ImText::zh_cn(),
         );
 
         let ids = entries

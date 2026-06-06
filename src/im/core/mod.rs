@@ -1,5 +1,6 @@
 pub mod accounts;
 pub mod approval;
+pub mod i18n;
 pub mod outbound;
 pub mod routing;
 pub mod session;

@@ -4,7 +4,9 @@ use anyhow::Result;
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    app_state::SharedState, chain_log, im::core::thread::approval_reply_hint,
+    app_state::SharedState,
+    chain_log,
+    im::core::{i18n::ImText, i18n::im_text_for_state},
     im_runtime::PendingApproval,
 };
 
@@ -88,8 +90,13 @@ impl WechatAdapter {
         target: &str,
         approval: &PendingApproval,
     ) -> Result<String> {
-        self.send_text(state, account_id, target, &approval_text(approval))
-            .await
+        self.send_text(
+            state,
+            account_id,
+            target,
+            &approval_text(approval, im_text_for_state(state)),
+        )
+        .await
     }
 
     pub async fn send_image_path(
@@ -142,14 +149,14 @@ impl WechatAdapter {
     }
 }
 
-fn approval_text(approval: &PendingApproval) -> String {
+fn approval_text(approval: &PendingApproval, text: ImText) -> String {
     let mut lines = vec![
-        "approval request".to_string(),
+        text.approval_request_heading().to_string(),
         format!("request_kind: `{}`", approval.request_kind),
         String::new(),
         approval.summary.trim().to_string(),
         String::new(),
-        "availableDecisions:".to_string(),
+        format!("{}:", text.available_decisions_label()),
     ];
     if approval.decisions.is_empty() {
         lines.push("/y".to_string());
@@ -164,7 +171,7 @@ fn approval_text(approval: &PendingApproval) -> String {
         );
     }
     lines.push(String::new());
-    lines.push(format!("回复 {} 处理。", approval_reply_hint(approval)));
+    lines.push(text.approval_reply_footer(&text.approval_reply_hint(approval)));
     lines.join("\n")
 }
 

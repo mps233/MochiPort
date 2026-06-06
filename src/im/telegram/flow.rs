@@ -8,6 +8,7 @@ use crate::{
             ApprovalReplyOutcome, resolve_approval_button_reply, resolve_approval_reply,
             submit_approval_decision,
         },
+        i18n::im_text_for_state,
         routing::{active_turn_for_message, clear_thread_binding, route_for_message},
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
@@ -19,7 +20,7 @@ use crate::{
             thread_start_options_from_form_for_client, thread_start_options_with_current_provider,
         },
         thread_list::{empty_thread_routing_request, load_thread_routing_page},
-        turn::{TurnStartOutcome, start_turn_for_route, turn_busy_notice},
+        turn::{TurnStartOutcome, start_turn_for_route},
     },
     im::events,
     im::telegram::{
@@ -60,6 +61,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     let adapter = TelegramAdapter::new(api);
     let trimmed = message.text.trim();
     let route = route_for_message(&message);
+    let text = im_text_for_state(&state);
     {
         let mut runtime = state.runtime.lock().await;
         runtime.last_route = Some(route.clone());
@@ -117,7 +119,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         Some("/s") => {
             let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await else {
                 adapter
-                    .send_text(&message.chat_id, "当前没有运行中的 turn。")
+                    .send_text(&message.chat_id, text.no_running_turn())
                     .await?;
                 return Ok(());
             };
@@ -140,7 +142,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                 .await
                 .mark_turn_completed(&thread_id, Some(&turn_id));
             adapter
-                .send_text(&message.chat_id, "已中断当前任务。")
+                .send_text(&message.chat_id, text.interrupted())
                 .await?;
             return Ok(());
         }
@@ -166,28 +168,21 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                     .mark_turn_completed(&thread_id, Some(&turn_id));
             }
             clear_thread_binding(&state, &route.conversation_key).await?;
-            adapter
-                .send_text(&message.chat_id, "已退出当前会话。")
-                .await?;
+            adapter.send_text(&message.chat_id, text.exited()).await?;
             return Ok(());
         }
         Some(other) => {
             adapter
-                .send_text(
-                    &message.chat_id,
-                    &format!(
-                        "不支持的命令：{other}。当前只支持 /s 中断当前任务、/q 退出当前会话。"
-                    ),
-                )
+                .send_text(&message.chat_id, &text.unsupported_command(other))
                 .await?;
             return Ok(());
         }
         None => {}
     }
 
-    if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
+    if active_turn_for_message(&state, &message).await.is_some() {
         adapter
-            .send_text(&message.chat_id, turn_busy_notice(&thread_id, &turn_id))
+            .send_text(&message.chat_id, text.turn_busy_notice())
             .await?;
         return Ok(());
     }
@@ -195,10 +190,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     let remote_status = remote_control_backend::status_snapshot(&state).await;
     if !remote_status.connected {
         adapter
-            .send_text(
-                &message.chat_id,
-                "Codex remote-control 还没有连接。请在项目目录运行 codex，确认它已经通过 remote-control 连接到 codex-remote。",
-            )
+            .send_text(&message.chat_id, text.remote_not_connected())
             .await?;
         return Ok(());
     }
@@ -226,21 +218,15 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                 .await;
             Ok(())
         }
-        TurnStartOutcome::Busy { thread_id, turn_id } => {
+        TurnStartOutcome::Busy => {
             adapter
-                .send_text(
-                    &message.chat_id,
-                    turn_busy_notice(&thread_id, turn_id.as_deref().unwrap_or("")),
-                )
+                .send_text(&message.chat_id, text.turn_busy_notice())
                 .await?;
             Ok(())
         }
         TurnStartOutcome::Expired { thread_id } => {
             adapter
-                .send_text(
-                    &message.chat_id,
-                    "这条消息是在上一轮任务期间收到的，已跳过。请重新发送最新指令。",
-                )
+                .send_text(&message.chat_id, text.inbound_expired())
                 .await?;
             state
                 .push_event(
@@ -270,22 +256,14 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                 )
                 .await;
             adapter
-                .send_text(
-                    &message.chat_id,
-                    "当前绑定的 Codex thread 已失效，已解除绑定。",
-                )
+                .send_text(&message.chat_id, text.stale_thread_unbound())
                 .await?;
             send_telegram_thread_routing_choice(&state, &adapter, &message, None).await
         }
         TurnStartOutcome::Failed { error } => {
             adapter
-                .send_text(
-                    &message.chat_id,
-                    &format!(
-                    "Codex App 没有接收这条消息：{error}\n\n请确认 Codex App 还打开着 remote-control。"
-                ),
-            )
-            .await?;
+                .send_text(&message.chat_id, &text.app_message_failed(&error))
+                .await?;
             Err(error)
         }
     }
@@ -298,17 +276,18 @@ async fn create_telegram_thread_for_route(
     options: remote_control_backend::ThreadStartOptions,
     request_id: Option<&str>,
 ) -> Result<String> {
+    let text = im_text_for_state(state);
     adapter
-        .send_text(&route.chat_id, "正在创建新的 Codex thread...")
+        .send_text(&route.chat_id, text.creating_new_thread())
         .await?;
     let thread_id = create_and_bind_thread(state, route, options.clone(), request_id).await?;
     adapter
         .send_thread_routing_result(
             &route.chat_id,
-            "已创建新会话",
-            &format!(
-                "已接入新 thread `{thread_id}`。\n\n{}\n\n现在可以直接发送消息。",
-                summarize_thread_start_options(&options)
+            text.created_new_session_title(),
+            &text.created_new_session_body(
+                &thread_id,
+                &summarize_thread_start_options(&options, text),
             ),
         )
         .await?;
@@ -375,8 +354,9 @@ pub(crate) async fn handle_inbound_action(
             {
                 Ok(options) => options,
                 Err(err) => {
+                    let text = im_text_for_state(&state);
                     adapter
-                        .send_text(&message.chat_id, &format!("新建会话参数不正确：{err}"))
+                        .send_text(&message.chat_id, &text.invalid_create_form(&err))
                         .await?;
                     return Ok(());
                 }
@@ -418,8 +398,9 @@ pub(crate) async fn handle_inbound_action(
             {
                 Ok(options) => options,
                 Err(err) => {
+                    let text = im_text_for_state(&state);
                     adapter
-                        .send_text(&message.chat_id, &format!("新建会话参数不正确：{err}"))
+                        .send_text(&message.chat_id, &text.invalid_create_form(&err))
                         .await?;
                     return Ok(());
                 }
@@ -452,8 +433,9 @@ pub(crate) async fn handle_inbound_action(
                 return Ok(());
             };
             let Some(field) = normalize_thread_create_field(&field) else {
+                let text = im_text_for_state(&state);
                 adapter
-                    .send_text(&message.chat_id, "这个创建选项不可用，请重新打开创建设置。")
+                    .send_text(&message.chat_id, text.create_option_unavailable())
                     .await?;
                 return Ok(());
             };
@@ -464,11 +446,9 @@ pub(crate) async fn handle_inbound_action(
                 .and_then(|values| values.get(index))
                 .cloned()
             else {
+                let text = im_text_for_state(&state);
                 adapter
-                    .send_text(
-                        &message.chat_id,
-                        "这个创建选项已经失效，请重新打开创建设置。",
-                    )
+                    .send_text(&message.chat_id, text.create_option_expired())
                     .await?;
                 return Ok(());
             };
@@ -479,7 +459,7 @@ pub(crate) async fn handle_inbound_action(
                 .await
                 .remember_thread_routing_request(request.clone());
             if field == "cwd" && value == "__custom__" {
-                send_telegram_thread_create_custom_cwd_prompt(&adapter, &message).await?;
+                send_telegram_thread_create_custom_cwd_prompt(&state, &adapter, &message).await?;
                 return Ok(());
             }
             send_telegram_thread_create_settings(&state, &adapter, &message, Some(request)).await
@@ -496,8 +476,9 @@ pub(crate) async fn handle_inbound_action(
                 return Ok(());
             };
             let Some(field) = normalize_thread_create_field(&field) else {
+                let text = im_text_for_state(&state);
                 adapter
-                    .send_text(&message.chat_id, "这个创建选项不可用，请重新打开创建设置。")
+                    .send_text(&message.chat_id, text.create_option_unavailable())
                     .await?;
                 return Ok(());
             };
@@ -508,7 +489,7 @@ pub(crate) async fn handle_inbound_action(
                 .await
                 .remember_thread_routing_request(request.clone());
             if field == "cwd" && value == "__custom__" {
-                send_telegram_thread_create_custom_cwd_prompt(&adapter, &message).await?;
+                send_telegram_thread_create_custom_cwd_prompt(&state, &adapter, &message).await?;
                 return Ok(());
             }
             send_telegram_thread_create_settings(&state, &adapter, &message, Some(request)).await
@@ -569,11 +550,9 @@ pub(crate) async fn handle_inbound_action(
                 .and_then(|thread_ids| thread_ids.get(index))
                 .cloned()
             else {
+                let text = im_text_for_state(&state);
                 adapter
-                    .send_text(
-                        &message.chat_id,
-                        "这个 thread 选择已经失效，请重新打开列表。",
-                    )
+                    .send_text(&message.chat_id, text.thread_selection_expired())
                     .await?;
                 return Ok(());
             };
@@ -621,8 +600,9 @@ async fn handle_telegram_thread_route_choice(
             send_telegram_thread_routing_choice(&state, &adapter, &message, Some(request)).await
         }
         other => {
+            let text = im_text_for_state(&state);
             adapter
-                .send_text(&message.chat_id, &format!("不支持的 thread 操作：{other}"))
+                .send_text(&message.chat_id, &text.unsupported_thread_action(other))
                 .await?;
             Ok(())
         }
@@ -643,17 +623,16 @@ async fn checked_telegram_thread_routing_request(
             .thread_routing_request(request_id)
     };
     let Some(request) = request else {
+        let text = im_text_for_state(state);
         adapter
-            .send_text(
-                &message.chat_id,
-                "这个 thread 操作已经失效，请重新发送一条消息触发会话选择。",
-            )
+            .send_text(&message.chat_id, text.thread_operation_expired())
             .await?;
         return Ok(None);
     };
     if request.conversation_key != message.conversation_key() {
+        let text = im_text_for_state(state);
         adapter
-            .send_text(&message.chat_id, "这个 thread 操作不属于当前会话。")
+            .send_text(&message.chat_id, text.thread_choice_not_current())
             .await?;
         return Ok(None);
     }
@@ -681,11 +660,9 @@ async fn handle_telegram_thread_list_text_reply(
         .and_then(|thread_ids| thread_ids.get(index))
         .cloned()
     else {
+        let text = im_text_for_state(&state);
         adapter
-            .send_text(
-                &message.chat_id,
-                "这个会话序号不可用，请重新发送一条消息触发会话选择。",
-            )
+            .send_text(&message.chat_id, text.invalid_thread_index_restart())
             .await?;
         return Ok(true);
     };
@@ -727,8 +704,9 @@ async fn handle_telegram_thread_create_option_text_reply(
                     .map(|value| (field.clone(), value))
             })
     else {
+        let text = im_text_for_state(&state);
         adapter
-            .send_text(&message.chat_id, "这个选项序号不可用，请重新打开创建设置。")
+            .send_text(&message.chat_id, text.create_option_unavailable())
             .await?;
         return Ok(true);
     };
@@ -739,7 +717,7 @@ async fn handle_telegram_thread_create_option_text_reply(
         .await
         .remember_thread_routing_request(request.clone());
     if field == "cwd" && value == "__custom__" {
-        send_telegram_thread_create_custom_cwd_prompt(&adapter, &message).await?;
+        send_telegram_thread_create_custom_cwd_prompt(&state, &adapter, &message).await?;
         return Ok(true);
     }
     send_telegram_thread_create_settings(&state, &adapter, &message, Some(request)).await?;
@@ -824,15 +802,13 @@ async fn handle_telegram_thread_create_text_input(
     }
     let path = text.trim();
     if path.is_empty() {
-        send_telegram_thread_create_custom_cwd_prompt(adapter, message).await?;
+        send_telegram_thread_create_custom_cwd_prompt(state, adapter, message).await?;
         return Ok(true);
     }
     if !expand_home_prefix(path).is_absolute() {
+        let text = im_text_for_state(state);
         adapter
-            .send_text(
-                &message.chat_id,
-                "项目目录需要是绝对路径。请重新发送一个绝对路径，或发送 /cancel 取消。",
-            )
+            .send_text(&message.chat_id, text.cwd_must_be_absolute_telegram())
             .await?;
         return Ok(true);
     }
@@ -866,14 +842,13 @@ async fn pending_telegram_thread_create_custom_cwd_request(
 }
 
 async fn send_telegram_thread_create_custom_cwd_prompt(
+    state: &SharedState,
     adapter: &TelegramAdapter,
     message: &InboundMessage,
 ) -> Result<()> {
+    let text = im_text_for_state(state);
     adapter
-        .send_text(
-            &message.chat_id,
-            "请发送项目目录的绝对路径。目录不存在时，创建 thread 时会自动创建。\n\n发送 /cancel 取消。",
-        )
+        .send_text(&message.chat_id, text.custom_cwd_prompt_telegram())
         .await?;
     Ok(())
 }
@@ -889,8 +864,9 @@ async fn send_telegram_thread_routing_choice(
         .as_ref()
         .map(|request| request.request_id.clone())
         .unwrap_or_else(next_thread_routing_request_id);
+    let text = im_text_for_state(state);
     let message_id = adapter
-        .send_thread_routing_choice(&route.chat_id, &request_id)
+        .send_thread_routing_choice(&route.chat_id, &request_id, text)
         .await?;
     state
         .runtime
@@ -918,9 +894,10 @@ async fn send_telegram_thread_create_settings(
         .map(|request| request.create_draft.clone())
         .unwrap_or_default();
     let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
-    let text = thread_create_help_text(&defaults, &create_draft);
+    let im_text = im_text_for_state(state);
+    let text = thread_create_help_text(&defaults, &create_draft, im_text);
     let message_id = adapter
-        .send_thread_create_settings(&route.chat_id, &request_id, &text)
+        .send_thread_create_settings(&route.chat_id, &request_id, &text, im_text)
         .await?;
     state
         .runtime
@@ -953,14 +930,17 @@ async fn send_telegram_thread_create_options(
     page: usize,
 ) -> Result<()> {
     let Some(field) = normalize_thread_create_field(field) else {
+        let text = im_text_for_state(state);
         adapter
-            .send_text(&message.chat_id, "这个创建选项不可用，请重新打开创建设置。")
+            .send_text(&message.chat_id, text.create_option_unavailable())
             .await?;
         return Ok(());
     };
     let route = route_for_message(message);
     let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
-    let (title, body, options) = create_options_for_field(&defaults, &request.create_draft, field)?;
+    let text = im_text_for_state(state);
+    let (title, body, options) =
+        create_options_for_field(&defaults, &request.create_draft, field, text)?;
     let total_pages = ((options.len() + TELEGRAM_CREATE_OPTION_PAGE_SIZE - 1)
         / TELEGRAM_CREATE_OPTION_PAGE_SIZE)
         .max(1);
@@ -997,6 +977,7 @@ async fn send_telegram_thread_create_options(
             page,
             page > 1,
             page < total_pages,
+            text,
         )
         .await?;
     request.message_id = Some(message_id);
@@ -1048,10 +1029,7 @@ async fn send_telegram_thread_routing_list(
                 )
                 .await;
             adapter
-                .send_text(
-                    &route.chat_id,
-                    "会话列表加载失败：Codex App 暂时没有响应，请稍后重试。",
-                )
+                .send_text(&route.chat_id, im_text_for_state(state).list_load_failed())
                 .await?;
             return Ok(());
         }
@@ -1066,17 +1044,19 @@ async fn send_telegram_thread_routing_list(
         })
         .collect::<Vec<_>>();
 
-    let body = thread_list_body(loaded_page.model_provider_filter.as_deref());
+    let text = im_text_for_state(state);
+    let body = text.thread_list_body_telegram(loaded_page.model_provider_filter.as_deref());
     let message_id = adapter
         .send_thread_list(
             &route.chat_id,
             &loaded_page.request_id,
-            "恢复历史会话",
+            text.thread_list_title_telegram(),
             &body,
             &telegram_entries,
             loaded_page.page,
             loaded_page.page > 1,
             loaded_page.next_cursor.is_some(),
+            text,
         )
         .await?;
     state
@@ -1136,22 +1116,20 @@ async fn handle_telegram_thread_route_resume_selected(
     else {
         return Ok(());
     };
+    let text = im_text_for_state(&state);
     adapter
-        .send_text(
-            &message.chat_id,
-            &format!("正在订阅 thread `{thread_id}` 的后续事件..."),
-        )
+        .send_text(&message.chat_id, &text.subscribing_thread(thread_id))
         .await?;
     let route = route_for_message(&message);
     let thread = resume_and_bind_thread(&state, &route, thread_id, Some(request_id)).await?;
-    let body = format!(
-        "已接入 thread `{thread_id}`。\n\n{}\n{}\n{}",
-        summarize_thread_title(&thread),
-        summarize_thread_cwd(&thread),
-        summarize_thread_status(&thread)
+    let body = text.subscribed_session_body(
+        thread_id,
+        &summarize_thread_title(&thread, text),
+        &summarize_thread_cwd(&thread, text),
+        &summarize_thread_status(&thread, text),
     );
     adapter
-        .send_thread_routing_result(&route.chat_id, "已订阅会话", &body)
+        .send_thread_routing_result(&route.chat_id, text.subscribed_session_title(), &body)
         .await?;
     state
         .push_event(
@@ -1209,7 +1187,10 @@ async fn handle_telegram_approval_outcome(
         } => {
             let next = submit_approval_decision(state, &pending, &decision).await?;
             adapter
-                .send_text(&message.chat_id, &format!("submitted: {}", decision.label))
+                .send_text(
+                    &message.chat_id,
+                    &im_text_for_state(state).approval_decision_submitted_label(&decision.label),
+                )
                 .await?;
             state
                 .push_event(
@@ -1232,21 +1213,21 @@ async fn handle_telegram_approval_outcome(
             }
         }
         ApprovalReplyOutcome::NoPending => {
+            let text = im_text_for_state(state);
             adapter
-                .send_text(&message.chat_id, "No pending approval.")
+                .send_text(&message.chat_id, text.no_pending_approval())
                 .await?;
         }
         ApprovalReplyOutcome::NotCurrent => {
+            let text = im_text_for_state(state);
             adapter
-                .send_text(&message.chat_id, "This approval is no longer current.")
+                .send_text(&message.chat_id, text.approval_not_current())
                 .await?;
         }
         ApprovalReplyOutcome::InvalidInput { hint } => {
+            let text = im_text_for_state(state);
             adapter
-                .send_text(
-                    &message.chat_id,
-                    &format!("Invalid approval option. Reply {hint}."),
-                )
+                .send_text(&message.chat_id, &text.invalid_approval_reply(&hint))
                 .await?;
         }
     }
@@ -1269,14 +1250,4 @@ pub(crate) fn command(text: &str) -> Option<String> {
 pub(crate) fn numeric_command_index(command: &str) -> Option<usize> {
     let number = command.strip_prefix('/')?.parse::<usize>().ok()?;
     number.checked_sub(1)
-}
-
-pub(crate) fn thread_list_body(model_provider_filter: Option<&str>) -> String {
-    let mut body = "请选择一个会话接入后续事件。".to_string();
-    if let Some(provider) = model_provider_filter {
-        body.push_str(&format!(
-            "\n已按当前 Codex App provider `{provider}` 过滤。"
-        ));
-    }
-    body
 }

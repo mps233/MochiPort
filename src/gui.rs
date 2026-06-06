@@ -26,6 +26,8 @@ use wxdragon::widgets::dataview::{
 use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
+use crate::config::AppConfig;
+
 #[cfg(target_os = "windows")]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 #[cfg(not(target_os = "windows"))]
@@ -91,12 +93,6 @@ impl Default for GuiLocale {
     }
 }
 
-#[derive(Default, Deserialize, Serialize)]
-#[serde(default, rename_all = "camelCase")]
-struct GuiSettings {
-    language: Option<String>,
-}
-
 #[derive(Clone, Copy)]
 struct GuiText {
     locale: GuiLocale,
@@ -157,17 +153,11 @@ impl GuiText {
     }
 
     fn language_menu(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "语言",
-            GuiLocale::EnUs => "&Language",
-        }
+        "&Language / 语言"
     }
 
     fn language_zh_cn(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "中文（简体）",
-            GuiLocale::EnUs => "Simplified Chinese",
-        }
+        "中文（简体）"
     }
 
     fn language_en_us(self) -> &'static str {
@@ -1978,31 +1968,18 @@ fn default_base_url() -> String {
 }
 
 fn load_gui_locale() -> GuiLocale {
-    let path = gui_settings_path();
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return GuiLocale::default();
-    };
-    toml::from_str::<GuiSettings>(&raw)
-        .ok()
-        .and_then(|settings| settings.language)
+    daemon_config_path()
+        .and_then(|path| AppConfig::load_or_default(&path).ok())
+        .and_then(|config| config.language)
         .and_then(|language| GuiLocale::from_code(&language))
         .unwrap_or_default()
 }
 
 fn save_gui_locale(locale: GuiLocale) -> Result<(), String> {
-    let path = gui_settings_path();
-    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
-    }
-    let settings = GuiSettings {
-        language: Some(locale.code().to_string()),
-    };
-    let raw = toml::to_string_pretty(&settings).map_err(|err| err.to_string())?;
-    std::fs::write(&path, raw).map_err(|err| format!("{}: {err}", path.display()))
-}
-
-fn gui_settings_path() -> PathBuf {
-    app_support_config_path().with_file_name("gui-settings.toml")
+    let path = daemon_config_path().unwrap_or_else(app_support_config_path);
+    let mut config = AppConfig::load_or_default(&path).map_err(|err| err.to_string())?;
+    config.language = Some(locale.code().to_string());
+    config.save(&path).map_err(|err| err.to_string())
 }
 
 fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {

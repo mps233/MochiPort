@@ -2,9 +2,12 @@ use anyhow::Result;
 
 use crate::{
     app_state::SharedState,
-    im::core::thread::{
-        ThreadListEntry, build_thread_entries, load_codex_app_model_provider,
-        next_thread_routing_request_id,
+    im::core::{
+        i18n::im_text_for_state,
+        thread::{
+            ThreadListEntry, build_thread_entries, load_codex_app_model_provider,
+            next_thread_routing_request_id,
+        },
     },
     im_runtime::{
         RouteTarget, ThreadCreateDraftState, ThreadRoutingRequestState, ThreadRoutingStage,
@@ -116,7 +119,13 @@ pub(crate) async fn load_thread_routing_page(
         .unwrap_or_default();
     let current_thread_id =
         remote_control_backend::current_thread_for_client(state, client_key).await;
-    let entries = build_thread_entries(&loaded_ids, &history_threads, current_thread_id.as_deref());
+    let text = im_text_for_state(state);
+    let entries = build_thread_entries(
+        &loaded_ids,
+        &history_threads,
+        current_thread_id.as_deref(),
+        text,
+    );
     let thread_ids = entries
         .iter()
         .map(|entry| entry.thread_id.clone())

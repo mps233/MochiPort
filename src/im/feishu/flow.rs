@@ -8,6 +8,7 @@ use crate::{
     app_state::SharedState,
     im::core::{
         approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
+        i18n::im_text_for_state,
         routing::{active_turn_for_message, route_for_message},
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
@@ -17,7 +18,7 @@ use crate::{
             thread_start_options_from_form_for_client, thread_start_options_with_current_provider,
         },
         thread_list::{empty_thread_routing_request, load_thread_routing_page},
-        turn::{TurnStartOutcome, start_turn_for_route, turn_busy_notice},
+        turn::{TurnStartOutcome, start_turn_for_route},
     },
     im::feishu::{FeishuAdapter, FeishuApi, renderer},
     im_runtime::{PendingApproval, RouteTarget, ThreadRoutingRequestState, TurnOrigin},
@@ -50,6 +51,7 @@ pub(crate) async fn handle_inbound(
 
     let trimmed = message.text.trim();
     let route = route_for_message(&message);
+    let text = im_text_for_state(&state);
     {
         let mut runtime = state.runtime.lock().await;
         runtime.last_route = Some(route.clone());
@@ -60,18 +62,13 @@ pub(crate) async fn handle_inbound(
     if handle_control_message(&state, &api, &message, trimmed).await? {
         return Ok(());
     }
-    if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
-        send_text_to_message(&api, &message, turn_busy_notice(&thread_id, &turn_id)).await?;
+    if active_turn_for_message(&state, &message).await.is_some() {
+        send_text_to_message(&api, &message, text.turn_busy_notice()).await?;
         return Ok(());
     }
     let remote_status = remote_control_backend::status_snapshot(&state).await;
     if !remote_status.connected {
-        send_text_to_message(
-            &api,
-            &message,
-            "Codex remote-control 还没有连接。请在项目目录运行 codex，确认它已经通过 remote-control 连接到 codex-remote。",
-        )
-        .await?;
+        send_text_to_message(&api, &message, text.remote_not_connected()).await?;
         return Ok(());
     }
 
@@ -98,22 +95,12 @@ pub(crate) async fn handle_inbound(
                 .await;
             Ok(())
         }
-        TurnStartOutcome::Busy { thread_id, turn_id } => {
-            send_text_to_message(
-                &api,
-                &message,
-                turn_busy_notice(&thread_id, turn_id.as_deref().unwrap_or("")),
-            )
-            .await?;
+        TurnStartOutcome::Busy => {
+            send_text_to_message(&api, &message, text.turn_busy_notice()).await?;
             Ok(())
         }
         TurnStartOutcome::Expired { thread_id } => {
-            send_text_to_message(
-                &api,
-                &message,
-                "这条消息是在上一轮任务期间收到的，已跳过。请重新发送最新指令。",
-            )
-            .await?;
+            send_text_to_message(&api, &message, text.inbound_expired()).await?;
             state
                 .push_event(
                     "warn",
@@ -144,14 +131,7 @@ pub(crate) async fn handle_inbound(
             send_thread_routing_list(&state, &api, &message, None, None, 1).await
         }
         TurnStartOutcome::Failed { error } => {
-            send_text_to_message(
-                &api,
-                &message,
-                &format!(
-                    "Codex App 没有接收这条消息：{error}\n\n请确认 Codex App 还打开着 remote-control。"
-                ),
-            )
-            .await?;
+            send_text_to_message(&api, &message, &text.app_message_failed(&error)).await?;
             Err(error)
         }
     }
@@ -170,13 +150,14 @@ async fn handle_control_message(
     command: &str,
 ) -> Result<bool> {
     let normalized = command.to_ascii_lowercase();
+    let text = im_text_for_state(state);
     if is_approval_reply(&normalized) {
         return handle_approval_text_reply(state, api, message, command).await;
     }
     match normalized.as_str() {
         "/s" => {
             let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await else {
-                send_text_to_message(api, message, "当前没有运行中的 turn。").await?;
+                send_text_to_message(api, message, text.no_running_turn()).await?;
                 return Ok(true);
             };
             let route = route_for_message(message);
@@ -198,7 +179,7 @@ async fn handle_control_message(
                 .lock()
                 .await
                 .mark_turn_completed(&thread_id, Some(&turn_id));
-            send_text_to_message(api, message, "已中断当前任务。").await?;
+            send_text_to_message(api, message, text.interrupted()).await?;
             return Ok(true);
         }
         "/q" => {
@@ -230,16 +211,11 @@ async fn handle_control_message(
                     "feishu_quit_command",
                 );
             }
-            send_text_to_message(api, message, "已退出当前会话。").await?;
+            send_text_to_message(api, message, text.exited()).await?;
             return Ok(true);
         }
         other if other.starts_with('/') => {
-            send_text_to_message(
-                api,
-                message,
-                &format!("不支持的命令：{other}。当前只支持 /s 中断当前任务、/q 退出当前会话。"),
-            )
-            .await?;
+            send_text_to_message(api, message, &text.unsupported_command(other)).await?;
             return Ok(true);
         }
         _ => {}
@@ -255,7 +231,8 @@ pub(crate) async fn handle_inbound_action(
 ) -> Result<()> {
     match action {
         InboundAction::ApprovalDecision { .. } => {
-            send_text_to_message(&api, &message, "Unsupported Telegram approval callback.").await?;
+            let text = im_text_for_state(&state);
+            send_text_to_message(&api, &message, text.unsupported_approval_callback()).await?;
             Ok(())
         }
         InboundAction::ThreadRouteChoice { request_id, action } => {
@@ -292,7 +269,8 @@ pub(crate) async fn handle_inbound_action(
         | InboundAction::ThreadRouteCreateSetIndex { .. }
         | InboundAction::ThreadRouteCreateSetValue { .. }
         | InboundAction::ThreadRouteCreateOptionsPage { .. } => {
-            send_text_to_message(&api, &message, "这个创建操作只支持 Telegram 按钮流程。").await?;
+            let text = im_text_for_state(&state);
+            send_text_to_message(&api, &message, text.telegram_creation_action_only()).await?;
             Ok(())
         }
         InboundAction::ThreadRouteResumeSelected {
@@ -328,16 +306,13 @@ async fn handle_thread_route_choice(
             .thread_routing_request(request_id)
     };
     let Some(request) = request else {
-        send_text_to_message(
-            &api,
-            &message,
-            "这张 thread 选择卡片已经失效，请重新发送消息。",
-        )
-        .await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_choice_card_expired()).await?;
         return Ok(());
     };
     if request.conversation_key != message.conversation_key() {
-        send_text_to_message(&api, &message, "这个 thread 选择不属于当前会话。").await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_choice_not_current()).await?;
         return Ok(());
     }
 
@@ -346,6 +321,7 @@ async fn handle_thread_route_choice(
         .clone()
         .or(message.card_message_id.clone());
     update_thread_routing_choice_card_selected(
+        &state,
         &api,
         request_id,
         card_message_id.as_deref(),
@@ -360,7 +336,8 @@ async fn handle_thread_route_choice(
         }
         "back" => send_thread_routing_choice_card(&state, &api, &message, Some(request)).await,
         other => {
-            send_text_to_message(&api, &message, &format!("不支持的 thread 操作：{other}")).await?;
+            let text = im_text_for_state(&state);
+            send_text_to_message(&api, &message, &text.unsupported_thread_action(other)).await?;
             Ok(())
         }
     }
@@ -406,7 +383,8 @@ async fn handle_thread_route_create_submit(
         {
             Ok(options) => options,
             Err(err) => {
-                send_text_to_message(&api, &message, &format!("新建会话参数不正确：{err}")).await?;
+                let text = im_text_for_state(&state);
+                send_text_to_message(&api, &message, &text.invalid_create_form(&err)).await?;
                 return Ok(());
             }
         };
@@ -427,16 +405,13 @@ async fn checked_thread_routing_request(
             .thread_routing_request(request_id)
     };
     let Some(request) = request else {
-        send_text_to_message(
-            api,
-            message,
-            "这张 thread 选择卡片已经失效，请重新发送消息。",
-        )
-        .await?;
+        let text = im_text_for_state(state);
+        send_text_to_message(api, message, text.thread_choice_card_expired()).await?;
         return Ok(None);
     };
     if request.conversation_key != message.conversation_key() {
-        send_text_to_message(api, message, "这个 thread 选择不属于当前会话。").await?;
+        let text = im_text_for_state(state);
+        send_text_to_message(api, message, text.thread_choice_not_current()).await?;
         return Ok(None);
     }
     Ok(Some(request))
@@ -450,6 +425,7 @@ async fn send_thread_create_settings_card(
 ) -> Result<()> {
     let route = route_for_message(message);
     let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
+    let text = im_text_for_state(state);
     let adapter = FeishuAdapter::new(api.clone());
     if let Some(message_id) = request
         .message_id
@@ -462,11 +438,18 @@ async fn send_thread_create_settings_card(
                 &request.request_id,
                 &defaults,
                 Some(&message_id),
+                text,
             )
             .await?;
     } else {
         let message_id = adapter
-            .send_thread_create_settings(&message.chat_id, &request.request_id, &defaults, None)
+            .send_thread_create_settings(
+                &message.chat_id,
+                &request.request_id,
+                &defaults,
+                None,
+                text,
+            )
             .await?;
         state
             .runtime
@@ -497,12 +480,13 @@ async fn create_new_thread_for_route(
         .clone()
         .or_else(|| message.card_message_id.clone());
     let adapter = FeishuAdapter::new(api.clone());
+    let text = im_text_for_state(state);
     if let Some(message_id) = card_message_id.as_deref() {
         let _ = adapter
             .send_thread_routing_result(
                 &message.chat_id,
-                "正在创建会话",
-                "正在创建新的 Codex thread...",
+                text.creating_session_title(),
+                text.creating_new_thread(),
                 Some(message_id),
             )
             .await;
@@ -511,14 +495,12 @@ async fn create_new_thread_for_route(
     let route = route_for_message(message);
     let thread_id =
         create_and_bind_thread(state, &route, options.clone(), Some(request_id)).await?;
-    let body = format!(
-        "已接入新 thread `{thread_id}`。\n\n{}\n\n现在可以直接发送消息。",
-        summarize_thread_start_options(&options)
-    );
+    let body =
+        text.created_new_session_body(&thread_id, &summarize_thread_start_options(&options, text));
     let _ = adapter
         .send_thread_routing_result(
             &route.chat_id,
-            "已创建新会话",
+            text.created_new_session_title(),
             &body,
             card_message_id.as_deref(),
         )
@@ -558,18 +540,16 @@ async fn handle_approval_text_reply(
             .await?;
         }
         ApprovalReplyOutcome::NoPending => {
-            send_text_to_message(api, message, "No pending approval.").await?;
+            let text = im_text_for_state(state);
+            send_text_to_message(api, message, text.no_pending_approval()).await?;
         }
         ApprovalReplyOutcome::NotCurrent => {
-            send_text_to_message(api, message, "This approval is no longer current.").await?;
+            let text = im_text_for_state(state);
+            send_text_to_message(api, message, text.approval_not_current()).await?;
         }
         ApprovalReplyOutcome::InvalidInput { hint } => {
-            send_text_to_message(
-                api,
-                message,
-                &format!("Invalid approval option. Reply {hint}."),
-            )
-            .await?;
+            let text = im_text_for_state(state);
+            send_text_to_message(api, message, &text.invalid_approval_reply(&hint)).await?;
         }
     }
     Ok(true)
@@ -590,16 +570,13 @@ async fn handle_thread_route_resume_selected(
             .thread_routing_request(request_id)
     };
     let Some(request) = request else {
-        send_text_to_message(
-            &api,
-            &message,
-            "这张 thread 选择卡片已经失效，请重新发送消息。",
-        )
-        .await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_choice_card_expired()).await?;
         return Ok(());
     };
     if request.conversation_key != message.conversation_key() {
-        send_text_to_message(&api, &message, "这个 thread 选择不属于当前会话。").await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_choice_not_current()).await?;
         return Ok(());
     }
 
@@ -608,12 +585,13 @@ async fn handle_thread_route_resume_selected(
         .clone()
         .or(message.card_message_id.clone());
     let adapter = FeishuAdapter::new(api.clone());
+    let text = im_text_for_state(&state);
     if let Some(message_id) = card_message_id.as_deref() {
         let _ = adapter
             .send_thread_routing_result(
                 &message.chat_id,
-                "正在接入会话",
-                &format!("正在订阅 thread `{thread_id}` 的后续事件..."),
+                text.subscribing_session_title(),
+                &text.subscribing_thread(thread_id),
                 Some(message_id),
             )
             .await;
@@ -621,16 +599,16 @@ async fn handle_thread_route_resume_selected(
 
     let route = route_for_message(&message);
     let thread = resume_and_bind_thread(&state, &route, thread_id, Some(request_id)).await?;
-    let body = format!(
-        "已接入 thread `{thread_id}`。\n\n{}\n{}\n{}",
-        summarize_thread_title(&thread),
-        summarize_thread_cwd(&thread),
-        summarize_thread_status(&thread)
+    let body = text.subscribed_session_body(
+        thread_id,
+        &summarize_thread_title(&thread, text),
+        &summarize_thread_cwd(&thread, text),
+        &summarize_thread_status(&thread, text),
     );
     let _ = adapter
         .send_thread_routing_result(
             &route.chat_id,
-            "已订阅会话",
+            text.subscribed_session_title(),
             &body,
             card_message_id.as_deref(),
         )
@@ -661,16 +639,13 @@ async fn handle_thread_route_resume_index(
             .thread_routing_request(request_id)
     };
     let Some(request) = request else {
-        send_text_to_message(
-            &api,
-            &message,
-            "这张 thread 选择卡片已经失效，请重新发送消息。",
-        )
-        .await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_choice_card_expired()).await?;
         return Ok(());
     };
     if request.conversation_key != message.conversation_key() {
-        send_text_to_message(&api, &message, "这个 thread 选择不属于当前会话。").await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_choice_not_current()).await?;
         return Ok(());
     }
     let Some(thread_id) = request
@@ -679,7 +654,8 @@ async fn handle_thread_route_resume_index(
         .and_then(|thread_ids| thread_ids.get(index))
         .cloned()
     else {
-        send_text_to_message(&api, &message, "这个 thread 选择已经失效，请重新打开列表。").await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_selection_expired()).await?;
         return Ok(());
     };
     handle_thread_route_resume_selected(state, api, message, request_id, &thread_id).await
@@ -700,16 +676,13 @@ async fn handle_thread_route_list_page(
             .thread_routing_request(request_id)
     };
     let Some(request) = request else {
-        send_text_to_message(
-            &api,
-            &message,
-            "这张 thread 选择卡片已经失效，请重新发送消息。",
-        )
-        .await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_choice_card_expired()).await?;
         return Ok(());
     };
     if request.conversation_key != message.conversation_key() {
-        send_text_to_message(&api, &message, "这个 thread 列表不属于当前会话。").await?;
+        let text = im_text_for_state(&state);
+        send_text_to_message(&api, &message, text.thread_list_not_current()).await?;
         return Ok(());
     }
 
@@ -743,7 +716,7 @@ async fn respond_to_pending_approval(
     decision: crate::im_runtime::ApprovalDecisionOption,
 ) -> Result<()> {
     let next = submit_approval_decision(state, &pending, &decision).await?;
-    update_resolved_approval_card(api, &pending, option_index, &decision.label).await;
+    update_resolved_approval_card(state, api, &pending, option_index, &decision.label).await;
     let _ = chat_id;
     state
         .push_event(
@@ -792,11 +765,12 @@ async fn send_thread_routing_list(
                     format!("conversation={} err={err}", route.conversation_key),
                 )
                 .await;
+            let text = im_text_for_state(state);
             let _ = adapter
                 .send_thread_routing_result(
                     &route.chat_id,
-                    "会话列表加载失败",
-                    "Codex App 暂时没有响应，请稍后重试。",
+                    text.list_load_failed_title(),
+                    text.list_load_failed(),
                     existing_message_id,
                 )
                 .await;
@@ -814,18 +788,20 @@ async fn send_thread_routing_list(
         })
         .collect::<Vec<_>>();
 
-    let body = thread_list_body(loaded_page.model_provider_filter.as_deref());
+    let text = im_text_for_state(state);
+    let body = text.thread_list_body_feishu(loaded_page.model_provider_filter.as_deref());
     let message_id = adapter
         .send_thread_list(
             &route.chat_id,
             &loaded_page.request_id,
-            "选择 Codex 会话",
+            text.thread_list_title_feishu(),
             &body,
             &feishu_entries,
             loaded_page.page,
             loaded_page.page > 1,
             loaded_page.next_cursor.is_some(),
             existing_message_id,
+            text,
         )
         .await?;
     {
@@ -872,8 +848,9 @@ async fn send_thread_routing_choice_card(
         .as_ref()
         .and_then(|request| request.message_id.as_deref());
     let adapter = FeishuAdapter::new(api.clone());
+    let text = im_text_for_state(state);
     let message_id = adapter
-        .send_thread_routing_choice(&route.chat_id, &request_id, existing_message_id)
+        .send_thread_routing_choice(&route.chat_id, &request_id, existing_message_id, text)
         .await?;
     {
         let mut runtime = state.runtime.lock().await;
@@ -892,6 +869,7 @@ async fn send_thread_routing_choice_card(
 }
 
 async fn update_thread_routing_choice_card_selected(
+    state: &SharedState,
     api: &FeishuApi,
     request_id: &str,
     message_id: Option<&str>,
@@ -899,7 +877,12 @@ async fn update_thread_routing_choice_card_selected(
 ) {
     let adapter = FeishuAdapter::new(api.clone());
     let _ = adapter
-        .update_thread_routing_choice_selected(request_id, message_id, selected_action)
+        .update_thread_routing_choice_selected(
+            request_id,
+            message_id,
+            selected_action,
+            im_text_for_state(state),
+        )
         .await;
 }
 
@@ -915,18 +898,8 @@ struct DecodedImage {
     extension: &'static str,
 }
 
-pub(crate) fn thread_list_body(model_provider_filter: Option<&str>) -> String {
-    let mut body =
-        "当前飞书会话还没有订阅任何 Codex thread。请选择一个会话接入后续事件。".to_string();
-    if let Some(provider) = model_provider_filter {
-        body.push_str(&format!(
-            "\n\n<font color='grey'>已按当前 Codex App provider `{provider}` 过滤。</font>"
-        ));
-    }
-    body
-}
-
 pub(crate) async fn update_resolved_approval_card(
+    state: &SharedState,
     api: &FeishuApi,
     pending: &PendingApproval,
     option_index: usize,
@@ -934,7 +907,12 @@ pub(crate) async fn update_resolved_approval_card(
 ) {
     let adapter = FeishuAdapter::new(api.clone());
     let _ = adapter
-        .update_resolved_approval(pending, option_index, decision_label)
+        .update_resolved_approval(
+            pending,
+            option_index,
+            decision_label,
+            im_text_for_state(state),
+        )
         .await;
 }
 
@@ -964,7 +942,9 @@ pub(crate) async fn send_approval_card(
     approval: &PendingApproval,
 ) -> Result<()> {
     let adapter = FeishuAdapter::new(api.clone());
-    let message_id = adapter.send_approval(&route.chat_id, approval).await?;
+    let message_id = adapter
+        .send_approval(&route.chat_id, approval, im_text_for_state(state))
+        .await?;
     state
         .runtime
         .lock()

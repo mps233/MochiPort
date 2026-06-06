@@ -10,9 +10,9 @@ use crate::{
     im::{
         core::{
             accounts::ImApiRegistry,
+            i18n::im_text_for_state,
             outbound::{ImOutboundKind, ImOutboundMessage, ImOutboundPayload, ImOutboundSender},
             text_renderer,
-            turn::turn_completed_notice,
         },
         feishu::{
             FeishuAdapter, FeishuApi, flow as feishu_flow, renderer,
@@ -295,7 +295,7 @@ async fn send_turn_completed_mark(
     thread_id: &str,
     route: &RouteTarget,
 ) {
-    let text = turn_completed_notice();
+    let text = im_text_for_state(state).turn_completed_notice();
     match route.platform {
         ImPlatformKind::Feishu => {
             let Some(api) = api_registry.feishu_for_route(route) else {
@@ -1042,7 +1042,9 @@ async fn send_feishu_approval(
     approval: &PendingApproval,
 ) -> Result<()> {
     let adapter = FeishuAdapter::new(api.clone());
-    let message_id = adapter.send_approval(&route.chat_id, approval).await?;
+    let message_id = adapter
+        .send_approval(&route.chat_id, approval, im_text_for_state(state))
+        .await?;
     state
         .runtime
         .lock()
@@ -1067,7 +1069,9 @@ async fn send_telegram_approval(
     route: &RouteTarget,
     approval: &PendingApproval,
 ) -> Result<()> {
-    let message_id = adapter.send_approval(&route.chat_id, approval).await?;
+    let message_id = adapter
+        .send_approval(&route.chat_id, approval, im_text_for_state(state))
+        .await?;
     state
         .runtime
         .lock()

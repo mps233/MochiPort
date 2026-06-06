@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::im::core::thread::ThreadCreateDefaults;
+use crate::im::core::{i18n::ImText, thread::ThreadCreateDefaults};
 use crate::im_runtime::PendingApproval;
 
 use super::{FeishuApi, renderer};
@@ -62,6 +62,7 @@ impl FeishuAdapter {
         pending: &PendingApproval,
         option_index: usize,
         decision_label: &str,
+        text: ImText,
     ) -> Result<()> {
         let Some(message_id) = pending.message_id.as_deref() else {
             return Ok(());
@@ -71,17 +72,24 @@ impl FeishuAdapter {
             &pending.summary,
             decision_label,
             option_index,
+            text,
         );
         self.update_interactive(message_id, &card).await
     }
 
-    pub async fn send_approval(&self, target: &str, approval: &PendingApproval) -> Result<String> {
+    pub async fn send_approval(
+        &self,
+        target: &str,
+        approval: &PendingApproval,
+        text: ImText,
+    ) -> Result<String> {
         let request_key = approval.request_key();
         let card = renderer::build_approval_card(
             &approval.request_kind,
             &approval.summary,
             &approval.decisions,
             &request_key,
+            text,
         );
         self.send_interactive(target, &card).await
     }
@@ -91,8 +99,9 @@ impl FeishuAdapter {
         target: &str,
         request_id: &str,
         message_id: Option<&str>,
+        text: ImText,
     ) -> Result<String> {
-        let card = thread_routing_choice_card(request_id, None);
+        let card = thread_routing_choice_card(request_id, None, text);
         self.send_or_update_interactive(target, message_id, &card)
             .await
     }
@@ -102,11 +111,12 @@ impl FeishuAdapter {
         request_id: &str,
         message_id: Option<&str>,
         selected_action: &str,
+        text: ImText,
     ) -> Result<()> {
         let Some(message_id) = message_id else {
             return Ok(());
         };
-        let card = thread_routing_choice_card(request_id, Some(selected_action));
+        let card = thread_routing_choice_card(request_id, Some(selected_action), text);
         self.update_interactive(message_id, &card).await
     }
 
@@ -121,9 +131,10 @@ impl FeishuAdapter {
         has_prev: bool,
         has_next: bool,
         message_id: Option<&str>,
+        text: ImText,
     ) -> Result<String> {
         let card = renderer::build_thread_list_card(
-            request_id, title, body, entries, page, has_prev, has_next,
+            request_id, title, body, entries, page, has_prev, has_next, text,
         );
         self.send_or_update_interactive(target, message_id, &card)
             .await
@@ -135,8 +146,9 @@ impl FeishuAdapter {
         request_id: &str,
         defaults: &ThreadCreateDefaults,
         message_id: Option<&str>,
+        text: ImText,
     ) -> Result<String> {
-        let card = renderer::build_thread_create_settings_card(request_id, defaults);
+        let card = renderer::build_thread_create_settings_card(request_id, defaults, text);
         self.send_or_update_interactive(target, message_id, &card)
             .await
     }
@@ -167,15 +179,16 @@ impl FeishuAdapter {
 fn thread_routing_choice_card(
     request_id: &str,
     selected_action: Option<&str>,
+    text: ImText,
 ) -> serde_json::Value {
     let resolved = selected_action.is_some();
     renderer::build_thread_routing_choice_card(
-        "未绑定会话",
-        "当前飞书会话没有可直接使用的活跃 Codex thread。请选择新建会话，或显式恢复一个历史会话。",
+        text.create_choice_title_feishu(),
+        text.create_choice_body_feishu(),
         &[
             renderer::FeishuThreadRoutingAction {
-                label: "创建新会话".to_string(),
-                description: "创建一个新的 Codex thread，并接入后续消息。".to_string(),
+                label: text.create_new_session_button().to_string(),
+                description: text.create_new_description_feishu().to_string(),
                 value: serde_json::json!({
                     "kind": "thread_route_choice",
                     "requestId": request_id,
@@ -186,8 +199,8 @@ fn thread_routing_choice_card(
                 resolved,
             },
             renderer::FeishuThreadRoutingAction {
-                label: "恢复历史会话".to_string(),
-                description: "查看 Codex App 当前可恢复的历史 thread 列表。".to_string(),
+                label: text.restore_history_button().to_string(),
+                description: text.restore_history_description_feishu().to_string(),
                 value: serde_json::json!({
                     "kind": "thread_route_choice",
                     "requestId": request_id,
@@ -198,5 +211,6 @@ fn thread_routing_choice_card(
                 resolved,
             },
         ],
+        text,
     )
 }

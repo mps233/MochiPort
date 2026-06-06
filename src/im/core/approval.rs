@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::{
     app_state::SharedState,
     codex::{approval_decision_by_input, approval_response},
-    im::core::thread::approval_reply_hint,
+    im::core::i18n::im_text_for_state,
     im_runtime::{ApprovalDecisionOption, PendingApproval, approval_request_fingerprint},
     remote_control_backend,
     types::InboundMessage,
@@ -54,7 +54,7 @@ pub(crate) async fn resolve_approval_reply(
     }
     let Some((option_index, decision)) = approval_decision_by_input(&pending, command) else {
         return ApprovalReplyOutcome::InvalidInput {
-            hint: approval_reply_hint(&pending),
+            hint: im_text_for_state(state).approval_reply_hint(&pending),
         };
     };
     ApprovalReplyOutcome::Ready {
@@ -89,7 +89,7 @@ pub(crate) async fn resolve_approval_button_reply(
         .cloned()
     else {
         return ApprovalReplyOutcome::InvalidInput {
-            hint: approval_reply_hint(&pending),
+            hint: im_text_for_state(state).approval_reply_hint(&pending),
         };
     };
     ApprovalReplyOutcome::Ready {

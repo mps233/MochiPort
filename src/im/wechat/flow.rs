@@ -6,6 +6,7 @@ use crate::{
     im::{
         core::{
             approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
+            i18n::{ImText, im_text_for_state},
             routing::{active_turn_for_message, clear_thread_binding, route_for_message},
             session::{create_and_bind_thread, resume_and_bind_thread},
             thread::{
@@ -17,7 +18,7 @@ use crate::{
                 thread_start_options_from_form_for_client,
             },
             thread_list::{empty_thread_routing_request, load_thread_routing_page},
-            turn::{TurnStartOutcome, start_turn_for_route, turn_busy_notice},
+            turn::{TurnStartOutcome, start_turn_for_route},
         },
         wechat::{adapter::WechatAdapter, api::WechatApi, types::WechatSettings},
     },
@@ -55,6 +56,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     let adapter = WechatAdapter::new(api);
     let account_id = message.account_id.clone();
     let route = route_for_message(&message);
+    let text = im_text_for_state(&state);
     {
         let mut runtime = state.runtime.lock().await;
         runtime.last_route = Some(route.clone());
@@ -124,7 +126,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                         &state,
                         &account_id,
                         &message.chat_id,
-                        "当前没有运行中的 turn。",
+                        text.no_running_turn(),
                     )
                     .await?;
                 return Ok(());
@@ -148,7 +150,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                 .await
                 .mark_turn_completed(&thread_id, Some(&turn_id));
             adapter
-                .send_text(&state, &account_id, &message.chat_id, "已中断当前任务。")
+                .send_text(&state, &account_id, &message.chat_id, text.interrupted())
                 .await?;
             return Ok(());
         }
@@ -175,7 +177,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             }
             clear_thread_binding(&state, &route.conversation_key).await?;
             adapter
-                .send_text(&state, &account_id, &message.chat_id, "已退出当前会话。")
+                .send_text(&state, &account_id, &message.chat_id, text.exited())
                 .await?;
             return Ok(());
         }
@@ -185,9 +187,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                     &state,
                     &account_id,
                     &message.chat_id,
-                    &format!(
-                        "不支持的命令：{other}。当前只支持 /s 中断当前任务、/q 退出当前会话。"
-                    ),
+                    &text.unsupported_command(other),
                 )
                 .await?;
             return Ok(());
@@ -195,13 +195,13 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         None => {}
     }
 
-    if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
+    if active_turn_for_message(&state, &message).await.is_some() {
         adapter
             .send_text(
                 &state,
                 &account_id,
                 &message.chat_id,
-                turn_busy_notice(&thread_id, &turn_id),
+                text.turn_busy_notice(),
             )
             .await?;
         return Ok(());
@@ -214,7 +214,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                 &state,
                 &account_id,
                 &message.chat_id,
-                "Codex remote-control 还没有连接。请在项目目录运行 Codex，并打开 remote-control 后再发送消息。",
+                text.remote_not_connected(),
             )
             .await?;
         return Ok(());
@@ -243,13 +243,13 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                 .await;
             Ok(())
         }
-        TurnStartOutcome::Busy { thread_id, turn_id } => {
+        TurnStartOutcome::Busy => {
             adapter
                 .send_text(
                     &state,
                     &account_id,
                     &message.chat_id,
-                    turn_busy_notice(&thread_id, turn_id.as_deref().unwrap_or("")),
+                    text.turn_busy_notice(),
                 )
                 .await?;
             Ok(())
@@ -260,7 +260,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                     &state,
                     &account_id,
                     &message.chat_id,
-                    "这条消息是在上一轮任务期间收到的，已跳过。请重新发送最新指令。",
+                    text.inbound_expired(),
                 )
                 .await?;
             state
@@ -295,7 +295,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
                     &state,
                     &account_id,
                     &message.chat_id,
-                    &format!("Codex App 没有接收这条消息：{error}\n\n请确认 Codex App 还打开着 remote-control。"),
+                    &text.app_message_failed(&error),
                 )
                 .await?;
             Err(error)
@@ -310,12 +310,13 @@ async fn create_wechat_thread_for_route(
     options: remote_control_backend::ThreadStartOptions,
     request_id: Option<&str>,
 ) -> Result<String> {
+    let text = im_text_for_state(state);
     adapter
         .send_text(
             state,
             &route.account_id,
             &route.chat_id,
-            "正在创建新的 Codex 会话...",
+            text.creating_new_thread(),
         )
         .await?;
     let thread_id = create_and_bind_thread(state, route, options.clone(), request_id).await?;
@@ -325,8 +326,12 @@ async fn create_wechat_thread_for_route(
             &route.account_id,
             &route.chat_id,
             &format!(
-                "已创建新会话\n\n已接入新 thread `{thread_id}`。\n\n{}\n\n现在可以直接发送消息。",
-                summarize_thread_start_options(&options)
+                "{}\n\n{}",
+                text.created_new_session_title(),
+                text.created_new_session_body(
+                    &thread_id,
+                    &summarize_thread_start_options(&options, text)
+                )
             ),
         )
         .await?;
@@ -356,10 +361,9 @@ async fn send_thread_create_settings(
         .map(|request| request.create_draft.clone())
         .unwrap_or_default();
     let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
-    let mut text = thread_create_help_text(&defaults, &create_draft);
-    text.push_str(
-        "\n\n1. 修改目录\n2. 修改模型\n3. 修改推理强度\n4. 修改权限\n5. 创建会话\n6. 恢复历史会话\n\n回复数字选择。也可以回复 y 创建，n 取消。",
-    );
+    let im_text = im_text_for_state(state);
+    let mut text = thread_create_help_text(&defaults, &create_draft, im_text);
+    text.push_str(im_text.create_settings_menu_suffix());
     let message_id = adapter
         .send_text(state, &message.account_id, &message.chat_id, &text)
         .await?;
@@ -420,7 +424,7 @@ async fn handle_thread_create_settings_text_reply(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "已取消创建会话。",
+                im_text_for_state(state).create_cancelled(),
             )
             .await?;
         return Ok(true);
@@ -457,7 +461,7 @@ async fn handle_thread_create_settings_text_reply(
                     state,
                     &message.account_id,
                     &message.chat_id,
-                    "请回复 1~6，或回复 y 创建、n 取消。",
+                    im_text_for_state(state).invalid_create_settings_reply(),
                 )
                 .await?;
             Ok(true)
@@ -481,12 +485,13 @@ async fn create_wechat_thread_from_request(
     {
         Ok(options) => options,
         Err(err) => {
+            let text = im_text_for_state(state);
             adapter
                 .send_text(
                     state,
                     &message.account_id,
                     &message.chat_id,
-                    &format!("新建会话参数不正确：{err}"),
+                    &text.invalid_create_form(&err),
                 )
                 .await?;
             return Ok(());
@@ -512,17 +517,18 @@ async fn send_thread_create_options(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "这个创建选项不可用，请重新打开创建设置。",
+                im_text_for_state(state).create_option_unavailable(),
             )
             .await?;
         return Ok(());
     };
     let route = route_for_message(message);
     let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
+    let text = im_text_for_state(state);
     let (title, body, mut options) =
-        create_options_for_field(&defaults, &request.create_draft, field)?;
+        create_options_for_field(&defaults, &request.create_draft, field, text)?;
     if field == "cwd" {
-        insert_custom_cwd_option(&mut options);
+        insert_custom_cwd_option(&mut options, text);
     }
     let total_pages = ((options.len() + WECHAT_CREATE_OPTION_PAGE_SIZE - 1)
         / WECHAT_CREATE_OPTION_PAGE_SIZE)
@@ -557,6 +563,7 @@ async fn send_thread_create_options(
         page,
         page > 1,
         page < total_pages,
+        text,
     );
     let message_id = adapter
         .send_text(state, &message.account_id, &message.chat_id, &text)
@@ -610,7 +617,7 @@ async fn handle_thread_create_option_text_reply(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "已取消创建会话。",
+                im_text_for_state(state).create_cancelled(),
             )
             .await?;
         return Ok(true);
@@ -642,7 +649,7 @@ async fn handle_thread_create_option_text_reply(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "这个选项序号不可用，请按当前列表里的数字选择。",
+                im_text_for_state(state).invalid_option_index(),
             )
             .await?;
         return Ok(true);
@@ -707,7 +714,7 @@ async fn handle_thread_create_custom_cwd_text_input(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "项目目录需要是绝对路径。请重新发送绝对路径，或回复 n 取消。",
+                im_text_for_state(state).cwd_must_be_absolute_wechat(),
             )
             .await?;
         return Ok(true);
@@ -733,7 +740,7 @@ async fn send_thread_create_custom_cwd_prompt(
             state,
             &message.account_id,
             &message.chat_id,
-            "请发送项目目录的绝对路径。目录不存在时，创建会话时会自动创建。\n\n回复 n 取消。",
+            im_text_for_state(state).custom_cwd_prompt_wechat(),
         )
         .await?;
     Ok(())
@@ -759,15 +766,15 @@ async fn pending_thread_create_custom_cwd_request(
         .cloned()
 }
 
-fn insert_custom_cwd_option(options: &mut Vec<(String, ThreadCreateOption)>) {
+fn insert_custom_cwd_option(options: &mut Vec<(String, ThreadCreateOption)>, text: ImText) {
     if options.iter().any(|(value, _)| value == "__custom__") {
         return;
     }
     let custom = (
         "__custom__".to_string(),
         ThreadCreateOption {
-            label: "自定义或新建目录".to_string(),
-            summary: Some("选择后发送绝对路径。目录不存在时会自动创建。".to_string()),
+            label: text.custom_cwd_label().to_string(),
+            summary: Some(text.custom_cwd_summary().to_string()),
         },
     );
     if options.is_empty() {
@@ -784,19 +791,20 @@ fn thread_create_options_text(
     page: usize,
     has_prev: bool,
     has_next: bool,
+    text: ImText,
 ) -> String {
     let mut lines = Vec::new();
     lines.push(format!("**{title}**"));
     lines.push(body.to_string());
-    let mut hints = vec![format!("回复 1~{} 选择", options.len())];
+    let mut hints = vec![text.reply_choose_range(options.len())];
     if has_prev {
-        hints.push("**p** 上一页".to_string());
+        hints.push(text.prev_action_markdown().to_string());
     }
     if has_next {
-        hints.push("**n** 下一页".to_string());
+        hints.push(text.next_action_markdown().to_string());
     }
-    hints.push("**0** 返回设置".to_string());
-    let navigation_hint = format!("第 {} 页 · {}", page.max(1), hints.join("，"));
+    hints.push(text.back_create_settings_markdown().to_string());
+    let navigation_hint = text.page_hint(page, &hints);
     lines.push("---".to_string());
     lines.push(String::new());
     for (index, option) in options.iter().enumerate() {
@@ -846,7 +854,7 @@ async fn send_thread_routing_choice(
             state,
             &message.account_id,
             &message.chat_id,
-            "当前微信会话还没有接入 Codex 会话。\n\n1. 新建会话\n2. 恢复历史会话\n\n回复 1 或 2。",
+            im_text_for_state(state).create_choice_wechat(),
         )
         .await?;
     state
@@ -889,7 +897,7 @@ async fn handle_thread_route_choice_text_reply(
                     state,
                     &message.account_id,
                     &message.chat_id,
-                    "请回复 1 新建会话，或回复 2 恢复历史会话。",
+                    im_text_for_state(state).invalid_route_choice_wechat(),
                 )
                 .await?;
             Ok(true)
@@ -930,7 +938,7 @@ async fn send_thread_routing_list(
                     state,
                     &message.account_id,
                     &message.chat_id,
-                    "会话列表加载失败：Codex App 暂时没有响应，请稍后重试。",
+                    im_text_for_state(state).list_load_failed(),
                 )
                 .await?;
             return Ok(());
@@ -942,7 +950,7 @@ async fn send_thread_routing_list(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "当前没有可恢复的历史会话。\n\n回复 1 创建新会话。",
+                im_text_for_state(state).no_history_create_hint_wechat(),
             )
             .await?;
         state
@@ -956,7 +964,7 @@ async fn send_thread_routing_list(
             ));
         return Ok(());
     }
-    let text = thread_list_text(&loaded_page);
+    let text = thread_list_text(&loaded_page, im_text_for_state(state));
     let message_id = adapter
         .send_text(state, &message.account_id, &message.chat_id, &text)
         .await?;
@@ -1011,7 +1019,7 @@ async fn handle_thread_list_text_reply(
                         state,
                         &message.account_id,
                         &message.chat_id,
-                        "已经是最后一页。",
+                        im_text_for_state(state).last_page(),
                     )
                     .await?;
             }
@@ -1040,7 +1048,7 @@ async fn handle_thread_list_text_reply(
                         state,
                         &message.account_id,
                         &message.chat_id,
-                        "已经是第一页。",
+                        im_text_for_state(state).first_page(),
                     )
                     .await?;
             }
@@ -1065,7 +1073,7 @@ async fn handle_thread_list_text_reply(
                 state,
                 &message.account_id,
                 &message.chat_id,
-                "这个序号不在当前会话列表里，请按列表里的 1、2 选择。",
+                im_text_for_state(state).invalid_thread_index(),
             )
             .await?;
         return Ok(true);
@@ -1073,15 +1081,19 @@ async fn handle_thread_list_text_reply(
     let route = route_for_message(message);
     let thread =
         resume_and_bind_thread(state, &route, &thread_id, Some(&request.request_id)).await?;
+    let text = im_text_for_state(state);
     adapter
         .send_text(
             state,
             &message.account_id,
             &message.chat_id,
             &format!(
-                "已接入历史会话\n\n{}\n{}\n\n现在可以直接发送消息。",
-                summarize_thread_title(&thread),
-                summarize_thread_cwd(&thread)
+                "{}\n\n{}",
+                text.resumed_session_title(),
+                text.resumed_session_body(
+                    &summarize_thread_title(&thread, text),
+                    &summarize_thread_cwd(&thread, text)
+                )
             ),
         )
         .await?;
@@ -1111,7 +1123,7 @@ async fn handle_wechat_approval_text_reply(
                     state,
                     &message.account_id,
                     &message.chat_id,
-                    "审批决定已提交。",
+                    im_text_for_state(state).approval_decision_submitted(),
                 )
                 .await?;
             if let Some((conversation_key, next_approval)) = next
@@ -1125,32 +1137,35 @@ async fn handle_wechat_approval_text_reply(
             }
         }
         ApprovalReplyOutcome::NoPending => {
+            let text = im_text_for_state(state);
             adapter
                 .send_text(
                     state,
                     &message.account_id,
                     &message.chat_id,
-                    "当前没有待处理审批。",
+                    text.no_pending_approval(),
                 )
                 .await?;
         }
         ApprovalReplyOutcome::NotCurrent => {
+            let text = im_text_for_state(state);
             adapter
                 .send_text(
                     state,
                     &message.account_id,
                     &message.chat_id,
-                    "这个审批请求已经不是当前待处理项。",
+                    text.approval_not_current(),
                 )
                 .await?;
         }
         ApprovalReplyOutcome::InvalidInput { hint } => {
+            let text = im_text_for_state(state);
             adapter
                 .send_text(
                     state,
                     &message.account_id,
                     &message.chat_id,
-                    &format!("审批回复无效，请回复 {hint}。"),
+                    &text.invalid_approval_reply(&hint),
                 )
                 .await?;
         }
@@ -1192,21 +1207,24 @@ fn thread_routing_request_rank(request_id: &str) -> u64 {
         .unwrap_or(0)
 }
 
-fn thread_list_text(page: &crate::im::core::thread_list::ThreadRoutingPage) -> String {
+fn thread_list_text(
+    page: &crate::im::core::thread_list::ThreadRoutingPage,
+    text: ImText,
+) -> String {
     let mut lines = Vec::new();
-    lines.push("**恢复历史会话**".to_string());
+    lines.push(format!("**{}**", text.thread_list_title_wechat()));
     if let Some(provider) = page.model_provider_filter.as_deref() {
-        lines.push(format!("已按当前 Codex App provider `{provider}` 过滤。"));
+        lines.push(text.provider_filter_line(provider));
     }
     lines.push("---".to_string());
-    let mut actions = vec![format!("回复 1~{} 选择会话", page.entries.len())];
+    let mut actions = vec![text.reply_choose_session_range(page.entries.len())];
     if page.page > 1 {
-        actions.push("**p** 上一页".to_string());
+        actions.push(text.prev_action_markdown().to_string());
     }
     if page.next_cursor.is_some() {
-        actions.push("**n** 下一页".to_string());
+        actions.push(text.next_action_markdown().to_string());
     }
-    let navigation_hint = format!("第 {} 页 · {}", page.page.max(1), actions.join("，"));
+    let navigation_hint = text.page_hint(page.page, &actions);
     let mut current_cwd: Option<&str> = None;
     for (index, entry) in page.entries.iter().enumerate() {
         let cwd = entry
@@ -1218,10 +1236,10 @@ fn thread_list_text(page: &crate::im::core::thread_list::ThreadRoutingPage) -> S
             if !lines.last().is_some_and(|line| line.is_empty()) {
                 lines.push(String::new());
             }
-            lines.extend(thread_project_header_lines(cwd));
+            lines.extend(thread_project_header_lines(cwd, text));
             current_cwd = cwd;
         }
-        let state = thread_state_suffix(&entry.state);
+        let state = thread_state_suffix(&entry.state, text);
         lines.push(format!(
             "{}. **{}**{}",
             index + 1,
@@ -1238,21 +1256,21 @@ fn thread_list_text(page: &crate::im::core::thread_list::ThreadRoutingPage) -> S
     lines.join("\n").trim_end().to_string()
 }
 
-fn thread_project_header_lines(cwd: Option<&str>) -> Vec<String> {
+fn thread_project_header_lines(cwd: Option<&str>, text: ImText) -> Vec<String> {
     match cwd {
         Some(cwd) => vec![
-            format!("**项目：{}**", project_name(cwd)),
+            format!("**{}**", text.project_header(&project_name(cwd))),
             format!("`{cwd}`"),
         ],
-        None => vec!["**项目：未知目录**".to_string()],
+        None => vec![format!("**{}**", text.unknown_project_header())],
     }
 }
 
-fn thread_state_suffix(state: &str) -> Option<&'static str> {
-    if state.contains("当前会话") {
-        Some(" · 当前")
-    } else if state.contains("已加载") {
-        Some(" · 已加载")
+fn thread_state_suffix(state: &str, text: ImText) -> Option<String> {
+    if state.contains("当前会话") || state.contains("Current session") {
+        Some(format!(" · {}", text.current_short()))
+    } else if state.contains("已加载") || state.contains("Loaded") {
+        Some(format!(" · {}", text.loaded_short()))
     } else {
         None
     }

@@ -5,7 +5,7 @@ use tokio::time::{Duration, sleep};
 
 use crate::{
     chain_log,
-    im::core::thread::ThreadCreateOption,
+    im::core::{i18n::ImText, thread::ThreadCreateOption},
     im_runtime::{PendingApproval, approval_request_fingerprint},
 };
 
@@ -188,8 +188,13 @@ impl TelegramAdapter {
         }
     }
 
-    pub async fn send_approval(&self, target: &str, approval: &PendingApproval) -> Result<String> {
-        let text = approval_text(approval);
+    pub async fn send_approval(
+        &self,
+        target: &str,
+        approval: &PendingApproval,
+        im_text: ImText,
+    ) -> Result<String> {
+        let text = approval_text(approval, im_text);
         let Some(keyboard) = approval_keyboard(approval) else {
             return self.send_text(target, &text).await;
         };
@@ -300,20 +305,26 @@ impl TelegramAdapter {
         &self,
         target: &str,
         request_id: &str,
+        text: ImText,
     ) -> Result<String> {
         let keyboard = inline_keyboard(vec![
-            vec![button("创建新会话", &format!("trc:{request_id}:new"))],
-            vec![button("恢复历史会话", &format!("trc:{request_id}:load"))],
+            vec![button(
+                text.create_new_session_button(),
+                &format!("trc:{request_id}:new"),
+            )],
+            vec![button(
+                text.restore_history_button(),
+                &format!("trc:{request_id}:load"),
+            )],
         ]);
-        let text =
-            "当前 Telegram 会话还没有接入 Codex thread。\n请选择创建新会话，或恢复一个历史会话。";
+        let body = text.create_choice_telegram();
         log_adapter(
             "send_thread_routing_choice_begin",
             format!("chat={} request={}", target, request_id),
         );
         let message_id = self
             .api
-            .send_text_with_reply_markup(target, text, keyboard)
+            .send_text_with_reply_markup(target, body, keyboard)
             .await?;
         log_adapter(
             "send_thread_routing_choice_done",
@@ -330,18 +341,28 @@ impl TelegramAdapter {
         target: &str,
         request_id: &str,
         text: &str,
+        im_text: ImText,
     ) -> Result<String> {
         let keyboard = inline_keyboard(vec![
             vec![
-                button("目录", &format!("tce:{request_id}:cwd")),
-                button("模型", &format!("tce:{request_id}:model")),
+                button(im_text.directory_button(), &format!("tce:{request_id}:cwd")),
+                button(im_text.model_button(), &format!("tce:{request_id}:model")),
             ],
             vec![
-                button("推理强度", &format!("tce:{request_id}:effort")),
-                button("权限", &format!("tce:{request_id}:perm")),
+                button(im_text.effort_button(), &format!("tce:{request_id}:effort")),
+                button(
+                    im_text.permission_button(),
+                    &format!("tce:{request_id}:perm"),
+                ),
             ],
-            vec![button("创建", &format!("tcc:{request_id}"))],
-            vec![button("恢复历史会话", &format!("trc:{request_id}:load"))],
+            vec![button(
+                im_text.create_button(),
+                &format!("tcc:{request_id}"),
+            )],
+            vec![button(
+                im_text.restore_history_button(),
+                &format!("trc:{request_id}:load"),
+            )],
         ]);
         log_adapter(
             "send_thread_create_settings_begin",
@@ -377,31 +398,39 @@ impl TelegramAdapter {
         page: usize,
         has_prev: bool,
         has_next: bool,
+        text: ImText,
     ) -> Result<String> {
         let mut rows = Vec::new();
         let mut nav = Vec::new();
         if has_prev {
-            nav.push(button("上一页", &format!("tcp:{request_id}:{field}:prev")));
+            nav.push(button(
+                text.previous_page_button(),
+                &format!("tcp:{request_id}:{field}:prev"),
+            ));
         }
         if has_next {
-            nav.push(button("下一页", &format!("tcp:{request_id}:{field}:next")));
+            nav.push(button(
+                text.next_page_button(),
+                &format!("tcp:{request_id}:{field}:next"),
+            ));
         }
         if !nav.is_empty() {
             rows.push(nav);
         }
         if field == "cwd" {
             rows.push(vec![button(
-                "自定义或新建目录",
+                text.custom_cwd_label(),
                 &format!("tcv:{request_id}:cwd:__custom__"),
             )]);
         }
         rows.push(vec![button(
-            "返回创建设置",
+            text.back_to_create_settings_button(),
             &format!("trc:{request_id}:new"),
         )]);
 
         let options_html = create_options_table_html(options);
-        let text = create_options_html_text(title, body, page, options.len(), &options_html);
+        let text_html =
+            create_options_html_text(title, body, page, options.len(), &options_html, text);
         log_adapter(
             "send_thread_create_options_begin",
             format!(
@@ -411,14 +440,14 @@ impl TelegramAdapter {
                 field,
                 page,
                 options.len(),
-                text.chars().count()
+                text_html.chars().count()
             ),
         );
         let message_id = self
             .api
             .send_text_with_reply_markup_parse_mode(
                 target,
-                &text,
+                &text_html,
                 inline_keyboard(rows),
                 TelegramParseMode::Html,
             )
@@ -443,26 +472,36 @@ impl TelegramAdapter {
         page: usize,
         has_prev: bool,
         has_next: bool,
+        text: ImText,
     ) -> Result<String> {
         let mut rows = Vec::new();
         let mut nav = Vec::new();
         if has_prev {
-            nav.push(button("上一页", &format!("tlp:{request_id}:prev")));
+            nav.push(button(
+                text.previous_page_button(),
+                &format!("tlp:{request_id}:prev"),
+            ));
         }
         if has_next {
-            nav.push(button("下一页", &format!("tlp:{request_id}:next")));
+            nav.push(button(
+                text.next_page_button(),
+                &format!("tlp:{request_id}:next"),
+            ));
         }
         if !nav.is_empty() {
             rows.push(nav);
         }
-        rows.push(vec![button("创建新会话", &format!("trc:{request_id}:new"))]);
+        rows.push(vec![button(
+            text.create_new_session_button(),
+            &format!("trc:{request_id}:new"),
+        )]);
 
         let entries_html = if entries.is_empty() {
-            telegram_html_escape("当前没有可恢复的历史会话。")
+            telegram_html_escape(text.no_restorable_history())
         } else {
-            thread_entries_table_html(entries)
+            thread_entries_table_html(entries, text)
         };
-        let text = thread_list_html_text(title, body, page, &entries_html);
+        let text_html = thread_list_html_text(title, body, page, &entries_html, text);
         log_adapter(
             "send_thread_list_begin",
             format!(
@@ -471,14 +510,14 @@ impl TelegramAdapter {
                 request_id,
                 page,
                 entries.len(),
-                text.chars().count()
+                text_html.chars().count()
             ),
         );
         let message_id = self
             .api
             .send_text_with_reply_markup_parse_mode(
                 target,
-                &text,
+                &text_html,
                 inline_keyboard(rows),
                 TelegramParseMode::Html,
             )
@@ -507,14 +546,14 @@ impl TelegramAdapter {
     }
 }
 
-fn approval_text(approval: &PendingApproval) -> String {
+fn approval_text(approval: &PendingApproval, text: ImText) -> String {
     let mut lines = vec![
-        "approval request".to_string(),
+        text.approval_request_heading().to_string(),
         format!("request_kind: `{}`", approval.request_kind),
         String::new(),
         approval.summary.trim().to_string(),
         String::new(),
-        "availableDecisions:".to_string(),
+        format!("{}:", text.available_decisions_label()),
     ];
     if approval.decisions.is_empty() {
         lines.push("/y".to_string());
@@ -528,6 +567,8 @@ fn approval_text(approval: &PendingApproval) -> String {
                 .map(|(index, decision)| format!("/{} {}", index + 1, decision.label)),
         );
     }
+    lines.push(String::new());
+    lines.push(text.approval_reply_footer(&text.approval_reply_hint(approval)));
     lines.join("\n")
 }
 
@@ -583,7 +624,7 @@ fn approval_button(text: &str, callback_data: &str) -> serde_json::Value {
     })
 }
 
-fn thread_entries_table_html(entries: &[TelegramThreadListEntry]) -> String {
+fn thread_entries_table_html(entries: &[TelegramThreadListEntry], text: ImText) -> String {
     let mut lines = Vec::new();
     let mut current_cwd: Option<&str> = None;
     for (index, entry) in entries.iter().enumerate() {
@@ -596,10 +637,10 @@ fn thread_entries_table_html(entries: &[TelegramThreadListEntry]) -> String {
             if !lines.is_empty() {
                 lines.push(String::new());
             }
-            lines.push(project_header_html(cwd));
+            lines.push(project_header_html(cwd, text));
             current_cwd = cwd;
         }
-        lines.push(thread_entry_table_html(index, entry));
+        lines.push(thread_entry_table_html(index, entry, text));
     }
     lines.join("\n")
 }
@@ -643,11 +684,12 @@ fn create_options_html_text(
     page: usize,
     option_count: usize,
     options_html: &str,
+    text: ImText,
 ) -> String {
     let hint = if option_count == 0 {
-        "当前没有可选项。".to_string()
+        text.no_options().to_string()
     } else {
-        format!("第 {} 页 · 点击 /1 ~ /{} 选择", page.max(1), option_count)
+        text.page_click_hint(page, option_count)
     };
     format!(
         "<b>{}</b>\n{}\n\n{}\n<code>{}</code>",
@@ -658,15 +700,15 @@ fn create_options_html_text(
     )
 }
 
-fn thread_entry_table_html(index: usize, entry: &TelegramThreadListEntry) -> String {
+fn thread_entry_table_html(index: usize, entry: &TelegramThreadListEntry, text: ImText) -> String {
     let title = entry.title.trim();
     let title = if title.is_empty() {
-        "未命名会话"
+        text.untitled_session()
     } else {
         title
     };
     let title = truncate_display_text(title, 22);
-    let state = thread_state_suffix(&entry.state)
+    let state = thread_state_suffix(&entry.state, text)
         .map(|state| format!(" <code>{}</code>", telegram_html_escape(state)))
         .unwrap_or_default();
     format!(
@@ -676,37 +718,46 @@ fn thread_entry_table_html(index: usize, entry: &TelegramThreadListEntry) -> Str
     )
 }
 
-fn project_header_html(cwd: Option<&str>) -> String {
+fn project_header_html(cwd: Option<&str>, text: ImText) -> String {
     match cwd {
         Some(cwd) => {
             let name = project_name(cwd);
             format!(
-                "<b>项目：{}</b>\n<code>{}</code>",
-                telegram_html_escape(&truncate_display_text(&name, 32)),
+                "<b>{}</b>\n<code>{}</code>",
+                telegram_html_escape(&truncate_display_text(&text.project_header(&name), 32)),
                 telegram_html_escape(&truncate_middle(cwd, 68))
             )
         }
-        None => "<b>项目：未知目录</b>".to_string(),
+        None => format!(
+            "<b>{}</b>",
+            telegram_html_escape(text.unknown_project_header())
+        ),
     }
 }
 
-fn thread_state_suffix(state: &str) -> Option<&'static str> {
-    if state.contains("当前会话") {
-        Some("当前")
-    } else if state.contains("已加载") {
-        Some("已加载")
+fn thread_state_suffix(state: &str, text: ImText) -> Option<&'static str> {
+    if state.contains("当前会话") || state.contains("Current session") {
+        Some(text.current_short())
+    } else if state.contains("已加载") || state.contains("Loaded") {
+        Some(text.loaded_short())
     } else {
         None
     }
 }
 
-fn thread_list_html_text(title: &str, body: &str, page: usize, entries_html: &str) -> String {
+fn thread_list_html_text(
+    title: &str,
+    body: &str,
+    page: usize,
+    entries_html: &str,
+    text: ImText,
+) -> String {
     format!(
-        "<b>{}</b>\n{}\n\n{}\n\n<code>第 {} 页</code>",
+        "<b>{}</b>\n{}\n\n{}\n\n<code>{}</code>",
         telegram_html_escape(title),
         telegram_markdown_to_html(&telegram_cleanup_text(body)),
         entries_html,
-        page.max(1)
+        text.page_label(page)
     )
 }
 
