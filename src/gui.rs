@@ -58,7 +58,10 @@ const ID_MENU_LANGUAGE_EN_US: i32 = 10_005;
 
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
+type ProviderRows = Rc<RefCell<Vec<[String; 5]>>>;
+type ProviderModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
+type PendingProviderWebsocketToggle = Rc<RefCell<Option<(String, bool)>>>;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type ConfigActionResultStore = Arc<Mutex<Option<ConfigActionResult>>>;
@@ -262,13 +265,6 @@ impl GuiText {
         }
     }
 
-    fn provider_hint(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "选择或填写第三方模型服务，然后写入 Codex App。",
-            GuiLocale::EnUs => "Select or enter a model provider, then write it into Codex App.",
-        }
-    }
-
     fn add(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "新增",
@@ -357,6 +353,38 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "API Key 已保存时会用星号显示；需要更换时直接输入新 key。",
             GuiLocale::EnUs => "Saved API keys are masked. Enter a new key to replace it.",
+        }
+    }
+
+    fn image_generation_feature(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启用生图工具",
+            GuiLocale::EnUs => "Enable image generation",
+        }
+    }
+
+    fn image_generation_feature_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "写入 ~/.codex/config.toml 的 [features].image_generation；仅用于影响 Codex CLI 和 VS Code 插件。Codex App 本地会话可能使用自己的 feature gate，本开关不能保证干预。"
+            }
+            GuiLocale::EnUs => {
+                "Writes [features].image_generation in ~/.codex/config.toml for Codex CLI and the VS Code extension. Codex App local sessions may use their own feature gates, so this switch cannot reliably control them."
+            }
+        }
+    }
+
+    fn image_generation_feature_note(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "仅 VS Code 插件和 Codex CLI 有效",
+            GuiLocale::EnUs => "Only affects VS Code extension and Codex CLI",
+        }
+    }
+
+    fn provider_websocket(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启用 WebSocket",
+            GuiLocale::EnUs => "Enable WebSocket",
         }
     }
 
@@ -1106,15 +1134,32 @@ fn build_ui() {
         .build();
     let config_box =
         StaticBoxSizerBuilder::new_with_box(&config_static_box, Orientation::Vertical).build();
-    let config_hint = StaticText::builder(&config_static_box)
-        .with_label(text.provider_hint())
+    let provider_image_generation = CheckBox::builder(&config_static_box)
+        .with_label(text.image_generation_feature())
+        .with_value(false)
         .build();
-    config_hint.set_foreground_color(Colour::rgb(34, 39, 47));
-    config_hint.wrap(760);
-    config_box.add(
-        &config_hint,
+    provider_image_generation.set_tooltip(text.image_generation_feature_help());
+    let provider_image_generation_note = StaticText::builder(&config_static_box)
+        .with_label(text.image_generation_feature_note())
+        .build();
+    provider_image_generation_note.set_foreground_color(Colour::rgb(103, 111, 124));
+    let provider_image_generation_row = BoxSizer::builder(Orientation::Horizontal).build();
+    provider_image_generation_row.add(
+        &provider_image_generation,
         0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        SizerFlag::Right | SizerFlag::AlignCenterVertical,
+        8,
+    );
+    provider_image_generation_row.add(
+        &provider_image_generation_note,
+        0,
+        SizerFlag::AlignCenterVertical,
+        0,
+    );
+    config_box.add_sizer(
+        &provider_image_generation_row,
+        0,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
     );
 
@@ -1147,14 +1192,105 @@ fn build_ui() {
         8,
     );
 
-    let provider_list = ListCtrl::builder(&config_static_box)
-        .with_style(ListCtrlStyle::Report | ListCtrlStyle::SingleSel | ListCtrlStyle::HRules)
+    let provider_rows: ProviderRows = Rc::new(RefCell::new(Vec::new()));
+    let pending_provider_websocket: PendingProviderWebsocketToggle = Rc::new(RefCell::new(None));
+    let pending_provider_websocket_for_model = pending_provider_websocket.clone();
+    let provider_model: ProviderModel = Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
+        0,
+        provider_rows.clone(),
+        |rows: &ProviderRows, row, col| -> Variant {
+            if col == 4 {
+                return rows
+                    .borrow()
+                    .get(row)
+                    .and_then(|row_data| row_data.get(4))
+                    .map(|value| value == "true")
+                    .unwrap_or(false)
+                    .into();
+            }
+            rows.borrow()
+                .get(row)
+                .and_then(|row_data| row_data.get(col))
+                .cloned()
+                .unwrap_or_default()
+                .into()
+        },
+        Some(
+            move |rows: &ProviderRows, row, col, value: &Variant| -> bool {
+                if col != 4 {
+                    return false;
+                }
+                let Some(enabled) = value.get_bool() else {
+                    return false;
+                };
+                let mut rows = rows.borrow_mut();
+                let Some(row_data): Option<&mut [String; 5]> = rows.get_mut(row) else {
+                    return false;
+                };
+                if !is_real_provider_name(&row_data[0]) {
+                    return false;
+                }
+                let provider_name = row_data[0].clone();
+                row_data[4] = enabled.to_string();
+                pending_provider_websocket_for_model
+                    .borrow_mut()
+                    .replace((provider_name, enabled));
+                true
+            },
+        ),
+        None::<fn(&ProviderRows, usize, usize) -> Option<DataViewItemAttr>>,
+        Some(|rows: &ProviderRows, row, col| -> bool {
+            if col != 4 {
+                return true;
+            }
+            rows.borrow()
+                .get(row)
+                .map(|row_data: &[String; 5]| is_real_provider_name(&row_data[0]))
+                .unwrap_or(false)
+        }),
+    )));
+    let provider_list = DataViewCtrl::builder(&config_static_box)
+        .with_style(
+            DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
+        )
         .with_size(Size::new(-1, 142))
         .build();
-    provider_list.insert_column(0, text.name(), ListColumnFormat::Left, 160);
-    provider_list.insert_column(1, "Base URL", ListColumnFormat::Left, 420);
-    provider_list.insert_column(2, text.current(), ListColumnFormat::Left, 90);
-    provider_list.insert_column(3, "API Key", ListColumnFormat::Left, 160);
+    provider_list.append_text_column(
+        text.name(),
+        0,
+        160,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    provider_list.append_text_column(
+        "Base URL",
+        1,
+        420,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    provider_list.append_text_column(
+        text.current(),
+        2,
+        90,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    provider_list.append_text_column(
+        "API Key",
+        3,
+        160,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    provider_list.append_toggle_column(
+        text.provider_websocket(),
+        4,
+        100,
+        DataViewAlign::Center,
+        DataViewColumnFlags::Resizable,
+    );
+    provider_list.associate_model(&*provider_model.borrow());
     config_box.add(
         &provider_list,
         0,
@@ -1450,6 +1586,7 @@ fn build_ui() {
         im_account_rows,
         im_account_model,
         pending_im_toggle,
+        pending_provider_websocket,
         delete_im_account_button,
         save_telegram_button,
         connect_wechat_button,
@@ -1459,10 +1596,13 @@ fn build_ui() {
         save_provider_button,
         delete_provider_button,
         configure_button,
+        provider_image_generation,
         provider_name,
         provider_base_url,
         provider_key,
         provider_list,
+        provider_rows,
+        provider_model,
         provider_catalog,
     };
 
@@ -1694,18 +1834,17 @@ fn build_ui() {
     {
         let handles = handles.clone();
         let dashboard_refresh = dashboard_refresh.clone();
-        provider_list.on_item_selected(move |event| {
-            let index = event.get_item_index();
-            if index < 0 {
+        provider_list.on_selection_changed(move |_| {
+            let Some(index) = provider_list.get_selected_row() else {
                 return;
-            }
+            };
             if let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) {
-                if let Some(provider) = provider_from_list_row(&snapshot, index as i64) {
+                if let Some(provider) = provider_from_list_row(&snapshot, index) {
                     apply_provider_to_form(&handles, &provider, true);
                     return;
                 }
             }
-            apply_provider_row_to_form(&handles, &provider_list, index as i64);
+            apply_provider_row_to_form(&handles, index);
         });
     }
 
@@ -1854,7 +1993,33 @@ fn build_ui() {
         let frame = frame;
         let dashboard_refresh = dashboard_refresh.clone();
         let config_action_result = config_action_result.clone();
+        let config_action_in_flight = config_action_in_flight.clone();
         config_action_timer.on_tick(move |_| {
+            if !config_action_in_flight.load(Ordering::SeqCst)
+                && let Some((provider_name, enabled)) =
+                    handles.pending_provider_websocket.borrow_mut().take()
+            {
+                if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                    force_dashboard_refresh(&api, &dashboard_refresh);
+                    return;
+                }
+                config_action_in_flight.store(true, Ordering::SeqCst);
+                handles.provider_list.enable(false);
+                let thread_api = api.clone();
+                let config_action_result = config_action_result.clone();
+                let config_action_in_flight = config_action_in_flight.clone();
+                thread::spawn(move || {
+                    let outcome =
+                        set_provider_websocket_and_verify(&thread_api, &provider_name, enabled);
+                    if let Ok(mut slot) = config_action_result.lock() {
+                        slot.replace(ConfigActionResult::ProviderWebSocket {
+                            provider_name,
+                            result: outcome,
+                        });
+                    }
+                    config_action_in_flight.store(false, Ordering::SeqCst);
+                });
+            }
             apply_pending_config_action(
                 &api,
                 &handles,
@@ -2914,6 +3079,17 @@ impl ApiClient {
         self.post_json_with_timeout("/api/codex-app/configure", request, GUI_CONFIG_TIMEOUT)
     }
 
+    fn set_codex_provider_websocket(
+        &self,
+        request: &SetProviderWebSocketRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout(
+            "/api/codex-app/provider/websocket",
+            request,
+            GUI_CONFIG_TIMEOUT,
+        )
+    }
+
     fn delete_codex_provider(
         &self,
         request: &DeleteProviderRequest,
@@ -3050,6 +3226,7 @@ struct UiHandles {
     im_account_rows: ImAccountRows,
     im_account_model: ImAccountModel,
     pending_im_toggle: PendingImToggle,
+    pending_provider_websocket: PendingProviderWebsocketToggle,
     delete_im_account_button: Button,
     save_telegram_button: Button,
     connect_wechat_button: Button,
@@ -3059,10 +3236,13 @@ struct UiHandles {
     save_provider_button: Button,
     delete_provider_button: Button,
     configure_button: Button,
+    provider_image_generation: CheckBox,
     provider_name: ComboBox,
     provider_base_url: TextCtrl,
     provider_key: TextCtrl,
-    provider_list: ListCtrl,
+    provider_list: DataViewCtrl,
+    provider_rows: ProviderRows,
+    provider_model: ProviderModel,
     provider_catalog: StaticText,
 }
 
@@ -3145,6 +3325,8 @@ struct CodexAppStatus {
     provider: Option<CodexAppProviderStatus>,
     #[serde(default)]
     providers: Vec<CodexAppProviderStatus>,
+    #[serde(default = "default_true")]
+    image_generation_enabled: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -3153,6 +3335,12 @@ struct CodexAppProviderStatus {
     name: String,
     base_url: Option<String>,
     key: Option<String>,
+    #[serde(default)]
+    supports_websockets: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Serialize)]
@@ -3163,6 +3351,9 @@ struct ConfigureRequest {
     provider_key: Option<String>,
     model: Option<String>,
     activate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_generation_enabled: Option<bool>,
+    supports_websockets: bool,
 }
 
 #[derive(Serialize)]
@@ -3171,12 +3362,23 @@ struct DeleteProviderRequest {
     provider_name: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SetProviderWebSocketRequest {
+    provider_name: String,
+    enabled: bool,
+}
+
 enum ConfigActionResult {
     Configure {
         provider_name: String,
         result: Result<CodexAppStatus, String>,
     },
     Save {
+        provider_name: String,
+        result: Result<CodexAppStatus, String>,
+    },
+    ProviderWebSocket {
         provider_name: String,
         result: Result<CodexAppStatus, String>,
     },
@@ -3878,6 +4080,21 @@ fn save_codex_provider_and_verify(
     Ok(status)
 }
 
+fn set_provider_websocket_and_verify(
+    api: &ApiClient,
+    provider_name: &str,
+    enabled: bool,
+) -> Result<CodexAppStatus, String> {
+    let request = SetProviderWebSocketRequest {
+        provider_name: provider_name.to_string(),
+        enabled,
+    };
+    api.set_codex_provider_websocket(&request)?;
+    let status = api.codex_app_status()?;
+    verify_provider_websocket(&status, provider_name, enabled)?;
+    Ok(status)
+}
+
 fn delete_codex_provider_and_verify(
     api: &ApiClient,
     request: &DeleteProviderRequest,
@@ -3931,6 +4148,34 @@ fn verify_saved_provider(status: &CodexAppStatus, selected_provider: &str) -> Re
     ))
 }
 
+fn verify_provider_websocket(
+    status: &CodexAppStatus,
+    provider_name: &str,
+    expected: bool,
+) -> Result<(), String> {
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() {
+        return Err("Provider 名称不能为空。".to_string());
+    }
+
+    let actual = provider_rows(status)
+        .iter()
+        .find(|provider| provider.name == provider_name)
+        .map(|provider| provider.supports_websockets);
+    if actual == Some(expected) {
+        return Ok(());
+    }
+
+    Err(format!(
+        "WebSocket 写入接口已返回成功，但 provider {} 的 supports_websockets 仍是 {}，期望是 {}。请刷新后再试一次。",
+        provider_name,
+        actual
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "<未找到>".to_string()),
+        expected
+    ))
+}
+
 fn verify_deleted_provider(status: &CodexAppStatus, provider_name: &str) -> Result<(), String> {
     if provider_rows(status)
         .iter()
@@ -3956,12 +4201,17 @@ fn apply_pending_config_action(
         return false;
     };
 
-    handles.configure_button.set_label(handles.text.enable());
-    handles.save_provider_button.set_label(handles.text.save());
-    handles
-        .delete_provider_button
-        .set_label(handles.text.delete());
-    set_actions_enabled(handles, true);
+    let provider_websocket_result = matches!(&result, ConfigActionResult::ProviderWebSocket { .. });
+    if provider_websocket_result {
+        handles.provider_list.enable(true);
+    } else {
+        handles.configure_button.set_label(handles.text.enable());
+        handles.save_provider_button.set_label(handles.text.save());
+        handles
+            .delete_provider_button
+            .set_label(handles.text.delete());
+        set_actions_enabled(handles, true);
+    }
 
     match result {
         ConfigActionResult::Save {
@@ -4014,6 +4264,21 @@ fn apply_pending_config_action(
             result: Err(err), ..
         } => {
             show_local_codex_app_config_preview(handles, api, refresh);
+            show_error(frame, &err);
+        }
+        ConfigActionResult::ProviderWebSocket {
+            provider_name,
+            result: Ok(status),
+        } => {
+            apply_provider_websocket_status(handles, refresh, status, &provider_name);
+        }
+        ConfigActionResult::ProviderWebSocket {
+            provider_name,
+            result: Err(err),
+        } => {
+            if let Ok(status) = api.codex_app_status() {
+                apply_provider_websocket_status(handles, refresh, status, &provider_name);
+            }
             show_error(frame, &err);
         }
     }
@@ -4098,6 +4363,41 @@ fn apply_provider_action_status(
         apply_provider_to_form(handles, &provider, true);
     } else {
         set_combo_value_if_changed(&handles.provider_name, provider_name);
+    }
+}
+
+fn apply_provider_websocket_status(
+    handles: &UiHandles,
+    refresh: &DashboardRefresh,
+    status: CodexAppStatus,
+    provider_name: &str,
+) {
+    let snapshot = if let Ok(mut last_snapshot) = refresh.last_snapshot.lock() {
+        let mut snapshot = last_snapshot.take().unwrap_or_default();
+        snapshot.service_online = true;
+        snapshot.codex_app = Some(status);
+        last_snapshot.replace(snapshot.clone());
+        snapshot
+    } else {
+        DashboardSnapshot {
+            service_online: true,
+            codex_app: Some(status),
+            ..DashboardSnapshot::default()
+        }
+    };
+
+    if let Some(status) = snapshot.codex_app.as_ref() {
+        handles
+            .provider_catalog
+            .set_label(&provider_catalog_label(handles.text, status));
+        handles.provider_catalog.wrap(980);
+        handles.provider_catalog.layout();
+        refresh_provider_choices(&handles.provider_name, &status.providers);
+        refresh_provider_list(handles, Some(status));
+    }
+
+    if let Some(provider) = find_provider(&snapshot, provider_name) {
+        apply_provider_to_form(handles, &provider, true);
     }
 }
 
@@ -4202,6 +4502,7 @@ fn local_codex_app_status(status: crate::codex_app_config::CodexAppConfigStatus)
             .into_iter()
             .map(local_codex_app_provider_status)
             .collect(),
+        image_generation_enabled: status.image_generation_enabled,
     }
 }
 
@@ -4212,6 +4513,7 @@ fn local_codex_app_provider_status(
         name: provider.name,
         base_url: provider.base_url,
         key: provider.key,
+        supports_websockets: provider.supports_websockets,
     }
 }
 
@@ -4425,6 +4727,11 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
     handles.provider_catalog.wrap(980);
     handles.provider_catalog.layout();
     refresh_provider_list(handles, Some(status));
+    if !handles.provider_image_generation.has_focus() {
+        handles
+            .provider_image_generation
+            .set_value(status.image_generation_enabled);
+    }
 
     if provider_form_has_focus(handles) {
         return;
@@ -4465,6 +4772,8 @@ fn provider_form_has_focus(handles: &UiHandles) -> bool {
     handles.provider_name.has_focus()
         || handles.provider_base_url.has_focus()
         || handles.provider_key.has_focus()
+        || handles.provider_image_generation.has_focus()
+        || handles.provider_list.has_focus()
 }
 
 fn refresh_provider_choices(input: &ComboBox, providers: &[CodexAppProviderStatus]) {
@@ -4484,29 +4793,31 @@ fn refresh_provider_choices(input: &ComboBox, providers: &[CodexAppProviderStatu
 }
 
 fn refresh_provider_list(handles: &UiHandles, status: Option<&CodexAppStatus>) {
-    let rows = provider_list_rows(handles.text, status);
-    if provider_list_matches(&handles.provider_list, &rows) {
+    if handles.pending_provider_websocket.borrow().is_some() {
         return;
     }
 
-    handles.provider_list.delete_all_items();
+    let rows = provider_list_rows(handles.text, status);
+    let mut current_rows = handles.provider_rows.borrow_mut();
+    if *current_rows == rows {
+        return;
+    }
 
-    for (index, row_data) in rows.iter().enumerate() {
-        let row = handles
-            .provider_list
-            .insert_item(index as i64, &row_data[0], None);
-        handles
-            .provider_list
-            .set_item_text_by_column(row as i64, 1, row_data[1].as_str());
-        handles
-            .provider_list
-            .set_item_text_by_column(row as i64, 2, row_data[2].as_str());
-        handles
-            .provider_list
-            .set_item_text_by_column(row as i64, 3, row_data[3].as_str());
+    let previous_len = current_rows.len();
+    let selected_row = handles.provider_list.get_selected_row();
+    let new_len = rows.len();
+    *current_rows = rows;
+    drop(current_rows);
 
-        if row_data[2] == handles.text.in_use() {
-            handles.provider_list.ensure_visible(row as i64);
+    if previous_len != new_len {
+        handles.provider_model.borrow_mut().reset(new_len);
+        if let Some(row) = selected_row.filter(|row| *row < new_len) {
+            handles.provider_list.select_row(row);
+        }
+    } else {
+        let model = handles.provider_model.borrow();
+        for row in 0..new_len {
+            model.row_changed(row);
         }
     }
 }
@@ -4696,13 +5007,14 @@ fn im_channel_first_name(rows: &[&[String; 5]]) -> Option<String> {
         .map(str::to_string)
 }
 
-fn provider_list_rows(text: GuiText, status: Option<&CodexAppStatus>) -> Vec<[String; 4]> {
+fn provider_list_rows(text: GuiText, status: Option<&CodexAppStatus>) -> Vec<[String; 5]> {
     let Some(status) = status else {
         return vec![[
             text.provider_waiting_service().to_string(),
             text.provider_read_after_start().to_string(),
             String::new(),
             String::new(),
+            "false".to_string(),
         ]];
     };
 
@@ -4717,6 +5029,7 @@ fn provider_list_rows(text: GuiText, status: Option<&CodexAppStatus>) -> Vec<[St
             text.provider_create_on_write().to_string(),
             String::new(),
             text.not_configured().to_string(),
+            "false".to_string(),
         ]];
     }
 
@@ -4735,18 +5048,10 @@ fn provider_list_rows(text: GuiText, status: Option<&CodexAppStatus>) -> Vec<[St
                     String::new()
                 },
                 masked_provider_key(text, provider.key.as_deref()),
+                provider.supports_websockets.to_string(),
             ]
         })
         .collect()
-}
-
-fn provider_list_matches(list: &ListCtrl, rows: &[[String; 4]]) -> bool {
-    if list.get_item_count() != rows.len() as i32 {
-        return false;
-    }
-    rows.iter().enumerate().all(|(index, row)| {
-        (0..4).all(|column| list.get_item_text(index as i64, column) == row[column as usize])
-    })
 }
 
 fn provider_rows(status: &CodexAppStatus) -> Vec<CodexAppProviderStatus> {
@@ -4864,12 +5169,10 @@ fn find_provider(
 
 fn provider_from_list_row(
     snapshot: &DashboardSnapshot,
-    row: i64,
+    row: usize,
 ) -> Option<CodexAppProviderStatus> {
     let status = snapshot.codex_app.as_ref()?;
-    (row >= 0)
-        .then(|| provider_rows(status).get(row as usize).cloned())
-        .flatten()
+    provider_rows(status).get(row).cloned()
 }
 
 fn provider_config_request_from_ui(
@@ -4885,9 +5188,10 @@ fn provider_config_request_from_ui(
     let mut selected_base_url = strip_nul(&provider_base_url.get_value());
     let mut selected_key = strip_nul(&provider_key.get_value());
 
-    let selected_row = handles.provider_list.get_first_selected_item();
-    if selected_provider.is_empty() && selected_row >= 0 {
-        let row = selected_row as i64;
+    let selected_row = handles.provider_list.get_selected_row();
+    if selected_provider.is_empty()
+        && let Some(row) = selected_row
+    {
         if let Some(provider) = snapshot.and_then(|snapshot| provider_from_list_row(snapshot, row))
         {
             selected_provider = provider.name;
@@ -4901,18 +5205,17 @@ fn provider_config_request_from_ui(
             if selected_provider != form_provider || selected_key.trim().is_empty() {
                 selected_key = row_key;
             }
-        } else {
-            let row_name = clean_provider_text(&handles.provider_list.get_item_text(row, 0));
+        } else if let Some(row_data) = provider_model_row(handles, row) {
+            let row_name = clean_provider_text(&row_data[0]);
             if is_real_provider_name(&row_name) {
                 selected_provider = row_name;
-                let row_base_url =
-                    list_base_url_cell_to_input(&handles.provider_list.get_item_text(row, 1));
+                let row_base_url = list_base_url_cell_to_input(&row_data[1]);
 
                 if selected_provider != form_provider || selected_base_url.trim().is_empty() {
                     selected_base_url = row_base_url;
                 }
 
-                let row_key = list_key_cell_to_input(&handles.provider_list.get_item_text(row, 3));
+                let row_key = list_key_cell_to_input(&row_data[3]);
                 if selected_provider != form_provider || selected_key.trim().is_empty() {
                     selected_key = row_key;
                 }
@@ -4922,12 +5225,15 @@ fn provider_config_request_from_ui(
 
     let selected_base_url = config_text_value(&selected_base_url).unwrap_or_default();
     let provider_key = provider_key_value_for_config(&selected_key);
+    let supports_websockets = provider_websocket_value_from_ui(handles, &selected_provider);
     let request = ConfigureRequest {
         provider_name: Some(selected_provider.clone()),
         provider_base_url: Some(selected_base_url),
         provider_key,
         model: None,
         activate,
+        image_generation_enabled: Some(handles.provider_image_generation.get_value()),
+        supports_websockets,
     };
     (selected_provider, request)
 }
@@ -4942,16 +5248,17 @@ fn provider_name_from_ui(
         return form_provider;
     }
 
-    let selected_row = handles.provider_list.get_first_selected_item();
-    if selected_row < 0 {
+    let Some(selected_row) = handles.provider_list.get_selected_row() else {
         return String::new();
-    }
+    };
 
     snapshot
-        .and_then(|snapshot| provider_from_list_row(snapshot, selected_row as i64))
+        .and_then(|snapshot| provider_from_list_row(snapshot, selected_row))
         .map(|provider| provider.name)
         .unwrap_or_else(|| {
-            clean_provider_text(&handles.provider_list.get_item_text(selected_row as i64, 0))
+            provider_model_row(handles, selected_row)
+                .map(|row| clean_provider_text(&row[0]))
+                .unwrap_or_default()
         })
 }
 
@@ -4960,10 +5267,13 @@ fn is_real_provider_name(value: &str) -> bool {
     !value.is_empty() && value != "等待本地服务" && value != "Waiting for local service"
 }
 
-fn apply_provider_row_to_form(handles: &UiHandles, list: &ListCtrl, row: i64) {
-    let name = clean_provider_text(&list.get_item_text(row, 0));
-    let base_url = list_base_url_cell_to_input(&list.get_item_text(row, 1));
-    let key = list_key_cell_to_input(&list.get_item_text(row, 3));
+fn apply_provider_row_to_form(handles: &UiHandles, row: usize) {
+    let Some(row_data) = provider_model_row(handles, row) else {
+        return;
+    };
+    let name = clean_provider_text(&row_data[0]);
+    let base_url = list_base_url_cell_to_input(&row_data[1]);
+    let key = list_key_cell_to_input(&row_data[3]);
     if is_real_provider_name(&name) {
         set_combo_value_if_changed(&handles.provider_name, &name);
     }
@@ -5054,20 +5364,39 @@ fn change_text_value_if_changed(input: &TextCtrl, value: &str) {
     input.change_value(value);
 }
 
-fn clear_provider_list_selection(list: &ListCtrl) {
-    loop {
-        let selected = list.get_first_selected_item();
-        if selected < 0 {
-            break;
-        }
-        if !list.set_item_state(
-            selected as i64,
-            ListItemState::None,
-            ListItemState::Selected,
-        ) {
-            break;
-        }
+fn provider_model_row(handles: &UiHandles, row: usize) -> Option<[String; 5]> {
+    handles.provider_rows.borrow().get(row).cloned()
+}
+
+fn provider_model_row_by_name(handles: &UiHandles, provider_name: &str) -> Option<[String; 5]> {
+    let provider_name = provider_name.trim();
+    if provider_name.is_empty() {
+        return None;
     }
+    handles
+        .provider_rows
+        .borrow()
+        .iter()
+        .find(|row| clean_provider_text(&row[0]) == provider_name)
+        .cloned()
+}
+
+fn provider_websocket_value_from_ui(handles: &UiHandles, provider_name: &str) -> bool {
+    handles
+        .provider_list
+        .get_selected_row()
+        .and_then(|row| provider_model_row(handles, row))
+        .filter(|row| {
+            let row_name = clean_provider_text(&row[0]);
+            provider_name.trim().is_empty() || row_name == provider_name.trim()
+        })
+        .or_else(|| provider_model_row_by_name(handles, provider_name))
+        .map(|row| row[4] == "true")
+        .unwrap_or(false)
+}
+
+fn clear_provider_list_selection(list: &DataViewCtrl) {
+    list.unselect_all();
 }
 
 fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
@@ -5079,6 +5408,8 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.new_provider_button.enable(enabled);
     handles.save_provider_button.enable(enabled);
     handles.delete_provider_button.enable(enabled);
+    handles.provider_image_generation.enable(enabled);
+    handles.provider_list.enable(enabled);
     handles.uninstall_button.enable(enabled);
 }
 

@@ -82,6 +82,8 @@ async fn main() -> anyhow::Result<()> {
                     provider_key,
                     model,
                     activate_provider: true,
+                    image_generation_enabled: None,
+                    provider_supports_websockets: None,
                 },
             )?;
             println!("Codex App configured:");

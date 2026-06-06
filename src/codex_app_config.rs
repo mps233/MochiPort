@@ -47,6 +47,8 @@ pub struct ConfigureCodexAppOptions {
     pub provider_key: Option<String>,
     pub model: Option<String>,
     pub activate_provider: bool,
+    pub image_generation_enabled: Option<bool>,
+    pub provider_supports_websockets: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +100,7 @@ pub struct CodexAppConfigStatus {
     pub remote_control_switch: CodexAppRemoteControlSwitchStatus,
     pub provider: Option<CodexAppProviderStatus>,
     pub providers: Vec<CodexAppProviderStatus>,
+    pub image_generation_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,6 +129,7 @@ pub struct CodexAppProviderStatus {
     pub name: String,
     pub base_url: Option<String>,
     pub key: Option<String>,
+    pub supports_websockets: bool,
 }
 
 pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<ConfigureCodexAppReport> {
@@ -221,7 +225,7 @@ pub fn inspect_codex_app_config(
 
     let (config_ok, config_error) = inspect_config_toml(&config_path, backend_url);
     let (auth_ok, auth_error) = inspect_auth_json(&auth_path);
-    let (provider, providers) = inspect_provider_catalog(&config_path);
+    let (provider, providers, image_generation_enabled) = inspect_provider_catalog(&config_path);
 
     let gui_api_base = inspect_gui_api_base_url(backend_url);
     let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
@@ -241,6 +245,7 @@ pub fn inspect_codex_app_config(
         remote_control_switch,
         provider,
         providers,
+        image_generation_enabled,
     }
 }
 
@@ -258,6 +263,31 @@ pub fn delete_codex_app_provider(
     let codex_home = codex_home.unwrap_or_else(default_codex_home);
     let config_path = codex_home.join("config.toml");
     delete_provider_from_config_toml(&config_path, provider_name)?;
+    Ok(config_path)
+}
+
+pub fn set_codex_app_provider_websocket(
+    codex_home: Option<PathBuf>,
+    provider_name_value: &str,
+    enabled: bool,
+) -> Result<PathBuf> {
+    let provider_name = provider_name(Some(provider_name_value))?;
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    let config_path = codex_home.join("config.toml");
+    let mut doc = if config_path.exists() {
+        parse_existing_config_toml(&config_path)?
+    } else {
+        toml_edit::DocumentMut::new()
+    };
+
+    let provider = provider_table_mut(&mut doc, &provider_name);
+    provider["name"] = toml_edit::value(provider_name.as_str());
+    provider["supports_websockets"] = toml_edit::value(enabled);
+
+    let raw = normalize_config_toml_order(&doc.to_string());
+    backup_existing(&config_path)?;
+    std::fs::write(&config_path, raw)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
     Ok(config_path)
 }
 
@@ -712,15 +742,25 @@ fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
 
 fn inspect_provider_catalog(
     path: &Path,
-) -> (Option<CodexAppProviderStatus>, Vec<CodexAppProviderStatus>) {
+) -> (
+    Option<CodexAppProviderStatus>,
+    Vec<CodexAppProviderStatus>,
+    bool,
+) {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
-        Err(_) => return (None, Vec::new()),
+        Err(_) => return (None, Vec::new(), true),
     };
     let doc = match raw.parse::<toml_edit::DocumentMut>() {
         Ok(doc) => doc,
-        Err(_) => return (None, Vec::new()),
+        Err(_) => return (None, Vec::new(), true),
     };
+    let image_generation_enabled = doc
+        .get("features")
+        .and_then(|item| item.as_table())
+        .and_then(|features| features.get("image_generation"))
+        .and_then(|item| item.as_bool())
+        .unwrap_or(true);
 
     let mut providers = Vec::new();
     if let Some(table) = doc.get("model_providers").and_then(|item| item.as_table()) {
@@ -744,7 +784,7 @@ fn inspect_provider_catalog(
                 .unwrap_or_else(|| provider_status_from_table(name, None))
         });
 
-    (provider, providers)
+    (provider, providers, image_generation_enabled)
 }
 
 fn provider_status_from_table(
@@ -759,11 +799,16 @@ fn provider_status_from_table(
         .and_then(|table| table.get("experimental_bearer_token"))
         .and_then(|item| item.as_str())
         .and_then(config_value);
+    let supports_websockets = provider
+        .and_then(|table| table.get("supports_websockets"))
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false);
 
     CodexAppProviderStatus {
         name: name.to_string(),
         base_url,
         key,
+        supports_websockets,
     }
 }
 
@@ -785,6 +830,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
 
     doc["chatgpt_base_url"] = toml_edit::value(&options.backend_url);
     disable_codex_apps_feature_if_unset(&mut doc);
+    set_hosted_image_generation_feature(&mut doc, options.image_generation_enabled);
 
     let provider_base_url = options.provider_base_url.as_deref().and_then(config_value);
     let provider_key = options.provider_key.as_deref().and_then(config_value);
@@ -815,6 +861,9 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         if let Some(provider_key) = provider_key {
             provider["experimental_bearer_token"] = toml_edit::value(provider_key);
         }
+        if let Some(supports_websockets) = options.provider_supports_websockets {
+            provider["supports_websockets"] = toml_edit::value(supports_websockets);
+        }
     }
 
     write_bundled_plugin_marketplace(&mut doc);
@@ -834,6 +883,23 @@ fn disable_codex_apps_feature_if_unset(doc: &mut toml_edit::DocumentMut) {
     };
     if features.get("apps").is_none() && features.get("connectors").is_none() {
         features["apps"] = toml_edit::value(false);
+    }
+}
+
+fn set_hosted_image_generation_feature(doc: &mut toml_edit::DocumentMut, enabled: Option<bool>) {
+    if !doc.contains_key("features") {
+        doc["features"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+
+    let Some(features) = doc["features"].as_table_mut() else {
+        return;
+    };
+    match enabled {
+        Some(enabled) => features["image_generation"] = toml_edit::value(enabled),
+        None if features.get("image_generation").is_none() => {
+            features["image_generation"] = toml_edit::value(false);
+        }
+        None => {}
     }
 }
 
@@ -1363,6 +1429,8 @@ mod tests {
             provider_key: Some("test-provider-key".to_string()),
             model: Some("gpt-5.5".to_string()),
             activate_provider: true,
+            image_generation_enabled: None,
+            provider_supports_websockets: Some(true),
         })
         .expect("configure codex app");
 
@@ -1378,10 +1446,12 @@ mod tests {
         assert!(!config.contains("windows_wsl_setup_acknowledged"));
         assert!(config.contains("[features]"));
         assert!(config.contains("apps = false"));
+        assert!(config.contains("image_generation = false"));
         assert!(config.contains("[model_providers.ai-codex]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(config.contains("wire_api = \"responses\""));
         assert!(config.contains("requires_openai_auth = true"));
+        assert!(config.contains("supports_websockets = true"));
         assert!(config.contains("experimental_bearer_token = \"test-provider-key\""));
 
         let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
@@ -1400,6 +1470,7 @@ mod tests {
             &config_path,
             r#"[features]
 apps = true
+image_generation = true
 
 [model_providers.old-provider]
 name = "old-provider"
@@ -1419,13 +1490,44 @@ name = "old-provider"
             provider_key: None,
             model: None,
             activate_provider: true,
+            image_generation_enabled: Some(true),
+            provider_supports_websockets: None,
         })
         .expect("configure codex app");
 
         let config = std::fs::read_to_string(report.config_path).expect("read config");
         assert!(config.contains("[features]"));
         assert!(config.contains("apps = true"));
+        assert!(config.contains("image_generation = true"));
         assert!(!config.contains("apps = false"));
+        assert!(!config.contains("image_generation = false"));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn set_provider_websocket_does_not_change_image_generation_feature() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[features]
+image_generation = true
+
+[model_providers.qwen]
+name = "qwen"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+"#,
+        )
+        .expect("write config");
+
+        set_codex_app_provider_websocket(Some(codex_home.clone()), "qwen", true)
+            .expect("set websocket");
+
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        assert!(config.contains("image_generation = true"));
+        assert!(!config.contains("image_generation = false"));
+        assert!(config.contains("supports_websockets = true"));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -1464,6 +1566,8 @@ experimental_bearer_token = "existing-qwen-key"
             provider_key: None,
             model: None,
             activate_provider: true,
+            image_generation_enabled: None,
+            provider_supports_websockets: None,
         })
         .expect("configure codex app");
 
@@ -1509,6 +1613,8 @@ base_url = "https://old.example.invalid"
             provider_key: Some("existing-qwen-key".to_string()),
             model: None,
             activate_provider: false,
+            image_generation_enabled: None,
+            provider_supports_websockets: Some(false),
         })
         .expect("configure codex app");
 
@@ -1627,6 +1733,8 @@ requires_openai_auth = true
             provider_key: Some("test-provider-key".to_string()),
             model: Some("gpt-5.5".to_string()),
             activate_provider: true,
+            image_generation_enabled: None,
+            provider_supports_websockets: None,
         })
         .expect("configure codex app");
 
@@ -1744,6 +1852,8 @@ base_url = "https://api.example.invalid"
                 provider_key: None,
                 model: None,
                 activate_provider: true,
+                image_generation_enabled: None,
+                provider_supports_websockets: None,
             },
         )
         .expect("write auth");

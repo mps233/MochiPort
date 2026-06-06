@@ -53,6 +53,10 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/config", get(get_config).post(save_config))
         .route("/api/codex-app/configure", post(configure_codex_app))
         .route(
+            "/api/codex-app/provider/websocket",
+            post(set_codex_app_provider_websocket),
+        )
+        .route(
             "/api/codex-app/provider/delete",
             post(delete_codex_app_provider),
         )
@@ -323,12 +327,21 @@ struct ConfigureCodexAppRequest {
     provider_key: Option<String>,
     model: Option<String>,
     activate: Option<bool>,
+    image_generation_enabled: Option<bool>,
+    supports_websockets: Option<bool>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DeleteCodexAppProviderRequest {
     provider_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetCodexAppProviderWebSocketRequest {
+    provider_name: String,
+    enabled: bool,
 }
 
 async fn configure_codex_app(
@@ -367,6 +380,10 @@ async fn configure_codex_app(
         .as_ref()
         .and_then(|value| value.activate)
         .unwrap_or(true);
+    let image_generation_enabled = request
+        .as_ref()
+        .and_then(|value| value.image_generation_enabled);
+    let provider_supports_websockets = request.as_ref().and_then(|value| value.supports_websockets);
 
     let backend_url = config.remote_control_base_url();
     state
@@ -392,6 +409,8 @@ async fn configure_codex_app(
         provider_key,
         model,
         activate_provider,
+        image_generation_enabled,
+        provider_supports_websockets,
     }) {
         Ok(report) => {
             let gui_api_base = codex_app_config::inspect_gui_api_base_url(&backend_url);
@@ -432,6 +451,49 @@ async fn configure_codex_app(
                 Json(json!({ "ok": false, "error": err.to_string() })),
             )
         }
+    }
+}
+
+async fn set_codex_app_provider_websocket(
+    State(state): State<SharedState>,
+    Json(request): Json<SetCodexAppProviderWebSocketRequest>,
+) -> impl IntoResponse {
+    let provider_name = request.provider_name.trim();
+    if provider_name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "provider_name is required" })),
+        );
+    }
+
+    let config = state.config.lock().await.clone();
+    let backend_url = config.remote_control_base_url();
+    match codex_app_config::set_codex_app_provider_websocket(None, provider_name, request.enabled) {
+        Ok(config_path) => {
+            let status = codex_app_config::inspect_codex_app_config(None, &backend_url);
+            state
+                .push_event(
+                    "info",
+                    "codex_app_provider_websocket_set",
+                    format!(
+                        "config={} provider={} supports_websockets={}",
+                        config_path.display(),
+                        provider_name,
+                        request.enabled
+                    ),
+                )
+                .await;
+            (
+                StatusCode::OK,
+                Json(
+                    json!({ "ok": true, "configPath": config_path.to_string_lossy().to_string(), "status": status }),
+                ),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        ),
     }
 }
 
