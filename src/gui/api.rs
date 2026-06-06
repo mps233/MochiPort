@@ -1,0 +1,393 @@
+use std::{thread, time::Duration};
+
+use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+
+use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
+
+#[derive(Clone)]
+pub(super) struct ApiClient {
+    pub(super) base_url: String,
+    pub(super) http: Client,
+}
+
+impl ApiClient {
+    pub(super) fn new(base_url: String) -> Self {
+        let http = Client::builder()
+            .connect_timeout(GUI_CONNECT_TIMEOUT)
+            .timeout(GUI_ACTION_TIMEOUT)
+            .build()
+            .expect("build HTTP client");
+        Self { base_url, http }
+    }
+
+    pub(super) fn get_quick<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        let text = self.request_text(self.http.get(self.url(path)).timeout(GUI_STATUS_TIMEOUT))?;
+        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+    }
+
+    pub(super) fn get_with_timeout<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        let text = self.request_text(self.http.get(self.url(path)).timeout(timeout))?;
+        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+    }
+
+    pub(super) fn is_online(&self) -> bool {
+        self.get_quick::<serde_json::Value>("/api/status").is_ok()
+    }
+
+    pub(super) fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
+        self.post_empty_with_timeout(path, GUI_ACTION_TIMEOUT)
+    }
+
+    pub(super) fn post_empty_with_timeout<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        let text = self.request_text(self.http.post(self.url(path)).timeout(timeout))?;
+        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+    }
+
+    pub(super) fn post_json<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, String> {
+        self.post_json_with_timeout(path, body, GUI_ACTION_TIMEOUT)
+    }
+
+    pub(super) fn post_json_with_timeout<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        let text = self.request_text(self.http.post(self.url(path)).json(body).timeout(timeout))?;
+        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+    }
+
+    pub(super) fn request_text(
+        &self,
+        request: reqwest::blocking::RequestBuilder,
+    ) -> Result<String, String> {
+        let response = request.send().map_err(|err| {
+            if err.is_timeout() {
+                format!("本地服务 {} 响应超时：{err}", self.base_url)
+            } else if err.is_connect() {
+                format!("无法连接本地服务 {}：{err}", self.base_url)
+            } else {
+                format!("本地服务 {} 请求失败：{err}", self.base_url)
+            }
+        })?;
+        let status = response.status();
+        let text = response.text().map_err(|err| err.to_string())?;
+        if status.is_success() {
+            Ok(text)
+        } else {
+            Err(format!("HTTP {status}: {text}"))
+        }
+    }
+
+    pub(super) fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    pub(super) fn local_port(&self) -> Option<u16> {
+        let url = reqwest::Url::parse(&self.base_url).ok()?;
+        let host = url.host_str()?;
+        matches!(host, "127.0.0.1" | "localhost" | "::1").then_some(url.port_or_known_default()?)
+    }
+
+    pub(super) fn dashboard(&self) -> DashboardSnapshot {
+        let status = match self.get_quick::<ServerStatus>("/api/status") {
+            Ok(status) => status,
+            Err(_err) => {
+                return DashboardSnapshot {
+                    service_online: false,
+                    ..DashboardSnapshot::default()
+                };
+            }
+        };
+
+        let remote =
+            self.get_quick_optional_async::<RemoteControlStatus>("/api/remote-control/status");
+        let codex_app = self.get_quick_optional_async::<CodexAppStatus>("/api/codex-app/status");
+        let im_accounts = self.get_quick_optional_async::<ImAccountsResponse>("/api/im/accounts");
+
+        DashboardSnapshot {
+            service_online: true,
+            remote: join_optional(remote),
+            codex_app: join_optional(codex_app),
+            im_accounts: join_optional(im_accounts),
+            status: Some(status),
+        }
+    }
+
+    pub(super) fn get_quick_optional_async<T>(
+        &self,
+        path: &'static str,
+    ) -> thread::JoinHandle<Option<T>>
+    where
+        T: DeserializeOwned + Send + 'static,
+    {
+        let api = self.clone();
+        thread::spawn(move || api.get_quick::<T>(path).ok())
+    }
+
+    pub(super) fn configure_codex_app(
+        &self,
+        request: &ConfigureRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout("/api/codex-app/configure", request, GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn set_codex_provider_websocket(
+        &self,
+        request: &SetProviderWebSocketRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout(
+            "/api/codex-app/provider/websocket",
+            request,
+            GUI_CONFIG_TIMEOUT,
+        )
+    }
+
+    pub(super) fn delete_codex_provider(
+        &self,
+        request: &DeleteProviderRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout(
+            "/api/codex-app/provider/delete",
+            request,
+            GUI_CONFIG_TIMEOUT,
+        )
+    }
+
+    pub(super) fn codex_app_status(&self) -> Result<CodexAppStatus, String> {
+        self.get_with_timeout("/api/codex-app/status", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn uninstall_codex_app(&self) -> Result<serde_json::Value, String> {
+        self.post_empty_with_timeout("/api/codex-app/uninstall", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn repair_codex_app_gui_environment(&self) -> Result<serde_json::Value, String> {
+        self.post_empty_with_timeout("/api/codex-app/repair-gui-environment", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn set_im_account_enabled(
+        &self,
+        request: &SetImAccountEnabledRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout("/api/im/account/enabled", request, GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn delete_im_account(
+        &self,
+        request: &DeleteImAccountRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout("/api/im/account/delete", request, GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn shutdown(&self) -> Result<serde_json::Value, String> {
+        self.post_empty("/api/shutdown")
+    }
+
+    pub(super) fn start_feishu_onboard(&self) -> Result<FeishuOnboardStart, String> {
+        self.post_empty("/api/feishu/onboard/start")
+    }
+
+    pub(super) fn poll_feishu_onboard(
+        &self,
+        device_code: &str,
+    ) -> Result<FeishuOnboardPoll, String> {
+        self.post_json(
+            "/api/feishu/onboard/poll",
+            &serde_json::json!({ "deviceCode": device_code }),
+        )
+    }
+
+    pub(super) fn configure_telegram_bot(
+        &self,
+        request: &ConfigureTelegramBotRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout("/api/telegram/configure", request, GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn start_wechat_onboard(&self) -> Result<WechatOnboardStart, String> {
+        self.post_empty_with_timeout("/api/wechat/onboard/start", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn poll_wechat_onboard(
+        &self,
+        session_key: &str,
+        verify_code: Option<&str>,
+    ) -> Result<WechatOnboardPoll, String> {
+        self.post_json(
+            "/api/wechat/onboard/poll",
+            &serde_json::json!({
+                "sessionKey": session_key,
+                "verifyCode": verify_code,
+            }),
+        )
+    }
+}
+
+fn join_optional<T>(handle: thread::JoinHandle<Option<T>>) -> Option<T> {
+    handle.join().ok().flatten()
+}
+
+#[derive(Clone, Default)]
+pub(super) struct DashboardSnapshot {
+    pub(super) service_online: bool,
+    pub(super) status: Option<ServerStatus>,
+    pub(super) remote: Option<RemoteControlStatus>,
+    pub(super) codex_app: Option<CodexAppStatus>,
+    pub(super) im_accounts: Option<ImAccountsResponse>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ServerStatus {
+    pub(super) bind: String,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ImAccountsResponse {
+    pub(super) accounts: Vec<ImAccountItem>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ImAccountItem {
+    pub(super) platform: String,
+    pub(super) account_id: String,
+    pub(super) display_name: Option<String>,
+    pub(super) enabled: bool,
+    pub(super) configured: bool,
+    pub(super) secret_set: bool,
+    pub(super) connecting: bool,
+    pub(super) polling: bool,
+    pub(super) connected: bool,
+    pub(super) last_error: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RemoteControlStatus {
+    pub(super) connected: bool,
+    pub(super) initialized: bool,
+    pub(super) last_error: Option<String>,
+    pub(super) healthy: Option<bool>,
+    pub(super) stale: Option<bool>,
+    pub(super) last_app_pong_status: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CodexAppStatus {
+    pub(super) configured: bool,
+    pub(super) provider: Option<CodexAppProviderStatus>,
+    #[serde(default)]
+    pub(super) providers: Vec<CodexAppProviderStatus>,
+    #[serde(default = "default_true")]
+    pub(super) image_generation_enabled: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CodexAppProviderStatus {
+    pub(super) name: String,
+    pub(super) base_url: Option<String>,
+    pub(super) key: Option<String>,
+    #[serde(default)]
+    pub(super) supports_websockets: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ConfigureRequest {
+    pub(super) provider_name: Option<String>,
+    pub(super) provider_base_url: Option<String>,
+    pub(super) provider_key: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) activate: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) image_generation_enabled: Option<bool>,
+    pub(super) supports_websockets: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DeleteProviderRequest {
+    pub(super) provider_name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetProviderWebSocketRequest {
+    pub(super) provider_name: String,
+    pub(super) enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ConfigureTelegramBotRequest {
+    pub(super) bot_token: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetImAccountEnabledRequest {
+    pub(super) platform: String,
+    pub(super) account_id: String,
+    pub(super) enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DeleteImAccountRequest {
+    pub(super) platform: String,
+    pub(super) account_id: String,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FeishuOnboardStart {
+    pub(super) verification_uri_complete: String,
+    pub(super) device_code: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FeishuOnboardPoll {
+    pub(super) done: bool,
+    pub(super) error: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WechatOnboardStart {
+    pub(super) session_key: String,
+    pub(super) qrcode_url: String,
+    pub(super) expires_in: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WechatOnboardPoll {
+    pub(super) done: bool,
+    pub(super) status: Option<String>,
+    pub(super) error: Option<serde_json::Value>,
+    pub(super) need_verify_code: Option<bool>,
+    pub(super) already_connected: Option<bool>,
+}
