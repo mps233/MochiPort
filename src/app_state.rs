@@ -49,6 +49,7 @@ pub struct RemoteControlInner {
     pub connections: HashMap<String, RemoteControlServerConnection>,
     pub active_connection_id: Option<String>,
     pub next_connection_epoch: u64,
+    pub pending_source_hints_by_installation: HashMap<String, RemoteControlSourceHint>,
     pub connected: bool,
     pub initialized: bool,
     pub client_id: String,
@@ -80,6 +81,12 @@ pub struct RemoteControlInner {
     pub revoked_clients: HashSet<String>,
     pub stream_diagnostics: HashMap<String, RemoteControlStreamDiagnostics>,
     pub recent_events: VecDeque<RemoteControlRecentEvent>,
+}
+
+pub struct RemoteControlSourceHint {
+    pub source_kind: RemoteControlSourceKind,
+    pub user_agent: Option<String>,
+    pub captured_at_ms: u128,
 }
 
 pub struct RemoteControlServerConnection {
@@ -200,6 +207,7 @@ impl RemoteControlState {
                 connections: HashMap::new(),
                 active_connection_id: None,
                 next_connection_epoch: 0,
+                pending_source_hints_by_installation: HashMap::new(),
                 connected: false,
                 initialized: false,
                 client_id: "codex-remote-feishu".to_string(),

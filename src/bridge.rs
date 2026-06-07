@@ -344,6 +344,7 @@ async fn install_default_feishu_route(
         conversation_key: format!("feishu:{account_id}:open_id:{open_id}"),
         account_id: account_id.to_string(),
         chat_id: format!("open_id:{open_id}"),
+        remote_client_key: None,
     };
     state.runtime.lock().await.last_route = Some(route);
     state
@@ -367,6 +368,7 @@ async fn handle_inbound(
         conversation_key: message.conversation_key(),
         account_id: message.account_id.clone(),
         chat_id: message.chat_id.clone(),
+        remote_client_key: None,
     };
     let Some(api) = api_registry.feishu_for_route(&route) else {
         anyhow::bail!(

@@ -3,7 +3,7 @@ use anyhow::Error;
 use crate::{
     app_state::SharedState,
     im::core::routing::{
-        clear_thread_binding_with_reason, is_stale_thread_error, live_thread_for_route,
+        clear_thread_binding_with_reason, is_stale_thread_error, live_thread_binding_for_route,
     },
     im_runtime::{RouteTarget, TurnOrigin},
     remote_control_backend,
@@ -27,9 +27,12 @@ pub(crate) async fn start_turn_for_route(
     received_at_ms: u128,
     origin: TurnOrigin,
 ) -> TurnStartOutcome {
-    let Some(thread_id) = live_thread_for_route(state, route).await else {
+    let Some((thread_id, bound_route)) = live_thread_binding_for_route(state, route).await else {
         return TurnStartOutcome::NoThread;
     };
+    let remote_client_key = bound_route
+        .remote_client_key
+        .unwrap_or_else(|| remote_control_backend::default_remote_client_key().to_string());
     let blocked = {
         let mut runtime = state.runtime.lock().await;
         match runtime.try_mark_turn_starting(&thread_id) {
@@ -49,7 +52,7 @@ pub(crate) async fn start_turn_for_route(
 
     match remote_control_backend::start_turn_for_client(
         state,
-        &route.conversation_key,
+        &remote_client_key,
         &thread_id,
         text,
         attachments,

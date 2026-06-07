@@ -9,7 +9,7 @@ use crate::{
     im::core::{
         approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
         i18n::im_text_for_state,
-        routing::{active_turn_for_message, route_for_message},
+        routing::{active_turn_for_message, remote_client_key_for_thread, route_for_message},
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
             ThreadCreateForm, is_approval_reply, load_thread_create_defaults_for_client,
@@ -160,17 +160,19 @@ async fn handle_control_message(
                 send_text_to_message(api, message, text.no_running_turn()).await?;
                 return Ok(true);
             };
-            let route = route_for_message(message);
+            let remote_client_key = remote_client_key_for_thread(state, &thread_id)
+                .await
+                .unwrap_or_else(|| remote_control_backend::default_remote_client_key().to_string());
             remote_control_backend::interrupt_turn_for_client(
                 state,
-                &route.conversation_key,
+                &remote_client_key,
                 &thread_id,
                 &turn_id,
             )
             .await?;
             remote_control_backend::clear_turn_for_client(
                 state,
-                &route.conversation_key,
+                &remote_client_key,
                 Some(&turn_id),
             )
             .await;
@@ -184,17 +186,21 @@ async fn handle_control_message(
         }
         "/q" => {
             if let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await {
-                let route = route_for_message(message);
+                let remote_client_key = remote_client_key_for_thread(state, &thread_id)
+                    .await
+                    .unwrap_or_else(|| {
+                        remote_control_backend::default_remote_client_key().to_string()
+                    });
                 let _ = remote_control_backend::interrupt_turn_for_client(
                     state,
-                    &route.conversation_key,
+                    &remote_client_key,
                     &thread_id,
                     &turn_id,
                 )
                 .await;
                 remote_control_backend::clear_thread_for_client(
                     state,
-                    &route.conversation_key,
+                    &remote_client_key,
                     Some(&thread_id),
                 )
                 .await;
@@ -377,17 +383,20 @@ async fn handle_thread_route_create_submit(
     else {
         return Ok(());
     };
-    let options =
-        match thread_start_options_from_form_for_client(&state, &message.conversation_key(), form)
-            .await
-        {
-            Ok(options) => options,
-            Err(err) => {
-                let text = im_text_for_state(&state);
-                send_text_to_message(&api, &message, &text.invalid_create_form(&err)).await?;
-                return Ok(());
-            }
-        };
+    let options = match thread_start_options_from_form_for_client(
+        &state,
+        remote_control_backend::default_remote_client_key(),
+        form,
+    )
+    .await
+    {
+        Ok(options) => options,
+        Err(err) => {
+            let text = im_text_for_state(&state);
+            send_text_to_message(&api, &message, &text.invalid_create_form(&err)).await?;
+            return Ok(());
+        }
+    };
     create_new_thread_for_route(&state, &api, &message, request_id, request, options).await
 }
 
@@ -423,8 +432,11 @@ async fn send_thread_create_settings_card(
     message: &InboundMessage,
     request: ThreadRoutingRequestState,
 ) -> Result<()> {
-    let route = route_for_message(message);
-    let defaults = load_thread_create_defaults_for_client(state, &route.conversation_key).await;
+    let defaults = load_thread_create_defaults_for_client(
+        state,
+        remote_control_backend::default_remote_client_key(),
+    )
+    .await;
     let text = im_text_for_state(state);
     let adapter = FeishuAdapter::new(api.clone());
     if let Some(message_id) = request
@@ -839,6 +851,7 @@ async fn send_thread_routing_choice_card(
         conversation_key: message.conversation_key(),
         account_id: message.account_id.clone(),
         chat_id: message.chat_id.clone(),
+        remote_client_key: None,
     };
     let request_id = existing_request
         .as_ref()

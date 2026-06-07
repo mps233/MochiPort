@@ -14,6 +14,7 @@ pub struct RouteTarget {
     pub conversation_key: String,
     pub account_id: String,
     pub chat_id: String,
+    pub remote_client_key: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -494,6 +495,7 @@ pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget
         conversation_key: conversation_key.to_string(),
         account_id,
         chat_id,
+        remote_client_key: None,
     })
 }
 

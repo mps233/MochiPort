@@ -1698,7 +1698,12 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         .as_ref()
         .map(|remote| remote.initialized)
         .unwrap_or(false);
-    let codex_control_ready = remote_connected && remote_initialized;
+    let remote_status = snapshot.remote.as_ref();
+    let codex_app_remote_ready = remote_connection_ready(remote_status, "codex_app")
+        || remote_active_ready(remote_status, "codex_app");
+    let vscode_remote_ready = remote_connection_ready(remote_status, "vscode")
+        || remote_active_ready(remote_status, "vscode");
+    let remote_initializing = remote_connected && !remote_initialized;
     let codex_configured = snapshot
         .codex_app
         .as_ref()
@@ -1711,7 +1716,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             text.unavailable(),
             text.app_gui_unsupported(),
         );
-    } else if codex_control_ready {
+    } else if codex_app_remote_ready {
         let detail = snapshot
             .remote
             .as_ref()
@@ -1723,7 +1728,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             &detail,
             StateTone::Ok,
         );
-    } else if remote_connected {
+    } else if remote_initializing {
         set_status_panel(
             &handles.codex_status,
             text.initializing(),
@@ -1746,12 +1751,8 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         );
     }
 
-    if codex_control_ready {
-        let detail = snapshot
-            .remote
-            .as_ref()
-            .map(|remote| codex_remote_detail(text, remote))
-            .unwrap_or_else(|| text.remote_connected_detail().to_string());
+    if vscode_remote_ready {
+        let detail = text.remote_connected_detail().to_string();
         set_status_panel(
             &handles.vscode_status,
             text.connected(),
@@ -1780,6 +1781,25 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.provider_image_generation.enable(enabled);
     handles.provider_list.enable(enabled);
     handles.uninstall_button.enable(enabled);
+}
+
+fn remote_connection_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
+    remote
+        .map(|remote| {
+            remote.connections.iter().any(|connection| {
+                connection.source_kind == source_kind
+                    && connection.connected
+                    && connection.initialized
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn remote_active_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
+    remote
+        .filter(|remote| remote.connected && remote.initialized)
+        .and_then(|remote| remote.active_source_kind.as_deref())
+        == Some(source_kind)
 }
 
 fn codex_remote_detail(text: GuiText, remote: &RemoteControlStatus) -> String {

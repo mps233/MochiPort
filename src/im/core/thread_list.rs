@@ -61,7 +61,7 @@ impl ThreadRoutingPage {
 
 pub(crate) async fn load_thread_routing_page(
     state: &SharedState,
-    route: &RouteTarget,
+    _route: &RouteTarget,
     existing_request: Option<&ThreadRoutingRequestState>,
     cursor: Option<&str>,
     page: usize,
@@ -77,9 +77,7 @@ pub(crate) async fn load_thread_routing_page(
     }
     page_cursors[page - 1] = cursor.map(str::to_string);
 
-    let client_key = existing_request
-        .map(|request| request.conversation_key.as_str())
-        .unwrap_or(route.conversation_key.as_str());
+    let client_key = remote_control_backend::default_remote_client_key();
     let loaded_ids = match remote_control_backend::thread_loaded_list_for_client(
         state,
         client_key,

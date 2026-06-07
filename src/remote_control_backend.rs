@@ -27,7 +27,8 @@ use crate::{
     app_state::{
         AuthorizedRemoteControlClient, PendingRemoteRequest, RemoteControlClientState,
         RemoteControlInner, RemoteControlRecentEvent, RemoteControlServerConnection,
-        RemoteControlSourceKind, RemoteControlStreamDiagnostics, SharedState,
+        RemoteControlSourceHint, RemoteControlSourceKind, RemoteControlStreamDiagnostics,
+        SharedState,
     },
     chain_log,
     codex::CodexNotification,
@@ -54,10 +55,22 @@ const REMOTE_CONTROL_SEGMENT_COUNT_MAX: usize = 1024;
 const REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY: usize = 4096;
 const REMOTE_CONTROL_RECENT_EVENT_LIMIT: usize = 96;
 const REMOTE_CONTROL_DIAGNOSTIC_WINDOW_MS: u128 = 10_000;
+const REMOTE_CONTROL_SOURCE_HINT_TTL_MS: u128 = 30_000;
 const FEISHU_BRIDGE_CLIENT_ID: &str = "codex-remote-feishu";
 const FEISHU_BRIDGE_ENV_ID: &str = "env_codex_remote_feishu_bridge";
 const FEISHU_BRIDGE_INSTALLATION_ID: &str = "codex-remote-feishu-bridge";
 const DEFAULT_REMOTE_CLIENT_KEY: &str = "default";
+
+pub fn default_remote_client_key() -> &'static str {
+    DEFAULT_REMOTE_CLIENT_KEY
+}
+
+pub async fn select_remote_client_key(state: &SharedState) -> Result<String> {
+    let mut remote = state.remote_control.inner.lock().await;
+    active_connection_epoch_locked(&mut remote)
+        .map(|connection_epoch| default_client_key_for_connection_locked(&remote, connection_epoch))
+        .ok_or_else(|| anyhow!("remote-control websocket is not connected"))
+}
 
 pub(crate) enum OutboundWsMessage {
     Text(Value),
@@ -436,7 +449,10 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
             last_error: connection.last_error.clone(),
         })
         .collect::<Vec<_>>();
-    let default_client = remote.clients.get(DEFAULT_REMOTE_CLIENT_KEY);
+    let active_client_key = active_connection
+        .map(|connection| source_default_client_key(connection.source_kind))
+        .unwrap_or_else(|| DEFAULT_REMOTE_CLIENT_KEY.to_string());
+    let default_client = remote.clients.get(&active_client_key);
     let initialized = default_client
         .map(|client| client.initialized)
         .unwrap_or(remote.initialized);
@@ -570,6 +586,125 @@ fn ensure_client_state_locked<'a>(
         .expect("remote client state should exist")
 }
 
+fn is_legacy_default_client_key(client_key: &str) -> bool {
+    client_key == DEFAULT_REMOTE_CLIENT_KEY || client_key.starts_with("default:")
+}
+
+fn source_default_client_key(source_kind: RemoteControlSourceKind) -> String {
+    match source_kind {
+        RemoteControlSourceKind::CodexApp => "default:codex_app",
+        RemoteControlSourceKind::Vscode => "default:vscode",
+        RemoteControlSourceKind::Cli => "default:cli",
+        RemoteControlSourceKind::Unknown => "default:unknown",
+    }
+    .to_string()
+}
+
+fn source_kind_from_default_client_key(client_key: &str) -> Option<RemoteControlSourceKind> {
+    match client_key {
+        "default:codex_app" => Some(RemoteControlSourceKind::CodexApp),
+        "default:vscode" => Some(RemoteControlSourceKind::Vscode),
+        "default:cli" => Some(RemoteControlSourceKind::Cli),
+        "default:unknown" => Some(RemoteControlSourceKind::Unknown),
+        _ => None,
+    }
+}
+
+fn default_client_key_for_connection_locked(
+    remote: &RemoteControlInner,
+    connection_epoch: u64,
+) -> String {
+    remote
+        .connections
+        .values()
+        .find(|connection| connection.connection_epoch == connection_epoch)
+        .map(|connection| source_default_client_key(connection.source_kind))
+        .unwrap_or_else(|| DEFAULT_REMOTE_CLIENT_KEY.to_string())
+}
+
+fn migrate_source_default_client_key_locked(
+    remote: &mut RemoteControlInner,
+    old_client_key: &str,
+    new_source_kind: RemoteControlSourceKind,
+    client_id: &str,
+    stream_id: &str,
+) -> String {
+    let old_client_key = normalize_remote_client_key(old_client_key);
+    if new_source_kind == RemoteControlSourceKind::Unknown
+        || !is_legacy_default_client_key(&old_client_key)
+    {
+        return old_client_key;
+    }
+
+    let new_client_key = source_default_client_key(new_source_kind);
+    if old_client_key == new_client_key {
+        return old_client_key;
+    }
+
+    let old_matches_stream = remote
+        .clients
+        .get(&old_client_key)
+        .is_some_and(|client| client.client_id == client_id && client.stream_id == stream_id);
+    if !old_matches_stream {
+        return old_client_key;
+    }
+
+    let Some(old_client) = remote.clients.remove(&old_client_key) else {
+        return old_client_key;
+    };
+    let replaced_existing = remote
+        .clients
+        .insert(new_client_key.clone(), old_client)
+        .is_some();
+    chain_log::write_line(format!(
+        "[remote_control] event=source_default_client_key_migrated old_client_key={} new_client_key={} source_kind={:?} client_id={} stream_id={} replaced_existing={}",
+        old_client_key, new_client_key, new_source_kind, client_id, stream_id, replaced_existing
+    ));
+    new_client_key
+}
+
+fn active_default_client_key_locked(remote: &mut RemoteControlInner) -> String {
+    if remote.connections.is_empty() {
+        return DEFAULT_REMOTE_CLIENT_KEY.to_string();
+    }
+    select_active_connection_id_locked(remote)
+        .as_ref()
+        .and_then(|connection_id| remote.connections.get(connection_id))
+        .map(|connection| source_default_client_key(connection.source_kind))
+        .unwrap_or_else(|| DEFAULT_REMOTE_CLIENT_KEY.to_string())
+}
+
+fn connection_epoch_for_client_key_locked(
+    remote: &mut RemoteControlInner,
+    client_key: &str,
+) -> Option<u64> {
+    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        return active_connection_epoch_locked(remote);
+    }
+    let Some(source_kind) = source_kind_from_default_client_key(client_key) else {
+        return active_connection_epoch_locked(remote);
+    };
+    remote
+        .connections
+        .values()
+        .filter(|connection| {
+            connection.connected
+                && connection.initialized
+                && connection.outbound_tx.is_some()
+                && connection.source_kind == source_kind
+        })
+        .max_by_key(|connection| {
+            (
+                connection
+                    .last_ws_inbound_at_ms
+                    .or(connection.connected_at_ms)
+                    .unwrap_or_default(),
+                connection.connection_epoch,
+            )
+        })
+        .map(|connection| connection.connection_epoch)
+}
+
 fn normalize_remote_client_key(client_key: &str) -> String {
     let client_key = client_key.trim();
     if client_key.is_empty() {
@@ -592,7 +727,8 @@ fn remote_client_key_for_stream_locked(
 }
 
 fn sync_default_client_legacy_locked(remote: &mut RemoteControlInner) {
-    let Some(default_client) = remote.clients.get(DEFAULT_REMOTE_CLIENT_KEY) else {
+    let active_client_key = active_default_client_key_locked(remote);
+    let Some(default_client) = remote.clients.get(&active_client_key) else {
         return;
     };
     let initialized = default_client.initialized;
@@ -661,6 +797,10 @@ fn select_active_connection_id_locked(remote: &RemoteControlInner) -> Option<Str
 }
 
 fn sync_legacy_from_active_connection_locked(remote: &mut RemoteControlInner) {
+    if remote.connections.is_empty() {
+        sync_default_client_legacy_locked(remote);
+        return;
+    }
     remote.active_connection_id = select_active_connection_id_locked(remote);
     let Some(active_connection_id) = remote.active_connection_id.clone() else {
         remote.connected = remote
@@ -1639,6 +1779,19 @@ async fn refresh(
         remote.installation_id = Some(installation_id.clone());
         remote.account_id =
             header_str(&headers, "chatgpt-account-id").or(remote.account_id.clone());
+        if let Some(user_agent) = header_str(&headers, "user-agent") {
+            let source_kind = source_kind_from_user_agent(&user_agent);
+            if source_kind != RemoteControlSourceKind::Unknown {
+                remote.pending_source_hints_by_installation.insert(
+                    installation_id.clone(),
+                    RemoteControlSourceHint {
+                        source_kind,
+                        user_agent: Some(user_agent),
+                        captured_at_ms: now_ms(),
+                    },
+                );
+            }
+        }
         remote.last_error = None;
     }
     state
@@ -1664,7 +1817,15 @@ async fn ensure_remote_control_client_initialized(
     connection_epoch: u64,
     client_key: &str,
 ) -> Result<()> {
-    let client_key = normalize_remote_client_key(client_key);
+    let requested_client_key = normalize_remote_client_key(client_key);
+    let client_key = {
+        let remote = state.remote_control.inner.lock().await;
+        if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
+            default_client_key_for_connection_locked(&remote, connection_epoch)
+        } else {
+            requested_client_key
+        }
+    };
     let should_initialize = {
         let mut remote = state.remote_control.inner.lock().await;
         if !connection_exists_locked(&remote, connection_epoch) {
@@ -1697,7 +1858,7 @@ async fn ensure_remote_control_client_initialized(
                 false
             } else {
                 client.last_app_pong_status = None;
-                if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                if is_legacy_default_client_key(&client_key) {
                     sync_default_client_legacy_locked(&mut remote);
                 }
                 true
@@ -1711,17 +1872,32 @@ async fn ensure_remote_control_client_initialized(
 }
 
 async fn ensure_remote_control_client_ready(state: &SharedState, client_key: &str) -> Result<()> {
-    let connection_epoch = {
-        let remote = state.remote_control.inner.lock().await;
+    let requested_client_key = normalize_remote_client_key(client_key);
+    let (connection_epoch, resolved_client_key) = {
+        let mut remote = state.remote_control.inner.lock().await;
         if !remote.connected {
             return Err(anyhow!(
                 "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 codex-remote 的 /backend-api。"
             ));
         }
-        remote.connection_epoch
+        let connection_epoch = connection_epoch_for_client_key_locked(
+            &mut remote,
+            &requested_client_key,
+        )
+        .ok_or_else(|| {
+            anyhow!(
+                "remote-control websocket is not connected for client_key={requested_client_key}"
+            )
+        })?;
+        let resolved_client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
+            default_client_key_for_connection_locked(&remote, connection_epoch)
+        } else {
+            requested_client_key
+        };
+        (connection_epoch, resolved_client_key)
     };
-    ensure_remote_control_client_initialized(state, connection_epoch, client_key).await?;
-    wait_for_remote_control_initialized(state, client_key).await
+    ensure_remote_control_client_initialized(state, connection_epoch, &resolved_client_key).await?;
+    wait_for_remote_control_initialized(state, &resolved_client_key).await
 }
 
 async fn wait_for_recovery_if_needed(state: &SharedState, client_key: &str) -> Result<()> {
@@ -1795,7 +1971,7 @@ async fn reset_remote_control_client_for_key(
         let stream_id = client.stream_id.clone();
         let pending_summary = pending_requests_summary(&client.pending);
         let pending = std::mem::take(&mut client.pending);
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         (pending, client_id, stream_id, pending_summary)
@@ -1844,7 +2020,7 @@ async fn start_remote_control_client_recovery(
             client.initialized = false;
             client.last_app_pong_status = Some("unknown".to_string());
             let attempt = client.recovery_attempt;
-            if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+            if is_legacy_default_client_key(&client_key) {
                 sync_default_client_legacy_locked(&mut remote);
             }
             (attempt, true)
@@ -1985,7 +2161,7 @@ async fn finish_remote_control_client_recovery(
     let stream_id = client.stream_id.clone();
     let attempt = client.recovery_attempt;
     client.recovery_started_at_ms = None;
-    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+    if is_legacy_default_client_key(&client_key) {
         sync_default_client_legacy_locked(&mut remote);
     }
     remote.last_error = None;
@@ -2183,16 +2359,21 @@ async fn next_client_envelope_parts(
     state: &SharedState,
     client_key: &str,
 ) -> Result<(String, String, u64)> {
-    let client_key = normalize_remote_client_key(client_key);
+    let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
     if !remote.connected {
         return Err(anyhow!("remote-control websocket is not connected"));
     }
+    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        active_default_client_key_locked(&mut remote)
+    } else {
+        requested_client_key
+    };
     let client = ensure_client_state_locked(&mut remote, &client_key);
     let seq_id = client.next_seq_id;
     client.next_seq_id = client.next_seq_id.saturating_add(1);
     let parts = (client.client_id.clone(), client.stream_id.clone(), seq_id);
-    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+    if is_legacy_default_client_key(&client_key) {
         sync_default_client_legacy_locked(&mut remote);
     }
     Ok(parts)
@@ -2247,7 +2428,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     let host = header_str(&headers, "host");
     let (outbound_tx, mut outbound_rx) =
         tokio::sync::mpsc::unbounded_channel::<OutboundWsMessage>();
-    let (connection_id, connection_epoch, client_id, stream_id) = {
+    let (connection_id, connection_epoch, client_id, stream_id, source_kind, source_user_agent) = {
         let mut remote = state.remote_control.inner.lock().await;
         let connected_at_ms = now_ms();
         remote.connected = true;
@@ -2265,12 +2446,6 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 connection_epoch
             ),
         );
-        if remote.stream_id.is_empty() {
-            remote.stream_id = uuid_like();
-        }
-        let default_client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
-        let client_id = default_client.client_id.clone();
-        let stream_id = default_client.stream_id.clone();
         remote.outbound_tx = Some(outbound_tx.clone());
         remote.server_id = server_id.clone().or(remote.server_id.clone());
         remote.server_name = server_name.clone().or(remote.server_name.clone());
@@ -2286,6 +2461,31 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         remote.last_app_pong_at_ms = None;
         remote.last_app_pong_status = None;
         remote.last_initialize_sent_at_ms = None;
+        let source_hint = installation_id.as_ref().and_then(|installation_id| {
+            remote
+                .pending_source_hints_by_installation
+                .remove(installation_id)
+                .filter(|hint| {
+                    connected_at_ms.saturating_sub(hint.captured_at_ms)
+                        <= REMOTE_CONTROL_SOURCE_HINT_TTL_MS
+                })
+        });
+        let source_kind = source_hint
+            .as_ref()
+            .map(|hint| hint.source_kind)
+            .or_else(|| user_agent.as_deref().map(source_kind_from_user_agent))
+            .unwrap_or(RemoteControlSourceKind::Unknown);
+        let source_user_agent = source_hint
+            .as_ref()
+            .and_then(|hint| hint.user_agent.clone())
+            .or_else(|| user_agent.clone());
+        if remote.stream_id.is_empty() {
+            remote.stream_id = uuid_like();
+        }
+        let default_client_key = source_default_client_key(source_kind);
+        let default_client = ensure_client_state_locked(&mut remote, &default_client_key);
+        let client_id = default_client.client_id.clone();
+        let stream_id = default_client.stream_id.clone();
         let environment_id = remote.environment_id.clone();
         remote.connections.insert(
             connection_id.clone(),
@@ -2294,8 +2494,8 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 connection_epoch,
                 connected: true,
                 initialized: false,
-                source_kind: RemoteControlSourceKind::Unknown,
-                user_agent: None,
+                source_kind,
+                user_agent: source_user_agent.clone(),
                 server_id: server_id.clone(),
                 environment_id,
                 server_name: server_name.clone(),
@@ -2313,7 +2513,14 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
             },
         );
         sync_default_client_legacy_locked(&mut remote);
-        (connection_id, connection_epoch, client_id, stream_id)
+        (
+            connection_id,
+            connection_epoch,
+            client_id,
+            stream_id,
+            source_kind,
+            source_user_agent,
+        )
     };
     state
         .push_event(
@@ -2329,17 +2536,18 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         )
         .await;
     chain_log::write_line(format!(
-        "[remote_control] event=ws_open connection_id={} connection_epoch={} client_id={} stream_id={} server_id={} server_name={} installation_id={} account_id={} subscribe_cursor={} user_agent={} origin={} host={}",
+        "[remote_control] event=ws_open connection_id={} connection_epoch={} client_id={} stream_id={} source_kind={:?} server_id={} server_name={} installation_id={} account_id={} subscribe_cursor={} user_agent={} origin={} host={}",
         connection_id,
         connection_epoch,
         client_id,
         stream_id,
+        source_kind,
         server_id.as_deref().unwrap_or_default(),
         server_name.as_deref().unwrap_or_default(),
         installation_id.as_deref().unwrap_or_default(),
         account_id.as_deref().unwrap_or_default(),
         subscribe_cursor.as_deref().unwrap_or_default(),
-        user_agent.as_deref().unwrap_or_default(),
+        source_user_agent.as_deref().unwrap_or_default(),
         origin.as_deref().unwrap_or_default(),
         host.as_deref().unwrap_or_default()
     ));
@@ -2530,15 +2738,10 @@ async fn initialize_remote_clients_for_connection(
         if !connection_exists_locked(&remote, connection_epoch) {
             return Ok(());
         }
-        let mut client_keys = remote.clients.keys().cloned().collect::<Vec<_>>();
-        if !client_keys
-            .iter()
-            .any(|client_key| client_key == DEFAULT_REMOTE_CLIENT_KEY)
-        {
-            client_keys.push(DEFAULT_REMOTE_CLIENT_KEY.to_string());
-        }
-        client_keys.sort();
-        client_keys
+        vec![default_client_key_for_connection_locked(
+            &remote,
+            connection_epoch,
+        )]
     };
     for client_key in client_keys {
         ensure_remote_control_client_initialized(state, connection_epoch, &client_key).await?;
@@ -2553,9 +2756,6 @@ async fn handle_server_envelope(
     chunks: &mut HashMap<(String, String, u64), ServerChunkAssembly>,
     server_work_tx: &tokio::sync::mpsc::Sender<RemoteServerWorkItem>,
 ) -> Result<()> {
-    if !is_active_connection_epoch(state, connection_epoch).await {
-        return Ok(());
-    }
     let envelope: IncomingServerEnvelope =
         serde_json::from_str(text).with_context(|| format!("invalid server envelope: {text}"))?;
     let IncomingServerEnvelope {
@@ -3146,7 +3346,7 @@ async fn mark_remote_app_ping(state: &SharedState, connection_epoch: u64, client
         let now = now_ms();
         let client = ensure_client_state_locked(&mut remote, &client_key);
         client.last_app_ping_at_ms = Some(now);
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
     }
@@ -3198,7 +3398,7 @@ async fn record_remote_app_pong(
         client.last_app_pong_at_ms = Some(now);
         client.last_app_pong_status = Some(normalized_status.clone());
         let should_reinitialize = normalized_status == "unknown" && client.initialized;
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         should_reinitialize
@@ -3574,9 +3774,6 @@ async fn observe_app_server_message(
     stream_id: &str,
     message: &Value,
 ) {
-    if !is_active_connection_epoch(state, connection_epoch).await {
-        return;
-    }
     let is_selected_connection = is_selected_active_connection_epoch(state, connection_epoch).await;
     let client_key = {
         let remote = state.remote_control.inner.lock().await;
@@ -3696,41 +3893,57 @@ async fn observe_app_server_message(
                     .get("userAgent")
                     .and_then(Value::as_str)
                     .map(str::to_string);
+                let result_source_kind = user_agent
+                    .as_deref()
+                    .map(source_kind_from_user_agent)
+                    .unwrap_or(RemoteControlSourceKind::Unknown);
                 chain_log::write_line(format!(
                     "[remote_control] event=initialize_result client_key={} client_id={} stream_id={} request_id={} source_kind={:?} result_keys={} preview={}",
                     client_key.as_deref().unwrap_or_default(),
                     client_id,
                     stream_id,
                     id,
-                    user_agent
-                        .as_deref()
-                        .map(source_kind_from_user_agent)
-                        .unwrap_or(RemoteControlSourceKind::Unknown),
+                    result_source_kind,
                     json_object_keys(result),
                     json_preview(&result.to_string())
                 ));
+                let mut initialized_client_key = client_key.clone();
                 {
                     let mut remote = state.remote_control.inner.lock().await;
+                    let mut connection_source_kind = result_source_kind;
                     if let Some(connection) = remote
                         .connections
                         .values_mut()
                         .find(|connection| connection.connection_epoch == connection_epoch)
                     {
                         connection.initialized = true;
-                        connection.user_agent = user_agent.clone();
-                        connection.source_kind = user_agent
-                            .as_deref()
-                            .map(source_kind_from_user_agent)
-                            .unwrap_or(RemoteControlSourceKind::Unknown);
+                        if connection.user_agent.is_none() {
+                            connection.user_agent = user_agent.clone();
+                        }
+                        if connection.source_kind == RemoteControlSourceKind::Unknown {
+                            connection.source_kind = user_agent
+                                .as_deref()
+                                .map(source_kind_from_user_agent)
+                                .unwrap_or(RemoteControlSourceKind::Unknown);
+                        }
+                        connection_source_kind = connection.source_kind;
                         connection.last_error = None;
                     }
                     if let Some(client_key) = client_key.as_deref() {
-                        if let Some(client) = remote.clients.get_mut(client_key) {
+                        let migrated_client_key = migrate_source_default_client_key_locked(
+                            &mut remote,
+                            client_key,
+                            connection_source_kind,
+                            client_id,
+                            stream_id,
+                        );
+                        initialized_client_key = Some(migrated_client_key.clone());
+                        if let Some(client) = remote.clients.get_mut(&migrated_client_key) {
                             client.initialized = true;
                             client.last_app_pong_status = Some("active".to_string());
                             client.recovery_started_at_ms = None;
                         }
-                        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                        if is_legacy_default_client_key(&migrated_client_key) {
                             sync_default_client_legacy_locked(&mut remote);
                         }
                     }
@@ -3748,8 +3961,12 @@ async fn observe_app_server_message(
                         )
                         .await;
                 } else if let Some(client_key) = client_key.as_deref()
-                    && let Err(err) =
-                        replay_pending_requests(state, connection_epoch, client_key).await
+                    && let Err(err) = replay_pending_requests(
+                        state,
+                        connection_epoch,
+                        initialized_client_key.as_deref().unwrap_or(client_key),
+                    )
+                    .await
                 {
                     state
                         .push_event(
@@ -3786,7 +4003,7 @@ async fn observe_app_server_message(
                             client.current_thread_id = Some(thread_id);
                         }
                     }
-                    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                    if is_legacy_default_client_key(&client_key) {
                         sync_default_client_legacy_locked(&mut remote);
                     }
                 } else {
@@ -3827,7 +4044,7 @@ async fn observe_app_server_message(
                         client.last_app_pong_status = Some("active".to_string());
                         client.recovery_started_at_ms = None;
                     }
-                    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                    if is_legacy_default_client_key(&client_key) {
                         sync_default_client_legacy_locked(&mut remote);
                     }
                 }
@@ -3906,7 +4123,7 @@ async fn observe_app_server_message(
                             client.current_turn_id = Some(turn_id);
                         }
                     }
-                    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                    if is_legacy_default_client_key(&client_key) {
                         sync_default_client_legacy_locked(&mut remote);
                     }
                 } else {
@@ -3937,7 +4154,7 @@ async fn observe_app_server_message(
                         client.current_turn_id = None;
                     }
                 }
-                if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                if is_legacy_default_client_key(&client_key) {
                     sync_default_client_legacy_locked(&mut remote);
                 }
             } else if thread_id.is_none()
@@ -3956,7 +4173,7 @@ async fn observe_app_server_message(
                     client.current_thread_id = None;
                     client.current_turn_id = None;
                 }
-                if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                if is_legacy_default_client_key(&client_key) {
                     sync_default_client_legacy_locked(&mut remote);
                 }
             } else if remote.current_thread_id.as_deref() == Some(thread_id.as_str()) {
@@ -4006,7 +4223,7 @@ async fn observe_thread_status_changed(
             {
                 cleared_turn_id = client.current_turn_id.take();
             }
-            if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+            if is_legacy_default_client_key(&client_key) {
                 sync_default_client_legacy_locked(&mut remote);
             }
             cleared_turn_id
@@ -4213,7 +4430,7 @@ async fn send_response_for_stream(
         let client = ensure_client_state_locked(&mut remote, &client_key);
         let seq_id = client.next_seq_id;
         client.next_seq_id = client.next_seq_id.saturating_add(1);
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         seq_id
@@ -4414,7 +4631,7 @@ async fn send_initialize_for_client_on_connection(
                 envelopes: envelopes.clone(),
             },
         );
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         (client_id, stream_id, seq_id, envelopes)
@@ -4428,7 +4645,7 @@ async fn send_initialize_for_client_on_connection(
         if let Some(client) = remote.clients.get_mut(&client_key) {
             client.pending.remove(&request_key);
         }
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         return Err(err);
@@ -4453,7 +4670,7 @@ async fn send_initialized_for_stream(
         let client = ensure_client_state_locked(&mut remote, &client_key);
         let seq_id = client.next_seq_id;
         client.next_seq_id = client.next_seq_id.saturating_add(1);
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         seq_id
@@ -4534,7 +4751,7 @@ async fn mark_thread_active_for_client(
             return;
         }
         client.current_thread_id = Some(thread_id.to_string());
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         drop(remote);
@@ -4575,7 +4792,7 @@ async fn should_track_notification_thread_for_client(
         return true;
     };
     let client_key = normalize_remote_client_key(client_key);
-    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+    if is_legacy_default_client_key(&client_key) {
         return true;
     }
     let is_bound_thread = {
@@ -4724,7 +4941,13 @@ async fn request_once_with_timeout_for_client_inner(
     params: Value,
     timeout: Duration,
 ) -> Result<Value> {
-    let client_key = normalize_remote_client_key(client_key);
+    let requested_client_key = normalize_remote_client_key(client_key);
+    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        let mut remote = state.remote_control.inner.lock().await;
+        active_default_client_key_locked(&mut remote)
+    } else {
+        requested_client_key
+    };
     if wait_for_recovery {
         wait_for_recovery_if_needed(state, &client_key).await?;
     }
@@ -4751,8 +4974,9 @@ async fn request_once_with_timeout_for_client_inner(
             }
             connection_epoch
         } else {
-            active_connection_epoch_locked(&mut remote)
-                .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
+            connection_epoch_for_client_key_locked(&mut remote, &client_key).ok_or_else(|| {
+                anyhow!("remote-control websocket is not connected for client_key={client_key}")
+            })?
         };
         if !remote.connected {
             return Err(anyhow!(
@@ -4793,7 +5017,7 @@ async fn request_once_with_timeout_for_client_inner(
                 envelopes: envelopes.clone(),
             },
         );
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         (connection_epoch, client_id, stream_id, seq_id, envelopes)
@@ -4813,7 +5037,7 @@ async fn request_once_with_timeout_for_client_inner(
         if let Some(client) = remote.clients.get_mut(&client_key) {
             client.pending.remove(&request_key);
         }
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
         return Err(err);
@@ -4827,7 +5051,7 @@ async fn request_once_with_timeout_for_client_inner(
                 if let Some(client) = remote.clients.get_mut(&client_key) {
                     client.pending.remove(&request_key);
                 }
-                if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+                if is_legacy_default_client_key(&client_key) {
                     sync_default_client_legacy_locked(&mut remote);
                 }
             }
@@ -5098,7 +5322,7 @@ pub async fn start_turn_for_client(
         let client = ensure_client_state_locked(&mut remote, &client_key);
         client.current_thread_id = Some(thread_id.to_string());
         client.current_turn_id = Some(turn_id.clone());
-        if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
     }
@@ -5125,26 +5349,33 @@ pub async fn interrupt_turn_for_client(
 }
 
 pub async fn current_thread_for_client(state: &SharedState, client_key: &str) -> Option<String> {
-    let client_key = normalize_remote_client_key(client_key);
-    state
-        .remote_control
-        .inner
-        .lock()
-        .await
+    let requested_client_key = normalize_remote_client_key(client_key);
+    let mut remote = state.remote_control.inner.lock().await;
+    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        active_default_client_key_locked(&mut remote)
+    } else {
+        requested_client_key
+    };
+    remote
         .clients
         .get(&client_key)
         .and_then(|client| client.current_thread_id.clone())
 }
 
 pub async fn clear_turn_for_client(state: &SharedState, client_key: &str, turn_id: Option<&str>) {
-    let client_key = normalize_remote_client_key(client_key);
+    let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
+    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        active_default_client_key_locked(&mut remote)
+    } else {
+        requested_client_key
+    };
     if let Some(client) = remote.clients.get_mut(&client_key) {
         if turn_id.is_none() || client.current_turn_id.as_deref() == turn_id {
             client.current_turn_id = None;
         }
     }
-    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+    if is_legacy_default_client_key(&client_key) {
         sync_default_client_legacy_locked(&mut remote);
     }
 }
@@ -5154,15 +5385,20 @@ pub async fn clear_thread_for_client(
     client_key: &str,
     thread_id: Option<&str>,
 ) {
-    let client_key = normalize_remote_client_key(client_key);
+    let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
+    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        active_default_client_key_locked(&mut remote)
+    } else {
+        requested_client_key
+    };
     if let Some(client) = remote.clients.get_mut(&client_key) {
         if thread_id.is_none() || client.current_thread_id.as_deref() == thread_id {
             client.current_thread_id = None;
             client.current_turn_id = None;
         }
     }
-    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+    if is_legacy_default_client_key(&client_key) {
         sync_default_client_legacy_locked(&mut remote);
     }
 }
@@ -5805,11 +6041,6 @@ fn turn_input_items(text: &str, attachments: &[InboundAttachment]) -> Vec<Value>
     items
 }
 
-async fn is_active_connection_epoch(state: &SharedState, connection_epoch: u64) -> bool {
-    let remote = state.remote_control.inner.lock().await;
-    connection_exists_locked(&remote, connection_epoch)
-}
-
 async fn is_selected_active_connection_epoch(state: &SharedState, connection_epoch: u64) -> bool {
     let remote = state.remote_control.inner.lock().await;
     if remote.connections.is_empty() {
@@ -5953,6 +6184,7 @@ mod tests {
             connections: HashMap::new(),
             active_connection_id: None,
             next_connection_epoch: 0,
+            pending_source_hints_by_installation: HashMap::new(),
             connected: false,
             initialized: false,
             client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
@@ -6235,6 +6467,7 @@ mod tests {
             connections: HashMap::new(),
             active_connection_id: None,
             next_connection_epoch: 0,
+            pending_source_hints_by_installation: HashMap::new(),
             connected: false,
             initialized: false,
             client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
@@ -6503,7 +6736,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn initialize_remote_clients_for_connection_sends_all_known_clients() {
+    async fn initialize_remote_clients_for_connection_sends_connection_default_client() {
         let state = test_state();
         let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
         let connection_epoch = {
@@ -6534,14 +6767,7 @@ mod tests {
                     .to_string()
             })
             .collect::<std::collections::HashSet<_>>();
-        let expected_streams = {
-            let remote = state.remote_control.inner.lock().await;
-            remote
-                .clients
-                .values()
-                .map(|client| client.stream_id.clone())
-                .collect::<std::collections::HashSet<_>>()
-        };
+        let expected_streams = std::collections::HashSet::from(["stream-root".to_string()]);
         assert_eq!(initialize_streams, expected_streams);
     }
 

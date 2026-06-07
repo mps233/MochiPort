@@ -295,10 +295,20 @@ pub(super) struct RemoteControlStatus {
     pub(super) connected: bool,
     pub(super) initialized: bool,
     pub(super) active_source_kind: Option<String>,
+    #[serde(default)]
+    pub(super) connections: Vec<RemoteControlConnectionStatus>,
     pub(super) last_error: Option<String>,
     pub(super) healthy: Option<bool>,
     pub(super) stale: Option<bool>,
     pub(super) last_app_pong_status: Option<String>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RemoteControlConnectionStatus {
+    pub(super) connected: bool,
+    pub(super) initialized: bool,
+    pub(super) source_kind: String,
 }
 
 #[derive(Clone, Deserialize)]

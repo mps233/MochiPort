@@ -8,10 +8,17 @@ pub(crate) async fn create_and_bind_thread(
     options: remote_control_backend::ThreadStartOptions,
     request_id: Option<&str>,
 ) -> Result<String> {
+    let remote_client_key = remote_control_backend::select_remote_client_key(state).await?;
     let thread_id =
-        remote_control_backend::start_thread_for_client(state, &route.conversation_key, options)
-            .await?;
-    bind_thread_to_route(state, route, &thread_id, request_id).await?;
+        remote_control_backend::start_thread_for_client(state, &remote_client_key, options).await?;
+    bind_thread_to_route(
+        state,
+        route,
+        &thread_id,
+        request_id,
+        Some(remote_client_key),
+    )
+    .await?;
     Ok(thread_id)
 }
 
@@ -21,14 +28,15 @@ pub(crate) async fn resume_and_bind_thread(
     thread_id: &str,
     request_id: Option<&str>,
 ) -> Result<serde_json::Value> {
+    let remote_client_key = remote_control_backend::select_remote_client_key(state).await?;
     let response = remote_control_backend::resume_thread_for_client(
         state,
-        &route.conversation_key,
+        &remote_client_key,
         thread_id,
         true,
     )
     .await?;
-    bind_thread_to_route(state, route, thread_id, request_id).await?;
+    bind_thread_to_route(state, route, thread_id, request_id, Some(remote_client_key)).await?;
     Ok(response
         .get("thread")
         .cloned()
@@ -40,6 +48,7 @@ pub(crate) async fn bind_thread_to_route(
     route: &RouteTarget,
     thread_id: &str,
     request_id: Option<&str>,
+    remote_client_key: Option<String>,
 ) -> Result<()> {
     {
         let mut runtime = state.runtime.lock().await;
@@ -47,7 +56,9 @@ pub(crate) async fn bind_thread_to_route(
             &route.conversation_key,
             "bind_thread_to_route",
         );
-        runtime.bind_route(thread_id, route.clone());
+        let mut route = route.clone();
+        route.remote_client_key = remote_client_key;
+        runtime.bind_route(thread_id, route);
         if let Some(request_id) = request_id {
             runtime.clear_thread_routing_request(request_id);
         }

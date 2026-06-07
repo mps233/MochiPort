@@ -6,6 +6,7 @@ pub(crate) fn route_for_message(message: &InboundMessage) -> RouteTarget {
         conversation_key: message.conversation_key(),
         account_id: message.account_id.clone(),
         chat_id: message.chat_id.clone(),
+        remote_client_key: None,
     }
 }
 
@@ -24,6 +25,22 @@ pub(crate) async fn live_thread_for_route(
         })
 }
 
+pub(crate) async fn live_thread_binding_for_route(
+    state: &SharedState,
+    route: &RouteTarget,
+) -> Option<(String, RouteTarget)> {
+    state
+        .runtime
+        .lock()
+        .await
+        .route_by_thread
+        .iter()
+        .find_map(|(thread_id, existing_route)| {
+            (existing_route.conversation_key == route.conversation_key)
+                .then(|| (thread_id.clone(), existing_route.clone()))
+        })
+}
+
 pub(crate) async fn active_turn_for_message(
     state: &SharedState,
     message: &InboundMessage,
@@ -33,6 +50,18 @@ pub(crate) async fn active_turn_for_message(
     let runtime = state.runtime.lock().await;
     let turn_id = runtime.current_turn_by_thread.get(&thread_id)?.clone();
     Some((thread_id, turn_id))
+}
+
+pub(crate) async fn remote_client_key_for_thread(
+    state: &SharedState,
+    thread_id: &str,
+) -> Option<String> {
+    state
+        .runtime
+        .lock()
+        .await
+        .route_for_thread(thread_id)
+        .and_then(|route| route.remote_client_key)
 }
 
 pub(crate) async fn clear_thread_binding(
