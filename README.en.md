@@ -21,6 +21,9 @@
   <img src="docs/assets/product/feishu-mobile-image.jpg" alt="Feishu mobile Codex image result" width="360">
   <img src="docs/assets/product/tg.jpg" alt="Telegram mobile Codex thread creation" width="360">
 </p>
+<p align="center">
+  <img src="docs/assets/product/syn.png" alt="Feishu IM and local Codex CLI synchronized session" width="900">
+</p>
 
 ## Quick Start
 
