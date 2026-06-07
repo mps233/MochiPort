@@ -44,6 +44,7 @@ pub(super) enum StatusIconKind {
     Service,
     Codex,
     VsCodeCodex,
+    CodexCli,
 }
 
 pub(super) fn status_panel<W: WxWidget>(
@@ -52,20 +53,43 @@ pub(super) fn status_panel<W: WxWidget>(
     icon_kind: StatusIconKind,
     text: GuiText,
 ) -> StatusPanel {
+    build_status_panel(parent, title, icon_kind, text, false)
+}
+
+pub(super) fn centered_status_panel<W: WxWidget>(
+    parent: &W,
+    title: &str,
+    icon_kind: StatusIconKind,
+    text: GuiText,
+) -> StatusPanel {
+    build_status_panel(parent, title, icon_kind, text, true)
+}
+
+fn build_status_panel<W: WxWidget>(
+    parent: &W,
+    title: &str,
+    icon_kind: StatusIconKind,
+    text: GuiText,
+    center_content: bool,
+) -> StatusPanel {
     let panel = Panel::builder(parent)
         .with_style(PanelStyle::BorderStatic)
         .build();
     panel.set_background_color(Colour::rgb(255, 255, 255));
-    panel.set_min_size(Size::new(230, 94));
+    panel.set_min_size(Size::new(230, 58));
 
     let row = BoxSizer::builder(Orientation::Horizontal).build();
+    if center_content {
+        row.add_stretch_spacer(1);
+    } else {
+        row.add_spacer(18);
+    }
     let icon = StaticBitmap::builder(&panel)
         .with_bitmap(Some(status_icon_bitmap(icon_kind, 34)))
         .with_scale_mode(Some(ScaleMode::None))
         .with_size(Size::new(34, 34))
         .build();
     icon.set_min_size(Size::new(34, 34));
-    row.add_spacer(18);
     row.add(
         &icon,
         0,
@@ -97,7 +121,11 @@ pub(super) fn status_panel<W: WxWidget>(
     text_col.add_stretch_spacer(1);
 
     row.add_sizer(&text_col, 1, SizerFlag::Expand, 0);
-    row.add_spacer(18);
+    if center_content {
+        row.add_stretch_spacer(1);
+    } else {
+        row.add_spacer(18);
+    }
     panel.set_sizer(row, true);
     StatusPanel {
         panel,
@@ -219,13 +247,13 @@ pub(super) fn im_channel_row(
 }
 
 pub(super) fn topology_connector<W: WxWidget>(parent: &W) -> StaticBitmap {
-    let bitmap = topology_connector_bitmap(72, 124);
+    let bitmap = topology_connector_bitmap(72, 190);
     let connector = StaticBitmap::builder(parent)
         .with_bitmap(Some(bitmap))
         .with_scale_mode(Some(ScaleMode::None))
-        .with_size(Size::new(72, 124))
+        .with_size(Size::new(72, 190))
         .build();
-    connector.set_min_size(Size::new(72, 124));
+    connector.set_min_size(Size::new(72, 190));
     connector
 }
 
@@ -292,6 +320,13 @@ pub(super) fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
                 size,
             );
         }
+        StatusIconKind::CodexCli => {
+            return brand_bitmap(
+                "codex-cli-terminal.png",
+                include_bytes!("../../packaging/brand/codex-cli-terminal.png"),
+                size,
+            );
+        }
         StatusIconKind::Service => {}
     }
 
@@ -313,6 +348,13 @@ pub(super) fn disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> 
             return disabled_brand_bitmap(
                 "codex-vscode-logo.png",
                 include_bytes!("../../packaging/brand/codex-vscode-logo.png"),
+                size,
+            );
+        }
+        StatusIconKind::CodexCli => {
+            return disabled_brand_bitmap(
+                "codex-cli-terminal.png",
+                include_bytes!("../../packaging/brand/codex-cli-terminal.png"),
                 size,
             );
         }
@@ -612,11 +654,16 @@ impl StateTone {
 }
 
 pub(super) fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, tone: StateTone) {
-    if panel.state.get_label() == state && panel.detail.get_label() == detail {
+    let title_colour = Colour::rgb(91, 100, 114);
+    let tone_colour = tone.colour();
+    if panel.state.get_label() == state
+        && panel.detail.get_label() == detail
+        && panel.marker.get_foreground_color() == tone_colour
+        && panel.state.get_foreground_color() == tone_colour
+    {
         return;
     }
 
-    let title_colour = Colour::rgb(91, 100, 114);
     panel.panel.set_background_color(Colour::rgb(255, 255, 255));
     if panel.title.get_foreground_color() != title_colour {
         panel
@@ -624,14 +671,17 @@ pub(super) fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, t
             .set_bitmap(&status_icon_bitmap(panel.icon_kind, 34));
     }
     panel.title.set_foreground_color(title_colour);
-    panel.marker.set_foreground_color(tone.colour());
+    panel.marker.set_foreground_color(tone_colour);
     panel.state.set_label(state);
-    panel.state.set_foreground_color(tone.colour());
+    panel.state.set_foreground_color(tone_colour);
     panel.detail.set_label(detail);
     panel
         .detail
         .set_foreground_color(Colour::rgb(103, 111, 124));
     panel.detail.wrap(220);
+    panel.panel.layout();
+    panel.panel.refresh(true, None);
+    panel.panel.update();
 }
 
 pub(super) fn set_im_channel_row(row: &ImChannelRow, state: &str, detail: &str, tone: StateTone) {

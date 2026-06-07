@@ -130,6 +130,8 @@ Windows 也使用同样的 websocket 方式，把目录换成 Windows 路径：
 codex --remote ws://127.0.0.1:3849 -C D:\path\to\project
 ```
 
+remote 模式下建议始终显式传 `-C`。如果只在项目目录运行 `codex --remote ...`，Codex 的 thread 元数据可能会使用 app-server 的启动目录，IM 端历史会话列表也会按这个目录显示。
+
 端口 `3849` 被占用时可以换成其它本机端口，但两个命令里的地址必须一致。连接成功后可以检查：
 
 ```text

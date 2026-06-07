@@ -161,6 +161,13 @@ impl GuiText {
         }
     }
 
+    pub(super) fn codex_cli(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex CLI",
+            GuiLocale::EnUs => "Codex CLI",
+        }
+    }
+
     pub(super) fn local_service(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "本地服务",
@@ -537,13 +544,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn starting_backend(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "正在启动本地 backend。",
-            GuiLocale::EnUs => "Starting local backend.",
-        }
-    }
-
     pub(super) fn waiting_service(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "等待服务",
@@ -555,20 +555,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "服务启动后读取状态",
             GuiLocale::EnUs => "Status loads after service startup.",
-        }
-    }
-
-    pub(super) fn service_reads_config(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "服务启动后读取配置",
-            GuiLocale::EnUs => "Config loads after service startup.",
-        }
-    }
-
-    pub(super) fn service_vscode_connect(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "服务启动后可连接 VS Code 插件。",
-            GuiLocale::EnUs => "VS Code extension can connect after service startup.",
         }
     }
 
@@ -630,26 +616,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn codex_initializing(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "Codex App 已打开控制通道，正在完成 remote-control 初始化。",
-            GuiLocale::EnUs => {
-                "Codex App opened the control channel and is finishing remote-control initialization."
-            }
-        }
-    }
-
     pub(super) fn control_not_open(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "未打开控制",
             GuiLocale::EnUs => "Control Closed",
-        }
-    }
-
-    pub(super) fn control_not_open_detail(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "配置已注入，请在 Codex App 里打开“控制这台 Mac”。",
-            GuiLocale::EnUs => "Config is injected. Open remote control in Codex App.",
         }
     }
 
@@ -660,26 +630,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn fill_provider_then_enable(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "填写 Base URL 和 API Key 后点击启用。",
-            GuiLocale::EnUs => "Enter Base URL and API key, then click Enable.",
-        }
-    }
-
     pub(super) fn can_connect(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "可接入",
             GuiLocale::EnUs => "Ready",
-        }
-    }
-
-    pub(super) fn vscode_wrapper_detail(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "VS Code 插件可通过 chatgpt.cliExecutable 使用本地 wrapper。",
-            GuiLocale::EnUs => {
-                "VS Code extension can use the local wrapper through chatgpt.cliExecutable."
-            }
         }
     }
 
@@ -890,50 +844,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => format!("{name} 异常"),
             GuiLocale::EnUs => format!("{name} error"),
-        }
-    }
-
-    pub(super) fn remote_stale(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "remote-control 心跳失活，等待 Codex App 自动重连。",
-            GuiLocale::EnUs => {
-                "remote-control heartbeat is stale; waiting for Codex App to reconnect."
-            }
-        }
-    }
-
-    pub(super) fn recent_error(self, err: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("最近错误: {err}"),
-            GuiLocale::EnUs => format!("Recent error: {err}"),
-        }
-    }
-
-    pub(super) fn remote_heartbeat(self, status: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("remote-control 已连接，心跳 {status}。"),
-            GuiLocale::EnUs => format!("remote-control connected, heartbeat {status}."),
-        }
-    }
-
-    pub(super) fn remote_connected_detail(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "remote-control 已连接。",
-            GuiLocale::EnUs => "remote-control connected.",
-        }
-    }
-
-    pub(super) fn remote_active_source(self, source: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("当前执行端 {source}"),
-            GuiLocale::EnUs => format!("Active endpoint: {source}"),
-        }
-    }
-
-    pub(super) fn codex_remote_connected_detail(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "Codex App remote-control 已连接。",
-            GuiLocale::EnUs => "Codex App remote-control connected.",
         }
     }
 

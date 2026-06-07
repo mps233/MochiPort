@@ -92,9 +92,9 @@ use self::provider::{
 };
 use self::text::{GuiLocale, GuiText};
 use self::widgets::{
-    ImStatusPanel, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap, im_status_panel,
-    provider_combo_row, set_disabled_status_panel, set_im_channel_row, set_status_panel,
-    status_panel, text_field_row, topology_connector, topology_splitter,
+    ImStatusPanel, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap, centered_status_panel,
+    im_status_panel, provider_combo_row, set_disabled_status_panel, set_im_channel_row,
+    set_status_panel, status_panel, text_field_row, topology_connector, topology_splitter,
 };
 
 #[derive(Clone)]
@@ -172,6 +172,12 @@ fn build_ui() {
         StatusIconKind::VsCodeCodex,
         text,
     );
+    let cli_status = status_panel(
+        &status_box,
+        text.codex_cli(),
+        StatusIconKind::CodexCli,
+        text,
+    );
     if CODEX_APP_GUI_UNSUPPORTED {
         set_disabled_status_panel(
             &codex_status,
@@ -179,7 +185,7 @@ fn build_ui() {
             text.app_gui_unsupported(),
         );
     }
-    let service_status = status_panel(
+    let service_status = centered_status_panel(
         &status_box,
         text.local_service(),
         StatusIconKind::Service,
@@ -195,7 +201,13 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::Bottom,
         8,
     );
-    entry_column.add(&vscode_status.panel, 1, SizerFlag::Expand, 0);
+    entry_column.add(
+        &vscode_status.panel,
+        1,
+        SizerFlag::Expand | SizerFlag::Bottom,
+        8,
+    );
+    entry_column.add(&cli_status.panel, 1, SizerFlag::Expand, 0);
     status_row.add_sizer(&entry_column, 1, SizerFlag::Expand | SizerFlag::All, 8);
     status_row.add(
         &entry_connector,
@@ -701,6 +713,7 @@ fn build_ui() {
         im_status,
         codex_status,
         vscode_status,
+        cli_status,
         im_account_list,
         im_account_rows,
         im_account_model,
@@ -1353,6 +1366,7 @@ struct UiHandles {
     im_status: ImStatusPanel,
     codex_status: StatusPanel,
     vscode_status: StatusPanel,
+    cli_status: StatusPanel,
     im_account_list: DataViewCtrl,
     im_account_rows: ImAccountRows,
     im_account_model: ImAccountModel,
@@ -1514,7 +1528,7 @@ fn show_dashboard_starting(handles: &UiHandles) {
     set_status_panel(
         &handles.service_status,
         text.starting(),
-        text.starting_backend(),
+        "",
         StateTone::Warn,
     );
     set_im_channel_row(
@@ -1541,13 +1555,19 @@ fn show_dashboard_starting(handles: &UiHandles) {
         if CODEX_APP_GUI_UNSUPPORTED {
             text.app_gui_unsupported()
         } else {
-            text.service_reads_config()
+            ""
         },
     );
     set_status_panel(
         &handles.vscode_status,
         text.waiting_service(),
-        text.service_vscode_connect(),
+        "",
+        StateTone::Muted,
+    );
+    set_status_panel(
+        &handles.cli_status,
+        text.waiting_service(),
+        "",
         StateTone::Muted,
     );
     set_actions_enabled(handles, false);
@@ -1662,13 +1682,19 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             if CODEX_APP_GUI_UNSUPPORTED {
                 text.app_gui_unsupported()
             } else {
-                text.local_service_not_running()
+                ""
             },
         );
         set_status_panel(
             &handles.vscode_status,
             text.unavailable(),
-            text.local_service_not_running(),
+            "",
+            StateTone::Muted,
+        );
+        set_status_panel(
+            &handles.cli_status,
+            text.unavailable(),
+            "",
             StateTone::Muted,
         );
         set_actions_enabled(handles, false);
@@ -1703,6 +1729,8 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         || remote_active_ready(remote_status, "codex_app");
     let vscode_remote_ready = remote_connection_ready(remote_status, "vscode")
         || remote_active_ready(remote_status, "vscode");
+    let cli_remote_ready =
+        remote_connection_ready(remote_status, "cli") || remote_active_ready(remote_status, "cli");
     let remote_initializing = remote_connected && !remote_initialized;
     let codex_configured = snapshot
         .codex_app
@@ -1717,55 +1745,45 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             text.app_gui_unsupported(),
         );
     } else if codex_app_remote_ready {
-        let detail = snapshot
-            .remote
-            .as_ref()
-            .map(|remote| codex_remote_detail(text, remote))
-            .unwrap_or_else(|| text.codex_remote_connected_detail().to_string());
-        set_status_panel(
-            &handles.codex_status,
-            text.connected(),
-            &detail,
-            StateTone::Ok,
-        );
+        set_status_panel(&handles.codex_status, text.connected(), "", StateTone::Ok);
     } else if remote_initializing {
         set_status_panel(
             &handles.codex_status,
             text.initializing(),
-            text.codex_initializing(),
+            "",
             StateTone::Warn,
         );
     } else if codex_configured {
         set_status_panel(
             &handles.codex_status,
             text.control_not_open(),
-            text.control_not_open_detail(),
+            "",
             StateTone::Warn,
         );
     } else {
         set_status_panel(
             &handles.codex_status,
             text.not_injected(),
-            text.fill_provider_then_enable(),
+            "",
             StateTone::Warn,
         );
     }
 
     if vscode_remote_ready {
-        let detail = text.remote_connected_detail().to_string();
-        set_status_panel(
-            &handles.vscode_status,
-            text.connected(),
-            &detail,
-            StateTone::Ok,
-        );
+        set_status_panel(&handles.vscode_status, text.connected(), "", StateTone::Ok);
     } else {
         set_status_panel(
             &handles.vscode_status,
             text.can_connect(),
-            text.vscode_wrapper_detail(),
+            "",
             StateTone::Warn,
         );
+    }
+
+    if cli_remote_ready {
+        set_status_panel(&handles.cli_status, text.connected(), "", StateTone::Ok);
+    } else {
+        set_status_panel(&handles.cli_status, text.can_connect(), "", StateTone::Warn);
     }
 }
 
@@ -1800,38 +1818,6 @@ fn remote_active_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) 
         .filter(|remote| remote.connected && remote.initialized)
         .and_then(|remote| remote.active_source_kind.as_deref())
         == Some(source_kind)
-}
-
-fn codex_remote_detail(text: GuiText, remote: &RemoteControlStatus) -> String {
-    if remote.stale.unwrap_or(false) {
-        return text.remote_stale().to_string();
-    }
-    if let Some(err) = &remote.last_error {
-        return text.recent_error(err);
-    }
-    if remote.healthy.unwrap_or(false) {
-        if let Some(status) = remote.last_app_pong_status.as_deref() {
-            return append_remote_source(text, text.remote_heartbeat(status), remote);
-        }
-    }
-    append_remote_source(text, text.remote_connected_detail().to_string(), remote)
-}
-
-fn append_remote_source(text: GuiText, mut detail: String, remote: &RemoteControlStatus) -> String {
-    let Some(source_kind) = remote.active_source_kind.as_deref() else {
-        return detail;
-    };
-    let source = match source_kind {
-        "codex_app" => "Codex App",
-        "vscode" => "VS Code",
-        "cli" => "Codex CLI",
-        _ => "Unknown",
-    };
-    if detail.ends_with('。') || detail.ends_with('.') {
-        detail.pop();
-    }
-    detail.push_str(&format!(" · {}.", text.remote_active_source(source)));
-    detail
 }
 
 fn show_about_dialog(parent: &Frame) {
