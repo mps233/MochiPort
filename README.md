@@ -18,7 +18,8 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="520">
+  <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="360">
+  <img src="docs/assets/product/tg.jpg" alt="Telegram 移动端创建 Codex thread" width="360">
 </p>
 
 
