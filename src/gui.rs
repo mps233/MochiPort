@@ -648,6 +648,17 @@ fn build_ui() {
     add_im_actions.add(&change_bot_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&save_telegram_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&connect_wechat_button, 0, SizerFlag::Right, 0);
+    let wechat_context_warning = StaticText::builder(&add_im_static_box)
+        .with_label(text.wechat_context_token_warning())
+        .build();
+    wechat_context_warning.set_foreground_color(Colour::rgb(210, 36, 36));
+    wechat_context_warning.wrap(620);
+    add_im_actions.add(
+        &wechat_context_warning,
+        0,
+        SizerFlag::Left | SizerFlag::AlignCenterVertical,
+        24,
+    );
     add_im_box.add_sizer(
         &add_im_actions,
         0,
@@ -1780,10 +1791,27 @@ fn codex_remote_detail(text: GuiText, remote: &RemoteControlStatus) -> String {
     }
     if remote.healthy.unwrap_or(false) {
         if let Some(status) = remote.last_app_pong_status.as_deref() {
-            return text.remote_heartbeat(status);
+            return append_remote_source(text, text.remote_heartbeat(status), remote);
         }
     }
-    text.remote_connected_detail().to_string()
+    append_remote_source(text, text.remote_connected_detail().to_string(), remote)
+}
+
+fn append_remote_source(text: GuiText, mut detail: String, remote: &RemoteControlStatus) -> String {
+    let Some(source_kind) = remote.active_source_kind.as_deref() else {
+        return detail;
+    };
+    let source = match source_kind {
+        "codex_app" => "Codex App",
+        "vscode" => "VS Code",
+        "cli" => "Codex CLI",
+        _ => "Unknown",
+    };
+    if detail.ends_with('。') || detail.ends_with('.') {
+        detail.pop();
+    }
+    detail.push_str(&format!(" · {}.", text.remote_active_source(source)));
+    detail
 }
 
 fn show_about_dialog(parent: &Frame) {

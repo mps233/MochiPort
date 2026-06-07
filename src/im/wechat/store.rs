@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::app_state::SharedState;
+use crate::{app_state::SharedState, types::now_ms};
 
 pub(crate) async fn local_bot_tokens(state: &SharedState) -> Vec<String> {
     let config = state.config.lock().await;
@@ -64,23 +64,34 @@ pub(crate) async fn remember_context_token(
         context_token_key(account_id, peer_id),
         context_token.to_string(),
     );
+    persisted
+        .wechat
+        .context_token_captured_at_ms
+        .insert(context_token_key(account_id, peer_id), now_ms());
     let config = state.config.lock().await.clone();
     persisted.save(&config.state_path)
 }
 
-pub(crate) async fn context_token(
+pub(crate) async fn context_token_record(
     state: &SharedState,
     account_id: &str,
     peer_id: &str,
-) -> Option<String> {
-    state
-        .persisted
-        .lock()
-        .await
+) -> Option<WechatContextTokenRecord> {
+    let key = context_token_key(account_id, peer_id);
+    let persisted = state.persisted.lock().await;
+    persisted
         .wechat
         .context_tokens
-        .get(&context_token_key(account_id, peer_id))
+        .get(&key)
         .cloned()
+        .map(|token| WechatContextTokenRecord {
+            token,
+            captured_at_ms: persisted
+                .wechat
+                .context_token_captured_at_ms
+                .get(&key)
+                .copied(),
+        })
 }
 
 pub(crate) async fn forget_context_token(
@@ -93,8 +104,25 @@ pub(crate) async fn forget_context_token(
         .wechat
         .context_tokens
         .remove(&context_token_key(account_id, peer_id));
+    persisted
+        .wechat
+        .context_token_captured_at_ms
+        .remove(&context_token_key(account_id, peer_id));
     let config = state.config.lock().await.clone();
     persisted.save(&config.state_path)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WechatContextTokenRecord {
+    pub token: String,
+    pub captured_at_ms: Option<u128>,
+}
+
+impl WechatContextTokenRecord {
+    pub(crate) fn age_ms(&self) -> Option<u128> {
+        self.captured_at_ms
+            .map(|captured_at_ms| now_ms().saturating_sub(captured_at_ms))
+    }
 }
 
 fn context_token_key(account_id: &str, peer_id: &str) -> String {

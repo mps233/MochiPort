@@ -46,6 +46,9 @@ pub struct RemoteControlState {
 }
 
 pub struct RemoteControlInner {
+    pub connections: HashMap<String, RemoteControlServerConnection>,
+    pub active_connection_id: Option<String>,
+    pub next_connection_epoch: u64,
     pub connected: bool,
     pub initialized: bool,
     pub client_id: String,
@@ -77,6 +80,47 @@ pub struct RemoteControlInner {
     pub revoked_clients: HashSet<String>,
     pub stream_diagnostics: HashMap<String, RemoteControlStreamDiagnostics>,
     pub recent_events: VecDeque<RemoteControlRecentEvent>,
+}
+
+pub struct RemoteControlServerConnection {
+    pub connection_id: String,
+    pub connection_epoch: u64,
+    pub connected: bool,
+    pub initialized: bool,
+    pub source_kind: RemoteControlSourceKind,
+    pub user_agent: Option<String>,
+    pub server_id: Option<String>,
+    pub environment_id: Option<String>,
+    pub server_name: Option<String>,
+    pub installation_id: Option<String>,
+    pub account_id: Option<String>,
+    pub subscribe_cursor: Option<String>,
+    pub outbound_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::remote_control_backend::OutboundWsMessage>,
+    >,
+    pub connected_at_ms: Option<u128>,
+    pub last_ws_inbound_at_ms: Option<u128>,
+    pub last_ws_ping_at_ms: Option<u128>,
+    pub last_ws_pong_at_ms: Option<u128>,
+    pub last_error: Option<String>,
+    pub clients: HashMap<String, RemoteControlClientState>,
+    #[allow(dead_code)]
+    pub stream_diagnostics: HashMap<String, RemoteControlStreamDiagnostics>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteControlSourceKind {
+    CodexApp,
+    Vscode,
+    Cli,
+    Unknown,
+}
+
+impl Default for RemoteControlSourceKind {
+    fn default() -> Self {
+        Self::Unknown
+    }
 }
 
 pub struct PendingRemoteRequest {
@@ -153,6 +197,9 @@ impl RemoteControlState {
         let (notifications, _) = broadcast::channel(512);
         Self {
             inner: Mutex::new(RemoteControlInner {
+                connections: HashMap::new(),
+                active_connection_id: None,
+                next_connection_epoch: 0,
                 connected: false,
                 initialized: false,
                 client_id: "codex-remote-feishu".to_string(),

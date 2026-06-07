@@ -294,6 +294,7 @@ pub(super) struct ImAccountItem {
 pub(super) struct RemoteControlStatus {
     pub(super) connected: bool,
     pub(super) initialized: bool,
+    pub(super) active_source_kind: Option<String>,
     pub(super) last_error: Option<String>,
     pub(super) healthy: Option<bool>,
     pub(super) stale: Option<bool>,

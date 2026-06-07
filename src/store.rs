@@ -13,6 +13,7 @@ pub struct PersistedState {
 pub struct WechatPersistedState {
     pub sync_buf_by_account: HashMap<String, String>,
     pub context_tokens: HashMap<String, String>,
+    pub context_token_captured_at_ms: HashMap<String, u128>,
 }
 
 impl PersistedState {

@@ -65,6 +65,14 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     let trimmed = message.text.trim();
     let normalized = command(trimmed);
     let menu_command = menu_command(trimmed);
+    crate::chain_log::write_line(format!(
+        "[wechat_flow] event=inbound_begin account={} chat={} text_len={} command={} menu_command={}",
+        message.account_id,
+        message.chat_id,
+        trimmed.chars().count(),
+        normalized.as_deref().unwrap_or(""),
+        menu_command.as_deref().unwrap_or("")
+    ));
 
     if let Some(command) = menu_command.as_deref()
         && is_approval_reply(command)
@@ -79,6 +87,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     }
 
     if handle_thread_create_custom_cwd_text_input(&state, &adapter, &message, trimmed).await? {
+        crate::chain_log::write_line(format!(
+            "[wechat_flow] event=inbound_handled stage=create_custom_cwd chat={}",
+            message.chat_id
+        ));
         return Ok(());
     }
 
@@ -91,6 +103,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     )
     .await?
     {
+        crate::chain_log::write_line(format!(
+            "[wechat_flow] event=inbound_handled stage=create_option chat={}",
+            message.chat_id
+        ));
         return Ok(());
     }
 
@@ -103,18 +119,30 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     )
     .await?
     {
+        crate::chain_log::write_line(format!(
+            "[wechat_flow] event=inbound_handled stage=create_settings chat={}",
+            message.chat_id
+        ));
         return Ok(());
     }
 
     if let Some(command) = menu_command.as_deref()
         && handle_thread_route_choice_text_reply(&state, &adapter, &message, command).await?
     {
+        crate::chain_log::write_line(format!(
+            "[wechat_flow] event=inbound_handled stage=route_choice chat={} command={}",
+            message.chat_id, command
+        ));
         return Ok(());
     }
 
     if let Some(command) = menu_command.as_deref()
         && handle_thread_list_text_reply(&state, &adapter, &message, command).await?
     {
+        crate::chain_log::write_line(format!(
+            "[wechat_flow] event=inbound_handled stage=thread_list chat={} command={}",
+            message.chat_id, command
+        ));
         return Ok(());
     }
 
@@ -196,6 +224,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     }
 
     if active_turn_for_message(&state, &message).await.is_some() {
+        crate::chain_log::write_line(format!(
+            "[wechat_flow] event=inbound_busy chat={}",
+            message.chat_id
+        ));
         adapter
             .send_text(
                 &state,
@@ -209,6 +241,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
 
     let remote_status = remote_control_backend::status_snapshot(&state).await;
     if !remote_status.connected {
+        crate::chain_log::write_line(format!(
+            "[wechat_flow] event=inbound_remote_not_connected chat={}",
+            message.chat_id
+        ));
         adapter
             .send_text(
                 &state,
@@ -231,6 +267,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     .await
     {
         TurnStartOutcome::Started { thread_id, turn_id } => {
+            crate::chain_log::write_line(format!(
+                "[wechat_flow] event=turn_started chat={} thread={} turn={}",
+                message.chat_id, thread_id, turn_id
+            ));
             state
                 .push_event(
                     "info",
@@ -244,6 +284,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             Ok(())
         }
         TurnStartOutcome::Busy => {
+            crate::chain_log::write_line(format!(
+                "[wechat_flow] event=turn_busy chat={}",
+                message.chat_id
+            ));
             adapter
                 .send_text(
                     &state,
@@ -255,6 +299,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             Ok(())
         }
         TurnStartOutcome::Expired { thread_id } => {
+            crate::chain_log::write_line(format!(
+                "[wechat_flow] event=inbound_expired chat={} thread={}",
+                message.chat_id, thread_id
+            ));
             adapter
                 .send_text(
                     &state,
@@ -276,10 +324,18 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             Ok(())
         }
         TurnStartOutcome::NoThread => {
+            crate::chain_log::write_line(format!(
+                "[wechat_flow] event=no_thread_route chat={}",
+                message.chat_id
+            ));
             send_thread_routing_choice(&state, &adapter, &message).await?;
             Ok(())
         }
         TurnStartOutcome::Stale { thread_id } => {
+            crate::chain_log::write_line(format!(
+                "[wechat_flow] event=stale_thread_route chat={} thread={}",
+                message.chat_id, thread_id
+            ));
             state
                 .push_event(
                     "warn",
@@ -290,6 +346,10 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             send_thread_routing_choice(&state, &adapter, &message).await
         }
         TurnStartOutcome::Failed { error } => {
+            crate::chain_log::write_line(format!(
+                "[wechat_flow] event=turn_failed chat={} err={}",
+                message.chat_id, error
+            ));
             adapter
                 .send_text(
                     &state,

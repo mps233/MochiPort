@@ -427,12 +427,28 @@ async fn defer_wechat_outbound_if_waiting(
         queue_wechat_pending_outbound(state, message, "waiting_for_fresh_context_token").await;
         return true;
     }
-    if wechat_store::context_token(state, &message.route.account_id, &message.route.chat_id)
-        .await
-        .is_none()
-    {
+    let context_token = wechat_store::context_token_record(
+        state,
+        &message.route.account_id,
+        &message.route.chat_id,
+    )
+    .await;
+    if context_token.is_none() {
         queue_wechat_pending_outbound(state, message, "missing_context_token").await;
         return true;
+    }
+    if let Some(age_ms) = context_token.as_ref().and_then(|record| record.age_ms()) {
+        log_outbound_result(
+            "wechat_context_token_available",
+            message,
+            &format!("token_age_ms={age_ms}"),
+        );
+    } else {
+        log_outbound_result(
+            "wechat_context_token_available",
+            message,
+            "token_age_ms=unknown",
+        );
     }
     false
 }

@@ -20,6 +20,7 @@ const WECHAT_SESSION_EXPIRED_ERRCODE: i64 = -14;
 const WECHAT_RETRY_DELAY_MS: u64 = 2_000;
 const WECHAT_BACKOFF_DELAY_MS: u64 = 30_000;
 const WECHAT_MAX_CONSECUTIVE_FAILURES: usize = 3;
+const WECHAT_CONTEXT_REFRESH_MARKERS: &[&str] = &[".", "!", "?", "。", "！", "？"];
 
 pub async fn listen_polling(
     state: SharedState,
@@ -173,6 +174,7 @@ async fn inbound_from_message(
             .await;
         return Ok(None);
     }
+    let text = message_text(&message);
     if let Some(context_token) = message.context_token.as_deref() {
         store::remember_context_token(state, account_id, &peer_id, context_token).await?;
         let replayed = crate::im::core::outbound::replay_wechat_pending_for_peer(
@@ -191,11 +193,22 @@ async fn inbound_from_message(
                     format!("account={account_id} peer={peer_id} replayed={replayed}"),
                 )
                 .await;
-            return Ok(None);
+            if text.trim().is_empty() || is_context_refresh_marker(&text) {
+                return Ok(None);
+            }
         }
     }
-    let text = message_text(&message);
     if text.trim().is_empty() {
+        return Ok(None);
+    }
+    if is_context_refresh_marker(&text) {
+        state
+            .push_event(
+                "info",
+                "wechat_context_refresh_marker_ignored",
+                format!("account={account_id} peer={peer_id} marker={}", text.trim()),
+            )
+            .await;
         return Ok(None);
     }
     update_last_inbound(state, account_id).await;
@@ -220,6 +233,13 @@ async fn inbound_from_message(
         card_message_id: None,
         attachments: vec![],
     }))
+}
+
+fn is_context_refresh_marker(text: &str) -> bool {
+    let marker = text.trim();
+    WECHAT_CONTEXT_REFRESH_MARKERS
+        .iter()
+        .any(|candidate| marker == *candidate)
 }
 
 fn message_text(message: &WechatMessage) -> String {

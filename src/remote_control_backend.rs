@@ -26,7 +26,8 @@ use tracing::{info, warn};
 use crate::{
     app_state::{
         AuthorizedRemoteControlClient, PendingRemoteRequest, RemoteControlClientState,
-        RemoteControlInner, RemoteControlRecentEvent, RemoteControlStreamDiagnostics, SharedState,
+        RemoteControlInner, RemoteControlRecentEvent, RemoteControlServerConnection,
+        RemoteControlSourceKind, RemoteControlStreamDiagnostics, SharedState,
     },
     chain_log,
     codex::CodexNotification,
@@ -70,6 +71,10 @@ pub(crate) enum OutboundWsMessage {
 pub struct RemoteControlStatusResponse {
     pub connected: bool,
     pub initialized: bool,
+    pub active_connection_id: Option<String>,
+    pub active_source_kind: Option<RemoteControlSourceKind>,
+    pub active_user_agent: Option<String>,
+    pub connections: Vec<RemoteControlConnectionStatusResponse>,
     pub client_id: String,
     pub stream_id: Option<String>,
     pub server_id: Option<String>,
@@ -90,6 +95,27 @@ pub struct RemoteControlStatusResponse {
     pub last_app_pong_at_ms: Option<u128>,
     pub last_app_pong_status: Option<String>,
     pub last_initialize_sent_at_ms: Option<u128>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteControlConnectionStatusResponse {
+    pub id: String,
+    pub connection_epoch: u64,
+    pub connected: bool,
+    pub initialized: bool,
+    pub healthy: bool,
+    pub source_kind: RemoteControlSourceKind,
+    pub user_agent: Option<String>,
+    pub server_id: Option<String>,
+    pub server_name: Option<String>,
+    pub installation_id: Option<String>,
+    pub account_id: Option<String>,
+    pub connected_at_ms: Option<u128>,
+    pub last_ws_inbound_at_ms: Option<u128>,
+    pub last_ws_ping_at_ms: Option<u128>,
+    pub last_ws_pong_at_ms: Option<u128>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -377,8 +403,39 @@ pub async fn status(State(state): State<SharedState>) -> Json<RemoteControlStatu
 }
 
 pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse {
-    let remote = state.remote_control.inner.lock().await;
+    let mut remote = state.remote_control.inner.lock().await;
+    sync_legacy_from_active_connection_locked(&mut remote);
     let stale = remote_control_stale_reason_locked(&remote, now_ms()).is_some();
+    let active_connection = remote
+        .active_connection_id
+        .as_ref()
+        .and_then(|connection_id| remote.connections.get(connection_id));
+    let active_source_kind = active_connection.map(|connection| connection.source_kind);
+    let active_user_agent = active_connection.and_then(|connection| connection.user_agent.clone());
+    let connections = remote
+        .connections
+        .values()
+        .map(|connection| RemoteControlConnectionStatusResponse {
+            id: connection.connection_id.clone(),
+            connection_epoch: connection.connection_epoch,
+            connected: connection.connected,
+            initialized: connection.initialized,
+            healthy: connection.connected
+                && connection.initialized
+                && connection.outbound_tx.is_some(),
+            source_kind: connection.source_kind,
+            user_agent: connection.user_agent.clone(),
+            server_id: connection.server_id.clone(),
+            server_name: connection.server_name.clone(),
+            installation_id: connection.installation_id.clone(),
+            account_id: connection.account_id.clone(),
+            connected_at_ms: connection.connected_at_ms,
+            last_ws_inbound_at_ms: connection.last_ws_inbound_at_ms,
+            last_ws_ping_at_ms: connection.last_ws_ping_at_ms,
+            last_ws_pong_at_ms: connection.last_ws_pong_at_ms,
+            last_error: connection.last_error.clone(),
+        })
+        .collect::<Vec<_>>();
     let default_client = remote.clients.get(DEFAULT_REMOTE_CLIENT_KEY);
     let initialized = default_client
         .map(|client| client.initialized)
@@ -411,6 +468,10 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
     RemoteControlStatusResponse {
         connected: remote.connected,
         initialized,
+        active_connection_id: remote.active_connection_id.clone(),
+        active_source_kind,
+        active_user_agent,
+        connections,
         client_id,
         stream_id: (!stream_id.is_empty()).then_some(stream_id),
         server_id: remote.server_id.clone(),
@@ -554,6 +615,132 @@ fn sync_default_client_legacy_locked(remote: &mut RemoteControlInner) {
     remote.last_initialize_sent_at_ms = last_initialize_sent_at_ms;
 }
 
+fn source_kind_from_user_agent(user_agent: &str) -> RemoteControlSourceKind {
+    let user_agent = user_agent.trim();
+    if user_agent.starts_with("Codex Desktop/") {
+        RemoteControlSourceKind::CodexApp
+    } else if user_agent.starts_with("codex_vscode/") {
+        RemoteControlSourceKind::Vscode
+    } else if user_agent.starts_with("codex-remote/")
+        || user_agent.contains("WindowsTerminal")
+        || user_agent.contains("Terminal")
+    {
+        RemoteControlSourceKind::Cli
+    } else {
+        RemoteControlSourceKind::Unknown
+    }
+}
+
+fn source_kind_priority(kind: RemoteControlSourceKind) -> u8 {
+    match kind {
+        RemoteControlSourceKind::CodexApp => 40,
+        RemoteControlSourceKind::Vscode => 30,
+        RemoteControlSourceKind::Cli => 20,
+        RemoteControlSourceKind::Unknown => 10,
+    }
+}
+
+fn select_active_connection_id_locked(remote: &RemoteControlInner) -> Option<String> {
+    remote
+        .connections
+        .values()
+        .filter(|connection| {
+            connection.connected && connection.outbound_tx.is_some() && connection.initialized
+        })
+        .max_by_key(|connection| {
+            (
+                source_kind_priority(connection.source_kind),
+                connection
+                    .last_ws_inbound_at_ms
+                    .or(connection.connected_at_ms)
+                    .unwrap_or_default(),
+                connection.connection_epoch,
+            )
+        })
+        .map(|connection| connection.connection_id.clone())
+}
+
+fn sync_legacy_from_active_connection_locked(remote: &mut RemoteControlInner) {
+    remote.active_connection_id = select_active_connection_id_locked(remote);
+    let Some(active_connection_id) = remote.active_connection_id.clone() else {
+        remote.connected = remote
+            .connections
+            .values()
+            .any(|connection| connection.connected && connection.outbound_tx.is_some());
+        remote.initialized = false;
+        remote.outbound_tx = None;
+        return;
+    };
+
+    let Some(connection) = remote.connections.get(&active_connection_id) else {
+        return;
+    };
+    remote.connected = connection.connected;
+    remote.initialized = connection
+        .clients
+        .get(DEFAULT_REMOTE_CLIENT_KEY)
+        .is_some_and(|client| client.initialized);
+    remote.server_id = connection.server_id.clone();
+    remote.environment_id = connection.environment_id.clone();
+    remote.server_name = connection.server_name.clone();
+    remote.installation_id = connection.installation_id.clone();
+    remote.account_id = connection.account_id.clone();
+    remote.subscribe_cursor = connection.subscribe_cursor.clone();
+    remote.outbound_tx = connection.outbound_tx.clone();
+    remote.connection_epoch = connection.connection_epoch;
+    remote.connected_at_ms = connection.connected_at_ms;
+    remote.last_ws_inbound_at_ms = connection.last_ws_inbound_at_ms;
+    remote.last_ws_ping_at_ms = connection.last_ws_ping_at_ms;
+    remote.last_ws_pong_at_ms = connection.last_ws_pong_at_ms;
+    remote.last_error = connection.last_error.clone();
+    if let Some(default_client) = remote.clients.get_mut(DEFAULT_REMOTE_CLIENT_KEY) {
+        default_client.initialized = connection.initialized;
+    }
+    remote.initialized = connection.initialized;
+}
+
+fn active_connection_epoch_locked(remote: &mut RemoteControlInner) -> Option<u64> {
+    sync_legacy_from_active_connection_locked(remote);
+    remote
+        .active_connection_id
+        .as_ref()
+        .and_then(|connection_id| remote.connections.get(connection_id))
+        .map(|connection| connection.connection_epoch)
+}
+
+fn outbound_tx_for_connection_epoch_locked(
+    remote: &RemoteControlInner,
+    connection_epoch: u64,
+) -> Option<tokio::sync::mpsc::UnboundedSender<OutboundWsMessage>> {
+    if remote.connections.is_empty()
+        && remote.connection_epoch == connection_epoch
+        && remote.connected
+        && remote.outbound_tx.is_some()
+    {
+        return remote.outbound_tx.clone();
+    }
+    remote
+        .connections
+        .values()
+        .find(|connection| {
+            connection.connection_epoch == connection_epoch
+                && connection.connected
+                && connection.outbound_tx.is_some()
+        })
+        .and_then(|connection| connection.outbound_tx.clone())
+}
+
+fn connection_exists_locked(remote: &RemoteControlInner, connection_epoch: u64) -> bool {
+    if remote.connections.is_empty() {
+        return remote.connection_epoch == connection_epoch && remote.connected;
+    }
+    remote
+        .connections
+        .values()
+        .any(|connection| connection.connection_epoch == connection_epoch && connection.connected)
+}
+
+#[allow(dead_code)]
 fn reset_remote_clients_for_connection_locked(remote: &mut RemoteControlInner) -> Vec<String> {
     let ack_cursor_keys = remote
         .clients
@@ -610,7 +797,7 @@ async fn record_remote_recent_event(
     summary: impl Into<String>,
 ) {
     let mut remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch != connection_epoch {
+    if !connection_exists_locked(&remote, connection_epoch) {
         return;
     }
     push_remote_recent_event_locked(
@@ -811,6 +998,7 @@ async fn delete_remote_control_environment(AxumPath(_env_id): AxumPath<String>) 
 }
 
 async fn remote_control_client_enroll_start(headers: HeaderMap) -> impl IntoResponse {
+    log_remote_control_entry_headers("client_enroll_start", &headers);
     Json(remote_control_client_start_response(
         &headers,
         None,
@@ -824,6 +1012,7 @@ async fn remote_control_client_refresh_start(
     headers: HeaderMap,
     payload: Option<Json<RemoteControlClientFinishRequest>>,
 ) -> impl IntoResponse {
+    log_remote_control_entry_headers("client_refresh_start", &headers);
     let client_id = payload.map(|Json(value)| value.client_id);
     let device_identity_hash = if let Some(client_id) = client_id.as_deref() {
         state
@@ -855,6 +1044,12 @@ async fn remote_control_client_enroll_finish(
     headers: HeaderMap,
     Json(request): Json<RemoteControlClientFinishRequest>,
 ) -> impl IntoResponse {
+    log_remote_control_entry_headers("client_enroll_finish", &headers);
+    chain_log::write_line(format!(
+        "[remote_control] event=client_enroll_finish_identity client_id={} device_identity={}",
+        request.client_id,
+        remote_control_finish_identity_summary(&request)
+    ));
     let token = remote_control_client_token_response(&headers, &request.client_id);
     remember_remote_control_client(&state, &headers, &request).await;
     Json(token)
@@ -865,6 +1060,12 @@ async fn remote_control_client_refresh_finish(
     headers: HeaderMap,
     Json(request): Json<RemoteControlClientFinishRequest>,
 ) -> impl IntoResponse {
+    log_remote_control_entry_headers("client_refresh_finish", &headers);
+    chain_log::write_line(format!(
+        "[remote_control] event=client_refresh_finish_identity client_id={} device_identity={}",
+        request.client_id,
+        remote_control_finish_identity_summary(&request)
+    ));
     let token = remote_control_client_token_response(&headers, &request.client_id);
     remember_remote_control_client(&state, &headers, &request).await;
     Json(token)
@@ -1344,6 +1545,15 @@ async fn enroll(
     headers: HeaderMap,
     Json(request): Json<EnrollRequest>,
 ) -> impl IntoResponse {
+    log_remote_control_entry_headers("server_enroll", &headers);
+    chain_log::write_line(format!(
+        "[remote_control] event=server_enroll_request name={} os={} arch={} app_server_version={} installation_id={}",
+        request.name.as_deref().unwrap_or_default(),
+        request.os.as_deref().unwrap_or_default(),
+        request.arch.as_deref().unwrap_or_default(),
+        request.app_server_version.as_deref().unwrap_or_default(),
+        request.installation_id.as_deref().unwrap_or_default()
+    ));
     let installation_id = request
         .installation_id
         .clone()
@@ -1393,6 +1603,12 @@ async fn refresh(
     headers: HeaderMap,
     Json(request): Json<RefreshRequest>,
 ) -> impl IntoResponse {
+    log_remote_control_entry_headers("server_refresh", &headers);
+    chain_log::write_line(format!(
+        "[remote_control] event=server_refresh_request server_id={} installation_id={}",
+        request.server_id.as_deref().unwrap_or_default(),
+        request.installation_id.as_deref().unwrap_or_default()
+    ));
     let installation_id = request
         .installation_id
         .clone()
@@ -1451,16 +1667,33 @@ async fn ensure_remote_control_client_initialized(
     let client_key = normalize_remote_client_key(client_key);
     let should_initialize = {
         let mut remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch || !remote.connected {
+        if !connection_exists_locked(&remote, connection_epoch) {
             false
         } else {
+            let has_connection_map = !remote.connections.is_empty();
+            let connection_initialized = remote
+                .connections
+                .is_empty()
+                .then_some(false)
+                .unwrap_or_else(|| {
+                    remote
+                        .connections
+                        .values()
+                        .find(|connection| connection.connection_epoch == connection_epoch)
+                        .is_some_and(|connection| connection.initialized)
+                });
             let client = ensure_client_state_locked(&mut remote, &client_key);
-            if client.initialized
-                || client
-                    .pending
-                    .values()
-                    .any(|pending| pending.method == "initialize")
-            {
+            let client_initializing = client
+                .pending
+                .values()
+                .any(|pending| pending.method == "initialize");
+            let should_skip_initialize = client_initializing
+                || if !has_connection_map {
+                    client.initialized
+                } else {
+                    client.initialized && connection_initialized
+                };
+            if should_skip_initialize {
                 false
             } else {
                 client.last_app_pong_status = None;
@@ -1472,7 +1705,7 @@ async fn ensure_remote_control_client_initialized(
         }
     };
     if should_initialize {
-        send_initialize_for_client(state, &client_key).await?;
+        send_initialize_for_client_on_connection(state, connection_epoch, &client_key).await?;
     }
     Ok(())
 }
@@ -1517,7 +1750,7 @@ async fn replay_pending_requests(
         let Some(client) = remote.clients.get(&client_key) else {
             return Ok(());
         };
-        if remote.connection_epoch != connection_epoch || !remote.connected || !client.initialized {
+        if !connection_exists_locked(&remote, connection_epoch) || !client.initialized {
             return Ok(());
         }
         client
@@ -1540,7 +1773,7 @@ async fn replay_pending_requests(
             method,
             envelopes.len()
         ));
-        send_envelopes(state, envelopes).await?;
+        send_envelopes_on_connection(state, connection_epoch, envelopes).await?;
     }
     Ok(())
 }
@@ -1553,7 +1786,7 @@ async fn reset_remote_control_client_for_key(
     let client_key = normalize_remote_client_key(client_key);
     let (pending, client_id, stream_id, pending_summary) = {
         let mut remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch {
+        if !connection_exists_locked(&remote, connection_epoch) {
             return Ok(());
         }
         let client = ensure_client_state_locked(&mut remote, &client_key);
@@ -1581,7 +1814,7 @@ async fn reset_remote_control_client_for_key(
             .response_tx
             .send(Err(anyhow!(REMOTE_CONTROL_CLIENT_REINITIALIZED_ERROR)));
     }
-    send_initialize_for_client(state, &client_key)
+    send_initialize_for_client_on_connection(state, connection_epoch, &client_key)
         .await
         .map(|_| ())
 }
@@ -1596,7 +1829,7 @@ async fn start_remote_control_client_recovery(
     let client_key = normalize_remote_client_key(client_key);
     let (attempt, should_spawn) = {
         let mut remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch || !remote.connected {
+        if !connection_exists_locked(&remote, connection_epoch) {
             return Ok(());
         }
         let client = ensure_client_state_locked(&mut remote, &client_key);
@@ -1741,7 +1974,7 @@ async fn finish_remote_control_client_recovery(
     client_key: &str,
 ) -> Result<(String, String, u64)> {
     let mut remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch != connection_epoch {
+    if !connection_exists_locked(&remote, connection_epoch) {
         return Err(anyhow!("remote-control recovery epoch changed"));
     }
     let client = remote
@@ -1768,7 +2001,7 @@ async fn resubscribe_current_thread_after_recovery(
     let client_key = normalize_remote_client_key(client_key);
     let Some((thread_id, turn_id, client_id, stream_id)) = ({
         let remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch || !remote.connected {
+        if !connection_exists_locked(&remote, connection_epoch) {
             None
         } else {
             remote.clients.get(&client_key).and_then(|client| {
@@ -1818,8 +2051,9 @@ async fn resubscribe_current_thread_after_recovery(
         )
         .await;
 
-    let response = request_with_timeout_for_client(
+    let response = request_once_with_timeout_for_client_on_connection(
         state,
+        connection_epoch,
         &client_key,
         "thread/resume",
         json!({
@@ -1871,16 +2105,14 @@ async fn force_remote_control_ws_reconnect(
 ) -> Result<()> {
     let outbound_tx = {
         let mut remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch || !remote.connected {
+        if !connection_exists_locked(&remote, connection_epoch) {
             return Ok(());
         }
         remote.last_error = Some(format!(
             "remote-control recovery forcing websocket reconnect: client_key={} reason={}",
             client_key, reason
         ));
-        remote
-            .outbound_tx
-            .clone()
+        outbound_tx_for_connection_epoch_locked(&remote, connection_epoch)
             .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
     };
     chain_log::write_line(format!(
@@ -1991,9 +2223,8 @@ async fn websocket(
                 let message = err.to_string();
                 {
                     let mut remote = state.remote_control.inner.lock().await;
-                    remote.connected = false;
-                    remote.outbound_tx = None;
                     remote.last_error = Some(message.clone());
+                    sync_legacy_from_active_connection_locked(&mut remote);
                 }
                 state
                     .push_event("error", "remote_control_ws_failed", message)
@@ -2003,6 +2234,7 @@ async fn websocket(
 }
 
 async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket) -> Result<()> {
+    log_remote_control_entry_headers("server_ws_open", &headers);
     let server_id = header_str(&headers, "x-codex-server-id");
     let server_name = header_str(&headers, "x-codex-name")
         .and_then(|value| base64::engine::general_purpose::STANDARD.decode(value).ok())
@@ -2010,26 +2242,36 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     let installation_id = header_str(&headers, "x-codex-installation-id");
     let account_id = header_str(&headers, "chatgpt-account-id");
     let subscribe_cursor = header_str(&headers, "x-codex-subscribe-cursor");
+    let user_agent = header_str(&headers, "user-agent");
+    let origin = header_str(&headers, "origin");
+    let host = header_str(&headers, "host");
     let (outbound_tx, mut outbound_rx) =
         tokio::sync::mpsc::unbounded_channel::<OutboundWsMessage>();
-    let (connection_epoch, client_id, stream_id) = {
+    let (connection_id, connection_epoch, client_id, stream_id) = {
         let mut remote = state.remote_control.inner.lock().await;
         let connected_at_ms = now_ms();
         remote.connected = true;
         remote.initialized = false;
-        remote.connection_epoch = remote.connection_epoch.saturating_add(1);
+        remote.next_connection_epoch = remote.next_connection_epoch.saturating_add(1);
+        remote.connection_epoch = remote.next_connection_epoch;
+        let connection_epoch = remote.connection_epoch;
+        let connection_id = stable_id(
+            "conn",
+            &format!(
+                "{}:{}:{}:{}",
+                server_id.as_deref().unwrap_or_default(),
+                installation_id.as_deref().unwrap_or_default(),
+                subscribe_cursor.as_deref().unwrap_or_default(),
+                connection_epoch
+            ),
+        );
         if remote.stream_id.is_empty() {
             remote.stream_id = uuid_like();
         }
-        let ack_cursor_keys = reset_remote_clients_for_connection_locked(&mut remote);
-        for key in ack_cursor_keys {
-            remote.server_ack_cursors.remove(&key);
-        }
-        remote.stream_diagnostics.clear();
         let default_client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
         let client_id = default_client.client_id.clone();
         let stream_id = default_client.stream_id.clone();
-        remote.outbound_tx = Some(outbound_tx);
+        remote.outbound_tx = Some(outbound_tx.clone());
         remote.server_id = server_id.clone().or(remote.server_id.clone());
         remote.server_name = server_name.clone().or(remote.server_name.clone());
         remote.installation_id = installation_id.clone().or(remote.installation_id.clone());
@@ -2044,8 +2286,34 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         remote.last_app_pong_at_ms = None;
         remote.last_app_pong_status = None;
         remote.last_initialize_sent_at_ms = None;
+        let environment_id = remote.environment_id.clone();
+        remote.connections.insert(
+            connection_id.clone(),
+            RemoteControlServerConnection {
+                connection_id: connection_id.clone(),
+                connection_epoch,
+                connected: true,
+                initialized: false,
+                source_kind: RemoteControlSourceKind::Unknown,
+                user_agent: None,
+                server_id: server_id.clone(),
+                environment_id,
+                server_name: server_name.clone(),
+                installation_id: installation_id.clone(),
+                account_id: account_id.clone(),
+                subscribe_cursor: subscribe_cursor.clone(),
+                outbound_tx: Some(outbound_tx),
+                connected_at_ms: Some(connected_at_ms),
+                last_ws_inbound_at_ms: Some(connected_at_ms),
+                last_ws_ping_at_ms: None,
+                last_ws_pong_at_ms: None,
+                last_error: None,
+                clients: HashMap::new(),
+                stream_diagnostics: HashMap::new(),
+            },
+        );
         sync_default_client_legacy_locked(&mut remote);
-        (remote.connection_epoch, client_id, stream_id)
+        (connection_id, connection_epoch, client_id, stream_id)
     };
     state
         .push_event(
@@ -2061,7 +2329,8 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         )
         .await;
     chain_log::write_line(format!(
-        "[remote_control] event=ws_open connection_epoch={} client_id={} stream_id={} server_id={} server_name={} installation_id={} account_id={} subscribe_cursor={}",
+        "[remote_control] event=ws_open connection_id={} connection_epoch={} client_id={} stream_id={} server_id={} server_name={} installation_id={} account_id={} subscribe_cursor={} user_agent={} origin={} host={}",
+        connection_id,
         connection_epoch,
         client_id,
         stream_id,
@@ -2069,7 +2338,10 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         server_name.as_deref().unwrap_or_default(),
         installation_id.as_deref().unwrap_or_default(),
         account_id.as_deref().unwrap_or_default(),
-        subscribe_cursor.as_deref().unwrap_or_default()
+        subscribe_cursor.as_deref().unwrap_or_default(),
+        user_agent.as_deref().unwrap_or_default(),
+        origin.as_deref().unwrap_or_default(),
+        host.as_deref().unwrap_or_default()
     ));
     info!(
         target: "codex_remote::remote_control",
@@ -2149,7 +2421,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
             tokio::select! {
                     _ = ws_ping_interval.tick() => {
                         mark_remote_ws_ping(&reader_state, connection_epoch).await;
-                        send_ws_control_ping(&reader_state).await?;
+                        send_ws_control_ping(&reader_state, connection_epoch).await?;
                     }
                     _ = app_ping_interval.tick() => {
                         let targets = remote_app_ping_targets(&reader_state, connection_epoch).await;
@@ -2163,7 +2435,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 seq_id: None,
                 cursor,
             });
-                            send_envelope(&reader_state, envelope).await?;
+                            send_envelope_on_connection(&reader_state, connection_epoch, envelope).await?;
                         }
                     }
                     _ = stale_check_interval.tick() => {
@@ -2185,7 +2457,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                             }
                             Message::Ping(data) => {
                                 mark_remote_ws_inbound(&reader_state, connection_epoch).await;
-                                send_ws_control_pong(&reader_state, data).await?;
+                                send_ws_control_pong(&reader_state, connection_epoch, data).await?;
                             }
                             Message::Pong(_) => {
                                 mark_remote_ws_pong(&reader_state, connection_epoch).await;
@@ -2222,11 +2494,14 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     server_work_task.abort();
     {
         let mut remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch == connection_epoch {
-            remote.connected = false;
-            remote.outbound_tx = None;
-            remote.last_error = connection_result.as_ref().err().map(|err| err.to_string());
+        let last_error = connection_result.as_ref().err().map(|err| err.to_string());
+        if let Some(connection) = remote.connections.get_mut(&connection_id) {
+            connection.connected = false;
+            connection.outbound_tx = None;
+            connection.last_error = last_error.clone();
         }
+        remote.last_error = last_error;
+        sync_legacy_from_active_connection_locked(&mut remote);
     }
     state
         .push_event(
@@ -2252,7 +2527,7 @@ async fn initialize_remote_clients_for_connection(
 ) -> Result<()> {
     let client_keys = {
         let remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch || !remote.connected {
+        if !connection_exists_locked(&remote, connection_epoch) {
             return Ok(());
         }
         let mut client_keys = remote.clients.keys().cloned().collect::<Vec<_>>();
@@ -2794,7 +3069,7 @@ async fn is_current_remote_stream(
     stream_id: &str,
 ) -> bool {
     let remote = state.remote_control.inner.lock().await;
-    remote.connection_epoch == connection_epoch
+    connection_exists_locked(&remote, connection_epoch)
         && remote_client_key_for_stream_locked(&remote, client_id, stream_id).is_some()
 }
 
@@ -2805,7 +3080,7 @@ async fn remote_stream_diagnostic_context(
     stream_id: &str,
 ) -> (Option<String>, String) {
     let remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch != connection_epoch {
+    if !connection_exists_locked(&remote, connection_epoch) {
         return (None, String::new());
     }
     let resolved_client_key = remote_client_key_for_stream_locked(&remote, client_id, stream_id);
@@ -2822,31 +3097,52 @@ async fn remote_stream_diagnostic_context(
 
 async fn mark_remote_ws_inbound(state: &SharedState, connection_epoch: u64) {
     let mut remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch == connection_epoch {
-        remote.last_ws_inbound_at_ms = Some(now_ms());
+    if let Some(connection) = remote
+        .connections
+        .values_mut()
+        .find(|connection| connection.connection_epoch == connection_epoch)
+    {
+        let now = now_ms();
+        connection.last_ws_inbound_at_ms = Some(now);
+        remote.last_ws_inbound_at_ms = Some(now);
+        sync_legacy_from_active_connection_locked(&mut remote);
     }
 }
 
 async fn mark_remote_ws_ping(state: &SharedState, connection_epoch: u64) {
     let mut remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch == connection_epoch {
-        remote.last_ws_ping_at_ms = Some(now_ms());
+    if let Some(connection) = remote
+        .connections
+        .values_mut()
+        .find(|connection| connection.connection_epoch == connection_epoch)
+    {
+        let now = now_ms();
+        connection.last_ws_ping_at_ms = Some(now);
+        remote.last_ws_ping_at_ms = Some(now);
+        sync_legacy_from_active_connection_locked(&mut remote);
     }
 }
 
 async fn mark_remote_ws_pong(state: &SharedState, connection_epoch: u64) {
     let mut remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch == connection_epoch {
+    if let Some(connection) = remote
+        .connections
+        .values_mut()
+        .find(|connection| connection.connection_epoch == connection_epoch)
+    {
         let now = now_ms();
+        connection.last_ws_inbound_at_ms = Some(now);
+        connection.last_ws_pong_at_ms = Some(now);
         remote.last_ws_inbound_at_ms = Some(now);
         remote.last_ws_pong_at_ms = Some(now);
+        sync_legacy_from_active_connection_locked(&mut remote);
     }
 }
 
 async fn mark_remote_app_ping(state: &SharedState, connection_epoch: u64, client_key: &str) {
     let client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch == connection_epoch {
+    if connection_exists_locked(&remote, connection_epoch) {
         let now = now_ms();
         let client = ensure_client_state_locked(&mut remote, &client_key);
         client.last_app_ping_at_ms = Some(now);
@@ -2861,9 +3157,8 @@ async fn remote_app_ping_targets(
     connection_epoch: u64,
 ) -> Vec<(String, String, String)> {
     let remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch != connection_epoch
-        || !remote.connected
-        || remote.outbound_tx.is_none()
+    if !connection_exists_locked(&remote, connection_epoch)
+        || outbound_tx_for_connection_epoch_locked(&remote, connection_epoch).is_none()
     {
         return Vec::new();
     }
@@ -2891,7 +3186,7 @@ async fn record_remote_app_pong(
     let normalized_status = status.trim().to_ascii_lowercase();
     Ok({
         let mut remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch {
+        if !connection_exists_locked(&remote, connection_epoch) {
             return Ok(false);
         }
         let Some(client_key) = remote_client_key_for_stream_locked(&remote, client_id, stream_id)
@@ -2988,7 +3283,7 @@ async fn observe_command_output_delta_received(
 
     let summary = {
         let mut remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch {
+        if !connection_exists_locked(&remote, connection_epoch) {
             return;
         }
         let key = server_ack_cursor_key(client_id, stream_id);
@@ -3031,7 +3326,7 @@ async fn observe_server_envelope_window(
     received_at_ms: u128,
 ) {
     let mut remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch != connection_epoch {
+    if !connection_exists_locked(&remote, connection_epoch) {
         return;
     }
     let key = server_ack_cursor_key(client_id, stream_id);
@@ -3130,7 +3425,7 @@ async fn record_server_ack_diagnostics(
     let elapsed_ms = ack_at_ms.saturating_sub(received_at_ms);
     let should_log = {
         let mut remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch {
+        if !connection_exists_locked(&remote, connection_epoch) {
             return;
         }
         let key = server_ack_cursor_key(client_id, stream_id);
@@ -3161,7 +3456,7 @@ async fn log_remote_control_unknown_context(
 ) {
     let (diagnostics, registered_streams, recent_events) = {
         let remote = state.remote_control.inner.lock().await;
-        if remote.connection_epoch != connection_epoch {
+        if !connection_exists_locked(&remote, connection_epoch) {
             return;
         }
         let key = server_ack_cursor_key(client_id, stream_id);
@@ -3266,7 +3561,7 @@ fn format_stream_diagnostics(diagnostics: &RemoteControlStreamDiagnostics) -> St
 
 async fn remote_control_stale_reason(state: &SharedState, connection_epoch: u64) -> Option<String> {
     let remote = state.remote_control.inner.lock().await;
-    if remote.connection_epoch != connection_epoch {
+    if !connection_exists_locked(&remote, connection_epoch) {
         return None;
     }
     remote_control_stale_reason_locked(&remote, now_ms())
@@ -3282,6 +3577,7 @@ async fn observe_app_server_message(
     if !is_active_connection_epoch(state, connection_epoch).await {
         return;
     }
+    let is_selected_connection = is_selected_active_connection_epoch(state, connection_epoch).await;
     let client_key = {
         let remote = state.remote_control.inner.lock().await;
         remote_client_key_for_stream_locked(&remote, client_id, stream_id)
@@ -3303,6 +3599,7 @@ async fn observe_app_server_message(
                     Ok(result) => {
                         if let Err(err) = send_response_for_stream(
                             state,
+                            connection_epoch,
                             client_id,
                             stream_id,
                             id.clone(),
@@ -3337,6 +3634,16 @@ async fn observe_app_server_message(
                             .await;
                     }
                 }
+                return;
+            }
+            if !is_selected_connection {
+                chain_log::write_line(format!(
+                    "[remote_control] event=non_active_connection_event_ignored connection_epoch={} client_key={} method={} request_id={}",
+                    connection_epoch,
+                    client_key.as_deref().unwrap_or(""),
+                    method,
+                    id
+                ));
                 return;
             }
             let params = message.get("params").cloned();
@@ -3385,8 +3692,38 @@ async fn observe_app_server_message(
         }
         if let Some(result) = message.get("result") {
             if client_method.as_deref() == Some("initialize") {
+                let user_agent = result
+                    .get("userAgent")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                chain_log::write_line(format!(
+                    "[remote_control] event=initialize_result client_key={} client_id={} stream_id={} request_id={} source_kind={:?} result_keys={} preview={}",
+                    client_key.as_deref().unwrap_or_default(),
+                    client_id,
+                    stream_id,
+                    id,
+                    user_agent
+                        .as_deref()
+                        .map(source_kind_from_user_agent)
+                        .unwrap_or(RemoteControlSourceKind::Unknown),
+                    json_object_keys(result),
+                    json_preview(&result.to_string())
+                ));
                 {
                     let mut remote = state.remote_control.inner.lock().await;
+                    if let Some(connection) = remote
+                        .connections
+                        .values_mut()
+                        .find(|connection| connection.connection_epoch == connection_epoch)
+                    {
+                        connection.initialized = true;
+                        connection.user_agent = user_agent.clone();
+                        connection.source_kind = user_agent
+                            .as_deref()
+                            .map(source_kind_from_user_agent)
+                            .unwrap_or(RemoteControlSourceKind::Unknown);
+                        connection.last_error = None;
+                    }
                     if let Some(client_key) = client_key.as_deref() {
                         if let Some(client) = remote.clients.get_mut(client_key) {
                             client.initialized = true;
@@ -3398,8 +3735,11 @@ async fn observe_app_server_message(
                         }
                     }
                     remote.last_error = None;
+                    sync_legacy_from_active_connection_locked(&mut remote);
                 }
-                if let Err(err) = send_initialized_for_stream(state, client_id, stream_id).await {
+                if let Err(err) =
+                    send_initialized_for_stream(state, connection_epoch, client_id, stream_id).await
+                {
                     state
                         .push_event(
                             "error",
@@ -3499,6 +3839,15 @@ async fn observe_app_server_message(
             return;
         }
         if method == "item/commandExecution/outputDelta" {
+            return;
+        }
+        if !is_selected_connection {
+            chain_log::write_line(format!(
+                "[remote_control] event=non_active_connection_event_ignored connection_epoch={} client_key={} method={}",
+                connection_epoch,
+                client_key.as_deref().unwrap_or(""),
+                method
+            ));
             return;
         }
         let params = message.get("params").cloned();
@@ -3847,6 +4196,7 @@ pub async fn send_response_for_client(
 
 async fn send_response_for_stream(
     state: &SharedState,
+    connection_epoch: u64,
     client_id: &str,
     stream_id: &str,
     request_id: Value,
@@ -3876,7 +4226,7 @@ async fn send_response_for_stream(
         json!({ "id": request_id, "result": result }),
         Some(&cursor),
     )?;
-    send_envelopes(state, envelopes).await
+    send_envelopes_on_connection(state, connection_epoch, envelopes).await
 }
 
 async fn local_chatgpt_auth_tokens_response(state: &SharedState) -> Result<Value> {
@@ -4004,7 +4354,21 @@ fn local_chatgpt_jwt(account_id: &str, plan_type: &str) -> String {
     )
 }
 
+#[allow(dead_code)]
 async fn send_initialize_for_client(state: &SharedState, client_key: &str) -> Result<u64> {
+    let connection_epoch = {
+        let mut remote = state.remote_control.inner.lock().await;
+        active_connection_epoch_locked(&mut remote)
+            .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
+    };
+    send_initialize_for_client_on_connection(state, connection_epoch, client_key).await
+}
+
+async fn send_initialize_for_client_on_connection(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_key: &str,
+) -> Result<u64> {
     let client_key = normalize_remote_client_key(client_key);
     let initialize_id = next_request_id();
     let request_key = initialize_id.to_string();
@@ -4040,9 +4404,6 @@ async fn send_initialize_for_client(state: &SharedState, client_key: &str) -> Re
             message.clone(),
             Some(&cursor),
         )?;
-        client
-            .pending
-            .retain(|_, pending| pending.method != "initialize");
         client.pending.insert(
             request_key.clone(),
             PendingRemoteRequest {
@@ -4062,7 +4423,7 @@ async fn send_initialize_for_client(state: &SharedState, client_key: &str) -> Re
         "[remote_control] event=initialize_send client_key={} client_id={} stream_id={} seq_id={} request_id={}",
         client_key, client_id, stream_id, seq_id, initialize_id
     ));
-    if let Err(err) = send_envelopes(state, envelopes).await {
+    if let Err(err) = send_envelopes_on_connection(state, connection_epoch, envelopes).await {
         let mut remote = state.remote_control.inner.lock().await;
         if let Some(client) = remote.clients.get_mut(&client_key) {
             client.pending.remove(&request_key);
@@ -4077,6 +4438,7 @@ async fn send_initialize_for_client(state: &SharedState, client_key: &str) -> Re
 
 async fn send_initialized_for_stream(
     state: &SharedState,
+    connection_epoch: u64,
     client_id: &str,
     stream_id: &str,
 ) -> Result<()> {
@@ -4106,7 +4468,7 @@ async fn send_initialized_for_stream(
         }),
         Some(&cursor),
     )?;
-    send_envelopes(state, envelopes).await
+    send_envelopes_on_connection(state, connection_epoch, envelopes).await
 }
 
 fn thread_id_from_payload(value: &Value) -> Option<String> {
@@ -4327,9 +4689,50 @@ async fn request_once_with_timeout_for_client(
     params: Value,
     timeout: Duration,
 ) -> Result<Value> {
+    request_once_with_timeout_for_client_inner(
+        state, None, true, client_key, method, params, timeout,
+    )
+    .await
+}
+
+async fn request_once_with_timeout_for_client_on_connection(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_key: &str,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
+    request_once_with_timeout_for_client_inner(
+        state,
+        Some(connection_epoch),
+        false,
+        client_key,
+        method,
+        params,
+        timeout,
+    )
+    .await
+}
+
+async fn request_once_with_timeout_for_client_inner(
+    state: &SharedState,
+    target_connection_epoch: Option<u64>,
+    wait_for_recovery: bool,
+    client_key: &str,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> Result<Value> {
     let client_key = normalize_remote_client_key(client_key);
-    wait_for_recovery_if_needed(state, &client_key).await?;
-    ensure_remote_control_client_ready(state, &client_key).await?;
+    if wait_for_recovery {
+        wait_for_recovery_if_needed(state, &client_key).await?;
+    }
+    if let Some(connection_epoch) = target_connection_epoch {
+        ensure_remote_control_client_initialized(state, connection_epoch, &client_key).await?;
+    } else {
+        ensure_remote_control_client_ready(state, &client_key).await?;
+    }
     let id = next_request_id();
     let request_key = id.to_string();
     let method_name = method.to_string();
@@ -4340,8 +4743,17 @@ async fn request_once_with_timeout_for_client(
     let message = build_pending_message(method, id, params);
     let (tx, rx) = tokio::sync::oneshot::channel();
     let cursor = next_remote_subscribe_cursor(state).await;
-    let (client_id, stream_id, seq_id, envelope) = {
+    let (connection_epoch, client_id, stream_id, seq_id, envelope) = {
         let mut remote = state.remote_control.inner.lock().await;
+        let connection_epoch = if let Some(connection_epoch) = target_connection_epoch {
+            if !connection_exists_locked(&remote, connection_epoch) {
+                return Err(anyhow!("remote-control websocket is not connected"));
+            }
+            connection_epoch
+        } else {
+            active_connection_epoch_locked(&mut remote)
+                .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
+        };
         if !remote.connected {
             return Err(anyhow!(
                 "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 codex-remote 的 /backend-api。"
@@ -4384,7 +4796,7 @@ async fn request_once_with_timeout_for_client(
         if client_key == DEFAULT_REMOTE_CLIENT_KEY {
             sync_default_client_legacy_locked(&mut remote);
         }
-        (client_id, stream_id, seq_id, envelopes)
+        (connection_epoch, client_id, stream_id, seq_id, envelopes)
     };
     chain_log::write_line(format!(
         "[remote_control] event=request_send client_key={} client_id={} stream_id={} seq_id={} request_id={} method={} thread={}",
@@ -4396,7 +4808,7 @@ async fn request_once_with_timeout_for_client(
         method_name,
         thread_id.as_deref().unwrap_or("")
     ));
-    if let Err(err) = send_envelopes(state, envelope).await {
+    if let Err(err) = send_envelopes_on_connection(state, connection_epoch, envelope).await {
         let mut remote = state.remote_control.inner.lock().await;
         if let Some(client) = remote.clients.get_mut(&client_key) {
             client.pending.remove(&request_key);
@@ -4765,9 +5177,7 @@ async fn ack_server_envelope(
 ) -> Result<()> {
     let outbound_tx = {
         let remote = state.remote_control.inner.lock().await;
-        remote
-            .outbound_tx
-            .clone()
+        outbound_tx_for_connection_epoch_locked(&remote, connection_epoch)
             .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
     };
     outbound_tx
@@ -4798,7 +5208,21 @@ async fn ack_server_envelope(
     Ok(())
 }
 
+#[allow(dead_code)]
 async fn send_envelope(state: &SharedState, envelope: Value) -> Result<()> {
+    let connection_epoch = {
+        let mut remote = state.remote_control.inner.lock().await;
+        active_connection_epoch_locked(&mut remote)
+            .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
+    };
+    send_envelope_on_connection(state, connection_epoch, envelope).await
+}
+
+async fn send_envelope_on_connection(
+    state: &SharedState,
+    connection_epoch: u64,
+    envelope: Value,
+) -> Result<()> {
     let client_id = envelope
         .get("client_id")
         .and_then(Value::as_str)
@@ -4820,15 +5244,10 @@ async fn send_envelope(state: &SharedState, envelope: Value) -> Result<()> {
         summary = %summary,
         "remote-control client envelope"
     );
-    let (connection_epoch, outbound_tx) = {
+    let outbound_tx = {
         let remote = state.remote_control.inner.lock().await;
-        (
-            remote.connection_epoch,
-            remote
-                .outbound_tx
-                .clone()
-                .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?,
-        )
+        outbound_tx_for_connection_epoch_locked(&remote, connection_epoch)
+            .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
     };
     record_remote_recent_event(
         state,
@@ -4848,11 +5267,22 @@ async fn send_envelope(state: &SharedState, envelope: Value) -> Result<()> {
 }
 
 async fn send_envelopes(state: &SharedState, envelopes: Vec<Value>) -> Result<()> {
+    let connection_epoch = {
+        let mut remote = state.remote_control.inner.lock().await;
+        active_connection_epoch_locked(&mut remote)
+            .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
+    };
+    send_envelopes_on_connection(state, connection_epoch, envelopes).await
+}
+
+async fn send_envelopes_on_connection(
+    state: &SharedState,
+    connection_epoch: u64,
+    envelopes: Vec<Value>,
+) -> Result<()> {
     let outbound_tx = {
         let remote = state.remote_control.inner.lock().await;
-        remote
-            .outbound_tx
-            .clone()
+        outbound_tx_for_connection_epoch_locked(&remote, connection_epoch)
             .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
     };
     let envelope_count = envelopes.len();
@@ -4879,7 +5309,6 @@ async fn send_envelopes(state: &SharedState, envelopes: Vec<Value>) -> Result<()
             summary = %summary,
             "remote-control client envelope"
         );
-        let connection_epoch = state.remote_control.inner.lock().await.connection_epoch;
         record_remote_recent_event(
             state,
             "client_out",
@@ -4898,7 +5327,7 @@ async fn send_envelopes(state: &SharedState, envelopes: Vec<Value>) -> Result<()
     Ok(())
 }
 
-async fn send_ws_control_ping(state: &SharedState) -> Result<()> {
+async fn send_ws_control_ping(state: &SharedState, connection_epoch: u64) -> Result<()> {
     chain_log::write_line("[remote_control] event=client_ping payload_len=0".to_string());
     info!(
         target: "codex_remote::remote_control",
@@ -4908,9 +5337,7 @@ async fn send_ws_control_ping(state: &SharedState) -> Result<()> {
     );
     let outbound_tx = {
         let remote = state.remote_control.inner.lock().await;
-        remote
-            .outbound_tx
-            .clone()
+        outbound_tx_for_connection_epoch_locked(&remote, connection_epoch)
             .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
     };
     outbound_tx
@@ -4919,7 +5346,11 @@ async fn send_ws_control_ping(state: &SharedState) -> Result<()> {
     Ok(())
 }
 
-async fn send_ws_control_pong(state: &SharedState, data: axum::body::Bytes) -> Result<()> {
+async fn send_ws_control_pong(
+    state: &SharedState,
+    connection_epoch: u64,
+    data: axum::body::Bytes,
+) -> Result<()> {
     chain_log::write_line(format!(
         "[remote_control] event=client_pong payload_len={}",
         data.len()
@@ -4932,9 +5363,7 @@ async fn send_ws_control_pong(state: &SharedState, data: axum::body::Bytes) -> R
     );
     let outbound_tx = {
         let remote = state.remote_control.inner.lock().await;
-        remote
-            .outbound_tx
-            .clone()
+        outbound_tx_for_connection_epoch_locked(&remote, connection_epoch)
             .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
     };
     outbound_tx
@@ -5377,7 +5806,22 @@ fn turn_input_items(text: &str, attachments: &[InboundAttachment]) -> Vec<Value>
 }
 
 async fn is_active_connection_epoch(state: &SharedState, connection_epoch: u64) -> bool {
-    state.remote_control.inner.lock().await.connection_epoch == connection_epoch
+    let remote = state.remote_control.inner.lock().await;
+    connection_exists_locked(&remote, connection_epoch)
+}
+
+async fn is_selected_active_connection_epoch(state: &SharedState, connection_epoch: u64) -> bool {
+    let remote = state.remote_control.inner.lock().await;
+    if remote.connections.is_empty() {
+        return remote.connection_epoch == connection_epoch && remote.connected;
+    }
+    let Some(active_connection_id) = select_active_connection_id_locked(&remote) else {
+        return false;
+    };
+    remote
+        .connections
+        .get(&active_connection_id)
+        .is_some_and(|connection| connection.connection_epoch == connection_epoch)
 }
 
 fn next_request_id() -> u64 {
@@ -5388,6 +5832,63 @@ fn request_id_key(id: &Value) -> String {
     id.as_str()
         .map(str::to_string)
         .unwrap_or_else(|| id.to_string())
+}
+
+fn log_remote_control_entry_headers(event: &str, headers: &HeaderMap) {
+    let header_names = headers
+        .keys()
+        .map(|name| name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let x_codex_name_raw = header_str(headers, "x-codex-name").unwrap_or_default();
+    let x_codex_name_decoded = if x_codex_name_raw.is_empty() {
+        String::new()
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(&x_codex_name_raw)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .unwrap_or_default()
+    };
+    chain_log::write_line(format!(
+        "[remote_control] event={} header_names={} user_agent={} origin={} referer={} host={} x_codex_protocol_version={} x_codex_server_id={} x_codex_name_raw={} x_codex_name_decoded={} x_codex_installation_id={} chatgpt_account_id={} x_codex_subscribe_cursor={}",
+        event,
+        header_names,
+        header_str(headers, "user-agent").unwrap_or_default(),
+        header_str(headers, "origin").unwrap_or_default(),
+        header_str(headers, "referer").unwrap_or_default(),
+        header_str(headers, "host").unwrap_or_default(),
+        header_str(headers, "x-codex-protocol-version").unwrap_or_default(),
+        header_str(headers, "x-codex-server-id").unwrap_or_default(),
+        x_codex_name_raw,
+        x_codex_name_decoded,
+        header_str(headers, "x-codex-installation-id").unwrap_or_default(),
+        header_str(headers, "chatgpt-account-id").unwrap_or_default(),
+        header_str(headers, "x-codex-subscribe-cursor").unwrap_or_default()
+    ));
+}
+
+fn remote_control_finish_identity_summary(request: &RemoteControlClientFinishRequest) -> String {
+    request
+        .device_identity
+        .as_ref()
+        .map(|identity| {
+            format!(
+                "algorithm={} key_id={} protection_class={} public_key_len={}",
+                identity.algorithm,
+                identity.key_id,
+                identity.protection_class,
+                identity.public_key_spki_der_base64.len()
+            )
+        })
+        .unwrap_or_else(|| "none".to_string())
+}
+
+fn json_object_keys(value: &Value) -> String {
+    value
+        .as_object()
+        .map(|object| object.keys().cloned().collect::<Vec<_>>().join(","))
+        .unwrap_or_default()
 }
 
 fn header_str(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -5449,6 +5950,9 @@ mod tests {
 
     fn remote_inner_for_test(stream_id: &str) -> RemoteControlInner {
         RemoteControlInner {
+            connections: HashMap::new(),
+            active_connection_id: None,
+            next_connection_epoch: 0,
             connected: false,
             initialized: false,
             client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
@@ -5728,6 +6232,9 @@ mod tests {
     #[test]
     fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests() {
         let mut remote = RemoteControlInner {
+            connections: HashMap::new(),
+            active_connection_id: None,
+            next_connection_epoch: 0,
             connected: false,
             initialized: false,
             client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),

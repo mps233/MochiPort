@@ -24,7 +24,7 @@ use super::types::{
 };
 
 const QR_LONG_POLL_TIMEOUT_MS: u64 = 35_000;
-const LONG_POLL_TIMEOUT_MS: u64 = 35_000;
+const LONG_POLL_TIMEOUT_MS: u64 = 5_000;
 const API_TIMEOUT_MS: u64 = 15_000;
 const CONFIG_TIMEOUT_MS: u64 = 10_000;
 const ILINK_APP_ID: &str = "bot";

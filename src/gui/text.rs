@@ -463,6 +463,17 @@ impl GuiText {
         }
     }
 
+    pub(super) fn wechat_context_token_warning(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "微信官方链路不成熟，长任务客户端可能主动断开；需要在手机端发送 ! 或者 ? 激活。长任务推荐使用飞书。"
+            }
+            GuiLocale::EnUs => {
+                "WeChat's official link is unstable for long tasks; send ! or ? from the phone to reactivate it. Feishu is recommended for long tasks."
+            }
+        }
+    }
+
     pub(super) fn new_provider_prompt(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "填写新 provider 名称、Base URL 和 API Key，然后点击启用。",
@@ -909,6 +920,13 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "remote-control 已连接。",
             GuiLocale::EnUs => "remote-control connected.",
+        }
+    }
+
+    pub(super) fn remote_active_source(self, source: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("当前执行端 {source}"),
+            GuiLocale::EnUs => format!("Active endpoint: {source}"),
         }
     }
 

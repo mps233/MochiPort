@@ -14,6 +14,7 @@ use super::{api::WechatApi, store};
 
 const WECHAT_TEXT_CHUNK_CHARS: usize = 3500;
 const WECHAT_CHUNK_DELAY_MS: u64 = 120;
+const WECHAT_CONTEXT_TOKEN_STALE_WARN_MS: u128 = 60_000;
 
 #[derive(Clone)]
 pub struct WechatAdapter {
@@ -32,13 +33,13 @@ impl WechatAdapter {
         target: &str,
         text: &str,
     ) -> Result<String> {
-        let context_token = store::context_token(state, account_id, target).await;
+        let context_token = store::context_token_record(state, account_id, target).await;
         let chunks = wechat_text_chunks(text);
         let mut last_message_id = String::new();
         log_adapter(
             "send_text_begin",
             format!(
-                "account={} target={} chars={} chunks={} context_token={}",
+                "account={} target={} chars={} chunks={} context_token={} token_age_ms={} token_stale={}",
                 account_id,
                 target,
                 text.chars().count(),
@@ -47,13 +48,19 @@ impl WechatAdapter {
                     "present"
                 } else {
                     "missing"
-                }
+                },
+                token_age_label(context_token.as_ref()),
+                token_stale_label(context_token.as_ref())
             ),
         );
         for (index, chunk) in chunks.iter().enumerate() {
             last_message_id = self
                 .api
-                .send_text(target, context_token.as_deref(), chunk)
+                .send_text(
+                    target,
+                    context_token.as_ref().map(|record| record.token.as_str()),
+                    chunk,
+                )
                 .await?;
             log_adapter(
                 "send_text_chunk_sent",
@@ -108,7 +115,7 @@ impl WechatAdapter {
         caption: Option<&str>,
         fallback_text: Option<&str>,
     ) -> Result<String> {
-        let context_token = store::context_token(state, account_id, target).await;
+        let context_token = store::context_token_record(state, account_id, target).await;
         if let Some(text) = caption
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -123,7 +130,7 @@ impl WechatAdapter {
         log_adapter(
             "send_image_begin",
             format!(
-                "account={} target={} path={} context_token={}",
+                "account={} target={} path={} context_token={} token_age_ms={} token_stale={}",
                 account_id,
                 target,
                 local_path.display(),
@@ -131,12 +138,18 @@ impl WechatAdapter {
                     "present"
                 } else {
                     "missing"
-                }
+                },
+                token_age_label(context_token.as_ref()),
+                token_stale_label(context_token.as_ref())
             ),
         );
         let message_id = self
             .api
-            .send_image_file(target, context_token.as_deref(), local_path)
+            .send_image_file(
+                target,
+                context_token.as_ref().map(|record| record.token.as_str()),
+                local_path,
+            )
             .await?;
         log_adapter(
             "send_image_sent",
@@ -231,6 +244,21 @@ fn log_adapter(event: &str, message: impl AsRef<str>) {
         event,
         message.as_ref()
     ));
+}
+
+fn token_age_label(record: Option<&store::WechatContextTokenRecord>) -> String {
+    record
+        .and_then(|record| record.age_ms())
+        .map(|age_ms| age_ms.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn token_stale_label(record: Option<&store::WechatContextTokenRecord>) -> &'static str {
+    match record.and_then(|record| record.age_ms()) {
+        Some(age_ms) if age_ms >= WECHAT_CONTEXT_TOKEN_STALE_WARN_MS => "true",
+        Some(_) => "false",
+        None => "unknown",
+    }
 }
 
 #[cfg(test)]
