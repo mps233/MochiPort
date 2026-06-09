@@ -507,8 +507,7 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             let route =
-                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
-                    .await;
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
             let Some(route) = route else {
                 state
                     .push_event(
@@ -519,6 +518,9 @@ pub(crate) async fn handle_codex_notification(
                     .await;
                 return;
             };
+            if route.platform != ImPlatformKind::Feishu {
+                return;
+            }
             let Some(api) = api_registry.feishu_for_route(&route) else {
                 log_missing_api(&state, &route, "agent_delta").await;
                 return;

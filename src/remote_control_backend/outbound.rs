@@ -135,6 +135,7 @@ pub(super) async fn send_initialize_for_client_on_connection(
             PendingRemoteRequest {
                 method: "initialize".to_string(),
                 thread_id: None,
+                track_thread_active: false,
                 response_tx: tx,
                 message: message.clone(),
                 envelopes: envelopes.clone(),

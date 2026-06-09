@@ -7,6 +7,8 @@ use super::*;
 use crate::{
     app_state::{AppState, PendingRemoteRequest},
     config::AppConfig,
+    im_runtime::RouteTarget,
+    types::ImPlatformKind,
 };
 
 fn test_state() -> SharedState {
@@ -350,6 +352,7 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
         PendingRemoteRequest {
             method: "initialize".to_string(),
             thread_id: None,
+            track_thread_active: false,
             response_tx: initialize_tx,
             message: json!({"id": 1, "method": "initialize"}),
             envelopes: Vec::new(),
@@ -361,6 +364,7 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
         PendingRemoteRequest {
             method: "thread/list".to_string(),
             thread_id: None,
+            track_thread_active: true,
             response_tx: request_tx,
             message: json!({"id": 2, "method": "thread/list"}),
             envelopes: Vec::new(),
@@ -467,7 +471,62 @@ async fn unknown_reinitializes_same_stream_without_client_closed() {
 }
 
 #[tokio::test]
-async fn recovery_resubscribes_current_thread_without_replaying_turn_start_and_clears_idle_turn() {
+async fn unbound_thread_started_does_not_replace_bound_im_thread() {
+    let state = test_state();
+    let (_outbound_rx, client_id, stream_id, connection_epoch) =
+        setup_connected_default_client(&state).await;
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.bind_route(
+            "thread-1",
+            RouteTarget {
+                platform: ImPlatformKind::Feishu,
+                conversation_key: "feishu:default:chat-1".to_string(),
+                account_id: "default".to_string(),
+                chat_id: "chat-1".to_string(),
+                remote_client_key: Some(DEFAULT_REMOTE_CLIENT_KEY.to_string()),
+            },
+        );
+    }
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        let client = remote
+            .clients
+            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
+            .expect("default client");
+        client.current_thread_id = Some("thread-1".to_string());
+        sync_default_client_legacy_locked(&mut remote);
+    }
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &stream_id,
+        &json!({
+            "method": "thread/started",
+            "params": {
+                "thread": {
+                    "id": "unbound-thread",
+                    "status": {
+                        "type": "idle"
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+
+    let remote = state.remote_control.inner.lock().await;
+    let client = remote
+        .clients
+        .get(DEFAULT_REMOTE_CLIENT_KEY)
+        .expect("default client");
+    assert_eq!(client.current_thread_id.as_deref(), Some("thread-1"));
+}
+
+#[tokio::test]
+async fn recovery_resubscribes_bound_threads_without_changing_current_session() {
     let state = test_state();
     let (mut outbound_rx, client_id, stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
@@ -477,19 +536,28 @@ async fn recovery_resubscribes_current_thread_without_replaying_turn_start_and_c
             .clients
             .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
             .expect("default client");
-        client.current_thread_id = Some("thread-1".to_string());
-        client.current_turn_id = Some("turn-1".to_string());
+        client.current_thread_id = Some("unbound-thread".to_string());
+        client.current_turn_id = Some("unbound-turn".to_string());
         sync_default_client_legacy_locked(&mut remote);
     }
-    state
-        .runtime
-        .lock()
-        .await
-        .mark_turn_started("thread-1", "turn-1");
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.bind_route(
+            "thread-1",
+            RouteTarget {
+                platform: ImPlatformKind::Feishu,
+                conversation_key: "feishu:default:chat-1".to_string(),
+                account_id: "default".to_string(),
+                chat_id: "chat-1".to_string(),
+                remote_client_key: Some(DEFAULT_REMOTE_CLIENT_KEY.to_string()),
+            },
+        );
+        runtime.mark_turn_started("thread-1", "turn-1");
+    }
 
     let resubscribe_state = state.clone();
     let resubscribe = tokio::spawn(async move {
-        resubscribe_current_thread_after_recovery(
+        resubscribe_bound_threads_after_recovery(
             &resubscribe_state,
             connection_epoch,
             DEFAULT_REMOTE_CLIENT_KEY,
@@ -526,6 +594,10 @@ async fn recovery_resubscribes_current_thread_without_replaying_turn_start_and_c
     assert_eq!(resume["client_id"], client_id);
     assert_eq!(resume["stream_id"], stream_id);
     assert_eq!(resume["message"]["params"]["threadId"], "thread-1");
+    assert_ne!(
+        resume["message"]["params"]["threadId"],
+        Value::String("unbound-thread".to_string())
+    );
     assert_eq!(resume["message"]["params"]["excludeTurns"], true);
     let request_id = resume["message"]["id"].clone();
 
@@ -559,17 +631,18 @@ async fn recovery_resubscribes_current_thread_without_replaying_turn_start_and_c
         .clients
         .get(DEFAULT_REMOTE_CLIENT_KEY)
         .expect("default client");
-    assert_eq!(client.current_thread_id.as_deref(), Some("thread-1"));
-    assert!(client.current_turn_id.is_none());
+    assert_eq!(client.current_thread_id.as_deref(), Some("unbound-thread"));
+    assert_eq!(client.current_turn_id.as_deref(), Some("unbound-turn"));
     drop(remote);
-    assert!(
+    assert_eq!(
         state
             .runtime
             .lock()
             .await
             .current_turn_by_thread
             .get("thread-1")
-            .is_none()
+            .map(String::as_str),
+        Some("turn-1")
     );
 }
 

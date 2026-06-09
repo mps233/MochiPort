@@ -111,7 +111,7 @@ async fn request_once_with_timeout_for_client(
     timeout: Duration,
 ) -> Result<Value> {
     request_once_with_timeout_for_client_inner(
-        state, None, true, client_key, method, params, timeout,
+        state, None, true, true, client_key, method, params, timeout,
     )
     .await
 }
@@ -128,6 +128,7 @@ pub(super) async fn request_once_with_timeout_for_client_on_connection(
         state,
         Some(connection_epoch),
         false,
+        false,
         client_key,
         method,
         params,
@@ -140,6 +141,7 @@ async fn request_once_with_timeout_for_client_inner(
     state: &SharedState,
     target_connection_epoch: Option<u64>,
     wait_for_recovery: bool,
+    track_thread_active: bool,
     client_key: &str,
     method: &str,
     params: Value,
@@ -216,6 +218,7 @@ async fn request_once_with_timeout_for_client_inner(
             PendingRemoteRequest {
                 method: method.to_string(),
                 thread_id: thread_id.clone(),
+                track_thread_active,
                 response_tx: tx,
                 message: message.clone(),
                 envelopes: envelopes.clone(),
@@ -649,6 +652,7 @@ async fn mark_thread_active(state: &SharedState, thread_id: &str) {
         return;
     }
     remote.current_thread_id = Some(thread_id.to_string());
+    remote.current_turn_id = None;
     drop(remote);
     state
         .push_event("info", "remote_control_thread_active", thread_id)
@@ -668,6 +672,7 @@ pub(super) async fn mark_thread_active_for_client(
             return;
         }
         client.current_thread_id = Some(thread_id.to_string());
+        client.current_turn_id = None;
         if is_legacy_default_client_key(&client_key) {
             sync_default_client_legacy_locked(&mut remote);
         }
@@ -705,16 +710,22 @@ pub(super) async fn should_track_notification_thread_for_client(
     client_key: Option<&str>,
     thread_id: &str,
 ) -> bool {
-    let Some(client_key) = client_key else {
-        return true;
+    let Some(client_key) = client_key.map(normalize_remote_client_key) else {
+        let runtime = state.runtime.lock().await;
+        return runtime.route_for_thread(thread_id).is_some();
     };
-    let client_key = normalize_remote_client_key(client_key);
-    if is_legacy_default_client_key(&client_key) {
-        return true;
-    }
     let is_bound_thread = {
         let runtime = state.runtime.lock().await;
-        runtime.route_for_thread(thread_id).is_some()
+        let mut is_bound_thread = false;
+        for (bound_thread_id, route) in &runtime.route_by_thread {
+            if !route_remote_client_key_matches(route.remote_client_key.as_deref(), &client_key) {
+                continue;
+            }
+            if bound_thread_id == thread_id {
+                is_bound_thread = true;
+            }
+        }
+        is_bound_thread
     };
     if is_bound_thread {
         return true;
@@ -735,6 +746,18 @@ pub(super) async fn should_track_notification_thread_for_client(
             .unwrap_or(false)
     };
     is_pending_request_thread
+}
+
+pub(super) fn route_remote_client_key_matches(
+    route_client_key: Option<&str>,
+    client_key: &str,
+) -> bool {
+    let client_key = normalize_remote_client_key(client_key);
+    let Some(route_client_key) = route_client_key else {
+        return client_key == DEFAULT_REMOTE_CLIENT_KEY;
+    };
+    let route_client_key = normalize_remote_client_key(route_client_key);
+    route_client_key == client_key
 }
 
 fn turn_input_items(text: &str, attachments: &[InboundAttachment]) -> Vec<Value> {

@@ -46,7 +46,7 @@ use outbound::{send_envelopes_on_connection, send_initialize_for_client_on_conne
 use protocol::{ServerChunkObservation, observe_server_chunk};
 #[cfg(test)]
 use recovery::{
-    force_remote_control_ws_reconnect, resubscribe_current_thread_after_recovery,
+    force_remote_control_ws_reconnect, resubscribe_bound_threads_after_recovery,
     start_remote_control_client_recovery,
 };
 #[cfg(test)]

@@ -139,6 +139,10 @@ pub(super) async fn observe_app_server_message(
         let client_thread_id = pending
             .as_ref()
             .and_then(|pending| pending.thread_id.clone());
+        let track_thread_active = pending
+            .as_ref()
+            .map(|pending| pending.track_thread_active)
+            .unwrap_or(true);
         if let Some(method) = client_method.as_deref() {
             state
                 .push_event(
@@ -238,7 +242,7 @@ pub(super) async fn observe_app_server_message(
                         .await;
                 }
             }
-            if let Some(thread_id) = thread_id_from_payload(result) {
+            if track_thread_active && let Some(thread_id) = thread_id_from_payload(result) {
                 mark_thread_active_for_client(state, client_key.as_deref(), &thread_id).await;
             }
             if client_method

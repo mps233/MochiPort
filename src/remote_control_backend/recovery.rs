@@ -10,9 +10,8 @@ use super::client_state::{
 };
 use super::log_format::pending_requests_summary;
 use super::outbound::send_initialize_for_client_on_connection;
-use super::server_messages::observe_thread_status_changed;
 use super::session_api::{
-    is_terminal_or_inactive_thread_status, request_once_with_timeout_for_client_on_connection,
+    request_once_with_timeout_for_client_on_connection, route_remote_client_key_matches,
     thread_status_type_from_payload, wait_for_remote_control_initialized,
 };
 use super::{
@@ -157,7 +156,7 @@ async fn run_remote_control_client_recovery(
                     ),
                 )
                 .await;
-            if let Err(err) = resubscribe_current_thread_after_recovery(
+            if let Err(err) = resubscribe_bound_threads_after_recovery(
                 &state,
                 connection_epoch,
                 &client_key,
@@ -234,109 +233,147 @@ async fn finish_remote_control_client_recovery(
     Ok((client_id, stream_id, attempt))
 }
 
-pub(super) async fn resubscribe_current_thread_after_recovery(
+pub(super) async fn resubscribe_bound_threads_after_recovery(
     state: &SharedState,
     connection_epoch: u64,
     client_key: &str,
     attempt: u64,
 ) -> Result<()> {
     let client_key = normalize_remote_client_key(client_key);
-    let Some((thread_id, turn_id, client_id, stream_id)) = ({
+    let (client_id, stream_id) = {
         let remote = state.remote_control.inner.lock().await;
         if !connection_exists_locked(&remote, connection_epoch) {
-            None
-        } else {
-            remote.clients.get(&client_key).and_then(|client| {
-                if client.initialized {
-                    client.current_thread_id.clone().map(|thread_id| {
-                        (
-                            thread_id,
-                            client.current_turn_id.clone(),
-                            client.client_id.clone(),
-                            client.stream_id.clone(),
-                        )
-                    })
-                } else {
-                    None
-                }
-            })
+            return Ok(());
         }
-    }) else {
+        let Some(client) = remote.clients.get(&client_key) else {
+            return Ok(());
+        };
+        if !client.initialized {
+            return Ok(());
+        }
+        (client.client_id.clone(), client.stream_id.clone())
+    };
+    let mut targets = {
+        let runtime = state.runtime.lock().await;
+        runtime
+            .route_by_thread
+            .iter()
+            .filter_map(|(thread_id, route)| {
+                route_remote_client_key_matches(route.remote_client_key.as_deref(), &client_key)
+                    .then(|| (thread_id.clone(), "bound_route"))
+            })
+            .collect::<Vec<_>>()
+    };
+    targets.sort_by(|left, right| left.0.cmp(&right.0));
+    targets.dedup_by(|left, right| left.0 == right.0);
+
+    if targets.is_empty() {
         chain_log::write_line(format!(
-            "[remote_control] event=recovery_thread_resubscribe_skipped connection_epoch={} client_key={} attempt={} reason=no_current_thread",
+            "[remote_control] event=recovery_thread_resubscribe_skipped connection_epoch={} client_key={} attempt={} reason=no_bound_threads",
             connection_epoch, client_key, attempt
         ));
         return Ok(());
     };
 
+    for (thread_id, source) in targets {
+        resubscribe_thread_after_recovery(
+            state,
+            connection_epoch,
+            &client_key,
+            &client_id,
+            &stream_id,
+            &thread_id,
+            attempt,
+            source,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resubscribe_thread_after_recovery(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_key: &str,
+    client_id: &str,
+    stream_id: &str,
+    thread_id: &str,
+    attempt: u64,
+    source: &str,
+) -> Result<()> {
     chain_log::write_line(format!(
-        "[remote_control] event=recovery_thread_resubscribe_start connection_epoch={} client_key={} client_id={} stream_id={} thread={} turn={} attempt={} method=thread/resume exclude_turns=true",
-        connection_epoch,
-        client_key,
-        client_id,
-        stream_id,
-        thread_id,
-        turn_id.as_deref().unwrap_or(""),
-        attempt
+        "[remote_control] event=recovery_thread_resubscribe_start connection_epoch={} client_key={} client_id={} stream_id={} thread={} attempt={} source={} method=thread/resume exclude_turns=true",
+        connection_epoch, client_key, client_id, stream_id, thread_id, attempt, source
     ));
     state
         .push_event(
             "info",
             "remote_control_recovery_thread_resubscribe_start",
             format!(
-                "client_key={} thread={} turn={} attempt={}",
-                client_key,
-                thread_id,
-                turn_id.as_deref().unwrap_or(""),
-                attempt
+                "client_key={} thread={} attempt={}",
+                client_key, thread_id, attempt
             ),
         )
         .await;
 
-    let response = request_once_with_timeout_for_client_on_connection(
+    let response = match request_once_with_timeout_for_client_on_connection(
         state,
         connection_epoch,
-        &client_key,
+        client_key,
         "thread/resume",
         json!({
-            "threadId": thread_id.clone(),
+            "threadId": thread_id,
             "excludeTurns": true,
         }),
         REMOTE_DISCOVERY_REQUEST_TIMEOUT,
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(err) if is_missing_rollout_error(&err) => {
+            chain_log::write_line(format!(
+                "[remote_control] event=recovery_thread_resubscribe_missing_rollout connection_epoch={} client_key={} thread={} attempt={} source={} err={}",
+                connection_epoch, client_key, thread_id, attempt, source, err
+            ));
+            state
+                .push_event(
+                    "warn",
+                    "remote_control_recovery_thread_resubscribe_missing_rollout",
+                    format!(
+                        "client_key={} thread={} attempt={} source={} err={}",
+                        client_key, thread_id, attempt, source, err
+                    ),
+                )
+                .await;
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
     let status_type = response
         .get("thread")
         .and_then(thread_status_type_from_payload)
         .or_else(|| thread_status_type_from_payload(&response))
         .unwrap_or_default();
     chain_log::write_line(format!(
-        "[remote_control] event=recovery_thread_resubscribe_ready connection_epoch={} client_key={} thread={} turn={} attempt={} status={}",
-        connection_epoch,
-        client_key,
-        thread_id,
-        turn_id.as_deref().unwrap_or(""),
-        attempt,
-        status_type
+        "[remote_control] event=recovery_thread_resubscribe_ready connection_epoch={} client_key={} thread={} attempt={} status={}",
+        connection_epoch, client_key, thread_id, attempt, status_type
     ));
     state
         .push_event(
             "info",
             "remote_control_recovery_thread_resubscribe_ready",
             format!(
-                "client_key={} thread={} turn={} attempt={} status={}",
-                client_key,
-                thread_id,
-                turn_id.as_deref().unwrap_or(""),
-                attempt,
-                status_type
+                "client_key={} thread={} attempt={} status={}",
+                client_key, thread_id, attempt, status_type
             ),
         )
         .await;
-    if is_terminal_or_inactive_thread_status(&status_type) {
-        observe_thread_status_changed(state, Some(&client_key), &thread_id, &status_type).await;
-    }
     Ok(())
+}
+
+fn is_missing_rollout_error(err: &anyhow::Error) -> bool {
+    err.to_string().contains("no rollout found for thread id")
 }
 
 pub(super) async fn force_remote_control_ws_reconnect(
