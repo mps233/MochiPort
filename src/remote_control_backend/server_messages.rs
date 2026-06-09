@@ -49,7 +49,6 @@ pub(super) async fn observe_app_server_message(
         stream_id,
         message_summary(message)
     ));
-    log_codex_to_remote_message(connection_epoch, message);
     if let Some(id) = message.get("id") {
         if let Some(method) = message.get("method").and_then(|v| v.as_str()) {
             if method == "account/chatgptAuthTokens/refresh" {
@@ -105,6 +104,17 @@ pub(super) async fn observe_app_server_message(
                 return;
             }
             let params = message.get("params").cloned();
+            if !should_forward_server_notification_to_im(
+                state,
+                client_key.as_deref(),
+                method,
+                params.as_ref(),
+            )
+            .await
+            {
+                return;
+            }
+            log_codex_to_remote_message(connection_epoch, message);
             state
                 .push_event(
                     "info",
@@ -320,9 +330,6 @@ pub(super) async fn observe_app_server_message(
                 .await;
             return;
         }
-        if method == "item/commandExecution/outputDelta" {
-            return;
-        }
         if !is_selected_connection {
             chain_log::write_line(format!(
                 "[remote_control] event=non_active_connection_event_ignored connection_epoch={} client_key={} method={}",
@@ -333,6 +340,20 @@ pub(super) async fn observe_app_server_message(
             return;
         }
         let params = message.get("params").cloned();
+        if !should_forward_server_notification_to_im(
+            state,
+            client_key.as_deref(),
+            method,
+            params.as_ref(),
+        )
+        .await
+        {
+            return;
+        }
+        log_codex_to_remote_message(connection_epoch, message);
+        if method == "item/commandExecution/outputDelta" {
+            return;
+        }
         if method == "remoteControl/status/changed" {
             observe_remote_control_status_changed(state, params.as_ref()).await;
         }
@@ -462,6 +483,27 @@ pub(super) async fn observe_app_server_message(
             remote_stream_id: Some(stream_id.to_string()),
         });
     }
+}
+
+async fn should_forward_server_notification_to_im(
+    state: &SharedState,
+    client_key: Option<&str>,
+    method: &str,
+    params: Option<&Value>,
+) -> bool {
+    let Some(thread_id) = params.and_then(thread_id_from_payload) else {
+        return true;
+    };
+    if should_track_notification_thread_for_client(state, client_key, &thread_id).await {
+        return true;
+    }
+    chain_log::write_line(format!(
+        "[remote_control] event=notification_broadcast_skipped reason=non_owner_thread client_key={} method={} thread={}",
+        client_key.unwrap_or(""),
+        method,
+        thread_id
+    ));
+    false
 }
 
 pub(super) async fn observe_thread_status_changed(

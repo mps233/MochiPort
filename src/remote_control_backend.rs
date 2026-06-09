@@ -93,10 +93,12 @@ const FEISHU_BRIDGE_ENV_ID: &str = "env_codex_remote_feishu_bridge";
 const FEISHU_BRIDGE_INSTALLATION_ID: &str = "codex-remote-feishu-bridge";
 const DEFAULT_REMOTE_CLIENT_KEY: &str = "default";
 
+#[allow(dead_code)]
 pub fn default_remote_client_key() -> &'static str {
     DEFAULT_REMOTE_CLIENT_KEY
 }
 
+#[allow(dead_code)]
 pub async fn select_remote_client_key(state: &SharedState) -> Result<String> {
     let mut remote = state.remote_control.inner.lock().await;
     active_connection_epoch_locked(&mut remote)

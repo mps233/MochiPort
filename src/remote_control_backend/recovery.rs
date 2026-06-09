@@ -259,7 +259,7 @@ pub(super) async fn resubscribe_bound_threads_after_recovery(
             .route_by_thread
             .iter()
             .filter_map(|(thread_id, route)| {
-                route_remote_client_key_matches(route.remote_client_key.as_deref(), &client_key)
+                route_remote_client_key_matches(&route.remote_client_key, &client_key)
                     .then(|| (thread_id.clone(), "bound_route"))
             })
             .collect::<Vec<_>>()

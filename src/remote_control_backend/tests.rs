@@ -484,7 +484,7 @@ async fn unbound_thread_started_does_not_replace_bound_im_thread() {
                 conversation_key: "feishu:default:chat-1".to_string(),
                 account_id: "default".to_string(),
                 chat_id: "chat-1".to_string(),
-                remote_client_key: Some(DEFAULT_REMOTE_CLIENT_KEY.to_string()),
+                remote_client_key: DEFAULT_REMOTE_CLIENT_KEY.to_string(),
             },
         );
     }
@@ -526,6 +526,160 @@ async fn unbound_thread_started_does_not_replace_bound_im_thread() {
 }
 
 #[tokio::test]
+async fn non_owner_thread_notification_is_not_forwarded_to_im() {
+    let state = test_state();
+    let (_outbound_rx, client_id, _default_stream_id, connection_epoch) =
+        setup_connected_default_client(&state).await;
+    let feishu_key = "im:feishu:owner-chat";
+    let wechat_key = "im:wechat:other-chat";
+    let (feishu_stream_id, wechat_stream_id) = {
+        let mut remote = state.remote_control.inner.lock().await;
+        let feishu_client = ensure_client_state_locked(&mut remote, feishu_key);
+        feishu_client.initialized = true;
+        let feishu_stream_id = feishu_client.stream_id.clone();
+        let wechat_client = ensure_client_state_locked(&mut remote, wechat_key);
+        wechat_client.initialized = true;
+        let wechat_stream_id = wechat_client.stream_id.clone();
+        (feishu_stream_id, wechat_stream_id)
+    };
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.bind_route(
+            "thread-feishu",
+            RouteTarget {
+                platform: ImPlatformKind::Feishu,
+                conversation_key: "feishu:default:chat-1".to_string(),
+                account_id: "default".to_string(),
+                chat_id: "chat-1".to_string(),
+                remote_client_key: feishu_key.to_string(),
+            },
+        );
+    }
+    let mut notifications = state.remote_control.notifications.subscribe();
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &wechat_stream_id,
+        &json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-feishu",
+                "itemId": "message-1",
+                "delta": "hello"
+            }
+        }),
+    )
+    .await;
+
+    assert!(matches!(
+        notifications.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &feishu_stream_id,
+        &json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "thread-feishu",
+                "itemId": "message-1",
+                "delta": "hello"
+            }
+        }),
+    )
+    .await;
+
+    let notification = notifications
+        .try_recv()
+        .expect("owner notification should be forwarded");
+    assert_eq!(notification.method, "item/agentMessage/delta");
+    assert_eq!(notification.remote_client_key.as_deref(), Some(feishu_key));
+}
+
+#[tokio::test]
+async fn non_owner_thread_server_request_is_not_forwarded_to_im() {
+    let state = test_state();
+    let (_outbound_rx, client_id, _default_stream_id, connection_epoch) =
+        setup_connected_default_client(&state).await;
+    let feishu_key = "im:feishu:owner-chat";
+    let wechat_key = "im:wechat:other-chat";
+    let (feishu_stream_id, wechat_stream_id) = {
+        let mut remote = state.remote_control.inner.lock().await;
+        let feishu_client = ensure_client_state_locked(&mut remote, feishu_key);
+        feishu_client.initialized = true;
+        let feishu_stream_id = feishu_client.stream_id.clone();
+        let wechat_client = ensure_client_state_locked(&mut remote, wechat_key);
+        wechat_client.initialized = true;
+        let wechat_stream_id = wechat_client.stream_id.clone();
+        (feishu_stream_id, wechat_stream_id)
+    };
+    {
+        let mut runtime = state.runtime.lock().await;
+        runtime.bind_route(
+            "thread-feishu",
+            RouteTarget {
+                platform: ImPlatformKind::Feishu,
+                conversation_key: "feishu:default:chat-1".to_string(),
+                account_id: "default".to_string(),
+                chat_id: "chat-1".to_string(),
+                remote_client_key: feishu_key.to_string(),
+            },
+        );
+    }
+    let mut notifications = state.remote_control.notifications.subscribe();
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &wechat_stream_id,
+        &json!({
+            "id": "server-request-1",
+            "method": "approval/requested",
+            "params": {
+                "threadId": "thread-feishu"
+            }
+        }),
+    )
+    .await;
+
+    assert!(matches!(
+        notifications.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &feishu_stream_id,
+        &json!({
+            "id": "server-request-2",
+            "method": "approval/requested",
+            "params": {
+                "threadId": "thread-feishu"
+            }
+        }),
+    )
+    .await;
+
+    let notification = notifications
+        .try_recv()
+        .expect("owner server request should be forwarded");
+    assert_eq!(notification.method, "approval/requested");
+    assert_eq!(notification.remote_client_key.as_deref(), Some(feishu_key));
+    assert_eq!(
+        notification.request_id.as_ref().and_then(Value::as_str),
+        Some("server-request-2")
+    );
+}
+
+#[tokio::test]
 async fn recovery_resubscribes_bound_threads_without_changing_current_session() {
     let state = test_state();
     let (mut outbound_rx, client_id, stream_id, connection_epoch) =
@@ -549,7 +703,7 @@ async fn recovery_resubscribes_bound_threads_without_changing_current_session() 
                 conversation_key: "feishu:default:chat-1".to_string(),
                 account_id: "default".to_string(),
                 chat_id: "chat-1".to_string(),
-                remote_client_key: Some(DEFAULT_REMOTE_CLIENT_KEY.to_string()),
+                remote_client_key: DEFAULT_REMOTE_CLIENT_KEY.to_string(),
             },
         );
         runtime.mark_turn_started("thread-1", "turn-1");

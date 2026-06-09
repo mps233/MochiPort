@@ -718,7 +718,7 @@ pub(super) async fn should_track_notification_thread_for_client(
         let runtime = state.runtime.lock().await;
         let mut is_bound_thread = false;
         for (bound_thread_id, route) in &runtime.route_by_thread {
-            if !route_remote_client_key_matches(route.remote_client_key.as_deref(), &client_key) {
+            if !route_remote_client_key_matches(&route.remote_client_key, &client_key) {
                 continue;
             }
             if bound_thread_id == thread_id {
@@ -730,32 +730,27 @@ pub(super) async fn should_track_notification_thread_for_client(
     if is_bound_thread {
         return true;
     }
-    let is_pending_request_thread = {
+    let is_current_or_pending_request_thread = {
         let remote = state.remote_control.inner.lock().await;
         remote
             .clients
             .get(&client_key)
             .map(|client| {
-                client.pending.values().any(|pending| {
-                    pending
-                        .thread_id
-                        .as_deref()
-                        .is_some_and(|pending_thread_id| pending_thread_id == thread_id)
-                })
+                client.current_thread_id.as_deref() == Some(thread_id)
+                    || client.pending.values().any(|pending| {
+                        pending
+                            .thread_id
+                            .as_deref()
+                            .is_some_and(|pending_thread_id| pending_thread_id == thread_id)
+                    })
             })
             .unwrap_or(false)
     };
-    is_pending_request_thread
+    is_current_or_pending_request_thread
 }
 
-pub(super) fn route_remote_client_key_matches(
-    route_client_key: Option<&str>,
-    client_key: &str,
-) -> bool {
+pub(super) fn route_remote_client_key_matches(route_client_key: &str, client_key: &str) -> bool {
     let client_key = normalize_remote_client_key(client_key);
-    let Some(route_client_key) = route_client_key else {
-        return client_key == DEFAULT_REMOTE_CLIENT_KEY;
-    };
     let route_client_key = normalize_remote_client_key(route_client_key);
     route_client_key == client_key
 }
