@@ -23,7 +23,6 @@ use crate::config::AppConfig;
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 #[cfg(not(target_os = "windows"))]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
-const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const CODEX_APP_GUI_UNSUPPORTED: bool = !(cfg!(target_os = "macos") || cfg!(target_os = "windows"));
 const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codex-remote";
 const UPDATE_MANIFEST_URL: &str =
@@ -49,16 +48,13 @@ const ID_MENU_LANGUAGE_EN_US: i32 = 10_005;
 
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
-type ProviderRows = Rc<RefCell<Vec<[String; 5]>>>;
-type ProviderModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
-type PendingProviderWebsocketToggle = Rc<RefCell<Option<(String, bool)>>>;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
-type ConfigActionResultStore = Arc<Mutex<Option<ConfigActionResult>>>;
 type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
 
 mod api;
+mod ai_gateway;
 mod daemon;
 mod im_accounts;
 mod onboarding;
@@ -68,8 +64,8 @@ mod update;
 mod widgets;
 
 use self::api::{
-    ApiClient, CodexAppProviderStatus, CodexAppStatus, ConfigureTelegramBotRequest,
-    DashboardSnapshot, DeleteImAccountRequest, DeleteProviderRequest, RemoteControlStatus,
+    ApiClient, ConfigureRequest, ConfigureTelegramBotRequest,
+    DashboardSnapshot, DeleteImAccountRequest, RemoteControlStatus,
     SetImAccountEnabledRequest,
 };
 use self::daemon::{
@@ -83,12 +79,14 @@ use self::onboarding::{
     prompt_telegram_bot_token, show_feishu_onboard_dialog, show_wechat_onboard_dialog,
 };
 use self::provider::{
-    apply_pending_config_action, apply_provider_row_to_form, apply_provider_to_form,
-    change_text_value_if_changed, clean_provider_text, clear_provider_list_selection,
-    configure_codex_app_and_verify, delete_codex_provider_and_verify, fill_provider_form_if_empty,
-    find_provider, is_real_provider_name, provider_config_request_from_ui, provider_from_list_row,
-    provider_name_from_ui, save_codex_provider_and_verify, set_combo_value_if_changed,
-    set_provider_websocket_and_verify,
+    change_text_value_if_changed, set_combo_value_if_changed,
+};
+use self::ai_gateway::{
+    AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRows,
+    ai_gw_provider_from_form, apply_ai_gw_provider_to_form, apply_pending_ai_gw_action,
+    delete_ai_gw_provider, gateway_entry_url, refresh_ai_gw_default_provider_combo,
+    refresh_ai_gw_provider_list, save_ai_gw_default_provider, save_ai_gw_provider,
+    set_ai_gw_actions_enabled, toggle_ai_gw_enabled,
 };
 use self::text::{GuiLocale, GuiText};
 use self::widgets::{
@@ -234,6 +232,16 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         8,
     );
+    let ai_gw_status_label = StaticText::builder(&status_box)
+        .with_label(text.ai_gw_status_disabled())
+        .build();
+    ai_gw_status_label.set_foreground_color(Colour::rgb(103, 111, 124));
+    status_section.add(
+        &ai_gw_status_label,
+        0,
+        SizerFlag::Left | SizerFlag::Bottom,
+        8,
+    );
     root_sizer.add_sizer(
         &status_section,
         0,
@@ -249,17 +257,12 @@ fn build_ui() {
     codex_page.set_background_color(Colour::rgb(250, 251, 253));
     let codex_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let config_static_box = StaticBox::builder(&codex_page)
-        .with_label(text.provider_management())
-        .build();
-    let config_box =
-        StaticBoxSizerBuilder::new_with_box(&config_static_box, Orientation::Vertical).build();
-    let provider_image_generation = CheckBox::builder(&config_static_box)
+    let provider_image_generation = CheckBox::builder(&codex_page)
         .with_label(text.image_generation_feature())
         .with_value(false)
         .build();
     provider_image_generation.set_tooltip(text.image_generation_feature_help());
-    let provider_image_generation_note = StaticText::builder(&config_static_box)
+    let provider_image_generation_note = StaticText::builder(&codex_page)
         .with_label(text.image_generation_feature_note())
         .build();
     provider_image_generation_note.set_foreground_color(Colour::rgb(103, 111, 124));
@@ -276,204 +279,11 @@ fn build_ui() {
         SizerFlag::AlignCenterVertical,
         0,
     );
-    config_box.add_sizer(
+    codex_sizer.add_sizer(
         &provider_image_generation_row,
         0,
         SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
-    );
-
-    let new_provider_button = Button::builder(&config_static_box)
-        .with_label(text.add())
-        .build();
-    new_provider_button.set_tooltip(text.new_provider_help());
-    let save_provider_button = Button::builder(&config_static_box)
-        .with_label(text.save())
-        .build();
-    save_provider_button.set_tooltip(text.save_provider_help());
-    let delete_provider_button = Button::builder(&config_static_box)
-        .with_label(text.delete())
-        .build();
-    delete_provider_button.set_tooltip(text.delete_provider_help());
-    let configure_button = Button::builder(&config_static_box)
-        .with_label(text.enable())
-        .build();
-    configure_button.set_tooltip(text.configure_provider_help());
-
-    let provider_catalog = StaticText::builder(&config_static_box)
-        .with_label(text.provider_catalog_loading())
-        .build();
-    provider_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
-    provider_catalog.wrap(980);
-    config_box.add(
-        &provider_catalog,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        8,
-    );
-
-    let provider_rows: ProviderRows = Rc::new(RefCell::new(Vec::new()));
-    let pending_provider_websocket: PendingProviderWebsocketToggle = Rc::new(RefCell::new(None));
-    let pending_provider_websocket_for_model = pending_provider_websocket.clone();
-    let provider_model: ProviderModel = Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
-        0,
-        provider_rows.clone(),
-        |rows: &ProviderRows, row, col| -> Variant {
-            if col == 4 {
-                return rows
-                    .borrow()
-                    .get(row)
-                    .and_then(|row_data| row_data.get(4))
-                    .map(|value| value == "true")
-                    .unwrap_or(false)
-                    .into();
-            }
-            rows.borrow()
-                .get(row)
-                .and_then(|row_data| row_data.get(col))
-                .cloned()
-                .unwrap_or_default()
-                .into()
-        },
-        Some(
-            move |rows: &ProviderRows, row, col, value: &Variant| -> bool {
-                if col != 4 {
-                    return false;
-                }
-                let Some(enabled) = value.get_bool() else {
-                    return false;
-                };
-                let mut rows = rows.borrow_mut();
-                let Some(row_data): Option<&mut [String; 5]> = rows.get_mut(row) else {
-                    return false;
-                };
-                if !is_real_provider_name(&row_data[0]) {
-                    return false;
-                }
-                let provider_name = row_data[0].clone();
-                row_data[4] = enabled.to_string();
-                pending_provider_websocket_for_model
-                    .borrow_mut()
-                    .replace((provider_name, enabled));
-                true
-            },
-        ),
-        None::<fn(&ProviderRows, usize, usize) -> Option<DataViewItemAttr>>,
-        Some(|rows: &ProviderRows, row, col| -> bool {
-            if col != 4 {
-                return true;
-            }
-            rows.borrow()
-                .get(row)
-                .map(|row_data: &[String; 5]| is_real_provider_name(&row_data[0]))
-                .unwrap_or(false)
-        }),
-    )));
-    let provider_list = DataViewCtrl::builder(&config_static_box)
-        .with_style(
-            DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
-        )
-        .with_size(Size::new(-1, 142))
-        .build();
-    provider_list.append_text_column(
-        text.name(),
-        0,
-        160,
-        DataViewAlign::Left,
-        DataViewColumnFlags::Resizable,
-    );
-    provider_list.append_text_column(
-        "Base URL",
-        1,
-        420,
-        DataViewAlign::Left,
-        DataViewColumnFlags::Resizable,
-    );
-    provider_list.append_text_column(
-        text.current(),
-        2,
-        90,
-        DataViewAlign::Left,
-        DataViewColumnFlags::Resizable,
-    );
-    provider_list.append_text_column(
-        "API Key",
-        3,
-        160,
-        DataViewAlign::Left,
-        DataViewColumnFlags::Resizable,
-    );
-    provider_list.append_toggle_column(
-        text.provider_websocket(),
-        4,
-        100,
-        DataViewAlign::Center,
-        DataViewColumnFlags::Resizable,
-    );
-    provider_list.associate_model(&*provider_model.borrow());
-    config_box.add(
-        &provider_list,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        10,
-    );
-
-    let provider_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    provider_actions.add_stretch_spacer(1);
-    provider_actions.add(&new_provider_button, 0, SizerFlag::Right, 8);
-    provider_actions.add(&delete_provider_button, 0, SizerFlag::Right, 8);
-    provider_actions.add(&configure_button, 0, SizerFlag::Right, 0);
-    config_box.add_sizer(
-        &provider_actions,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        10,
-    );
-
-    let provider_help = StaticText::builder(&config_static_box)
-        .with_label(text.api_key_help())
-        .build();
-    provider_help.set_foreground_color(Colour::rgb(91, 100, 114));
-    provider_help.wrap(980);
-    config_box.add(
-        &provider_help,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        8,
-    );
-
-    let form = FlexGridSizer::builder(0, 2)
-        .with_gap(Size::new(12, 10))
-        .build();
-    form.add_growable_col(1, 1);
-    let provider_name = provider_combo_row(
-        &config_static_box,
-        &form,
-        text.provider_name(),
-        DEFAULT_PROVIDER_NAME,
-    );
-    let provider_base_url = text_field_row(&config_static_box, &form, "Base URL", "");
-    let provider_key = text_field_row(&config_static_box, &form, "API Key", "");
-    config_box.add_sizer(
-        &form,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        8,
-    );
-    let save_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    save_actions.add_stretch_spacer(1);
-    save_actions.add(&save_provider_button, 0, SizerFlag::Right, 0);
-    config_box.add_sizer(
-        &save_actions,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        12,
-    );
-    codex_sizer.add_sizer(
-        &config_box,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        10,
     );
 
     let uninstall_button = Button::builder(&codex_page)
@@ -498,6 +308,202 @@ fn build_ui() {
         pixels_per_unit_y: 10,
         no_units_x: (codex_best_size.width + 20).max(1) / 10,
         no_units_y: (codex_best_size.height + 80).max(1) / 10,
+        x_pos: 0,
+        y_pos: 0,
+        no_refresh: true,
+    });
+
+    // --- AI Gateway Tab ---
+    let ai_gw_page = ScrolledWindow::builder(&notebook)
+        .with_style(ScrolledWindowStyle::VScroll)
+        .build();
+    ai_gw_page.set_background_color(Colour::rgb(250, 251, 253));
+    let ai_gw_sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let ai_gw_static_box = StaticBox::builder(&ai_gw_page)
+        .with_label(text.ai_gateway_management())
+        .build();
+    let ai_gw_box =
+        StaticBoxSizerBuilder::new_with_box(&ai_gw_static_box, Orientation::Vertical).build();
+
+    let ai_gw_enabled = CheckBox::builder(&ai_gw_static_box)
+        .with_label(text.ai_gateway_enabled())
+        .with_value(false)
+        .build();
+    let ai_gw_entry_url = StaticText::builder(&ai_gw_static_box)
+        .with_label("")
+        .build();
+    ai_gw_entry_url.set_foreground_color(Colour::rgb(91, 100, 114));
+    ai_gw_entry_url.set_tooltip(text.ai_gw_entry_url_help());
+    let ai_gw_enable_row = BoxSizer::builder(Orientation::Horizontal).build();
+    ai_gw_enable_row.add(
+        &ai_gw_enabled,
+        0,
+        SizerFlag::Right | SizerFlag::AlignCenterVertical,
+        12,
+    );
+    ai_gw_enable_row.add(
+        &ai_gw_entry_url,
+        1,
+        SizerFlag::AlignCenterVertical,
+        0,
+    );
+    ai_gw_box.add_sizer(
+        &ai_gw_enable_row,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        12,
+    );
+
+    let ai_gw_catalog = StaticText::builder(&ai_gw_static_box)
+        .with_label("")
+        .build();
+    ai_gw_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
+    ai_gw_box.add(
+        &ai_gw_catalog,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        8,
+    );
+
+    let ai_gw_provider_rows: AiGwProviderRows = Rc::new(RefCell::new(Vec::new()));
+    let ai_gw_provider_model: AiGwProviderModel =
+        Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
+            0,
+            ai_gw_provider_rows.clone(),
+            |rows: &AiGwProviderRows, row, col| -> Variant {
+                rows.borrow()
+                    .get(row)
+                    .and_then(|row_data| row_data.get(col))
+                    .cloned()
+                    .unwrap_or_default()
+                    .into()
+            },
+            None::<fn(&AiGwProviderRows, usize, usize, &Variant) -> bool>,
+            None::<fn(&AiGwProviderRows, usize, usize) -> Option<DataViewItemAttr>>,
+            None::<fn(&AiGwProviderRows, usize, usize) -> bool>,
+        )));
+    let ai_gw_provider_list = DataViewCtrl::builder(&ai_gw_static_box)
+        .with_style(
+            DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
+        )
+        .with_size(Size::new(-1, 142))
+        .build();
+    ai_gw_provider_list.append_text_column(
+        text.ai_gw_col_name(),
+        0,
+        160,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    ai_gw_provider_list.append_text_column(
+        text.ai_gw_col_type(),
+        1,
+        140,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    ai_gw_provider_list.append_text_column(
+        text.ai_gw_col_base_url(),
+        2,
+        320,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    ai_gw_provider_list.append_text_column(
+        text.ai_gw_col_api_key(),
+        3,
+        160,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    ai_gw_provider_list.associate_model(&*ai_gw_provider_model.borrow());
+    ai_gw_box.add(
+        &ai_gw_provider_list,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        10,
+    );
+
+    let ai_gw_new_button = Button::builder(&ai_gw_static_box)
+        .with_label(text.add())
+        .build();
+    let ai_gw_delete_button = Button::builder(&ai_gw_static_box)
+        .with_label(text.delete())
+        .build();
+    let ai_gw_save_button = Button::builder(&ai_gw_static_box)
+        .with_label(text.save())
+        .build();
+    let ai_gw_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    ai_gw_actions.add_stretch_spacer(1);
+    ai_gw_actions.add(&ai_gw_new_button, 0, SizerFlag::Right, 8);
+    ai_gw_actions.add(&ai_gw_delete_button, 0, SizerFlag::Right, 8);
+    ai_gw_actions.add(&ai_gw_save_button, 0, SizerFlag::Right, 0);
+    ai_gw_box.add_sizer(
+        &ai_gw_actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        10,
+    );
+
+    let ai_gw_form = FlexGridSizer::builder(0, 2)
+        .with_gap(Size::new(12, 10))
+        .build();
+    ai_gw_form.add_growable_col(1, 1);
+    let ai_gw_name = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_provider_name(), "");
+    let ai_gw_type = provider_combo_row(
+        &ai_gw_static_box,
+        &ai_gw_form,
+        text.ai_gw_provider_type(),
+        text.provider_type_openai_responses(),
+    );
+    ai_gw_type.append(text.provider_type_openai_responses());
+    ai_gw_type.append(text.provider_type_chat_completions());
+    let ai_gw_base_url = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_col_base_url(), "");
+    let ai_gw_key = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_col_api_key(), "");
+    let ai_gw_timeout = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_timeout(), "300");
+    let ai_gw_models = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_models(), "");
+    ai_gw_box.add_sizer(
+        &ai_gw_form,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        8,
+    );
+
+    let ai_gw_default_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let ai_gw_default_label = StaticText::builder(&ai_gw_static_box)
+        .with_label(text.ai_gw_default_provider())
+        .build();
+    let ai_gw_default_provider = ComboBox::builder(&ai_gw_static_box).build();
+    ai_gw_default_row.add(
+        &ai_gw_default_label,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        8,
+    );
+    ai_gw_default_row.add(&ai_gw_default_provider, 1, SizerFlag::Expand, 0);
+    ai_gw_box.add_sizer(
+        &ai_gw_default_row,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        12,
+    );
+
+    ai_gw_sizer.add_sizer(
+        &ai_gw_box,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+    ai_gw_sizer.add_stretch_spacer(1);
+    ai_gw_page.set_sizer(ai_gw_sizer, true);
+    ai_gw_page.set_scroll_rate(10, 10);
+    let ai_gw_best_size = ai_gw_page.get_best_size();
+    ai_gw_page.set_scrollbars(ScrollBarConfig {
+        pixels_per_unit_x: 10,
+        pixels_per_unit_y: 10,
+        no_units_x: (ai_gw_best_size.width + 20).max(1) / 10,
+        no_units_y: (ai_gw_best_size.height + 80).max(1) / 10,
         x_pos: 0,
         y_pos: 0,
         no_refresh: true,
@@ -693,6 +699,7 @@ fn build_ui() {
     });
 
     notebook.add_page(&codex_page, text.codex_tab(), true, None);
+    notebook.add_page(&ai_gw_page, text.ai_gateway_tab(), false, None);
     notebook.add_page(&feishu_page, text.chat_tab(), false, None);
 
     root_sizer.add(
@@ -718,212 +725,54 @@ fn build_ui() {
         im_account_rows,
         im_account_model,
         pending_im_toggle,
-        pending_provider_websocket,
         delete_im_account_button,
         save_telegram_button,
         connect_wechat_button,
         change_bot_button,
         uninstall_button,
-        new_provider_button,
-        save_provider_button,
-        delete_provider_button,
-        configure_button,
         provider_image_generation,
-        provider_name,
-        provider_base_url,
-        provider_key,
-        provider_list,
-        provider_rows,
-        provider_model,
-        provider_catalog,
+        ai_gw_enabled,
+        ai_gw_default_provider,
+        ai_gw_provider_list,
+        ai_gw_provider_rows,
+        ai_gw_provider_model,
+        ai_gw_name,
+        ai_gw_type,
+        ai_gw_base_url,
+        ai_gw_key,
+        ai_gw_timeout,
+        ai_gw_models,
+        ai_gw_save_button,
+        ai_gw_delete_button,
+        ai_gw_new_button,
+        ai_gw_entry_url,
+        ai_gw_status_label,
+        ai_gw_catalog,
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
     let dashboard_refresh = DashboardRefresh::new();
-    let config_action_result: ConfigActionResultStore = Arc::new(Mutex::new(None));
-    let config_action_in_flight = Arc::new(AtomicBool::new(false));
     show_dashboard_starting(&handles);
-    show_local_codex_app_config_preview(&handles, &api, &dashboard_refresh);
-
-    {
-        let handles = handles.clone();
-        new_provider_button.on_click(move |_| {
-            clear_provider_list_selection(&handles.provider_list);
-            set_combo_value_if_changed(&handles.provider_name, "");
-            change_text_value_if_changed(&handles.provider_base_url, "");
-            change_text_value_if_changed(&handles.provider_key, "");
-            handles
-                .provider_catalog
-                .set_label(handles.text.new_provider_prompt());
-            handles.provider_catalog.wrap(980);
-            handles.provider_catalog.layout();
-        });
-    }
 
     {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
-        let provider_name = provider_name;
-        let provider_base_url = provider_base_url;
-        let provider_key = provider_key;
         let frame = frame;
-        let handles = handles.clone();
-        let config_action_result = config_action_result.clone();
-        let config_action_in_flight = config_action_in_flight.clone();
-        save_provider_button.on_click(move |_| {
-            if config_action_in_flight.swap(true, Ordering::SeqCst) {
-                return;
-            }
+        provider_image_generation.on_toggled(move |event| {
             if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                config_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
-            handles
-                .provider_catalog
-                .set_label(handles.text.saving_provider());
-            handles.provider_catalog.wrap(980);
-            handles
-                .save_provider_button
-                .set_label(handles.text.save_in_progress());
-            set_actions_enabled(&handles, false);
-            frame.refresh(true, None);
-            frame.update();
-
-            let (selected_provider, request) = provider_config_request_from_ui(
-                &handles,
-                &provider_name,
-                &provider_base_url,
-                &provider_key,
-                cached_dashboard_snapshot(&dashboard_refresh).as_ref(),
-                false,
-            );
-            let api = api.clone();
-            let config_action_result = config_action_result.clone();
-            let config_action_in_flight = config_action_in_flight.clone();
-            let text = handles.text;
-            thread::spawn(move || {
-                let outcome =
-                    save_codex_provider_and_verify(&api, &request, &selected_provider, text);
-                if let Ok(mut slot) = config_action_result.lock() {
-                    slot.replace(ConfigActionResult::Save {
-                        provider_name: selected_provider,
-                        result: outcome,
-                    });
-                }
-                config_action_in_flight.store(false, Ordering::SeqCst);
-            });
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let provider_name = provider_name;
-        let frame = frame;
-        let handles = handles.clone();
-        let config_action_result = config_action_result.clone();
-        let config_action_in_flight = config_action_in_flight.clone();
-        delete_provider_button.on_click(move |_| {
-            if config_action_in_flight.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                config_action_in_flight.store(false, Ordering::SeqCst);
-                return;
-            }
-            let provider_name = provider_name_from_ui(
-                &handles,
-                &provider_name,
-                cached_dashboard_snapshot(&dashboard_refresh).as_ref(),
-            );
-            if provider_name.trim().is_empty() {
-                config_action_in_flight.store(false, Ordering::SeqCst);
-                show_error(&frame, handles.text.select_provider_to_delete());
-                return;
-            }
-            if !confirm_delete_provider(&frame, handles.text, &provider_name) {
-                config_action_in_flight.store(false, Ordering::SeqCst);
-                return;
-            }
-
-            handles
-                .provider_catalog
-                .set_label(handles.text.deleting_provider());
-            handles.provider_catalog.wrap(980);
-            handles
-                .delete_provider_button
-                .set_label(handles.text.delete_in_progress());
-            set_actions_enabled(&handles, false);
-            frame.refresh(true, None);
-            frame.update();
-
-            let request = DeleteProviderRequest { provider_name };
-            let api = api.clone();
-            let config_action_result = config_action_result.clone();
-            let config_action_in_flight = config_action_in_flight.clone();
-            let text = handles.text;
-            thread::spawn(move || {
-                let outcome = delete_codex_provider_and_verify(&api, &request, text);
-                if let Ok(mut slot) = config_action_result.lock() {
-                    slot.replace(ConfigActionResult::Delete(outcome));
-                }
-                config_action_in_flight.store(false, Ordering::SeqCst);
-            });
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let provider_name = provider_name;
-        let provider_base_url = provider_base_url;
-        let provider_key = provider_key;
-        let frame = frame;
-        let handles = handles.clone();
-        let config_action_result = config_action_result.clone();
-        let config_action_in_flight = config_action_in_flight.clone();
-        configure_button.on_click(move |_| {
-            if config_action_in_flight.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                config_action_in_flight.store(false, Ordering::SeqCst);
-                return;
-            }
-            handles
-                .provider_catalog
-                .set_label(handles.text.enabling_provider());
-            handles.provider_catalog.wrap(980);
-            handles
-                .configure_button
-                .set_label(handles.text.enable_in_progress());
-            set_actions_enabled(&handles, false);
-            frame.refresh(true, None);
-            frame.update();
-
-            let (selected_provider, request) = provider_config_request_from_ui(
-                &handles,
-                &provider_name,
-                &provider_base_url,
-                &provider_key,
-                cached_dashboard_snapshot(&dashboard_refresh).as_ref(),
-                true,
-            );
-            let api = api.clone();
-            let config_action_result = config_action_result.clone();
-            let config_action_in_flight = config_action_in_flight.clone();
-            let text = handles.text;
-            thread::spawn(move || {
-                let outcome =
-                    configure_codex_app_and_verify(&api, &request, &selected_provider, text);
-                if let Ok(mut slot) = config_action_result.lock() {
-                    slot.replace(ConfigActionResult::Configure {
-                        provider_name: selected_provider,
-                        result: outcome,
-                    });
-                }
-                config_action_in_flight.store(false, Ordering::SeqCst);
-            });
+            let request = ConfigureRequest {
+                provider_name: None,
+                provider_base_url: None,
+                provider_key: None,
+                model: None,
+                activate: false,
+                image_generation_enabled: Some(event.is_checked()),
+                supports_websockets: false,
+            };
+            let _ = api.configure_codex_app(&request);
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
 
@@ -943,42 +792,10 @@ fn build_ui() {
             match api.uninstall_codex_app() {
                 Ok(_) => {
                     show_info(&frame, handles.text.codex_app_config_uninstalled());
-                    show_local_codex_app_config_preview(&handles, &api, &dashboard_refresh);
                     schedule_dashboard_refresh(&api, &dashboard_refresh);
                 }
                 Err(err) => show_error(&frame, &err),
             }
-        });
-    }
-
-    {
-        let handles = handles.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        provider_name.on_selection_changed(move |_| {
-            let selected = clean_provider_text(&provider_name.get_value());
-            let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) else {
-                return;
-            };
-            if let Some(provider) = find_provider(&snapshot, &selected) {
-                apply_provider_to_form(&handles, &provider, true);
-            }
-        });
-    }
-
-    {
-        let handles = handles.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        provider_list.on_selection_changed(move |_| {
-            let Some(index) = provider_list.get_selected_row() else {
-                return;
-            };
-            if let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) {
-                if let Some(provider) = provider_from_list_row(&snapshot, index) {
-                    apply_provider_to_form(&handles, &provider, true);
-                    return;
-                }
-            }
-            apply_provider_row_to_form(&handles, index);
         });
     }
 
@@ -1120,61 +937,6 @@ fn build_ui() {
     result_timer_store.borrow_mut().replace(result_timer);
     gui_timers.track(&result_timer_store);
 
-    let config_action_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
-    let config_action_timer = Timer::new(&frame);
-    {
-        let api = api.clone();
-        let handles = handles.clone();
-        let frame = frame;
-        let dashboard_refresh = dashboard_refresh.clone();
-        let config_action_result = config_action_result.clone();
-        let config_action_in_flight = config_action_in_flight.clone();
-        config_action_timer.on_tick(move |_| {
-            if !config_action_in_flight.load(Ordering::SeqCst)
-                && let Some((provider_name, enabled)) =
-                    handles.pending_provider_websocket.borrow_mut().take()
-            {
-                if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                    force_dashboard_refresh(&api, &dashboard_refresh);
-                    return;
-                }
-                config_action_in_flight.store(true, Ordering::SeqCst);
-                handles.provider_list.enable(false);
-                let thread_api = api.clone();
-                let config_action_result = config_action_result.clone();
-                let config_action_in_flight = config_action_in_flight.clone();
-                let text = handles.text;
-                thread::spawn(move || {
-                    let outcome = set_provider_websocket_and_verify(
-                        &thread_api,
-                        &provider_name,
-                        enabled,
-                        text,
-                    );
-                    if let Ok(mut slot) = config_action_result.lock() {
-                        slot.replace(ConfigActionResult::ProviderWebSocket {
-                            provider_name,
-                            result: outcome,
-                        });
-                    }
-                    config_action_in_flight.store(false, Ordering::SeqCst);
-                });
-            }
-            apply_pending_config_action(
-                &api,
-                &handles,
-                &frame,
-                &dashboard_refresh,
-                &config_action_result,
-            );
-        });
-    }
-    config_action_timer.start(DASHBOARD_RESULT_POLL_MS, false);
-    config_action_timer_store
-        .borrow_mut()
-        .replace(config_action_timer);
-    gui_timers.track(&config_action_timer_store);
-
     let im_action_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let im_action_timer = Timer::new(&frame);
     {
@@ -1223,6 +985,184 @@ fn build_ui() {
     im_action_timer.start(DASHBOARD_RESULT_POLL_MS, false);
     im_action_timer_store.borrow_mut().replace(im_action_timer);
     gui_timers.track(&im_action_timer_store);
+
+    // --- AI Gateway event handlers ---
+    let ai_gw_action_result: AiGwActionResultStore = Arc::new(Mutex::new(None));
+    let ai_gw_action_in_flight = Arc::new(AtomicBool::new(false));
+
+    {
+        let handles = handles.clone();
+        ai_gw_new_button.on_click(move |_| {
+            change_text_value_if_changed(&handles.ai_gw_name, "");
+            set_combo_value_if_changed(&handles.ai_gw_type, handles.text.provider_type_openai_responses());
+            change_text_value_if_changed(&handles.ai_gw_base_url, "");
+            change_text_value_if_changed(&handles.ai_gw_key, "");
+            change_text_value_if_changed(&handles.ai_gw_timeout, "300");
+            change_text_value_if_changed(&handles.ai_gw_models, "");
+            handles.ai_gw_catalog.set_label("");
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
+        let handles = handles.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+        ai_gw_save_button.on_click(move |_| {
+            if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let provider = ai_gw_provider_from_form(&handles);
+            if provider.name.is_empty() {
+                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
+                show_error(&frame, handles.text.ai_gw_provider_name_empty());
+                return;
+            }
+            handles.ai_gw_save_button.set_label(handles.text.ai_gw_saving());
+            set_ai_gw_actions_enabled(&handles, false);
+
+            let worker_api = api.clone();
+            let ai_gw_action_result = ai_gw_action_result.clone();
+            let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = save_ai_gw_provider(&worker_api, provider);
+                if let Ok(mut slot) = ai_gw_action_result.lock() {
+                    slot.replace(AiGwActionResult::Save(outcome));
+                }
+                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
+        let handles = handles.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+        ai_gw_delete_button.on_click(move |_| {
+            if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let name = handles.ai_gw_name.get_value().trim().to_string();
+            if name.is_empty() {
+                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
+                show_error(&frame, handles.text.ai_gw_provider_name_empty());
+                return;
+            }
+            handles.ai_gw_delete_button.set_label(handles.text.ai_gw_deleting());
+            set_ai_gw_actions_enabled(&handles, false);
+
+            let worker_api = api.clone();
+            let ai_gw_action_result = ai_gw_action_result.clone();
+            let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = delete_ai_gw_provider(&worker_api, &name);
+                if let Ok(mut slot) = ai_gw_action_result.lock() {
+                    slot.replace(AiGwActionResult::Delete(outcome));
+                }
+                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let handles = handles.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+        ai_gw_enabled.on_toggled(move |event| {
+            if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let enabled = event.is_checked();
+            handles.ai_gw_catalog.set_label(handles.text.ai_gw_toggling());
+            set_ai_gw_actions_enabled(&handles, false);
+
+            let worker_api = api.clone();
+            let ai_gw_action_result = ai_gw_action_result.clone();
+            let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = toggle_ai_gw_enabled(&worker_api, enabled);
+                if let Ok(mut slot) = ai_gw_action_result.lock() {
+                    slot.replace(AiGwActionResult::Toggle(outcome));
+                }
+                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+        ai_gw_default_provider.on_selection_changed(move |_| {
+            if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let name = ai_gw_default_provider.get_value().trim().to_string();
+            let worker_api = api.clone();
+            let ai_gw_action_result = ai_gw_action_result.clone();
+            let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = save_ai_gw_default_provider(&worker_api, &name);
+                if let Ok(mut slot) = ai_gw_action_result.lock() {
+                    slot.replace(AiGwActionResult::DefaultProvider(outcome));
+                }
+                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
+    {
+        let handles = handles.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        ai_gw_provider_list.on_selection_changed(move |_| {
+            let Some(index) = ai_gw_provider_list.get_selected_row() else {
+                return;
+            };
+            let rows = handles.ai_gw_provider_rows.borrow();
+            if index >= rows.len() {
+                return;
+            }
+            if let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) {
+                if let Some(config) = snapshot.ai_gateway.as_ref() {
+                    if let Some(provider) = config.providers.get(index) {
+                        apply_ai_gw_provider_to_form(&handles, provider);
+                    }
+                }
+            }
+        });
+    }
+
+    let ai_gw_action_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
+    let ai_gw_action_timer = Timer::new(&frame);
+    {
+        let handles = handles.clone();
+        let frame = frame;
+        let dashboard_refresh = dashboard_refresh.clone();
+        let api = api.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        ai_gw_action_timer.on_tick(move |_| {
+            if apply_pending_ai_gw_action(&handles, &frame, &ai_gw_action_result) {
+                force_dashboard_refresh(&api, &dashboard_refresh);
+            }
+        });
+    }
+    ai_gw_action_timer.start(DASHBOARD_RESULT_POLL_MS, false);
+    ai_gw_action_timer_store
+        .borrow_mut()
+        .replace(ai_gw_action_timer);
+    gui_timers.track(&ai_gw_action_timer_store);
 
     let timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let timer = Timer::new(&frame);
@@ -1371,24 +1311,30 @@ struct UiHandles {
     im_account_rows: ImAccountRows,
     im_account_model: ImAccountModel,
     pending_im_toggle: PendingImToggle,
-    pending_provider_websocket: PendingProviderWebsocketToggle,
     delete_im_account_button: Button,
     save_telegram_button: Button,
     connect_wechat_button: Button,
     change_bot_button: Button,
     uninstall_button: Button,
-    new_provider_button: Button,
-    save_provider_button: Button,
-    delete_provider_button: Button,
-    configure_button: Button,
     provider_image_generation: CheckBox,
-    provider_name: ComboBox,
-    provider_base_url: TextCtrl,
-    provider_key: TextCtrl,
-    provider_list: DataViewCtrl,
-    provider_rows: ProviderRows,
-    provider_model: ProviderModel,
-    provider_catalog: StaticText,
+    // AI Gateway fields
+    ai_gw_enabled: CheckBox,
+    ai_gw_default_provider: ComboBox,
+    ai_gw_provider_list: DataViewCtrl,
+    ai_gw_provider_rows: AiGwProviderRows,
+    ai_gw_provider_model: AiGwProviderModel,
+    ai_gw_name: TextCtrl,
+    ai_gw_type: ComboBox,
+    ai_gw_base_url: TextCtrl,
+    ai_gw_key: TextCtrl,
+    ai_gw_timeout: TextCtrl,
+    ai_gw_models: TextCtrl,
+    ai_gw_save_button: Button,
+    ai_gw_delete_button: Button,
+    ai_gw_new_button: Button,
+    ai_gw_entry_url: StaticText,
+    ai_gw_status_label: StaticText,
+    ai_gw_catalog: StaticText,
 }
 
 #[derive(Clone)]
@@ -1414,22 +1360,6 @@ impl DashboardRefresh {
             pending_startup_child: Arc::new(Mutex::new(None)),
         }
     }
-}
-
-enum ConfigActionResult {
-    Configure {
-        provider_name: String,
-        result: Result<CodexAppStatus, String>,
-    },
-    Save {
-        provider_name: String,
-        result: Result<CodexAppStatus, String>,
-    },
-    ProviderWebSocket {
-        provider_name: String,
-        result: Result<CodexAppStatus, String>,
-    },
-    Delete(Result<CodexAppStatus, String>),
 }
 
 enum ImActionResult {
@@ -1601,50 +1531,6 @@ fn show_dashboard_startup_error(handles: &UiHandles, detail: &str) {
     set_actions_enabled(handles, false);
 }
 
-fn show_local_codex_app_config_preview(
-    handles: &UiHandles,
-    api: &ApiClient,
-    refresh: &DashboardRefresh,
-) {
-    if CODEX_APP_GUI_UNSUPPORTED {
-        return;
-    }
-    let status = crate::codex_app_config::inspect_codex_app_config(None, &api.url("/backend-api"));
-    let snapshot = DashboardSnapshot {
-        service_online: false,
-        codex_app: Some(local_codex_app_status(status)),
-        ..DashboardSnapshot::default()
-    };
-    if let Ok(mut last_snapshot) = refresh.last_snapshot.lock() {
-        last_snapshot.replace(snapshot.clone());
-    }
-    fill_provider_form_if_empty(handles, &snapshot);
-}
-
-fn local_codex_app_status(status: crate::codex_app_config::CodexAppConfigStatus) -> CodexAppStatus {
-    CodexAppStatus {
-        configured: status.configured,
-        provider: status.provider.map(local_codex_app_provider_status),
-        providers: status
-            .providers
-            .into_iter()
-            .map(local_codex_app_provider_status)
-            .collect(),
-        image_generation_enabled: status.image_generation_enabled,
-    }
-}
-
-fn local_codex_app_provider_status(
-    provider: crate::codex_app_config::CodexAppProviderStatus,
-) -> CodexAppProviderStatus {
-    CodexAppProviderStatus {
-        name: provider.name,
-        base_url: provider.base_url,
-        key: provider.key,
-        supports_websockets: provider.supports_websockets,
-    }
-}
-
 fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_starting: bool) {
     let text = handles.text;
     if !snapshot.service_online {
@@ -1702,6 +1588,14 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     }
 
     set_actions_enabled(handles, true);
+
+    if let Some(codex_status) = &snapshot.codex_app {
+        if !handles.provider_image_generation.has_focus() {
+            handles
+                .provider_image_generation
+                .set_value(codex_status.image_generation_enabled);
+        }
+    }
 
     if let Some(status) = &snapshot.status {
         set_status_panel(
@@ -1785,6 +1679,33 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     } else {
         set_status_panel(&handles.cli_status, text.can_connect(), "", StateTone::Warn);
     }
+
+    // AI Gateway status
+    if let Some(gw) = &snapshot.ai_gateway {
+        if gw.enabled {
+            handles
+                .ai_gw_status_label
+                .set_label(&text.ai_gw_status_enabled(gw.providers.len()));
+        } else {
+            handles
+                .ai_gw_status_label
+                .set_label(text.ai_gw_status_disabled());
+        }
+        if !handles.ai_gw_enabled.has_focus() {
+            handles.ai_gw_enabled.set_value(gw.enabled);
+        }
+        let base = api_base_url_from_status(snapshot);
+        handles
+            .ai_gw_entry_url
+            .set_label(&format!("{}: {}", text.ai_gw_entry_url(), gateway_entry_url(&base)));
+        refresh_ai_gw_provider_list(handles, Some(gw));
+        refresh_ai_gw_default_provider_combo(handles, Some(gw));
+    } else {
+        handles
+            .ai_gw_status_label
+            .set_label(text.ai_gw_status_disabled());
+        refresh_ai_gw_provider_list(handles, None);
+    }
 }
 
 fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
@@ -1792,13 +1713,17 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.connect_wechat_button.enable(enabled);
     handles.save_telegram_button.enable(enabled);
     handles.delete_im_account_button.enable(enabled);
-    handles.configure_button.enable(enabled);
-    handles.new_provider_button.enable(enabled);
-    handles.save_provider_button.enable(enabled);
-    handles.delete_provider_button.enable(enabled);
     handles.provider_image_generation.enable(enabled);
-    handles.provider_list.enable(enabled);
     handles.uninstall_button.enable(enabled);
+    set_ai_gw_actions_enabled(handles, enabled);
+}
+
+fn api_base_url_from_status(snapshot: &DashboardSnapshot) -> String {
+    snapshot
+        .status
+        .as_ref()
+        .map(|s| format!("http://{}", s.bind))
+        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
 }
 
 fn remote_connection_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
@@ -1916,18 +1841,6 @@ fn confirm_uninstall_codex_app_config(parent: &dyn WxWidget, text: GuiText) -> b
         parent,
         text.confirm_uninstall_codex_app_message(),
         text.confirm_uninstall_codex_app_title(),
-    )
-    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
-    .build()
-    .show_modal()
-        == ID_YES
-}
-
-fn confirm_delete_provider(parent: &dyn WxWidget, text: GuiText, provider_name: &str) -> bool {
-    MessageDialog::builder(
-        parent,
-        &text.confirm_delete_provider_message(provider_name),
-        text.confirm_delete_provider_title(),
     )
     .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
     .build()

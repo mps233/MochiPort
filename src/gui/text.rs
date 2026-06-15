@@ -1496,4 +1496,183 @@ impl GuiText {
             GuiLocale::EnUs => format!("Failed to locate the current executable: {err}"),
         }
     }
+
+    // --- AI Gateway Tab ---
+
+    pub(super) fn ai_gateway_tab(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "AI Gateway",
+            GuiLocale::EnUs => "AI Gateway",
+        }
+    }
+
+    pub(super) fn ai_gateway_management(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "AI Gateway 管理",
+            GuiLocale::EnUs => "AI Gateway Management",
+        }
+    }
+
+    pub(super) fn ai_gateway_enabled(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启用 AI Gateway",
+            GuiLocale::EnUs => "Enable AI Gateway",
+        }
+    }
+
+    pub(super) fn ai_gw_col_name(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "名称",
+            GuiLocale::EnUs => "Name",
+        }
+    }
+
+    pub(super) fn ai_gw_col_type(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "类型",
+            GuiLocale::EnUs => "Type",
+        }
+    }
+
+    pub(super) fn ai_gw_col_base_url(self) -> &'static str {
+        "Base URL"
+    }
+
+    pub(super) fn ai_gw_col_api_key(self) -> &'static str {
+        "API Key"
+    }
+
+    pub(super) fn ai_gw_default_provider(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "默认 Provider",
+            GuiLocale::EnUs => "Default Provider",
+        }
+    }
+
+    pub(super) fn ai_gw_timeout(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "超时(秒)",
+            GuiLocale::EnUs => "Timeout (s)",
+        }
+    }
+
+    pub(super) fn ai_gw_models(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "模型列表",
+            GuiLocale::EnUs => "Models",
+        }
+    }
+
+    pub(super) fn ai_gw_provider_type(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "类型",
+            GuiLocale::EnUs => "Type",
+        }
+    }
+
+    pub(super) fn provider_type_openai_responses(self) -> &'static str {
+        "OpenAI Responses"
+    }
+
+    pub(super) fn provider_type_chat_completions(self) -> &'static str {
+        "Chat Completions"
+    }
+
+    pub(super) fn ai_gw_saving(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存中...",
+            GuiLocale::EnUs => "Saving...",
+        }
+    }
+
+    pub(super) fn ai_gw_saved(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "AI Gateway Provider 已保存。",
+            GuiLocale::EnUs => "AI Gateway provider saved.",
+        }
+    }
+
+    pub(super) fn ai_gw_deleted(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "AI Gateway Provider 已删除。",
+            GuiLocale::EnUs => "AI Gateway provider deleted.",
+        }
+    }
+
+    pub(super) fn ai_gw_save_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("保存 AI Gateway 配置失败：{err}"),
+            GuiLocale::EnUs => format!("Failed to save AI Gateway config: {err}"),
+        }
+    }
+
+    pub(super) fn ai_gw_provider_name_empty(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请输入 Provider 名称。",
+            GuiLocale::EnUs => "Please enter a provider name.",
+        }
+    }
+
+    pub(super) fn ai_gw_entry_url(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "入口地址",
+            GuiLocale::EnUs => "Entry URL",
+        }
+    }
+
+    pub(super) fn ai_gw_entry_url_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex/Claude 等客户端应设置 Base URL 为此地址",
+            GuiLocale::EnUs => "Set this URL as Base URL in Codex/Claude clients",
+        }
+    }
+
+    pub(super) fn ai_gw_status_enabled(self, count: usize) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("AI Gateway: 已启用 ({count} providers)"),
+            GuiLocale::EnUs => format!("AI Gateway: Enabled ({count} providers)"),
+        }
+    }
+
+    pub(super) fn ai_gw_status_disabled(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "AI Gateway: 未启用",
+            GuiLocale::EnUs => "AI Gateway: Disabled",
+        }
+    }
+
+    pub(super) fn ai_gw_provider_name(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Provider 名称",
+            GuiLocale::EnUs => "Provider Name",
+        }
+    }
+
+    pub(super) fn ai_gw_models_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "逗号分隔的模型名称列表",
+            GuiLocale::EnUs => "Comma-separated model names",
+        }
+    }
+
+    pub(super) fn ai_gw_toggling(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "切换中...",
+            GuiLocale::EnUs => "Toggling...",
+        }
+    }
+
+    pub(super) fn ai_gw_deleting(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除中...",
+            GuiLocale::EnUs => "Deleting...",
+        }
+    }
+
+    pub(super) fn ai_gw_restart_codex_hint(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "AI Gateway 已启用并注入 Codex 配置，请重启 Codex 生效。",
+            GuiLocale::EnUs => "AI Gateway enabled and injected into Codex config. Please restart Codex.",
+        }
+    }
 }

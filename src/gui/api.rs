@@ -3,6 +3,9 @@ use std::{thread, time::Duration};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use crate::ai_gateway::config::AiGatewayConfig;
+use crate::config::AppConfig;
+
 use super::text::GuiText;
 use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
 
@@ -129,6 +132,10 @@ impl ApiClient {
             self.get_quick_optional_async::<RemoteControlStatus>("/api/remote-control/status");
         let codex_app = self.get_quick_optional_async::<CodexAppStatus>("/api/codex-app/status");
         let im_accounts = self.get_quick_optional_async::<ImAccountsResponse>("/api/im/accounts");
+        let ai_gateway_config = {
+            let api = self.clone();
+            thread::spawn(move || api.get_quick::<AppConfig>("/api/config").ok().map(|c| c.ai_gateway))
+        };
 
         DashboardSnapshot {
             service_online: true,
@@ -136,6 +143,7 @@ impl ApiClient {
             codex_app: join_optional(codex_app),
             im_accounts: join_optional(im_accounts),
             status: Some(status),
+            ai_gateway: join_optional(ai_gateway_config),
         }
     }
 
@@ -157,17 +165,6 @@ impl ApiClient {
         self.post_json_with_timeout("/api/codex-app/configure", request, GUI_CONFIG_TIMEOUT)
     }
 
-    pub(super) fn set_codex_provider_websocket(
-        &self,
-        request: &SetProviderWebSocketRequest,
-    ) -> Result<serde_json::Value, String> {
-        self.post_json_with_timeout(
-            "/api/codex-app/provider/websocket",
-            request,
-            GUI_CONFIG_TIMEOUT,
-        )
-    }
-
     pub(super) fn delete_codex_provider(
         &self,
         request: &DeleteProviderRequest,
@@ -177,10 +174,6 @@ impl ApiClient {
             request,
             GUI_CONFIG_TIMEOUT,
         )
-    }
-
-    pub(super) fn codex_app_status(&self) -> Result<CodexAppStatus, String> {
-        self.get_with_timeout("/api/codex-app/status", GUI_CONFIG_TIMEOUT)
     }
 
     pub(super) fn uninstall_codex_app(&self) -> Result<serde_json::Value, String> {
@@ -247,6 +240,14 @@ impl ApiClient {
             }),
         )
     }
+
+    pub(super) fn get_app_config(&self) -> Result<AppConfig, String> {
+        self.get_with_timeout("/api/config", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn save_app_config(&self, config: &AppConfig) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout("/api/config", config, GUI_CONFIG_TIMEOUT)
+    }
 }
 
 fn join_optional<T>(handle: thread::JoinHandle<Option<T>>) -> Option<T> {
@@ -260,6 +261,7 @@ pub(super) struct DashboardSnapshot {
     pub(super) remote: Option<RemoteControlStatus>,
     pub(super) codex_app: Option<CodexAppStatus>,
     pub(super) im_accounts: Option<ImAccountsResponse>,
+    pub(super) ai_gateway: Option<AiGatewayConfig>,
 }
 
 #[derive(Clone, Deserialize)]
@@ -349,13 +351,6 @@ pub(super) struct ConfigureRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct DeleteProviderRequest {
     pub(super) provider_name: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct SetProviderWebSocketRequest {
-    pub(super) provider_name: String,
-    pub(super) enabled: bool,
 }
 
 #[derive(Serialize)]
