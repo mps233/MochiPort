@@ -6,6 +6,11 @@
 - A local ChatGPT backend-shaped base URL
 - IM channel adapters: Feishu websocket/message APIs, Telegram Bot API, and WeChat iLink APIs
 
+The planned AI Gateway is documented separately in
+[`ai-gateway-architecture.zh-CN.md`](ai-gateway-architecture.zh-CN.md). It is an
+independent model API layer for Codex Responses requests and must not be mixed
+with the existing remote-control backend.
+
 It is not a Codex client replacement. It implements the remote-control backend that official Codex app-server connects to, then adapts those JSON-RPC messages to IM channels.
 
 The design target is strict:

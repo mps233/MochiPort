@@ -1,5 +1,6 @@
 #![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
 
+mod ai_gateway;
 mod app_state;
 mod bridge;
 mod chain_log;

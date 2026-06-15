@@ -131,6 +131,7 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/events", get(events))
         .merge(remote_control_backend::router())
+        .nest("/ai-gateway", crate::ai_gateway::router())
         .layer(middleware::from_fn(access_log))
         .with_state(state)
 }

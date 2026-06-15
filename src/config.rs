@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub telegram_accounts: Vec<TelegramConfig>,
     pub wechat_accounts: Vec<WechatConfig>,
     pub bridge: BridgeConfig,
+    pub ai_gateway: crate::ai_gateway::config::AiGatewayConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +94,7 @@ impl Default for AppConfig {
             telegram_accounts: Vec::new(),
             wechat_accounts: Vec::new(),
             bridge: BridgeConfig::default(),
+            ai_gateway: crate::ai_gateway::config::AiGatewayConfig::default(),
         }
     }
 }
