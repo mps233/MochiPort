@@ -198,8 +198,3 @@ pub(super) fn set_ai_gw_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.ai_gw_edit_button.enable(enabled);
     handles.ai_gw_provider_list.enable(enabled);
 }
-
-pub(super) fn gateway_entry_url(base_url: &str) -> String {
-    let base = base_url.trim_end_matches('/');
-    format!("{base}/ai-gateway/v1")
-}

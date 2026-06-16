@@ -69,7 +69,7 @@ mod widgets;
 
 use self::ai_gateway::{
     AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRow, AiGwProviderRows,
-    PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider, gateway_entry_url,
+    PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
     provider_logo_variant, provider_type_display, refresh_ai_gw_provider_list, save_ai_gw_provider,
     set_ai_gw_actions_enabled, set_ai_gw_provider_enabled,
 };
@@ -331,20 +331,6 @@ fn build_ui() {
         .build();
     let ai_gw_header =
         StaticBoxSizerBuilder::new_with_box(&ai_gw_header_box, Orientation::Vertical).build();
-
-    let ai_gw_entry_url = StaticText::builder(&ai_gw_header_box)
-        .with_label("")
-        .build();
-    ai_gw_entry_url.set_foreground_color(Colour::rgb(91, 100, 114));
-    ai_gw_entry_url.set_tooltip(text.ai_gw_entry_url_help());
-    let ai_gw_enable_row = BoxSizer::builder(Orientation::Horizontal).build();
-    ai_gw_enable_row.add(&ai_gw_entry_url, 1, SizerFlag::AlignCenterVertical, 0);
-    ai_gw_header.add_sizer(
-        &ai_gw_enable_row,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
-        12,
-    );
 
     let ai_gw_catalog = StaticText::builder(&ai_gw_header_box)
         .with_label("")
@@ -743,7 +729,6 @@ fn build_ui() {
         ai_gw_delete_button,
         ai_gw_new_button,
         ai_gw_edit_button,
-        ai_gw_entry_url,
         ai_gw_status_label,
         ai_gw_catalog,
     };
@@ -2130,7 +2115,6 @@ struct UiHandles {
     ai_gw_delete_button: Button,
     ai_gw_new_button: Button,
     ai_gw_edit_button: Button,
-    ai_gw_entry_url: StaticText,
     ai_gw_status_label: StaticText,
     ai_gw_catalog: StaticText,
 }
@@ -2530,12 +2514,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         handles
             .ai_gw_status_label
             .set_label(&text.ai_gw_status_enabled(gw.providers.len()));
-        let base = api_base_url_from_status(snapshot);
-        handles.ai_gw_entry_url.set_label(&format!(
-            "{}: {}",
-            text.ai_gw_entry_url(),
-            gateway_entry_url(&base)
-        ));
         refresh_ai_gw_provider_list(handles, Some(gw));
     } else {
         handles
@@ -2554,14 +2532,6 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.inject_codex_button.enable(enabled);
     handles.uninstall_button.enable(enabled);
     set_ai_gw_actions_enabled(handles, enabled);
-}
-
-fn api_base_url_from_status(snapshot: &DashboardSnapshot) -> String {
-    snapshot
-        .status
-        .as_ref()
-        .map(|s| format!("http://{}", s.bind))
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
 }
 
 fn remote_connection_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {

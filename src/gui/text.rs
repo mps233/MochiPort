@@ -1814,20 +1814,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn ai_gw_entry_url(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "入口地址",
-            GuiLocale::EnUs => "Entry URL",
-        }
-    }
-
-    pub(super) fn ai_gw_entry_url_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "Codex/Claude 等客户端应设置 Base URL 为此地址",
-            GuiLocale::EnUs => "Set this URL as Base URL in Codex/Claude clients",
-        }
-    }
-
     pub(super) fn ai_gw_status_enabled(self, count: usize) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!("AI Gateway: 已启用 ({count} 个渠道)"),
