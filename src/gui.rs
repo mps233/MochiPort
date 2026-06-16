@@ -326,29 +326,6 @@ fn build_ui() {
     ai_gw_page.set_background_color(Colour::rgb(250, 251, 253));
     let ai_gw_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let ai_gw_header_box = StaticBox::builder(&ai_gw_page)
-        .with_label(text.ai_gateway_tab())
-        .build();
-    let ai_gw_header =
-        StaticBoxSizerBuilder::new_with_box(&ai_gw_header_box, Orientation::Vertical).build();
-
-    let ai_gw_catalog = StaticText::builder(&ai_gw_header_box)
-        .with_label("")
-        .build();
-    ai_gw_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
-    ai_gw_header.add(
-        &ai_gw_catalog,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        8,
-    );
-    ai_gw_sizer.add_sizer(
-        &ai_gw_header,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        10,
-    );
-
     let ai_gw_list_box = StaticBox::builder(&ai_gw_page)
         .with_label(text.ai_gw_channel_list())
         .build();
@@ -730,7 +707,6 @@ fn build_ui() {
         ai_gw_new_button,
         ai_gw_edit_button,
         ai_gw_status_label,
-        ai_gw_catalog,
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
@@ -1157,9 +1133,6 @@ fn build_ui() {
                     return;
                 }
                 ai_gw_action_in_flight.store(true, Ordering::SeqCst);
-                handles
-                    .ai_gw_catalog
-                    .set_label(handles.text.ai_gw_toggling());
                 set_ai_gw_actions_enabled(&handles, false);
                 let worker_api = api.clone();
                 let ai_gw_action_result = ai_gw_action_result.clone();
@@ -1389,7 +1362,6 @@ fn start_ai_gw_provider_save(
     if in_flight.swap(true, Ordering::SeqCst) {
         return;
     }
-    handles.ai_gw_catalog.set_label(handles.text.ai_gw_saving());
     set_ai_gw_actions_enabled(handles, false);
 
     let worker_api = api.clone();
@@ -2116,7 +2088,6 @@ struct UiHandles {
     ai_gw_new_button: Button,
     ai_gw_edit_button: Button,
     ai_gw_status_label: StaticText,
-    ai_gw_catalog: StaticText,
 }
 
 #[derive(Clone)]

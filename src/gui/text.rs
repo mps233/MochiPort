@@ -1772,13 +1772,6 @@ impl GuiText {
         "Chat Completions"
     }
 
-    pub(super) fn ai_gw_saving(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "保存中...",
-            GuiLocale::EnUs => "Saving...",
-        }
-    }
-
     pub(super) fn ai_gw_saved(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "渠道已保存。",
@@ -1825,13 +1818,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "渠道名称",
             GuiLocale::EnUs => "Channel Name",
-        }
-    }
-
-    pub(super) fn ai_gw_toggling(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "切换中...",
-            GuiLocale::EnUs => "Toggling...",
         }
     }
 

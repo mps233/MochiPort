@@ -158,34 +158,19 @@ pub(super) fn apply_pending_ai_gw_action(
 
     match result {
         AiGwActionResult::Save(Ok(())) => {
-            handles.ai_gw_catalog.set_label(handles.text.ai_gw_saved());
             super::show_info(frame, handles.text.ai_gw_saved());
         }
         AiGwActionResult::Save(Err(err)) => {
-            handles
-                .ai_gw_catalog
-                .set_label(&handles.text.ai_gw_save_failed(&err));
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
         AiGwActionResult::Delete(Ok(())) => {
-            handles
-                .ai_gw_catalog
-                .set_label(handles.text.ai_gw_deleted());
             super::show_info(frame, handles.text.ai_gw_deleted());
         }
         AiGwActionResult::Delete(Err(err)) => {
-            handles
-                .ai_gw_catalog
-                .set_label(&handles.text.ai_gw_save_failed(&err));
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
-        AiGwActionResult::ChannelToggle(Ok(())) => {
-            handles.ai_gw_catalog.set_label("");
-        }
+        AiGwActionResult::ChannelToggle(Ok(())) => {}
         AiGwActionResult::ChannelToggle(Err(err)) => {
-            handles
-                .ai_gw_catalog
-                .set_label(&handles.text.ai_gw_save_failed(&err));
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
     }
