@@ -17,7 +17,7 @@ use wxdragon::widgets::dataview::{
 use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
-use crate::ai_gateway::config::{ProviderConfig, ProviderType};
+use crate::ai_gateway::config::{ProviderConfig, ProviderType, provider_api_root};
 use crate::config::AppConfig;
 
 #[cfg(target_os = "windows")]
@@ -1792,10 +1792,11 @@ fn show_ai_gw_channel_dialog(
                 .parse::<u64>()
                 .unwrap_or(60);
             match fetch_remote_models(&base_url, &api_key, timeout_secs) {
-                Ok(models) => {
+                Ok((models, normalized_base_url)) => {
                     if models.is_empty() {
                         show_error(&dialog, text.ai_gw_models_empty());
                     } else {
+                        base_url_input.change_value(&normalized_base_url);
                         models_list.clear();
                         let count = append_models_to_list(&models_list, models);
                         show_info(&dialog, &text.ai_gw_models_fetched(count));
@@ -1944,27 +1945,94 @@ fn fetch_remote_models(
     base_url: &str,
     api_key: &str,
     timeout_secs: u64,
-) -> Result<Vec<String>, String> {
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+) -> Result<(Vec<String>, String), String> {
     let timeout = Duration::from_secs(timeout_secs.max(1));
     let client = reqwest::blocking::Client::builder()
         .timeout(timeout)
         .build()
         .map_err(|err| err.to_string())?;
-    let mut request = client.get(&url);
-    if !api_key.trim().is_empty() {
-        request = request.header("authorization", format!("Bearer {}", api_key.trim()));
+    let mut errors = Vec::new();
+    for candidate in model_list_candidates(base_url) {
+        let mut request = client.get(&candidate.url);
+        if !api_key.trim().is_empty() {
+            request = request.header("authorization", format!("Bearer {}", api_key.trim()));
+        }
+
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(err) => {
+                errors.push(format!("{}: {}", candidate.url, err));
+                continue;
+            }
+        };
+        let status = response.status();
+        let body = match response.text() {
+            Ok(body) => body,
+            Err(err) => {
+                errors.push(format!("{}: {}", candidate.url, err));
+                continue;
+            }
+        };
+        if !status.is_success() {
+            errors.push(format!(
+                "{}: HTTP {status}: {}",
+                candidate.url,
+                response_preview(&body)
+            ));
+            continue;
+        }
+
+        match serde_json::from_str::<serde_json::Value>(&body) {
+            Ok(json) => return Ok((extract_model_ids(&json), candidate.normalized_base_url)),
+            Err(err) => errors.push(format!(
+                "{}: response is not JSON ({err}): {}",
+                candidate.url,
+                response_preview(&body)
+            )),
+        }
+    }
+    Err(errors.join("; "))
+}
+
+struct ModelListCandidate {
+    url: String,
+    normalized_base_url: String,
+}
+
+fn model_list_candidates(base_url: &str) -> Vec<ModelListCandidate> {
+    let raw = base_url.trim().trim_end_matches('/');
+    if raw.is_empty() {
+        return Vec::new();
     }
 
-    let response = request.send().map_err(|err| err.to_string())?;
-    let status = response.status();
-    let body = response.text().map_err(|err| err.to_string())?;
-    if !status.is_success() {
-        return Err(format!("HTTP {status}: {body}"));
-    }
+    let root = provider_api_root(raw);
+    let mut candidates = Vec::new();
+    push_model_list_candidate(&mut candidates, format!("{raw}/models"), raw.to_string());
+    push_model_list_candidate(
+        &mut candidates,
+        format!("{root}/v1/models"),
+        format!("{root}/v1"),
+    );
+    candidates
+}
 
-    let json: serde_json::Value = serde_json::from_str(&body).map_err(|err| err.to_string())?;
-    Ok(extract_model_ids(&json))
+fn push_model_list_candidate(
+    candidates: &mut Vec<ModelListCandidate>,
+    url: String,
+    normalized_base_url: String,
+) {
+    if candidates.iter().any(|candidate| candidate.url == url) {
+        return;
+    }
+    candidates.push(ModelListCandidate {
+        url,
+        normalized_base_url,
+    });
+}
+
+fn response_preview(body: &str) -> String {
+    let preview: String = body.chars().take(240).collect();
+    preview.replace(['\r', '\n', '\t'], " ")
 }
 
 fn extract_model_ids(value: &serde_json::Value) -> Vec<String> {

@@ -38,6 +38,19 @@ impl AiGatewayConfig {
     }
 }
 
+/// 将 provider Base URL 规范成 API 根地址。
+///
+/// UI 允许用户填 `https://api.example.com` 或 `https://api.example.com/v1`；
+/// 出站请求统一在这里去掉末尾 `/v1`，再拼具体路径。
+pub fn provider_api_root(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.to_ascii_lowercase().ends_with("/v1") {
+        base[..base.len() - 3].trim_end_matches('/').to_string()
+    } else {
+        base.to_string()
+    }
+}
+
 /// 单个 provider 配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -226,5 +239,21 @@ mod tests {
         );
         assert_eq!(config.providers[0].timeout_secs, 120);
         assert_eq!(config.providers[1].timeout_secs, 300); // default
+    }
+
+    #[test]
+    fn test_provider_api_root_accepts_versioned_or_root_base_url() {
+        assert_eq!(
+            provider_api_root("https://api.deepseek.com"),
+            "https://api.deepseek.com"
+        );
+        assert_eq!(
+            provider_api_root("https://api.deepseek.com/v1"),
+            "https://api.deepseek.com"
+        );
+        assert_eq!(
+            provider_api_root("https://proxy.example.com/openai/v1/"),
+            "https://proxy.example.com/openai"
+        );
     }
 }

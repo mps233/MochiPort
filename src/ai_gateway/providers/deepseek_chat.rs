@@ -8,7 +8,7 @@ use axum::{
 };
 use tracing::{debug, error};
 
-use crate::ai_gateway::config::ProviderConfig;
+use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::GatewayRequest;
@@ -26,10 +26,7 @@ pub async fn handle(
     let chat_body = build_chat_request(request, true)
         .map_err(|e| GatewayError::bad_request(format!("transform error: {e}")))?;
 
-    let url = format!(
-        "{}/v1/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/chat/completions", provider_api_root(&provider.base_url));
 
     debug!(url = %url, stream = request.stream, "proxying to deepseek chat");
 

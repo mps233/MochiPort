@@ -116,6 +116,8 @@ apiKeyEnv = "DEEPSEEK_API_KEY"
 models = ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro"]
 ```
 
+`baseUrl` 可以填厂商根地址（如 `https://api.deepseek.com`）或带版本路径的地址（如 `https://api.deepseek.com/v1`）。运行时会统一规范化，避免拼出重复的 `/v1/v1/...`。GUI 获取远端模型列表时会先尝试 `{baseUrl}/models`，如果缺少 API 版本会再尝试 `{baseUrl}/v1/models`。
+
 Codex 侧 provider 配置示例：
 
 ```toml
