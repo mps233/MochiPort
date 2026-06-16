@@ -1677,36 +1677,28 @@ fn show_ai_gw_channel_dialog(
         key_input.change_value(&provider.api_key);
     }
 
-    let is_new_channel = initial.is_none();
+    let service_template_applying = Rc::new(RefCell::new(false));
     {
         let type_input = type_input;
         let name_input = name_input;
         let base_url_input = base_url_input;
+        let key_input = key_input;
         let models_list = models_list;
-        let timeout_input = timeout_input;
+        let service_template_applying = service_template_applying.clone();
         radio_openai.on_selected(move |_| {
-            if radio_openai.get_value() {
-                if is_new_channel {
-                    apply_ai_gw_dialog_template(
-                        text,
-                        None,
-                        &radio_openai,
-                        &radio_deepseek,
-                        &type_input,
-                        &name_input,
-                        &base_url_input,
-                        &models_list,
-                        &timeout_input,
-                    );
-                } else {
-                    set_ai_gw_dialog_provider_type(
-                        text,
-                        ProviderType::OpenAiResponses,
-                        &radio_openai,
-                        &radio_deepseek,
-                        &type_input,
-                    );
-                }
+            if radio_openai.get_value() && !*service_template_applying.borrow() {
+                apply_ai_gw_service_template(
+                    text,
+                    ProviderType::OpenAiResponses,
+                    &radio_openai,
+                    &radio_deepseek,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &key_input,
+                    &models_list,
+                    &service_template_applying,
+                );
             }
         });
     }
@@ -1714,38 +1706,23 @@ fn show_ai_gw_channel_dialog(
         let type_input = type_input;
         let name_input = name_input;
         let base_url_input = base_url_input;
+        let key_input = key_input;
         let models_list = models_list;
-        let timeout_input = timeout_input;
+        let service_template_applying = service_template_applying.clone();
         radio_deepseek.on_selected(move |_| {
-            if radio_deepseek.get_value() {
-                if is_new_channel {
-                    let provider = ProviderConfig {
-                        name: "deepseek".to_string(),
-                        provider_type: ProviderType::ChatCompletions,
-                        base_url: "https://api.deepseek.com/v1".to_string(),
-                        timeout_secs: 60,
-                        ..Default::default()
-                    };
-                    apply_ai_gw_dialog_template(
-                        text,
-                        Some(&provider),
-                        &radio_openai,
-                        &radio_deepseek,
-                        &type_input,
-                        &name_input,
-                        &base_url_input,
-                        &models_list,
-                        &timeout_input,
-                    );
-                } else {
-                    set_ai_gw_dialog_provider_type(
-                        text,
-                        ProviderType::ChatCompletions,
-                        &radio_openai,
-                        &radio_deepseek,
-                        &type_input,
-                    );
-                }
+            if radio_deepseek.get_value() && !*service_template_applying.borrow() {
+                apply_ai_gw_service_template(
+                    text,
+                    ProviderType::ChatCompletions,
+                    &radio_openai,
+                    &radio_deepseek,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &key_input,
+                    &models_list,
+                    &service_template_applying,
+                );
             }
         });
     }
@@ -1903,6 +1880,61 @@ fn apply_ai_gw_dialog_template(
     base_url_input.change_value(&provider.base_url);
     replace_model_list(models_list, &provider.models);
     timeout_input.change_value(&provider.timeout_secs.to_string());
+}
+
+fn apply_ai_gw_service_template(
+    text: GuiText,
+    provider_type: ProviderType,
+    radio_openai: &RadioButton,
+    radio_deepseek: &RadioButton,
+    type_input: &TextCtrl,
+    name_input: &TextCtrl,
+    base_url_input: &TextCtrl,
+    key_input: &TextCtrl,
+    models_list: &ListBox,
+    service_template_applying: &Rc<RefCell<bool>>,
+) {
+    *service_template_applying.borrow_mut() = true;
+    let provider = default_ai_gw_service_provider(provider_type);
+    set_ai_gw_dialog_provider_type(
+        text,
+        provider.provider_type.clone(),
+        radio_openai,
+        radio_deepseek,
+        type_input,
+    );
+
+    let current_name = strip_nul(&name_input.get_value()).trim().to_string();
+    if current_name.is_empty() || is_default_ai_gw_channel_name(&current_name) {
+        name_input.change_value(&provider.name);
+    }
+    base_url_input.change_value(&provider.base_url);
+    key_input.change_value("");
+    replace_model_list(models_list, &provider.models);
+    *service_template_applying.borrow_mut() = false;
+}
+
+fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig {
+    match provider_type {
+        ProviderType::OpenAiResponses => ProviderConfig {
+            name: "openai".to_string(),
+            provider_type: ProviderType::OpenAiResponses,
+            base_url: "https://api.openai.com/v1".to_string(),
+            timeout_secs: 60,
+            ..Default::default()
+        },
+        ProviderType::ChatCompletions => ProviderConfig {
+            name: "deepseek".to_string(),
+            provider_type: ProviderType::ChatCompletions,
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            timeout_secs: 60,
+            ..Default::default()
+        },
+    }
+}
+
+fn is_default_ai_gw_channel_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("openai") || name.eq_ignore_ascii_case("deepseek")
 }
 
 fn set_ai_gw_dialog_provider_type(
