@@ -2038,6 +2038,7 @@ fn push_model_items(models: &mut Vec<String>, items: &[serde_json::Value]) {
         let id = item
             .as_str()
             .or_else(|| item.get("id").and_then(|value| value.as_str()))
+            .or_else(|| item.get("slug").and_then(|value| value.as_str()))
             .map(str::trim)
             .filter(|id| !id.is_empty());
         if let Some(id) = id {

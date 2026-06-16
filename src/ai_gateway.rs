@@ -1,3 +1,4 @@
+pub mod catalog;
 pub mod config;
 pub mod context;
 pub mod error;
@@ -7,11 +8,16 @@ pub mod providers;
 pub mod router;
 pub mod transform;
 
-use axum::{Router, routing::post};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 use crate::app_state::SharedState;
 
 /// 构建 AI Gateway 子路由（state 由父 Router 提供）。
 pub fn router() -> Router<SharedState> {
-    Router::new().route("/v1/responses", post(handler::handle_responses))
+    Router::new()
+        .route("/v1/responses", post(handler::handle_responses))
+        .route("/v1/models", get(handler::handle_models))
 }

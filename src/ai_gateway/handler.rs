@@ -1,8 +1,9 @@
-use axum::{body::Bytes, extract::State, http::HeaderMap, response::IntoResponse};
+use axum::{Json, body::Bytes, extract::State, http::HeaderMap, response::IntoResponse};
 use tracing::info;
 
 use crate::app_state::SharedState;
 
+use super::catalog::configured_models_response;
 use super::config::ProviderType;
 use super::context::GatewayContext;
 use super::error::GatewayError;
@@ -69,4 +70,13 @@ pub async fn handle_responses(
             }
         }
     }
+}
+
+/// GET /ai-gateway/v1/models
+pub async fn handle_models(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    let gw_config = config.ai_gateway.clone();
+    drop(config);
+
+    Json(configured_models_response(&gw_config))
 }
