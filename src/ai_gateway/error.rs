@@ -42,15 +42,6 @@ impl GatewayError {
         }
     }
 
-    pub fn gateway_disabled() -> Self {
-        Self {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            error_type: "service_unavailable",
-            code: "gateway_disabled",
-            message: "AI Gateway is not enabled".into(),
-        }
-    }
-
     pub fn upstream(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,

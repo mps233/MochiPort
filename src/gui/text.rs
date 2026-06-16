@@ -1550,13 +1550,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn ai_gateway_enabled(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "启用 AI Gateway",
-            GuiLocale::EnUs => "Enable AI Gateway",
-        }
-    }
-
     pub(super) fn ai_gw_channel_list(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "渠道列表",
@@ -1842,13 +1835,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn ai_gw_status_disabled(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "AI Gateway: 未启用",
-            GuiLocale::EnUs => "AI Gateway: Disabled",
-        }
-    }
-
     pub(super) fn ai_gw_provider_name(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "渠道名称",
@@ -1867,15 +1853,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "删除中...",
             GuiLocale::EnUs => "Deleting...",
-        }
-    }
-
-    pub(super) fn ai_gw_restart_codex_hint(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "AI Gateway 已启用并注入 Codex 配置，请重启 Codex 生效。",
-            GuiLocale::EnUs => {
-                "AI Gateway enabled and injected into Codex config. Please restart Codex."
-            }
         }
     }
 }

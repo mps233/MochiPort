@@ -169,17 +169,6 @@ impl ApiClient {
         self.post_json_with_timeout("/api/codex-app/configure", request, GUI_CONFIG_TIMEOUT)
     }
 
-    pub(super) fn delete_codex_provider(
-        &self,
-        request: &DeleteProviderRequest,
-    ) -> Result<serde_json::Value, String> {
-        self.post_json_with_timeout(
-            "/api/codex-app/provider/delete",
-            request,
-            GUI_CONFIG_TIMEOUT,
-        )
-    }
-
     pub(super) fn uninstall_codex_app(&self) -> Result<serde_json::Value, String> {
         self.post_empty_with_timeout("/api/codex-app/uninstall", GUI_CONFIG_TIMEOUT)
     }
@@ -349,12 +338,6 @@ pub(super) struct ConfigureRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) image_generation_enabled: Option<bool>,
     pub(super) supports_websockets: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct DeleteProviderRequest {
-    pub(super) provider_name: String,
 }
 
 #[derive(Serialize)]

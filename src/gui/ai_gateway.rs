@@ -10,7 +10,7 @@ use crate::ai_gateway::config::{
 };
 
 use super::UiHandles;
-use super::api::{ApiClient, ConfigureRequest, DeleteProviderRequest};
+use super::api::ApiClient;
 use super::widgets::{ProviderLogoKind, provider_logo_bitmap};
 
 pub(super) type AiGwProviderRows = Rc<RefCell<Vec<AiGwProviderRow>>>;
@@ -30,7 +30,6 @@ pub(super) struct AiGwProviderRow {
 pub(super) enum AiGwActionResult {
     Save(Result<(), String>),
     Delete(Result<(), String>),
-    Toggle(Result<(), String>),
     ChannelToggle(Result<(), String>),
 }
 
@@ -58,31 +57,6 @@ pub(super) fn delete_ai_gw_provider(api: &ApiClient, name: &str) -> Result<(), S
     let mut config = api.get_app_config()?;
     config.ai_gateway.providers.retain(|p| p.name != name);
     api.save_app_config(&config)?;
-    Ok(())
-}
-
-pub(super) fn toggle_ai_gw_enabled(api: &ApiClient, enabled: bool) -> Result<(), String> {
-    let mut config = api.get_app_config()?;
-    config.ai_gateway.enabled = enabled;
-    api.save_app_config(&config)?;
-
-    if enabled {
-        let request = ConfigureRequest {
-            provider_name: Some("ai-gateway".to_string()),
-            provider_base_url: Some(gateway_entry_url(&api.base_url)),
-            provider_key: Some(String::new()),
-            model: None,
-            activate: true,
-            image_generation_enabled: None,
-            supports_websockets: false,
-        };
-        api.configure_codex_app(&request)?;
-    } else {
-        let request = DeleteProviderRequest {
-            provider_name: "ai-gateway".to_string(),
-        };
-        let _ = api.delete_codex_provider(&request);
-    }
     Ok(())
 }
 
@@ -138,14 +112,12 @@ fn ai_gw_provider_list_rows(config: Option<&AiGatewayConfig>) -> Vec<AiGwProvide
     config
         .providers
         .iter()
-        .map(|provider| {
-            AiGwProviderRow {
-                enabled: provider.enabled,
-                name: provider.name.clone(),
-                provider_type: provider.provider_type.clone(),
-                base_url: provider.base_url.clone(),
-                timeout_secs: provider.timeout_secs,
-            }
+        .map(|provider| AiGwProviderRow {
+            enabled: provider.enabled,
+            name: provider.name.clone(),
+            provider_type: provider.provider_type.clone(),
+            base_url: provider.base_url.clone(),
+            timeout_secs: provider.timeout_secs,
         })
         .collect()
 }
@@ -207,18 +179,6 @@ pub(super) fn apply_pending_ai_gw_action(
                 .set_label(&handles.text.ai_gw_save_failed(&err));
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
-        AiGwActionResult::Toggle(Ok(())) => {
-            handles
-                .ai_gw_catalog
-                .set_label(handles.text.ai_gw_restart_codex_hint());
-            super::show_info(frame, handles.text.ai_gw_restart_codex_hint());
-        }
-        AiGwActionResult::Toggle(Err(err)) => {
-            handles
-                .ai_gw_catalog
-                .set_label(&handles.text.ai_gw_save_failed(&err));
-            super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
-        }
         AiGwActionResult::ChannelToggle(Ok(())) => {
             handles.ai_gw_catalog.set_label("");
         }
@@ -236,7 +196,6 @@ pub(super) fn set_ai_gw_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.ai_gw_delete_button.enable(enabled);
     handles.ai_gw_new_button.enable(enabled);
     handles.ai_gw_edit_button.enable(enabled);
-    handles.ai_gw_enabled.enable(enabled);
     handles.ai_gw_provider_list.enable(enabled);
 }
 

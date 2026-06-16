@@ -68,11 +68,10 @@ mod update;
 mod widgets;
 
 use self::ai_gateway::{
-    AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRow,
-    AiGwProviderRows, PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
-    gateway_entry_url, provider_logo_variant, provider_type_display, refresh_ai_gw_provider_list,
-    save_ai_gw_provider, set_ai_gw_actions_enabled, set_ai_gw_provider_enabled,
-    toggle_ai_gw_enabled,
+    AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRow, AiGwProviderRows,
+    PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider, gateway_entry_url,
+    provider_logo_variant, provider_type_display, refresh_ai_gw_provider_list, save_ai_gw_provider,
+    set_ai_gw_actions_enabled, set_ai_gw_provider_enabled,
 };
 use self::api::{
     ApiClient, ConfigureRequest, ConfigureTelegramBotRequest, DashboardSnapshot,
@@ -235,7 +234,7 @@ fn build_ui() {
         8,
     );
     let ai_gw_status_label = StaticText::builder(&status_box)
-        .with_label(text.ai_gw_status_disabled())
+        .with_label(&text.ai_gw_status_enabled(0))
         .build();
     ai_gw_status_label.set_foreground_color(Colour::rgb(103, 111, 124));
     status_section.add(
@@ -333,22 +332,12 @@ fn build_ui() {
     let ai_gw_header =
         StaticBoxSizerBuilder::new_with_box(&ai_gw_header_box, Orientation::Vertical).build();
 
-    let ai_gw_enabled = CheckBox::builder(&ai_gw_header_box)
-        .with_label(text.ai_gateway_enabled())
-        .with_value(false)
-        .build();
     let ai_gw_entry_url = StaticText::builder(&ai_gw_header_box)
         .with_label("")
         .build();
     ai_gw_entry_url.set_foreground_color(Colour::rgb(91, 100, 114));
     ai_gw_entry_url.set_tooltip(text.ai_gw_entry_url_help());
     let ai_gw_enable_row = BoxSizer::builder(Orientation::Horizontal).build();
-    ai_gw_enable_row.add(
-        &ai_gw_enabled,
-        0,
-        SizerFlag::Right | SizerFlag::AlignCenterVertical,
-        12,
-    );
     ai_gw_enable_row.add(&ai_gw_entry_url, 1, SizerFlag::AlignCenterVertical, 0);
     ai_gw_header.add_sizer(
         &ai_gw_enable_row,
@@ -747,7 +736,6 @@ fn build_ui() {
         inject_codex_button,
         uninstall_button,
         provider_image_generation,
-        ai_gw_enabled,
         ai_gw_provider_list,
         ai_gw_provider_rows,
         ai_gw_provider_model,
@@ -1139,36 +1127,6 @@ fn build_ui() {
     {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
-        let handles = handles.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
-        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
-        ai_gw_enabled.on_toggled(move |event| {
-            if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            let enabled = event.is_checked();
-            handles
-                .ai_gw_catalog
-                .set_label(handles.text.ai_gw_toggling());
-            set_ai_gw_actions_enabled(&handles, false);
-
-            let worker_api = api.clone();
-            let ai_gw_action_result = ai_gw_action_result.clone();
-            let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
-            thread::spawn(move || {
-                let outcome = toggle_ai_gw_enabled(&worker_api, enabled);
-                if let Ok(mut slot) = ai_gw_action_result.lock() {
-                    slot.replace(AiGwActionResult::Toggle(outcome));
-                }
-                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
-            });
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         let handles = handles.clone();
         let ai_gw_action_result = ai_gw_action_result.clone();
@@ -1426,7 +1384,12 @@ fn selected_ai_gw_provider(
     snapshot
         .ai_gateway
         .as_ref()
-        .and_then(|config| config.providers.iter().find(|provider| provider.name == name))
+        .and_then(|config| {
+            config
+                .providers
+                .iter()
+                .find(|provider| provider.name == name)
+        })
         .cloned()
 }
 
@@ -2160,7 +2123,6 @@ struct UiHandles {
     uninstall_button: Button,
     provider_image_generation: CheckBox,
     // AI Gateway fields
-    ai_gw_enabled: CheckBox,
     ai_gw_provider_list: DataViewCtrl,
     ai_gw_provider_rows: AiGwProviderRows,
     ai_gw_provider_model: AiGwProviderModel,
@@ -2565,18 +2527,9 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
 
     // AI Gateway status
     if let Some(gw) = &snapshot.ai_gateway {
-        if gw.enabled {
-            handles
-                .ai_gw_status_label
-                .set_label(&text.ai_gw_status_enabled(gw.providers.len()));
-        } else {
-            handles
-                .ai_gw_status_label
-                .set_label(text.ai_gw_status_disabled());
-        }
-        if !handles.ai_gw_enabled.has_focus() {
-            handles.ai_gw_enabled.set_value(gw.enabled);
-        }
+        handles
+            .ai_gw_status_label
+            .set_label(&text.ai_gw_status_enabled(gw.providers.len()));
         let base = api_base_url_from_status(snapshot);
         handles.ai_gw_entry_url.set_label(&format!(
             "{}: {}",
@@ -2587,7 +2540,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     } else {
         handles
             .ai_gw_status_label
-            .set_label(text.ai_gw_status_disabled());
+            .set_label(&text.ai_gw_status_enabled(0));
         refresh_ai_gw_provider_list(handles, None);
     }
 }
