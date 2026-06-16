@@ -7,11 +7,9 @@ use std::task::{Context, Poll};
 
 use axum::body::Bytes;
 use futures_util::Stream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::ai_gateway::model::{
-    generate_item_id, generate_response_id,
-};
+use crate::ai_gateway::model::{generate_item_id, generate_response_id};
 
 // ─── Stream adapter ────────────────────────────────────────────
 
@@ -75,7 +73,8 @@ where
                             }
 
                             if let Ok(chunk_json) = serde_json::from_str::<Value>(data) {
-                                this.state.process_chunk(&chunk_json, &mut this.output_queue);
+                                this.state
+                                    .process_chunk(&chunk_json, &mut this.output_queue);
                             }
                         }
                     }
@@ -215,7 +214,11 @@ impl ResponsesStreamState {
             self.emit_response_created(queue);
         }
 
-        let choice = match chunk.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()) {
+        let choice = match chunk
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+        {
             Some(c) => c,
             None => {
                 // 可能是纯 usage chunk
@@ -271,43 +274,55 @@ impl ResponsesStreamState {
         if !self.reasoning_item_started {
             self.current_item_id = generate_item_id();
             let seq = self.next_seq();
-            emit_sse(queue, "response.output_item.added", json!({
-                "type": "response.output_item.added",
-                "sequence_number": seq,
-                "output_index": self.output_index,
-                "item": {
-                    "type": "reasoning",
-                    "id": self.current_item_id,
-                    "status": "in_progress",
-                    "summary": [],
-                }
-            }));
+            emit_sse(
+                queue,
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": seq,
+                    "output_index": self.output_index,
+                    "item": {
+                        "type": "reasoning",
+                        "id": self.current_item_id,
+                        "status": "in_progress",
+                        "summary": [],
+                    }
+                }),
+            );
             self.reasoning_item_started = true;
         }
 
         if !self.reasoning_summary_part {
             let seq = self.next_seq();
-            emit_sse(queue, "response.reasoning_summary_part.added", json!({
-                "type": "response.reasoning_summary_part.added",
-                "sequence_number": seq,
-                "item_id": self.current_item_id,
-                "output_index": self.output_index,
-                "summary_index": 0,
-                "part": {"type": "summary_text", "text": ""},
-            }));
+            emit_sse(
+                queue,
+                "response.reasoning_summary_part.added",
+                json!({
+                    "type": "response.reasoning_summary_part.added",
+                    "sequence_number": seq,
+                    "item_id": self.current_item_id,
+                    "output_index": self.output_index,
+                    "summary_index": 0,
+                    "part": {"type": "summary_text", "text": ""},
+                }),
+            );
             self.reasoning_summary_part = true;
         }
 
         self.accumulated_reasoning.push_str(text);
         let seq = self.next_seq();
-        emit_sse(queue, "response.reasoning_summary_text.delta", json!({
-            "type": "response.reasoning_summary_text.delta",
-            "sequence_number": seq,
-            "item_id": self.current_item_id,
-            "output_index": self.output_index,
-            "summary_index": 0,
-            "delta": text,
-        }));
+        emit_sse(
+            queue,
+            "response.reasoning_summary_text.delta",
+            json!({
+                "type": "response.reasoning_summary_text.delta",
+                "sequence_number": seq,
+                "item_id": self.current_item_id,
+                "output_index": self.output_index,
+                "summary_index": 0,
+                "delta": text,
+            }),
+        );
     }
 
     fn close_reasoning_item(&mut self, queue: &mut VecDeque<Bytes>) {
@@ -317,39 +332,51 @@ impl ResponsesStreamState {
 
         // summary_text.done
         let seq = self.next_seq();
-        emit_sse(queue, "response.reasoning_summary_text.done", json!({
-            "type": "response.reasoning_summary_text.done",
-            "sequence_number": seq,
-            "item_id": self.current_item_id,
-            "output_index": self.output_index,
-            "summary_index": 0,
-            "text": self.accumulated_reasoning,
-        }));
+        emit_sse(
+            queue,
+            "response.reasoning_summary_text.done",
+            json!({
+                "type": "response.reasoning_summary_text.done",
+                "sequence_number": seq,
+                "item_id": self.current_item_id,
+                "output_index": self.output_index,
+                "summary_index": 0,
+                "text": self.accumulated_reasoning,
+            }),
+        );
 
         // summary_part.done
         let seq = self.next_seq();
-        emit_sse(queue, "response.reasoning_summary_part.done", json!({
-            "type": "response.reasoning_summary_part.done",
-            "sequence_number": seq,
-            "item_id": self.current_item_id,
-            "output_index": self.output_index,
-            "summary_index": 0,
-            "part": {"type": "summary_text", "text": self.accumulated_reasoning},
-        }));
+        emit_sse(
+            queue,
+            "response.reasoning_summary_part.done",
+            json!({
+                "type": "response.reasoning_summary_part.done",
+                "sequence_number": seq,
+                "item_id": self.current_item_id,
+                "output_index": self.output_index,
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": self.accumulated_reasoning},
+            }),
+        );
 
         // output_item.done
         let seq = self.next_seq();
-        emit_sse(queue, "response.output_item.done", json!({
-            "type": "response.output_item.done",
-            "sequence_number": seq,
-            "output_index": self.output_index,
-            "item": {
-                "type": "reasoning",
-                "id": self.current_item_id,
-                "status": "completed",
-                "summary": [{"type": "summary_text", "text": self.accumulated_reasoning}],
-            }
-        }));
+        emit_sse(
+            queue,
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": seq,
+                "output_index": self.output_index,
+                "item": {
+                    "type": "reasoning",
+                    "id": self.current_item_id,
+                    "status": "completed",
+                    "summary": [{"type": "summary_text", "text": self.accumulated_reasoning}],
+                }
+            }),
+        );
 
         self.output_index += 1;
         self.reasoning_item_started = false;
@@ -366,44 +393,56 @@ impl ResponsesStreamState {
         if !self.message_item_started {
             self.current_item_id = generate_item_id();
             let seq = self.next_seq();
-            emit_sse(queue, "response.output_item.added", json!({
-                "type": "response.output_item.added",
-                "sequence_number": seq,
-                "output_index": self.output_index,
-                "item": {
-                    "type": "message",
-                    "id": self.current_item_id,
-                    "role": "assistant",
-                    "status": "in_progress",
-                    "content": [],
-                }
-            }));
+            emit_sse(
+                queue,
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": seq,
+                    "output_index": self.output_index,
+                    "item": {
+                        "type": "message",
+                        "id": self.current_item_id,
+                        "role": "assistant",
+                        "status": "in_progress",
+                        "content": [],
+                    }
+                }),
+            );
             self.message_item_started = true;
         }
 
         if !self.content_part_started {
             let seq = self.next_seq();
-            emit_sse(queue, "response.content_part.added", json!({
-                "type": "response.content_part.added",
-                "sequence_number": seq,
-                "item_id": self.current_item_id,
-                "output_index": self.output_index,
-                "content_index": self.content_index,
-                "part": {"type": "output_text", "text": "", "annotations": []},
-            }));
+            emit_sse(
+                queue,
+                "response.content_part.added",
+                json!({
+                    "type": "response.content_part.added",
+                    "sequence_number": seq,
+                    "item_id": self.current_item_id,
+                    "output_index": self.output_index,
+                    "content_index": self.content_index,
+                    "part": {"type": "output_text", "text": "", "annotations": []},
+                }),
+            );
             self.content_part_started = true;
         }
 
         self.accumulated_text.push_str(text);
         let seq = self.next_seq();
-        emit_sse(queue, "response.output_text.delta", json!({
-            "type": "response.output_text.delta",
-            "sequence_number": seq,
-            "item_id": self.current_item_id,
-            "output_index": self.output_index,
-            "content_index": self.content_index,
-            "delta": text,
-        }));
+        emit_sse(
+            queue,
+            "response.output_text.delta",
+            json!({
+                "type": "response.output_text.delta",
+                "sequence_number": seq,
+                "item_id": self.current_item_id,
+                "output_index": self.output_index,
+                "content_index": self.content_index,
+                "delta": text,
+            }),
+        );
     }
 
     fn close_content_part(&mut self, queue: &mut VecDeque<Bytes>) {
@@ -413,25 +452,33 @@ impl ResponsesStreamState {
 
         // output_text.done
         let seq = self.next_seq();
-        emit_sse(queue, "response.output_text.done", json!({
-            "type": "response.output_text.done",
-            "sequence_number": seq,
-            "item_id": self.current_item_id,
-            "output_index": self.output_index,
-            "content_index": self.content_index,
-            "text": self.accumulated_text,
-        }));
+        emit_sse(
+            queue,
+            "response.output_text.done",
+            json!({
+                "type": "response.output_text.done",
+                "sequence_number": seq,
+                "item_id": self.current_item_id,
+                "output_index": self.output_index,
+                "content_index": self.content_index,
+                "text": self.accumulated_text,
+            }),
+        );
 
         // content_part.done
         let seq = self.next_seq();
-        emit_sse(queue, "response.content_part.done", json!({
-            "type": "response.content_part.done",
-            "sequence_number": seq,
-            "item_id": self.current_item_id,
-            "output_index": self.output_index,
-            "content_index": self.content_index,
-            "part": {"type": "output_text", "text": self.accumulated_text, "annotations": []},
-        }));
+        emit_sse(
+            queue,
+            "response.content_part.done",
+            json!({
+                "type": "response.content_part.done",
+                "sequence_number": seq,
+                "item_id": self.current_item_id,
+                "output_index": self.output_index,
+                "content_index": self.content_index,
+                "part": {"type": "output_text", "text": self.accumulated_text, "annotations": []},
+            }),
+        );
 
         self.content_part_started = false;
     }
@@ -445,18 +492,22 @@ impl ResponsesStreamState {
 
         // output_item.done
         let seq = self.next_seq();
-        emit_sse(queue, "response.output_item.done", json!({
-            "type": "response.output_item.done",
-            "sequence_number": seq,
-            "output_index": self.output_index,
-            "item": {
-                "type": "message",
-                "id": self.current_item_id,
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": self.accumulated_text, "annotations": []}],
-            }
-        }));
+        emit_sse(
+            queue,
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": seq,
+                "output_index": self.output_index,
+                "item": {
+                    "type": "message",
+                    "id": self.current_item_id,
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": self.accumulated_text, "annotations": []}],
+                }
+            }),
+        );
 
         self.output_index += 1;
         self.message_item_started = false;
@@ -498,19 +549,23 @@ impl ResponsesStreamState {
 
             // output_item.added for function_call
             let seq = self.next_seq();
-            emit_sse(queue, "response.output_item.added", json!({
-                "type": "response.output_item.added",
-                "sequence_number": seq,
-                "output_index": self.output_index,
-                "item": {
-                    "type": "function_call",
-                    "id": item_id,
-                    "call_id": call_id,
-                    "name": name,
-                    "arguments": "",
-                    "status": "in_progress",
-                }
-            }));
+            emit_sse(
+                queue,
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": seq,
+                    "output_index": self.output_index,
+                    "item": {
+                        "type": "function_call",
+                        "id": item_id,
+                        "call_id": call_id,
+                        "name": name,
+                        "arguments": "",
+                        "status": "in_progress",
+                    }
+                }),
+            );
 
             self.tool_calls.insert(index, tc_state);
             self.output_index += 1;
@@ -525,13 +580,17 @@ impl ResponsesStreamState {
                 let item_id = tc_state.item_id.clone();
                 let output_index = tc_state.output_index;
 
-                emit_sse(queue, "response.function_call_arguments.delta", json!({
-                    "type": "response.function_call_arguments.delta",
-                    "sequence_number": seq,
-                    "item_id": item_id,
-                    "output_index": output_index,
-                    "delta": args,
-                }));
+                emit_sse(
+                    queue,
+                    "response.function_call_arguments.delta",
+                    json!({
+                        "type": "response.function_call_arguments.delta",
+                        "sequence_number": seq,
+                        "item_id": item_id,
+                        "output_index": output_index,
+                        "delta": args,
+                    }),
+                );
             }
         }
     }
@@ -543,29 +602,37 @@ impl ResponsesStreamState {
 
             // function_call_arguments.done
             let seq = self.next_seq();
-            emit_sse(queue, "response.function_call_arguments.done", json!({
-                "type": "response.function_call_arguments.done",
-                "sequence_number": seq,
-                "item_id": tc.item_id,
-                "output_index": tc.output_index,
-                "arguments": tc.arguments,
-            }));
+            emit_sse(
+                queue,
+                "response.function_call_arguments.done",
+                json!({
+                    "type": "response.function_call_arguments.done",
+                    "sequence_number": seq,
+                    "item_id": tc.item_id,
+                    "output_index": tc.output_index,
+                    "arguments": tc.arguments,
+                }),
+            );
 
             // output_item.done
             let seq = self.next_seq();
-            emit_sse(queue, "response.output_item.done", json!({
-                "type": "response.output_item.done",
-                "sequence_number": seq,
-                "output_index": tc.output_index,
-                "item": {
-                    "type": "function_call",
-                    "id": tc.item_id,
-                    "call_id": tc.id,
-                    "name": tc.name,
-                    "arguments": tc.arguments,
-                    "status": "completed",
-                }
-            }));
+            emit_sse(
+                queue,
+                "response.output_item.done",
+                json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": seq,
+                    "output_index": tc.output_index,
+                    "item": {
+                        "type": "function_call",
+                        "id": tc.item_id,
+                        "call_id": tc.id,
+                        "name": tc.name,
+                        "arguments": tc.arguments,
+                        "status": "completed",
+                    }
+                }),
+            );
         }
     }
 
@@ -603,11 +670,15 @@ impl ResponsesStreamState {
 
     fn emit_response_created(&mut self, queue: &mut VecDeque<Bytes>) {
         let seq = self.next_seq();
-        emit_sse(queue, "response.created", json!({
-            "type": "response.created",
-            "sequence_number": seq,
-            "response": self.response_object("in_progress"),
-        }));
+        emit_sse(
+            queue,
+            "response.created",
+            json!({
+                "type": "response.created",
+                "sequence_number": seq,
+                "response": self.response_object("in_progress"),
+            }),
+        );
 
         self.response_created = true;
     }
@@ -624,11 +695,15 @@ impl ResponsesStreamState {
         };
 
         let seq = self.next_seq();
-        emit_sse(queue, event_type, json!({
-            "type": event_type,
-            "sequence_number": seq,
-            "response": self.response_object(status),
-        }));
+        emit_sse(
+            queue,
+            event_type,
+            json!({
+                "type": event_type,
+                "sequence_number": seq,
+                "response": self.response_object(status),
+            }),
+        );
 
         self.response_completed = true;
     }
@@ -1054,8 +1129,14 @@ mod tests {
         assert!(types.contains(&"response.reasoning_summary_text.delta"));
         assert!(types.contains(&"response.reasoning_summary_text.done"));
 
-        let reasoning_done_pos = types.iter().position(|&t| t == "response.reasoning_summary_text.done").unwrap();
-        let fc_added_pos = types.iter().rposition(|&t| t == "response.output_item.added").unwrap();
+        let reasoning_done_pos = types
+            .iter()
+            .position(|&t| t == "response.reasoning_summary_text.done")
+            .unwrap();
+        let fc_added_pos = types
+            .iter()
+            .rposition(|&t| t == "response.output_item.added")
+            .unwrap();
         assert!(reasoning_done_pos < fc_added_pos);
 
         // tool call 事件
@@ -1095,8 +1176,14 @@ mod tests {
         assert!(types.contains(&"response.output_item.done"));
 
         // message 的 output_item.done 应在 function_call 的 output_item.added 之前
-        let msg_done_pos = types.iter().position(|&t| t == "response.output_item.done").unwrap();
-        let fc_added_pos = types.iter().rposition(|&t| t == "response.output_item.added").unwrap();
+        let msg_done_pos = types
+            .iter()
+            .position(|&t| t == "response.output_item.done")
+            .unwrap();
+        let fc_added_pos = types
+            .iter()
+            .rposition(|&t| t == "response.output_item.added")
+            .unwrap();
         assert!(msg_done_pos < fc_added_pos);
 
         assert!(types.contains(&"response.function_call_arguments.done"));
@@ -1129,9 +1216,13 @@ mod tests {
             .collect();
         // 严格递增
         for i in 1..seq_nums.len() {
-            assert!(seq_nums[i] == seq_nums[i - 1] + 1,
+            assert!(
+                seq_nums[i] == seq_nums[i - 1] + 1,
                 "sequence_number not monotonic at index {}: {} vs {}",
-                i, seq_nums[i], seq_nums[i - 1]);
+                i,
+                seq_nums[i],
+                seq_nums[i - 1]
+            );
         }
     }
 
@@ -1159,7 +1250,10 @@ mod tests {
         assert!(types.contains(&"response.completed"));
 
         // completed 事件里应包含 usage
-        let completed = events.iter().find(|(t, _)| t == "response.completed").unwrap();
+        let completed = events
+            .iter()
+            .find(|(t, _)| t == "response.completed")
+            .unwrap();
         assert_eq!(completed.1["response"]["usage"]["input_tokens"], 100);
         assert_eq!(completed.1["response"]["usage"]["output_tokens"], 50);
     }

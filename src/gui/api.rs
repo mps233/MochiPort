@@ -134,7 +134,11 @@ impl ApiClient {
         let im_accounts = self.get_quick_optional_async::<ImAccountsResponse>("/api/im/accounts");
         let ai_gateway_config = {
             let api = self.clone();
-            thread::spawn(move || api.get_quick::<AppConfig>("/api/config").ok().map(|c| c.ai_gateway))
+            thread::spawn(move || {
+                api.get_quick::<AppConfig>("/api/config")
+                    .ok()
+                    .map(|c| c.ai_gateway)
+            })
         };
 
         DashboardSnapshot {

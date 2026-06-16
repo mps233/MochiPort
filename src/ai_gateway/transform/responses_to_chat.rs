@@ -1,7 +1,7 @@
 //! Responses API input → Chat Completions messages 转换。
 //! 参考 AxonHub `responses/inbound.go` 的 `convertInputToMessages`。
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::ai_gateway::model::{
     GatewayRequest, ItemContent, ItemType, Reasoning, ResponseItem, TextFormat,
@@ -770,7 +770,9 @@ mod tests {
     fn test_parallel_tool_calls_and_outputs() {
         // user → 2 个 function_call → 2 个 function_call_output → assistant 回答
         let mut user = make_item(ItemType::InputText);
-        user.content = Some(ItemContent::Text("What's the weather in NYC and SF?".into()));
+        user.content = Some(ItemContent::Text(
+            "What's the weather in NYC and SF?".into(),
+        ));
 
         let mut fc1 = make_item(ItemType::FunctionCall);
         fc1.call_id = Some("call_1".into());
@@ -853,7 +855,10 @@ mod tests {
         // reasoning+fc1+fc2 → 1 assistant msg, fco1 → tool, fco2 → tool, asst → assistant = 4
         assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0]["role"], "assistant");
-        assert_eq!(msgs[0]["reasoning_content"], "I need both weather and time.");
+        assert_eq!(
+            msgs[0]["reasoning_content"],
+            "I need both weather and time."
+        );
         let tcs = msgs[0]["tool_calls"].as_array().unwrap();
         assert_eq!(tcs.len(), 2);
         assert_eq!(msgs[1]["role"], "tool");
@@ -900,10 +905,16 @@ mod tests {
         assert_eq!(msgs.len(), 6);
         assert_eq!(msgs[0]["role"], "user");
         assert_eq!(msgs[1]["role"], "assistant");
-        assert_eq!(msgs[1]["tool_calls"].as_array().unwrap()[0]["function"]["name"], "search_flights");
+        assert_eq!(
+            msgs[1]["tool_calls"].as_array().unwrap()[0]["function"]["name"],
+            "search_flights"
+        );
         assert_eq!(msgs[2]["role"], "tool");
         assert_eq!(msgs[3]["role"], "assistant");
-        assert_eq!(msgs[3]["tool_calls"].as_array().unwrap()[0]["function"]["name"], "search_hotels");
+        assert_eq!(
+            msgs[3]["tool_calls"].as_array().unwrap()[0]["function"]["name"],
+            "search_hotels"
+        );
         assert_eq!(msgs[4]["role"], "tool");
         assert_eq!(msgs[5]["role"], "assistant");
     }
@@ -937,8 +948,10 @@ mod tests {
         // assistant(tool_calls) and assistant(content) 应该都被补上 reasoning_content=""
         for msg in msgs {
             if msg["role"] == "assistant" {
-                assert!(msg.get("reasoning_content").is_some(),
-                    "assistant message missing reasoning_content padding");
+                assert!(
+                    msg.get("reasoning_content").is_some(),
+                    "assistant message missing reasoning_content padding"
+                );
             }
         }
     }
@@ -1040,7 +1053,10 @@ mod tests {
         req.temperature = Some(0.7);
         req.top_p = Some(0.9);
         let body = build_chat_request(&req, true).unwrap();
-        assert!(body.get("temperature").is_none(), "temperature should be stripped");
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature should be stripped"
+        );
         assert!(body.get("top_p").is_none(), "top_p should be stripped");
     }
 
@@ -1147,11 +1163,16 @@ mod tests {
         // 找到有 tool_calls 的 assistant messages，检查 reasoning_content
         for msg in msgs {
             if msg["role"] == "assistant"
-                && msg.get("tool_calls").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty())
+                && msg
+                    .get("tool_calls")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty())
             {
                 let rc = msg["reasoning_content"].as_str().unwrap_or("");
-                assert!(!rc.is_empty(),
-                    "tool_calls assistant message should have reasoning_content backfilled, got empty");
+                assert!(
+                    !rc.is_empty(),
+                    "tool_calls assistant message should have reasoning_content backfilled, got empty"
+                );
             }
         }
     }

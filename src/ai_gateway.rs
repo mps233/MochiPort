@@ -13,6 +13,5 @@ use crate::app_state::SharedState;
 
 /// 构建 AI Gateway 子路由（state 由父 Router 提供）。
 pub fn router() -> Router<SharedState> {
-    Router::new()
-        .route("/v1/responses", post(handler::handle_responses))
+    Router::new().route("/v1/responses", post(handler::handle_responses))
 }

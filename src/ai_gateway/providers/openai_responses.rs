@@ -5,7 +5,7 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde_json::json;
-use tracing::{error, debug};
+use tracing::{debug, error};
 
 use crate::ai_gateway::config::ProviderConfig;
 use crate::ai_gateway::context::GatewayContext;
@@ -39,10 +39,7 @@ pub async fn passthrough(
         .unwrap_or(false);
 
     // 3. 构建上游请求
-    let url = format!(
-        "{}/v1/responses",
-        provider.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/responses", provider.base_url.trim_end_matches('/'));
 
     let client = reqwest::Client::new();
     let mut req_builder = client

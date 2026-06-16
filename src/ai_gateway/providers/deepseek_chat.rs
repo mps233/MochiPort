@@ -23,9 +23,8 @@ pub async fn handle(
     provider: &ProviderConfig,
 ) -> Result<Response<Body>, GatewayError> {
     // 1. Responses → Chat Completions 请求转换
-    let chat_body = build_chat_request(request, true).map_err(|e| {
-        GatewayError::bad_request(format!("transform error: {e}"))
-    })?;
+    let chat_body = build_chat_request(request, true)
+        .map_err(|e| GatewayError::bad_request(format!("transform error: {e}")))?;
 
     let url = format!(
         "{}/v1/chat/completions",
@@ -75,10 +74,7 @@ async fn handle_non_stream(
     model: &str,
 ) -> Result<Response<Body>, GatewayError> {
     let chat_resp: serde_json::Value = resp.json().await.map_err(|e| {
-        GatewayError::upstream(
-            StatusCode::BAD_GATEWAY,
-            format!("parse upstream json: {e}"),
-        )
+        GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("parse upstream json: {e}"))
     })?;
 
     let response_obj = convert_chat_response(&chat_resp, model).map_err(|e| {

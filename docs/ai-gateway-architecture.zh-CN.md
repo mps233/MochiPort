@@ -82,7 +82,7 @@ AI Gateway 要解决的是：Codex 只按 OpenAI Responses 协议发请求，但
 
 - **axonhub fork (dev)**（Go，[github.com/doubaoyui/axonhub](https://github.com/doubaoyui/axonhub/tree/dev)）：AxonHub 的 fork，dev 分支有成熟的 DeepSeek 严格约束处理实现，是本项目 DeepSeek 兼容处理的主要参考。
 - **codex-relay**（Rust，[github.com/MetaFARS/codex-relay](https://github.com/MetaFARS/codex-relay)）：Rust 实现蓝本，SSE 事件序列化、tool call delta 积累、`previous_response_id` session store。
-- **codex-bridge**（Node.js，[github.com/wujfeng712-ui/codex-bridge](https://github.com/wujfeng712-ui/codex-bridge)）：多 provider 路由策略（精确匹配→前缀启发→名称提示→fallback）、reasoning effort 六级映射表、LRU session store。
+- **codex-bridge**（Node.js，[github.com/wujfeng712-ui/codex-bridge](https://github.com/wujfeng712-ui/codex-bridge)）：多 provider 路由策略（本项目只采用精确匹配/前缀启发，不采用 fallback）、reasoning effort 六级映射表、LRU session store。
 
 不直接照搬的点：
 
@@ -97,11 +97,11 @@ AI Gateway 要解决的是：Codex 只按 OpenAI Responses 协议发请求，但
 [aiGateway]
 enabled = true
 routePrefix = "/ai-gateway/v1"
-defaultProvider = "openai"
 promptCacheRetention = "24h"
 
 [[aiGateway.providers]]
 name = "openai"
+enabled = true
 kind = "openai_responses"
 baseUrl = "https://api.openai.com/v1"
 apiKeyEnv = "OPENAI_API_KEY"
@@ -109,6 +109,7 @@ models = ["gpt-5.5", "gpt-5.4", "gpt-5.2"]
 
 [[aiGateway.providers]]
 name = "deepseek"
+enabled = true
 kind = "deepseek_chat"
 baseUrl = "https://api.deepseek.com/v1"
 apiKeyEnv = "DEEPSEEK_API_KEY"

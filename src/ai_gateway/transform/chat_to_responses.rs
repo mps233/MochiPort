@@ -4,8 +4,8 @@
 use serde_json::Value;
 
 use crate::ai_gateway::model::{
-    ContentPart, ItemContent, ItemType, ResponseItem, ResponseObject, SummaryPart, Usage,
-    InputTokensDetails, OutputTokensDetails, generate_item_id, generate_response_id,
+    ContentPart, InputTokensDetails, ItemContent, ItemType, OutputTokensDetails, ResponseItem,
+    ResponseObject, SummaryPart, Usage, generate_item_id, generate_response_id,
 };
 
 /// 将 Chat Completions 非流式响应转为 Responses API ResponseObject。
@@ -27,9 +27,7 @@ pub fn convert_chat_response(
         .and_then(|a| a.first())
         .ok_or("no choices in chat response")?;
 
-    let message = choice
-        .get("message")
-        .ok_or("no message in choice")?;
+    let message = choice.get("message").ok_or("no message in choice")?;
 
     let finish_reason = choice
         .get("finish_reason")
@@ -374,7 +372,10 @@ mod tests {
         // reasoning item + function_call item = 2
         assert_eq!(resp.output.len(), 2);
         assert_eq!(resp.output[0].item_type, ItemType::Reasoning);
-        assert_eq!(resp.output[0].summary.as_ref().unwrap()[0].text, "I need to search for this.");
+        assert_eq!(
+            resp.output[0].summary.as_ref().unwrap()[0].text,
+            "I need to search for this."
+        );
         assert_eq!(resp.output[1].item_type, ItemType::FunctionCall);
         assert_eq!(resp.output[1].name.as_deref(), Some("search"));
     }

@@ -430,21 +430,21 @@ Chat SSE chunk → 状态机 → Responses SSE 事件（按第 4 节状态机处
 参考 codex-bridge 的 model-name-based routing。
 
 ```rust
-fn select_provider(model: &str, config: &AiGatewayConfig) -> &ProviderConfig {
-    // 1. 精确匹配：遍历 providers，检查 models 列表
-    for provider in &config.providers {
+fn select_provider(model: &str, config: &AiGatewayConfig) -> Result<&ProviderConfig, GatewayError> {
+    // 1. 精确匹配：遍历已启用 providers，检查 models 列表
+    for provider in config.providers.iter().filter(|p| p.enabled) {
         if provider.models.contains(&model.to_string()) {
-            return provider;
+            return Ok(provider);
         }
     }
-    // 2. 前缀匹配：model 以 provider name 开头
-    for provider in &config.providers {
+    // 2. 前缀匹配：model 以已启用 provider name 开头
+    for provider in config.providers.iter().filter(|p| p.enabled) {
         if model.starts_with(&provider.name) {
-            return provider;
+            return Ok(provider);
         }
     }
-    // 3. fallback：default_provider
-    config.get_provider(&config.default_provider)
+    // 3. 无匹配则返回错误，不做默认渠道/兜底渠道
+    Err(GatewayError::invalid_model(model))
 }
 ```
 
@@ -686,7 +686,7 @@ src/ai_gateway/
 
 | 模块 | 测试数 | 覆盖范围 |
 |---|---|---|
-| `config.rs` | 7 | provider 路由（精确/前缀/默认/无匹配）、TOML 反序列化 |
+| `config.rs` | 7 | provider 路由（精确/前缀/禁用/无匹配）、TOML 反序列化 |
 | `context.rs` | 8 | prompt_cache_key 6 级优先级、passthrough header 收集、无效 JSON 处理 |
 | `transform/responses_to_chat.rs` | 28 | 全部 item type 转换、DeepSeek 严格约束（developer→system、reasoning effort 映射、thinking 参数清理、无效消息过滤、tool_calls reasoning_content 回填）、多轮对话、Codex 专属工具过滤 |
 | `transform/chat_to_responses.rs` | 11 | 简单/reasoning/tool_calls/多 tool_calls 响应、空内容跳过、usage 详情、无 usage 字段 |

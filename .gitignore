@@ -5,6 +5,7 @@ config.toml
 codex-remote-state.json
 *.log
 .im/
+.claude/
 typescript
 rust_democodex-remoteconfig.toml
 references/

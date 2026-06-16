@@ -25,8 +25,8 @@ const PASSTHROUGH_HEADER_NAMES: &[&str] = &[
 impl GatewayContext {
     /// 从请求 header 和已解析的 body 提取 GatewayContext。
     pub fn extract(headers: &HeaderMap, body_cache_key: Option<&str>) -> Self {
-        let session_id = get_header(headers, "session_id")
-            .or_else(|| get_header(headers, "session-id"));
+        let session_id =
+            get_header(headers, "session_id").or_else(|| get_header(headers, "session-id"));
         let thread_id = get_header(headers, "thread-id");
         let window_id = get_header(headers, "x-codex-window-id");
         let request_id = get_header(headers, "x-client-request-id")

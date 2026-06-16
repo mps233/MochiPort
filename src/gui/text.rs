@@ -340,6 +340,34 @@ impl GuiText {
         }
     }
 
+    pub(super) fn inject_codex_access(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "注入 Codex 配置",
+            GuiLocale::EnUs => "Inject Codex Config",
+        }
+    }
+
+    pub(super) fn inject_codex_access_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "写入本工具管理的 Codex App 本地接入配置",
+            GuiLocale::EnUs => "Write the local Codex App access settings managed by this tool",
+        }
+    }
+
+    pub(super) fn injecting_codex_access(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "注入中...",
+            GuiLocale::EnUs => "Injecting...",
+        }
+    }
+
+    pub(super) fn clearing_codex_access(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清除中...",
+            GuiLocale::EnUs => "Clearing...",
+        }
+    }
+
     pub(super) fn codex_tab(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "Codex 接入",
@@ -894,6 +922,15 @@ impl GuiText {
             GuiLocale::ZhCn => "Codex App 本地接入配置已卸载。请重启 Codex App 以恢复官方连接。",
             GuiLocale::EnUs => {
                 "Local Codex App access settings were removed. Restart Codex App to restore the official connection."
+            }
+        }
+    }
+
+    pub(super) fn codex_app_config_injected(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex App 本地接入配置已注入。请重启 Codex App 生效。",
+            GuiLocale::EnUs => {
+                "Local Codex App access settings were injected. Restart Codex App to apply them."
             }
         }
     }
@@ -1508,7 +1545,7 @@ impl GuiText {
 
     pub(super) fn ai_gateway_management(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "AI Gateway 管理",
+            GuiLocale::ZhCn => "渠道管理",
             GuiLocale::EnUs => "AI Gateway Management",
         }
     }
@@ -1517,6 +1554,62 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "启用 AI Gateway",
             GuiLocale::EnUs => "Enable AI Gateway",
+        }
+    }
+
+    pub(super) fn ai_gw_channel_list(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "渠道列表",
+            GuiLocale::EnUs => "Channels",
+        }
+    }
+
+    pub(super) fn ai_gw_channel_editor(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "新增 / 编辑渠道",
+            GuiLocale::EnUs => "Add / Edit Channel",
+        }
+    }
+
+    pub(super) fn ai_gw_channel_editor_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "选择服务商并填写这个渠道的 API 细节。",
+            GuiLocale::EnUs => "Choose a provider and fill in the API details for this channel.",
+        }
+    }
+
+    pub(super) fn ai_gw_add_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "新增渠道",
+            GuiLocale::EnUs => "Add Channel",
+        }
+    }
+
+    pub(super) fn ai_gw_edit_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "编辑渠道",
+            GuiLocale::EnUs => "Edit Channel",
+        }
+    }
+
+    pub(super) fn ai_gw_delete_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除渠道",
+            GuiLocale::EnUs => "Delete Channel",
+        }
+    }
+
+    pub(super) fn ai_gw_save_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存渠道",
+            GuiLocale::EnUs => "Save Channel",
+        }
+    }
+
+    pub(super) fn ai_gw_create_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "创建渠道",
+            GuiLocale::EnUs => "Create Channel",
         }
     }
 
@@ -1534,19 +1627,34 @@ impl GuiText {
         }
     }
 
+    pub(super) fn ai_gw_provider_service(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "服务商",
+            GuiLocale::EnUs => "Provider",
+        }
+    }
+
+    pub(super) fn ai_gw_service_openai(self) -> &'static str {
+        "OpenAI"
+    }
+
+    pub(super) fn ai_gw_service_deepseek(self) -> &'static str {
+        "DeepSeek"
+    }
+
+    pub(super) fn ai_gw_service_custom(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "自定义",
+            GuiLocale::EnUs => "Custom",
+        }
+    }
+
     pub(super) fn ai_gw_col_base_url(self) -> &'static str {
         "Base URL"
     }
 
     pub(super) fn ai_gw_col_api_key(self) -> &'static str {
         "API Key"
-    }
-
-    pub(super) fn ai_gw_default_provider(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "默认 Provider",
-            GuiLocale::EnUs => "Default Provider",
-        }
     }
 
     pub(super) fn ai_gw_timeout(self) -> &'static str {
@@ -1560,6 +1668,13 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "模型列表",
             GuiLocale::EnUs => "Models",
+        }
+    }
+
+    pub(super) fn ai_gw_api_format(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "API 格式",
+            GuiLocale::EnUs => "API Format",
         }
     }
 
@@ -1587,29 +1702,36 @@ impl GuiText {
 
     pub(super) fn ai_gw_saved(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "AI Gateway Provider 已保存。",
-            GuiLocale::EnUs => "AI Gateway provider saved.",
+            GuiLocale::ZhCn => "渠道已保存。",
+            GuiLocale::EnUs => "AI Gateway channel saved.",
         }
     }
 
     pub(super) fn ai_gw_deleted(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "AI Gateway Provider 已删除。",
-            GuiLocale::EnUs => "AI Gateway provider deleted.",
+            GuiLocale::ZhCn => "渠道已删除。",
+            GuiLocale::EnUs => "AI Gateway channel deleted.",
         }
     }
 
     pub(super) fn ai_gw_save_failed(self, err: &str) -> String {
         match self.locale {
-            GuiLocale::ZhCn => format!("保存 AI Gateway 配置失败：{err}"),
+            GuiLocale::ZhCn => format!("保存渠道配置失败：{err}"),
             GuiLocale::EnUs => format!("Failed to save AI Gateway config: {err}"),
         }
     }
 
     pub(super) fn ai_gw_provider_name_empty(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "请输入 Provider 名称。",
-            GuiLocale::EnUs => "Please enter a provider name.",
+            GuiLocale::ZhCn => "请输入渠道名称。",
+            GuiLocale::EnUs => "Please enter a channel name.",
+        }
+    }
+
+    pub(super) fn ai_gw_select_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请选择一个渠道。",
+            GuiLocale::EnUs => "Please select a channel.",
         }
     }
 
@@ -1629,8 +1751,8 @@ impl GuiText {
 
     pub(super) fn ai_gw_status_enabled(self, count: usize) -> String {
         match self.locale {
-            GuiLocale::ZhCn => format!("AI Gateway: 已启用 ({count} providers)"),
-            GuiLocale::EnUs => format!("AI Gateway: Enabled ({count} providers)"),
+            GuiLocale::ZhCn => format!("AI Gateway: 已启用 ({count} 个渠道)"),
+            GuiLocale::EnUs => format!("AI Gateway: Enabled ({count} channels)"),
         }
     }
 
@@ -1643,8 +1765,8 @@ impl GuiText {
 
     pub(super) fn ai_gw_provider_name(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Provider 名称",
-            GuiLocale::EnUs => "Provider Name",
+            GuiLocale::ZhCn => "渠道名称",
+            GuiLocale::EnUs => "Channel Name",
         }
     }
 
@@ -1672,7 +1794,9 @@ impl GuiText {
     pub(super) fn ai_gw_restart_codex_hint(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "AI Gateway 已启用并注入 Codex 配置，请重启 Codex 生效。",
-            GuiLocale::EnUs => "AI Gateway enabled and injected into Codex config. Please restart Codex.",
+            GuiLocale::EnUs => {
+                "AI Gateway enabled and injected into Codex config. Please restart Codex."
+            }
         }
     }
 }

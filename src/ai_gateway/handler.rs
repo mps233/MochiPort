@@ -1,9 +1,4 @@
-use axum::{
-    body::Bytes,
-    extract::State,
-    http::HeaderMap,
-    response::IntoResponse,
-};
+use axum::{body::Bytes, extract::State, http::HeaderMap, response::IntoResponse};
 use tracing::info;
 
 use crate::app_state::SharedState;

@@ -58,9 +58,7 @@ where
             summary: None,
             encrypted_content: None,
         }]),
-        Value::Array(_) => {
-            serde_json::from_value(value).map_err(serde::de::Error::custom)
-        }
+        Value::Array(_) => serde_json::from_value(value).map_err(serde::de::Error::custom),
         Value::Null => Ok(Vec::new()),
         _ => Err(serde::de::Error::custom("input must be string or array")),
     }

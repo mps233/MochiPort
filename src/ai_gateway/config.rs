@@ -5,7 +5,8 @@ use serde::{Deserialize, Serialize};
 #[serde(default, rename_all = "camelCase")]
 pub struct AiGatewayConfig {
     pub enabled: bool,
-    /// 默认 provider 名，当 model 无法匹配任何 provider 时使用。
+    /// 兼容旧配置的遗留字段；路由不使用默认/兜底 provider。
+    #[serde(skip_serializing)]
     pub default_provider: String,
     /// 全局 prompt_cache_retention 值（如 "1h"），可选。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,28 +27,19 @@ impl Default for AiGatewayConfig {
 }
 
 impl AiGatewayConfig {
-    /// 按名称查找 provider 配置。
-    pub fn get_provider(&self, name: &str) -> Option<&ProviderConfig> {
-        self.providers.iter().find(|p| p.name == name)
-    }
-
-    /// 按 model 名选择 provider：精确匹配 → 前缀匹配 → default fallback。
+    /// 按 model 名选择已启用的 provider：精确匹配 → 前缀匹配。
     pub fn select_provider(&self, model: &str) -> Option<&ProviderConfig> {
         // 1. 精确匹配：models 列表包含该 model
-        for provider in &self.providers {
+        for provider in self.providers.iter().filter(|provider| provider.enabled) {
             if provider.models.iter().any(|m| m == model) {
                 return Some(provider);
             }
         }
         // 2. 前缀匹配：model 以 provider name 开头
-        for provider in &self.providers {
+        for provider in self.providers.iter().filter(|provider| provider.enabled) {
             if model.starts_with(&provider.name) {
                 return Some(provider);
             }
-        }
-        // 3. fallback：default_provider
-        if !self.default_provider.is_empty() {
-            return self.get_provider(&self.default_provider);
         }
         None
     }
@@ -59,6 +51,8 @@ impl AiGatewayConfig {
 pub struct ProviderConfig {
     /// provider 名称标识（如 "openai"、"deepseek"）。
     pub name: String,
+    /// 是否启用该 provider。
+    pub enabled: bool,
     /// provider 类型：`"openai_responses"` 或 `"chat_completions"`。
     pub provider_type: ProviderType,
     /// 上游 API base URL。
@@ -78,6 +72,7 @@ impl Default for ProviderConfig {
     fn default() -> Self {
         Self {
             name: String::new(),
+            enabled: true,
             provider_type: ProviderType::OpenAiResponses,
             base_url: String::new(),
             api_key: String::new(),
@@ -111,10 +106,9 @@ mod tests {
         }
     }
 
-    fn make_config(providers: Vec<ProviderConfig>, default: &str) -> AiGatewayConfig {
+    fn make_config(providers: Vec<ProviderConfig>) -> AiGatewayConfig {
         AiGatewayConfig {
             enabled: true,
-            default_provider: default.into(),
             providers,
             ..Default::default()
         }
@@ -122,13 +116,18 @@ mod tests {
 
     #[test]
     fn test_exact_match() {
-        let config = make_config(
-            vec![
-                make_provider("openai", ProviderType::OpenAiResponses, vec!["gpt-4o", "gpt-4.1"]),
-                make_provider("deepseek", ProviderType::ChatCompletions, vec!["deepseek-chat", "deepseek-reasoner"]),
-            ],
-            "openai",
-        );
+        let config = make_config(vec![
+            make_provider(
+                "openai",
+                ProviderType::OpenAiResponses,
+                vec!["gpt-4o", "gpt-4.1"],
+            ),
+            make_provider(
+                "deepseek",
+                ProviderType::ChatCompletions,
+                vec!["deepseek-chat", "deepseek-reasoner"],
+            ),
+        ]);
         let p = config.select_provider("deepseek-chat").unwrap();
         assert_eq!(p.name, "deepseek");
 
@@ -138,53 +137,69 @@ mod tests {
 
     #[test]
     fn test_prefix_match() {
-        let config = make_config(
-            vec![
-                make_provider("openai", ProviderType::OpenAiResponses, vec![]),
-                make_provider("deepseek", ProviderType::ChatCompletions, vec![]),
-            ],
-            "openai",
-        );
+        let config = make_config(vec![
+            make_provider("openai", ProviderType::OpenAiResponses, vec![]),
+            make_provider("deepseek", ProviderType::ChatCompletions, vec![]),
+        ]);
         // "deepseek-v3" 前缀匹配 "deepseek"
         let p = config.select_provider("deepseek-v3").unwrap();
         assert_eq!(p.name, "deepseek");
     }
 
     #[test]
-    fn test_default_fallback() {
-        let config = make_config(
-            vec![
-                make_provider("openai", ProviderType::OpenAiResponses, vec!["gpt-4o"]),
-                make_provider("deepseek", ProviderType::ChatCompletions, vec!["deepseek-chat"]),
-            ],
-            "openai",
-        );
-        // "claude-xxx" 既不精确也不前缀匹配，fallback 到 default
-        let p = config.select_provider("claude-sonnet-4").unwrap();
-        assert_eq!(p.name, "openai");
+    fn test_no_fallback_even_with_legacy_default_provider() {
+        let config = make_config(vec![
+            make_provider("openai", ProviderType::OpenAiResponses, vec!["gpt-4o"]),
+            make_provider(
+                "deepseek",
+                ProviderType::ChatCompletions,
+                vec!["deepseek-chat"],
+            ),
+        ]);
+        let config = AiGatewayConfig {
+            default_provider: "openai".into(),
+            ..config
+        };
+        assert!(config.select_provider("claude-sonnet-4").is_none());
     }
 
     #[test]
     fn test_no_match_no_default() {
-        let config = make_config(
-            vec![make_provider("openai", ProviderType::OpenAiResponses, vec!["gpt-4o"])],
-            "",
-        );
+        let config = make_config(vec![make_provider(
+            "openai",
+            ProviderType::OpenAiResponses,
+            vec!["gpt-4o"],
+        )]);
         assert!(config.select_provider("unknown-model").is_none());
     }
 
     #[test]
     fn test_exact_takes_priority_over_prefix() {
-        let config = make_config(
-            vec![
-                make_provider("deepseek", ProviderType::ChatCompletions, vec![]),
-                make_provider("other", ProviderType::OpenAiResponses, vec!["deepseek-chat"]),
-            ],
-            "",
-        );
+        let config = make_config(vec![
+            make_provider("deepseek", ProviderType::ChatCompletions, vec![]),
+            make_provider(
+                "other",
+                ProviderType::OpenAiResponses,
+                vec!["deepseek-chat"],
+            ),
+        ]);
         // "deepseek-chat" 精确匹配 "other" 的 models 列表
         let p = config.select_provider("deepseek-chat").unwrap();
         assert_eq!(p.name, "other");
+    }
+
+    #[test]
+    fn test_disabled_provider_is_not_selected() {
+        let mut provider = make_provider(
+            "deepseek",
+            ProviderType::ChatCompletions,
+            vec!["deepseek-chat"],
+        );
+        provider.enabled = false;
+        let config = make_config(vec![provider]);
+
+        assert!(config.select_provider("deepseek-chat").is_none());
+        assert!(config.select_provider("deepseek-v3").is_none());
     }
 
     #[test]
@@ -210,8 +225,14 @@ mod tests {
         let config: AiGatewayConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);
         assert_eq!(config.providers.len(), 2);
-        assert_eq!(config.providers[0].provider_type, ProviderType::OpenAiResponses);
-        assert_eq!(config.providers[1].provider_type, ProviderType::ChatCompletions);
+        assert_eq!(
+            config.providers[0].provider_type,
+            ProviderType::OpenAiResponses
+        );
+        assert_eq!(
+            config.providers[1].provider_type,
+            ProviderType::ChatCompletions
+        );
         assert_eq!(config.providers[0].timeout_secs, 120);
         assert_eq!(config.providers[1].timeout_secs, 300); // default
     }

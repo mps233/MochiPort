@@ -17,6 +17,7 @@ use wxdragon::widgets::dataview::{
 use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
+use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::config::AppConfig;
 
 #[cfg(target_os = "windows")]
@@ -51,10 +52,11 @@ type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
+type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
 type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
 
-mod api;
 mod ai_gateway;
+mod api;
 mod daemon;
 mod im_accounts;
 mod onboarding;
@@ -63,10 +65,15 @@ mod text;
 mod update;
 mod widgets;
 
+use self::ai_gateway::{
+    AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRows,
+    PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider, gateway_entry_url,
+    provider_service_index, refresh_ai_gw_provider_list, save_ai_gw_provider,
+    set_ai_gw_actions_enabled, set_ai_gw_provider_enabled, toggle_ai_gw_enabled,
+};
 use self::api::{
-    ApiClient, ConfigureRequest, ConfigureTelegramBotRequest,
-    DashboardSnapshot, DeleteImAccountRequest, RemoteControlStatus,
-    SetImAccountEnabledRequest,
+    ApiClient, ConfigureRequest, ConfigureTelegramBotRequest, DashboardSnapshot,
+    DeleteImAccountRequest, RemoteControlStatus, SetImAccountEnabledRequest,
 };
 use self::daemon::{
     app_support_config_path, daemon_config_path, start_daemon_for_gui_async, stop_daemon_on_exit,
@@ -78,21 +85,13 @@ use self::im_accounts::{
 use self::onboarding::{
     prompt_telegram_bot_token, show_feishu_onboard_dialog, show_wechat_onboard_dialog,
 };
-use self::provider::{
-    change_text_value_if_changed, set_combo_value_if_changed,
-};
-use self::ai_gateway::{
-    AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRows,
-    ai_gw_provider_from_form, apply_ai_gw_provider_to_form, apply_pending_ai_gw_action,
-    delete_ai_gw_provider, gateway_entry_url, refresh_ai_gw_default_provider_combo,
-    refresh_ai_gw_provider_list, save_ai_gw_default_provider, save_ai_gw_provider,
-    set_ai_gw_actions_enabled, toggle_ai_gw_enabled,
-};
+use self::provider::strip_nul;
 use self::text::{GuiLocale, GuiText};
 use self::widgets::{
-    ImStatusPanel, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap, centered_status_panel,
-    im_status_panel, provider_combo_row, set_disabled_status_panel, set_im_channel_row,
-    set_status_panel, status_panel, text_field_row, topology_connector, topology_splitter,
+    ImStatusPanel, ProviderLogoKind, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap,
+    centered_status_panel, im_status_panel, provider_combo_row, provider_logo_bitmap,
+    set_disabled_status_panel, set_im_channel_row, set_status_panel, status_panel, text_field_row,
+    topology_connector, topology_splitter,
 };
 
 #[derive(Clone)]
@@ -136,7 +135,7 @@ fn build_ui() {
 
     let frame = Frame::builder()
         .with_title("Codex Remote")
-        .with_size(Size::new(1100, 760))
+        .with_size(Size::new(1280, 760))
         .build();
     frame.set_icon(&app_icon_bitmap(48));
     install_system_menu(&frame, &gui_timers, text);
@@ -286,12 +285,17 @@ fn build_ui() {
         12,
     );
 
+    let inject_codex_button = Button::builder(&codex_page)
+        .with_label(text.inject_codex_access())
+        .build();
+    inject_codex_button.set_tooltip(text.inject_codex_access_help());
     let uninstall_button = Button::builder(&codex_page)
         .with_label(text.clear_codex_access())
         .build();
     uninstall_button.set_tooltip(text.clear_codex_access_help());
     let codex_maintenance_actions = BoxSizer::builder(Orientation::Horizontal).build();
     codex_maintenance_actions.add_stretch_spacer(1);
+    codex_maintenance_actions.add(&inject_codex_button, 0, SizerFlag::Right, 8);
     codex_maintenance_actions.add(&uninstall_button, 0, SizerFlag::Right, 0);
     codex_sizer.add_stretch_spacer(1);
     codex_sizer.add_sizer(
@@ -320,17 +324,17 @@ fn build_ui() {
     ai_gw_page.set_background_color(Colour::rgb(250, 251, 253));
     let ai_gw_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let ai_gw_static_box = StaticBox::builder(&ai_gw_page)
-        .with_label(text.ai_gateway_management())
+    let ai_gw_header_box = StaticBox::builder(&ai_gw_page)
+        .with_label(text.ai_gateway_tab())
         .build();
-    let ai_gw_box =
-        StaticBoxSizerBuilder::new_with_box(&ai_gw_static_box, Orientation::Vertical).build();
+    let ai_gw_header =
+        StaticBoxSizerBuilder::new_with_box(&ai_gw_header_box, Orientation::Vertical).build();
 
-    let ai_gw_enabled = CheckBox::builder(&ai_gw_static_box)
+    let ai_gw_enabled = CheckBox::builder(&ai_gw_header_box)
         .with_label(text.ai_gateway_enabled())
         .with_value(false)
         .build();
-    let ai_gw_entry_url = StaticText::builder(&ai_gw_static_box)
+    let ai_gw_entry_url = StaticText::builder(&ai_gw_header_box)
         .with_label("")
         .build();
     ai_gw_entry_url.set_foreground_color(Colour::rgb(91, 100, 114));
@@ -342,36 +346,54 @@ fn build_ui() {
         SizerFlag::Right | SizerFlag::AlignCenterVertical,
         12,
     );
-    ai_gw_enable_row.add(
-        &ai_gw_entry_url,
-        1,
-        SizerFlag::AlignCenterVertical,
-        0,
-    );
-    ai_gw_box.add_sizer(
+    ai_gw_enable_row.add(&ai_gw_entry_url, 1, SizerFlag::AlignCenterVertical, 0);
+    ai_gw_header.add_sizer(
         &ai_gw_enable_row,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
     );
 
-    let ai_gw_catalog = StaticText::builder(&ai_gw_static_box)
+    let ai_gw_catalog = StaticText::builder(&ai_gw_header_box)
         .with_label("")
         .build();
     ai_gw_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
-    ai_gw_box.add(
+    ai_gw_header.add(
         &ai_gw_catalog,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         8,
     );
+    ai_gw_sizer.add_sizer(
+        &ai_gw_header,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+
+    let ai_gw_list_box = StaticBox::builder(&ai_gw_page)
+        .with_label(text.ai_gw_channel_list())
+        .build();
+    let ai_gw_list_section =
+        StaticBoxSizerBuilder::new_with_box(&ai_gw_list_box, Orientation::Vertical).build();
 
     let ai_gw_provider_rows: AiGwProviderRows = Rc::new(RefCell::new(Vec::new()));
+    let pending_ai_gw_channel_toggle: PendingAiGwChannelToggle = Rc::new(RefCell::new(None));
+    let pending_ai_gw_channel_toggle_for_model = pending_ai_gw_channel_toggle.clone();
     let ai_gw_provider_model: AiGwProviderModel =
         Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
             0,
             ai_gw_provider_rows.clone(),
             |rows: &AiGwProviderRows, row, col| -> Variant {
+                if col == 0 {
+                    return rows
+                        .borrow()
+                        .get(row)
+                        .and_then(|row_data| row_data.get(0))
+                        .map(|value| value == "true")
+                        .unwrap_or(false)
+                        .into();
+                }
                 rows.borrow()
                     .get(row)
                     .and_then(|row_data| row_data.get(col))
@@ -379,119 +401,118 @@ fn build_ui() {
                     .unwrap_or_default()
                     .into()
             },
-            None::<fn(&AiGwProviderRows, usize, usize, &Variant) -> bool>,
+            Some(
+                move |rows: &AiGwProviderRows, row, col, value: &Variant| -> bool {
+                    if col != 0 {
+                        return false;
+                    }
+                    let Some(enabled) = value.get_bool() else {
+                        return false;
+                    };
+                    let mut rows = std::cell::RefCell::borrow_mut(std::rc::Rc::as_ref(rows));
+                    let Some(row_data): Option<&mut [String; 7]> = rows.get_mut(row) else {
+                        return false;
+                    };
+                    let name = row_data[1].clone();
+                    if name.trim().is_empty() {
+                        return false;
+                    }
+                    pending_ai_gw_channel_toggle_for_model
+                        .borrow_mut()
+                        .replace((name, enabled));
+                    false
+                },
+            ),
             None::<fn(&AiGwProviderRows, usize, usize) -> Option<DataViewItemAttr>>,
             None::<fn(&AiGwProviderRows, usize, usize) -> bool>,
         )));
-    let ai_gw_provider_list = DataViewCtrl::builder(&ai_gw_static_box)
+    let ai_gw_provider_list = DataViewCtrl::builder(&ai_gw_list_box)
         .with_style(
             DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
         )
-        .with_size(Size::new(-1, 142))
+        .with_size(Size::new(-1, 330))
         .build();
+    ai_gw_provider_list.append_toggle_column(
+        text.enable(),
+        0,
+        70,
+        DataViewAlign::Center,
+        DataViewColumnFlags::Resizable,
+    );
     ai_gw_provider_list.append_text_column(
         text.ai_gw_col_name(),
-        0,
+        1,
         160,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.append_text_column(
-        text.ai_gw_col_type(),
-        1,
-        140,
+        text.ai_gw_provider_service(),
+        2,
+        110,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    ai_gw_provider_list.append_text_column(
+        text.ai_gw_api_format(),
+        3,
+        150,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    ai_gw_provider_list.append_text_column(
+        text.ai_gw_models(),
+        4,
+        230,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.append_text_column(
         text.ai_gw_col_base_url(),
-        2,
-        320,
+        5,
+        260,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.append_text_column(
-        text.ai_gw_col_api_key(),
-        3,
-        160,
+        text.ai_gw_timeout(),
+        6,
+        80,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.associate_model(&*ai_gw_provider_model.borrow());
-    ai_gw_box.add(
+    ai_gw_list_section.add(
         &ai_gw_provider_list,
-        0,
+        1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         10,
     );
 
-    let ai_gw_new_button = Button::builder(&ai_gw_static_box)
-        .with_label(text.add())
+    let ai_gw_new_button = Button::builder(&ai_gw_list_box)
+        .with_label(text.ai_gw_add_channel())
         .build();
-    let ai_gw_delete_button = Button::builder(&ai_gw_static_box)
-        .with_label(text.delete())
+    let ai_gw_edit_button = Button::builder(&ai_gw_list_box)
+        .with_label(text.ai_gw_edit_channel())
         .build();
-    let ai_gw_save_button = Button::builder(&ai_gw_static_box)
-        .with_label(text.save())
+    let ai_gw_delete_button = Button::builder(&ai_gw_list_box)
+        .with_label(text.ai_gw_delete_channel())
         .build();
-    let ai_gw_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    ai_gw_actions.add_stretch_spacer(1);
-    ai_gw_actions.add(&ai_gw_new_button, 0, SizerFlag::Right, 8);
-    ai_gw_actions.add(&ai_gw_delete_button, 0, SizerFlag::Right, 8);
-    ai_gw_actions.add(&ai_gw_save_button, 0, SizerFlag::Right, 0);
-    ai_gw_box.add_sizer(
-        &ai_gw_actions,
+    let ai_gw_list_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    ai_gw_list_actions.add_stretch_spacer(1);
+    ai_gw_list_actions.add(&ai_gw_new_button, 0, SizerFlag::Right, 8);
+    ai_gw_list_actions.add(&ai_gw_edit_button, 0, SizerFlag::Right, 8);
+    ai_gw_list_actions.add(&ai_gw_delete_button, 0, SizerFlag::Right, 0);
+    ai_gw_list_section.add_sizer(
+        &ai_gw_list_actions,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         10,
-    );
-
-    let ai_gw_form = FlexGridSizer::builder(0, 2)
-        .with_gap(Size::new(12, 10))
-        .build();
-    ai_gw_form.add_growable_col(1, 1);
-    let ai_gw_name = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_provider_name(), "");
-    let ai_gw_type = provider_combo_row(
-        &ai_gw_static_box,
-        &ai_gw_form,
-        text.ai_gw_provider_type(),
-        text.provider_type_openai_responses(),
-    );
-    ai_gw_type.append(text.provider_type_openai_responses());
-    ai_gw_type.append(text.provider_type_chat_completions());
-    let ai_gw_base_url = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_col_base_url(), "");
-    let ai_gw_key = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_col_api_key(), "");
-    let ai_gw_timeout = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_timeout(), "300");
-    let ai_gw_models = text_field_row(&ai_gw_static_box, &ai_gw_form, text.ai_gw_models(), "");
-    ai_gw_box.add_sizer(
-        &ai_gw_form,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        8,
-    );
-
-    let ai_gw_default_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let ai_gw_default_label = StaticText::builder(&ai_gw_static_box)
-        .with_label(text.ai_gw_default_provider())
-        .build();
-    let ai_gw_default_provider = ComboBox::builder(&ai_gw_static_box).build();
-    ai_gw_default_row.add(
-        &ai_gw_default_label,
-        0,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        8,
-    );
-    ai_gw_default_row.add(&ai_gw_default_provider, 1, SizerFlag::Expand, 0);
-    ai_gw_box.add_sizer(
-        &ai_gw_default_row,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        12,
     );
 
     ai_gw_sizer.add_sizer(
-        &ai_gw_box,
-        0,
+        &ai_gw_list_section,
+        1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
     );
@@ -729,22 +750,17 @@ fn build_ui() {
         save_telegram_button,
         connect_wechat_button,
         change_bot_button,
+        inject_codex_button,
         uninstall_button,
         provider_image_generation,
         ai_gw_enabled,
-        ai_gw_default_provider,
         ai_gw_provider_list,
         ai_gw_provider_rows,
         ai_gw_provider_model,
-        ai_gw_name,
-        ai_gw_type,
-        ai_gw_base_url,
-        ai_gw_key,
-        ai_gw_timeout,
-        ai_gw_models,
-        ai_gw_save_button,
+        pending_ai_gw_channel_toggle,
         ai_gw_delete_button,
         ai_gw_new_button,
+        ai_gw_edit_button,
         ai_gw_entry_url,
         ai_gw_status_label,
         ai_gw_catalog,
@@ -754,24 +770,47 @@ fn build_ui() {
     let dashboard_refresh = DashboardRefresh::new();
     show_dashboard_starting(&handles);
 
+    let codex_action_result: CodexActionResultStore = Arc::new(Mutex::new(None));
+    let codex_action_in_flight = Arc::new(AtomicBool::new(false));
+
     {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
-        provider_image_generation.on_toggled(move |event| {
-            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+        let handles = handles.clone();
+        let codex_action_result = codex_action_result.clone();
+        let codex_action_in_flight = codex_action_in_flight.clone();
+        inject_codex_button.on_click(move |_| {
+            if codex_action_in_flight.swap(true, Ordering::SeqCst) {
                 return;
             }
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                codex_action_in_flight.store(false, Ordering::SeqCst);
+                return;
+            }
+            handles
+                .inject_codex_button
+                .set_label(handles.text.injecting_codex_access());
+            handles.inject_codex_button.enable(false);
             let request = ConfigureRequest {
                 provider_name: None,
                 provider_base_url: None,
                 provider_key: None,
                 model: None,
-                activate: false,
-                image_generation_enabled: Some(event.is_checked()),
+                activate: true,
+                image_generation_enabled: Some(handles.provider_image_generation.get_value()),
                 supports_websockets: false,
             };
-            let _ = api.configure_codex_app(&request);
+            let thread_api = api.clone();
+            let codex_action_result = codex_action_result.clone();
+            let codex_action_in_flight = codex_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = thread_api.configure_codex_app(&request);
+                if let Ok(mut slot) = codex_action_result.lock() {
+                    slot.replace(CodexActionResult::Inject(outcome));
+                }
+                codex_action_in_flight.store(false, Ordering::SeqCst);
+            });
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
@@ -781,21 +820,35 @@ fn build_ui() {
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         let handles = handles.clone();
+        let codex_action_result = codex_action_result.clone();
+        let codex_action_in_flight = codex_action_in_flight.clone();
         uninstall_button.on_click(move |_| {
+            if codex_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
             if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                codex_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
             if !confirm_uninstall_codex_app_config(&frame, handles.text) {
+                codex_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
-
-            match api.uninstall_codex_app() {
-                Ok(_) => {
-                    show_info(&frame, handles.text.codex_app_config_uninstalled());
-                    schedule_dashboard_refresh(&api, &dashboard_refresh);
+            handles
+                .uninstall_button
+                .set_label(handles.text.clearing_codex_access());
+            handles.uninstall_button.enable(false);
+            let thread_api = api.clone();
+            let codex_action_result = codex_action_result.clone();
+            let codex_action_in_flight = codex_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = thread_api.uninstall_codex_app();
+                if let Ok(mut slot) = codex_action_result.lock() {
+                    slot.replace(CodexActionResult::Clear(outcome));
                 }
-                Err(err) => show_error(&frame, &err),
-            }
+                codex_action_in_flight.store(false, Ordering::SeqCst);
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
 
@@ -929,8 +982,18 @@ fn build_ui() {
     {
         let handles = handles.clone();
         let dashboard_refresh = dashboard_refresh.clone();
+        let api = api.clone();
+        let frame = frame;
+        let codex_action_result = codex_action_result.clone();
         result_timer.on_tick(move |_| {
             apply_pending_dashboard(&handles, &dashboard_refresh);
+            apply_pending_codex_action(
+                &api,
+                &handles,
+                &frame,
+                &dashboard_refresh,
+                &codex_action_result,
+            );
         });
     }
     result_timer.start(DASHBOARD_RESULT_POLL_MS, false);
@@ -991,15 +1054,26 @@ fn build_ui() {
     let ai_gw_action_in_flight = Arc::new(AtomicBool::new(false));
 
     {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
         let handles = handles.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
         ai_gw_new_button.on_click(move |_| {
-            change_text_value_if_changed(&handles.ai_gw_name, "");
-            set_combo_value_if_changed(&handles.ai_gw_type, handles.text.provider_type_openai_responses());
-            change_text_value_if_changed(&handles.ai_gw_base_url, "");
-            change_text_value_if_changed(&handles.ai_gw_key, "");
-            change_text_value_if_changed(&handles.ai_gw_timeout, "300");
-            change_text_value_if_changed(&handles.ai_gw_models, "");
-            handles.ai_gw_catalog.set_label("");
+            if ai_gw_action_in_flight.load(Ordering::SeqCst) {
+                return;
+            }
+            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, None) {
+                start_ai_gw_provider_save(
+                    &api,
+                    &dashboard_refresh,
+                    &handles,
+                    &ai_gw_action_result,
+                    &ai_gw_action_in_flight,
+                    provider,
+                );
+            }
         });
     }
 
@@ -1010,30 +1084,25 @@ fn build_ui() {
         let handles = handles.clone();
         let ai_gw_action_result = ai_gw_action_result.clone();
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
-        ai_gw_save_button.on_click(move |_| {
-            if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
+        ai_gw_edit_button.on_click(move |_| {
+            if ai_gw_action_in_flight.load(Ordering::SeqCst) {
                 return;
             }
-            let provider = ai_gw_provider_from_form(&handles);
-            if provider.name.is_empty() {
-                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
-                show_error(&frame, handles.text.ai_gw_provider_name_empty());
+            let Some(provider) = selected_ai_gw_provider(&handles, &dashboard_refresh) else {
+                show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
+            };
+            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, Some(&provider))
+            {
+                start_ai_gw_provider_save(
+                    &api,
+                    &dashboard_refresh,
+                    &handles,
+                    &ai_gw_action_result,
+                    &ai_gw_action_in_flight,
+                    provider,
+                );
             }
-            handles.ai_gw_save_button.set_label(handles.text.ai_gw_saving());
-            set_ai_gw_actions_enabled(&handles, false);
-
-            let worker_api = api.clone();
-            let ai_gw_action_result = ai_gw_action_result.clone();
-            let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
-            thread::spawn(move || {
-                let outcome = save_ai_gw_provider(&worker_api, provider);
-                if let Ok(mut slot) = ai_gw_action_result.lock() {
-                    slot.replace(AiGwActionResult::Save(outcome));
-                }
-                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
-            });
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
 
@@ -1048,13 +1117,15 @@ fn build_ui() {
             if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
                 return;
             }
-            let name = handles.ai_gw_name.get_value().trim().to_string();
-            if name.is_empty() {
+            let Some(provider) = selected_ai_gw_provider(&handles, &dashboard_refresh) else {
                 ai_gw_action_in_flight.store(false, Ordering::SeqCst);
-                show_error(&frame, handles.text.ai_gw_provider_name_empty());
+                show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
-            }
-            handles.ai_gw_delete_button.set_label(handles.text.ai_gw_deleting());
+            };
+            let name = provider.name;
+            handles
+                .ai_gw_delete_button
+                .set_label(handles.text.ai_gw_deleting());
             set_ai_gw_actions_enabled(&handles, false);
 
             let worker_api = api.clone();
@@ -1082,7 +1153,9 @@ fn build_ui() {
                 return;
             }
             let enabled = event.is_checked();
-            handles.ai_gw_catalog.set_label(handles.text.ai_gw_toggling());
+            handles
+                .ai_gw_catalog
+                .set_label(handles.text.ai_gw_toggling());
             set_ai_gw_actions_enabled(&handles, false);
 
             let worker_api = api.clone();
@@ -1102,44 +1175,28 @@ fn build_ui() {
     {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
+        let handles = handles.clone();
         let ai_gw_action_result = ai_gw_action_result.clone();
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
-        ai_gw_default_provider.on_selection_changed(move |_| {
-            if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
+        ai_gw_provider_list.on_item_activated(move |_| {
+            if ai_gw_action_in_flight.load(Ordering::SeqCst) {
                 return;
             }
-            let name = ai_gw_default_provider.get_value().trim().to_string();
-            let worker_api = api.clone();
-            let ai_gw_action_result = ai_gw_action_result.clone();
-            let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
-            thread::spawn(move || {
-                let outcome = save_ai_gw_default_provider(&worker_api, &name);
-                if let Ok(mut slot) = ai_gw_action_result.lock() {
-                    slot.replace(AiGwActionResult::DefaultProvider(outcome));
-                }
-                ai_gw_action_in_flight.store(false, Ordering::SeqCst);
-            });
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
-        });
-    }
-
-    {
-        let handles = handles.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        ai_gw_provider_list.on_selection_changed(move |_| {
-            let Some(index) = ai_gw_provider_list.get_selected_row() else {
+            let Some(provider) = selected_ai_gw_provider(&handles, &dashboard_refresh) else {
+                show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
             };
-            let rows = handles.ai_gw_provider_rows.borrow();
-            if index >= rows.len() {
-                return;
-            }
-            if let Some(snapshot) = cached_dashboard_snapshot(&dashboard_refresh) {
-                if let Some(config) = snapshot.ai_gateway.as_ref() {
-                    if let Some(provider) = config.providers.get(index) {
-                        apply_ai_gw_provider_to_form(&handles, provider);
-                    }
-                }
+            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, Some(&provider))
+            {
+                start_ai_gw_provider_save(
+                    &api,
+                    &dashboard_refresh,
+                    &handles,
+                    &ai_gw_action_result,
+                    &ai_gw_action_in_flight,
+                    provider,
+                );
             }
         });
     }
@@ -1152,7 +1209,32 @@ fn build_ui() {
         let dashboard_refresh = dashboard_refresh.clone();
         let api = api.clone();
         let ai_gw_action_result = ai_gw_action_result.clone();
+        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
         ai_gw_action_timer.on_tick(move |_| {
+            if !ai_gw_action_in_flight.load(Ordering::SeqCst)
+                && let Some((name, enabled)) =
+                    handles.pending_ai_gw_channel_toggle.borrow_mut().take()
+            {
+                if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                    force_dashboard_refresh(&api, &dashboard_refresh);
+                    return;
+                }
+                ai_gw_action_in_flight.store(true, Ordering::SeqCst);
+                handles
+                    .ai_gw_catalog
+                    .set_label(handles.text.ai_gw_toggling());
+                set_ai_gw_actions_enabled(&handles, false);
+                let worker_api = api.clone();
+                let ai_gw_action_result = ai_gw_action_result.clone();
+                let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+                thread::spawn(move || {
+                    let outcome = set_ai_gw_provider_enabled(&worker_api, &name, enabled);
+                    if let Ok(mut slot) = ai_gw_action_result.lock() {
+                        slot.replace(AiGwActionResult::ChannelToggle(outcome));
+                    }
+                    ai_gw_action_in_flight.store(false, Ordering::SeqCst);
+                });
+            }
             if apply_pending_ai_gw_action(&handles, &frame, &ai_gw_action_result) {
                 force_dashboard_refresh(&api, &dashboard_refresh);
             }
@@ -1288,6 +1370,464 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
     });
 }
 
+fn ai_gw_service_option(
+    parent: &Panel,
+    parent_sizer: &BoxSizer,
+    label: &str,
+    logo: Option<ProviderLogoKind>,
+    first_in_group: bool,
+) -> RadioButton {
+    let row_panel = Panel::builder(parent)
+        .with_style(PanelStyle::BorderStatic)
+        .build();
+    row_panel.set_background_color(Colour::rgb(250, 251, 253));
+    row_panel.set_min_size(Size::new(0, 46));
+
+    let row = BoxSizer::builder(Orientation::Horizontal).build();
+    row.add_spacer(12);
+    match logo {
+        Some(kind) => {
+            let icon = StaticBitmap::builder(&row_panel)
+                .with_bitmap(Some(provider_logo_bitmap(kind, 24)))
+                .with_size(Size::new(24, 24))
+                .build();
+            icon.set_min_size(Size::new(24, 24));
+            row.add(
+                &icon,
+                0,
+                SizerFlag::AlignCenterVertical | SizerFlag::Right,
+                10,
+            );
+        }
+        None => {
+            row.add_spacer(34);
+        }
+    }
+
+    let builder = RadioButton::builder(&row_panel).with_label(label);
+    let radio = if first_in_group {
+        builder.first_in_group().build()
+    } else {
+        builder.build()
+    };
+    radio.set_tooltip(label);
+    row.add(&radio, 1, SizerFlag::AlignCenterVertical, 0);
+    row.add_spacer(12);
+    row_panel.set_sizer(row, true);
+    parent_sizer.add(&row_panel, 0, SizerFlag::Expand | SizerFlag::Bottom, 8);
+    radio
+}
+
+fn selected_ai_gw_provider(
+    handles: &UiHandles,
+    dashboard_refresh: &DashboardRefresh,
+) -> Option<ProviderConfig> {
+    let index = handles.ai_gw_provider_list.get_selected_row()?;
+    let snapshot = cached_dashboard_snapshot(dashboard_refresh)?;
+    snapshot
+        .ai_gateway
+        .as_ref()
+        .and_then(|config| config.providers.get(index))
+        .cloned()
+}
+
+fn start_ai_gw_provider_save(
+    api: &ApiClient,
+    dashboard_refresh: &DashboardRefresh,
+    handles: &UiHandles,
+    result_store: &AiGwActionResultStore,
+    in_flight: &Arc<AtomicBool>,
+    provider: ProviderConfig,
+) {
+    if in_flight.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    handles.ai_gw_catalog.set_label(handles.text.ai_gw_saving());
+    set_ai_gw_actions_enabled(handles, false);
+
+    let worker_api = api.clone();
+    let result_store = result_store.clone();
+    let in_flight = in_flight.clone();
+    thread::spawn(move || {
+        let outcome = save_ai_gw_provider(&worker_api, provider);
+        if let Ok(mut slot) = result_store.lock() {
+            slot.replace(AiGwActionResult::Save(outcome));
+        }
+        in_flight.store(false, Ordering::SeqCst);
+    });
+    schedule_dashboard_refresh(api, dashboard_refresh);
+}
+
+fn show_ai_gw_channel_dialog(
+    parent: &Frame,
+    text: GuiText,
+    initial: Option<&ProviderConfig>,
+) -> Option<ProviderConfig> {
+    let dialog = Dialog::builder(parent, text.ai_gw_channel_editor())
+        .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
+        .with_size(1120, 760)
+        .build();
+    dialog.set_min_size(Size::new(920, 640));
+    dialog.set_background_color(Colour::rgb(250, 251, 253));
+
+    let panel = Panel::builder(&dialog).build();
+    panel.set_background_color(Colour::rgb(250, 251, 253));
+    let root = BoxSizer::builder(Orientation::Vertical).build();
+
+    let title = StaticText::builder(&panel)
+        .with_label(text.ai_gw_channel_editor())
+        .build();
+    title.set_foreground_color(Colour::rgb(21, 25, 31));
+    root.add(
+        &title,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let help = StaticText::builder(&panel)
+        .with_label(text.ai_gw_channel_editor_help())
+        .build();
+    help.set_foreground_color(Colour::rgb(103, 111, 124));
+    root.add(
+        &help,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let workspace = BoxSizer::builder(Orientation::Horizontal).build();
+
+    let service_panel = Panel::builder(&panel)
+        .with_style(PanelStyle::BorderStatic)
+        .build();
+    service_panel.set_background_color(Colour::rgb(255, 255, 255));
+    service_panel.set_min_size(Size::new(300, 500));
+    let service_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let service_title = StaticText::builder(&service_panel)
+        .with_label(text.ai_gw_provider_service())
+        .build();
+    service_title.set_foreground_color(Colour::rgb(21, 25, 31));
+    service_sizer.add(
+        &service_title,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        14,
+    );
+    let radio_openai = ai_gw_service_option(
+        &service_panel,
+        &service_sizer,
+        text.ai_gw_service_openai(),
+        Some(ProviderLogoKind::OpenAi),
+        true,
+    );
+    let radio_deepseek = ai_gw_service_option(
+        &service_panel,
+        &service_sizer,
+        text.ai_gw_service_deepseek(),
+        Some(ProviderLogoKind::DeepSeek),
+        false,
+    );
+    let radio_custom = ai_gw_service_option(
+        &service_panel,
+        &service_sizer,
+        text.ai_gw_service_custom(),
+        None,
+        false,
+    );
+    service_sizer.add_stretch_spacer(1);
+    service_panel.set_sizer(service_sizer, true);
+    workspace.add(&service_panel, 0, SizerFlag::Expand | SizerFlag::Right, 14);
+
+    let form_panel = Panel::builder(&panel)
+        .with_style(PanelStyle::BorderStatic)
+        .build();
+    form_panel.set_background_color(Colour::rgb(255, 255, 255));
+    form_panel.set_min_size(Size::new(620, 500));
+    let form_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let form_title = StaticText::builder(&form_panel)
+        .with_label(text.ai_gw_api_format())
+        .build();
+    form_title.set_foreground_color(Colour::rgb(21, 25, 31));
+    form_sizer.add(
+        &form_title,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let grid = FlexGridSizer::builder(0, 2)
+        .with_vgap(12)
+        .with_hgap(14)
+        .build();
+    grid.add_growable_col(1, 1);
+
+    let type_input = provider_combo_row(
+        &form_panel,
+        &grid,
+        text.ai_gw_api_format(),
+        text.provider_type_openai_responses(),
+    );
+    type_input.append(text.provider_type_openai_responses());
+    type_input.append(text.provider_type_chat_completions());
+    type_input.set_selection(0);
+    let name_input = text_field_row(&form_panel, &grid, text.ai_gw_provider_name(), "");
+    let base_url_input = text_field_row(&form_panel, &grid, text.ai_gw_col_base_url(), "");
+    let key_input = text_field_row(&form_panel, &grid, text.ai_gw_col_api_key(), "");
+    let models_input = text_field_row(&form_panel, &grid, text.ai_gw_models(), "");
+    models_input.set_tooltip(text.ai_gw_models_help());
+    let timeout_input = text_field_row(&form_panel, &grid, text.ai_gw_timeout(), "60");
+
+    form_sizer.add_sizer(
+        &grid,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+    form_sizer.add_stretch_spacer(1);
+    form_panel.set_sizer(form_sizer, true);
+    workspace.add(&form_panel, 1, SizerFlag::Expand, 0);
+
+    root.add_sizer(
+        &workspace,
+        1,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let buttons = BoxSizer::builder(Orientation::Horizontal).build();
+    let cancel_button = Button::builder(&panel)
+        .with_id(ID_CANCEL)
+        .with_label(text.cancel())
+        .build();
+    let save_button = Button::builder(&panel)
+        .with_id(ID_OK)
+        .with_label(if initial.is_some() {
+            text.ai_gw_save_channel()
+        } else {
+            text.ai_gw_create_channel()
+        })
+        .build();
+    save_button.set_default();
+    buttons.add_stretch_spacer(1);
+    buttons.add(&cancel_button, 0, SizerFlag::Right, 8);
+    buttons.add(&save_button, 0, SizerFlag::Right, 0);
+    root.add_sizer(
+        &buttons,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        18,
+    );
+
+    panel.set_sizer(root, true);
+    let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer(dialog_sizer, true);
+
+    apply_ai_gw_dialog_template(
+        text,
+        initial,
+        &radio_openai,
+        &radio_deepseek,
+        &radio_custom,
+        &type_input,
+        &name_input,
+        &base_url_input,
+        &models_input,
+        &timeout_input,
+    );
+    if let Some(provider) = initial {
+        key_input.change_value(&provider.api_key);
+    }
+
+    {
+        let type_input = type_input;
+        let name_input = name_input;
+        let base_url_input = base_url_input;
+        let models_input = models_input;
+        let timeout_input = timeout_input;
+        radio_openai.on_selected(move |_| {
+            if radio_openai.get_value() {
+                apply_ai_gw_dialog_template(
+                    text,
+                    None,
+                    &radio_openai,
+                    &radio_deepseek,
+                    &radio_custom,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &models_input,
+                    &timeout_input,
+                );
+            }
+        });
+    }
+    {
+        let type_input = type_input;
+        let name_input = name_input;
+        let base_url_input = base_url_input;
+        let models_input = models_input;
+        let timeout_input = timeout_input;
+        radio_deepseek.on_selected(move |_| {
+            if radio_deepseek.get_value() {
+                let provider = ProviderConfig {
+                    name: "deepseek".to_string(),
+                    provider_type: ProviderType::ChatCompletions,
+                    base_url: "https://api.deepseek.com/v1".to_string(),
+                    models: vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
+                    timeout_secs: 60,
+                    ..Default::default()
+                };
+                apply_ai_gw_dialog_template(
+                    text,
+                    Some(&provider),
+                    &radio_openai,
+                    &radio_deepseek,
+                    &radio_custom,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &models_input,
+                    &timeout_input,
+                );
+            }
+        });
+    }
+    {
+        let type_input = type_input;
+        let name_input = name_input;
+        let base_url_input = base_url_input;
+        let models_input = models_input;
+        let timeout_input = timeout_input;
+        radio_custom.on_selected(move |_| {
+            if radio_custom.get_value() {
+                let provider = ProviderConfig {
+                    timeout_secs: 60,
+                    ..Default::default()
+                };
+                apply_ai_gw_dialog_template(
+                    text,
+                    Some(&provider),
+                    &radio_openai,
+                    &radio_deepseek,
+                    &radio_custom,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &models_input,
+                    &timeout_input,
+                );
+            }
+        });
+    }
+    {
+        let dialog = dialog;
+        cancel_button.on_click(move |_| dialog.end_modal(ID_CANCEL));
+    }
+    {
+        let dialog = dialog;
+        save_button.on_click(move |_| dialog.end_modal(ID_OK));
+    }
+
+    name_input.set_focus();
+    dialog.center();
+    let result = dialog.show_modal();
+
+    let provider = if result == ID_OK {
+        let name = strip_nul(&name_input.get_value()).trim().to_string();
+        if name.is_empty() {
+            show_error(parent, text.ai_gw_provider_name_empty());
+            None
+        } else {
+            let provider_type = if strip_nul(&type_input.get_value())
+                .trim()
+                .eq_ignore_ascii_case(text.provider_type_chat_completions())
+            {
+                ProviderType::ChatCompletions
+            } else {
+                ProviderType::OpenAiResponses
+            };
+            let models = strip_nul(&models_input.get_value())
+                .split(',')
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(ToOwned::to_owned)
+                .collect();
+            let timeout_secs = strip_nul(&timeout_input.get_value())
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(60);
+            Some(ProviderConfig {
+                name,
+                enabled: initial.map(|provider| provider.enabled).unwrap_or(true),
+                provider_type,
+                base_url: strip_nul(&base_url_input.get_value()).trim().to_string(),
+                api_key: strip_nul(&key_input.get_value()).trim().to_string(),
+                models,
+                prompt_cache_retention: initial
+                    .and_then(|provider| provider.prompt_cache_retention.clone()),
+                timeout_secs,
+            })
+        }
+    } else {
+        None
+    };
+
+    dialog.destroy();
+    provider
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_ai_gw_dialog_template(
+    text: GuiText,
+    provider: Option<&ProviderConfig>,
+    radio_openai: &RadioButton,
+    radio_deepseek: &RadioButton,
+    radio_custom: &RadioButton,
+    type_input: &ComboBox,
+    name_input: &TextCtrl,
+    base_url_input: &TextCtrl,
+    models_input: &TextCtrl,
+    timeout_input: &TextCtrl,
+) {
+    let provider = provider.cloned().unwrap_or_else(|| ProviderConfig {
+        name: "openai".to_string(),
+        provider_type: ProviderType::OpenAiResponses,
+        base_url: "https://api.openai.com/v1".to_string(),
+        models: vec![
+            "gpt-5.5".to_string(),
+            "gpt-5.4".to_string(),
+            "gpt-5.2".to_string(),
+        ],
+        timeout_secs: 60,
+        ..Default::default()
+    });
+
+    radio_openai.set_value(false);
+    radio_deepseek.set_value(false);
+    radio_custom.set_value(false);
+    match provider_service_index(&provider) {
+        1 => radio_deepseek.set_value(true),
+        0 => radio_openai.set_value(true),
+        _ => radio_custom.set_value(true),
+    }
+    match provider.provider_type {
+        ProviderType::OpenAiResponses => {
+            type_input.set_value(text.provider_type_openai_responses());
+            type_input.set_selection(0);
+        }
+        ProviderType::ChatCompletions => {
+            type_input.set_value(text.provider_type_chat_completions());
+            type_input.set_selection(1);
+        }
+    }
+    name_input.change_value(&provider.name);
+    base_url_input.change_value(&provider.base_url);
+    models_input.change_value(&provider.models.join(", "));
+    timeout_input.change_value(&provider.timeout_secs.to_string());
+}
+
 fn handle_language_selected(frame: &Frame, text: GuiText, locale: GuiLocale) {
     if let Some(menu_bar) = frame.get_menu_bar() {
         menu_bar.check_item(ID_MENU_LANGUAGE_ZH_CN, locale == GuiLocale::ZhCn);
@@ -1315,23 +1855,18 @@ struct UiHandles {
     save_telegram_button: Button,
     connect_wechat_button: Button,
     change_bot_button: Button,
+    inject_codex_button: Button,
     uninstall_button: Button,
     provider_image_generation: CheckBox,
     // AI Gateway fields
     ai_gw_enabled: CheckBox,
-    ai_gw_default_provider: ComboBox,
     ai_gw_provider_list: DataViewCtrl,
     ai_gw_provider_rows: AiGwProviderRows,
     ai_gw_provider_model: AiGwProviderModel,
-    ai_gw_name: TextCtrl,
-    ai_gw_type: ComboBox,
-    ai_gw_base_url: TextCtrl,
-    ai_gw_key: TextCtrl,
-    ai_gw_timeout: TextCtrl,
-    ai_gw_models: TextCtrl,
-    ai_gw_save_button: Button,
+    pending_ai_gw_channel_toggle: PendingAiGwChannelToggle,
     ai_gw_delete_button: Button,
     ai_gw_new_button: Button,
+    ai_gw_edit_button: Button,
     ai_gw_entry_url: StaticText,
     ai_gw_status_label: StaticText,
     ai_gw_catalog: StaticText,
@@ -1366,6 +1901,11 @@ enum ImActionResult {
     TelegramConfigure(Result<serde_json::Value, String>),
     AccountToggle(Result<serde_json::Value, String>),
     AccountDelete(Result<serde_json::Value, String>),
+}
+
+enum CodexActionResult {
+    Inject(Result<serde_json::Value, String>),
+    Clear(Result<serde_json::Value, String>),
 }
 
 fn schedule_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh) -> bool {
@@ -1427,6 +1967,48 @@ fn cached_dashboard_snapshot(refresh: &DashboardRefresh) -> Option<DashboardSnap
         .lock()
         .ok()
         .and_then(|snapshot| snapshot.clone())
+}
+
+fn apply_pending_codex_action(
+    api: &ApiClient,
+    handles: &UiHandles,
+    frame: &Frame,
+    refresh: &DashboardRefresh,
+    result: &CodexActionResultStore,
+) -> bool {
+    let result = result.lock().ok().and_then(|mut slot| slot.take());
+    let Some(result) = result else {
+        return false;
+    };
+
+    handles
+        .inject_codex_button
+        .set_label(handles.text.inject_codex_access());
+    handles
+        .uninstall_button
+        .set_label(handles.text.clear_codex_access());
+    handles.inject_codex_button.enable(true);
+    handles.uninstall_button.enable(true);
+
+    match result {
+        CodexActionResult::Inject(Ok(_)) => {
+            show_info(frame, handles.text.codex_app_config_injected());
+            force_dashboard_refresh(api, refresh);
+        }
+        CodexActionResult::Inject(Err(err)) => {
+            show_error(frame, &err);
+            force_dashboard_refresh(api, refresh);
+        }
+        CodexActionResult::Clear(Ok(_)) => {
+            show_info(frame, handles.text.codex_app_config_uninstalled());
+            force_dashboard_refresh(api, refresh);
+        }
+        CodexActionResult::Clear(Err(err)) => {
+            show_error(frame, &err);
+            force_dashboard_refresh(api, refresh);
+        }
+    }
+    true
 }
 
 fn ensure_service_ready_for_action(
@@ -1695,11 +2277,12 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             handles.ai_gw_enabled.set_value(gw.enabled);
         }
         let base = api_base_url_from_status(snapshot);
-        handles
-            .ai_gw_entry_url
-            .set_label(&format!("{}: {}", text.ai_gw_entry_url(), gateway_entry_url(&base)));
+        handles.ai_gw_entry_url.set_label(&format!(
+            "{}: {}",
+            text.ai_gw_entry_url(),
+            gateway_entry_url(&base)
+        ));
         refresh_ai_gw_provider_list(handles, Some(gw));
-        refresh_ai_gw_default_provider_combo(handles, Some(gw));
     } else {
         handles
             .ai_gw_status_label
@@ -1714,6 +2297,7 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.save_telegram_button.enable(enabled);
     handles.delete_im_account_button.enable(enabled);
     handles.provider_image_generation.enable(enabled);
+    handles.inject_codex_button.enable(enabled);
     handles.uninstall_button.enable(enabled);
     set_ai_gw_actions_enabled(handles, enabled);
 }

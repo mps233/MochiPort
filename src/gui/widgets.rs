@@ -47,6 +47,12 @@ pub(super) enum StatusIconKind {
     CodexCli,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum ProviderLogoKind {
+    OpenAi,
+    DeepSeek,
+}
+
 pub(super) fn status_panel<W: WxWidget>(
     parent: &W,
     title: &str,
@@ -422,6 +428,22 @@ pub(super) fn im_channel_icon_bitmap(kind: ImChannelKind, disabled: bool, size: 
             }
         }
     }
+}
+
+pub(super) fn provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap {
+    let (file_name, bytes) = match kind {
+        ProviderLogoKind::OpenAi => (
+            "openai.svg",
+            include_bytes!("../../packaging/brand/providers/openai.svg").as_slice(),
+        ),
+        ProviderLogoKind::DeepSeek => (
+            "deepseek.svg",
+            include_bytes!("../../packaging/brand/providers/deepseek.svg").as_slice(),
+        ),
+    };
+    BitmapBundle::from_svg_data(bytes, Size::new(size, size))
+        .and_then(|bundle| bundle.get_bitmap(Size::new(size, size)))
+        .unwrap_or_else(|| panic!("failed to load provider logo {file_name}"))
 }
 
 pub(super) fn brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {

@@ -7,19 +7,20 @@ use wxdragon::widgets::dataview::CustomDataViewVirtualListModel;
 
 use crate::ai_gateway::config::{AiGatewayConfig, ProviderConfig, ProviderType};
 
+use super::UiHandles;
 use super::api::{ApiClient, ConfigureRequest, DeleteProviderRequest};
 use super::text::GuiText;
-use super::UiHandles;
 
-pub(super) type AiGwProviderRows = Rc<RefCell<Vec<[String; 4]>>>;
+pub(super) type AiGwProviderRows = Rc<RefCell<Vec<[String; 7]>>>;
 pub(super) type AiGwProviderModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
+pub(super) type PendingAiGwChannelToggle = Rc<RefCell<Option<(String, bool)>>>;
 pub(super) type AiGwActionResultStore = Arc<Mutex<Option<AiGwActionResult>>>;
 
 pub(super) enum AiGwActionResult {
     Save(Result<(), String>),
     Delete(Result<(), String>),
     Toggle(Result<(), String>),
-    DefaultProvider(Result<(), String>),
+    ChannelToggle(Result<(), String>),
 }
 
 pub(super) fn save_ai_gw_provider(api: &ApiClient, provider: ProviderConfig) -> Result<(), String> {
@@ -41,9 +42,6 @@ pub(super) fn save_ai_gw_provider(api: &ApiClient, provider: ProviderConfig) -> 
 pub(super) fn delete_ai_gw_provider(api: &ApiClient, name: &str) -> Result<(), String> {
     let mut config = api.get_app_config()?;
     config.ai_gateway.providers.retain(|p| p.name != name);
-    if config.ai_gateway.default_provider == name {
-        config.ai_gateway.default_provider = String::new();
-    }
     api.save_app_config(&config)?;
     Ok(())
 }
@@ -73,9 +71,21 @@ pub(super) fn toggle_ai_gw_enabled(api: &ApiClient, enabled: bool) -> Result<(),
     Ok(())
 }
 
-pub(super) fn save_ai_gw_default_provider(api: &ApiClient, name: &str) -> Result<(), String> {
+pub(super) fn set_ai_gw_provider_enabled(
+    api: &ApiClient,
+    name: &str,
+    enabled: bool,
+) -> Result<(), String> {
     let mut config = api.get_app_config()?;
-    config.ai_gateway.default_provider = name.to_string();
+    let Some(provider) = config
+        .ai_gateway
+        .providers
+        .iter_mut()
+        .find(|provider| provider.name == name)
+    else {
+        return Err(format!("AI Gateway channel not found: {name}"));
+    };
+    provider.enabled = enabled;
     api.save_app_config(&config)?;
     Ok(())
 }
@@ -106,10 +116,7 @@ pub(super) fn refresh_ai_gw_provider_list(handles: &UiHandles, config: Option<&A
     }
 }
 
-fn ai_gw_provider_list_rows(
-    _text: GuiText,
-    config: Option<&AiGatewayConfig>,
-) -> Vec<[String; 4]> {
+fn ai_gw_provider_list_rows(text: GuiText, config: Option<&AiGatewayConfig>) -> Vec<[String; 7]> {
     let Some(config) = config else {
         return Vec::new();
     };
@@ -118,78 +125,50 @@ fn ai_gw_provider_list_rows(
         .iter()
         .map(|p| {
             [
+                p.enabled.to_string(),
                 p.name.clone(),
+                provider_service_display(text, p),
                 provider_type_display(&p.provider_type),
+                provider_models_display(&p.models),
                 p.base_url.clone(),
-                masked_ai_gw_key(&p.api_key),
+                p.timeout_secs.to_string(),
             ]
         })
         .collect()
 }
 
-fn provider_type_display(pt: &ProviderType) -> String {
+fn provider_service_display(text: GuiText, provider: &ProviderConfig) -> String {
+    match provider_service_index(provider) {
+        1 => "DeepSeek".to_string(),
+        0 => "OpenAI".to_string(),
+        _ => text.ai_gw_service_custom().to_string(),
+    }
+}
+
+pub(super) fn provider_service_index(provider: &ProviderConfig) -> i32 {
+    let name = provider.name.to_ascii_lowercase();
+    let base_url = provider.base_url.to_ascii_lowercase();
+    if name.contains("deepseek") || base_url.contains("deepseek") {
+        1
+    } else if name.contains("openai") || base_url.contains("openai") {
+        0
+    } else {
+        2
+    }
+}
+
+pub(super) fn provider_type_display(pt: &ProviderType) -> String {
     match pt {
         ProviderType::OpenAiResponses => "OpenAI Responses".to_string(),
         ProviderType::ChatCompletions => "Chat Completions".to_string(),
     }
 }
 
-fn masked_ai_gw_key(value: &str) -> String {
-    let value = value.trim();
-    if value.is_empty() {
+fn provider_models_display(models: &[String]) -> String {
+    if models.is_empty() {
         return String::new();
     }
-    let suffix: String = value.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
-    format!("****{suffix}")
-}
-
-pub(super) fn apply_ai_gw_provider_to_form(handles: &UiHandles, provider: &ProviderConfig) {
-    super::provider::change_text_value_if_changed(&handles.ai_gw_name, &provider.name);
-    let type_str = provider_type_display(&provider.provider_type);
-    super::provider::set_combo_value_if_changed(&handles.ai_gw_type, &type_str);
-    super::provider::change_text_value_if_changed(&handles.ai_gw_base_url, &provider.base_url);
-    super::provider::change_text_value_if_changed(&handles.ai_gw_key, &provider.api_key);
-    super::provider::change_text_value_if_changed(
-        &handles.ai_gw_timeout,
-        &provider.timeout_secs.to_string(),
-    );
-    let models_str = provider.models.join(", ");
-    super::provider::change_text_value_if_changed(&handles.ai_gw_models, &models_str);
-}
-
-pub(super) fn ai_gw_provider_from_form(handles: &UiHandles) -> ProviderConfig {
-    let name = handles.ai_gw_name.get_value().trim().to_string();
-    let type_str = handles.ai_gw_type.get_value();
-    let provider_type = if type_str.contains("Chat") {
-        ProviderType::ChatCompletions
-    } else {
-        ProviderType::OpenAiResponses
-    };
-    let base_url = handles.ai_gw_base_url.get_value().trim().to_string();
-    let api_key = handles.ai_gw_key.get_value().trim().to_string();
-    let timeout_secs = handles
-        .ai_gw_timeout
-        .get_value()
-        .trim()
-        .parse::<u64>()
-        .unwrap_or(300);
-    let models: Vec<String> = handles
-        .ai_gw_models
-        .get_value()
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    ProviderConfig {
-        name,
-        provider_type,
-        base_url,
-        api_key,
-        models,
-        prompt_cache_retention: None,
-        timeout_secs,
-    }
+    models.join(" / ")
 }
 
 pub(super) fn apply_pending_ai_gw_action(
@@ -202,15 +181,14 @@ pub(super) fn apply_pending_ai_gw_action(
         return false;
     };
 
-    handles.ai_gw_save_button.set_label(handles.text.save());
-    handles.ai_gw_delete_button.set_label(handles.text.delete());
+    handles
+        .ai_gw_delete_button
+        .set_label(handles.text.ai_gw_delete_channel());
     set_ai_gw_actions_enabled(handles, true);
 
     match result {
         AiGwActionResult::Save(Ok(())) => {
-            handles
-                .ai_gw_catalog
-                .set_label(handles.text.ai_gw_saved());
+            handles.ai_gw_catalog.set_label(handles.text.ai_gw_saved());
             super::show_info(frame, handles.text.ai_gw_saved());
         }
         AiGwActionResult::Save(Err(err)) => {
@@ -243,10 +221,10 @@ pub(super) fn apply_pending_ai_gw_action(
                 .set_label(&handles.text.ai_gw_save_failed(&err));
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
-        AiGwActionResult::DefaultProvider(Ok(())) => {
+        AiGwActionResult::ChannelToggle(Ok(())) => {
             handles.ai_gw_catalog.set_label("");
         }
-        AiGwActionResult::DefaultProvider(Err(err)) => {
+        AiGwActionResult::ChannelToggle(Err(err)) => {
             handles
                 .ai_gw_catalog
                 .set_label(&handles.text.ai_gw_save_failed(&err));
@@ -257,36 +235,14 @@ pub(super) fn apply_pending_ai_gw_action(
 }
 
 pub(super) fn set_ai_gw_actions_enabled(handles: &UiHandles, enabled: bool) {
-    handles.ai_gw_save_button.enable(enabled);
     handles.ai_gw_delete_button.enable(enabled);
     handles.ai_gw_new_button.enable(enabled);
+    handles.ai_gw_edit_button.enable(enabled);
     handles.ai_gw_enabled.enable(enabled);
+    handles.ai_gw_provider_list.enable(enabled);
 }
 
 pub(super) fn gateway_entry_url(base_url: &str) -> String {
     let base = base_url.trim_end_matches('/');
     format!("{base}/ai-gateway/v1")
-}
-
-pub(super) fn refresh_ai_gw_default_provider_combo(
-    handles: &UiHandles,
-    config: Option<&AiGatewayConfig>,
-) {
-    let Some(config) = config else {
-        return;
-    };
-    let names: Vec<String> = config.providers.iter().map(|p| p.name.clone()).collect();
-    let current = handles.ai_gw_default_provider.get_value();
-    handles.ai_gw_default_provider.clear();
-    for name in &names {
-        handles.ai_gw_default_provider.append(name);
-    }
-    if names.contains(&config.default_provider) {
-        super::provider::set_combo_value_if_changed(
-            &handles.ai_gw_default_provider,
-            &config.default_provider,
-        );
-    } else if !current.is_empty() && names.iter().any(|n| n == &current) {
-        super::provider::set_combo_value_if_changed(&handles.ai_gw_default_provider, &current);
-    }
 }
