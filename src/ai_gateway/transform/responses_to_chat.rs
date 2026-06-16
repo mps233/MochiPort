@@ -458,7 +458,7 @@ mod tests {
 
     fn make_request(input: Vec<ResponseItem>) -> GatewayRequest {
         GatewayRequest {
-            model: "deepseek-chat".into(),
+            model: "deepseek-v4-flash".into(),
             instructions: None,
             input,
             tools: vec![],

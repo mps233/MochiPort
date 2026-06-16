@@ -516,13 +516,12 @@
       "prefer_websockets": true,
       "support_verbosity": true,
       "default_verbosity": "low",
-      "apply_patch_tool_type": "freeform",
-      "web_search_tool_type": "text_and_image",
+      "apply_patch_tool_type": null,
+      "web_search_tool_type": "text",
       "input_modalities": [
-        "text",
-        "image"
+        "text"
       ],
-      "supports_image_detail_original": true,
+      "supports_image_detail_original": false,
       "truncation_policy": {
         "mode": "tokens",
         "limit": 10000
@@ -533,8 +532,8 @@
       "auto_compact_token_limit": null,
       "reasoning_summary_format": "experimental",
       "default_reasoning_summary": "none",
-      "slug": "deepseek-chat",
-      "display_name": "deepseek-chat",
+      "slug": "deepseek-v4-pro",
+      "display_name": "deepseek-v4-pro",
       "description": "Frontier model for complex coding, research, and real-world work.",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [
@@ -593,7 +592,7 @@
         "self_serve_business_usage_based",
         "team"
       ],
-      "supports_search_tool": true,
+      "supports_search_tool": false,
       "service_tiers": [
         {
           "id": "priority",
@@ -610,13 +609,12 @@
       "prefer_websockets": true,
       "support_verbosity": true,
       "default_verbosity": "low",
-      "apply_patch_tool_type": "freeform",
-      "web_search_tool_type": "text_and_image",
+      "apply_patch_tool_type": null,
+      "web_search_tool_type": "text",
       "input_modalities": [
-        "text",
-        "image"
+        "text"
       ],
-      "supports_image_detail_original": true,
+      "supports_image_detail_original": false,
       "truncation_policy": {
         "mode": "tokens",
         "limit": 10000
@@ -627,8 +625,8 @@
       "auto_compact_token_limit": null,
       "reasoning_summary_format": "experimental",
       "default_reasoning_summary": "none",
-      "slug": "deepseek-reasoner",
-      "display_name": "deepseek-reasoner",
+      "slug": "deepseek-v4-flash",
+      "display_name": "deepseek-v4-flash",
       "description": "Frontier model for complex coding, research, and real-world work.",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [
@@ -687,7 +685,7 @@
         "self_serve_business_usage_based",
         "team"
       ],
-      "supports_search_tool": true,
+      "supports_search_tool": false,
       "service_tiers": [
         {
           "id": "priority",

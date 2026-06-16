@@ -798,7 +798,7 @@ mod tests {
     fn test_simple_text_stream() {
         let chunks = vec![
             json!({
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {"content": "Hello"}}]
             }),
@@ -845,7 +845,7 @@ mod tests {
     fn test_reasoning_then_text_stream() {
         let chunks = vec![
             json!({
-                "model": "deepseek-reasoner",
+                "model": "deepseek-v4-pro",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {"reasoning_content": "Let me think"}}]
             }),
@@ -901,7 +901,7 @@ mod tests {
     fn test_tool_call_stream() {
         let chunks = vec![
             json!({
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {
                     "tool_calls": [{
@@ -967,7 +967,7 @@ mod tests {
     fn test_usage_in_separate_chunk() {
         let chunks = vec![
             json!({
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {"content": "hi"}}]
             }),
@@ -991,7 +991,7 @@ mod tests {
     fn test_length_finish_reason_incomplete() {
         let chunks = vec![
             json!({
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {"content": "truncated"}}]
             }),
@@ -1026,7 +1026,7 @@ mod tests {
     fn test_parallel_tool_calls_stream() {
         let chunks = vec![
             json!({
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {
                     "tool_calls": [
@@ -1101,7 +1101,7 @@ mod tests {
     fn test_reasoning_then_tool_call_stream() {
         let chunks = vec![
             json!({
-                "model": "deepseek-reasoner",
+                "model": "deepseek-v4-pro",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {"reasoning_content": "I should call a tool"}}]
             }),
@@ -1151,7 +1151,7 @@ mod tests {
     fn test_text_then_tool_call_stream() {
         let chunks = vec![
             json!({
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {"content": "Let me check"}}]
             }),
@@ -1232,7 +1232,7 @@ mod tests {
     fn test_standalone_usage_chunk() {
         let chunks = vec![
             json!({
-                "model": "deepseek-chat",
+                "model": "deepseek-v4-flash",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {"content": "hi"}}]
             }),

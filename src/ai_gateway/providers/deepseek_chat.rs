@@ -26,7 +26,10 @@ pub async fn handle(
     let chat_body = build_chat_request(request, true)
         .map_err(|e| GatewayError::bad_request(format!("transform error: {e}")))?;
 
-    let url = format!("{}/v1/chat/completions", provider_api_root(&provider.base_url));
+    let url = format!(
+        "{}/v1/chat/completions",
+        provider_api_root(&provider.base_url)
+    );
 
     debug!(url = %url, stream = request.stream, "proxying to deepseek chat");
 

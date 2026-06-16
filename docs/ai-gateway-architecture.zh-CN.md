@@ -113,7 +113,7 @@ enabled = true
 kind = "deepseek_chat"
 baseUrl = "https://api.deepseek.com/v1"
 apiKeyEnv = "DEEPSEEK_API_KEY"
-models = ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro"]
+models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 ```
 
 `baseUrl` 可以填厂商根地址（如 `https://api.deepseek.com`）或带版本路径的地址（如 `https://api.deepseek.com/v1`）。运行时会统一规范化，避免拼出重复的 `/v1/v1/...`。GUI 获取远端模型列表时会先尝试 `{baseUrl}/models`，如果缺少 API 版本会再尝试 `{baseUrl}/v1/models`。
@@ -267,7 +267,7 @@ DeepSeek 请求形态：
 
 ```json
 {
-  "model": "deepseek-chat",
+  "model": "deepseek-v4-flash",
   "messages": [
     { "role": "system", "content": "..." },
     { "role": "user", "content": "..." }
@@ -440,7 +440,7 @@ WebSocket 实现前置条件：
 
 - Codex 配置 `base_url = http://127.0.0.1:3847/ai-gateway/v1` 可发起普通对话。
 - 模型为 `gpt-5.5` 时打 OpenAI Responses。
-- 模型为 `deepseek-chat` 时打 DeepSeek Chat。
+- 模型为 `deepseek-v4-flash` 或 `deepseek-v4-pro` 时打 DeepSeek Chat。
 - DeepSeek 能触发 Codex 工具调用，工具结果回填后继续回答。
 - 日志能看到 session、thread、prompt_cache_key、provider route。
 

@@ -172,7 +172,7 @@ mod tests {
     fn test_simple_content_response() {
         let chat_resp = json!({
             "id": "chatcmpl-123",
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "created": 1700000000,
             "choices": [{
                 "index": 0,
@@ -189,7 +189,7 @@ mod tests {
             }
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-chat").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         assert!(resp.id.starts_with("gwresp_"));
         assert_eq!(resp.status, "completed");
         assert_eq!(resp.output.len(), 1);
@@ -204,7 +204,7 @@ mod tests {
     #[test]
     fn test_reasoning_content_response() {
         let chat_resp = json!({
-            "model": "deepseek-reasoner",
+            "model": "deepseek-v4-pro",
             "created": 1700000000,
             "choices": [{
                 "message": {
@@ -217,7 +217,7 @@ mod tests {
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-reasoner").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-pro").unwrap();
         assert_eq!(resp.output.len(), 2);
         // 第一个是 reasoning
         assert_eq!(resp.output[0].item_type, ItemType::Reasoning);
@@ -230,7 +230,7 @@ mod tests {
     #[test]
     fn test_tool_calls_response() {
         let chat_resp = json!({
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "created": 1700000000,
             "choices": [{
                 "message": {
@@ -250,7 +250,7 @@ mod tests {
             "usage": {"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18}
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-chat").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         assert_eq!(resp.status, "completed"); // tool_calls → completed
         assert_eq!(resp.output.len(), 1);
         assert_eq!(resp.output[0].item_type, ItemType::FunctionCall);
@@ -261,7 +261,7 @@ mod tests {
     #[test]
     fn test_length_finish_reason_incomplete() {
         let chat_resp = json!({
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "created": 1700000000,
             "choices": [{
                 "message": {"role": "assistant", "content": "truncated..."},
@@ -270,7 +270,7 @@ mod tests {
             "usage": {"prompt_tokens": 10, "completion_tokens": 4096, "total_tokens": 4106}
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-chat").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         assert_eq!(resp.status, "incomplete");
     }
 
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn test_usage_with_details() {
         let chat_resp = json!({
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "created": 1700000000,
             "choices": [{
                 "message": {"role": "assistant", "content": "ok"},
@@ -298,7 +298,7 @@ mod tests {
             }
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-chat").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         let usage = resp.usage.unwrap();
         assert_eq!(usage.input_tokens_details.unwrap().cached_tokens, 80);
         assert_eq!(usage.output_tokens_details.unwrap().reasoning_tokens, 30);
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn test_multiple_tool_calls_response() {
         let chat_resp = json!({
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "created": 1700000000,
             "choices": [{
                 "message": {
@@ -333,7 +333,7 @@ mod tests {
             "usage": {"prompt_tokens": 20, "completion_tokens": 15, "total_tokens": 35}
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-chat").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         assert_eq!(resp.status, "completed");
         // 应该有 2 个 function_call items，没有 message item（content 是 null）
         assert_eq!(resp.output.len(), 2);
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn test_reasoning_plus_tool_calls_response() {
         let chat_resp = json!({
-            "model": "deepseek-reasoner",
+            "model": "deepseek-v4-pro",
             "created": 1700000000,
             "choices": [{
                 "message": {
@@ -368,7 +368,7 @@ mod tests {
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-reasoner").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-pro").unwrap();
         // reasoning item + function_call item = 2
         assert_eq!(resp.output.len(), 2);
         assert_eq!(resp.output[0].item_type, ItemType::Reasoning);
@@ -385,7 +385,7 @@ mod tests {
     #[test]
     fn test_empty_reasoning_content_skipped() {
         let chat_resp = json!({
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "created": 1700000000,
             "choices": [{
                 "message": {
@@ -398,7 +398,7 @@ mod tests {
             "usage": {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-chat").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         // 空 reasoning_content 不应生成 reasoning item
         assert_eq!(resp.output.len(), 1);
         assert_eq!(resp.output[0].item_type, ItemType::Message);
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn test_empty_content_no_message_item() {
         let chat_resp = json!({
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "created": 1700000000,
             "choices": [{
                 "message": {
@@ -426,7 +426,7 @@ mod tests {
             "usage": {"prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10}
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-chat").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         // 只有 function_call，没有 message（content 为空）
         assert_eq!(resp.output.len(), 1);
         assert_eq!(resp.output[0].item_type, ItemType::FunctionCall);
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn test_no_usage_field() {
         let chat_resp = json!({
-            "model": "deepseek-chat",
+            "model": "deepseek-v4-flash",
             "created": 1700000000,
             "choices": [{
                 "message": {"role": "assistant", "content": "hi"},
@@ -445,7 +445,7 @@ mod tests {
             }]
         });
 
-        let resp = convert_chat_response(&chat_resp, "deepseek-chat").unwrap();
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         assert!(resp.usage.is_none());
     }
 }

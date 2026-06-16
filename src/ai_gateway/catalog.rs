@@ -33,6 +33,7 @@ pub fn configured_models_response(config: &AiGatewayConfig) -> Value {
             .find(|model| model_slug(model) == Some(model_id.as_str()))
             .cloned()
             .unwrap_or_else(|| model_from_template(gpt55_template, &model_id));
+        normalize_deepseek_model(&mut model);
         if let Some(object) = model.as_object_mut() {
             object.insert("priority".to_string(), json!(priority));
         }
@@ -73,7 +74,25 @@ fn model_from_template(template: &Value, model_id: &str) -> Value {
         object.insert("description".to_string(), Value::Null);
         object.insert("availability_nux".to_string(), Value::Null);
     }
+    normalize_deepseek_model(&mut model);
     model
+}
+
+fn normalize_deepseek_model(model: &mut Value) {
+    let Some(slug) = model_slug(model) else {
+        return;
+    };
+    if !slug.starts_with("deepseek-") {
+        return;
+    }
+
+    if let Some(object) = model.as_object_mut() {
+        object.insert("apply_patch_tool_type".to_string(), Value::Null);
+        object.insert("web_search_tool_type".to_string(), json!("text"));
+        object.insert("supports_search_tool".to_string(), Value::Bool(false));
+        object.insert("supports_image_detail_original".to_string(), Value::Bool(false));
+        object.insert("input_modalities".to_string(), json!(["text"]));
+    }
 }
 
 #[cfg(test)]
@@ -96,7 +115,11 @@ mod tests {
         let config = AiGatewayConfig {
             providers: vec![
                 provider("openai", true, &["gpt-5.5"]),
-                provider("deepseek", true, &["deepseek-chat", "deepseek-reasoner"]),
+                provider(
+                    "deepseek",
+                    true,
+                    &["deepseek-v4-pro", "deepseek-v4-flash"],
+                ),
                 provider("disabled", false, &["disabled-model"]),
             ],
             ..Default::default()
@@ -110,8 +133,12 @@ mod tests {
             .map(|model| model["slug"].as_str().unwrap())
             .collect();
 
-        assert_eq!(slugs, vec!["gpt-5.5", "deepseek-chat", "deepseek-reasoner"]);
-        assert_eq!(response["models"][1]["display_name"], "deepseek-chat");
+        assert_eq!(slugs, vec!["gpt-5.5", "deepseek-v4-pro", "deepseek-v4-flash"]);
+        assert_eq!(response["models"][1]["display_name"], "deepseek-v4-pro");
+        assert_eq!(response["models"][1]["apply_patch_tool_type"], Value::Null);
+        assert_eq!(response["models"][1]["supports_search_tool"], false);
+        assert_eq!(response["models"][1]["supports_image_detail_original"], false);
+        assert_eq!(response["models"][1]["input_modalities"], json!(["text"]));
     }
 
     #[test]
@@ -129,6 +156,16 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_models_disable_apply_patch_tool() {
+        let model = model_from_template(gpt55_template(), "deepseek-v4-pro");
+        assert_eq!(model["apply_patch_tool_type"], Value::Null);
+        assert_eq!(model["supports_image_detail_original"], false);
+        assert_eq!(model["input_modalities"], json!(["text"]));
+        assert_eq!(model["web_search_tool_type"], "text");
+        assert_eq!(model["supports_search_tool"], false);
+    }
+
+    #[test]
     fn configured_models_response_returns_empty_when_no_models_configured() {
         let config = AiGatewayConfig {
             providers: vec![provider("empty", true, &[])],
@@ -137,5 +174,17 @@ mod tests {
 
         let response = configured_models_response(&config);
         assert!(response["models"].as_array().unwrap().is_empty());
+    }
+
+    fn gpt55_template() -> &'static Value {
+        BASE_MODEL_CATALOG
+            .get("models")
+            .and_then(Value::as_array)
+            .and_then(|models| {
+                models
+                    .iter()
+                    .find(|model| model_slug(model) == Some("gpt-5.5"))
+            })
+            .expect("gpt-5.5 template")
     }
 }

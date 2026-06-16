@@ -581,7 +581,7 @@ src/ai_gateway/
 - 生成 gateway response id
 
 验收：
-- Codex model=deepseek-chat，非流式对话可用
+- Codex model=deepseek-v4-flash，非流式对话可用
 - 响应格式符合 Responses API
 
 ### Step 6：Chat SSE → Responses SSE 流状态机 ✅
@@ -598,7 +598,7 @@ src/ai_gateway/
 - 错误事件处理
 
 验收：
-- Codex model=deepseek-chat，流式对话可用
+- Codex model=deepseek-v4-flash，流式对话可用
 - SSE 事件顺序正确，Codex 能正常渲染流式输出
 - reasoning 模型的推理过程正确显示
 

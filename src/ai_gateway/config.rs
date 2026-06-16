@@ -143,10 +143,10 @@ mod tests {
             make_provider(
                 "deepseek",
                 ProviderType::ChatCompletions,
-                vec!["deepseek-chat", "deepseek-reasoner"],
+                vec!["deepseek-v4-flash", "deepseek-v4-pro"],
             ),
         ]);
-        let p = config.select_provider("deepseek-chat").unwrap();
+        let p = config.select_provider("deepseek-v4-flash").unwrap();
         assert_eq!(p.name, "deepseek");
 
         let p = config.select_provider("gpt-4o").unwrap();
@@ -160,7 +160,7 @@ mod tests {
             make_provider("deepseek", ProviderType::ChatCompletions, vec![]),
         ]);
         assert!(config.select_provider("deepseek-v3").is_none());
-        assert!(config.select_provider("deepseek-chat").is_none());
+        assert!(config.select_provider("deepseek-v4-flash").is_none());
     }
 
     #[test]
@@ -170,7 +170,7 @@ mod tests {
             make_provider(
                 "deepseek",
                 ProviderType::ChatCompletions,
-                vec!["deepseek-chat"],
+                vec!["deepseek-v4-flash"],
             ),
         ]);
         let config = AiGatewayConfig {
@@ -197,10 +197,10 @@ mod tests {
             make_provider(
                 "other",
                 ProviderType::OpenAiResponses,
-                vec!["deepseek-chat"],
+                vec!["deepseek-v4-flash"],
             ),
         ]);
-        let p = config.select_provider("deepseek-chat").unwrap();
+        let p = config.select_provider("deepseek-v4-flash").unwrap();
         assert_eq!(p.name, "other");
     }
 
@@ -209,12 +209,12 @@ mod tests {
         let mut provider = make_provider(
             "deepseek",
             ProviderType::ChatCompletions,
-            vec!["deepseek-chat"],
+            vec!["deepseek-v4-flash"],
         );
         provider.enabled = false;
         let config = make_config(vec![provider]);
 
-        assert!(config.select_provider("deepseek-chat").is_none());
+        assert!(config.select_provider("deepseek-v4-flash").is_none());
         assert!(config.select_provider("deepseek-v3").is_none());
     }
 
@@ -236,7 +236,7 @@ mod tests {
             providerType = "chat_completions"
             baseUrl = "https://api.deepseek.com"
             apiKey = "sk-yyy"
-            models = ["deepseek-chat"]
+            models = ["deepseek-v4-flash"]
         "#;
         let config: AiGatewayConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);
