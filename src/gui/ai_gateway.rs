@@ -9,7 +9,6 @@ use crate::ai_gateway::config::{AiGatewayConfig, ProviderConfig, ProviderType};
 
 use super::UiHandles;
 use super::api::{ApiClient, ConfigureRequest, DeleteProviderRequest};
-use super::text::GuiText;
 
 pub(super) type AiGwProviderRows = Rc<RefCell<Vec<[String; 7]>>>;
 pub(super) type AiGwProviderModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
@@ -91,7 +90,7 @@ pub(super) fn set_ai_gw_provider_enabled(
 }
 
 pub(super) fn refresh_ai_gw_provider_list(handles: &UiHandles, config: Option<&AiGatewayConfig>) {
-    let rows = ai_gw_provider_list_rows(handles.text, config);
+    let rows = ai_gw_provider_list_rows(config);
     let mut current_rows = handles.ai_gw_provider_rows.borrow_mut();
     if *current_rows == rows {
         return;
@@ -116,7 +115,7 @@ pub(super) fn refresh_ai_gw_provider_list(handles: &UiHandles, config: Option<&A
     }
 }
 
-fn ai_gw_provider_list_rows(text: GuiText, config: Option<&AiGatewayConfig>) -> Vec<[String; 7]> {
+fn ai_gw_provider_list_rows(config: Option<&AiGatewayConfig>) -> Vec<[String; 7]> {
     let Some(config) = config else {
         return Vec::new();
     };
@@ -127,7 +126,7 @@ fn ai_gw_provider_list_rows(text: GuiText, config: Option<&AiGatewayConfig>) -> 
             [
                 p.enabled.to_string(),
                 p.name.clone(),
-                provider_service_display(text, p),
+                provider_service_display(p),
                 provider_type_display(&p.provider_type),
                 provider_models_display(&p.models),
                 p.base_url.clone(),
@@ -137,23 +136,10 @@ fn ai_gw_provider_list_rows(text: GuiText, config: Option<&AiGatewayConfig>) -> 
         .collect()
 }
 
-fn provider_service_display(text: GuiText, provider: &ProviderConfig) -> String {
-    match provider_service_index(provider) {
-        1 => "DeepSeek".to_string(),
-        0 => "OpenAI".to_string(),
-        _ => text.ai_gw_service_custom().to_string(),
-    }
-}
-
-pub(super) fn provider_service_index(provider: &ProviderConfig) -> i32 {
-    let name = provider.name.to_ascii_lowercase();
-    let base_url = provider.base_url.to_ascii_lowercase();
-    if name.contains("deepseek") || base_url.contains("deepseek") {
-        1
-    } else if name.contains("openai") || base_url.contains("openai") {
-        0
-    } else {
-        2
+fn provider_service_display(provider: &ProviderConfig) -> String {
+    match provider.provider_type {
+        ProviderType::OpenAiResponses => "OpenAI".to_string(),
+        ProviderType::ChatCompletions => "DeepSeek".to_string(),
     }
 }
 

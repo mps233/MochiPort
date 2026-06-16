@@ -1651,20 +1651,6 @@ impl GuiText {
         "DeepSeek"
     }
 
-    pub(super) fn ai_gw_service_custom(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "自定义",
-            GuiLocale::EnUs => "Custom",
-        }
-    }
-
-    pub(super) fn ai_gw_custom_channel_unsupported(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "暂不支持自定义渠道。",
-            GuiLocale::EnUs => "Custom channels are not supported yet.",
-        }
-    }
-
     pub(super) fn ai_gw_col_base_url(self) -> &'static str {
         "Base URL"
     }

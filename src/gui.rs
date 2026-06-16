@@ -68,8 +68,8 @@ mod widgets;
 use self::ai_gateway::{
     AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRows,
     PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider, gateway_entry_url,
-    provider_service_index, refresh_ai_gw_provider_list, save_ai_gw_provider,
-    set_ai_gw_actions_enabled, set_ai_gw_provider_enabled, toggle_ai_gw_enabled,
+    refresh_ai_gw_provider_list, save_ai_gw_provider, set_ai_gw_actions_enabled,
+    set_ai_gw_provider_enabled, toggle_ai_gw_enabled,
 };
 use self::api::{
     ApiClient, ConfigureRequest, ConfigureTelegramBotRequest, DashboardSnapshot,
@@ -1092,8 +1092,7 @@ fn build_ui() {
                 show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
             };
-            if let Some(provider) =
-                show_ai_gw_provider_editor(&frame, handles.text, Some(&provider))
+            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, Some(&provider))
             {
                 start_ai_gw_provider_save(
                     &api,
@@ -1188,8 +1187,7 @@ fn build_ui() {
                 show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
             };
-            if let Some(provider) =
-                show_ai_gw_provider_editor(&frame, handles.text, Some(&provider))
+            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, Some(&provider))
             {
                 start_ai_gw_provider_save(
                     &api,
@@ -1458,20 +1456,6 @@ fn start_ai_gw_provider_save(
         in_flight.store(false, Ordering::SeqCst);
     });
     schedule_dashboard_refresh(api, dashboard_refresh);
-}
-
-fn show_ai_gw_provider_editor(
-    parent: &Frame,
-    text: GuiText,
-    initial: Option<&ProviderConfig>,
-) -> Option<ProviderConfig> {
-    if let Some(provider) = initial {
-        if provider_service_index(provider) == 2 {
-            show_error(parent, text.ai_gw_custom_channel_unsupported());
-            return None;
-        }
-    }
-    show_ai_gw_channel_dialog(parent, text, initial)
 }
 
 fn show_ai_gw_channel_dialog(
@@ -1889,12 +1873,12 @@ fn apply_ai_gw_dialog_template(
 
     radio_openai.set_value(false);
     radio_deepseek.set_value(false);
-    match provider_service_index(&provider) {
-        1 => {
+    match provider.provider_type {
+        ProviderType::ChatCompletions => {
             radio_deepseek.set_value(true);
             type_input.change_value(text.provider_type_chat_completions());
         }
-        _ => {
+        ProviderType::OpenAiResponses => {
             radio_openai.set_value(true);
             type_input.change_value(text.provider_type_openai_responses());
         }
