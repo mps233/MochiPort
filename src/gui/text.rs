@@ -1757,6 +1757,13 @@ impl GuiText {
         }
     }
 
+    pub(super) fn ai_gw_api_protocol(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "API 协议",
+            GuiLocale::EnUs => "API Protocol",
+        }
+    }
+
     pub(super) fn ai_gw_provider_type(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "类型",

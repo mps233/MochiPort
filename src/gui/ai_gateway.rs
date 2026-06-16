@@ -5,15 +5,27 @@ use std::sync::{Arc, Mutex};
 use wxdragon::prelude::*;
 use wxdragon::widgets::dataview::CustomDataViewVirtualListModel;
 
-use crate::ai_gateway::config::{AiGatewayConfig, ProviderConfig, ProviderType};
+use crate::ai_gateway::config::{
+    AiGatewayConfig, ProviderConfig, ProviderType, provider_display_base_url,
+};
 
 use super::UiHandles;
 use super::api::{ApiClient, ConfigureRequest, DeleteProviderRequest};
+use super::widgets::{ProviderLogoKind, provider_logo_bitmap};
 
-pub(super) type AiGwProviderRows = Rc<RefCell<Vec<[String; 7]>>>;
+pub(super) type AiGwProviderRows = Rc<RefCell<Vec<AiGwProviderRow>>>;
 pub(super) type AiGwProviderModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 pub(super) type PendingAiGwChannelToggle = Rc<RefCell<Option<(String, bool)>>>;
 pub(super) type AiGwActionResultStore = Arc<Mutex<Option<AiGwActionResult>>>;
+
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct AiGwProviderRow {
+    pub(super) enabled: bool,
+    pub(super) name: String,
+    pub(super) provider_type: ProviderType,
+    pub(super) base_url: String,
+    pub(super) timeout_secs: u64,
+}
 
 pub(super) enum AiGwActionResult {
     Save(Result<(), String>),
@@ -22,7 +34,11 @@ pub(super) enum AiGwActionResult {
     ChannelToggle(Result<(), String>),
 }
 
-pub(super) fn save_ai_gw_provider(api: &ApiClient, provider: ProviderConfig) -> Result<(), String> {
+pub(super) fn save_ai_gw_provider(
+    api: &ApiClient,
+    mut provider: ProviderConfig,
+) -> Result<(), String> {
+    provider.base_url = provider_display_base_url(&provider.base_url);
     let mut config = api.get_app_config()?;
     if let Some(existing) = config
         .ai_gateway
@@ -115,31 +131,34 @@ pub(super) fn refresh_ai_gw_provider_list(handles: &UiHandles, config: Option<&A
     }
 }
 
-fn ai_gw_provider_list_rows(config: Option<&AiGatewayConfig>) -> Vec<[String; 7]> {
+fn ai_gw_provider_list_rows(config: Option<&AiGatewayConfig>) -> Vec<AiGwProviderRow> {
     let Some(config) = config else {
         return Vec::new();
     };
     config
         .providers
         .iter()
-        .map(|p| {
-            [
-                p.enabled.to_string(),
-                p.name.clone(),
-                provider_service_display(p),
-                provider_type_display(&p.provider_type),
-                provider_models_display(&p.models),
-                p.base_url.clone(),
-                p.timeout_secs.to_string(),
-            ]
+        .map(|provider| {
+            AiGwProviderRow {
+                enabled: provider.enabled,
+                name: provider.name.clone(),
+                provider_type: provider.provider_type.clone(),
+                base_url: provider.base_url.clone(),
+                timeout_secs: provider.timeout_secs,
+            }
         })
         .collect()
 }
 
-fn provider_service_display(provider: &ProviderConfig) -> String {
-    match provider.provider_type {
-        ProviderType::OpenAiResponses => "OpenAI".to_string(),
-        ProviderType::ChatCompletions => "DeepSeek".to_string(),
+pub(super) fn provider_logo_variant(provider_type: &ProviderType) -> Variant {
+    let bitmap = provider_logo_bitmap(provider_logo_kind(provider_type), 18);
+    (&bitmap).into()
+}
+
+fn provider_logo_kind(provider_type: &ProviderType) -> ProviderLogoKind {
+    match provider_type {
+        ProviderType::OpenAiResponses => ProviderLogoKind::OpenAi,
+        ProviderType::ChatCompletions => ProviderLogoKind::DeepSeek,
     }
 }
 
@@ -148,13 +167,6 @@ pub(super) fn provider_type_display(pt: &ProviderType) -> String {
         ProviderType::OpenAiResponses => "OpenAI Responses".to_string(),
         ProviderType::ChatCompletions => "Chat Completions".to_string(),
     }
-}
-
-fn provider_models_display(models: &[String]) -> String {
-    if models.is_empty() {
-        return String::new();
-    }
-    models.join(" / ")
 }
 
 pub(super) fn apply_pending_ai_gw_action(

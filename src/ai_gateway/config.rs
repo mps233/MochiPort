@@ -51,6 +51,18 @@ pub fn provider_api_root(base_url: &str) -> String {
     }
 }
 
+/// 将 provider Base URL 规范成 UI/配置展示用地址。
+///
+/// 目前支持的上游协议都使用 `/v1`，所以保存时统一展示为带 `/v1`。
+pub fn provider_display_base_url(base_url: &str) -> String {
+    let root = provider_api_root(base_url);
+    if root.is_empty() {
+        String::new()
+    } else {
+        format!("{root}/v1")
+    }
+}
+
 /// 单个 provider 配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -255,5 +267,18 @@ mod tests {
             provider_api_root("https://proxy.example.com/openai/v1/"),
             "https://proxy.example.com/openai"
         );
+    }
+
+    #[test]
+    fn test_provider_display_base_url_uses_v1() {
+        assert_eq!(
+            provider_display_base_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(
+            provider_display_base_url("https://api.deepseek.com/v1"),
+            "https://api.deepseek.com/v1"
+        );
+        assert_eq!(provider_display_base_url(""), "");
     }
 }

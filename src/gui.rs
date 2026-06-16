@@ -17,7 +17,9 @@ use wxdragon::widgets::dataview::{
 use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
-use crate::ai_gateway::config::{ProviderConfig, ProviderType, provider_api_root};
+use crate::ai_gateway::config::{
+    ProviderConfig, ProviderType, provider_api_root, provider_display_base_url,
+};
 use crate::config::AppConfig;
 
 #[cfg(target_os = "windows")]
@@ -66,10 +68,11 @@ mod update;
 mod widgets;
 
 use self::ai_gateway::{
-    AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRows,
-    PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider, gateway_entry_url,
-    refresh_ai_gw_provider_list, save_ai_gw_provider, set_ai_gw_actions_enabled,
-    set_ai_gw_provider_enabled, toggle_ai_gw_enabled,
+    AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRow,
+    AiGwProviderRows, PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
+    gateway_entry_url, provider_logo_variant, provider_type_display, refresh_ai_gw_provider_list,
+    save_ai_gw_provider, set_ai_gw_actions_enabled, set_ai_gw_provider_enabled,
+    toggle_ai_gw_enabled,
 };
 use self::api::{
     ApiClient, ConfigureRequest, ConfigureTelegramBotRequest, DashboardSnapshot,
@@ -385,21 +388,19 @@ fn build_ui() {
             0,
             ai_gw_provider_rows.clone(),
             |rows: &AiGwProviderRows, row, col| -> Variant {
-                if col == 0 {
-                    return rows
-                        .borrow()
-                        .get(row)
-                        .and_then(|row_data| row_data.get(0))
-                        .map(|value| value == "true")
-                        .unwrap_or(false)
-                        .into();
+                let rows = rows.borrow();
+                let Some(row_data) = rows.get(row) else {
+                    return String::new().into();
+                };
+                match col {
+                    0 => row_data.enabled.into(),
+                    1 => row_data.name.clone().into(),
+                    2 => provider_logo_variant(&row_data.provider_type),
+                    3 => provider_type_display(&row_data.provider_type).into(),
+                    4 => row_data.base_url.clone().into(),
+                    5 => row_data.timeout_secs.to_string().into(),
+                    _ => String::new().into(),
                 }
-                rows.borrow()
-                    .get(row)
-                    .and_then(|row_data| row_data.get(col))
-                    .cloned()
-                    .unwrap_or_default()
-                    .into()
             },
             Some(
                 move |rows: &AiGwProviderRows, row, col, value: &Variant| -> bool {
@@ -410,10 +411,10 @@ fn build_ui() {
                         return false;
                     };
                     let mut rows = std::cell::RefCell::borrow_mut(std::rc::Rc::as_ref(rows));
-                    let Some(row_data): Option<&mut [String; 7]> = rows.get_mut(row) else {
+                    let Some(row_data): Option<&mut AiGwProviderRow> = rows.get_mut(row) else {
                         return false;
                     };
-                    let name = row_data[1].clone();
+                    let name = row_data.name.clone();
                     if name.trim().is_empty() {
                         return false;
                     }
@@ -446,37 +447,30 @@ fn build_ui() {
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
-    ai_gw_provider_list.append_text_column(
+    ai_gw_provider_list.append_bitmap_column(
         text.ai_gw_provider_service(),
         2,
-        110,
-        DataViewAlign::Left,
+        72,
+        DataViewAlign::Center,
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.append_text_column(
-        text.ai_gw_api_format(),
+        text.ai_gw_api_protocol(),
         3,
-        150,
-        DataViewAlign::Left,
-        DataViewColumnFlags::Resizable,
-    );
-    ai_gw_provider_list.append_text_column(
-        text.ai_gw_models(),
-        4,
-        230,
+        190,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.append_text_column(
         text.ai_gw_col_base_url(),
-        5,
-        260,
+        4,
+        360,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.append_text_column(
         text.ai_gw_timeout(),
-        6,
+        5,
         80,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
@@ -1423,11 +1417,16 @@ fn selected_ai_gw_provider(
     dashboard_refresh: &DashboardRefresh,
 ) -> Option<ProviderConfig> {
     let index = handles.ai_gw_provider_list.get_selected_row()?;
+    let name = handles
+        .ai_gw_provider_rows
+        .borrow()
+        .get(index)
+        .map(|row| row.name.clone())?;
     let snapshot = cached_dashboard_snapshot(dashboard_refresh)?;
     snapshot
         .ai_gateway
         .as_ref()
-        .and_then(|config| config.providers.get(index))
+        .and_then(|config| config.providers.iter().find(|provider| provider.name == name))
         .cloned()
 }
 
@@ -1558,7 +1557,7 @@ fn show_ai_gw_channel_dialog(
     let type_input = text_field_row(
         &form_panel,
         &grid,
-        text.ai_gw_api_format(),
+        text.ai_gw_api_protocol(),
         text.provider_type_openai_responses(),
     );
     type_input.set_editable(false);
@@ -1678,6 +1677,7 @@ fn show_ai_gw_channel_dialog(
         key_input.change_value(&provider.api_key);
     }
 
+    let is_new_channel = initial.is_none();
     {
         let type_input = type_input;
         let name_input = name_input;
@@ -1686,17 +1686,27 @@ fn show_ai_gw_channel_dialog(
         let timeout_input = timeout_input;
         radio_openai.on_selected(move |_| {
             if radio_openai.get_value() {
-                apply_ai_gw_dialog_template(
-                    text,
-                    None,
-                    &radio_openai,
-                    &radio_deepseek,
-                    &type_input,
-                    &name_input,
-                    &base_url_input,
-                    &models_list,
-                    &timeout_input,
-                );
+                if is_new_channel {
+                    apply_ai_gw_dialog_template(
+                        text,
+                        None,
+                        &radio_openai,
+                        &radio_deepseek,
+                        &type_input,
+                        &name_input,
+                        &base_url_input,
+                        &models_list,
+                        &timeout_input,
+                    );
+                } else {
+                    set_ai_gw_dialog_provider_type(
+                        text,
+                        ProviderType::OpenAiResponses,
+                        &radio_openai,
+                        &radio_deepseek,
+                        &type_input,
+                    );
+                }
             }
         });
     }
@@ -1708,24 +1718,34 @@ fn show_ai_gw_channel_dialog(
         let timeout_input = timeout_input;
         radio_deepseek.on_selected(move |_| {
             if radio_deepseek.get_value() {
-                let provider = ProviderConfig {
-                    name: "deepseek".to_string(),
-                    provider_type: ProviderType::ChatCompletions,
-                    base_url: "https://api.deepseek.com/v1".to_string(),
-                    timeout_secs: 60,
-                    ..Default::default()
-                };
-                apply_ai_gw_dialog_template(
-                    text,
-                    Some(&provider),
-                    &radio_openai,
-                    &radio_deepseek,
-                    &type_input,
-                    &name_input,
-                    &base_url_input,
-                    &models_list,
-                    &timeout_input,
-                );
+                if is_new_channel {
+                    let provider = ProviderConfig {
+                        name: "deepseek".to_string(),
+                        provider_type: ProviderType::ChatCompletions,
+                        base_url: "https://api.deepseek.com/v1".to_string(),
+                        timeout_secs: 60,
+                        ..Default::default()
+                    };
+                    apply_ai_gw_dialog_template(
+                        text,
+                        Some(&provider),
+                        &radio_openai,
+                        &radio_deepseek,
+                        &type_input,
+                        &name_input,
+                        &base_url_input,
+                        &models_list,
+                        &timeout_input,
+                    );
+                } else {
+                    set_ai_gw_dialog_provider_type(
+                        text,
+                        ProviderType::ChatCompletions,
+                        &radio_openai,
+                        &radio_deepseek,
+                        &type_input,
+                    );
+                }
             }
         });
     }
@@ -1872,9 +1892,29 @@ fn apply_ai_gw_dialog_template(
         ..Default::default()
     });
 
+    set_ai_gw_dialog_provider_type(
+        text,
+        provider.provider_type.clone(),
+        radio_openai,
+        radio_deepseek,
+        type_input,
+    );
+    name_input.change_value(&provider.name);
+    base_url_input.change_value(&provider.base_url);
+    replace_model_list(models_list, &provider.models);
+    timeout_input.change_value(&provider.timeout_secs.to_string());
+}
+
+fn set_ai_gw_dialog_provider_type(
+    text: GuiText,
+    provider_type: ProviderType,
+    radio_openai: &RadioButton,
+    radio_deepseek: &RadioButton,
+    type_input: &TextCtrl,
+) {
     radio_openai.set_value(false);
     radio_deepseek.set_value(false);
-    match provider.provider_type {
+    match provider_type {
         ProviderType::ChatCompletions => {
             radio_deepseek.set_value(true);
             type_input.change_value(text.provider_type_chat_completions());
@@ -1884,10 +1924,6 @@ fn apply_ai_gw_dialog_template(
             type_input.change_value(text.provider_type_openai_responses());
         }
     }
-    name_input.change_value(&provider.name);
-    base_url_input.change_value(&provider.base_url);
-    replace_model_list(models_list, &provider.models);
-    timeout_input.change_value(&provider.timeout_secs.to_string());
 }
 
 fn selected_ai_gw_dialog_provider_type(radio_deepseek: &RadioButton) -> ProviderType {
@@ -2011,7 +2047,7 @@ fn model_list_candidates(base_url: &str) -> Vec<ModelListCandidate> {
     push_model_list_candidate(
         &mut candidates,
         format!("{root}/v1/models"),
-        format!("{root}/v1"),
+        provider_display_base_url(&root),
     );
     candidates
 }
