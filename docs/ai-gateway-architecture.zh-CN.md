@@ -130,6 +130,8 @@ model = "gpt-5.5"
 model_provider = "ai-gateway"
 ```
 
+新增渠道时 `models` 初始为空。模型列表只来自手工添加或远端模型列表同步；空列表不会按渠道名自动匹配模型。
+
 `AI_GATEWAY_API_KEY` 第一阶段可以是本地占位 key。真实上游 provider key 放在 `codex-remote` 运行环境里，不写入 Codex 配置。
 
 ## 5. 路由设计

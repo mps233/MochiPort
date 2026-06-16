@@ -89,9 +89,9 @@ use self::provider::strip_nul;
 use self::text::{GuiLocale, GuiText};
 use self::widgets::{
     ImStatusPanel, ProviderLogoKind, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap,
-    centered_status_panel, im_status_panel, provider_combo_row, provider_logo_bitmap,
-    set_disabled_status_panel, set_im_channel_row, set_status_panel, status_panel, text_field_row,
-    topology_connector, topology_splitter,
+    centered_status_panel, im_status_panel, provider_logo_bitmap, set_disabled_status_panel,
+    set_im_channel_row, set_status_panel, status_panel, text_field_row, topology_connector,
+    topology_splitter,
 };
 
 #[derive(Clone)]
@@ -1092,7 +1092,8 @@ fn build_ui() {
                 show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
             };
-            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, Some(&provider))
+            if let Some(provider) =
+                show_ai_gw_provider_editor(&frame, handles.text, Some(&provider))
             {
                 start_ai_gw_provider_save(
                     &api,
@@ -1187,7 +1188,8 @@ fn build_ui() {
                 show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
             };
-            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, Some(&provider))
+            if let Some(provider) =
+                show_ai_gw_provider_editor(&frame, handles.text, Some(&provider))
             {
                 start_ai_gw_provider_save(
                     &api,
@@ -1458,6 +1460,20 @@ fn start_ai_gw_provider_save(
     schedule_dashboard_refresh(api, dashboard_refresh);
 }
 
+fn show_ai_gw_provider_editor(
+    parent: &Frame,
+    text: GuiText,
+    initial: Option<&ProviderConfig>,
+) -> Option<ProviderConfig> {
+    if let Some(provider) = initial {
+        if provider_service_index(provider) == 2 {
+            show_error(parent, text.ai_gw_custom_channel_unsupported());
+            return None;
+        }
+    }
+    show_ai_gw_channel_dialog(parent, text, initial)
+}
+
 fn show_ai_gw_channel_dialog(
     parent: &Frame,
     text: GuiText,
@@ -1528,13 +1544,6 @@ fn show_ai_gw_channel_dialog(
         Some(ProviderLogoKind::DeepSeek),
         false,
     );
-    let radio_custom = ai_gw_service_option(
-        &service_panel,
-        &service_sizer,
-        text.ai_gw_service_custom(),
-        None,
-        false,
-    );
     service_sizer.add_stretch_spacer(1);
     service_panel.set_sizer(service_sizer, true);
     workspace.add(&service_panel, 0, SizerFlag::Expand | SizerFlag::Right, 14);
@@ -1546,7 +1555,7 @@ fn show_ai_gw_channel_dialog(
     form_panel.set_min_size(Size::new(620, 500));
     let form_sizer = BoxSizer::builder(Orientation::Vertical).build();
     let form_title = StaticText::builder(&form_panel)
-        .with_label(text.ai_gw_api_format())
+        .with_label(text.ai_gw_channel_settings())
         .build();
     form_title.set_foreground_color(Colour::rgb(21, 25, 31));
     form_sizer.add(
@@ -1562,20 +1571,16 @@ fn show_ai_gw_channel_dialog(
         .build();
     grid.add_growable_col(1, 1);
 
-    let type_input = provider_combo_row(
+    let type_input = text_field_row(
         &form_panel,
         &grid,
         text.ai_gw_api_format(),
         text.provider_type_openai_responses(),
     );
-    type_input.append(text.provider_type_openai_responses());
-    type_input.append(text.provider_type_chat_completions());
-    type_input.set_selection(0);
+    type_input.set_editable(false);
     let name_input = text_field_row(&form_panel, &grid, text.ai_gw_provider_name(), "");
     let base_url_input = text_field_row(&form_panel, &grid, text.ai_gw_col_base_url(), "");
     let key_input = text_field_row(&form_panel, &grid, text.ai_gw_col_api_key(), "");
-    let models_input = text_field_row(&form_panel, &grid, text.ai_gw_models(), "");
-    models_input.set_tooltip(text.ai_gw_models_help());
     let timeout_input = text_field_row(&form_panel, &grid, text.ai_gw_timeout(), "60");
 
     form_sizer.add_sizer(
@@ -1584,7 +1589,57 @@ fn show_ai_gw_channel_dialog(
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         18,
     );
-    form_sizer.add_stretch_spacer(1);
+
+    let model_header = BoxSizer::builder(Orientation::Horizontal).build();
+    let model_title = StaticText::builder(&form_panel)
+        .with_label(text.ai_gw_models())
+        .build();
+    model_title.set_foreground_color(Colour::rgb(78, 86, 98));
+    let fetch_models_button = Button::builder(&form_panel)
+        .with_label(text.ai_gw_fetch_models())
+        .build();
+    let add_model_button = Button::builder(&form_panel)
+        .with_label(text.ai_gw_add_model())
+        .build();
+    let delete_model_button = Button::builder(&form_panel)
+        .with_label(text.ai_gw_delete_model())
+        .build();
+    model_header.add(&model_title, 1, SizerFlag::AlignCenterVertical, 0);
+    model_header.add(
+        &fetch_models_button,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        8,
+    );
+    model_header.add(
+        &add_model_button,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        8,
+    );
+    model_header.add(&delete_model_button, 0, SizerFlag::AlignCenterVertical, 0);
+    form_sizer.add_sizer(
+        &model_header,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let models_list = ListBox::builder(&form_panel)
+        .with_style(
+            ListBoxStyle::Default
+                | ListBoxStyle::AlwaysScrollbar
+                | ListBoxStyle::HorizontalScrollbar,
+        )
+        .with_size(Size::new(-1, 170))
+        .build();
+    models_list.set_min_size(Size::new(420, 150));
+    form_sizer.add(
+        &models_list,
+        1,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
     form_panel.set_sizer(form_sizer, true);
     workspace.add(&form_panel, 1, SizerFlag::Expand, 0);
 
@@ -1629,11 +1684,10 @@ fn show_ai_gw_channel_dialog(
         initial,
         &radio_openai,
         &radio_deepseek,
-        &radio_custom,
         &type_input,
         &name_input,
         &base_url_input,
-        &models_input,
+        &models_list,
         &timeout_input,
     );
     if let Some(provider) = initial {
@@ -1644,7 +1698,7 @@ fn show_ai_gw_channel_dialog(
         let type_input = type_input;
         let name_input = name_input;
         let base_url_input = base_url_input;
-        let models_input = models_input;
+        let models_list = models_list;
         let timeout_input = timeout_input;
         radio_openai.on_selected(move |_| {
             if radio_openai.get_value() {
@@ -1653,11 +1707,10 @@ fn show_ai_gw_channel_dialog(
                     None,
                     &radio_openai,
                     &radio_deepseek,
-                    &radio_custom,
                     &type_input,
                     &name_input,
                     &base_url_input,
-                    &models_input,
+                    &models_list,
                     &timeout_input,
                 );
             }
@@ -1667,7 +1720,7 @@ fn show_ai_gw_channel_dialog(
         let type_input = type_input;
         let name_input = name_input;
         let base_url_input = base_url_input;
-        let models_input = models_input;
+        let models_list = models_list;
         let timeout_input = timeout_input;
         radio_deepseek.on_selected(move |_| {
             if radio_deepseek.get_value() {
@@ -1675,7 +1728,6 @@ fn show_ai_gw_channel_dialog(
                     name: "deepseek".to_string(),
                     provider_type: ProviderType::ChatCompletions,
                     base_url: "https://api.deepseek.com/v1".to_string(),
-                    models: vec!["deepseek-chat".to_string(), "deepseek-reasoner".to_string()],
                     timeout_secs: 60,
                     ..Default::default()
                 };
@@ -1684,41 +1736,91 @@ fn show_ai_gw_channel_dialog(
                     Some(&provider),
                     &radio_openai,
                     &radio_deepseek,
-                    &radio_custom,
                     &type_input,
                     &name_input,
                     &base_url_input,
-                    &models_input,
+                    &models_list,
                     &timeout_input,
                 );
             }
         });
     }
     {
-        let type_input = type_input;
-        let name_input = name_input;
-        let base_url_input = base_url_input;
-        let models_input = models_input;
-        let timeout_input = timeout_input;
-        radio_custom.on_selected(move |_| {
-            if radio_custom.get_value() {
-                let provider = ProviderConfig {
-                    timeout_secs: 60,
-                    ..Default::default()
-                };
-                apply_ai_gw_dialog_template(
-                    text,
-                    Some(&provider),
-                    &radio_openai,
-                    &radio_deepseek,
-                    &radio_custom,
-                    &type_input,
-                    &name_input,
-                    &base_url_input,
-                    &models_input,
-                    &timeout_input,
-                );
+        let models_list = models_list;
+        add_model_button.on_click(move |_| {
+            let input = TextEntryDialog::builder(
+                &dialog,
+                text.ai_gw_model_id_prompt(),
+                text.ai_gw_add_model(),
+            )
+            .with_style(
+                TextEntryDialogStyle::Ok
+                    | TextEntryDialogStyle::Cancel
+                    | TextEntryDialogStyle::Centre,
+            )
+            .build();
+            let result = input.show_modal();
+            if result != ID_OK {
+                return;
             }
+            let Some(value) = input.get_value() else {
+                return;
+            };
+            let models = parse_model_ids(&value);
+            if models.is_empty() {
+                show_error(&dialog, text.ai_gw_model_id_empty());
+                return;
+            }
+            append_models_to_list(&models_list, models);
+        });
+    }
+    {
+        let models_list = models_list;
+        delete_model_button.on_click(move |_| {
+            let Some(index) = models_list.get_selection() else {
+                show_error(&dialog, text.ai_gw_select_model());
+                return;
+            };
+            models_list.delete(index);
+            let count = models_list.get_count();
+            if count > 0 {
+                models_list.set_selection(index.min(count - 1), true);
+            }
+        });
+    }
+    {
+        let base_url_input = base_url_input;
+        let key_input = key_input;
+        let timeout_input = timeout_input;
+        let models_list = models_list;
+        fetch_models_button.on_click(move |_| {
+            let base_url = strip_nul(&base_url_input.get_value()).trim().to_string();
+            if base_url.is_empty() {
+                show_error(&dialog, text.ai_gw_base_url_empty());
+                return;
+            }
+
+            fetch_models_button.enable(false);
+            fetch_models_button.set_label(text.ai_gw_fetching_models());
+            let api_key = strip_nul(&key_input.get_value()).trim().to_string();
+            let timeout_secs = strip_nul(&timeout_input.get_value())
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(60);
+            match fetch_remote_models(&base_url, &api_key, timeout_secs) {
+                Ok(models) => {
+                    if models.is_empty() {
+                        show_error(&dialog, text.ai_gw_models_empty());
+                    } else {
+                        models_list.clear();
+                        let count = append_models_to_list(&models_list, models);
+                        show_info(&dialog, &text.ai_gw_models_fetched(count));
+                    }
+                }
+                Err(err) => show_error(&dialog, &text.ai_gw_models_fetch_failed(&err)),
+            }
+            fetch_models_button.set_label(text.ai_gw_fetch_models());
+            fetch_models_button.enable(true);
         });
     }
     {
@@ -1740,20 +1842,8 @@ fn show_ai_gw_channel_dialog(
             show_error(parent, text.ai_gw_provider_name_empty());
             None
         } else {
-            let provider_type = if strip_nul(&type_input.get_value())
-                .trim()
-                .eq_ignore_ascii_case(text.provider_type_chat_completions())
-            {
-                ProviderType::ChatCompletions
-            } else {
-                ProviderType::OpenAiResponses
-            };
-            let models = strip_nul(&models_input.get_value())
-                .split(',')
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .map(ToOwned::to_owned)
-                .collect();
+            let provider_type = selected_ai_gw_dialog_provider_type(&radio_deepseek);
+            let models = list_box_models(&models_list);
             let timeout_secs = strip_nul(&timeout_input.get_value())
                 .trim()
                 .parse::<u64>()
@@ -1778,54 +1868,147 @@ fn show_ai_gw_channel_dialog(
     provider
 }
 
-#[allow(clippy::too_many_arguments)]
 fn apply_ai_gw_dialog_template(
     text: GuiText,
     provider: Option<&ProviderConfig>,
     radio_openai: &RadioButton,
     radio_deepseek: &RadioButton,
-    radio_custom: &RadioButton,
-    type_input: &ComboBox,
+    type_input: &TextCtrl,
     name_input: &TextCtrl,
     base_url_input: &TextCtrl,
-    models_input: &TextCtrl,
+    models_list: &ListBox,
     timeout_input: &TextCtrl,
 ) {
     let provider = provider.cloned().unwrap_or_else(|| ProviderConfig {
         name: "openai".to_string(),
         provider_type: ProviderType::OpenAiResponses,
         base_url: "https://api.openai.com/v1".to_string(),
-        models: vec![
-            "gpt-5.5".to_string(),
-            "gpt-5.4".to_string(),
-            "gpt-5.2".to_string(),
-        ],
         timeout_secs: 60,
         ..Default::default()
     });
 
     radio_openai.set_value(false);
     radio_deepseek.set_value(false);
-    radio_custom.set_value(false);
     match provider_service_index(&provider) {
-        1 => radio_deepseek.set_value(true),
-        0 => radio_openai.set_value(true),
-        _ => radio_custom.set_value(true),
-    }
-    match provider.provider_type {
-        ProviderType::OpenAiResponses => {
-            type_input.set_value(text.provider_type_openai_responses());
-            type_input.set_selection(0);
+        1 => {
+            radio_deepseek.set_value(true);
+            type_input.change_value(text.provider_type_chat_completions());
         }
-        ProviderType::ChatCompletions => {
-            type_input.set_value(text.provider_type_chat_completions());
-            type_input.set_selection(1);
+        _ => {
+            radio_openai.set_value(true);
+            type_input.change_value(text.provider_type_openai_responses());
         }
     }
     name_input.change_value(&provider.name);
     base_url_input.change_value(&provider.base_url);
-    models_input.change_value(&provider.models.join(", "));
+    replace_model_list(models_list, &provider.models);
     timeout_input.change_value(&provider.timeout_secs.to_string());
+}
+
+fn selected_ai_gw_dialog_provider_type(radio_deepseek: &RadioButton) -> ProviderType {
+    if radio_deepseek.get_value() {
+        ProviderType::ChatCompletions
+    } else {
+        ProviderType::OpenAiResponses
+    }
+}
+
+fn replace_model_list(list: &ListBox, models: &[String]) {
+    list.clear();
+    append_models_to_list(list, models.iter().cloned());
+}
+
+fn append_models_to_list(list: &ListBox, models: impl IntoIterator<Item = String>) -> usize {
+    let mut added = 0;
+    for model in models {
+        let model = model.trim();
+        if model.is_empty() || list_box_contains(list, model) {
+            continue;
+        }
+        list.append(model);
+        added += 1;
+    }
+    added
+}
+
+fn list_box_contains(list: &ListBox, model: &str) -> bool {
+    (0..list.get_count()).any(|index| {
+        list.get_string(index)
+            .map(|value| value == model)
+            .unwrap_or(false)
+    })
+}
+
+fn list_box_models(list: &ListBox) -> Vec<String> {
+    (0..list.get_count())
+        .filter_map(|index| list.get_string(index))
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect()
+}
+
+fn parse_model_ids(value: &str) -> Vec<String> {
+    value
+        .split([',', '\n', '\r', ';'])
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn fetch_remote_models(
+    base_url: &str,
+    api_key: &str,
+    timeout_secs: u64,
+) -> Result<Vec<String>, String> {
+    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let timeout = Duration::from_secs(timeout_secs.max(1));
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|err| err.to_string())?;
+    let mut request = client.get(&url);
+    if !api_key.trim().is_empty() {
+        request = request.header("authorization", format!("Bearer {}", api_key.trim()));
+    }
+
+    let response = request.send().map_err(|err| err.to_string())?;
+    let status = response.status();
+    let body = response.text().map_err(|err| err.to_string())?;
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {body}"));
+    }
+
+    let json: serde_json::Value = serde_json::from_str(&body).map_err(|err| err.to_string())?;
+    Ok(extract_model_ids(&json))
+}
+
+fn extract_model_ids(value: &serde_json::Value) -> Vec<String> {
+    let mut models = Vec::new();
+    if let Some(items) = value.get("data").and_then(|value| value.as_array()) {
+        push_model_items(&mut models, items);
+    } else if let Some(items) = value.get("models").and_then(|value| value.as_array()) {
+        push_model_items(&mut models, items);
+    } else if let Some(items) = value.as_array() {
+        push_model_items(&mut models, items);
+    }
+    models
+}
+
+fn push_model_items(models: &mut Vec<String>, items: &[serde_json::Value]) {
+    for item in items {
+        let id = item
+            .as_str()
+            .or_else(|| item.get("id").and_then(|value| value.as_str()))
+            .map(str::trim)
+            .filter(|id| !id.is_empty());
+        if let Some(id) = id {
+            let id = id.to_string();
+            if !models.iter().any(|existing| existing == &id) {
+                models.push(id);
+            }
+        }
+    }
 }
 
 fn handle_language_selected(frame: &Frame, text: GuiText, locale: GuiLocale) {

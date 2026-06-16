@@ -27,17 +27,10 @@ impl Default for AiGatewayConfig {
 }
 
 impl AiGatewayConfig {
-    /// 按 model 名选择已启用的 provider：精确匹配 → 前缀匹配。
+    /// 按 model 名选择已启用的 provider：只匹配显式配置的 model。
     pub fn select_provider(&self, model: &str) -> Option<&ProviderConfig> {
-        // 1. 精确匹配：models 列表包含该 model
         for provider in self.providers.iter().filter(|provider| provider.enabled) {
             if provider.models.iter().any(|m| m == model) {
-                return Some(provider);
-            }
-        }
-        // 2. 前缀匹配：model 以 provider name 开头
-        for provider in self.providers.iter().filter(|provider| provider.enabled) {
-            if model.starts_with(&provider.name) {
                 return Some(provider);
             }
         }
@@ -136,14 +129,13 @@ mod tests {
     }
 
     #[test]
-    fn test_prefix_match() {
+    fn test_empty_model_list_does_not_match_provider_name_prefix() {
         let config = make_config(vec![
             make_provider("openai", ProviderType::OpenAiResponses, vec![]),
             make_provider("deepseek", ProviderType::ChatCompletions, vec![]),
         ]);
-        // "deepseek-v3" 前缀匹配 "deepseek"
-        let p = config.select_provider("deepseek-v3").unwrap();
-        assert_eq!(p.name, "deepseek");
+        assert!(config.select_provider("deepseek-v3").is_none());
+        assert!(config.select_provider("deepseek-chat").is_none());
     }
 
     #[test]
@@ -174,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exact_takes_priority_over_prefix() {
+    fn test_exact_match_uses_configured_model_not_provider_name() {
         let config = make_config(vec![
             make_provider("deepseek", ProviderType::ChatCompletions, vec![]),
             make_provider(
@@ -183,7 +175,6 @@ mod tests {
                 vec!["deepseek-chat"],
             ),
         ]);
-        // "deepseek-chat" 精确匹配 "other" 的 models 列表
         let p = config.select_provider("deepseek-chat").unwrap();
         assert_eq!(p.name, "other");
     }

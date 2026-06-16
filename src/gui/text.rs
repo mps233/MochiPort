@@ -1573,8 +1573,17 @@ impl GuiText {
 
     pub(super) fn ai_gw_channel_editor_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "选择服务商并填写这个渠道的 API 细节。",
-            GuiLocale::EnUs => "Choose a provider and fill in the API details for this channel.",
+            GuiLocale::ZhCn => "选择 OpenAI 或 DeepSeek，并填写渠道连接信息。",
+            GuiLocale::EnUs => {
+                "Choose OpenAI or DeepSeek and fill in the channel connection details."
+            }
+        }
+    }
+
+    pub(super) fn ai_gw_channel_settings(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "渠道配置",
+            GuiLocale::EnUs => "Channel Settings",
         }
     }
 
@@ -1649,6 +1658,13 @@ impl GuiText {
         }
     }
 
+    pub(super) fn ai_gw_custom_channel_unsupported(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "暂不支持自定义渠道。",
+            GuiLocale::EnUs => "Custom channels are not supported yet.",
+        }
+    }
+
     pub(super) fn ai_gw_col_base_url(self) -> &'static str {
         "Base URL"
     }
@@ -1668,6 +1684,83 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "模型列表",
             GuiLocale::EnUs => "Models",
+        }
+    }
+
+    pub(super) fn ai_gw_fetch_models(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "获取远端列表",
+            GuiLocale::EnUs => "Fetch Remote List",
+        }
+    }
+
+    pub(super) fn ai_gw_fetching_models(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "获取中...",
+            GuiLocale::EnUs => "Fetching...",
+        }
+    }
+
+    pub(super) fn ai_gw_add_model(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "手工添加",
+            GuiLocale::EnUs => "Add Manually",
+        }
+    }
+
+    pub(super) fn ai_gw_delete_model(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除选中",
+            GuiLocale::EnUs => "Delete Selected",
+        }
+    }
+
+    pub(super) fn ai_gw_model_id_prompt(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请输入模型 ID。多个模型可以用逗号或换行分隔。",
+            GuiLocale::EnUs => "Enter model ID. Use commas or new lines for multiple models.",
+        }
+    }
+
+    pub(super) fn ai_gw_model_id_empty(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请输入模型 ID。",
+            GuiLocale::EnUs => "Please enter a model ID.",
+        }
+    }
+
+    pub(super) fn ai_gw_select_model(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请选择一个模型。",
+            GuiLocale::EnUs => "Please select a model.",
+        }
+    }
+
+    pub(super) fn ai_gw_base_url_empty(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请输入 Base URL。",
+            GuiLocale::EnUs => "Please enter Base URL.",
+        }
+    }
+
+    pub(super) fn ai_gw_models_empty(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "远端没有返回可用模型。",
+            GuiLocale::EnUs => "The remote endpoint returned no models.",
+        }
+    }
+
+    pub(super) fn ai_gw_models_fetched(self, count: usize) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("已获取 {count} 个模型。"),
+            GuiLocale::EnUs => format!("Fetched {count} models."),
+        }
+    }
+
+    pub(super) fn ai_gw_models_fetch_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("获取模型列表失败：{err}"),
+            GuiLocale::EnUs => format!("Failed to fetch model list: {err}"),
         }
     }
 
@@ -1767,13 +1860,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "渠道名称",
             GuiLocale::EnUs => "Channel Name",
-        }
-    }
-
-    pub(super) fn ai_gw_models_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "逗号分隔的模型名称列表",
-            GuiLocale::EnUs => "Comma-separated model names",
         }
     }
 

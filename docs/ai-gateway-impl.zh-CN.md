@@ -427,23 +427,15 @@ Chat SSE chunk → 状态机 → Responses SSE 事件（按第 4 节状态机处
 
 ## 6. Provider 路由
 
-参考 codex-bridge 的 model-name-based routing。
+按显式模型列表路由，不做默认渠道、兜底渠道或 provider name 前缀猜测。
 
 ```rust
 fn select_provider(model: &str, config: &AiGatewayConfig) -> Result<&ProviderConfig, GatewayError> {
-    // 1. 精确匹配：遍历已启用 providers，检查 models 列表
     for provider in config.providers.iter().filter(|p| p.enabled) {
         if provider.models.contains(&model.to_string()) {
             return Ok(provider);
         }
     }
-    // 2. 前缀匹配：model 以已启用 provider name 开头
-    for provider in config.providers.iter().filter(|p| p.enabled) {
-        if model.starts_with(&provider.name) {
-            return Ok(provider);
-        }
-    }
-    // 3. 无匹配则返回错误，不做默认渠道/兜底渠道
     Err(GatewayError::invalid_model(model))
 }
 ```

@@ -632,30 +632,6 @@ pub(super) fn text_field_row<W: WxWidget>(
     input
 }
 
-pub(super) fn provider_combo_row<W: WxWidget>(
-    parent: &W,
-    sizer: &FlexGridSizer,
-    label: &str,
-    value: &str,
-) -> ComboBox {
-    let label_widget = StaticText::builder(parent).with_label(label).build();
-    label_widget.set_foreground_color(Colour::rgb(78, 86, 98));
-    sizer.add(
-        &label_widget,
-        0,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        0,
-    );
-
-    let input = ComboBox::builder(parent)
-        .with_value(value)
-        .with_style(ComboBoxStyle::Default | ComboBoxStyle::ProcessEnter)
-        .build();
-    input.set_min_size(Size::new(420, 30));
-    sizer.add(&input, 1, SizerFlag::Expand, 0);
-    input
-}
-
 #[derive(Clone, Copy)]
 pub(super) enum StateTone {
     Ok,
