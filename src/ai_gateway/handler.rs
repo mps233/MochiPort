@@ -1,14 +1,25 @@
-use axum::{Json, body::Bytes, extract::State, http::HeaderMap, response::IntoResponse};
+use std::time::Instant;
+
+use axum::{
+    Json,
+    body::Bytes,
+    extract::{Query, State},
+    http::HeaderMap,
+    response::IntoResponse,
+};
+use serde::Deserialize;
+use serde_json::json;
 use tracing::info;
 
 use crate::app_state::SharedState;
 
 use super::catalog::configured_models_response;
-use super::config::ProviderType;
+use super::config::{ProviderConfig, ProviderType};
 use super::context::GatewayContext;
 use super::error::GatewayError;
 use super::model::GatewayRequest;
 use super::providers::{deepseek_chat, openai_responses};
+use super::request_log::{self, RequestLogContext, RequestLogRecord, RequestLogUpdate};
 use super::router::resolve_provider;
 
 /// POST /ai-gateway/v1/responses
@@ -17,7 +28,10 @@ pub async fn handle_responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    let started_at = Instant::now();
+    let created_at_ms = request_log::now_ms();
     let config = state.config.lock().await;
+    let log_db_path = request_log::database_path(&config);
     let gw_config = config.ai_gateway.clone();
     drop(config);
 
@@ -42,8 +56,29 @@ pub async fn handle_responses(
     // 3. 路由到 provider
     let provider = match resolve_provider(&request.model, &gw_config) {
         Ok(p) => p,
-        Err(e) => return e.into_response(),
+        Err(e) => {
+            let log_context = insert_initial_log(
+                &log_db_path,
+                &ctx,
+                &request,
+                None,
+                &raw_body,
+                started_at,
+                created_at_ms,
+            );
+            update_failed_log(&log_context, &e.message);
+            return e.into_response();
+        }
     };
+    let log_context = insert_initial_log(
+        &log_db_path,
+        &ctx,
+        &request,
+        Some(provider),
+        &raw_body,
+        started_at,
+        created_at_ms,
+    );
 
     info!(
         model = %request.model,
@@ -58,15 +93,22 @@ pub async fn handle_responses(
     // 4. 按 provider_type 分发
     match provider.provider_type {
         ProviderType::OpenAiResponses => {
-            match openai_responses::passthrough(&ctx, raw_body, provider).await {
+            match openai_responses::passthrough(&ctx, raw_body, provider, log_context.clone()).await
+            {
                 Ok(resp) => resp.into_response(),
-                Err(e) => e.into_response(),
+                Err(e) => {
+                    update_failed_log(&log_context, &e.message);
+                    e.into_response()
+                }
             }
         }
         ProviderType::ChatCompletions => {
-            match deepseek_chat::handle(&ctx, &request, provider).await {
+            match deepseek_chat::handle(&ctx, &request, provider, log_context.clone()).await {
                 Ok(resp) => resp.into_response(),
-                Err(e) => e.into_response(),
+                Err(e) => {
+                    update_failed_log(&log_context, &e.message);
+                    e.into_response()
+                }
             }
         }
     }
@@ -79,4 +121,93 @@ pub async fn handle_models(State(state): State<SharedState>) -> impl IntoRespons
     drop(config);
 
     Json(configured_models_response(&gw_config))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RequestLogsQuery {
+    limit: Option<usize>,
+}
+
+/// GET /ai-gateway/request-logs
+pub async fn handle_request_logs(
+    State(state): State<SharedState>,
+    Query(query): Query<RequestLogsQuery>,
+) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    let db_path = request_log::database_path(&config);
+    drop(config);
+
+    match request_log::list_recent(&db_path, query.limit.unwrap_or(200)) {
+        Ok(logs) => Json(json!({ "logs": logs })).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+fn insert_initial_log(
+    db_path: &std::path::Path,
+    ctx: &GatewayContext,
+    request: &GatewayRequest,
+    provider: Option<&ProviderConfig>,
+    raw_body: &serde_json::Value,
+    started_at: Instant,
+    created_at_ms: i64,
+) -> Option<RequestLogContext> {
+    let record = RequestLogRecord {
+        request_id: ctx.request_id.clone(),
+        model_id: request.model.clone(),
+        stream: request.stream,
+        channel: provider
+            .map(|provider| provider.name.clone())
+            .unwrap_or_else(|| "-".to_string()),
+        provider_type: provider
+            .map(|provider| provider_type_key(&provider.provider_type).to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        status: "running".to_string(),
+        usage: Default::default(),
+        cost_usd: None,
+        latency_ms: None,
+        ttft_ms: None,
+        created_at_ms,
+        error_message: None,
+        request_json: serde_json::to_string(raw_body).ok(),
+        response_json: None,
+    };
+    match request_log::insert_record(db_path, &record) {
+        Ok(log_id) => Some(RequestLogContext {
+            db_path: db_path.to_path_buf(),
+            log_id,
+            started_at,
+        }),
+        Err(err) => {
+            request_log::log_insert_error(err);
+            None
+        }
+    }
+}
+
+fn update_failed_log(log_context: &Option<RequestLogContext>, message: &str) {
+    let Some(log_context) = log_context else {
+        return;
+    };
+    let update = RequestLogUpdate {
+        status: Some("failed".to_string()),
+        latency_ms: Some(request_log::elapsed_ms(log_context.started_at)),
+        error_message: Some(message.to_string()),
+        ..RequestLogUpdate::default()
+    };
+    if let Err(err) = request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+    {
+        request_log::log_update_error(err);
+    }
+}
+
+fn provider_type_key(provider_type: &ProviderType) -> &'static str {
+    match provider_type {
+        ProviderType::OpenAiResponses => "responses",
+        ProviderType::ChatCompletions => "chat_completions",
+    }
 }

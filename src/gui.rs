@@ -56,6 +56,7 @@ type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
 type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
+type RequestLogResultStore = Arc<Mutex<Option<Result<Vec<RequestLogItem>, String>>>>;
 
 mod ai_gateway;
 mod api;
@@ -63,6 +64,7 @@ mod daemon;
 mod im_accounts;
 mod onboarding;
 mod provider;
+mod request_logs;
 mod text;
 mod update;
 mod widgets;
@@ -75,7 +77,7 @@ use self::ai_gateway::{
 };
 use self::api::{
     ApiClient, ConfigureRequest, ConfigureTelegramBotRequest, DashboardSnapshot,
-    DeleteImAccountRequest, RemoteControlStatus, SetImAccountEnabledRequest,
+    DeleteImAccountRequest, RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
 };
 use self::daemon::{
     app_support_config_path, daemon_config_path, start_daemon_for_gui_async, stop_daemon_on_exit,
@@ -88,6 +90,9 @@ use self::onboarding::{
     prompt_telegram_bot_token, show_feishu_onboard_dialog, show_wechat_onboard_dialog,
 };
 use self::provider::strip_nul;
+use self::request_logs::{
+    RequestLogModel, RequestLogRows, refresh_request_log_list, request_log_cell,
+};
 use self::text::{GuiLocale, GuiText};
 use self::widgets::{
     ImStatusPanel, ProviderLogoKind, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap,
@@ -665,9 +670,167 @@ fn build_ui() {
         no_refresh: true,
     });
 
+    // --- Request Logs Tab ---
+    let request_logs_page = Panel::builder(&notebook).build();
+    request_logs_page.set_background_color(Colour::rgb(250, 251, 253));
+    let request_logs_sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let request_log_toolbar = BoxSizer::builder(Orientation::Horizontal).build();
+    let request_log_status_label = StaticText::builder(&request_logs_page)
+        .with_label(text.request_logs_waiting())
+        .build();
+    request_log_status_label.set_foreground_color(Colour::rgb(64, 72, 86));
+    let request_log_auto_refresh = CheckBox::builder(&request_logs_page)
+        .with_label(text.auto_refresh())
+        .build();
+    request_log_auto_refresh.set_value(true);
+    let request_log_refresh_button = Button::builder(&request_logs_page)
+        .with_label(text.refresh())
+        .build();
+    request_log_toolbar.add(
+        &request_log_status_label,
+        1,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        12,
+    );
+    request_log_toolbar.add(
+        &request_log_auto_refresh,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        10,
+    );
+    request_log_toolbar.add(&request_log_refresh_button, 0, SizerFlag::Right, 0);
+    request_logs_sizer.add_sizer(
+        &request_log_toolbar,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+
+    let request_log_box = StaticBox::builder(&request_logs_page)
+        .with_label(text.request_logs())
+        .build();
+    let request_log_section =
+        StaticBoxSizerBuilder::new_with_box(&request_log_box, Orientation::Vertical).build();
+    let request_log_rows: RequestLogRows = Rc::new(RefCell::new(Vec::new()));
+    let request_log_model: RequestLogModel =
+        Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
+            0,
+            request_log_rows.clone(),
+            request_log_cell,
+            None::<fn(&RequestLogRows, usize, usize, &Variant) -> bool>,
+            None::<fn(&RequestLogRows, usize, usize) -> Option<DataViewItemAttr>>,
+            None::<fn(&RequestLogRows, usize, usize) -> bool>,
+        )));
+    let request_log_list = DataViewCtrl::builder(&request_log_box)
+        .with_style(
+            DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
+        )
+        .with_size(Size::new(-1, 520))
+        .build();
+    request_log_list.append_text_column(
+        text.request_log_col_id(),
+        0,
+        80,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_model(),
+        1,
+        170,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_stream(),
+        2,
+        100,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_channel(),
+        3,
+        160,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_status(),
+        4,
+        120,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_tokens(),
+        5,
+        260,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_read_cache(),
+        6,
+        160,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_write_cache(),
+        7,
+        150,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_cost(),
+        8,
+        110,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_ttft(),
+        9,
+        95,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_latency(),
+        10,
+        110,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_created_at(),
+        11,
+        170,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.associate_model(&*request_log_model.borrow());
+    request_log_section.add(
+        &request_log_list,
+        1,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        10,
+    );
+    request_logs_sizer.add_sizer(
+        &request_log_section,
+        1,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        10,
+    );
+    request_logs_page.set_sizer(request_logs_sizer, true);
+
     notebook.add_page(&codex_page, text.codex_tab(), true, None);
     notebook.add_page(&ai_gw_page, text.ai_gateway_tab(), false, None);
     notebook.add_page(&feishu_page, text.chat_tab(), false, None);
+    notebook.add_page(&request_logs_page, text.request_logs_tab(), false, None);
 
     root_sizer.add(
         &notebook,
@@ -707,6 +870,12 @@ fn build_ui() {
         ai_gw_new_button,
         ai_gw_edit_button,
         ai_gw_status_label,
+        request_log_list,
+        request_log_rows,
+        request_log_model,
+        request_log_refresh_button,
+        request_log_auto_refresh,
+        request_log_status_label,
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
@@ -1154,6 +1323,44 @@ fn build_ui() {
         .borrow_mut()
         .replace(ai_gw_action_timer);
     gui_timers.track(&ai_gw_action_timer_store);
+
+    let request_log_result: RequestLogResultStore = Arc::new(Mutex::new(None));
+    let request_log_in_flight = Arc::new(AtomicBool::new(false));
+    {
+        let api = api.clone();
+        let handles = handles.clone();
+        let request_log_result = request_log_result.clone();
+        let request_log_in_flight = request_log_in_flight.clone();
+        request_log_refresh_button.on_click(move |_| {
+            force_request_log_refresh(&api, &handles, &request_log_result, &request_log_in_flight);
+        });
+    }
+    force_request_log_refresh(&api, &handles, &request_log_result, &request_log_in_flight);
+
+    let request_log_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
+    let request_log_timer = Timer::new(&frame);
+    {
+        let api = api.clone();
+        let handles = handles.clone();
+        let request_log_result = request_log_result.clone();
+        let request_log_in_flight = request_log_in_flight.clone();
+        request_log_timer.on_tick(move |_| {
+            apply_pending_request_logs(&handles, &request_log_result);
+            if handles.request_log_auto_refresh.get_value() {
+                schedule_request_log_refresh(
+                    &api,
+                    &handles,
+                    &request_log_result,
+                    &request_log_in_flight,
+                );
+            }
+        });
+    }
+    request_log_timer.start(1500, false);
+    request_log_timer_store
+        .borrow_mut()
+        .replace(request_log_timer);
+    gui_timers.track(&request_log_timer_store);
 
     let timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let timer = Timer::new(&frame);
@@ -2088,6 +2295,13 @@ struct UiHandles {
     ai_gw_new_button: Button,
     ai_gw_edit_button: Button,
     ai_gw_status_label: StaticText,
+    // Request logs fields
+    request_log_list: DataViewCtrl,
+    request_log_rows: RequestLogRows,
+    request_log_model: RequestLogModel,
+    request_log_refresh_button: Button,
+    request_log_auto_refresh: CheckBox,
+    request_log_status_label: StaticText,
 }
 
 #[derive(Clone)]
@@ -2502,7 +2716,69 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.provider_image_generation.enable(enabled);
     handles.inject_codex_button.enable(enabled);
     handles.uninstall_button.enable(enabled);
+    handles.request_log_refresh_button.enable(enabled);
     set_ai_gw_actions_enabled(handles, enabled);
+}
+
+fn force_request_log_refresh(
+    api: &ApiClient,
+    handles: &UiHandles,
+    result_store: &RequestLogResultStore,
+    in_flight: &Arc<AtomicBool>,
+) {
+    if in_flight.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    handles.request_log_refresh_button.enable(false);
+    handles
+        .request_log_status_label
+        .set_label(handles.text.request_logs_loading());
+    let thread_api = api.clone();
+    let result_store = result_store.clone();
+    let in_flight = in_flight.clone();
+    thread::spawn(move || {
+        let outcome = thread_api
+            .ai_gateway_request_logs()
+            .map(|response| response.logs);
+        if let Ok(mut slot) = result_store.lock() {
+            slot.replace(outcome);
+        }
+        in_flight.store(false, Ordering::SeqCst);
+    });
+}
+
+fn schedule_request_log_refresh(
+    api: &ApiClient,
+    handles: &UiHandles,
+    result_store: &RequestLogResultStore,
+    in_flight: &Arc<AtomicBool>,
+) {
+    if in_flight.load(Ordering::SeqCst) {
+        return;
+    }
+    force_request_log_refresh(api, handles, result_store, in_flight);
+}
+
+fn apply_pending_request_logs(handles: &UiHandles, result_store: &RequestLogResultStore) {
+    let result = result_store.lock().ok().and_then(|mut slot| slot.take());
+    let Some(result) = result else {
+        return;
+    };
+    handles.request_log_refresh_button.enable(true);
+    match result {
+        Ok(logs) => {
+            let count = logs.len();
+            refresh_request_log_list(handles, logs);
+            handles
+                .request_log_status_label
+                .set_label(&handles.text.request_logs_loaded(count));
+        }
+        Err(err) => {
+            handles
+                .request_log_status_label
+                .set_label(&handles.text.request_logs_failed(&err));
+        }
+    }
 }
 
 fn remote_connection_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {

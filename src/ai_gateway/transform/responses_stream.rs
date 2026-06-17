@@ -222,8 +222,8 @@ impl ResponsesStreamState {
             Some(c) => c,
             None => {
                 // 可能是纯 usage chunk
-                if let Some(usage) = chunk.get("usage") {
-                    self.usage = Some(convert_usage_value(usage));
+                if let Some(usage) = chunk.get("usage").and_then(convert_usage_value) {
+                    self.usage = Some(usage);
                     if self.finished && !self.response_completed {
                         self.emit_response_completed(queue);
                     }
@@ -262,8 +262,8 @@ impl ResponsesStreamState {
         }
 
         // usage（有些 provider 在最后一个 chunk 里带 usage）
-        if let Some(usage) = chunk.get("usage") {
-            self.usage = Some(convert_usage_value(usage));
+        if let Some(usage) = chunk.get("usage").and_then(convert_usage_value) {
+            self.usage = Some(usage);
             if self.finished && !self.response_completed {
                 self.emit_response_completed(queue);
             }
@@ -716,24 +716,21 @@ fn emit_sse(queue: &mut VecDeque<Bytes>, event_type: &str, data: Value) {
     queue.push_back(Bytes::from(line));
 }
 
-fn convert_usage_value(usage: &Value) -> Value {
-    let input = usage
-        .get("prompt_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let output = usage
-        .get("completion_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let total = usage
-        .get("total_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(input + output);
+fn convert_usage_value(usage: &Value) -> Option<Value> {
+    usage.as_object()?;
+    if !has_usage_token_fields(usage) {
+        return None;
+    }
+
+    let input = first_i64(usage, &["prompt_tokens"]).unwrap_or(0);
+    let output = first_i64(usage, &["completion_tokens"]).unwrap_or(0);
+    let total = first_i64(usage, &["total_tokens"]).unwrap_or(input + output);
 
     let cached = usage
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_i64())
+        .or_else(|| first_i64(usage, &["cached_tokens", "prompt_cache_hit_tokens"]))
         .unwrap_or(0);
     let reasoning = usage
         .get("completion_tokens_details")
@@ -741,13 +738,26 @@ fn convert_usage_value(usage: &Value) -> Value {
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
-    json!({
+    Some(json!({
         "input_tokens": input,
         "output_tokens": output,
         "total_tokens": total,
         "input_tokens_details": {"cached_tokens": cached},
         "output_tokens_details": {"reasoning_tokens": reasoning},
-    })
+    }))
+}
+
+fn has_usage_token_fields(usage: &Value) -> bool {
+    first_i64(
+        usage,
+        &["prompt_tokens", "completion_tokens", "total_tokens"],
+    )
+    .is_some()
+}
+
+fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_i64))
 }
 
 #[cfg(test)]
@@ -983,6 +993,80 @@ mod tests {
         let events = feed_chunks(&chunks);
         let types = event_types(&events);
         assert!(types.contains(&"response.completed"));
+    }
+
+    #[test]
+    fn test_null_usage_is_ignored() {
+        let chunks = vec![
+            json!({
+                "model": "deepseek-v4-flash",
+                "created": 1700000000,
+                "choices": [{"index": 0, "delta": {"content": "hi"}, "usage": null}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": null
+            }),
+        ];
+
+        let events = feed_chunks(&chunks);
+        let completed = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.completed")
+            .unwrap();
+        assert!(completed.1["response"].get("usage").is_none());
+    }
+
+    #[test]
+    fn test_empty_usage_object_is_ignored() {
+        let chunks = vec![
+            json!({
+                "model": "deepseek-v4-flash",
+                "created": 1700000000,
+                "choices": [{"index": 0, "delta": {"content": "hi"}}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {}
+            }),
+        ];
+
+        let events = feed_chunks(&chunks);
+        let completed = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.completed")
+            .unwrap();
+        assert!(completed.1["response"].get("usage").is_none());
+    }
+
+    #[test]
+    fn test_deepseek_prompt_cache_hit_tokens_are_mapped() {
+        let chunks = vec![
+            json!({
+                "model": "deepseek-v4-pro",
+                "created": 1700000000,
+                "choices": [{"index": 0, "delta": {"content": "hi"}}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 16,
+                    "completion_tokens": 645,
+                    "total_tokens": 661,
+                    "prompt_cache_hit_tokens": 4
+                }
+            }),
+        ];
+
+        let events = feed_chunks(&chunks);
+        let completed = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.completed")
+            .unwrap();
+        assert_eq!(
+            completed.1["response"]["usage"]["input_tokens_details"]["cached_tokens"],
+            4
+        );
     }
 
     // ─── finish_reason=length → incomplete ─────────────────────

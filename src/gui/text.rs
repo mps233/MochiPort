@@ -382,6 +382,143 @@ impl GuiText {
         }
     }
 
+    pub(super) fn request_logs_tab(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请求日志",
+            GuiLocale::EnUs => "Request Logs",
+        }
+    }
+
+    pub(super) fn request_logs(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请求日志",
+            GuiLocale::EnUs => "Request Logs",
+        }
+    }
+
+    pub(super) fn auto_refresh(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "自动刷新",
+            GuiLocale::EnUs => "Auto Refresh",
+        }
+    }
+
+    pub(super) fn refresh(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "刷新",
+            GuiLocale::EnUs => "Refresh",
+        }
+    }
+
+    pub(super) fn request_logs_waiting(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "等待本地服务启动",
+            GuiLocale::EnUs => "Waiting for local service",
+        }
+    }
+
+    pub(super) fn request_logs_loading(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在读取请求日志...",
+            GuiLocale::EnUs => "Loading request logs...",
+        }
+    }
+
+    pub(super) fn request_logs_loaded(self, count: usize) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("最近 {count} 条请求"),
+            GuiLocale::EnUs => format!("Latest {count} requests"),
+        }
+    }
+
+    pub(super) fn request_logs_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("读取请求日志失败：{err}"),
+            GuiLocale::EnUs => format!("Failed to load request logs: {err}"),
+        }
+    }
+
+    pub(super) fn request_log_col_id(self) -> &'static str {
+        "ID"
+    }
+
+    pub(super) fn request_log_col_model(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "MODEL ID",
+            GuiLocale::EnUs => "MODEL ID",
+        }
+    }
+
+    pub(super) fn request_log_col_stream(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "STREAM",
+            GuiLocale::EnUs => "STREAM",
+        }
+    }
+
+    pub(super) fn request_log_col_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "CHANNEL",
+            GuiLocale::EnUs => "CHANNEL",
+        }
+    }
+
+    pub(super) fn request_log_col_status(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "STATUS",
+            GuiLocale::EnUs => "STATUS",
+        }
+    }
+
+    pub(super) fn request_log_col_tokens(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "TOKENS",
+            GuiLocale::EnUs => "TOKENS",
+        }
+    }
+
+    pub(super) fn request_log_col_read_cache(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "READ CACHE",
+            GuiLocale::EnUs => "READ CACHE",
+        }
+    }
+
+    pub(super) fn request_log_col_write_cache(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "WRITE CACHE",
+            GuiLocale::EnUs => "WRITE CACHE",
+        }
+    }
+
+    pub(super) fn request_log_col_cost(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "COST",
+            GuiLocale::EnUs => "COST",
+        }
+    }
+
+    pub(super) fn request_log_col_latency(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "LATENCY",
+            GuiLocale::EnUs => "LATENCY",
+        }
+    }
+
+    pub(super) fn request_log_col_ttft(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "TTFT",
+            GuiLocale::EnUs => "TTFT",
+        }
+    }
+
+    pub(super) fn request_log_col_created_at(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "CREATED AT",
+            GuiLocale::EnUs => "CREATED AT",
+        }
+    }
+
     pub(super) fn im_access_hint(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {

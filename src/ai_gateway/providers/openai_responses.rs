@@ -10,12 +10,16 @@ use tracing::{debug, error};
 use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::error::GatewayError;
+use crate::ai_gateway::request_log::{
+    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
+};
 
 /// OpenAI Responses API 透传：补齐 cache 字段后代理到上游。
 pub async fn passthrough(
     ctx: &GatewayContext,
     mut raw_body: serde_json::Value,
     provider: &ProviderConfig,
+    log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     // 1. 补齐 prompt_cache_key
     let existing_key = raw_body
@@ -95,7 +99,14 @@ pub async fn passthrough(
                 std::io::Error::new(std::io::ErrorKind::Other, e)
             })
         });
-        let body = Body::from_stream(byte_stream);
+        let body = if let Some(log_context) = log_context {
+            Body::from_stream(ResponsesSseLogStream::new(
+                Box::pin(byte_stream),
+                log_context,
+            ))
+        } else {
+            Body::from_stream(byte_stream)
+        };
         let mut response = Response::new(body);
         *response.status_mut() = StatusCode::OK;
         *response.headers_mut() = headers;
@@ -106,6 +117,31 @@ pub async fn passthrough(
     let body_bytes = upstream_resp.bytes().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("read upstream body: {e}"))
     })?;
+    if let Some(log_context) = &log_context {
+        let response_json = serde_json::from_slice::<serde_json::Value>(&body_bytes).ok();
+        let (status, usage, response_text) = response_json
+            .as_ref()
+            .map(|value| {
+                (
+                    request_log::status_from_response_value(value),
+                    request_log::usage_from_response_value(value),
+                    serde_json::to_string(value).ok(),
+                )
+            })
+            .unwrap_or_else(|| ("completed".to_string(), Default::default(), None));
+        let update = RequestLogUpdate {
+            status: Some(status),
+            usage: Some(usage),
+            latency_ms: Some(request_log::elapsed_ms(log_context.started_at)),
+            response_json: response_text,
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) =
+            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+        {
+            request_log::log_update_error(err);
+        }
+    }
 
     let mut response = Response::new(Body::from(body_bytes));
     *response.status_mut() = StatusCode::OK;

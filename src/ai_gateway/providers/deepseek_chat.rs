@@ -12,6 +12,9 @@ use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::GatewayRequest;
+use crate::ai_gateway::request_log::{
+    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
+};
 use crate::ai_gateway::transform::chat_to_responses::convert_chat_response;
 use crate::ai_gateway::transform::responses_stream::ChatSseToResponsesSse;
 use crate::ai_gateway::transform::responses_to_chat::build_chat_request;
@@ -21,6 +24,7 @@ pub async fn handle(
     _ctx: &GatewayContext,
     request: &GatewayRequest,
     provider: &ProviderConfig,
+    log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     // 1. Responses → Chat Completions 请求转换
     let chat_body = build_chat_request(request, true)
@@ -62,9 +66,9 @@ pub async fn handle(
 
     // 3. 流式 vs 非流式
     if request.stream {
-        handle_stream(upstream_resp, &request.model).await
+        handle_stream(upstream_resp, &request.model, log_context).await
     } else {
-        handle_non_stream(upstream_resp, &request.model).await
+        handle_non_stream(upstream_resp, &request.model, log_context).await
     }
 }
 
@@ -72,6 +76,7 @@ pub async fn handle(
 async fn handle_non_stream(
     resp: reqwest::Response,
     model: &str,
+    log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     let chat_resp: serde_json::Value = resp.json().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("parse upstream json: {e}"))
@@ -82,6 +87,22 @@ async fn handle_non_stream(
     })?;
 
     let body_bytes = serde_json::to_vec(&response_obj).unwrap_or_default();
+    if let Some(log_context) = &log_context {
+        let response_value = serde_json::to_value(&response_obj).unwrap_or_default();
+        let update = RequestLogUpdate {
+            status: Some(response_obj.status.clone()),
+            usage: Some(request_log::usage_from_response_value(&response_value)),
+            latency_ms: Some(request_log::elapsed_ms(log_context.started_at)),
+            response_json: serde_json::to_string(&response_value).ok(),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) =
+            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+        {
+            request_log::log_update_error(err);
+        }
+    }
+
     let mut response = Response::new(Body::from(body_bytes));
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(
@@ -95,13 +116,18 @@ async fn handle_non_stream(
 async fn handle_stream(
     resp: reqwest::Response,
     model: &str,
+    log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     let model = model.to_string();
     let byte_stream = resp.bytes_stream();
 
     let sse_stream = ChatSseToResponsesSse::new(byte_stream, model);
 
-    let body = Body::from_stream(sse_stream);
+    let body = if let Some(log_context) = log_context {
+        Body::from_stream(ResponsesSseLogStream::new(sse_stream, log_context))
+    } else {
+        Body::from_stream(sse_stream)
+    };
     let mut response = Response::new(body);
     *response.status_mut() = StatusCode::OK;
     response.headers_mut().insert(

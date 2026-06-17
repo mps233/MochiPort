@@ -241,6 +241,10 @@ impl ApiClient {
     pub(super) fn save_app_config(&self, config: &AppConfig) -> Result<serde_json::Value, String> {
         self.post_json_with_timeout("/api/config", config, GUI_CONFIG_TIMEOUT)
     }
+
+    pub(super) fn ai_gateway_request_logs(&self) -> Result<RequestLogsResponse, String> {
+        self.get_with_timeout("/ai-gateway/request-logs?limit=200", GUI_CONFIG_TIMEOUT)
+    }
 }
 
 fn join_optional<T>(handle: thread::JoinHandle<Option<T>>) -> Option<T> {
@@ -325,6 +329,36 @@ pub(super) struct CodexAppProviderStatus {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RequestLogsResponse {
+    #[serde(default)]
+    pub(super) logs: Vec<RequestLogItem>,
+}
+
+#[derive(Clone, Default, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RequestLogItem {
+    pub(super) id: i64,
+    pub(super) request_id: String,
+    pub(super) model_id: String,
+    pub(super) stream: bool,
+    pub(super) channel: String,
+    pub(super) provider_type: String,
+    pub(super) status: String,
+    pub(super) input_tokens: Option<i64>,
+    pub(super) output_tokens: Option<i64>,
+    pub(super) total_tokens: Option<i64>,
+    pub(super) read_cache_tokens: Option<i64>,
+    pub(super) read_cache_hit_rate: Option<f64>,
+    pub(super) write_cache_tokens: Option<i64>,
+    pub(super) cost_usd: Option<f64>,
+    pub(super) latency_ms: Option<i64>,
+    pub(super) ttft_ms: Option<i64>,
+    pub(super) created_at: String,
+    pub(super) error_message: Option<String>,
 }
 
 #[derive(Serialize)]

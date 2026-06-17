@@ -132,17 +132,20 @@ pub fn convert_chat_response(
 
 fn convert_usage(usage_val: Option<&Value>) -> Option<Usage> {
     let u = usage_val?;
-    let input_tokens = u.get("prompt_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
-    let output_tokens = u
-        .get("completion_tokens")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let total_tokens = u.get("total_tokens").and_then(|v| v.as_i64()).unwrap_or(0);
+    u.as_object()?;
+    if !has_usage_token_fields(u) {
+        return None;
+    }
+
+    let input_tokens = first_i64(u, &["prompt_tokens"]).unwrap_or(0);
+    let output_tokens = first_i64(u, &["completion_tokens"]).unwrap_or(0);
+    let total_tokens = first_i64(u, &["total_tokens"]).unwrap_or(input_tokens + output_tokens);
 
     let cached = u
         .get("prompt_tokens_details")
         .and_then(|d| d.get("cached_tokens"))
         .and_then(|v| v.as_i64())
+        .or_else(|| first_i64(u, &["cached_tokens", "prompt_cache_hit_tokens"]))
         .unwrap_or(0);
     let reasoning = u
         .get("completion_tokens_details")
@@ -161,6 +164,19 @@ fn convert_usage(usage_val: Option<&Value>) -> Option<Usage> {
             reasoning_tokens: reasoning,
         }),
     })
+}
+
+fn has_usage_token_fields(usage: &Value) -> bool {
+    first_i64(
+        usage,
+        &["prompt_tokens", "completion_tokens", "total_tokens"],
+    )
+    .is_some()
+}
+
+fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_i64))
 }
 
 #[cfg(test)]
@@ -447,5 +463,59 @@ mod tests {
 
         let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn test_null_usage_is_ignored() {
+        let chat_resp = json!({
+            "model": "deepseek-v4-flash",
+            "created": 1700000000,
+            "choices": [{
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": null
+        });
+
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
+        assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn test_empty_usage_object_is_ignored() {
+        let chat_resp = json!({
+            "model": "deepseek-v4-flash",
+            "created": 1700000000,
+            "choices": [{
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {}
+        });
+
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
+        assert!(resp.usage.is_none());
+    }
+
+    #[test]
+    fn test_deepseek_prompt_cache_hit_tokens_are_mapped() {
+        let chat_resp = json!({
+            "model": "deepseek-v4-pro",
+            "created": 1700000000,
+            "choices": [{
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 16,
+                "completion_tokens": 645,
+                "total_tokens": 661,
+                "prompt_cache_hit_tokens": 4
+            }
+        });
+
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-pro").unwrap();
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.input_tokens_details.unwrap().cached_tokens, 4);
     }
 }
