@@ -319,6 +319,45 @@ impl GuiText {
         }
     }
 
+    pub(super) fn codex_visible_models(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex 可见模型",
+            GuiLocale::EnUs => "Codex visible models",
+        }
+    }
+
+    pub(super) fn codex_visible_models_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "只控制 Codex App 模型选择器展示哪些 models.json 中可用的模型；不影响 AI Gateway 渠道路由。"
+            }
+            GuiLocale::EnUs => {
+                "Controls which available models from models.json are shown in the Codex App picker; does not affect AI Gateway routing."
+            }
+        }
+    }
+
+    pub(super) fn save_codex_models(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存模型列表",
+            GuiLocale::EnUs => "Save model list",
+        }
+    }
+
+    pub(super) fn saving_codex_models(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存中...",
+            GuiLocale::EnUs => "Saving...",
+        }
+    }
+
+    pub(super) fn codex_models_saved(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex 可见模型列表已保存。",
+            GuiLocale::EnUs => "Codex visible model list saved.",
+        }
+    }
+
     pub(super) fn provider_websocket(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "启用 WebSocket",

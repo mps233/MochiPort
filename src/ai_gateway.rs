@@ -11,6 +11,7 @@ pub mod transform;
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     routing::{get, post},
 };
 
@@ -22,4 +23,5 @@ pub fn router() -> Router<SharedState> {
         .route("/v1/responses", post(handler::handle_responses))
         .route("/v1/models", get(handler::handle_models))
         .route("/request-logs", get(handler::handle_request_logs))
+        .layer(DefaultBodyLimit::disable())
 }

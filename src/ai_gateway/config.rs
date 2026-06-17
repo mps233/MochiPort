@@ -13,6 +13,10 @@ pub struct AiGatewayConfig {
     pub prompt_cache_retention: Option<String>,
     /// provider 列表。
     pub providers: Vec<ProviderConfig>,
+    /// Codex App 前端模型选择器可见的模型列表。
+    ///
+    /// 该列表只控制 `/models` 暴露给 Codex App 的 catalog 模型，不参与上游 provider 路由。
+    pub codex_visible_models: Vec<String>,
 }
 
 impl Default for AiGatewayConfig {
@@ -22,6 +26,7 @@ impl Default for AiGatewayConfig {
             default_provider: String::new(),
             prompt_cache_retention: None,
             providers: Vec::new(),
+            codex_visible_models: Vec::new(),
         }
     }
 }

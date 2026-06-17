@@ -17,6 +17,7 @@ use wxdragon::widgets::dataview::{
 use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
+use crate::ai_gateway::catalog::visible_catalog_model_options;
 use crate::ai_gateway::config::{
     ProviderConfig, ProviderType, provider_api_root, provider_display_base_url,
 };
@@ -55,6 +56,7 @@ type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
+type CodexModelChecks = Rc<Vec<(String, CheckBox)>>;
 type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
 type RequestLogResultStore = Arc<Mutex<Option<Result<Vec<RequestLogItem>, String>>>>;
 
@@ -289,6 +291,67 @@ fn build_ui() {
         &provider_image_generation_row,
         0,
         SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        12,
+    );
+
+    let codex_models_box = StaticBox::builder(&codex_page)
+        .with_label(text.codex_visible_models())
+        .build();
+    codex_models_box.set_tooltip(text.codex_visible_models_help());
+    let codex_models_section =
+        StaticBoxSizerBuilder::new_with_box(&codex_models_box, Orientation::Vertical).build();
+    let codex_models_hint = StaticText::builder(&codex_models_box)
+        .with_label(text.codex_visible_models_help())
+        .build();
+    codex_models_hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    codex_models_section.add(
+        &codex_models_hint,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+    let codex_model_checks: CodexModelChecks = Rc::new(
+        visible_catalog_model_options()
+            .into_iter()
+            .map(|model| {
+                let label = if model.display_name == model.slug {
+                    model.slug.clone()
+                } else {
+                    format!("{} ({})", model.display_name, model.slug)
+                };
+                let checkbox = CheckBox::builder(&codex_models_box)
+                    .with_label(&label)
+                    .with_value(false)
+                    .build();
+                if !model.description.trim().is_empty() {
+                    checkbox.set_tooltip(&model.description);
+                }
+                codex_models_section.add(
+                    &checkbox,
+                    0,
+                    SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+                    10,
+                );
+                (model.slug, checkbox)
+            })
+            .collect(),
+    );
+    let save_codex_models_button = Button::builder(&codex_models_box)
+        .with_label(text.save_codex_models())
+        .build();
+    let codex_models_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    codex_models_actions.add_stretch_spacer(1);
+    codex_models_actions.add(&save_codex_models_button, 0, SizerFlag::Right, 0);
+    codex_models_section.add_sizer(
+        &codex_models_actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        10,
+    );
+    codex_sizer.add_sizer(
+        &codex_models_section,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         12,
     );
 
@@ -862,6 +925,8 @@ fn build_ui() {
         inject_codex_button,
         uninstall_button,
         provider_image_generation,
+        save_codex_models_button,
+        codex_model_checks,
         ai_gw_provider_list,
         ai_gw_provider_rows,
         ai_gw_provider_model,
@@ -919,6 +984,41 @@ fn build_ui() {
                 let outcome = thread_api.configure_codex_app(&request);
                 if let Ok(mut slot) = codex_action_result.lock() {
                     slot.replace(CodexActionResult::Inject(outcome));
+                }
+                codex_action_in_flight.store(false, Ordering::SeqCst);
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
+        let handles = handles.clone();
+        let codex_action_result = codex_action_result.clone();
+        let codex_action_in_flight = codex_action_in_flight.clone();
+        let save_codex_models_button = handles.save_codex_models_button.clone();
+        save_codex_models_button.on_click(move |_| {
+            if codex_action_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                codex_action_in_flight.store(false, Ordering::SeqCst);
+                return;
+            }
+            handles
+                .save_codex_models_button
+                .set_label(handles.text.saving_codex_models());
+            handles.save_codex_models_button.enable(false);
+            let selected_models = selected_codex_visible_models(&handles);
+            let thread_api = api.clone();
+            let codex_action_result = codex_action_result.clone();
+            let codex_action_in_flight = codex_action_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = save_codex_visible_models(&thread_api, selected_models);
+                if let Ok(mut slot) = codex_action_result.lock() {
+                    slot.replace(CodexActionResult::SaveModels(outcome));
                 }
                 codex_action_in_flight.store(false, Ordering::SeqCst);
             });
@@ -2286,6 +2386,8 @@ struct UiHandles {
     inject_codex_button: Button,
     uninstall_button: Button,
     provider_image_generation: CheckBox,
+    save_codex_models_button: Button,
+    codex_model_checks: CodexModelChecks,
     // AI Gateway fields
     ai_gw_provider_list: DataViewCtrl,
     ai_gw_provider_rows: AiGwProviderRows,
@@ -2338,6 +2440,22 @@ enum ImActionResult {
 enum CodexActionResult {
     Inject(Result<serde_json::Value, String>),
     Clear(Result<serde_json::Value, String>),
+    SaveModels(Result<(), String>),
+}
+
+fn selected_codex_visible_models(handles: &UiHandles) -> Vec<String> {
+    handles
+        .codex_model_checks
+        .iter()
+        .filter_map(|(slug, checkbox)| checkbox.get_value().then(|| slug.clone()))
+        .collect()
+}
+
+fn save_codex_visible_models(api: &ApiClient, models: Vec<String>) -> Result<(), String> {
+    let mut config = api.get_app_config()?;
+    config.ai_gateway.codex_visible_models = models;
+    api.save_app_config(&config)?;
+    Ok(())
 }
 
 fn schedule_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh) -> bool {
@@ -2419,8 +2537,12 @@ fn apply_pending_codex_action(
     handles
         .uninstall_button
         .set_label(handles.text.clear_codex_access());
+    handles
+        .save_codex_models_button
+        .set_label(handles.text.save_codex_models());
     handles.inject_codex_button.enable(true);
     handles.uninstall_button.enable(true);
+    handles.save_codex_models_button.enable(true);
 
     match result {
         CodexActionResult::Inject(Ok(_)) => {
@@ -2436,6 +2558,14 @@ fn apply_pending_codex_action(
             force_dashboard_refresh(api, refresh);
         }
         CodexActionResult::Clear(Err(err)) => {
+            show_error(frame, &err);
+            force_dashboard_refresh(api, refresh);
+        }
+        CodexActionResult::SaveModels(Ok(())) => {
+            show_info(frame, handles.text.codex_models_saved());
+            force_dashboard_refresh(api, refresh);
+        }
+        CodexActionResult::SaveModels(Err(err)) => {
             show_error(frame, &err);
             force_dashboard_refresh(api, refresh);
         }
@@ -2700,6 +2830,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             .ai_gw_status_label
             .set_label(&text.ai_gw_status_enabled(gw.providers.len()));
         refresh_ai_gw_provider_list(handles, Some(gw));
+        refresh_codex_visible_model_checks(handles, gw);
     } else {
         handles
             .ai_gw_status_label
@@ -2714,10 +2845,30 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.save_telegram_button.enable(enabled);
     handles.delete_im_account_button.enable(enabled);
     handles.provider_image_generation.enable(enabled);
+    handles.save_codex_models_button.enable(enabled);
+    for (_, checkbox) in handles.codex_model_checks.iter() {
+        checkbox.enable(enabled);
+    }
     handles.inject_codex_button.enable(enabled);
     handles.uninstall_button.enable(enabled);
     handles.request_log_refresh_button.enable(enabled);
     set_ai_gw_actions_enabled(handles, enabled);
+}
+
+fn refresh_codex_visible_model_checks(
+    handles: &UiHandles,
+    gateway_config: &crate::ai_gateway::config::AiGatewayConfig,
+) {
+    let selected = gateway_config
+        .codex_visible_models
+        .iter()
+        .map(|model| model.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for (slug, checkbox) in handles.codex_model_checks.iter() {
+        if !checkbox.has_focus() {
+            checkbox.set_value(selected.contains(slug.as_str()));
+        }
+    }
 }
 
 fn force_request_log_refresh(

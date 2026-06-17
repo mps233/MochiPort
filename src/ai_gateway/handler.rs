@@ -4,7 +4,7 @@ use axum::{
     Json,
     body::Bytes,
     extract::{Query, State},
-    http::HeaderMap,
+    http::{HeaderMap, HeaderName, HeaderValue, header::ETAG},
     response::IntoResponse,
 };
 use serde::Deserialize;
@@ -13,7 +13,7 @@ use tracing::info;
 
 use crate::app_state::SharedState;
 
-use super::catalog::configured_models_response;
+use super::catalog::{configured_models_etag, configured_models_response_with_etag};
 use super::config::{ProviderConfig, ProviderType};
 use super::context::GatewayContext;
 use super::error::GatewayError;
@@ -33,6 +33,7 @@ pub async fn handle_responses(
     let config = state.config.lock().await;
     let log_db_path = request_log::database_path(&config);
     let gw_config = config.ai_gateway.clone();
+    let models_etag = configured_models_etag(&gw_config);
     drop(config);
 
     // 1. 解析请求 body
@@ -95,7 +96,10 @@ pub async fn handle_responses(
         ProviderType::OpenAiResponses => {
             match openai_responses::passthrough(&ctx, raw_body, provider, log_context.clone()).await
             {
-                Ok(resp) => resp.into_response(),
+                Ok(mut resp) => {
+                    set_models_etag_header(&mut resp, &models_etag);
+                    resp.into_response()
+                }
                 Err(e) => {
                     update_failed_log(&log_context, &e.message);
                     e.into_response()
@@ -104,7 +108,10 @@ pub async fn handle_responses(
         }
         ProviderType::ChatCompletions => {
             match deepseek_chat::handle(&ctx, &request, provider, log_context.clone()).await {
-                Ok(resp) => resp.into_response(),
+                Ok(mut resp) => {
+                    set_models_etag_header(&mut resp, &models_etag);
+                    resp.into_response()
+                }
                 Err(e) => {
                     update_failed_log(&log_context, &e.message);
                     e.into_response()
@@ -120,7 +127,10 @@ pub async fn handle_models(State(state): State<SharedState>) -> impl IntoRespons
     let gw_config = config.ai_gateway.clone();
     drop(config);
 
-    Json(configured_models_response(&gw_config))
+    let (models, models_etag) = configured_models_response_with_etag(&gw_config);
+    let mut response = Json(models).into_response();
+    set_etag_header(&mut response, &models_etag);
+    response
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,4 +220,18 @@ fn provider_type_key(provider_type: &ProviderType) -> &'static str {
         ProviderType::OpenAiResponses => "responses",
         ProviderType::ChatCompletions => "chat_completions",
     }
+}
+
+fn set_models_etag_header(response: &mut axum::response::Response, etag: &str) {
+    response.headers_mut().insert(
+        HeaderName::from_static("x-models-etag"),
+        HeaderValue::from_str(etag).expect("models etag should be a valid header value"),
+    );
+}
+
+fn set_etag_header(response: &mut axum::response::Response, etag: &str) {
+    response.headers_mut().insert(
+        ETAG,
+        HeaderValue::from_str(etag).expect("models etag should be a valid header value"),
+    );
 }
