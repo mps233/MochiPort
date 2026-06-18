@@ -17,7 +17,6 @@ use wxdragon::widgets::dataview::{
 use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
-use crate::ai_gateway::catalog::visible_catalog_model_options;
 use crate::ai_gateway::config::{
     ProviderConfig, ProviderType, provider_api_root, provider_display_base_url,
 };
@@ -55,13 +54,12 @@ type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
-type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
-type CodexModelChecks = Rc<Vec<(String, CheckBox)>>;
 type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
 type RequestLogResultStore = Arc<Mutex<Option<Result<Vec<RequestLogItem>, String>>>>;
 
 mod ai_gateway;
 mod api;
+mod codex_tab;
 mod daemon;
 mod im_accounts;
 mod onboarding;
@@ -78,9 +76,10 @@ use self::ai_gateway::{
     set_ai_gw_actions_enabled, set_ai_gw_provider_enabled,
 };
 use self::api::{
-    ApiClient, ConfigureRequest, ConfigureTelegramBotRequest, DashboardSnapshot,
-    DeleteImAccountRequest, RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
+    ApiClient, ConfigureTelegramBotRequest, DashboardSnapshot, DeleteImAccountRequest,
+    RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
 };
+use self::codex_tab::{CodexActionResultStore, CodexTab};
 use self::daemon::{
     app_support_config_path, daemon_config_path, start_daemon_for_gui_async, stop_daemon_on_exit,
     stop_pending_startup_daemon,
@@ -259,133 +258,7 @@ fn build_ui() {
 
     let notebook = Notebook::builder(&root).build();
 
-    let codex_page = ScrolledWindow::builder(&notebook)
-        .with_style(ScrolledWindowStyle::VScroll)
-        .build();
-    codex_page.set_background_color(Colour::rgb(250, 251, 253));
-    let codex_sizer = BoxSizer::builder(Orientation::Vertical).build();
-
-    let provider_image_generation = CheckBox::builder(&codex_page)
-        .with_label(text.image_generation_feature())
-        .with_value(false)
-        .build();
-    provider_image_generation.set_tooltip(text.image_generation_feature_help());
-    let provider_image_generation_note = StaticText::builder(&codex_page)
-        .with_label(text.image_generation_feature_note())
-        .build();
-    provider_image_generation_note.set_foreground_color(Colour::rgb(103, 111, 124));
-    let provider_image_generation_row = BoxSizer::builder(Orientation::Horizontal).build();
-    provider_image_generation_row.add(
-        &provider_image_generation,
-        0,
-        SizerFlag::Right | SizerFlag::AlignCenterVertical,
-        8,
-    );
-    provider_image_generation_row.add(
-        &provider_image_generation_note,
-        0,
-        SizerFlag::AlignCenterVertical,
-        0,
-    );
-    codex_sizer.add_sizer(
-        &provider_image_generation_row,
-        0,
-        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
-        12,
-    );
-
-    let codex_models_box = StaticBox::builder(&codex_page)
-        .with_label(text.codex_visible_models())
-        .build();
-    codex_models_box.set_tooltip(text.codex_visible_models_help());
-    let codex_models_section =
-        StaticBoxSizerBuilder::new_with_box(&codex_models_box, Orientation::Vertical).build();
-    let codex_models_hint = StaticText::builder(&codex_models_box)
-        .with_label(text.codex_visible_models_help())
-        .build();
-    codex_models_hint.set_foreground_color(Colour::rgb(103, 111, 124));
-    codex_models_section.add(
-        &codex_models_hint,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        10,
-    );
-    let codex_model_checks: CodexModelChecks = Rc::new(
-        visible_catalog_model_options()
-            .into_iter()
-            .map(|model| {
-                let label = if model.display_name == model.slug {
-                    model.slug.clone()
-                } else {
-                    format!("{} ({})", model.display_name, model.slug)
-                };
-                let checkbox = CheckBox::builder(&codex_models_box)
-                    .with_label(&label)
-                    .with_value(false)
-                    .build();
-                if !model.description.trim().is_empty() {
-                    checkbox.set_tooltip(&model.description);
-                }
-                codex_models_section.add(
-                    &checkbox,
-                    0,
-                    SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-                    10,
-                );
-                (model.slug, checkbox)
-            })
-            .collect(),
-    );
-    let save_codex_models_button = Button::builder(&codex_models_box)
-        .with_label(text.save_codex_models())
-        .build();
-    let codex_models_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    codex_models_actions.add_stretch_spacer(1);
-    codex_models_actions.add(&save_codex_models_button, 0, SizerFlag::Right, 0);
-    codex_models_section.add_sizer(
-        &codex_models_actions,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
-        10,
-    );
-    codex_sizer.add_sizer(
-        &codex_models_section,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        12,
-    );
-
-    let inject_codex_button = Button::builder(&codex_page)
-        .with_label(text.inject_codex_access())
-        .build();
-    inject_codex_button.set_tooltip(text.inject_codex_access_help());
-    let uninstall_button = Button::builder(&codex_page)
-        .with_label(text.clear_codex_access())
-        .build();
-    uninstall_button.set_tooltip(text.clear_codex_access_help());
-    let codex_maintenance_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    codex_maintenance_actions.add_stretch_spacer(1);
-    codex_maintenance_actions.add(&inject_codex_button, 0, SizerFlag::Right, 8);
-    codex_maintenance_actions.add(&uninstall_button, 0, SizerFlag::Right, 0);
-    codex_sizer.add_stretch_spacer(1);
-    codex_sizer.add_sizer(
-        &codex_maintenance_actions,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        20,
-    );
-    codex_page.set_sizer(codex_sizer, true);
-    codex_page.set_scroll_rate(10, 10);
-    let codex_best_size = codex_page.get_best_size();
-    codex_page.set_scrollbars(ScrollBarConfig {
-        pixels_per_unit_x: 10,
-        pixels_per_unit_y: 10,
-        no_units_x: (codex_best_size.width + 20).max(1) / 10,
-        no_units_y: (codex_best_size.height + 80).max(1) / 10,
-        x_pos: 0,
-        y_pos: 0,
-        no_refresh: true,
-    });
+    let codex_tab = codex_tab::create(&notebook, text);
 
     // --- AI Gateway Tab ---
     let ai_gw_page = ScrolledWindow::builder(&notebook)
@@ -890,7 +763,7 @@ fn build_ui() {
     );
     request_logs_page.set_sizer(request_logs_sizer, true);
 
-    notebook.add_page(&codex_page, text.codex_tab(), true, None);
+    notebook.add_page(&codex_tab.page, text.codex_tab(), true, None);
     notebook.add_page(&ai_gw_page, text.ai_gateway_tab(), false, None);
     notebook.add_page(&feishu_page, text.chat_tab(), false, None);
     notebook.add_page(&request_logs_page, text.request_logs_tab(), false, None);
@@ -922,11 +795,7 @@ fn build_ui() {
         save_telegram_button,
         connect_wechat_button,
         change_bot_button,
-        inject_codex_button,
-        uninstall_button,
-        provider_image_generation,
-        save_codex_models_button,
-        codex_model_checks,
+        codex_tab,
         ai_gw_provider_list,
         ai_gw_provider_rows,
         ai_gw_provider_model,
@@ -949,119 +818,14 @@ fn build_ui() {
 
     let codex_action_result: CodexActionResultStore = Arc::new(Mutex::new(None));
     let codex_action_in_flight = Arc::new(AtomicBool::new(false));
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let frame = frame;
-        let handles = handles.clone();
-        let codex_action_result = codex_action_result.clone();
-        let codex_action_in_flight = codex_action_in_flight.clone();
-        inject_codex_button.on_click(move |_| {
-            if codex_action_in_flight.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                codex_action_in_flight.store(false, Ordering::SeqCst);
-                return;
-            }
-            handles
-                .inject_codex_button
-                .set_label(handles.text.injecting_codex_access());
-            handles.inject_codex_button.enable(false);
-            let request = ConfigureRequest {
-                provider_name: None,
-                provider_base_url: None,
-                provider_key: None,
-                activate: true,
-                image_generation_enabled: Some(handles.provider_image_generation.get_value()),
-                supports_websockets: false,
-            };
-            let thread_api = api.clone();
-            let codex_action_result = codex_action_result.clone();
-            let codex_action_in_flight = codex_action_in_flight.clone();
-            thread::spawn(move || {
-                let outcome = thread_api.configure_codex_app(&request);
-                if let Ok(mut slot) = codex_action_result.lock() {
-                    slot.replace(CodexActionResult::Inject(outcome));
-                }
-                codex_action_in_flight.store(false, Ordering::SeqCst);
-            });
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let frame = frame;
-        let handles = handles.clone();
-        let codex_action_result = codex_action_result.clone();
-        let codex_action_in_flight = codex_action_in_flight.clone();
-        let save_codex_models_button = handles.save_codex_models_button.clone();
-        save_codex_models_button.on_click(move |_| {
-            if codex_action_in_flight.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                codex_action_in_flight.store(false, Ordering::SeqCst);
-                return;
-            }
-            handles
-                .save_codex_models_button
-                .set_label(handles.text.saving_codex_models());
-            handles.save_codex_models_button.enable(false);
-            let selected_models = selected_codex_visible_models(&handles);
-            let thread_api = api.clone();
-            let codex_action_result = codex_action_result.clone();
-            let codex_action_in_flight = codex_action_in_flight.clone();
-            thread::spawn(move || {
-                let outcome = save_codex_visible_models(&thread_api, selected_models);
-                if let Ok(mut slot) = codex_action_result.lock() {
-                    slot.replace(CodexActionResult::SaveModels(outcome));
-                }
-                codex_action_in_flight.store(false, Ordering::SeqCst);
-            });
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
-        });
-    }
-
-    {
-        let api = api.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let frame = frame;
-        let handles = handles.clone();
-        let codex_action_result = codex_action_result.clone();
-        let codex_action_in_flight = codex_action_in_flight.clone();
-        uninstall_button.on_click(move |_| {
-            if codex_action_in_flight.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                codex_action_in_flight.store(false, Ordering::SeqCst);
-                return;
-            }
-            if !confirm_uninstall_codex_app_config(&frame, handles.text) {
-                codex_action_in_flight.store(false, Ordering::SeqCst);
-                return;
-            }
-            handles
-                .uninstall_button
-                .set_label(handles.text.clearing_codex_access());
-            handles.uninstall_button.enable(false);
-            let thread_api = api.clone();
-            let codex_action_result = codex_action_result.clone();
-            let codex_action_in_flight = codex_action_in_flight.clone();
-            thread::spawn(move || {
-                let outcome = thread_api.uninstall_codex_app();
-                if let Ok(mut slot) = codex_action_result.lock() {
-                    slot.replace(CodexActionResult::Clear(outcome));
-                }
-                codex_action_in_flight.store(false, Ordering::SeqCst);
-            });
-            schedule_dashboard_refresh(&api, &dashboard_refresh);
-        });
-    }
+    codex_tab::bind_actions(
+        &api,
+        &frame,
+        &handles.codex_tab,
+        &dashboard_refresh,
+        &codex_action_result,
+        &codex_action_in_flight,
+    );
 
     {
         let api = api.clone();
@@ -1198,9 +962,10 @@ fn build_ui() {
         let codex_action_result = codex_action_result.clone();
         result_timer.on_tick(move |_| {
             apply_pending_dashboard(&handles, &dashboard_refresh);
-            apply_pending_codex_action(
+            codex_tab::apply_pending_action(
                 &api,
-                &handles,
+                &handles.codex_tab,
+                handles.text,
                 &frame,
                 &dashboard_refresh,
                 &codex_action_result,
@@ -2383,11 +2148,7 @@ struct UiHandles {
     save_telegram_button: Button,
     connect_wechat_button: Button,
     change_bot_button: Button,
-    inject_codex_button: Button,
-    uninstall_button: Button,
-    provider_image_generation: CheckBox,
-    save_codex_models_button: Button,
-    codex_model_checks: CodexModelChecks,
+    codex_tab: CodexTab,
     // AI Gateway fields
     ai_gw_provider_list: DataViewCtrl,
     ai_gw_provider_rows: AiGwProviderRows,
@@ -2435,27 +2196,6 @@ enum ImActionResult {
     TelegramConfigure(Result<serde_json::Value, String>),
     AccountToggle(Result<serde_json::Value, String>),
     AccountDelete(Result<serde_json::Value, String>),
-}
-
-enum CodexActionResult {
-    Inject(Result<serde_json::Value, String>),
-    Clear(Result<serde_json::Value, String>),
-    SaveModels(Result<(), String>),
-}
-
-fn selected_codex_visible_models(handles: &UiHandles) -> Vec<String> {
-    handles
-        .codex_model_checks
-        .iter()
-        .filter_map(|(slug, checkbox)| checkbox.get_value().then(|| slug.clone()))
-        .collect()
-}
-
-fn save_codex_visible_models(api: &ApiClient, models: Vec<String>) -> Result<(), String> {
-    let mut config = api.get_app_config()?;
-    config.ai_gateway.codex_visible_models = models;
-    api.save_app_config(&config)?;
-    Ok(())
 }
 
 fn schedule_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh) -> bool {
@@ -2517,60 +2257,6 @@ fn cached_dashboard_snapshot(refresh: &DashboardRefresh) -> Option<DashboardSnap
         .lock()
         .ok()
         .and_then(|snapshot| snapshot.clone())
-}
-
-fn apply_pending_codex_action(
-    api: &ApiClient,
-    handles: &UiHandles,
-    frame: &Frame,
-    refresh: &DashboardRefresh,
-    result: &CodexActionResultStore,
-) -> bool {
-    let result = result.lock().ok().and_then(|mut slot| slot.take());
-    let Some(result) = result else {
-        return false;
-    };
-
-    handles
-        .inject_codex_button
-        .set_label(handles.text.inject_codex_access());
-    handles
-        .uninstall_button
-        .set_label(handles.text.clear_codex_access());
-    handles
-        .save_codex_models_button
-        .set_label(handles.text.save_codex_models());
-    handles.inject_codex_button.enable(true);
-    handles.uninstall_button.enable(true);
-    handles.save_codex_models_button.enable(true);
-
-    match result {
-        CodexActionResult::Inject(Ok(_)) => {
-            show_info(frame, handles.text.codex_app_config_injected());
-            force_dashboard_refresh(api, refresh);
-        }
-        CodexActionResult::Inject(Err(err)) => {
-            show_error(frame, &err);
-            force_dashboard_refresh(api, refresh);
-        }
-        CodexActionResult::Clear(Ok(_)) => {
-            show_info(frame, handles.text.codex_app_config_uninstalled());
-            force_dashboard_refresh(api, refresh);
-        }
-        CodexActionResult::Clear(Err(err)) => {
-            show_error(frame, &err);
-            force_dashboard_refresh(api, refresh);
-        }
-        CodexActionResult::SaveModels(Ok(())) => {
-            show_info(frame, handles.text.codex_models_saved());
-            force_dashboard_refresh(api, refresh);
-        }
-        CodexActionResult::SaveModels(Err(err)) => {
-            show_error(frame, &err);
-            force_dashboard_refresh(api, refresh);
-        }
-    }
-    true
 }
 
 fn ensure_service_ready_for_action(
@@ -2734,11 +2420,10 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     set_actions_enabled(handles, true);
 
     if let Some(codex_status) = &snapshot.codex_app {
-        if !handles.provider_image_generation.has_focus() {
-            handles
-                .provider_image_generation
-                .set_value(codex_status.image_generation_enabled);
-        }
+        codex_tab::refresh_image_generation(
+            &handles.codex_tab,
+            codex_status.image_generation_enabled,
+        );
     }
 
     if let Some(status) = &snapshot.status {
@@ -2830,7 +2515,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             .ai_gw_status_label
             .set_label(&text.ai_gw_status_enabled(gw.providers.len()));
         refresh_ai_gw_provider_list(handles, Some(gw));
-        refresh_codex_visible_model_checks(handles, gw);
+        codex_tab::initialize_visible_model_checks(&handles.codex_tab, gw);
     } else {
         handles
             .ai_gw_status_label
@@ -2844,31 +2529,9 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.connect_wechat_button.enable(enabled);
     handles.save_telegram_button.enable(enabled);
     handles.delete_im_account_button.enable(enabled);
-    handles.provider_image_generation.enable(enabled);
-    handles.save_codex_models_button.enable(enabled);
-    for (_, checkbox) in handles.codex_model_checks.iter() {
-        checkbox.enable(enabled);
-    }
-    handles.inject_codex_button.enable(enabled);
-    handles.uninstall_button.enable(enabled);
+    codex_tab::set_actions_enabled(&handles.codex_tab, enabled);
     handles.request_log_refresh_button.enable(enabled);
     set_ai_gw_actions_enabled(handles, enabled);
-}
-
-fn refresh_codex_visible_model_checks(
-    handles: &UiHandles,
-    gateway_config: &crate::ai_gateway::config::AiGatewayConfig,
-) {
-    let selected = gateway_config
-        .codex_visible_models
-        .iter()
-        .map(|model| model.as_str())
-        .collect::<std::collections::HashSet<_>>();
-    for (slug, checkbox) in handles.codex_model_checks.iter() {
-        if !checkbox.has_focus() {
-            checkbox.set_value(selected.contains(slug.as_str()));
-        }
-    }
 }
 
 fn force_request_log_refresh(

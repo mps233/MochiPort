@@ -353,8 +353,12 @@ impl GuiText {
 
     pub(super) fn codex_models_saved(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex 可见模型列表已保存。",
-            GuiLocale::EnUs => "Codex visible model list saved.",
+            GuiLocale::ZhCn => {
+                "Codex 可见模型列表已保存。\n无需重启 Codex，Codex 端通常会在 5 分钟内更新列表。"
+            }
+            GuiLocale::EnUs => {
+                "Codex visible model list saved.\nNo Codex restart is needed; Codex usually updates the list within 5 minutes."
+            }
         }
     }
 

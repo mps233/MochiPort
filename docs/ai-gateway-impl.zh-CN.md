@@ -620,7 +620,7 @@ src/ai_gateway/
 ### Step 8：GET /models 和健壮性（约 1 天）
 
 新增路由：
-- `GET /ai-gateway/v1/models` — 返回所有配置的 model 列表
+- `GET /ai-gateway/v1/models` — 返回 `aiGateway.codexVisibleModels` 白名单中、且在内置 catalog 里可见的 model 列表，并附带 `ETag`
 
 完善：
 - 上游超时处理
@@ -629,9 +629,27 @@ src/ai_gateway/
 - 请求/响应日志（model、provider、latency、tokens）
 
 验收：
-- `/v1/models` 返回完整 model 列表
+- `/v1/models` 只返回允许给 Codex 看的 model 列表
 - 上游故障时返回明确错误
 - 日志可观测
+
+### Codex 模型列表更新机制
+
+Codex App 侧的模型列表不是“保存后立刻推送刷新”，而是按 Codex 自己的 `model/list` 链路更新：
+
+```text
+Codex App
+  -> app-server model/list
+  -> models-manager OnlineIfUncached
+  -> models_cache.json 命中则直接返回
+  -> 缓存失效后重新请求 /ai-gateway/v1/models
+```
+
+因此，保存可见模型后：
+
+- 如果 Codex 还在用新鲜的 `models_cache.json`，最多会延迟到缓存过期，默认 300 秒。
+- 如果 Codex 收到一次 `/responses` 且 `x-models-etag` 变化，会触发一次 `/models` 刷新。
+- 如果要稳定看到最新列表，退出 Codex App、删除 `models_cache.json`、再启动最直接。
 
 ---
 

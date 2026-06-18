@@ -134,6 +134,8 @@ model_provider = "ai-gateway"
 
 新增渠道时 `models` 初始为空。模型列表只来自手工添加或远端模型列表同步；空列表不会按渠道名自动匹配模型。
 
+Codex 可见模型由 `aiGateway.codexVisibleModels` 控制。它不是 provider 上游模型列表的简单合并，而是一个显式白名单：只有配置在该列表里，并且内置 `src/ai_gateway/models.json` 中 `supported_in_api = true`、`visibility = "list"` 的模型，才会出现在 `GET /ai-gateway/v1/models` 返回值里。
+
 `AI_GATEWAY_API_KEY` 第一阶段可以是本地占位 key。真实上游 provider key 放在 `codex-remote` 运行环境里，不写入 Codex 配置。
 
 ## 5. 路由设计
@@ -152,6 +154,27 @@ POST /ai-gateway/v1/chat/completions
 ```
 
 第一阶段主路径只要求 Codex 能打 `/responses`。
+
+### 5.1 Codex 模型列表刷新机制
+
+Codex App 前端不直接读取 `codex-remote` 配置，也不监听 `aiGateway.codexVisibleModels` 文件变化。Codex 侧模型列表链路是：
+
+```text
+Codex App
+  -> app-server JSON-RPC model/list
+  -> models_manager.list_models(OnlineIfUncached)
+  -> models_cache.json 命中则直接使用缓存
+  -> 缓存缺失/过期/版本不匹配时请求 GET /ai-gateway/v1/models
+```
+
+Codex `models_cache.json` 的默认 TTL 是 300 秒。保存可见模型后，Codex 端何时更新取决于它何时重新请求 `model/list`，以及本地 `models_cache.json` 是否仍然新鲜。没有额外操作时，旧模型列表可能继续保留到缓存过期。
+
+Gateway 需要在两个位置提供模型指纹：
+
+- `GET /ai-gateway/v1/models` 返回 `ETag`。
+- `POST /ai-gateway/v1/responses` 响应返回 `x-models-etag`。
+
+Codex core 收到 `/responses` 的 `x-models-etag` 后，会与当前内存中的模型 ETag 比较；如果不同，会强制刷新 `/models`。这只能刷新 Codex core/models-manager 的缓存，前端模型选择器是否马上重拉 `model/list` 仍由 Codex App 自身决定。稳定复现新列表的方式是退出 Codex App，删除 Codex home 下的 `models_cache.json`，再启动 Codex App。
 
 处理流程：
 
