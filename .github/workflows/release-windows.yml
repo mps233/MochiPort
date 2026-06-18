@@ -118,6 +118,8 @@ jobs:
         with:
           body_path: RELEASE_NOTES.md
           overwrite_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
             target/dist/Codex Remote Windows.zip
             target/dist/latest.json

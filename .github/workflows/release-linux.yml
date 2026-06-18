@@ -132,6 +132,8 @@ jobs:
         with:
           body_path: RELEASE_NOTES.md
           overwrite_files: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
             target/dist/Codex Remote Linux x86_64.AppImage
             target/dist/Codex Remote Linux x86_64.tar.gz
