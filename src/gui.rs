@@ -614,37 +614,12 @@ fn build_ui() {
     request_logs_page.set_background_color(Colour::rgb(250, 251, 253));
     let request_logs_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let request_log_toolbar = BoxSizer::builder(Orientation::Horizontal).build();
-    let request_log_status_label = StaticText::builder(&request_logs_page)
-        .with_label(text.request_logs_waiting())
+    let request_log_hint = StaticText::builder(&request_logs_page)
+        .with_label(text.request_log_open_hint())
         .build();
-    request_log_status_label.set_foreground_color(Colour::rgb(64, 72, 86));
-    let request_log_auto_refresh = CheckBox::builder(&request_logs_page)
-        .with_label(text.auto_refresh())
-        .build();
-    request_log_auto_refresh.set_value(true);
-    let request_log_refresh_button = Button::builder(&request_logs_page)
-        .with_label(text.refresh())
-        .build();
-    let request_log_detail_button = Button::builder(&request_logs_page)
-        .with_label(text.request_log_detail_action())
-        .build();
-    request_log_toolbar.add(
-        &request_log_status_label,
-        1,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        12,
-    );
-    request_log_toolbar.add(
-        &request_log_auto_refresh,
-        0,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        10,
-    );
-    request_log_toolbar.add(&request_log_detail_button, 0, SizerFlag::Right, 8);
-    request_log_toolbar.add(&request_log_refresh_button, 0, SizerFlag::Right, 0);
-    request_logs_sizer.add_sizer(
-        &request_log_toolbar,
+    request_log_hint.set_foreground_color(Colour::rgb(64, 72, 86));
+    request_logs_sizer.add(
+        &request_log_hint,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
@@ -814,10 +789,6 @@ fn build_ui() {
         request_log_list,
         request_log_rows,
         request_log_model,
-        request_log_detail_button,
-        request_log_refresh_button,
-        request_log_auto_refresh,
-        request_log_status_label,
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
@@ -1204,33 +1175,6 @@ fn build_ui() {
     {
         let api = api.clone();
         let handles = handles.clone();
-        let request_log_result = request_log_result.clone();
-        let request_log_in_flight = request_log_in_flight.clone();
-        request_log_refresh_button.on_click(move |_| {
-            force_request_log_refresh(&api, &handles, &request_log_result, &request_log_in_flight);
-        });
-    }
-    {
-        let api = api.clone();
-        let handles = handles.clone();
-        let request_log_detail_result = request_log_detail_result.clone();
-        let request_log_detail_in_flight = request_log_detail_in_flight.clone();
-        request_log_detail_button.on_click(move |_| {
-            let Some(row) = handles.request_log_list.get_selected_row() else {
-                return;
-            };
-            start_request_log_detail_load(
-                &api,
-                &handles,
-                row,
-                &request_log_detail_result,
-                &request_log_detail_in_flight,
-            );
-        });
-    }
-    {
-        let api = api.clone();
-        let handles = handles.clone();
         let request_log_detail_result = request_log_detail_result.clone();
         let request_log_detail_in_flight = request_log_detail_in_flight.clone();
         request_log_list.on_item_activated(move |event| {
@@ -1246,7 +1190,7 @@ fn build_ui() {
             );
         });
     }
-    force_request_log_refresh(&api, &handles, &request_log_result, &request_log_in_flight);
+    force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
 
     let request_log_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let request_log_timer = Timer::new(&frame);
@@ -1256,23 +1200,10 @@ fn build_ui() {
         let request_log_result = request_log_result.clone();
         let request_log_in_flight = request_log_in_flight.clone();
         let request_log_detail_result = request_log_detail_result.clone();
-        let request_log_detail_in_flight = request_log_detail_in_flight.clone();
         request_log_timer.on_tick(move |_| {
             apply_pending_request_logs(&handles, &request_log_result);
-            apply_pending_request_log_detail(
-                &frame,
-                &handles,
-                &request_log_detail_result,
-                &request_log_detail_in_flight,
-            );
-            if handles.request_log_auto_refresh.get_value() {
-                schedule_request_log_refresh(
-                    &api,
-                    &handles,
-                    &request_log_result,
-                    &request_log_in_flight,
-                );
-            }
+            apply_pending_request_log_detail(&frame, &handles, &request_log_detail_result);
+            schedule_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
         });
     }
     request_log_timer.start(1500, false);
@@ -2216,10 +2147,6 @@ struct UiHandles {
     request_log_list: DataViewCtrl,
     request_log_rows: RequestLogRows,
     request_log_model: RequestLogModel,
-    request_log_detail_button: Button,
-    request_log_refresh_button: Button,
-    request_log_auto_refresh: CheckBox,
-    request_log_status_label: StaticText,
 }
 
 #[derive(Clone)]
@@ -2585,24 +2512,17 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.save_telegram_button.enable(enabled);
     handles.delete_im_account_button.enable(enabled);
     codex_tab::set_actions_enabled(&handles.codex_tab, enabled);
-    handles.request_log_detail_button.enable(enabled);
-    handles.request_log_refresh_button.enable(enabled);
     set_ai_gw_actions_enabled(handles, enabled);
 }
 
 fn force_request_log_refresh(
     api: &ApiClient,
-    handles: &UiHandles,
     result_store: &RequestLogResultStore,
     in_flight: &Arc<AtomicBool>,
 ) {
     if in_flight.swap(true, Ordering::SeqCst) {
         return;
     }
-    handles.request_log_refresh_button.enable(false);
-    handles
-        .request_log_status_label
-        .set_label(handles.text.request_logs_loading());
     let thread_api = api.clone();
     let result_store = result_store.clone();
     let in_flight = in_flight.clone();
@@ -2619,14 +2539,13 @@ fn force_request_log_refresh(
 
 fn schedule_request_log_refresh(
     api: &ApiClient,
-    handles: &UiHandles,
     result_store: &RequestLogResultStore,
     in_flight: &Arc<AtomicBool>,
 ) {
     if in_flight.load(Ordering::SeqCst) {
         return;
     }
-    force_request_log_refresh(api, handles, result_store, in_flight);
+    force_request_log_refresh(api, result_store, in_flight);
 }
 
 fn start_request_log_detail_load(
@@ -2643,10 +2562,6 @@ fn start_request_log_detail_load(
         in_flight.store(false, Ordering::SeqCst);
         return;
     };
-    handles.request_log_detail_button.enable(false);
-    handles
-        .request_log_status_label
-        .set_label(&handles.text.request_log_detail_loading(id));
     let thread_api = api.clone();
     let result_store = result_store.clone();
     let in_flight = in_flight.clone();
@@ -2665,31 +2580,18 @@ fn apply_pending_request_log_detail(
     frame: &Frame,
     handles: &UiHandles,
     result_store: &RequestLogDetailResultStore,
-    in_flight: &Arc<AtomicBool>,
 ) {
     let result = result_store.lock().ok().and_then(|mut slot| slot.take());
     let Some((_id, result)) = result else {
         return;
     };
-    handles.request_log_detail_button.enable(true);
     match result {
         Ok(detail) => {
-            handles.request_log_status_label.set_label(
-                &handles
-                    .text
-                    .request_logs_loaded(handles.request_log_rows.borrow().len()),
-            );
             request_log_detail::show(frame, handles.text, &detail);
         }
         Err(err) => {
-            handles
-                .request_log_status_label
-                .set_label(&handles.text.request_log_detail_failed(&err));
             show_error(frame, &handles.text.request_log_detail_failed(&err));
         }
-    }
-    if !in_flight.load(Ordering::SeqCst) {
-        handles.request_log_detail_button.enable(true);
     }
 }
 
@@ -2698,19 +2600,12 @@ fn apply_pending_request_logs(handles: &UiHandles, result_store: &RequestLogResu
     let Some(result) = result else {
         return;
     };
-    handles.request_log_refresh_button.enable(true);
     match result {
         Ok(logs) => {
-            let count = logs.len();
             refresh_request_log_list(handles, logs);
-            handles
-                .request_log_status_label
-                .set_label(&handles.text.request_logs_loaded(count));
         }
         Err(err) => {
-            handles
-                .request_log_status_label
-                .set_label(&handles.text.request_logs_failed(&err));
+            tracing::warn!("failed to load request logs: {err}");
         }
     }
 }

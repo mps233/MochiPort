@@ -439,52 +439,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn auto_refresh(self) -> &'static str {
+    pub(super) fn request_log_open_hint(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "自动刷新",
-            GuiLocale::EnUs => "Auto Refresh",
-        }
-    }
-
-    pub(super) fn refresh(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "刷新",
-            GuiLocale::EnUs => "Refresh",
-        }
-    }
-
-    pub(super) fn request_logs_waiting(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "等待本地服务启动",
-            GuiLocale::EnUs => "Waiting for local service",
-        }
-    }
-
-    pub(super) fn request_logs_loading(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "正在读取请求日志...",
-            GuiLocale::EnUs => "Loading request logs...",
-        }
-    }
-
-    pub(super) fn request_logs_loaded(self, count: usize) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("最近 {count} 条请求"),
-            GuiLocale::EnUs => format!("Latest {count} requests"),
-        }
-    }
-
-    pub(super) fn request_logs_failed(self, err: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("读取请求日志失败：{err}"),
-            GuiLocale::EnUs => format!("Failed to load request logs: {err}"),
-        }
-    }
-
-    pub(super) fn request_log_detail_action(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "查看详情",
-            GuiLocale::EnUs => "Details",
+            GuiLocale::ZhCn => "双击查看请求详情",
+            GuiLocale::EnUs => "Double-click a request to view details",
         }
     }
 
@@ -492,13 +450,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => format!("请求日志详情 #{id}"),
             GuiLocale::EnUs => format!("Request Log #{id}"),
-        }
-    }
-
-    pub(super) fn request_log_detail_loading(self, id: i64) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("正在读取请求日志详情 #{id}..."),
-            GuiLocale::EnUs => format!("Loading request log #{id}..."),
         }
     }
 

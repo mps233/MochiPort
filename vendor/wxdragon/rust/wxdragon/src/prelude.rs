@@ -166,8 +166,9 @@ pub use crate::widgets::staticbox::{StaticBox, StaticBoxBuilder, StaticBoxStyle}
 pub use crate::widgets::statusbar::{StatusBar, StatusBarBuilder};
 #[cfg(feature = "stc")]
 pub use crate::widgets::styledtextctrl::{
-    EolMode, FindFlags, Lexer, MarginType, MarkerSymbol, SelectionMode, StyledTextCtrl, StyledTextCtrlBuilder,
-    StyledTextCtrlEvent, StyledTextCtrlEventData, StyledTextCtrlStyle, WhiteSpaceView, WrapMode,
+    EolMode, FindFlags, IndentationGuide, Lexer, MarginType, MarkerSymbol, SelectionMode,
+    StyledTextCtrl, StyledTextCtrlBuilder, StyledTextCtrlEvent, StyledTextCtrlEventData,
+    StyledTextCtrlStyle, WhiteSpaceView, WrapMode,
 };
 pub use crate::widgets::taskbar_icon::{TaskBarIcon, TaskBarIconBuilder, TaskBarIconStyle, TaskBarIconType};
 pub use crate::widgets::textctrl::{TextCtrl, TextCtrlBuilder, TextCtrlStyle};

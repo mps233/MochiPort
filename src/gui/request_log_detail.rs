@@ -1,3 +1,4 @@
+use serde::Serialize;
 use wxdragon::prelude::*;
 
 use super::api::{RequestLogDetail, RequestLogItem};
@@ -9,6 +10,8 @@ const STYLE_JSON_STRING: i32 = 2;
 const STYLE_JSON_NUMBER: i32 = 3;
 const STYLE_JSON_KEYWORD: i32 = 4;
 const STYLE_JSON_PUNCT: i32 = 5;
+const STYLE_LINE_NUMBER: i32 = 33;
+const STYLE_INDENT_GUIDE: i32 = 37;
 const FOLD_BASE: i32 = 0x400;
 const FOLD_HEADER: i32 = 0x2000;
 const FOLD_MARGIN: i32 = 2;
@@ -111,7 +114,7 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
     let json_value = serde_json::from_str::<serde_json::Value>(content).ok();
     let display = json_value
         .as_ref()
-        .and_then(|value| serde_json::to_string_pretty(value).ok())
+        .and_then(format_json_pretty)
         .unwrap_or_else(|| content.to_string());
 
     let panel = Panel::builder(parent).build();
@@ -173,6 +176,14 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
     parent.add_page(&panel, label, false, None);
 }
 
+fn format_json_pretty(value: &serde_json::Value) -> Option<String> {
+    let mut output = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(b"    ");
+    let mut serializer = serde_json::Serializer::with_formatter(&mut output, formatter);
+    value.serialize(&mut serializer).ok()?;
+    String::from_utf8(output).ok()
+}
+
 fn add_text_tab(parent: &Notebook, label: &str, content: &str) {
     let panel = Panel::builder(parent).build();
     panel.set_background_color(Colour::rgb(255, 255, 255));
@@ -191,6 +202,9 @@ fn add_text_tab(parent: &Notebook, label: &str, content: &str) {
 fn configure_json_editor(editor: &StyledTextCtrl, content: &str) {
     editor.set_read_only(false);
     editor.set_wrap_mode(WrapMode::None);
+    editor.set_tab_width(4);
+    editor.set_indent(4);
+    editor.set_use_tabs(false);
     editor.set_margin_line_numbers(0, true);
     editor.set_margin_width(0, 52);
     editor.set_margin_width(1, 0);
@@ -200,6 +214,7 @@ fn configure_json_editor(editor: &StyledTextCtrl, content: &str) {
     editor.set_margin_sensitive(FOLD_MARGIN, true);
     editor.set_fold_flags(FOLD_FLAG_LINE_BEFORE_CONTRACTED | FOLD_FLAG_LINE_AFTER_CONTRACTED);
     configure_fold_markers(editor);
+    editor.set_indentation_guides_typed(IndentationGuide::LookBoth);
     editor.set_view_white_space_typed(WhiteSpaceView::Invisible);
     editor.set_caret_line_visible(true);
     editor.set_caret_line_background(Colour::rgb(244, 247, 251));
@@ -214,6 +229,10 @@ fn configure_json_editor(editor: &StyledTextCtrl, content: &str) {
     editor.style_set_foreground(STYLE_JSON_NUMBER, Colour::rgb(151, 71, 0));
     editor.style_set_foreground(STYLE_JSON_KEYWORD, Colour::rgb(128, 61, 150));
     editor.style_set_foreground(STYLE_JSON_PUNCT, Colour::rgb(92, 99, 112));
+    editor.style_set_foreground(STYLE_LINE_NUMBER, Colour::rgb(94, 103, 117));
+    editor.style_set_background(STYLE_LINE_NUMBER, Colour::rgb(243, 246, 250));
+    editor.style_set_foreground(STYLE_INDENT_GUIDE, Colour::rgb(174, 184, 199));
+    editor.style_set_background(STYLE_INDENT_GUIDE, Colour::rgb(255, 255, 255));
 
     editor.set_text(content);
     apply_json_stc_highlight(editor, content);
@@ -224,7 +243,7 @@ fn configure_json_editor(editor: &StyledTextCtrl, content: &str) {
 
 fn configure_fold_markers(editor: &StyledTextCtrl) {
     let marker_foreground = Colour::rgb(92, 99, 112);
-    let marker_background = Colour::rgb(255, 255, 255);
+    let marker_background = Colour::rgb(243, 246, 250);
     editor.marker_define_symbol(
         MARKER_FOLDER,
         MarkerSymbol::BoxPlus,

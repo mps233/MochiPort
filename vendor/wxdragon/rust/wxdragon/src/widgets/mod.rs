@@ -164,8 +164,9 @@ pub use staticbox::{StaticBox, StaticBoxBuilder};
 pub use statusbar::{StatusBar, StatusBarBuilder};
 #[cfg(feature = "stc")]
 pub use styledtextctrl::{
-    EolMode, FindFlags, Lexer, MarginType, MarkerSymbol, SelectionMode, StyledTextCtrl, StyledTextCtrlBuilder,
-    StyledTextCtrlEvent, StyledTextCtrlEventData, StyledTextCtrlStyle, WhiteSpaceView, WrapMode,
+    EolMode, FindFlags, IndentationGuide, Lexer, MarginType, MarkerSymbol, SelectionMode,
+    StyledTextCtrl, StyledTextCtrlBuilder, StyledTextCtrlEvent, StyledTextCtrlEventData,
+    StyledTextCtrlStyle, WhiteSpaceView, WrapMode,
 };
 pub use taskbar_icon::{TaskBarIcon, TaskBarIconBuilder, TaskBarIconStyle, TaskBarIconType};
 pub use textctrl::{TextCtrl, TextCtrlBuilder};

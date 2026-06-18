@@ -141,6 +141,22 @@ impl From<WhiteSpaceView> for i32 {
     }
 }
 
+/// Indentation guide display modes for StyledTextCtrl.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndentationGuide {
+    None = 0,
+    Real = 1,
+    LookForward = 2,
+    LookBoth = 3,
+}
+
+impl From<IndentationGuide> for i32 {
+    fn from(val: IndentationGuide) -> Self {
+        val as i32
+    }
+}
+
 /// Lexer types for syntax highlighting
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lexer {
@@ -1362,6 +1378,29 @@ impl StyledTextCtrl {
     }
 
     // --- View Options ---
+
+    /// Set indentation guide display mode.
+    pub fn set_indentation_guides(&self, indent_view: i32) {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_SetIndentationGuides(ptr, indent_view) };
+    }
+
+    /// Set indentation guide display mode with a type-safe enum.
+    pub fn set_indentation_guides_typed(&self, indent_view: IndentationGuide) {
+        self.set_indentation_guides(indent_view.into());
+    }
+
+    /// Get indentation guide display mode.
+    pub fn get_indentation_guides(&self) -> i32 {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return 0;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_GetIndentationGuides(ptr) }
+    }
 
     /// Set whether end-of-line characters are visible
     pub fn set_view_eol(&self, visible: bool) {

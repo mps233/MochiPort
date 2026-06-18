@@ -222,6 +222,10 @@ wxd_StyledTextCtrl_GetLineIndentation(wxd_StyledTextCtrl_t* self, int line);
 
 // View options
 WXD_EXPORTED void
+wxd_StyledTextCtrl_SetIndentationGuides(wxd_StyledTextCtrl_t* self, int indent_view);
+WXD_EXPORTED int
+wxd_StyledTextCtrl_GetIndentationGuides(wxd_StyledTextCtrl_t* self);
+WXD_EXPORTED void
 wxd_StyledTextCtrl_SetViewEOL(wxd_StyledTextCtrl_t* self, bool visible);
 WXD_EXPORTED bool
 wxd_StyledTextCtrl_GetViewEOL(wxd_StyledTextCtrl_t* self);

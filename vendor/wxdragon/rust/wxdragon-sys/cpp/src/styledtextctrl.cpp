@@ -862,6 +862,25 @@ wxd_StyledTextCtrl_GetLineIndentation(wxd_StyledTextCtrl_t* self, int line)
 
 // View options
 WXD_EXPORTED void
+wxd_StyledTextCtrl_SetIndentationGuides(wxd_StyledTextCtrl_t* self, int indent_view)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl) {
+        ctrl->SetIndentationGuides(indent_view);
+    }
+}
+
+WXD_EXPORTED int
+wxd_StyledTextCtrl_GetIndentationGuides(wxd_StyledTextCtrl_t* self)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl) {
+        return ctrl->GetIndentationGuides();
+    }
+    return -1;
+}
+
+WXD_EXPORTED void
 wxd_StyledTextCtrl_SetViewEOL(wxd_StyledTextCtrl_t* self, bool visible)
 {
     wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
