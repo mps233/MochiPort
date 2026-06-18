@@ -33,7 +33,7 @@ Codex (POST /ai-gateway/v1/responses)
 InboundTransformer          ← 解析 Responses API 请求 → 统一 GatewayRequest
   │
   ▼
-ProviderRouter              ← 按 model 名选择 provider
+ProviderRouter              ← 按 model 名筛选 provider，按 session_id 做 HRW 粘性选择
   │
   ├─ OpenAI Responses ──▶ OutboundOpenAI   ← 补齐 cache 字段后透传
   │
@@ -427,18 +427,17 @@ Chat SSE chunk → 状态机 → Responses SSE 事件（按第 4 节状态机处
 
 ## 6. Provider 路由
 
-按显式模型列表路由，不做默认渠道、兜底渠道或 provider name 前缀猜测。
+按显式模型列表筛选候选 provider，不做默认渠道、兜底渠道或 provider name 前缀猜测。
 
-```rust
-fn select_provider(model: &str, config: &AiGatewayConfig) -> Result<&ProviderConfig, GatewayError> {
-    for provider in config.providers.iter().filter(|p| p.enabled) {
-        if provider.models.contains(&model.to_string()) {
-            return Ok(provider);
-        }
-    }
-    Err(GatewayError::invalid_model(model))
-}
+当多个已启用 provider 都显式支持同一个 model 时，使用 `session_id` 做 Rendezvous/HRW Hash 粘性选择：
+
+```text
+candidates = enabled providers where provider.models contains request.model
+score = sha256("codex-remote-ai-gateway-hrw-v1", session_id, provider_route_id)
+selected_provider = candidate with max(score)
 ```
+
+这样同一个 `session_id + model` 在配置不变时会稳定落到同一个上游；provider 增删时，未落在受影响 provider 上的 session 通常保持原路由。没有 `session_id` 时保持旧行为，返回配置顺序里的第一个匹配 provider。
 
 ---
 

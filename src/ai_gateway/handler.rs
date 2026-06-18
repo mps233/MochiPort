@@ -55,7 +55,7 @@ pub async fn handle_responses(
     let ctx = GatewayContext::extract(&headers, body_cache_key);
 
     // 3. 路由到 provider
-    let provider = match resolve_provider(&request.model, &gw_config) {
+    let provider = match resolve_provider(&request.model, ctx.session_id.as_deref(), &gw_config) {
         Ok(p) => p,
         Err(e) => {
             let log_context = insert_initial_log(

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// AI Gateway 顶层配置，对应 config.toml 中 `[aiGateway]` 段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,12 +35,76 @@ impl Default for AiGatewayConfig {
 impl AiGatewayConfig {
     /// 按 model 名选择已启用的 provider：只匹配显式配置的 model。
     pub fn select_provider(&self, model: &str) -> Option<&ProviderConfig> {
-        for provider in self.providers.iter().filter(|provider| provider.enabled) {
-            if provider.models.iter().any(|m| m == model) {
-                return Some(provider);
-            }
+        self.select_provider_for_session(model, None)
+    }
+
+    /// 按 model 名和 session_id 选择已启用的 provider。
+    ///
+    /// 同一个 model 可以配置到多个 provider；有 session_id 时使用 Rendezvous/HRW
+    /// Hash 在候选 provider 中稳定选择一个。没有 session_id 时保持旧行为：
+    /// 返回配置顺序中的第一个匹配 provider。
+    pub fn select_provider_for_session(
+        &self,
+        model: &str,
+        session_id: Option<&str>,
+    ) -> Option<&ProviderConfig> {
+        let candidates = self
+            .providers
+            .iter()
+            .filter(|provider| provider.enabled && provider.models.iter().any(|m| m == model));
+        let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return candidates.into_iter().next();
+        };
+
+        candidates
+            .into_iter()
+            .max_by(|left, right| compare_hrw_provider(session_id, left, right))
+    }
+}
+
+fn compare_hrw_provider(
+    session_id: &str,
+    left: &ProviderConfig,
+    right: &ProviderConfig,
+) -> std::cmp::Ordering {
+    let left_score = hrw_score(session_id, left);
+    let right_score = hrw_score(session_id, right);
+    left_score.cmp(&right_score).then_with(|| {
+        provider_route_id(left)
+            .as_str()
+            .cmp(provider_route_id(right).as_str())
+    })
+}
+
+fn hrw_score(session_id: &str, provider: &ProviderConfig) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"codex-remote-ai-gateway-hrw-v1\0");
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(provider_route_id(provider).as_bytes());
+    let digest = hasher.finalize();
+    let mut score = [0_u8; 32];
+    score.copy_from_slice(&digest);
+    score
+}
+
+fn provider_route_id(provider: &ProviderConfig) -> String {
+    let name = provider.name.trim();
+    let base_url = provider.base_url.trim();
+    format!(
+        "{}\0{}\0{}",
+        name,
+        provider.provider_type.route_key(),
+        base_url
+    )
+}
+
+impl ProviderType {
+    fn route_key(&self) -> &'static str {
+        match self {
+            Self::OpenAiResponses => "openai_responses",
+            Self::ChatCompletions => "chat_completions",
         }
-        None
     }
 }
 
@@ -221,6 +286,127 @@ mod tests {
 
         assert!(config.select_provider("deepseek-v4-flash").is_none());
         assert!(config.select_provider("deepseek-v3").is_none());
+    }
+
+    #[test]
+    fn test_session_provider_selection_is_stable() {
+        let config = make_config(vec![
+            make_provider("openai-a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-b", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-c", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+        ]);
+
+        let first = config
+            .select_provider_for_session("gpt-5.5", Some("session-abc"))
+            .unwrap()
+            .name
+            .clone();
+        let second = config
+            .select_provider_for_session("gpt-5.5", Some("session-abc"))
+            .unwrap()
+            .name
+            .clone();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn test_session_provider_selection_is_independent_of_config_order() {
+        let providers = vec![
+            make_provider("openai-a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-b", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-c", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-d", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+        ];
+        let config = make_config(providers.clone());
+        let reversed = make_config(providers.into_iter().rev().collect());
+
+        let selected = config
+            .select_provider_for_session("gpt-5.5", Some("session-abc"))
+            .unwrap()
+            .name
+            .clone();
+        let selected_reversed = reversed
+            .select_provider_for_session("gpt-5.5", Some("session-abc"))
+            .unwrap()
+            .name
+            .clone();
+
+        assert_eq!(selected, selected_reversed);
+    }
+
+    #[test]
+    fn test_session_provider_selection_ignores_unmatched_models() {
+        let config = make_config(vec![
+            make_provider("openai-a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-b", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("other", ProviderType::OpenAiResponses, vec!["gpt-4o"]),
+        ]);
+
+        let selected = config
+            .select_provider_for_session("gpt-5.5", Some("session-abc"))
+            .unwrap();
+
+        assert_ne!(selected.name, "other");
+    }
+
+    #[test]
+    fn test_session_provider_selection_stays_when_non_selected_provider_removed() {
+        let providers = vec![
+            make_provider("openai-a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-b", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-c", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-d", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+        ];
+        let config = make_config(providers.clone());
+        let selected = config
+            .select_provider_for_session("gpt-5.5", Some("session-abc"))
+            .unwrap()
+            .name
+            .clone();
+        let removed_name = providers
+            .iter()
+            .find(|provider| provider.name != selected)
+            .unwrap()
+            .name
+            .clone();
+        let pruned = make_config(
+            providers
+                .into_iter()
+                .filter(|provider| provider.name != removed_name)
+                .collect(),
+        );
+
+        let selected_after_removal = pruned
+            .select_provider_for_session("gpt-5.5", Some("session-abc"))
+            .unwrap()
+            .name
+            .clone();
+
+        assert_eq!(selected, selected_after_removal);
+    }
+
+    #[test]
+    fn test_missing_session_id_keeps_first_match_behavior() {
+        let config = make_config(vec![
+            make_provider("openai-a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+            make_provider("openai-b", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
+        ]);
+
+        assert_eq!(
+            config
+                .select_provider_for_session("gpt-5.5", None)
+                .unwrap()
+                .name,
+            "openai-a"
+        );
+        assert_eq!(
+            config
+                .select_provider_for_session("gpt-5.5", Some("   "))
+                .unwrap()
+                .name,
+            "openai-a"
+        );
     }
 
     #[test]

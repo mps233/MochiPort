@@ -82,7 +82,7 @@ AI Gateway 要解决的是：Codex 只按 OpenAI Responses 协议发请求，但
 
 - **axonhub fork (dev)**（Go，[github.com/doubaoyui/axonhub](https://github.com/doubaoyui/axonhub/tree/dev)）：AxonHub 的 fork，dev 分支有成熟的 DeepSeek 严格约束处理实现，是本项目 DeepSeek 兼容处理的主要参考。
 - **codex-relay**（Rust，[github.com/MetaFARS/codex-relay](https://github.com/MetaFARS/codex-relay)）：Rust 实现蓝本，SSE 事件序列化、tool call delta 积累、`previous_response_id` session store。
-- **codex-bridge**（Node.js，[github.com/wujfeng712-ui/codex-bridge](https://github.com/wujfeng712-ui/codex-bridge)）：多 provider 路由策略（本项目只采用精确匹配/前缀启发，不采用 fallback）、reasoning effort 六级映射表、LRU session store。
+- **codex-bridge**（Node.js，[github.com/wujfeng712-ui/codex-bridge](https://github.com/wujfeng712-ui/codex-bridge)）：多 provider 路由策略（本项目按显式模型列表筛选 provider，同模型多 provider 使用 `session_id` 的 Rendezvous/HRW Hash 粘性选择，不采用 fallback）、reasoning effort 六级映射表、LRU session store。
 
 不直接照搬的点：
 
@@ -183,7 +183,7 @@ POST /ai-gateway/v1/responses
   -> 读取 headers 和 JSON body
   -> 提取 session/thread/cache key
   -> 解析 OpenAI Responses request
-  -> 按 model 选择 provider
+  -> 按 model 筛选 provider；同 model 多 provider 时按 session_id 做 HRW 粘性选择
   -> provider = openai_responses:
        补齐 cache 字段后透传到 /v1/responses
   -> provider = deepseek_chat:
