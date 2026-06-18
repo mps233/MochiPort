@@ -9,6 +9,7 @@
 | 远程和本地同屏操作 | 支持飞书、微信、Telegram 远程连接本地 Codex App、Codex VS Code 插件和 Codex CLI，同一个 Codex 会话可以在 IM 和本地客户端之间同步操作。 |
 | 非入侵接入 Codex 能力 | 不修改任何 Codex 前端代码，通过配置config 打开 Codex App 插件、Computer Use 和 Fast Speed 等能力。 |
 | 支持IM端管理codex会话 | 利用codex原生remote协议,在IM管理创建会话, resume会话 |
+| AI Gateway 预览 | 专门为 Codex App 提供本地 OpenAI-compatible AI Gateway，目前支持 OpenAI Responses 透传和 DeepSeek Chat 协议转换。 |
 
 <p align="center">
   <img src="docs/assets/product/main.png" alt="Codex Remote GUI 状态和配置界面" width="900">
@@ -16,6 +17,11 @@
 <p align="center">
   <img src="docs/assets/product/codex-app-chat.png" alt="Codex App 会话同步和图片结果" width="900">
 </p>
+<p align="center">
+  <img src="docs/assets/product/deepseek.jpg" alt="Codex App 通过 AI Gateway 使用 DeepSeek 模型" width="900">
+</p>
+
+AI Gateway 预览功能可以让 Codex App 继续使用 Responses 协议接入本地 `codex-remote`，由 `codex-remote` 再转发到不同模型渠道。当前重点支持 DeepSeek，适合临时验证 `deepseek-v4-flash` / `deepseek-v4-pro` 在 Codex App 中的对话和工具调用链路。
 
 <p align="center">
   <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="360">
@@ -122,10 +128,6 @@ codex --remote ws://127.0.0.1:3849
 推荐关注公众号，后续会更新技术干货、实践记录和项目进展。
 
 <img src="docs/assets/wechat-public-account.jpg" alt="微信公众号" width="220">
-
-微信群主要用于反馈问题、交流使用体验和提出功能建议。
-
-<img src="docs/assets/wechat-group.png" alt="AI-Agent 技术交流群" width="260">
 
 ## IM 命令  一个/q 命令就够了. 其它按照提示操作
 
