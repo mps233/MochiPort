@@ -103,6 +103,7 @@ pub struct GatewayContext {
     pub thread_id: Option<String>,     // thread-id header
     pub window_id: Option<String>,     // X-Codex-Window-Id
     pub prompt_cache_key: String,      // 最终确定的 cache key
+    pub upstream_headers: HeaderMap,   // 按 AxonHub MergeHTTPHeaders 规则过滤后的上游 header
 }
 ```
 
@@ -114,6 +115,12 @@ Cache key 确定优先级（参考架构文档第 7 节）：
 4. header `thread-id`
 5. `X-Codex-Turn-Metadata` JSON 的 `session_id`
 6. fallback `codex-remote:<uuid>`
+
+上游请求 header 处理参考 AxonHub `llm/httpclient/utils.go`：
+
+- 保留可安全跨代理转发的入站 header，例如 `User-Agent`、`Accept`、`Session_id`、`thread-id`、`X-Codex-Turn-Metadata`、`X-Codex-Window-Id`、`X-Client-Request-Id`、`X-Codex-Beta-Features`。
+- 过滤入站 `Authorization`、API key、cookie 等敏感 header，避免覆盖 provider 自己的 key。
+- 过滤 `Content-Type`、`Host`、`Content-Length`、`Transfer-Encoding`、`Accept-Encoding`、hop-by-hop、浏览器安全头、代理注入头和 `Cf-*` / `Cdn-*` / `Sec-Websocket-*` 前缀。
 
 ### 3.3 ResponseItem（Responses API Item 子集）
 

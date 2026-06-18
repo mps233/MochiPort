@@ -1,4 +1,4 @@
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderName};
 
 /// 从 HTTP header 提取的请求上下文。
 /// 参考 AxonHub `codex/headers.go`。
@@ -10,17 +10,66 @@ pub struct GatewayContext {
     pub window_id: Option<String>,
     /// 最终确定的 prompt_cache_key。
     pub prompt_cache_key: String,
-    /// 需要透传到上游的 Codex header。
-    pub passthrough_headers: HeaderMap,
+    /// 需要合并到上游请求的安全 header。
+    pub upstream_headers: HeaderMap,
 }
 
-/// Codex 需要透传的 header 列表。
-const PASSTHROUGH_HEADER_NAMES: &[&str] = &[
-    "x-codex-turn-metadata",
-    "x-codex-window-id",
-    "x-client-request-id",
-    "x-codex-beta-features",
+const LIB_MANAGED_HEADERS: &[&str] = &[
+    "content-length",
+    "transfer-encoding",
+    "accept-encoding",
+    "host",
 ];
+
+const SENSITIVE_HEADERS: &[&str] = &[
+    "authorization",
+    "api-key",
+    "x-api-key",
+    "x-api-secret",
+    "x-api-token",
+    "x-goog-api-key",
+    "x-google-api-key",
+    "cookie",
+    "set-cookie",
+    "proxy-authorization",
+    "www-authenticate",
+];
+
+const BLOCKED_HEADERS: &[&str] = &[
+    "content-type",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "trailers",
+    "upgrade",
+    "x-channel-id",
+    "x-project-id",
+    "x-real-ip",
+    "x-forwarded-for",
+    "x-forwarded-proto",
+    "x-forwarded-host",
+    "x-forwarded-port",
+    "x-forwarded-server",
+    "accept-language",
+    "dnt",
+    "origin",
+    "referer",
+    "sec-fetch-dest",
+    "sec-fetch-mode",
+    "sec-fetch-site",
+    "sec-fetch-user",
+    "sec-ch-ua",
+    "sec-ch-ua-mobile",
+    "sec-ch-ua-platform",
+    "ah-trace-id",
+    "ah-thread-id",
+    "x-initiator",
+];
+
+const BLOCKED_HEADER_PREFIXES: &[&str] = &["cf-", "cdn-", "sec-websocket-"];
 
 impl GatewayContext {
     /// 从请求 header 和已解析的 body 提取 GatewayContext。
@@ -45,16 +94,7 @@ impl GatewayContext {
             .or_else(|| metadata_session_id.clone())
             .unwrap_or_else(|| format!("codex-remote:{}", uuid::Uuid::new_v4()));
 
-        // 收集透传 header
-        let mut passthrough_headers = HeaderMap::new();
-        for name in PASSTHROUGH_HEADER_NAMES {
-            if let Some(value) = headers.get(*name) {
-                if let Ok(header_name) = axum::http::header::HeaderName::from_bytes(name.as_bytes())
-                {
-                    passthrough_headers.insert(header_name, value.clone());
-                }
-            }
-        }
+        let upstream_headers = collect_upstream_headers(headers);
 
         Self {
             request_id,
@@ -62,9 +102,47 @@ impl GatewayContext {
             thread_id,
             window_id,
             prompt_cache_key,
-            passthrough_headers,
+            upstream_headers,
         }
     }
+}
+
+pub fn apply_upstream_headers(
+    mut request: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers.iter() {
+        if let Ok(value) = value.to_str() {
+            request = request.header(name.as_str(), value);
+        }
+    }
+    request
+}
+
+fn collect_upstream_headers(headers: &HeaderMap) -> HeaderMap {
+    let mut upstream_headers = HeaderMap::new();
+    for (name, value) in headers.iter() {
+        if should_forward_header(name) {
+            upstream_headers.append(name.clone(), value.clone());
+        }
+    }
+    upstream_headers
+}
+
+fn should_forward_header(name: &HeaderName) -> bool {
+    let name = name.as_str();
+    !contains_header(LIB_MANAGED_HEADERS, name)
+        && !contains_header(SENSITIVE_HEADERS, name)
+        && !contains_header(BLOCKED_HEADERS, name)
+        && !BLOCKED_HEADER_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+}
+
+fn contains_header(headers: &[&str], name: &str) -> bool {
+    headers
+        .iter()
+        .any(|blocked| blocked.eq_ignore_ascii_case(name))
 }
 
 /// 从 X-Codex-Turn-Metadata JSON 中提取 session_id。
@@ -142,21 +220,95 @@ mod tests {
     }
 
     #[test]
-    fn test_passthrough_headers_collected() {
+    fn test_upstream_headers_collected() {
         let mut headers = HeaderMap::new();
         headers.insert("x-codex-window-id", HeaderValue::from_static("win-1"));
         headers.insert("x-client-request-id", HeaderValue::from_static("req-1"));
         headers.insert("x-unrelated", HeaderValue::from_static("nope"));
         let ctx = GatewayContext::extract(&headers, Some("key"));
         assert_eq!(
-            ctx.passthrough_headers.get("x-codex-window-id").unwrap(),
+            ctx.upstream_headers.get("x-codex-window-id").unwrap(),
             "win-1"
         );
         assert_eq!(
-            ctx.passthrough_headers.get("x-client-request-id").unwrap(),
+            ctx.upstream_headers.get("x-client-request-id").unwrap(),
             "req-1"
         );
-        assert!(ctx.passthrough_headers.get("x-unrelated").is_none());
+        assert_eq!(ctx.upstream_headers.get("x-unrelated").unwrap(), "nope");
+    }
+
+    #[test]
+    fn test_upstream_headers_follow_proxy_filter_rules() {
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", HeaderValue::from_static("Codex/1.0"));
+        headers.insert("accept", HeaderValue::from_static("application/json"));
+        headers.insert("session_id", HeaderValue::from_static("sess-1"));
+        headers.insert("thread-id", HeaderValue::from_static("thread-1"));
+        headers.insert("x-codex-window-id", HeaderValue::from_static("win-1"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer codex"));
+        headers.insert("content-type", HeaderValue::from_static("text/plain"));
+        headers.insert("content-length", HeaderValue::from_static("123"));
+        headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
+        headers.insert("origin", HeaderValue::from_static("https://example.test"));
+        headers.insert("cf-ray", HeaderValue::from_static("edge"));
+        headers.insert("sec-websocket-key", HeaderValue::from_static("key"));
+        headers.insert("x-forwarded-for", HeaderValue::from_static("127.0.0.1"));
+
+        let ctx = GatewayContext::extract(&headers, Some("key"));
+
+        assert_eq!(ctx.upstream_headers.get("user-agent").unwrap(), "Codex/1.0");
+        assert_eq!(
+            ctx.upstream_headers.get("accept").unwrap(),
+            "application/json"
+        );
+        assert_eq!(ctx.upstream_headers.get("session_id").unwrap(), "sess-1");
+        assert_eq!(ctx.upstream_headers.get("thread-id").unwrap(), "thread-1");
+        assert_eq!(
+            ctx.upstream_headers.get("x-codex-window-id").unwrap(),
+            "win-1"
+        );
+        assert!(ctx.upstream_headers.get("authorization").is_none());
+        assert!(ctx.upstream_headers.get("content-type").is_none());
+        assert!(ctx.upstream_headers.get("content-length").is_none());
+        assert!(ctx.upstream_headers.get("accept-encoding").is_none());
+        assert!(ctx.upstream_headers.get("origin").is_none());
+        assert!(ctx.upstream_headers.get("cf-ray").is_none());
+        assert!(ctx.upstream_headers.get("sec-websocket-key").is_none());
+        assert!(ctx.upstream_headers.get("x-forwarded-for").is_none());
+    }
+
+    #[test]
+    fn test_apply_upstream_headers_keeps_provider_managed_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("user-agent", HeaderValue::from_static("Codex/1.0"));
+        headers.insert("accept", HeaderValue::from_static("application/json"));
+        headers.insert("authorization", HeaderValue::from_static("Bearer codex"));
+        headers.insert("content-type", HeaderValue::from_static("text/plain"));
+
+        let ctx = GatewayContext::extract(&headers, Some("key"));
+        let client = reqwest::Client::new();
+        let request = apply_upstream_headers(
+            client
+                .post("https://upstream.example.test/v1/responses")
+                .header("content-type", "application/json")
+                .header("authorization", "Bearer provider-key")
+                .json(&serde_json::json!({"model":"gpt-5.5"})),
+            &ctx.upstream_headers,
+        )
+        .build()
+        .unwrap();
+
+        let request_headers = request.headers();
+        assert_eq!(
+            request_headers.get("authorization").unwrap(),
+            "Bearer provider-key"
+        );
+        assert_eq!(
+            request_headers.get("content-type").unwrap(),
+            "application/json"
+        );
+        assert_eq!(request_headers.get("user-agent").unwrap(), "Codex/1.0");
+        assert_eq!(request_headers.get("accept").unwrap(), "application/json");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use serde_json::json;
 use tracing::{debug, error};
 
 use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
-use crate::ai_gateway::context::GatewayContext;
+use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
@@ -58,19 +58,14 @@ pub async fn passthrough(
     let url = format!("{}/v1/responses", provider_api_root(&provider.base_url));
 
     let client = reqwest::Client::new();
-    let mut req_builder = client
+    let req_builder = client
         .post(&url)
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {}", provider.api_key))
         .timeout(std::time::Duration::from_secs(provider.timeout_secs))
         .json(&raw_body);
 
-    // 4. 透传 Codex header
-    for (name, value) in ctx.passthrough_headers.iter() {
-        if let Ok(v) = value.to_str() {
-            req_builder = req_builder.header(name.as_str(), v);
-        }
-    }
+    let req_builder = apply_upstream_headers(req_builder, &ctx.upstream_headers);
 
     debug!(url = %url, stream = is_stream, "proxying to openai responses");
 

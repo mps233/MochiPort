@@ -9,7 +9,7 @@ use axum::{
 use tracing::{debug, error};
 
 use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
-use crate::ai_gateway::context::GatewayContext;
+use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::GatewayRequest;
 use crate::ai_gateway::request_log::{
@@ -21,7 +21,7 @@ use crate::ai_gateway::transform::responses_to_chat::build_chat_request;
 
 /// DeepSeek Chat Completions 出站处理。
 pub async fn handle(
-    _ctx: &GatewayContext,
+    ctx: &GatewayContext,
     request: &GatewayRequest,
     provider: &ProviderConfig,
     log_context: Option<RequestLogContext>,
@@ -50,12 +50,13 @@ pub async fn handle(
 
     // 2. 发送上游请求
     let client = reqwest::Client::new();
-    let upstream_resp = client
+    let req_builder = client
         .post(&url)
         .header("content-type", "application/json")
         .header("authorization", format!("Bearer {}", provider.api_key))
         .timeout(std::time::Duration::from_secs(provider.timeout_secs))
-        .json(&chat_body)
+        .json(&chat_body);
+    let upstream_resp = apply_upstream_headers(req_builder, &ctx.upstream_headers)
         .send()
         .await
         .map_err(|e| {

@@ -74,7 +74,8 @@ AI Gateway 要解决的是：Codex 只按 OpenAI Responses 协议发请求，但
 - **Responses API 完整数据模型**（`llm/transformer/openai/responses/model.go`）：覆盖 function_call、custom_tool_call、reasoning、web_search_call、image_generation_call、compaction 等全部 item 类型。
 - **Responses→Chat 转换**（`llm/transformer/openai/responses/inbound.go` 的 `convertInputToMessages`）：reasoning + 后续 function_call 合并成单个 assistant message，多个连续 function_call 合并到同一 tool_calls。
 - **SSE 流状态机**（`llm/transformer/openai/responses/inbound_stream.go`）：`responsesInboundStream` 维护 outputIndex、contentIndex、sequenceNumber，按正确顺序生成完整 Responses SSE 事件序列。
-- **Codex header 处理**（`llm/transformer/openai/codex/headers.go`）：从 `Session_id` 或 `X-Codex-Turn-Metadata` JSON 的 `session_id` 提取 session，透传 `X-Codex-Window-Id`、`X-Client-Request-Id`、`X-Codex-Beta-Features`。
+- **Codex header 处理**（`llm/transformer/openai/codex/headers.go`）：从 `Session_id` 或 `X-Codex-Turn-Metadata` JSON 的 `session_id` 提取 session。
+- **上游 header 合并规则**（`llm/httpclient/utils.go`）：参考 `MergeHTTPHeaders`，向上游合并安全的入站 header，例如 `User-Agent`、`Accept`、`Session_id`、`thread-id`、`X-Codex-*`；过滤 `Authorization`、API key、cookie、`Content-Type`、`Host`、`Content-Length`、`Accept-Encoding`、hop-by-hop、浏览器安全头、代理注入头和 `Cf-*` / `Cdn-*` 等边缘代理头。
 - **OpenAI Responses 出站**（`llm/transformer/openai/responses/outbound.go`）：如果请求没有 `prompt_cache_key`，从 context session 补一个稳定值。
 - **DeepSeek 出站**（`llm/transformer/deepseek/outbound.go`）：继承 OpenAI Chat Completions outbound，`json_schema` 降级为 `json_object`，`reasoning.effort="none"` 转为 `thinking={type:"disabled"}` 并清除 effort 字段，thinking 启用时所有 assistant message 缺少 `reasoning_content` 的补空字符串。
 
