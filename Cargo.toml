@@ -47,7 +47,12 @@ winreg = "0.55"
 embed-resource = "3.0.6"
 
 [features]
-gui = ["dep:image", "dep:wxdragon", "reqwest/blocking"]
+gui = ["dep:image", "dep:wxdragon", "wxdragon/stc", "reqwest/blocking"]
+
+[patch.crates-io]
+wxdragon = { path = "vendor/wxdragon/rust/wxdragon" }
+wxdragon-sys = { path = "vendor/wxdragon/rust/wxdragon-sys" }
+wxdragon-macros = { path = "vendor/wxdragon/rust/wxdragon-macros" }
 
 [[bin]]
 name = "codex-remote"

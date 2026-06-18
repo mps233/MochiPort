@@ -23,5 +23,9 @@ pub fn router() -> Router<SharedState> {
         .route("/v1/responses", post(handler::handle_responses))
         .route("/v1/models", get(handler::handle_models))
         .route("/request-logs", get(handler::handle_request_logs))
+        .route(
+            "/request-logs/{id}",
+            get(handler::handle_request_log_detail),
+        )
         .layer(DefaultBodyLimit::disable())
 }

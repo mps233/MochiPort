@@ -25,6 +25,12 @@ jobs:
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Reset wxWidgets CMake Cache
+        run: |
+          set -euo pipefail
+          rm -rf target/release/wxwidgets_cmake_build
+          rm -rf target/release/wxdragon_sys_cmake_build
+
       - name: Import Developer ID Certificate
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}

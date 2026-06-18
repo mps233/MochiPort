@@ -3,7 +3,7 @@ use std::time::Instant;
 use axum::{
     Json,
     body::Bytes,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, header::ETAG},
     response::IntoResponse,
 };
@@ -157,6 +157,30 @@ pub async fn handle_request_logs(
     }
 }
 
+/// GET /ai-gateway/request-logs/{id}
+pub async fn handle_request_log_detail(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    let db_path = request_log::database_path(&config);
+    drop(config);
+
+    match request_log::get_detail(&db_path, id) {
+        Ok(Some(log)) => Json(json!({ "log": log })).into_response(),
+        Ok(None) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "error": "request log not found" })),
+        )
+            .into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 fn insert_initial_log(
     db_path: &std::path::Path,
     ctx: &GatewayContext,
@@ -184,6 +208,7 @@ fn insert_initial_log(
         created_at_ms,
         error_message: None,
         request_json: serde_json::to_string(raw_body).ok(),
+        upstream_request_json: None,
         response_json: None,
     };
     match request_log::insert_record(db_path, &record) {

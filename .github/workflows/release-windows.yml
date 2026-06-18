@@ -24,6 +24,13 @@ jobs:
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Reset wxWidgets CMake Cache
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Remove-Item -Recurse -Force "target\release\wxwidgets_cmake_build" -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force "target\release\wxdragon_sys_cmake_build" -ErrorAction SilentlyContinue
+
       - name: Build Release
         shell: pwsh
         run: |

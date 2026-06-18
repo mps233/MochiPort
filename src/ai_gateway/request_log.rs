@@ -42,6 +42,7 @@ pub struct RequestLogRecord {
     pub created_at_ms: i64,
     pub error_message: Option<String>,
     pub request_json: Option<String>,
+    pub upstream_request_json: Option<String>,
     pub response_json: Option<String>,
 }
 
@@ -53,6 +54,7 @@ pub struct RequestLogUpdate {
     pub latency_ms: Option<i64>,
     pub ttft_ms: Option<i64>,
     pub error_message: Option<String>,
+    pub upstream_request_json: Option<String>,
     pub response_json: Option<String>,
 }
 
@@ -78,6 +80,16 @@ pub struct RequestLogEntry {
     pub created_at_ms: i64,
     pub created_at: String,
     pub error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestLogDetail {
+    #[serde(flatten)]
+    pub summary: RequestLogEntry,
+    pub request_json: Option<String>,
+    pub upstream_request_json: Option<String>,
+    pub response_json: Option<String>,
 }
 
 #[derive(Clone)]
@@ -114,8 +126,9 @@ pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Res
             request_id, model_id, stream, channel, provider_type, status,
             input_tokens, output_tokens, total_tokens, read_cache_tokens,
             read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
-            ttft_ms, created_at_ms, error_message, request_json, response_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+            ttft_ms, created_at_ms, error_message, request_json, upstream_request_json,
+            response_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             &record.request_id,
             &record.model_id,
@@ -135,6 +148,7 @@ pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Res
             record.created_at_ms,
             &record.error_message,
             &record.request_json,
+            &record.upstream_request_json,
             &record.response_json,
         ],
     )?;
@@ -148,7 +162,7 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
             "SELECT
                 status, input_tokens, output_tokens, total_tokens, read_cache_tokens,
                 read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
-                ttft_ms, error_message, response_json
+                ttft_ms, error_message, upstream_request_json, response_json
              FROM ai_gateway_request_logs WHERE id = ?1",
             params![id],
             |row| {
@@ -165,6 +179,7 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
                     row.get::<_, Option<i64>>(9)?,
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ))
             },
         )
@@ -195,8 +210,9 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
             latency_ms = ?9,
             ttft_ms = ?10,
             error_message = ?11,
-            response_json = ?12
-         WHERE id = ?13",
+            upstream_request_json = ?12,
+            response_json = ?13
+         WHERE id = ?14",
         params![
             update.status.as_deref().unwrap_or(&existing.0),
             usage.input_tokens,
@@ -209,7 +225,8 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
             update.latency_ms.or(existing.8),
             update.ttft_ms.or(existing.9),
             update.error_message.clone().or(existing.10),
-            update.response_json.clone().or(existing.11),
+            update.upstream_request_json.clone().or(existing.11),
+            update.response_json.clone().or(existing.12),
             id,
         ],
     )?;
@@ -259,6 +276,51 @@ pub fn list_recent(db_path: &Path, limit: usize) -> rusqlite::Result<Vec<Request
         logs.push(row?);
     }
     Ok(logs)
+}
+
+pub fn get_detail(db_path: &Path, id: i64) -> rusqlite::Result<Option<RequestLogDetail>> {
+    let conn = open(db_path)?;
+    conn.query_row(
+        "SELECT
+            id, request_id, model_id, stream, channel, provider_type, status,
+            input_tokens, output_tokens, total_tokens, read_cache_tokens,
+            read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
+            ttft_ms, created_at_ms,
+            datetime(created_at_ms / 1000, 'unixepoch', 'localtime') AS created_at,
+            error_message, request_json, upstream_request_json, response_json
+         FROM ai_gateway_request_logs
+         WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(RequestLogDetail {
+                summary: RequestLogEntry {
+                    id: row.get(0)?,
+                    request_id: row.get(1)?,
+                    model_id: row.get(2)?,
+                    stream: row.get::<_, i64>(3)? != 0,
+                    channel: row.get(4)?,
+                    provider_type: row.get(5)?,
+                    status: row.get(6)?,
+                    input_tokens: row.get(7)?,
+                    output_tokens: row.get(8)?,
+                    total_tokens: row.get(9)?,
+                    read_cache_tokens: row.get(10)?,
+                    read_cache_hit_rate: row.get(11)?,
+                    write_cache_tokens: row.get(12)?,
+                    cost_usd: row.get(13)?,
+                    latency_ms: row.get(14)?,
+                    ttft_ms: row.get(15)?,
+                    created_at_ms: row.get(16)?,
+                    created_at: row.get(17)?,
+                    error_message: row.get(18)?,
+                },
+                request_json: row.get(19)?,
+                upstream_request_json: row.get(20)?,
+                response_json: row.get(21)?,
+            })
+        },
+    )
+    .optional()
 }
 
 pub fn usage_from_response_value(response: &Value) -> LogUsage {
@@ -473,8 +535,23 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             created_at_ms INTEGER NOT NULL,
             error_message TEXT,
             request_json TEXT,
+            upstream_request_json TEXT,
             response_json TEXT
         );
+        "#,
+    )?;
+
+    match conn.execute(
+        "ALTER TABLE ai_gateway_request_logs ADD COLUMN upstream_request_json TEXT",
+        [],
+    ) {
+        Ok(_) => {}
+        Err(err) if is_duplicate_column_error(&err) => {}
+        Err(err) => return Err(err),
+    }
+
+    conn.execute_batch(
+        r#"
         CREATE INDEX IF NOT EXISTS idx_ai_gateway_request_logs_created
             ON ai_gateway_request_logs(created_at_ms DESC, id DESC);
         CREATE INDEX IF NOT EXISTS idx_ai_gateway_request_logs_model
@@ -485,6 +562,10 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             ON ai_gateway_request_logs(status);
         "#,
     )
+}
+
+fn is_duplicate_column_error(err: &rusqlite::Error) -> bool {
+    matches!(err, rusqlite::Error::SqliteFailure(_, Some(message)) if message.contains("duplicate column name"))
 }
 
 fn observe_sse_chunk(
@@ -628,6 +709,9 @@ mod tests {
             created_at_ms: now_ms(),
             error_message: None,
             request_json: Some(r#"{"model":"deepseek-v4-flash"}"#.to_string()),
+            upstream_request_json: Some(
+                r#"{"model":"deepseek-v4-flash","messages":[]}"#.to_string(),
+            ),
             response_json: None,
         };
 
@@ -646,6 +730,7 @@ mod tests {
                     write_cache_tokens: None,
                 }),
                 latency_ms: Some(1234),
+                response_json: Some(r#"{"status":"completed"}"#.to_string()),
                 ..RequestLogUpdate::default()
             },
         )
@@ -658,6 +743,16 @@ mod tests {
         assert_eq!(logs[0].total_tokens, Some(13));
         assert_eq!(logs[0].read_cache_tokens, Some(8));
         assert_eq!(logs[0].latency_ms, Some(1234));
+        let detail = get_detail(&db_path, id).unwrap().unwrap();
+        assert_eq!(detail.summary.id, id);
+        assert_eq!(
+            detail.upstream_request_json.as_deref(),
+            Some(r#"{"model":"deepseek-v4-flash","messages":[]}"#)
+        );
+        assert_eq!(
+            detail.response_json.as_deref(),
+            Some(r#"{"status":"completed"}"#)
+        );
         let _ = std::fs::remove_file(db_path);
     }
 
@@ -681,6 +776,7 @@ mod tests {
             created_at_ms: now_ms(),
             error_message: None,
             request_json: None,
+            upstream_request_json: None,
             response_json: None,
         };
 

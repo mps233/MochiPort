@@ -56,6 +56,8 @@ type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
 type RequestLogResultStore = Arc<Mutex<Option<Result<Vec<RequestLogItem>, String>>>>;
+type RequestLogDetailResultStore =
+    Arc<Mutex<Option<(i64, Result<self::api::RequestLogDetail, String>)>>>;
 
 mod ai_gateway;
 mod api;
@@ -64,6 +66,7 @@ mod daemon;
 mod im_accounts;
 mod onboarding;
 mod provider;
+mod request_log_detail;
 mod request_logs;
 mod text;
 mod update;
@@ -623,6 +626,9 @@ fn build_ui() {
     let request_log_refresh_button = Button::builder(&request_logs_page)
         .with_label(text.refresh())
         .build();
+    let request_log_detail_button = Button::builder(&request_logs_page)
+        .with_label(text.request_log_detail_action())
+        .build();
     request_log_toolbar.add(
         &request_log_status_label,
         1,
@@ -635,6 +641,7 @@ fn build_ui() {
         SizerFlag::AlignCenterVertical | SizerFlag::Right,
         10,
     );
+    request_log_toolbar.add(&request_log_detail_button, 0, SizerFlag::Right, 8);
     request_log_toolbar.add(&request_log_refresh_button, 0, SizerFlag::Right, 0);
     request_logs_sizer.add_sizer(
         &request_log_toolbar,
@@ -807,6 +814,7 @@ fn build_ui() {
         request_log_list,
         request_log_rows,
         request_log_model,
+        request_log_detail_button,
         request_log_refresh_button,
         request_log_auto_refresh,
         request_log_status_label,
@@ -1191,6 +1199,8 @@ fn build_ui() {
 
     let request_log_result: RequestLogResultStore = Arc::new(Mutex::new(None));
     let request_log_in_flight = Arc::new(AtomicBool::new(false));
+    let request_log_detail_result: RequestLogDetailResultStore = Arc::new(Mutex::new(None));
+    let request_log_detail_in_flight = Arc::new(AtomicBool::new(false));
     {
         let api = api.clone();
         let handles = handles.clone();
@@ -1198,6 +1208,42 @@ fn build_ui() {
         let request_log_in_flight = request_log_in_flight.clone();
         request_log_refresh_button.on_click(move |_| {
             force_request_log_refresh(&api, &handles, &request_log_result, &request_log_in_flight);
+        });
+    }
+    {
+        let api = api.clone();
+        let handles = handles.clone();
+        let request_log_detail_result = request_log_detail_result.clone();
+        let request_log_detail_in_flight = request_log_detail_in_flight.clone();
+        request_log_detail_button.on_click(move |_| {
+            let Some(row) = handles.request_log_list.get_selected_row() else {
+                return;
+            };
+            start_request_log_detail_load(
+                &api,
+                &handles,
+                row,
+                &request_log_detail_result,
+                &request_log_detail_in_flight,
+            );
+        });
+    }
+    {
+        let api = api.clone();
+        let handles = handles.clone();
+        let request_log_detail_result = request_log_detail_result.clone();
+        let request_log_detail_in_flight = request_log_detail_in_flight.clone();
+        request_log_list.on_item_activated(move |event| {
+            let Some(row) = event.get_row().map(|row| row as usize) else {
+                return;
+            };
+            start_request_log_detail_load(
+                &api,
+                &handles,
+                row,
+                &request_log_detail_result,
+                &request_log_detail_in_flight,
+            );
         });
     }
     force_request_log_refresh(&api, &handles, &request_log_result, &request_log_in_flight);
@@ -1209,8 +1255,16 @@ fn build_ui() {
         let handles = handles.clone();
         let request_log_result = request_log_result.clone();
         let request_log_in_flight = request_log_in_flight.clone();
+        let request_log_detail_result = request_log_detail_result.clone();
+        let request_log_detail_in_flight = request_log_detail_in_flight.clone();
         request_log_timer.on_tick(move |_| {
             apply_pending_request_logs(&handles, &request_log_result);
+            apply_pending_request_log_detail(
+                &frame,
+                &handles,
+                &request_log_detail_result,
+                &request_log_detail_in_flight,
+            );
             if handles.request_log_auto_refresh.get_value() {
                 schedule_request_log_refresh(
                     &api,
@@ -2162,6 +2216,7 @@ struct UiHandles {
     request_log_list: DataViewCtrl,
     request_log_rows: RequestLogRows,
     request_log_model: RequestLogModel,
+    request_log_detail_button: Button,
     request_log_refresh_button: Button,
     request_log_auto_refresh: CheckBox,
     request_log_status_label: StaticText,
@@ -2530,6 +2585,7 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.save_telegram_button.enable(enabled);
     handles.delete_im_account_button.enable(enabled);
     codex_tab::set_actions_enabled(&handles.codex_tab, enabled);
+    handles.request_log_detail_button.enable(enabled);
     handles.request_log_refresh_button.enable(enabled);
     set_ai_gw_actions_enabled(handles, enabled);
 }
@@ -2571,6 +2627,70 @@ fn schedule_request_log_refresh(
         return;
     }
     force_request_log_refresh(api, handles, result_store, in_flight);
+}
+
+fn start_request_log_detail_load(
+    api: &ApiClient,
+    handles: &UiHandles,
+    row: usize,
+    result_store: &RequestLogDetailResultStore,
+    in_flight: &Arc<AtomicBool>,
+) {
+    if in_flight.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let Some(id) = handles.request_log_rows.borrow().get(row).map(|log| log.id) else {
+        in_flight.store(false, Ordering::SeqCst);
+        return;
+    };
+    handles.request_log_detail_button.enable(false);
+    handles
+        .request_log_status_label
+        .set_label(&handles.text.request_log_detail_loading(id));
+    let thread_api = api.clone();
+    let result_store = result_store.clone();
+    let in_flight = in_flight.clone();
+    thread::spawn(move || {
+        let outcome = thread_api
+            .ai_gateway_request_log_detail(id)
+            .map(|response| response.log);
+        if let Ok(mut slot) = result_store.lock() {
+            slot.replace((id, outcome));
+        }
+        in_flight.store(false, Ordering::SeqCst);
+    });
+}
+
+fn apply_pending_request_log_detail(
+    frame: &Frame,
+    handles: &UiHandles,
+    result_store: &RequestLogDetailResultStore,
+    in_flight: &Arc<AtomicBool>,
+) {
+    let result = result_store.lock().ok().and_then(|mut slot| slot.take());
+    let Some((_id, result)) = result else {
+        return;
+    };
+    handles.request_log_detail_button.enable(true);
+    match result {
+        Ok(detail) => {
+            handles.request_log_status_label.set_label(
+                &handles
+                    .text
+                    .request_logs_loaded(handles.request_log_rows.borrow().len()),
+            );
+            request_log_detail::show(frame, handles.text, &detail);
+        }
+        Err(err) => {
+            handles
+                .request_log_status_label
+                .set_label(&handles.text.request_log_detail_failed(&err));
+            show_error(frame, &handles.text.request_log_detail_failed(&err));
+        }
+    }
+    if !in_flight.load(Ordering::SeqCst) {
+        handles.request_log_detail_button.enable(true);
+    }
 }
 
 fn apply_pending_request_logs(handles: &UiHandles, result_store: &RequestLogResultStore) {

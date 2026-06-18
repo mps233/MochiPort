@@ -1,0 +1,36 @@
+[package]
+name = "wxdragon-sys"
+# Inherit from workspace or specify explicitly
+version.workspace = true 
+edition.workspace = true
+authors.workspace = true
+description = "Raw FFI bindings to libwxdragon (which statically links wxWidgets)."
+license.workspace = true
+repository.workspace = true
+readme = "README.md" # Ensure this file exists
+keywords = ["ffi", "wxwidgets", "gui", "native", "bindings"]
+categories = ["external-ffi-bindings", "gui", "development-tools::ffi"]
+build = "build.rs"
+links = "wxdragon" # Crucial: Signals to Cargo this crate builds/links libwxdragon
+
+[features]
+default = []
+aui = []
+media-ctrl = []
+webview = []
+stc = []
+xrc = []
+richtext = []
+
+[dependencies]
+log = "0.4"
+# Sys crates typically have no runtime Rust dependencies
+
+[build-dependencies]
+bindgen = "0.72"    # For generating Rust bindings from C/C++ headers
+cmake = "0.1"
+flate2 = "1.1.4"
+pkg-config = "0.3"  # For finding libgtk and its dependencies (Linux only)
+rawzip = "0.4"
+reqwest = { version = "0.12", features = ["blocking", "rustls-tls", "socks"] }
+sha2 = "0.10"

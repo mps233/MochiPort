@@ -3009,8 +3009,6 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 [[package]]
 name = "wxdragon"
 version = "0.9.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5314fa5626f7ead856ffb8cc2b1b903c1d3febc17fc4d72656a62a97480fa417"
 dependencies = [
  "bitflags",
  "log",
@@ -3022,8 +3020,6 @@ dependencies = [
 [[package]]
 name = "wxdragon-macros"
 version = "0.9.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acbe229e79c65da245de0550e3891300965845d050fa2a08b8cee28748679913"
 dependencies = [
  "proc-macro2",
  "quick-xml",
@@ -3034,8 +3030,6 @@ dependencies = [
 [[package]]
 name = "wxdragon-sys"
 version = "0.9.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0668184cb66ed040a36c984a7c7e502c737635079af69af32c7804871caeea94"
 dependencies = [
  "bindgen",
  "cmake",

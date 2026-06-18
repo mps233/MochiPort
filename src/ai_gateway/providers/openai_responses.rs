@@ -37,6 +37,18 @@ pub async fn passthrough(
         }
     }
 
+    if let Some(log_context) = &log_context {
+        let update = RequestLogUpdate {
+            upstream_request_json: serde_json::to_string(&raw_body).ok(),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) =
+            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+        {
+            request_log::log_update_error(err);
+        }
+    }
+
     let is_stream = raw_body
         .get("stream")
         .and_then(|v| v.as_bool())

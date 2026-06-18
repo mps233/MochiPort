@@ -49,6 +49,12 @@ jobs:
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Reset wxWidgets CMake Cache
+        run: |
+          set -euo pipefail
+          rm -rf target/release/wxwidgets_cmake_build
+          rm -rf target/release/wxdragon_sys_cmake_build
+
       - name: Build Release
         run: |
           set -euo pipefail

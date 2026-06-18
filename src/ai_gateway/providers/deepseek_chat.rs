@@ -29,6 +29,17 @@ pub async fn handle(
     // 1. Responses → Chat Completions 请求转换
     let chat_body = build_chat_request(request, true)
         .map_err(|e| GatewayError::bad_request(format!("transform error: {e}")))?;
+    if let Some(log_context) = &log_context {
+        let update = RequestLogUpdate {
+            upstream_request_json: serde_json::to_string(&chat_body).ok(),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) =
+            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+        {
+            request_log::log_update_error(err);
+        }
+    }
 
     let url = format!(
         "{}/v1/chat/completions",

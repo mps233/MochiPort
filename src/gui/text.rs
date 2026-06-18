@@ -481,6 +481,69 @@ impl GuiText {
         }
     }
 
+    pub(super) fn request_log_detail_action(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "查看详情",
+            GuiLocale::EnUs => "Details",
+        }
+    }
+
+    pub(super) fn request_log_detail_title(self, id: i64) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("请求日志详情 #{id}"),
+            GuiLocale::EnUs => format!("Request Log #{id}"),
+        }
+    }
+
+    pub(super) fn request_log_detail_loading(self, id: i64) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("正在读取请求日志详情 #{id}..."),
+            GuiLocale::EnUs => format!("Loading request log #{id}..."),
+        }
+    }
+
+    pub(super) fn request_log_detail_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("读取详情失败：{err}"),
+            GuiLocale::EnUs => format!("Failed to load detail: {err}"),
+        }
+    }
+
+    pub(super) fn request_log_detail_codex_request(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex 请求",
+            GuiLocale::EnUs => "Codex Request",
+        }
+    }
+
+    pub(super) fn request_log_detail_upstream_request(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "上游请求",
+            GuiLocale::EnUs => "Upstream Request",
+        }
+    }
+
+    pub(super) fn request_log_detail_response(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "响应",
+            GuiLocale::EnUs => "Response",
+        }
+    }
+
+    pub(super) fn request_log_detail_error(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "错误",
+            GuiLocale::EnUs => "Error",
+        }
+    }
+
+    pub(super) fn request_log_detail_empty(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "没有记录",
+            GuiLocale::EnUs => "No data",
+        }
+    }
+
     pub(super) fn request_log_col_id(self) -> &'static str {
         "ID"
     }

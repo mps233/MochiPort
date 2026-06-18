@@ -245,6 +245,16 @@ impl ApiClient {
     pub(super) fn ai_gateway_request_logs(&self) -> Result<RequestLogsResponse, String> {
         self.get_with_timeout("/ai-gateway/request-logs?limit=200", GUI_CONFIG_TIMEOUT)
     }
+
+    pub(super) fn ai_gateway_request_log_detail(
+        &self,
+        id: i64,
+    ) -> Result<RequestLogDetailResponse, String> {
+        self.get_with_timeout(
+            &format!("/ai-gateway/request-logs/{id}"),
+            GUI_CONFIG_TIMEOUT,
+        )
+    }
 }
 
 fn join_optional<T>(handle: thread::JoinHandle<Option<T>>) -> Option<T> {
@@ -359,6 +369,22 @@ pub(super) struct RequestLogItem {
     pub(super) ttft_ms: Option<i64>,
     pub(super) created_at: String,
     pub(super) error_message: Option<String>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RequestLogDetailResponse {
+    pub(super) log: RequestLogDetail,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RequestLogDetail {
+    #[serde(flatten)]
+    pub(super) summary: RequestLogItem,
+    pub(super) request_json: Option<String>,
+    pub(super) upstream_request_json: Option<String>,
+    pub(super) response_json: Option<String>,
 }
 
 #[derive(Serialize)]
