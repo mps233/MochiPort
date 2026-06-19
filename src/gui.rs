@@ -1588,6 +1588,13 @@ fn show_ai_gw_channel_dialog(
         Some(ProviderLogoKind::DeepSeek),
         false,
     );
+    let radio_anthropic = ai_gw_service_option(
+        &service_panel,
+        &service_sizer,
+        text.ai_gw_service_anthropic(),
+        Some(ProviderLogoKind::Anthropic),
+        false,
+    );
     service_sizer.add_stretch_spacer(1);
     service_panel.set_sizer(service_sizer, true);
     workspace.add(&service_panel, 0, SizerFlag::Expand | SizerFlag::Right, 14);
@@ -1728,6 +1735,7 @@ fn show_ai_gw_channel_dialog(
         initial,
         &radio_openai,
         &radio_deepseek,
+        &radio_anthropic,
         &type_input,
         &name_input,
         &base_url_input,
@@ -1738,6 +1746,7 @@ fn show_ai_gw_channel_dialog(
         key_input.change_value(&provider.api_key);
         radio_openai.enable(false);
         radio_deepseek.enable(false);
+        radio_anthropic.enable(false);
     }
 
     let service_template_applying = Rc::new(RefCell::new(false));
@@ -1756,6 +1765,7 @@ fn show_ai_gw_channel_dialog(
                     ProviderType::OpenAiResponses,
                     &radio_openai,
                     &radio_deepseek,
+                    &radio_anthropic,
                     &type_input,
                     &name_input,
                     &base_url_input,
@@ -1782,6 +1792,34 @@ fn show_ai_gw_channel_dialog(
                     ProviderType::ChatCompletions,
                     &radio_openai,
                     &radio_deepseek,
+                    &radio_anthropic,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &key_input,
+                    &models_list,
+                    &weight_input,
+                    &service_template_applying,
+                );
+            }
+        });
+    }
+    if initial.is_none() {
+        let type_input = type_input;
+        let name_input = name_input;
+        let base_url_input = base_url_input;
+        let key_input = key_input;
+        let models_list = models_list;
+        let weight_input = weight_input;
+        let service_template_applying = service_template_applying.clone();
+        radio_anthropic.on_selected(move |_| {
+            if radio_anthropic.get_value() && !*service_template_applying.borrow() {
+                apply_ai_gw_service_template(
+                    text,
+                    ProviderType::AnthropicMessages,
+                    &radio_openai,
+                    &radio_deepseek,
+                    &radio_anthropic,
                     &type_input,
                     &name_input,
                     &base_url_input,
@@ -1886,7 +1924,8 @@ fn show_ai_gw_channel_dialog(
             show_error(parent, text.ai_gw_provider_name_empty());
             None
         } else {
-            let provider_type = selected_ai_gw_dialog_provider_type(&radio_deepseek);
+            let provider_type =
+                selected_ai_gw_dialog_provider_type(&radio_deepseek, &radio_anthropic);
             let models = list_box_models(&models_list);
             let weight = strip_nul(&weight_input.get_value())
                 .trim()
@@ -1921,6 +1960,7 @@ fn apply_ai_gw_dialog_template(
     provider: Option<&ProviderConfig>,
     radio_openai: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_anthropic: &RadioButton,
     type_input: &TextCtrl,
     name_input: &TextCtrl,
     base_url_input: &TextCtrl,
@@ -1939,6 +1979,7 @@ fn apply_ai_gw_dialog_template(
         provider.provider_type.clone(),
         radio_openai,
         radio_deepseek,
+        radio_anthropic,
         type_input,
     );
     name_input.change_value(&provider.name);
@@ -1952,6 +1993,7 @@ fn apply_ai_gw_service_template(
     provider_type: ProviderType,
     radio_openai: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_anthropic: &RadioButton,
     type_input: &TextCtrl,
     name_input: &TextCtrl,
     base_url_input: &TextCtrl,
@@ -1967,6 +2009,7 @@ fn apply_ai_gw_service_template(
         Some(&provider),
         radio_openai,
         radio_deepseek,
+        radio_anthropic,
         type_input,
         name_input,
         base_url_input,
@@ -2005,10 +2048,12 @@ fn set_ai_gw_dialog_provider_type(
     provider_type: ProviderType,
     radio_openai: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_anthropic: &RadioButton,
     type_input: &TextCtrl,
 ) {
     radio_openai.set_value(false);
     radio_deepseek.set_value(false);
+    radio_anthropic.set_value(false);
     match provider_type {
         ProviderType::ChatCompletions => {
             radio_deepseek.set_value(true);
@@ -2019,14 +2064,19 @@ fn set_ai_gw_dialog_provider_type(
             type_input.change_value(text.provider_type_openai_responses());
         }
         ProviderType::AnthropicMessages => {
-            radio_openai.set_value(true);
-            type_input.change_value("Anthropic Messages");
+            radio_anthropic.set_value(true);
+            type_input.change_value(text.provider_type_anthropic_messages());
         }
     }
 }
 
-fn selected_ai_gw_dialog_provider_type(radio_deepseek: &RadioButton) -> ProviderType {
-    if radio_deepseek.get_value() {
+fn selected_ai_gw_dialog_provider_type(
+    radio_deepseek: &RadioButton,
+    radio_anthropic: &RadioButton,
+) -> ProviderType {
+    if radio_anthropic.get_value() {
+        ProviderType::AnthropicMessages
+    } else if radio_deepseek.get_value() {
         ProviderType::ChatCompletions
     } else {
         ProviderType::OpenAiResponses

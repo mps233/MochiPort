@@ -1818,9 +1818,9 @@ impl GuiText {
 
     pub(super) fn ai_gw_channel_editor_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "选择 OpenAI 或 DeepSeek，并填写渠道连接信息。",
+            GuiLocale::ZhCn => "选择 OpenAI、DeepSeek 或 Anthropic，并填写渠道连接信息。",
             GuiLocale::EnUs => {
-                "Choose OpenAI or DeepSeek and fill in the channel connection details."
+                "Choose OpenAI, DeepSeek, or Anthropic and fill in the channel connection details."
             }
         }
     }
@@ -1894,6 +1894,10 @@ impl GuiText {
 
     pub(super) fn ai_gw_service_deepseek(self) -> &'static str {
         "DeepSeek"
+    }
+
+    pub(super) fn ai_gw_service_anthropic(self) -> &'static str {
+        "Anthropic"
     }
 
     pub(super) fn ai_gw_col_base_url(self) -> &'static str {
@@ -2022,6 +2026,10 @@ impl GuiText {
 
     pub(super) fn provider_type_chat_completions(self) -> &'static str {
         "Chat Completions"
+    }
+
+    pub(super) fn provider_type_anthropic_messages(self) -> &'static str {
+        "Anthropic Messages"
     }
 
     pub(super) fn ai_gw_saved(self) -> &'static str {
