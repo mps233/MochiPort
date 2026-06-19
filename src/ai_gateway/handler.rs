@@ -61,6 +61,7 @@ pub async fn handle_responses(
             let log_context = insert_initial_log(
                 &log_db_path,
                 &ctx,
+                &headers,
                 &request,
                 None,
                 &raw_body,
@@ -74,6 +75,7 @@ pub async fn handle_responses(
     let log_context = insert_initial_log(
         &log_db_path,
         &ctx,
+        &headers,
         &request,
         Some(provider),
         &raw_body,
@@ -226,6 +228,7 @@ pub async fn handle_request_log_detail(
 fn insert_initial_log(
     db_path: &std::path::Path,
     ctx: &GatewayContext,
+    headers: &HeaderMap,
     request: &GatewayRequest,
     provider: Option<&ProviderConfig>,
     raw_body: &serde_json::Value,
@@ -249,7 +252,9 @@ fn insert_initial_log(
         ttft_ms: None,
         created_at_ms,
         error_message: None,
+        request_headers_json: request_log::headers_to_json(headers),
         request_json: serde_json::to_string(raw_body).ok(),
+        upstream_request_headers_json: None,
         upstream_request_json: None,
         response_json: None,
     };

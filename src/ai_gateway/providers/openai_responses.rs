@@ -37,18 +37,6 @@ pub async fn passthrough(
         }
     }
 
-    if let Some(log_context) = &log_context {
-        let update = RequestLogUpdate {
-            upstream_request_json: serde_json::to_string(&raw_body).ok(),
-            ..RequestLogUpdate::default()
-        };
-        if let Err(err) =
-            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
-        {
-            request_log::log_update_error(err);
-        }
-    }
-
     let is_stream = raw_body
         .get("stream")
         .and_then(|v| v.as_bool())
@@ -66,10 +54,30 @@ pub async fn passthrough(
         .json(&raw_body);
 
     let req_builder = apply_upstream_headers(req_builder, &ctx.upstream_headers);
+    let upstream_req = req_builder.build().map_err(|e| {
+        error!(error = %e, "build upstream request failed");
+        GatewayError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("build upstream request: {e}"),
+        )
+    })?;
+
+    if let Some(log_context) = &log_context {
+        let update = RequestLogUpdate {
+            upstream_request_headers_json: request_log::headers_to_json(upstream_req.headers()),
+            upstream_request_json: serde_json::to_string(&raw_body).ok(),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) =
+            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+        {
+            request_log::log_update_error(err);
+        }
+    }
 
     debug!(url = %url, stream = is_stream, "proxying to openai responses");
 
-    let upstream_resp = req_builder.send().await.map_err(|e| {
+    let upstream_resp = client.execute(upstream_req).await.map_err(|e| {
         if e.is_timeout() {
             GatewayError::upstream_timeout()
         } else {

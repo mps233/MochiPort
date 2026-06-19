@@ -131,6 +131,7 @@ struct ResponsesStreamState {
     // 积累器
     accumulated_text: String,
     accumulated_reasoning: String,
+    completed_output: Vec<Value>,
 
     // 工具调用追踪
     tool_calls: HashMap<usize, ToolCallState>,
@@ -173,6 +174,7 @@ impl ResponsesStreamState {
             current_item_id: String::new(),
             accumulated_text: String::new(),
             accumulated_reasoning: String::new(),
+            completed_output: Vec::new(),
             tool_calls: HashMap::new(),
             usage: None,
             finish_reason: None,
@@ -192,7 +194,7 @@ impl ResponsesStreamState {
             "model": self.model,
             "created_at": self.created_at,
             "status": status,
-            "output": [],
+            "output": self.completed_output.clone(),
         });
         if let Some(usage) = &self.usage {
             resp["usage"] = usage.clone();
@@ -330,6 +332,13 @@ impl ResponsesStreamState {
             return;
         }
 
+        let item = json!({
+            "type": "reasoning",
+            "id": self.current_item_id,
+            "status": "completed",
+            "summary": [{"type": "summary_text", "text": self.accumulated_reasoning}],
+        });
+
         // summary_text.done
         let seq = self.next_seq();
         emit_sse(
@@ -369,15 +378,11 @@ impl ResponsesStreamState {
                 "type": "response.output_item.done",
                 "sequence_number": seq,
                 "output_index": self.output_index,
-                "item": {
-                    "type": "reasoning",
-                    "id": self.current_item_id,
-                    "status": "completed",
-                    "summary": [{"type": "summary_text", "text": self.accumulated_reasoning}],
-                }
+                "item": item.clone(),
             }),
         );
 
+        self.completed_output.push(item);
         self.output_index += 1;
         self.reasoning_item_started = false;
         self.reasoning_summary_part = false;
@@ -490,6 +495,14 @@ impl ResponsesStreamState {
 
         self.close_content_part(queue);
 
+        let item = json!({
+            "type": "message",
+            "id": self.current_item_id,
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": self.accumulated_text, "annotations": []}],
+        });
+
         // output_item.done
         let seq = self.next_seq();
         emit_sse(
@@ -499,16 +512,11 @@ impl ResponsesStreamState {
                 "type": "response.output_item.done",
                 "sequence_number": seq,
                 "output_index": self.output_index,
-                "item": {
-                    "type": "message",
-                    "id": self.current_item_id,
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": self.accumulated_text, "annotations": []}],
-                }
+                "item": item.clone(),
             }),
         );
 
+        self.completed_output.push(item);
         self.output_index += 1;
         self.message_item_started = false;
         self.accumulated_text.clear();
@@ -596,9 +604,23 @@ impl ResponsesStreamState {
     }
 
     fn close_tool_calls(&mut self, queue: &mut VecDeque<Bytes>) {
-        let indices: Vec<usize> = self.tool_calls.keys().cloned().collect();
+        let mut indices: Vec<usize> = self.tool_calls.keys().cloned().collect();
+        indices.sort_unstable();
         for index in indices {
             let tc = self.tool_calls.remove(&index).unwrap();
+            let item_id = tc.item_id;
+            let call_id = tc.id;
+            let name = tc.name;
+            let arguments = tc.arguments;
+            let output_index = tc.output_index;
+            let item = json!({
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
+                "status": "completed",
+            });
 
             // function_call_arguments.done
             let seq = self.next_seq();
@@ -608,9 +630,9 @@ impl ResponsesStreamState {
                 json!({
                     "type": "response.function_call_arguments.done",
                     "sequence_number": seq,
-                    "item_id": tc.item_id,
-                    "output_index": tc.output_index,
-                    "arguments": tc.arguments,
+                    "item_id": item["id"].clone(),
+                    "output_index": output_index,
+                    "arguments": item["arguments"].clone(),
                 }),
             );
 
@@ -622,17 +644,11 @@ impl ResponsesStreamState {
                 json!({
                     "type": "response.output_item.done",
                     "sequence_number": seq,
-                    "output_index": tc.output_index,
-                    "item": {
-                        "type": "function_call",
-                        "id": tc.item_id,
-                        "call_id": tc.id,
-                        "name": tc.name,
-                        "arguments": tc.arguments,
-                        "status": "completed",
-                    }
+                    "output_index": output_index,
+                    "item": item.clone(),
                 }),
             );
+            self.completed_output.push(item);
         }
     }
 
@@ -842,6 +858,14 @@ mod tests {
         assert!(types.contains(&"response.content_part.done"));
         assert!(types.contains(&"response.output_item.done"));
         assert!(types.contains(&"response.completed"));
+        let completed = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.completed")
+            .unwrap();
+        assert_eq!(
+            completed.1["response"]["output"][0]["content"][0]["text"],
+            "Hello world"
+        );
 
         // sequence_number 递增
         for (i, (_, ev)) in events.iter().enumerate() {
@@ -903,6 +927,18 @@ mod tests {
         assert_eq!(text_deltas, vec!["The answer", " is 42."]);
 
         assert!(types.contains(&"response.completed"));
+        let completed = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.completed")
+            .unwrap();
+        assert_eq!(
+            completed.1["response"]["output"][0]["summary"][0]["text"],
+            "Let me think..."
+        );
+        assert_eq!(
+            completed.1["response"]["output"][1]["content"][0]["text"],
+            "The answer is 42."
+        );
     }
 
     // ─── tool call 流 ──────────────────────────────────────────

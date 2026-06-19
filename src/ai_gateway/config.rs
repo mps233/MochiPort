@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub(crate) const DEFAULT_PROVIDER_TIMEOUT_SECS: u64 = 600;
+const DEFAULT_PROVIDER_WEIGHT: u32 = 100;
+
 /// AI Gateway 顶层配置，对应 config.toml 中 `[aiGateway]` 段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -53,39 +56,42 @@ impl AiGatewayConfig {
             .iter()
             .filter(|provider| provider.enabled && provider.models.iter().any(|m| m == model));
         let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
-            return candidates.into_iter().next();
+            return candidates
+                .into_iter()
+                .max_by_key(|provider| provider.effective_weight());
         };
 
-        candidates
-            .into_iter()
-            .max_by(|left, right| compare_hrw_provider(session_id, left, right))
+        candidates.into_iter().max_by(|left, right| {
+            compare_weighted_hrw_provider(session_id, left, right)
+                .then_with(|| provider_route_id(left).cmp(&provider_route_id(right)))
+        })
     }
 }
 
-fn compare_hrw_provider(
+fn compare_weighted_hrw_provider(
     session_id: &str,
     left: &ProviderConfig,
     right: &ProviderConfig,
 ) -> std::cmp::Ordering {
-    let left_score = hrw_score(session_id, left);
-    let right_score = hrw_score(session_id, right);
-    left_score.cmp(&right_score).then_with(|| {
-        provider_route_id(left)
-            .as_str()
-            .cmp(provider_route_id(right).as_str())
-    })
+    let left_score = weighted_hrw_score(session_id, left);
+    let right_score = weighted_hrw_score(session_id, right);
+    left_score.total_cmp(&right_score)
 }
 
-fn hrw_score(session_id: &str, provider: &ProviderConfig) -> [u8; 32] {
+fn weighted_hrw_score(session_id: &str, provider: &ProviderConfig) -> f64 {
+    let hash = hrw_hash_u64(session_id, provider);
+    let normalized = ((hash as f64) + 1.0) / ((u64::MAX as f64) + 1.0);
+    normalized.ln() / provider.effective_weight() as f64
+}
+
+fn hrw_hash_u64(session_id: &str, provider: &ProviderConfig) -> u64 {
     let mut hasher = Sha256::new();
-    hasher.update(b"codex-remote-ai-gateway-hrw-v1\0");
+    hasher.update(b"codex-remote-ai-gateway-weighted-hrw-v1\0");
     hasher.update(session_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(provider_route_id(provider).as_bytes());
     let digest = hasher.finalize();
-    let mut score = [0_u8; 32];
-    score.copy_from_slice(&digest);
-    score
+    u64::from_be_bytes(digest[..8].try_into().expect("sha256 digest has 32 bytes"))
 }
 
 fn provider_route_id(provider: &ProviderConfig) -> String {
@@ -152,6 +158,8 @@ pub struct ProviderConfig {
     /// 可选的 prompt_cache_retention 覆盖。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_retention: Option<String>,
+    /// 同一 model 命中多个 provider 时的路由权重。实际路由中最小按 1 处理。
+    pub weight: u32,
     /// 上游请求超时（秒）。
     pub timeout_secs: u64,
 }
@@ -166,8 +174,15 @@ impl Default for ProviderConfig {
             api_key: String::new(),
             models: Vec::new(),
             prompt_cache_retention: None,
-            timeout_secs: 300,
+            weight: DEFAULT_PROVIDER_WEIGHT,
+            timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
         }
+    }
+}
+
+impl ProviderConfig {
+    pub fn effective_weight(&self) -> u32 {
+        self.weight.max(1)
     }
 }
 
@@ -311,6 +326,42 @@ mod tests {
     }
 
     #[test]
+    fn test_session_provider_selection_honors_weight() {
+        let mut low = make_provider("low", ProviderType::OpenAiResponses, vec!["gpt-5.5"]);
+        low.weight = 1;
+        let mut high = make_provider("high", ProviderType::OpenAiResponses, vec!["gpt-5.5"]);
+        high.weight = 100;
+        let config = make_config(vec![low, high]);
+
+        let high_count = (0..200)
+            .filter(|idx| {
+                config
+                    .select_provider_for_session("gpt-5.5", Some(&format!("session-{idx}")))
+                    .is_some_and(|provider| provider.name == "high")
+            })
+            .count();
+
+        assert!(high_count > 180, "high provider selected {high_count}/200");
+    }
+
+    #[test]
+    fn test_zero_weight_is_treated_as_one() {
+        let mut provider = make_provider(
+            "deepseek",
+            ProviderType::ChatCompletions,
+            vec!["deepseek-v4-flash"],
+        );
+        provider.weight = 0;
+        let config = make_config(vec![provider]);
+
+        assert_eq!(
+            config.select_provider("deepseek-v4-flash").unwrap().name,
+            "deepseek"
+        );
+        assert_eq!(config.providers[0].effective_weight(), 1);
+    }
+
+    #[test]
     fn test_session_provider_selection_is_independent_of_config_order() {
         let providers = vec![
             make_provider("openai-a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
@@ -387,25 +438,26 @@ mod tests {
     }
 
     #[test]
-    fn test_missing_session_id_keeps_first_match_behavior() {
-        let config = make_config(vec![
-            make_provider("openai-a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
-            make_provider("openai-b", ProviderType::OpenAiResponses, vec!["gpt-5.5"]),
-        ]);
+    fn test_missing_session_id_uses_highest_weight() {
+        let mut low = make_provider("openai-a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]);
+        low.weight = 10;
+        let mut high = make_provider("openai-b", ProviderType::OpenAiResponses, vec!["gpt-5.5"]);
+        high.weight = 100;
+        let config = make_config(vec![low, high]);
 
         assert_eq!(
             config
                 .select_provider_for_session("gpt-5.5", None)
                 .unwrap()
                 .name,
-            "openai-a"
+            "openai-b"
         );
         assert_eq!(
             config
                 .select_provider_for_session("gpt-5.5", Some("   "))
                 .unwrap()
                 .name,
-            "openai-a"
+            "openai-b"
         );
     }
 
@@ -441,7 +493,12 @@ mod tests {
             ProviderType::ChatCompletions
         );
         assert_eq!(config.providers[0].timeout_secs, 120);
-        assert_eq!(config.providers[1].timeout_secs, 300); // default
+        assert_eq!(
+            config.providers[1].timeout_secs,
+            DEFAULT_PROVIDER_TIMEOUT_SECS
+        );
+        assert_eq!(config.providers[0].weight, DEFAULT_PROVIDER_WEIGHT);
+        assert_eq!(config.providers[1].weight, DEFAULT_PROVIDER_WEIGHT);
     }
 
     #[test]

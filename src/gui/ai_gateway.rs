@@ -24,7 +24,7 @@ pub(super) struct AiGwProviderRow {
     pub(super) name: String,
     pub(super) provider_type: ProviderType,
     pub(super) base_url: String,
-    pub(super) timeout_secs: u64,
+    pub(super) weight: u32,
 }
 
 pub(super) enum AiGwActionResult {
@@ -117,7 +117,7 @@ fn ai_gw_provider_list_rows(config: Option<&AiGatewayConfig>) -> Vec<AiGwProvide
             name: provider.name.clone(),
             provider_type: provider.provider_type.clone(),
             base_url: provider.base_url.clone(),
-            timeout_secs: provider.timeout_secs,
+            weight: provider.effective_weight(),
         })
         .collect()
 }

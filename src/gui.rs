@@ -18,7 +18,8 @@ use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
 use crate::ai_gateway::config::{
-    ProviderConfig, ProviderType, provider_api_root, provider_display_base_url,
+    DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderConfig, ProviderType, provider_api_root,
+    provider_display_base_url,
 };
 use crate::config::AppConfig;
 
@@ -295,7 +296,7 @@ fn build_ui() {
                     2 => provider_logo_variant(&row_data.provider_type),
                     3 => provider_type_display(&row_data.provider_type).into(),
                     4 => row_data.base_url.clone().into(),
-                    5 => row_data.timeout_secs.to_string().into(),
+                    5 => row_data.weight.to_string().into(),
                     _ => String::new().into(),
                 }
             },
@@ -366,7 +367,7 @@ fn build_ui() {
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.append_text_column(
-        text.ai_gw_timeout(),
+        text.ai_gw_weight(),
         5,
         80,
         DataViewAlign::Left,
@@ -1624,7 +1625,7 @@ fn show_ai_gw_channel_dialog(
     let name_input = text_field_row(&form_panel, &grid, text.ai_gw_provider_name(), "");
     let base_url_input = text_field_row(&form_panel, &grid, text.ai_gw_col_base_url(), "");
     let key_input = text_field_row(&form_panel, &grid, text.ai_gw_col_api_key(), "");
-    let timeout_input = text_field_row(&form_panel, &grid, text.ai_gw_timeout(), "60");
+    let weight_input = text_field_row(&form_panel, &grid, text.ai_gw_weight(), "100");
 
     form_sizer.add_sizer(
         &grid,
@@ -1731,7 +1732,7 @@ fn show_ai_gw_channel_dialog(
         &name_input,
         &base_url_input,
         &models_list,
-        &timeout_input,
+        &weight_input,
     );
     if let Some(provider) = initial {
         key_input.change_value(&provider.api_key);
@@ -1746,6 +1747,7 @@ fn show_ai_gw_channel_dialog(
         let base_url_input = base_url_input;
         let key_input = key_input;
         let models_list = models_list;
+        let weight_input = weight_input;
         let service_template_applying = service_template_applying.clone();
         radio_openai.on_selected(move |_| {
             if radio_openai.get_value() && !*service_template_applying.borrow() {
@@ -1759,7 +1761,7 @@ fn show_ai_gw_channel_dialog(
                     &base_url_input,
                     &key_input,
                     &models_list,
-                    &timeout_input,
+                    &weight_input,
                     &service_template_applying,
                 );
             }
@@ -1771,6 +1773,7 @@ fn show_ai_gw_channel_dialog(
         let base_url_input = base_url_input;
         let key_input = key_input;
         let models_list = models_list;
+        let weight_input = weight_input;
         let service_template_applying = service_template_applying.clone();
         radio_deepseek.on_selected(move |_| {
             if radio_deepseek.get_value() && !*service_template_applying.borrow() {
@@ -1784,7 +1787,7 @@ fn show_ai_gw_channel_dialog(
                     &base_url_input,
                     &key_input,
                     &models_list,
-                    &timeout_input,
+                    &weight_input,
                     &service_template_applying,
                 );
             }
@@ -1836,7 +1839,6 @@ fn show_ai_gw_channel_dialog(
     {
         let base_url_input = base_url_input;
         let key_input = key_input;
-        let timeout_input = timeout_input;
         let models_list = models_list;
         fetch_models_button.on_click(move |_| {
             let base_url = strip_nul(&base_url_input.get_value()).trim().to_string();
@@ -1848,11 +1850,7 @@ fn show_ai_gw_channel_dialog(
             fetch_models_button.enable(false);
             fetch_models_button.set_label(text.ai_gw_fetching_models());
             let api_key = strip_nul(&key_input.get_value()).trim().to_string();
-            let timeout_secs = strip_nul(&timeout_input.get_value())
-                .trim()
-                .parse::<u64>()
-                .unwrap_or(60);
-            match fetch_remote_models(&base_url, &api_key, timeout_secs) {
+            match fetch_remote_models(&base_url, &api_key, DEFAULT_PROVIDER_TIMEOUT_SECS) {
                 Ok((models, normalized_base_url)) => {
                     if models.is_empty() {
                         show_error(&dialog, text.ai_gw_models_empty());
@@ -1890,10 +1888,11 @@ fn show_ai_gw_channel_dialog(
         } else {
             let provider_type = selected_ai_gw_dialog_provider_type(&radio_deepseek);
             let models = list_box_models(&models_list);
-            let timeout_secs = strip_nul(&timeout_input.get_value())
+            let weight = strip_nul(&weight_input.get_value())
                 .trim()
-                .parse::<u64>()
-                .unwrap_or(60);
+                .parse::<u32>()
+                .unwrap_or(100)
+                .max(1);
             Some(ProviderConfig {
                 name,
                 enabled: initial.map(|provider| provider.enabled).unwrap_or(true),
@@ -1903,7 +1902,10 @@ fn show_ai_gw_channel_dialog(
                 models,
                 prompt_cache_retention: initial
                     .and_then(|provider| provider.prompt_cache_retention.clone()),
-                timeout_secs,
+                weight,
+                timeout_secs: initial
+                    .map(|provider| provider.timeout_secs)
+                    .unwrap_or(DEFAULT_PROVIDER_TIMEOUT_SECS),
             })
         }
     } else {
@@ -1923,13 +1925,12 @@ fn apply_ai_gw_dialog_template(
     name_input: &TextCtrl,
     base_url_input: &TextCtrl,
     models_list: &ListBox,
-    timeout_input: &TextCtrl,
+    weight_input: &TextCtrl,
 ) {
     let provider = provider.cloned().unwrap_or_else(|| ProviderConfig {
         name: "openai".to_string(),
         provider_type: ProviderType::OpenAiResponses,
         base_url: "https://api.openai.com/v1".to_string(),
-        timeout_secs: 60,
         ..Default::default()
     });
 
@@ -1943,7 +1944,7 @@ fn apply_ai_gw_dialog_template(
     name_input.change_value(&provider.name);
     base_url_input.change_value(&provider.base_url);
     replace_model_list(models_list, &provider.models);
-    timeout_input.change_value(&provider.timeout_secs.to_string());
+    weight_input.change_value(&provider.effective_weight().to_string());
 }
 
 fn apply_ai_gw_service_template(
@@ -1956,7 +1957,7 @@ fn apply_ai_gw_service_template(
     base_url_input: &TextCtrl,
     key_input: &TextCtrl,
     models_list: &ListBox,
-    timeout_input: &TextCtrl,
+    weight_input: &TextCtrl,
     service_template_applying: &Rc<RefCell<bool>>,
 ) {
     *service_template_applying.borrow_mut() = true;
@@ -1970,7 +1971,7 @@ fn apply_ai_gw_service_template(
         name_input,
         base_url_input,
         models_list,
-        timeout_input,
+        weight_input,
     );
     key_input.change_value("");
     *service_template_applying.borrow_mut() = false;
@@ -1982,14 +1983,12 @@ fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig
             name: "openai".to_string(),
             provider_type: ProviderType::OpenAiResponses,
             base_url: "https://api.openai.com/v1".to_string(),
-            timeout_secs: 60,
             ..Default::default()
         },
         ProviderType::ChatCompletions => ProviderConfig {
             name: "deepseek".to_string(),
             provider_type: ProviderType::ChatCompletions,
             base_url: "https://api.deepseek.com/v1".to_string(),
-            timeout_secs: 60,
             ..Default::default()
         },
     }

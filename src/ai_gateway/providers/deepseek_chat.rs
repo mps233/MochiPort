@@ -29,17 +29,6 @@ pub async fn handle(
     // 1. Responses → Chat Completions 请求转换
     let chat_body = build_chat_request(request, true)
         .map_err(|e| GatewayError::bad_request(format!("transform error: {e}")))?;
-    if let Some(log_context) = &log_context {
-        let update = RequestLogUpdate {
-            upstream_request_json: serde_json::to_string(&chat_body).ok(),
-            ..RequestLogUpdate::default()
-        };
-        if let Err(err) =
-            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
-        {
-            request_log::log_update_error(err);
-        }
-    }
 
     let url = format!(
         "{}/v1/chat/completions",
@@ -56,17 +45,37 @@ pub async fn handle(
         .header("authorization", format!("Bearer {}", provider.api_key))
         .timeout(std::time::Duration::from_secs(provider.timeout_secs))
         .json(&chat_body);
-    let upstream_resp = apply_upstream_headers(req_builder, &ctx.upstream_headers)
-        .send()
-        .await
+    let upstream_req = apply_upstream_headers(req_builder, &ctx.upstream_headers)
+        .build()
         .map_err(|e| {
-            if e.is_timeout() {
-                GatewayError::upstream_timeout()
-            } else {
-                error!(error = %e, "deepseek upstream request failed");
-                GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("upstream error: {e}"))
-            }
+            error!(error = %e, "build deepseek upstream request failed");
+            GatewayError::upstream(
+                StatusCode::BAD_GATEWAY,
+                format!("build upstream request: {e}"),
+            )
         })?;
+
+    if let Some(log_context) = &log_context {
+        let update = RequestLogUpdate {
+            upstream_request_headers_json: request_log::headers_to_json(upstream_req.headers()),
+            upstream_request_json: serde_json::to_string(&chat_body).ok(),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) =
+            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+        {
+            request_log::log_update_error(err);
+        }
+    }
+
+    let upstream_resp = client.execute(upstream_req).await.map_err(|e| {
+        if e.is_timeout() {
+            GatewayError::upstream_timeout()
+        } else {
+            error!(error = %e, "deepseek upstream request failed");
+            GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("upstream error: {e}"))
+        }
+    })?;
 
     let upstream_status = upstream_resp.status();
     if !upstream_status.is_success() {

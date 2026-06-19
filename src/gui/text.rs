@@ -1904,10 +1904,10 @@ impl GuiText {
         "API Key"
     }
 
-    pub(super) fn ai_gw_timeout(self) -> &'static str {
+    pub(super) fn ai_gw_weight(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "超时(秒)",
-            GuiLocale::EnUs => "Timeout (s)",
+            GuiLocale::ZhCn => "权重",
+            GuiLocale::EnUs => "Weight",
         }
     }
 

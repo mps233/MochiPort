@@ -1,4 +1,6 @@
 use serde::Serialize;
+use std::cell::RefCell;
+use std::rc::Rc;
 use wxdragon::prelude::*;
 
 use super::api::{RequestLogDetail, RequestLogItem};
@@ -10,6 +12,7 @@ const STYLE_JSON_STRING: i32 = 2;
 const STYLE_JSON_NUMBER: i32 = 3;
 const STYLE_JSON_KEYWORD: i32 = 4;
 const STYLE_JSON_PUNCT: i32 = 5;
+const STYLE_FIND_MATCH: i32 = 6;
 const STYLE_LINE_NUMBER: i32 = 33;
 const STYLE_INDENT_GUIDE: i32 = 37;
 const FOLD_BASE: i32 = 0x400;
@@ -25,6 +28,13 @@ const MARKER_FOLDER_TAIL: i32 = 28;
 const MARKER_FOLDER_SUB: i32 = 29;
 const MARKER_FOLDER: i32 = 30;
 const MARKER_FOLDER_OPEN: i32 = 31;
+
+#[derive(Default)]
+struct SearchState {
+    query: String,
+    matches: Vec<i32>,
+    current: usize,
+}
 
 pub(super) fn show(parent: &Frame, text: GuiText, detail: &RequestLogDetail) {
     let id = detail.summary.id;
@@ -54,16 +64,24 @@ pub(super) fn show(parent: &Frame, text: GuiText, detail: &RequestLogDetail) {
     );
 
     let notebook = Notebook::builder(&panel).build();
+    let codex_request_detail = request_detail_json(
+        detail.request_headers_json.as_deref(),
+        detail.request_json.as_deref(),
+    );
+    let upstream_request_detail = request_detail_json(
+        detail.upstream_request_headers_json.as_deref(),
+        detail.upstream_request_json.as_deref(),
+    );
     add_json_tab(
         &notebook,
         text.request_log_detail_codex_request(),
-        detail.request_json.as_deref(),
+        codex_request_detail.as_deref(),
         text,
     );
     add_json_tab(
         &notebook,
         text.request_log_detail_upstream_request(),
-        detail.upstream_request_json.as_deref(),
+        upstream_request_detail.as_deref(),
         text,
     );
     add_json_tab(
@@ -106,6 +124,29 @@ pub(super) fn show(parent: &Frame, text: GuiText, detail: &RequestLogDetail) {
     dialog.show_modal();
 }
 
+fn request_detail_json(headers: Option<&str>, body: Option<&str>) -> Option<String> {
+    if headers.is_none() && body.is_none() {
+        return None;
+    }
+
+    let headers = headers
+        .map(parse_json_or_string)
+        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+    let body = body
+        .map(parse_json_or_string)
+        .unwrap_or(serde_json::Value::Null);
+
+    serde_json::to_string(&serde_json::json!({
+        "headers": headers,
+        "body": body,
+    }))
+    .ok()
+}
+
+fn parse_json_or_string(content: &str) -> serde_json::Value {
+    serde_json::from_str(content).unwrap_or_else(|_| serde_json::Value::String(content.to_string()))
+}
+
 fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: GuiText) {
     let Some(content) = content else {
         add_text_tab(parent, label, text.request_log_detail_empty());
@@ -120,36 +161,118 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
     let panel = Panel::builder(parent).build();
     panel.set_background_color(Colour::rgb(255, 255, 255));
 
-    let editor_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    let editor_expand_button = Button::builder(&panel)
+    let search_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let search_label = StaticText::builder(&panel)
         .with_label(match text.locale {
-            super::text::GuiLocale::ZhCn => "展开代码",
-            super::text::GuiLocale::EnUs => "Expand code",
+            super::text::GuiLocale::ZhCn => "查找",
+            super::text::GuiLocale::EnUs => "Find",
         })
         .build();
-    let editor_collapse_button = Button::builder(&panel)
+    let search_input = TextCtrl::builder(&panel)
+        .with_style(TextCtrlStyle::Default | TextCtrlStyle::ProcessEnter)
+        .build();
+    search_input.set_min_size(Size::new(320, 28));
+    let previous_button = Button::builder(&panel)
         .with_label(match text.locale {
-            super::text::GuiLocale::ZhCn => "折叠代码",
-            super::text::GuiLocale::EnUs => "Collapse code",
+            super::text::GuiLocale::ZhCn => "上一个",
+            super::text::GuiLocale::EnUs => "Previous",
         })
         .build();
-    editor_actions.add(&editor_expand_button, 0, SizerFlag::Right, 8);
-    editor_actions.add(&editor_collapse_button, 0, SizerFlag::Right, 0);
+    let next_button = Button::builder(&panel)
+        .with_label(match text.locale {
+            super::text::GuiLocale::ZhCn => "下一个",
+            super::text::GuiLocale::EnUs => "Next",
+        })
+        .build();
+    let search_status = StaticText::builder(&panel).with_label("").build();
+    search_status.set_foreground_color(Colour::rgb(94, 103, 117));
+    search_row.add(
+        &search_label,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        8,
+    );
+    search_row.add(&search_input, 0, SizerFlag::Right, 8);
+    search_row.add(&previous_button, 0, SizerFlag::Right, 6);
+    search_row.add(&next_button, 0, SizerFlag::Right, 10);
+    search_row.add(
+        &search_status,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        0,
+    );
 
     let editor = StyledTextCtrl::builder(&panel)
         .with_size(Size::new(1200, 720))
         .build();
     configure_json_editor(&editor, &display);
+    let search_state = Rc::new(RefCell::new(SearchState::default()));
     {
         let editor = editor;
-        editor_expand_button.on_click(move |_| {
-            set_all_editor_folds(&editor, true);
+        let search_input = search_input;
+        let search_status = search_status;
+        let search_state = Rc::clone(&search_state);
+        let display = display.clone();
+        search_input.on_text_changed(move |_| {
+            update_editor_search(
+                &editor,
+                &display,
+                &search_input.get_value(),
+                &search_status,
+                &search_state,
+                0,
+            );
         });
     }
     {
         let editor = editor;
-        editor_collapse_button.on_click(move |_| {
-            set_all_editor_folds(&editor, false);
+        let search_input = search_input;
+        let search_status = search_status;
+        let search_state = Rc::clone(&search_state);
+        let display = display.clone();
+        search_input.on_text_enter(move |_| {
+            update_editor_search(
+                &editor,
+                &display,
+                &search_input.get_value(),
+                &search_status,
+                &search_state,
+                1,
+            );
+        });
+    }
+    {
+        let editor = editor;
+        let search_input = search_input;
+        let search_status = search_status;
+        let search_state = Rc::clone(&search_state);
+        let display = display.clone();
+        previous_button.on_click(move |_| {
+            update_editor_search(
+                &editor,
+                &display,
+                &search_input.get_value(),
+                &search_status,
+                &search_state,
+                -1,
+            );
+        });
+    }
+    {
+        let editor = editor;
+        let search_input = search_input;
+        let search_status = search_status;
+        let search_state = Rc::clone(&search_state);
+        let display = display.clone();
+        next_button.on_click(move |_| {
+            update_editor_search(
+                &editor,
+                &display,
+                &search_input.get_value(),
+                &search_status,
+                &search_state,
+                1,
+            );
         });
     }
     {
@@ -170,10 +293,93 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
     }
 
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    sizer.add_sizer(&editor_actions, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    sizer.add_sizer(&search_row, 0, SizerFlag::Expand | SizerFlag::All, 8);
     sizer.add(&editor, 1, SizerFlag::Expand | SizerFlag::All, 8);
     panel.set_sizer(sizer, true);
     parent.add_page(&panel, label, false, None);
+}
+
+fn update_editor_search(
+    editor: &StyledTextCtrl,
+    content: &str,
+    query: &str,
+    status: &StaticText,
+    state: &Rc<RefCell<SearchState>>,
+    step: i32,
+) {
+    apply_json_stc_highlight(editor, content);
+
+    let query = query.trim();
+    if query.is_empty() || query.contains('\0') {
+        editor.set_selection(0, 0);
+        status.set_label("");
+        *state.borrow_mut() = SearchState::default();
+        return;
+    }
+
+    let mut state = state.borrow_mut();
+    if state.query != query {
+        state.query = query.to_string();
+        state.matches = find_all_matches(editor, content, query);
+        state.current = 0;
+    } else if !state.matches.is_empty() {
+        state.current = move_match_index(state.current, state.matches.len(), step);
+    }
+
+    apply_search_match_styles(editor, query, &state.matches);
+    if let Some(position) = state.matches.get(state.current).copied() {
+        select_search_match(editor, position, query);
+        status.set_label(&format!("{}/{}", state.current + 1, state.matches.len()));
+    } else {
+        editor.set_selection(0, 0);
+        status.set_label("0/0");
+    }
+}
+
+fn find_all_matches(editor: &StyledTextCtrl, content: &str, query: &str) -> Vec<i32> {
+    let mut matches = Vec::new();
+    let mut start = 0;
+    let end = byte_len_to_i32(content.len());
+    let query_len = byte_len_to_i32(query.len()).max(1);
+    while start < end {
+        let Some(position) = editor.find_text(start, end, query, FindFlags::None) else {
+            break;
+        };
+        matches.push(position);
+        start = position.saturating_add(query_len);
+    }
+    matches
+}
+
+fn move_match_index(current: usize, len: usize, step: i32) -> usize {
+    if len == 0 || step == 0 {
+        return current;
+    }
+    if step > 0 {
+        (current + 1) % len
+    } else if current == 0 {
+        len - 1
+    } else {
+        current - 1
+    }
+}
+
+fn apply_search_match_styles(editor: &StyledTextCtrl, query: &str, matches: &[i32]) {
+    if matches.is_empty() {
+        return;
+    }
+    let len = byte_len_to_i32(query.len());
+    for position in matches {
+        editor.start_styling(*position);
+        editor.set_styling(len, STYLE_FIND_MATCH);
+    }
+}
+
+fn select_search_match(editor: &StyledTextCtrl, position: i32, query: &str) {
+    let end = position.saturating_add(byte_len_to_i32(query.len()));
+    editor.goto_pos(position);
+    editor.set_selection(position, end);
+    editor.ensure_caret_visible();
 }
 
 fn format_json_pretty(value: &serde_json::Value) -> Option<String> {
@@ -229,6 +435,8 @@ fn configure_json_editor(editor: &StyledTextCtrl, content: &str) {
     editor.style_set_foreground(STYLE_JSON_NUMBER, Colour::rgb(151, 71, 0));
     editor.style_set_foreground(STYLE_JSON_KEYWORD, Colour::rgb(128, 61, 150));
     editor.style_set_foreground(STYLE_JSON_PUNCT, Colour::rgb(92, 99, 112));
+    editor.style_set_foreground(STYLE_FIND_MATCH, Colour::rgb(25, 31, 42));
+    editor.style_set_background(STYLE_FIND_MATCH, Colour::rgb(255, 232, 128));
     editor.style_set_foreground(STYLE_LINE_NUMBER, Colour::rgb(94, 103, 117));
     editor.style_set_background(STYLE_LINE_NUMBER, Colour::rgb(243, 246, 250));
     editor.style_set_foreground(STYLE_INDENT_GUIDE, Colour::rgb(174, 184, 199));
@@ -391,19 +599,6 @@ fn apply_json_stc_folding(editor: &StyledTextCtrl, content: &str) {
             editor.set_fold_expanded(line_no, true);
         }
         depth = json_depth_after_line(line, depth);
-    }
-}
-
-fn set_all_editor_folds(editor: &StyledTextCtrl, expand: bool) {
-    let line_count = editor.get_line_count();
-    for line in 0..line_count {
-        if editor.get_fold_level(line) & FOLD_HEADER == 0 {
-            continue;
-        }
-        if editor.get_fold_expanded(line) != expand {
-            editor.toggle_fold(line);
-        }
-        editor.set_fold_expanded(line, expand);
     }
 }
 
