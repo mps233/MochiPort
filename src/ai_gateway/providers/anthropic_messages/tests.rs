@@ -86,11 +86,14 @@ fn parse_events_from_bytes(chunks: &[Bytes]) -> Vec<(String, Value)> {
 
 #[test]
 fn builds_anthropic_text_request() {
-    let (body, _) = build_anthropic_request(&request(vec![
-        message("user", "hello"),
-        message("assistant", "hi"),
-        message("user", "continue"),
-    ]))
+    let (body, _) = build_anthropic_request(
+        &request(vec![
+            message("user", "hello"),
+            message("assistant", "hi"),
+            message("user", "continue"),
+        ]),
+        None,
+    )
     .unwrap();
 
     assert_eq!(body["model"], "claude-sonnet-4-6");
@@ -101,6 +104,17 @@ fn builds_anthropic_text_request() {
     assert_eq!(body["messages"][0]["content"][0]["text"], "hello");
     assert_eq!(body["messages"][1]["role"], "assistant");
     assert_eq!(body["messages"][1]["content"][0]["text"], "hi");
+    assert_eq!(body["cache_control"]["type"], "ephemeral");
+    assert!(body["cache_control"].get("ttl").is_none());
+}
+
+#[test]
+fn builds_anthropic_request_with_one_hour_prompt_cache_ttl() {
+    let (body, _) =
+        build_anthropic_request(&request(vec![message("user", "hello")]), Some("1h")).unwrap();
+
+    assert_eq!(body["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["cache_control"]["ttl"], "1h");
 }
 
 #[test]
@@ -120,7 +134,7 @@ fn builds_anthropic_tool_result_message() {
     ]));
 
     let (body, _) =
-        build_anthropic_request(&request(vec![message("user", "run"), output])).unwrap();
+        build_anthropic_request(&request(vec![message("user", "run"), output]), None).unwrap();
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"][0]["type"], "tool_result");
     assert_eq!(
@@ -153,7 +167,7 @@ fn builds_anthropic_tools_and_tool_choice() {
         "name": "open page"
     }));
 
-    let (body, map) = build_anthropic_request(&req).unwrap();
+    let (body, map) = build_anthropic_request(&req, None).unwrap();
     assert_eq!(body["tools"][0]["name"], "browser__codexns__open_page");
     assert_eq!(body["tools"][0]["description"], "Open a URL");
     assert_eq!(body["tools"][0]["input_schema"]["required"][0], "url");
@@ -176,7 +190,7 @@ fn builds_anthropic_web_search_server_tool() {
         }
     })];
 
-    let (body, _) = build_anthropic_request(&req).unwrap();
+    let (body, _) = build_anthropic_request(&req, None).unwrap();
     assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
     assert_eq!(body["tools"][0]["name"], "web_search");
     assert_eq!(body["tools"][0]["max_uses"], 3);
@@ -192,7 +206,7 @@ fn builds_anthropic_thinking_from_reasoning() {
         generate_summary: None,
     });
 
-    let (body, _) = build_anthropic_request(&req).unwrap();
+    let (body, _) = build_anthropic_request(&req, None).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 2_048);
 }

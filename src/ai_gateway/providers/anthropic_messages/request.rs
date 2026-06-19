@@ -11,6 +11,7 @@ use super::types::DEFAULT_MAX_TOKENS;
 
 pub(super) fn build_anthropic_request(
     request: &GatewayRequest,
+    prompt_cache_retention: Option<&str>,
 ) -> Result<(Value, ToolNameMap), GatewayError> {
     let mut tool_name_map = ToolNameMap::default();
     let mut body = Map::new();
@@ -54,5 +55,33 @@ pub(super) fn build_anthropic_request(
             convert_tool_choice_to_anthropic(tool_choice, &mut tool_name_map),
         );
     }
+    insert_prompt_cache_control(&mut body, prompt_cache_retention);
     Ok((Value::Object(body), tool_name_map))
+}
+
+fn insert_prompt_cache_control(
+    body: &mut Map<String, Value>,
+    prompt_cache_retention: Option<&str>,
+) {
+    if body.contains_key("cache_control") {
+        return;
+    }
+
+    let mut cache_control = Map::new();
+    cache_control.insert("type".to_string(), json!("ephemeral"));
+    if matches!(
+        normalized_anthropic_cache_ttl(prompt_cache_retention),
+        Some("1h")
+    ) {
+        cache_control.insert("ttl".to_string(), json!("1h"));
+    }
+    body.insert("cache_control".to_string(), Value::Object(cache_control));
+}
+
+fn normalized_anthropic_cache_ttl(prompt_cache_retention: Option<&str>) -> Option<&'static str> {
+    let value = prompt_cache_retention?.trim().to_ascii_lowercase();
+    match value.as_str() {
+        "1h" => Some("1h"),
+        _ => None,
+    }
 }

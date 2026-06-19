@@ -47,7 +47,11 @@ pub async fn handle(
     provider: &ProviderConfig,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
-    let (anthropic_body, tool_name_map) = build_anthropic_request(request)?;
+    let prompt_cache_retention = request
+        .prompt_cache_retention
+        .as_deref()
+        .or(provider.prompt_cache_retention.as_deref());
+    let (anthropic_body, tool_name_map) = build_anthropic_request(request, prompt_cache_retention)?;
     let url = format!("{}/v1/messages", provider_api_root(&provider.base_url));
     debug!(url = %url, stream = false, "proxying to anthropic messages");
 
