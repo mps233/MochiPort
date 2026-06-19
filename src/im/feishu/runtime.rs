@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use tracing::{info, warn};
 
 use crate::{
@@ -26,6 +26,8 @@ use crate::{
 const FEISHU_CARDKIT_THROTTLE_MS: u64 = 100;
 const FEISHU_CARDKIT_LONG_GAP_THRESHOLD_MS: u64 = 2000;
 const FEISHU_CARDKIT_BATCH_AFTER_GAP_MS: u64 = 300;
+const FEISHU_CARDKIT_SEND_TIMEOUT_MS: u64 = 15_000;
+const FEISHU_CARDKIT_RETRY_AFTER_ERROR_MS: u64 = 500;
 const FEISHU_LOG_PREVIEW_CHARS: usize = 240;
 
 fn streaming_card_key(thread_id: &str, item_id: &str) -> String {
@@ -406,7 +408,7 @@ async fn drive_streaming_card_state(
                 tail = %log_tail(&state_snapshot.text),
                 "Sending Feishu CardKit streaming card"
             );
-            send_agent_message_cardkit(&api, &state_snapshot).await
+            send_streaming_with_timeout(send_agent_message_cardkit(&api, &state_snapshot)).await
         } else {
             write_stream_log("send_begin", thread_id, item_id, &state_snapshot, "");
             info!(
@@ -429,7 +431,8 @@ async fn drive_streaming_card_state(
                 tail = %log_tail(&state_snapshot.text),
                 "Sending Feishu interactive streaming card"
             );
-            send_interactive_streaming_card(&api, &state_snapshot).await
+            send_streaming_with_timeout(send_interactive_streaming_card(&api, &state_snapshot))
+                .await
         };
 
         match send_result {
@@ -528,10 +531,26 @@ async fn drive_streaming_card_state(
                         "Feishu streaming send failed"
                     );
                 }
-                return Err(err.to_string());
+                tokio::time::sleep(Duration::from_millis(FEISHU_CARDKIT_RETRY_AFTER_ERROR_MS))
+                    .await;
+                continue;
             }
         }
     }
+}
+
+async fn send_streaming_with_timeout<F>(
+    operation: F,
+) -> Result<(Option<String>, Option<String>, u64)>
+where
+    F: std::future::Future<Output = Result<(Option<String>, Option<String>, u64)>>,
+{
+    tokio::time::timeout(
+        Duration::from_millis(FEISHU_CARDKIT_SEND_TIMEOUT_MS),
+        operation,
+    )
+    .await
+    .map_err(|_| anyhow!("Feishu streaming card send timed out"))?
 }
 
 async fn send_agent_message_cardkit(

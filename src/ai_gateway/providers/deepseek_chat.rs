@@ -15,9 +15,12 @@ use crate::ai_gateway::model::GatewayRequest;
 use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
 };
-use crate::ai_gateway::transform::chat_to_responses::convert_chat_response;
+use crate::ai_gateway::tool_names::ToolNameMap;
+use crate::ai_gateway::transform::chat_to_responses::convert_chat_response_with_tool_names;
 use crate::ai_gateway::transform::responses_stream::ChatSseToResponsesSse;
-use crate::ai_gateway::transform::responses_to_chat::build_chat_request;
+use crate::ai_gateway::transform::responses_to_chat::build_chat_request_with_tool_names;
+
+use super::{apply_total_request_timeout, execute_stream_start, map_upstream_response};
 
 /// DeepSeek Chat Completions 出站处理。
 pub async fn handle(
@@ -27,7 +30,7 @@ pub async fn handle(
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     // 1. Responses → Chat Completions 请求转换
-    let chat_body = build_chat_request(request, true)
+    let (chat_body, tool_name_map) = build_chat_request_with_tool_names(request, true)
         .map_err(|e| GatewayError::bad_request(format!("transform error: {e}")))?;
 
     let url = format!(
@@ -42,9 +45,10 @@ pub async fn handle(
     let req_builder = client
         .post(&url)
         .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {}", provider.api_key))
-        .timeout(std::time::Duration::from_secs(provider.timeout_secs))
-        .json(&chat_body);
+        .header("authorization", format!("Bearer {}", provider.api_key));
+    let req_builder =
+        apply_total_request_timeout(req_builder, provider.timeout_secs, request.stream)
+            .json(&chat_body);
     let upstream_req = apply_upstream_headers(req_builder, &ctx.upstream_headers)
         .build()
         .map_err(|e| {
@@ -68,14 +72,20 @@ pub async fn handle(
         }
     }
 
-    let upstream_resp = client.execute(upstream_req).await.map_err(|e| {
-        if e.is_timeout() {
-            GatewayError::upstream_timeout()
-        } else {
-            error!(error = %e, "deepseek upstream request failed");
-            GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("upstream error: {e}"))
-        }
-    })?;
+    let upstream_resp = if request.stream {
+        execute_stream_start(
+            &client,
+            upstream_req,
+            provider.timeout_secs,
+            "deepseek upstream request failed",
+        )
+        .await?
+    } else {
+        map_upstream_response(
+            client.execute(upstream_req).await,
+            "deepseek upstream request failed",
+        )?
+    };
 
     let upstream_status = upstream_resp.status();
     if !upstream_status.is_success() {
@@ -87,9 +97,9 @@ pub async fn handle(
 
     // 3. 流式 vs 非流式
     if request.stream {
-        handle_stream(upstream_resp, &request.model, log_context).await
+        handle_stream(upstream_resp, &request.model, tool_name_map, log_context).await
     } else {
-        handle_non_stream(upstream_resp, &request.model, log_context).await
+        handle_non_stream(upstream_resp, &request.model, tool_name_map, log_context).await
     }
 }
 
@@ -97,15 +107,17 @@ pub async fn handle(
 async fn handle_non_stream(
     resp: reqwest::Response,
     model: &str,
+    tool_name_map: ToolNameMap,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     let chat_resp: serde_json::Value = resp.json().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("parse upstream json: {e}"))
     })?;
 
-    let response_obj = convert_chat_response(&chat_resp, model).map_err(|e| {
-        GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("transform error: {e}"))
-    })?;
+    let response_obj = convert_chat_response_with_tool_names(&chat_resp, model, &tool_name_map)
+        .map_err(|e| {
+            GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("transform error: {e}"))
+        })?;
 
     let body_bytes = serde_json::to_vec(&response_obj).unwrap_or_default();
     if let Some(log_context) = &log_context {
@@ -137,12 +149,13 @@ async fn handle_non_stream(
 async fn handle_stream(
     resp: reqwest::Response,
     model: &str,
+    tool_name_map: ToolNameMap,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     let model = model.to_string();
     let byte_stream = resp.bytes_stream();
 
-    let sse_stream = ChatSseToResponsesSse::new(byte_stream, model);
+    let sse_stream = ChatSseToResponsesSse::new_with_tool_names(byte_stream, model, tool_name_map);
 
     let body = if let Some(log_context) = log_context {
         Body::from_stream(ResponsesSseLogStream::new(sse_stream, log_context))

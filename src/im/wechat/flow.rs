@@ -7,6 +7,7 @@ use crate::{
         core::{
             approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
             i18n::{ImText, im_text_for_state},
+            outbound::ImOutboundSender,
             routing::{
                 active_turn_for_message, clear_thread_binding, remote_client_key_for_thread,
                 route_for_message,
@@ -23,6 +24,7 @@ use crate::{
             thread_list::{empty_thread_routing_request, load_thread_routing_page},
             turn::{TurnStartOutcome, start_turn_for_route},
         },
+        events,
         wechat::{adapter::WechatAdapter, api::WechatApi, types::WechatSettings},
     },
     im_runtime::{RouteTarget, ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
@@ -32,7 +34,11 @@ use crate::{
 
 const WECHAT_CREATE_OPTION_PAGE_SIZE: usize = 8;
 
-pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) -> Result<()> {
+pub(crate) async fn handle_inbound(
+    state: SharedState,
+    outbound_tx: ImOutboundSender,
+    message: InboundMessage,
+) -> Result<()> {
     info!(
         "inbound wechat message chat={} sender={}",
         message.chat_id, message.sender_id
@@ -85,7 +91,8 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             .await
             .has_pending_approvals(&message.conversation_key())
     {
-        handle_wechat_approval_text_reply(&state, &adapter, &message, command).await?;
+        handle_wechat_approval_text_reply(&state, &outbound_tx, &adapter, &message, command)
+            .await?;
         return Ok(());
     }
 
@@ -1180,6 +1187,7 @@ async fn handle_thread_list_text_reply(
 
 async fn handle_wechat_approval_text_reply(
     state: &SharedState,
+    outbound_tx: &ImOutboundSender,
     adapter: &WechatAdapter,
     message: &InboundMessage,
     command: &str,
@@ -1197,13 +1205,8 @@ async fn handle_wechat_approval_text_reply(
                     im_text_for_state(state).approval_decision_submitted(),
                 )
                 .await?;
-            if let Some((conversation_key, next_approval)) = next
-                && let Some(route) =
-                    crate::im_runtime::route_from_conversation_key(&conversation_key)
-                && route.platform == crate::types::ImPlatformKind::Wechat
-            {
-                adapter
-                    .send_approval(state, &route.account_id, &route.chat_id, &next_approval)
+            if let Some((conversation_key, next_approval)) = next {
+                events::send_next_approval(state, outbound_tx, &conversation_key, &next_approval)
                     .await?;
             }
         }

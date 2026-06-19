@@ -9,6 +9,7 @@ use crate::{
     im::core::{
         approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
         i18n::im_text_for_state,
+        outbound::ImOutboundSender,
         routing::{active_turn_for_message, remote_client_key_for_thread, route_for_message},
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
@@ -20,7 +21,10 @@ use crate::{
         thread_list::{empty_thread_routing_request, load_thread_routing_page},
         turn::{TurnStartOutcome, start_turn_for_route},
     },
-    im::feishu::{FeishuAdapter, FeishuApi, renderer},
+    im::{
+        events,
+        feishu::{FeishuAdapter, FeishuApi, renderer},
+    },
     im_runtime::{PendingApproval, RouteTarget, ThreadRoutingRequestState, TurnOrigin},
     remote_control_backend,
     types::{InboundAction, InboundMessage, ThreadRouteDirection},
@@ -29,6 +33,7 @@ use crate::{
 pub(crate) async fn handle_inbound(
     state: SharedState,
     api: FeishuApi,
+    outbound_tx: ImOutboundSender,
     message: InboundMessage,
 ) -> Result<()> {
     info!(
@@ -57,9 +62,9 @@ pub(crate) async fn handle_inbound(
         runtime.last_route = Some(route.clone());
     }
     if let Some(action) = message.action.clone() {
-        return handle_inbound_action(state, api, message, action).await;
+        return handle_inbound_action(state, api, outbound_tx, message, action).await;
     }
-    if handle_control_message(&state, &api, &message, trimmed).await? {
+    if handle_control_message(&state, &api, &outbound_tx, &message, trimmed).await? {
         return Ok(());
     }
     if active_turn_for_message(&state, &message).await.is_some() {
@@ -146,13 +151,14 @@ async fn send_text_to_message(api: &FeishuApi, message: &InboundMessage, text: &
 async fn handle_control_message(
     state: &SharedState,
     api: &FeishuApi,
+    outbound_tx: &ImOutboundSender,
     message: &InboundMessage,
     command: &str,
 ) -> Result<bool> {
     let normalized = command.to_ascii_lowercase();
     let text = im_text_for_state(state);
     if is_approval_reply(&normalized) {
-        return handle_approval_text_reply(state, api, message, command).await;
+        return handle_approval_text_reply(state, api, outbound_tx, message, command).await;
     }
     match normalized.as_str() {
         "/s" => {
@@ -230,6 +236,7 @@ async fn handle_control_message(
 pub(crate) async fn handle_inbound_action(
     state: SharedState,
     api: FeishuApi,
+    _outbound_tx: ImOutboundSender,
     message: InboundMessage,
     action: InboundAction,
 ) -> Result<()> {
@@ -523,6 +530,7 @@ async fn create_new_thread_for_route(
 async fn handle_approval_text_reply(
     state: &SharedState,
     api: &FeishuApi,
+    outbound_tx: &ImOutboundSender,
     message: &InboundMessage,
     command: &str,
 ) -> Result<bool> {
@@ -541,6 +549,7 @@ async fn handle_approval_text_reply(
                 pending,
                 option_index,
                 decision,
+                outbound_tx,
             )
             .await?;
         }
@@ -719,6 +728,7 @@ async fn respond_to_pending_approval(
     pending: PendingApproval,
     option_index: usize,
     decision: crate::im_runtime::ApprovalDecisionOption,
+    outbound_tx: &ImOutboundSender,
 ) -> Result<()> {
     let next = submit_approval_decision(state, &pending, &decision).await?;
     update_resolved_approval_card(state, api, &pending, option_index, &decision.label).await;
@@ -734,7 +744,7 @@ async fn respond_to_pending_approval(
         )
         .await;
     if let Some((conversation_key, next_approval)) = next {
-        send_next_approval_card(state, api, &conversation_key, &next_approval).await?;
+        events::send_next_approval(state, outbound_tx, &conversation_key, &next_approval).await?;
     }
     Ok(())
 }
@@ -914,53 +924,6 @@ pub(crate) async fn update_resolved_approval_card(
             im_text_for_state(state),
         )
         .await;
-}
-
-pub(crate) async fn send_next_approval_card(
-    state: &SharedState,
-    api: &FeishuApi,
-    conversation_key: &str,
-    approval: &PendingApproval,
-) -> Result<()> {
-    let Some(route) = crate::im_runtime::route_from_conversation_key(conversation_key) else {
-        state
-            .push_event(
-                "warn",
-                "approval_next_route_missing",
-                format!("conversation={conversation_key}"),
-            )
-            .await;
-        return Ok(());
-    };
-    send_approval_card(state, api, &route, approval).await
-}
-
-pub(crate) async fn send_approval_card(
-    state: &SharedState,
-    api: &FeishuApi,
-    route: &RouteTarget,
-    approval: &PendingApproval,
-) -> Result<()> {
-    let adapter = FeishuAdapter::new(api.clone());
-    let message_id = adapter
-        .send_approval(&route.chat_id, approval, im_text_for_state(state))
-        .await?;
-    state
-        .runtime
-        .lock()
-        .await
-        .remember_approval_message_id(&approval.request_id, message_id.clone());
-    state
-        .push_event(
-            "info",
-            "approval_card_sent",
-            format!(
-                "conversation={} request_id={} message={}",
-                route.conversation_key, approval.request_id, message_id
-            ),
-        )
-        .await;
-    Ok(())
 }
 
 pub(crate) async fn send_image_item_card(

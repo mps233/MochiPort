@@ -1,12 +1,15 @@
 pub mod catalog;
+pub mod codec;
 pub mod config;
 pub mod context;
 pub mod error;
 pub mod handler;
+pub mod ir;
 pub mod model;
 pub mod providers;
 pub mod request_log;
 pub mod router;
+pub mod tool_names;
 pub mod transform;
 
 use axum::{

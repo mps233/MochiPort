@@ -212,6 +212,24 @@ pub fn approval_request_view(notification: &CodexNotification) -> Option<Approva
                 decisions,
             })
         }
+        "item/permissions/requestApproval" => {
+            let summary = permissions_approval_summary(params);
+            let decisions = permissions_approval_decisions(params);
+            Some(ApprovalRequestView {
+                request_kind: "permissions".to_string(),
+                summary,
+                decisions,
+            })
+        }
+        "mcpServer/elicitation/request" => {
+            let summary = mcp_elicitation_summary(params);
+            let decisions = mcp_elicitation_decisions(params);
+            Some(ApprovalRequestView {
+                request_kind: "mcpElicitation".to_string(),
+                summary,
+                decisions,
+            })
+        }
         "applyPatchApproval" => {
             let reason = params.get("reason").and_then(|v| v.as_str()).unwrap_or("");
             Some(ApprovalRequestView {
@@ -240,6 +258,12 @@ pub fn approval_request_view(notification: &CodexNotification) -> Option<Approva
 }
 
 pub fn approval_response(decision: Value) -> Value {
+    if let Some(response) = decision.get("__codexRemotePermissionsResponse") {
+        return response.clone();
+    }
+    if let Some(response) = decision.get("__codexRemoteMcpElicitationResponse") {
+        return response.clone();
+    }
     json!({ "decision": decision })
 }
 
@@ -354,6 +378,87 @@ fn file_change_approval_summary(params: &Value) -> String {
     }
 }
 
+fn permissions_approval_summary(params: &Value) -> String {
+    let mut lines = Vec::new();
+    if let Some(reason) = params
+        .get("reason")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        lines.push(format!("reason: {reason}"));
+    }
+    if let Some(cwd) = params.get("cwd").and_then(|v| v.as_str()) {
+        lines.push(format!("cwd: `{cwd}`"));
+    }
+    if let Some(permissions) = params.get("permissions") {
+        if let Some(summary) = permission_profile_summary("permissions", permissions) {
+            lines.push(summary);
+        }
+    }
+    if let Some(item_id) = params.get("itemId").and_then(|v| v.as_str()) {
+        lines.push(format!("itemId: `{item_id}`"));
+    }
+    if lines.is_empty() {
+        "permissions approval requested".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn mcp_elicitation_summary(params: &Value) -> String {
+    let mut lines = Vec::new();
+    if let Some(server_name) = params.get("serverName").and_then(|v| v.as_str()) {
+        lines.push(format!("serverName: `{server_name}`"));
+    }
+    if let Some(message) = params
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        lines.push(message.to_string());
+    }
+    if let Some(url) = params.get("url").and_then(|v| v.as_str()) {
+        lines.push(format!("url: `{url}`"));
+    }
+    if let Some(elicitation_id) = params.get("elicitationId").and_then(|v| v.as_str()) {
+        lines.push(format!("elicitationId: `{elicitation_id}`"));
+    }
+    if let Some(mode) = params.get("mode").and_then(|v| v.as_str()) {
+        lines.push(format!("mode: `{mode}`"));
+    }
+    if let Some(tool_summary) = mcp_tool_display_summary(params) {
+        lines.push(tool_summary);
+    }
+    if lines.is_empty() {
+        "MCP elicitation requested".to_string()
+    } else {
+        lines.join("\n")
+    }
+}
+
+fn mcp_tool_display_summary(params: &Value) -> Option<String> {
+    let display_params = params
+        .get("_meta")
+        .and_then(|meta| meta.get("tool_params_display"))
+        .and_then(|value| value.as_array())?;
+    let lines = display_params
+        .iter()
+        .take(4)
+        .filter_map(|param| {
+            let name = param
+                .get("display_name")
+                .or_else(|| param.get("displayName"))
+                .or_else(|| param.get("name"))
+                .and_then(|v| v.as_str())?;
+            let value = param.get("value").map(compact_json_value)?;
+            Some(format!("- `{name}`: {value}"))
+        })
+        .collect::<Vec<_>>();
+    (!lines.is_empty()).then(|| format!("tool params:\n{}", lines.join("\n")))
+}
+
 fn command_actions_summary(params: &Value) -> Option<String> {
     let actions = params.get("commandActions")?.as_array()?;
     if actions.is_empty() {
@@ -387,7 +492,13 @@ fn command_actions_summary(params: &Value) -> Option<String> {
 }
 
 fn additional_permissions_summary(params: &Value) -> Option<String> {
-    let permissions = params.get("additionalPermissions")?;
+    permission_profile_summary(
+        "additionalPermissions",
+        params.get("additionalPermissions")?,
+    )
+}
+
+fn permission_profile_summary(label: &str, permissions: &Value) -> Option<String> {
     let mut parts = Vec::new();
     if permissions
         .get("network")
@@ -426,7 +537,7 @@ fn additional_permissions_summary(params: &Value) -> Option<String> {
             }
         }
     }
-    (!parts.is_empty()).then(|| format!("additionalPermissions: {}", parts.join("; ")))
+    (!parts.is_empty()).then(|| format!("{label}: {}", parts.join("; ")))
 }
 
 fn execpolicy_amendment_summary(params: &Value) -> Option<String> {
@@ -506,6 +617,141 @@ fn file_change_approval_decisions() -> Vec<ApprovalDecisionOption> {
         ),
         decision_option("No, and tell Codex what to do differently", json!("cancel")),
     ]
+}
+
+fn permissions_approval_decisions(params: &Value) -> Vec<ApprovalDecisionOption> {
+    vec![
+        decision_option(
+            "Yes, allow these permissions for this turn",
+            permissions_decision("turn", params),
+        ),
+        decision_option(
+            "Yes, allow these permissions for this session",
+            permissions_decision("session", params),
+        ),
+        decision_option(
+            "No, continue without granting them",
+            permissions_denial_decision(),
+        ),
+    ]
+}
+
+fn mcp_elicitation_decisions(params: &Value) -> Vec<ApprovalDecisionOption> {
+    let mut decisions = vec![decision_option(
+        "Yes, allow once",
+        mcp_elicitation_decision("accept", mcp_accept_content(params), None),
+    )];
+
+    if mcp_elicitation_supports_persist(params, "session") {
+        decisions.push(decision_option(
+            "Yes, allow for this session",
+            mcp_elicitation_decision("accept", mcp_accept_content(params), Some("session")),
+        ));
+    }
+
+    if mcp_elicitation_supports_persist(params, "always")
+        || params.get("mode").and_then(|v| v.as_str()) == Some("url")
+    {
+        decisions.push(decision_option(
+            "Yes, always allow",
+            mcp_elicitation_decision("accept", mcp_accept_content(params), Some("always")),
+        ));
+    }
+
+    decisions.push(decision_option(
+        "No, continue without it",
+        mcp_elicitation_decision("decline", Value::Null, None),
+    ));
+    decisions.push(decision_option(
+        "Cancel this request",
+        mcp_elicitation_decision("cancel", Value::Null, None),
+    ));
+    decisions
+}
+
+fn mcp_elicitation_decision(action: &str, content: Value, persist: Option<&str>) -> Value {
+    let content = (!content.is_null()).then_some(content);
+    let meta = persist.map(|persist| json!({ "persist": persist }));
+    json!({
+        "__codexRemoteMcpElicitationResponse": {
+            "action": action,
+            "content": content,
+            "_meta": meta
+        }
+    })
+}
+
+fn mcp_elicitation_supports_persist(params: &Value, expected: &str) -> bool {
+    match params.get("_meta").and_then(|meta| meta.get("persist")) {
+        Some(Value::String(value)) => value == expected,
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_str())
+            .any(|value| value == expected),
+        _ => false,
+    }
+}
+
+fn mcp_accept_content(params: &Value) -> Value {
+    let Some(properties) = params
+        .get("requestedSchema")
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|value| value.as_object())
+    else {
+        return Value::Null;
+    };
+    let required = params
+        .get("requestedSchema")
+        .and_then(|schema| schema.get("required"))
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut content = serde_json::Map::new();
+    for name in required {
+        let Some(schema) = properties.get(name) else {
+            continue;
+        };
+        if let Some(default) = schema.get("default") {
+            content.insert(name.to_string(), default.clone());
+        } else if schema.get("type").and_then(|value| value.as_str()) == Some("boolean") {
+            content.insert(name.to_string(), Value::Bool(true));
+        }
+    }
+    if content.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(content)
+    }
+}
+
+fn permissions_decision(scope: &str, params: &Value) -> Value {
+    let permissions = params
+        .get("permissions")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    json!({
+        "__codexRemotePermissionsResponse": {
+            "permissions": permissions,
+            "scope": scope,
+            "strictAutoReview": null
+        }
+    })
+}
+
+fn permissions_denial_decision() -> Value {
+    json!({
+        "__codexRemotePermissionsResponse": {
+            "permissions": {},
+            "scope": "turn",
+            "strictAutoReview": null
+        }
+    })
 }
 
 fn command_decision_option(decision: &Value, params: &Value) -> Option<ApprovalDecisionOption> {
@@ -608,12 +854,32 @@ fn is_accept_decision(decision: &Value) -> bool {
     decision
         .as_str()
         .is_some_and(|value| value == "accept" || value == "approved")
+        || decision
+            .get("__codexRemotePermissionsResponse")
+            .and_then(|value| value.get("permissions"))
+            .and_then(|value| value.as_object())
+            .is_some_and(|permissions| !permissions.is_empty())
+        || decision
+            .get("__codexRemoteMcpElicitationResponse")
+            .and_then(|value| value.get("action"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| value == "accept")
 }
 
 fn is_negative_decision(decision: &Value) -> bool {
     decision
         .as_str()
         .is_some_and(|value| matches!(value, "decline" | "cancel" | "denied"))
+        || decision
+            .get("__codexRemotePermissionsResponse")
+            .and_then(|value| value.get("permissions"))
+            .and_then(|value| value.as_object())
+            .is_some_and(|permissions| permissions.is_empty())
+        || decision
+            .get("__codexRemoteMcpElicitationResponse")
+            .and_then(|value| value.get("action"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| matches!(value, "decline" | "cancel"))
         || decision
             .get("applyNetworkPolicyAmendment")
             .and_then(|value| value.get("network_policy_amendment"))
@@ -707,6 +973,248 @@ mod tests {
         assert_eq!(
             approval_response(view.decisions[0].decision.clone()),
             json!({ "decision": "approved" })
+        );
+    }
+
+    #[test]
+    fn permissions_approval_builds_protocol_response_options() {
+        let view = approval_request_view(&notification(
+            "item/permissions/requestApproval",
+            json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "itemId": "item",
+                "startedAtMs": 1,
+                "cwd": "D:\\repo",
+                "reason": "Need website access",
+                "permissions": {
+                    "network": {
+                        "enabled": true
+                    }
+                }
+            }),
+        ))
+        .expect("approval view");
+
+        assert_eq!(view.request_kind, "permissions");
+        assert!(view.summary.contains("Need website access"));
+        assert!(view.summary.contains("permissions: network"));
+        assert_eq!(view.decisions.len(), 3);
+        assert_eq!(
+            approval_response(view.decisions[0].decision.clone()),
+            json!({
+                "permissions": {
+                    "network": {
+                        "enabled": true
+                    }
+                },
+                "scope": "turn",
+                "strictAutoReview": null
+            })
+        );
+        assert_eq!(
+            approval_response(view.decisions[1].decision.clone()),
+            json!({
+                "permissions": {
+                    "network": {
+                        "enabled": true
+                    }
+                },
+                "scope": "session",
+                "strictAutoReview": null
+            })
+        );
+        assert_eq!(
+            approval_response(view.decisions[2].decision.clone()),
+            json!({
+                "permissions": {},
+                "scope": "turn",
+                "strictAutoReview": null
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_url_elicitation_builds_protocol_response_options() {
+        let view = approval_request_view(&notification(
+            "mcpServer/elicitation/request",
+            json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "serverName": "Browser",
+                "mode": "url",
+                "message": "Allow Browser Use to access https://www.xiaohongshu.com?",
+                "url": "https://www.xiaohongshu.com",
+                "elicitationId": "browser-access"
+            }),
+        ))
+        .expect("approval view");
+
+        assert_eq!(view.request_kind, "mcpElicitation");
+        assert!(view.summary.contains("Browser"));
+        assert!(view.summary.contains("https://www.xiaohongshu.com"));
+        assert_eq!(view.decisions.len(), 4);
+        assert_eq!(
+            approval_response(view.decisions[0].decision.clone()),
+            json!({
+                "action": "accept",
+                "content": null,
+                "_meta": null
+            })
+        );
+        assert_eq!(
+            approval_response(view.decisions[1].decision.clone()),
+            json!({
+                "action": "accept",
+                "content": null,
+                "_meta": {
+                    "persist": "always"
+                }
+            })
+        );
+        assert_eq!(
+            approval_response(view.decisions[2].decision.clone()),
+            json!({
+                "action": "decline",
+                "content": null,
+                "_meta": null
+            })
+        );
+        assert_eq!(
+            approval_response(view.decisions[3].decision.clone()),
+            json!({
+                "action": "cancel",
+                "content": null,
+                "_meta": null
+            })
+        );
+    }
+
+    #[test]
+    fn mcp_form_elicitation_accepts_boolean_confirmation() {
+        let view = approval_request_view(&notification(
+            "mcpServer/elicitation/request",
+            json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "serverName": "codex_apps",
+                "mode": "form",
+                "message": "Allow this request?",
+                "_meta": {
+                    "persist": ["session", "always"]
+                },
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "confirmed": {
+                            "type": "boolean"
+                        }
+                    },
+                    "required": ["confirmed"]
+                }
+            }),
+        ))
+        .expect("approval view");
+
+        assert_eq!(view.decisions.len(), 5);
+        assert_eq!(
+            approval_response(view.decisions[0].decision.clone()),
+            json!({
+                "action": "accept",
+                "content": {
+                    "confirmed": true
+                },
+                "_meta": null
+            })
+        );
+        assert_eq!(
+            approval_response(view.decisions[1].decision.clone()),
+            json!({
+                "action": "accept",
+                "content": {
+                    "confirmed": true
+                },
+                "_meta": {
+                    "persist": "session"
+                }
+            })
+        );
+        assert_eq!(
+            approval_response(view.decisions[2].decision.clone()),
+            json!({
+                "action": "accept",
+                "content": {
+                    "confirmed": true
+                },
+                "_meta": {
+                    "persist": "always"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn yes_no_reply_maps_to_permissions_decisions() {
+        let pending = PendingApproval {
+            request_id: json!(7),
+            request_kind: "permissions".to_string(),
+            method: "item/permissions/requestApproval".to_string(),
+            params: json!({}),
+            summary: "summary".to_string(),
+            decisions: vec![
+                super::decision_option(
+                    "Yes",
+                    json!({
+                        "__codexRemotePermissionsResponse": {
+                            "permissions": {
+                                "network": {
+                                    "enabled": true
+                                }
+                            },
+                            "scope": "turn",
+                            "strictAutoReview": null
+                        }
+                    }),
+                ),
+                super::decision_option(
+                    "No",
+                    json!({
+                        "__codexRemotePermissionsResponse": {
+                            "permissions": {},
+                            "scope": "turn",
+                            "strictAutoReview": null
+                        }
+                    }),
+                ),
+            ],
+            message_id: None,
+            remote_client_key: None,
+        };
+
+        let (yes_index, yes) = approval_decision_by_input(&pending, "/y").expect("yes");
+        let (no_index, no) = approval_decision_by_input(&pending, "/n").expect("no");
+
+        assert_eq!(yes_index, 1);
+        assert_eq!(
+            approval_response(yes.decision),
+            json!({
+                "permissions": {
+                    "network": {
+                        "enabled": true
+                    }
+                },
+                "scope": "turn",
+                "strictAutoReview": null
+            })
+        );
+        assert_eq!(no_index, 2);
+        assert_eq!(
+            approval_response(no.decision),
+            json!({
+                "permissions": {},
+                "scope": "turn",
+                "strictAutoReview": null
+            })
         );
     }
 

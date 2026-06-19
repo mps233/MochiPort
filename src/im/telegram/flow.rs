@@ -9,6 +9,7 @@ use crate::{
             submit_approval_decision,
         },
         i18n::im_text_for_state,
+        outbound::ImOutboundSender,
         routing::{
             active_turn_for_message, clear_thread_binding, remote_client_key_for_thread,
             route_for_message,
@@ -38,7 +39,11 @@ use crate::{
 
 const TELEGRAM_CREATE_OPTION_PAGE_SIZE: usize = 8;
 
-pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) -> Result<()> {
+pub(crate) async fn handle_inbound(
+    state: SharedState,
+    outbound_tx: ImOutboundSender,
+    message: InboundMessage,
+) -> Result<()> {
     info!(
         "inbound telegram message chat={} sender={}",
         message.chat_id, message.sender_id
@@ -70,7 +75,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
         runtime.last_route = Some(route.clone());
     }
     if let Some(action) = message.action.clone() {
-        return handle_inbound_action(state, adapter, message, action).await;
+        return handle_inbound_action(state, outbound_tx, adapter, message, action).await;
     }
 
     if handle_telegram_thread_create_text_input(&state, &adapter, &message, trimmed).await? {
@@ -97,7 +102,8 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             .await
             .has_pending_approvals(&message.conversation_key())
     {
-        handle_telegram_approval_text_reply(&state, &adapter, &message, command).await?;
+        handle_telegram_approval_text_reply(&state, &outbound_tx, &adapter, &message, command)
+            .await?;
         return Ok(());
     }
     if let Some(command) = command.as_deref()
@@ -114,7 +120,8 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
     if let Some(command) = command.as_deref()
         && is_approval_reply(command)
     {
-        handle_telegram_approval_text_reply(&state, &adapter, &message, command).await?;
+        handle_telegram_approval_text_reply(&state, &outbound_tx, &adapter, &message, command)
+            .await?;
         return Ok(());
     }
 
@@ -312,6 +319,7 @@ async fn create_telegram_thread_for_route(
 
 pub(crate) async fn handle_inbound_action(
     state: SharedState,
+    outbound_tx: ImOutboundSender,
     adapter: TelegramAdapter,
     message: InboundMessage,
     action: InboundAction,
@@ -323,6 +331,7 @@ pub(crate) async fn handle_inbound_action(
         } => {
             handle_telegram_approval_button_reply(
                 &state,
+                &outbound_tx,
                 &adapter,
                 &message,
                 &request_fingerprint,
@@ -1155,12 +1164,14 @@ async fn handle_telegram_thread_route_resume_selected(
 
 async fn handle_telegram_approval_text_reply(
     state: &SharedState,
+    outbound_tx: &ImOutboundSender,
     adapter: &TelegramAdapter,
     message: &InboundMessage,
     command: &str,
 ) -> Result<bool> {
     handle_telegram_approval_outcome(
         state,
+        outbound_tx,
         adapter,
         message,
         resolve_approval_reply(state, message, command).await,
@@ -1170,6 +1181,7 @@ async fn handle_telegram_approval_text_reply(
 
 async fn handle_telegram_approval_button_reply(
     state: &SharedState,
+    outbound_tx: &ImOutboundSender,
     adapter: &TelegramAdapter,
     message: &InboundMessage,
     request_fingerprint: &str,
@@ -1177,6 +1189,7 @@ async fn handle_telegram_approval_button_reply(
 ) -> Result<bool> {
     handle_telegram_approval_outcome(
         state,
+        outbound_tx,
         adapter,
         message,
         resolve_approval_button_reply(state, message, request_fingerprint, option_index).await,
@@ -1186,6 +1199,7 @@ async fn handle_telegram_approval_button_reply(
 
 async fn handle_telegram_approval_outcome(
     state: &SharedState,
+    outbound_tx: &ImOutboundSender,
     adapter: &TelegramAdapter,
     message: &InboundMessage,
     outcome: ApprovalReplyOutcome,
@@ -1215,13 +1229,8 @@ async fn handle_telegram_approval_outcome(
                 )
                 .await;
             if let Some((conversation_key, next_approval)) = next {
-                events::send_next_telegram_approval(
-                    state,
-                    adapter,
-                    &conversation_key,
-                    &next_approval,
-                )
-                .await?;
+                events::send_next_approval(state, outbound_tx, &conversation_key, &next_approval)
+                    .await?;
             }
         }
         ApprovalReplyOutcome::NoPending => {

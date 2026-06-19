@@ -15,7 +15,7 @@ use crate::{
             text_renderer,
         },
         feishu::{
-            FeishuAdapter, FeishuApi, flow as feishu_flow, renderer,
+            FeishuAdapter, flow as feishu_flow, renderer,
             runtime::{
                 self as feishu_runtime, complete_existing_item_card,
                 ensure_started_streaming_card_state, upsert_streaming_card_state,
@@ -31,7 +31,7 @@ use crate::{
 const COMMAND_OUTPUT_PREVIEW_CHARS: usize = 2400;
 pub(crate) async fn send_next_approval(
     state: &SharedState,
-    api_registry: &ImApiRegistry,
+    outbound_tx: &ImOutboundSender,
     conversation_key: &str,
     approval: &PendingApproval,
 ) -> Result<()> {
@@ -45,62 +45,52 @@ pub(crate) async fn send_next_approval(
             .await;
         return Ok(());
     };
-    send_approval(state, api_registry, &route, approval).await
+    enqueue_approval(state, outbound_tx, &route, approval).await
 }
 
 pub(crate) async fn send_approval(
     state: &SharedState,
-    api_registry: &ImApiRegistry,
+    outbound_tx: &ImOutboundSender,
     route: &RouteTarget,
     approval: &PendingApproval,
 ) -> Result<()> {
-    match route.platform {
-        ImPlatformKind::Feishu => {
-            let Some(api) = api_registry.feishu_for_route(route) else {
-                log_missing_api(state, route, "approval").await;
-                return Ok(());
-            };
-            send_feishu_approval(state, &api, route, approval).await
-        }
-        ImPlatformKind::Telegram => {
-            let Some(api) = api_registry.telegram_for_route(route) else {
-                log_missing_api(state, route, "approval").await;
-                return Ok(());
-            };
-            let adapter = TelegramAdapter::new(api);
-            send_telegram_approval(state, &adapter, route, approval).await
-        }
-        ImPlatformKind::Wechat => {
-            let Some(api) = api_registry.wechat_for_route(route) else {
-                log_missing_api(state, route, "approval").await;
-                return Ok(());
-            };
-            let adapter = WechatAdapter::new(api);
-            send_wechat_approval(state, &adapter, route, approval).await
-        }
-    }
+    enqueue_approval(state, outbound_tx, route, approval).await
 }
 
-pub(crate) async fn send_next_telegram_approval(
+async fn enqueue_approval(
     state: &SharedState,
-    adapter: &TelegramAdapter,
-    conversation_key: &str,
+    outbound_tx: &ImOutboundSender,
+    route: &RouteTarget,
     approval: &PendingApproval,
 ) -> Result<()> {
-    let Some(route) = crate::im_runtime::route_from_conversation_key(conversation_key) else {
-        state
-            .push_event(
-                "warn",
-                "telegram_approval_next_route_missing",
-                format!("conversation={conversation_key}"),
-            )
-            .await;
-        return Ok(());
-    };
-    if route.platform != ImPlatformKind::Telegram {
-        return Ok(());
-    }
-    send_telegram_approval(state, adapter, &route, approval).await
+    let request_key = approval.request_key();
+    outbound_tx.enqueue(ImOutboundMessage {
+        thread_id: approval
+            .params
+            .get("threadId")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        route: route.clone(),
+        item_id: Some(request_key),
+        item_type: Some("approval".to_string()),
+        kind: ImOutboundKind::Approval,
+        payload: ImOutboundPayload::Approval(approval.clone()),
+    })?;
+    state
+        .push_event(
+            "info",
+            "approval_queued",
+            format!(
+                "platform={} conversation={} request_id={} chat={}",
+                route.platform.key(),
+                route.conversation_key,
+                approval.request_id,
+                route.chat_id
+            ),
+        )
+        .await;
+    Ok(())
 }
 
 pub(crate) async fn send_turn_reply(
@@ -1099,88 +1089,6 @@ fn truncate_command_output_preview(text: &str) -> String {
         count += 1;
     }
     out
-}
-
-async fn send_feishu_approval(
-    state: &SharedState,
-    api: &FeishuApi,
-    route: &RouteTarget,
-    approval: &PendingApproval,
-) -> Result<()> {
-    let adapter = FeishuAdapter::new(api.clone());
-    let message_id = adapter
-        .send_approval(&route.chat_id, approval, im_text_for_state(state))
-        .await?;
-    state
-        .runtime
-        .lock()
-        .await
-        .remember_approval_message_id(&approval.request_id, message_id.clone());
-    state
-        .push_event(
-            "info",
-            "approval_card_sent",
-            format!(
-                "conversation={} request_id={} message={}",
-                route.conversation_key, approval.request_id, message_id
-            ),
-        )
-        .await;
-    Ok(())
-}
-
-async fn send_telegram_approval(
-    state: &SharedState,
-    adapter: &TelegramAdapter,
-    route: &RouteTarget,
-    approval: &PendingApproval,
-) -> Result<()> {
-    let message_id = adapter
-        .send_approval(&route.chat_id, approval, im_text_for_state(state))
-        .await?;
-    state
-        .runtime
-        .lock()
-        .await
-        .remember_approval_message_id(&approval.request_id, message_id.clone());
-    state
-        .push_event(
-            "info",
-            "telegram_approval_sent",
-            format!(
-                "conversation={} request_id={} message={}",
-                route.conversation_key, approval.request_id, message_id
-            ),
-        )
-        .await;
-    Ok(())
-}
-
-async fn send_wechat_approval(
-    state: &SharedState,
-    adapter: &WechatAdapter,
-    route: &RouteTarget,
-    approval: &PendingApproval,
-) -> Result<()> {
-    let message_id = adapter
-        .send_approval(state, &route.account_id, &route.chat_id, approval)
-        .await?;
-    state
-        .runtime
-        .lock()
-        .await
-        .remember_approval_message_id(&approval.request_id, message_id.clone());
-    state
-        .push_event(
-            "info",
-            "wechat_approval_sent",
-            format!(
-                "conversation={} request_id={} message={}",
-                route.conversation_key, approval.request_id, message_id
-            ),
-        )
-        .await;
-    Ok(())
 }
 
 async fn send_text_im_codex_item(

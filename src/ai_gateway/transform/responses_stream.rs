@@ -10,6 +10,7 @@ use futures_util::Stream;
 use serde_json::{Value, json};
 
 use crate::ai_gateway::model::{generate_item_id, generate_response_id};
+use crate::ai_gateway::tool_names::{ToolCallKind, ToolCallTarget, ToolNameMap};
 
 // ─── Stream adapter ────────────────────────────────────────────
 
@@ -24,10 +25,15 @@ pub struct ChatSseToResponsesSse<S> {
 }
 
 impl<S> ChatSseToResponsesSse<S> {
+    #[cfg(test)]
     pub fn new(inner: S, model: String) -> Self {
+        Self::new_with_tool_names(inner, model, ToolNameMap::default())
+    }
+
+    pub fn new_with_tool_names(inner: S, model: String, tool_name_map: ToolNameMap) -> Self {
         Self {
             inner,
-            state: ResponsesStreamState::new(model),
+            state: ResponsesStreamState::new(model, tool_name_map),
             line_buf: String::new(),
             output_queue: VecDeque::new(),
         }
@@ -141,18 +147,20 @@ struct ResponsesStreamState {
 
     // finish_reason
     finish_reason: Option<String>,
+
+    tool_name_map: ToolNameMap,
 }
 
 struct ToolCallState {
     id: String,
-    name: String,
+    target: ToolCallTarget,
     arguments: String,
     item_id: String,
     output_index: usize,
 }
 
 impl ResponsesStreamState {
-    fn new(model: String) -> Self {
+    fn new(model: String, tool_name_map: ToolNameMap) -> Self {
         Self {
             has_started: false,
             response_created: false,
@@ -178,6 +186,7 @@ impl ResponsesStreamState {
             tool_calls: HashMap::new(),
             usage: None,
             finish_reason: None,
+            tool_name_map,
         }
     }
 
@@ -546,16 +555,17 @@ impl ResponsesStreamState {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let target = self.tool_name_map.decode(&name);
 
             let tc_state = ToolCallState {
                 id: call_id.clone(),
-                name: name.clone(),
+                target: target.clone(),
                 arguments: String::new(),
                 item_id: item_id.clone(),
                 output_index: self.output_index,
             };
+            let added_item = in_progress_tool_item(&item_id, &call_id, &target);
 
-            // output_item.added for function_call
             let seq = self.next_seq();
             emit_sse(
                 queue,
@@ -564,14 +574,7 @@ impl ResponsesStreamState {
                     "type": "response.output_item.added",
                     "sequence_number": seq,
                     "output_index": self.output_index,
-                    "item": {
-                        "type": "function_call",
-                        "id": item_id,
-                        "call_id": call_id,
-                        "name": name,
-                        "arguments": "",
-                        "status": "in_progress",
-                    }
+                    "item": added_item
                 }),
             );
 
@@ -610,17 +613,10 @@ impl ResponsesStreamState {
             let tc = self.tool_calls.remove(&index).unwrap();
             let item_id = tc.item_id;
             let call_id = tc.id;
-            let name = tc.name;
+            let target = tc.target;
             let arguments = tc.arguments;
             let output_index = tc.output_index;
-            let item = json!({
-                "type": "function_call",
-                "id": item_id,
-                "call_id": call_id,
-                "name": name,
-                "arguments": arguments,
-                "status": "completed",
-            });
+            let item = completed_tool_item(&item_id, &call_id, &target, &arguments);
 
             // function_call_arguments.done
             let seq = self.next_seq();
@@ -727,6 +723,92 @@ impl ResponsesStreamState {
 
 // ─── 工具函数 ──────────────────────────────────────────────────
 
+fn in_progress_tool_item(item_id: &str, call_id: &str, target: &ToolCallTarget) -> Value {
+    match target.kind {
+        ToolCallKind::ToolSearch => json!({
+            "type": "tool_search_call",
+            "id": item_id,
+            "call_id": call_id,
+            "execution": "client",
+            "arguments": {},
+            "status": "in_progress",
+        }),
+        ToolCallKind::Custom => json!({
+            "type": "custom_tool_call",
+            "id": item_id,
+            "call_id": call_id,
+            "name": target.name.clone(),
+            "input": "",
+            "status": "in_progress",
+        }),
+        ToolCallKind::Function => {
+            let mut item = json!({
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": target.name.clone(),
+                "arguments": "",
+                "status": "in_progress",
+            });
+            if let Some(namespace) = &target.namespace {
+                item["namespace"] = json!(namespace.clone());
+            }
+            item
+        }
+    }
+}
+
+fn completed_tool_item(
+    item_id: &str,
+    call_id: &str,
+    target: &ToolCallTarget,
+    arguments: &str,
+) -> Value {
+    match target.kind {
+        ToolCallKind::ToolSearch => json!({
+            "type": "tool_search_call",
+            "id": item_id,
+            "call_id": call_id,
+            "execution": "client",
+            "arguments": serde_json::from_str::<Value>(arguments).unwrap_or_else(|_| json!({})),
+            "status": "completed",
+        }),
+        ToolCallKind::Custom => {
+            let input = serde_json::from_str::<Value>(arguments)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("input")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| arguments.to_string());
+            json!({
+                "type": "custom_tool_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": target.name.clone(),
+                "input": input,
+                "status": "completed",
+            })
+        }
+        ToolCallKind::Function => {
+            let mut item = json!({
+                "type": "function_call",
+                "id": item_id,
+                "call_id": call_id,
+                "name": target.name.clone(),
+                "arguments": arguments,
+                "status": "completed",
+            });
+            if let Some(namespace) = &target.namespace {
+                item["namespace"] = json!(namespace.clone());
+            }
+            item
+        }
+    }
+}
+
 fn emit_sse(queue: &mut VecDeque<Bytes>, event_type: &str, data: Value) {
     let line = format!("event: {}\ndata: {}\n\n", event_type, data.to_string());
     queue.push_back(Bytes::from(line));
@@ -783,7 +865,14 @@ mod tests {
 
     /// 辅助：直接对状态机喂 chunk，收集输出事件。
     fn feed_chunks(chunks: &[Value]) -> Vec<(String, Value)> {
-        let mut state = ResponsesStreamState::new("test-model".into());
+        feed_chunks_with_tool_names(chunks, ToolNameMap::default())
+    }
+
+    fn feed_chunks_with_tool_names(
+        chunks: &[Value],
+        tool_name_map: ToolNameMap,
+    ) -> Vec<(String, Value)> {
+        let mut state = ResponsesStreamState::new("test-model".into(), tool_name_map);
         let mut queue = VecDeque::new();
         for chunk in chunks {
             state.process_chunk(chunk, &mut queue);
@@ -1005,6 +1094,95 @@ mod tests {
         assert_eq!(arg_done[0]["arguments"], "{\"city\":\"NYC\"}");
 
         assert!(types.contains(&"response.completed"));
+    }
+
+    #[test]
+    fn test_stream_restores_namespaced_tool_from_tool_name_map() {
+        let mut tool_name_map = ToolNameMap::default();
+        tool_name_map.insert(
+            "codex_app__codexns__read_thread_terminal",
+            ToolCallTarget::function(Some("codex_app"), "read_thread_terminal"),
+        );
+        let chunks = vec![
+            json!({
+                "model": "deepseek-v4-flash",
+                "created": 1700000000,
+                "choices": [{"index": 0, "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_app",
+                        "type": "function",
+                        "function": {
+                            "name": "codex_app__codexns__read_thread_terminal",
+                            "arguments": ""
+                        }
+                    }]
+                }}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {
+                    "tool_calls": [{"index": 0, "function": {"arguments": "{\"limit\":20}"}}]
+                }}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+            }),
+        ];
+
+        let events = feed_chunks_with_tool_names(&chunks, tool_name_map);
+        let done = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.output_item.done")
+            .unwrap();
+
+        assert_eq!(done.1["item"]["type"], "function_call");
+        assert_eq!(done.1["item"]["namespace"], "codex_app");
+        assert_eq!(done.1["item"]["name"], "read_thread_terminal");
+        assert_eq!(done.1["item"]["arguments"], "{\"limit\":20}");
+    }
+
+    #[test]
+    fn test_stream_restores_tool_search_call_from_tool_name_map() {
+        let mut tool_name_map = ToolNameMap::default();
+        tool_name_map.insert("tool_search", ToolCallTarget::tool_search());
+        let chunks = vec![
+            json!({
+                "model": "deepseek-v4-flash",
+                "created": 1700000000,
+                "choices": [{"index": 0, "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "search_1",
+                        "type": "function",
+                        "function": {"name": "tool_search", "arguments": ""}
+                    }]
+                }}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {
+                    "tool_calls": [{"index": 0, "function": {"arguments": "{\"query\":\"chrome\",\"limit\":1}"}}]
+                }}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+            }),
+        ];
+
+        let events = feed_chunks_with_tool_names(&chunks, tool_name_map);
+        let done = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.output_item.done")
+            .unwrap();
+
+        assert_eq!(done.1["item"]["type"], "tool_search_call");
+        assert_eq!(done.1["item"]["call_id"], "search_1");
+        assert_eq!(done.1["item"]["execution"], "client");
+        assert_eq!(
+            done.1["item"]["arguments"],
+            json!({"query": "chrome", "limit": 1})
+        );
     }
 
     // ─── usage 分离的 chunk ────────────────────────────────────

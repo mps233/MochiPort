@@ -4,10 +4,7 @@ use anyhow::Result;
 use tokio::time::{Duration, sleep};
 
 use crate::{
-    app_state::SharedState,
-    chain_log,
-    im::core::{i18n::ImText, i18n::im_text_for_state},
-    im_runtime::PendingApproval,
+    app_state::SharedState, chain_log, im::core::i18n::ImText, im_runtime::PendingApproval,
 };
 
 use super::{api::WechatApi, store};
@@ -118,22 +115,6 @@ impl WechatAdapter {
         self.send_text(state, account_id, target, reply_text).await
     }
 
-    pub async fn send_approval(
-        &self,
-        state: &SharedState,
-        account_id: &str,
-        target: &str,
-        approval: &PendingApproval,
-    ) -> Result<String> {
-        self.send_text(
-            state,
-            account_id,
-            target,
-            &approval_text(approval, im_text_for_state(state)),
-        )
-        .await
-    }
-
     pub async fn send_image_path(
         &self,
         state: &SharedState,
@@ -190,7 +171,7 @@ impl WechatAdapter {
     }
 }
 
-fn approval_text(approval: &PendingApproval, text: ImText) -> String {
+pub(crate) fn approval_text(approval: &PendingApproval, text: ImText) -> String {
     let mut lines = vec![
         text.approval_request_heading().to_string(),
         format!("request_kind: `{}`", approval.request_kind),

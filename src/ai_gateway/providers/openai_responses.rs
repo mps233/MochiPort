@@ -14,6 +14,8 @@ use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
 };
 
+use super::{apply_total_request_timeout, execute_stream_start, map_upstream_response};
+
 /// OpenAI Responses API 透传：补齐 cache 字段后代理到上游。
 pub async fn passthrough(
     ctx: &GatewayContext,
@@ -49,9 +51,9 @@ pub async fn passthrough(
     let req_builder = client
         .post(&url)
         .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {}", provider.api_key))
-        .timeout(std::time::Duration::from_secs(provider.timeout_secs))
-        .json(&raw_body);
+        .header("authorization", format!("Bearer {}", provider.api_key));
+    let req_builder =
+        apply_total_request_timeout(req_builder, provider.timeout_secs, is_stream).json(&raw_body);
 
     let req_builder = apply_upstream_headers(req_builder, &ctx.upstream_headers);
     let upstream_req = req_builder.build().map_err(|e| {
@@ -77,14 +79,20 @@ pub async fn passthrough(
 
     debug!(url = %url, stream = is_stream, "proxying to openai responses");
 
-    let upstream_resp = client.execute(upstream_req).await.map_err(|e| {
-        if e.is_timeout() {
-            GatewayError::upstream_timeout()
-        } else {
-            error!(error = %e, "upstream request failed");
-            GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("upstream error: {e}"))
-        }
-    })?;
+    let upstream_resp = if is_stream {
+        execute_stream_start(
+            &client,
+            upstream_req,
+            provider.timeout_secs,
+            "upstream request failed",
+        )
+        .await?
+    } else {
+        map_upstream_response(
+            client.execute(upstream_req).await,
+            "upstream request failed",
+        )?
+    };
 
     let upstream_status = upstream_resp.status();
 

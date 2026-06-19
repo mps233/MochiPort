@@ -7,13 +7,14 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, header::ETAG},
     response::IntoResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, de::IntoDeserializer};
 use serde_json::json;
-use tracing::info;
+use tracing::{debug, info};
 
 use crate::app_state::SharedState;
 
 use super::catalog::{configured_models_etag, configured_models_response_with_etag};
+use super::codec::responses_inbound::decode_gateway_turn;
 use super::config::{ProviderConfig, ProviderType};
 use super::context::GatewayContext;
 use super::error::GatewayError;
@@ -43,26 +44,27 @@ pub async fn handle_responses(
             return GatewayError::bad_request(format!("invalid JSON: {e}")).into_response();
         }
     };
-    let request: GatewayRequest = match serde_json::from_value(raw_body.clone()) {
-        Ok(r) => r,
+    let envelope: GatewayRequestEnvelope = match serde_json::from_value(raw_body.clone()) {
+        Ok(envelope) => envelope,
         Err(e) => {
-            return GatewayError::bad_request(format!("invalid request: {e}")).into_response();
+            return GatewayError::bad_request(format!("invalid request envelope: {e}"))
+                .into_response();
         }
     };
 
     // 2. 提取上下文
-    let body_cache_key = request.prompt_cache_key.as_deref();
+    let body_cache_key = envelope.prompt_cache_key.as_deref();
     let ctx = GatewayContext::extract(&headers, body_cache_key);
 
     // 3. 路由到 provider
-    let provider = match resolve_provider(&request.model, ctx.session_id.as_deref(), &gw_config) {
+    let provider = match resolve_provider(&envelope.model, ctx.session_id.as_deref(), &gw_config) {
         Ok(p) => p,
         Err(e) => {
             let log_context = insert_initial_log(
                 &log_db_path,
                 &ctx,
                 &headers,
-                &request,
+                &envelope,
                 None,
                 &raw_body,
                 started_at,
@@ -76,20 +78,36 @@ pub async fn handle_responses(
         &log_db_path,
         &ctx,
         &headers,
-        &request,
+        &envelope,
         Some(provider),
         &raw_body,
         started_at,
         created_at_ms,
     );
 
+    let decoded_turn = match deserialize_gateway_request(raw_body.clone()) {
+        Ok(request) => {
+            let turn = decode_gateway_turn(&request, raw_body.clone());
+            debug!(
+                input_items = turn.input.len(),
+                tools = turn.tools.len(),
+                "ai-gateway request decoded to gateway ir"
+            );
+            Some((request, turn))
+        }
+        Err(err) => {
+            debug!(error = %err, "ai-gateway request ir decode skipped");
+            None
+        }
+    };
+
     info!(
-        model = %request.model,
+        model = %envelope.model,
         provider = %provider.name,
         provider_type = ?provider.provider_type,
         session_id = ?ctx.session_id,
         prompt_cache_key = %ctx.prompt_cache_key,
-        stream = request.stream,
+        stream = envelope.stream,
         "ai-gateway request routed"
     );
 
@@ -109,6 +127,18 @@ pub async fn handle_responses(
             }
         }
         ProviderType::ChatCompletions => {
+            let request = if let Some((request, _turn)) = decoded_turn.as_ref() {
+                request.clone()
+            } else {
+                match deserialize_gateway_request(raw_body.clone()) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        update_failed_log(&log_context, &format!("invalid request: {e}"));
+                        return GatewayError::bad_request(format!("invalid request: {e}"))
+                            .into_response();
+                    }
+                }
+            };
             match deepseek_chat::handle(&ctx, &request, provider, log_context.clone()).await {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
@@ -121,6 +151,20 @@ pub async fn handle_responses(
             }
         }
     }
+}
+
+fn deserialize_gateway_request(raw_body: serde_json::Value) -> Result<GatewayRequest, String> {
+    let deserializer = raw_body.into_deserializer();
+    serde_path_to_error::deserialize(deserializer).map_err(|err| err.to_string())
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GatewayRequestEnvelope {
+    model: String,
+    #[serde(default)]
+    stream: bool,
+    #[serde(default)]
+    prompt_cache_key: Option<String>,
 }
 
 /// GET /ai-gateway/v1/models
@@ -229,7 +273,7 @@ fn insert_initial_log(
     db_path: &std::path::Path,
     ctx: &GatewayContext,
     headers: &HeaderMap,
-    request: &GatewayRequest,
+    request: &GatewayRequestEnvelope,
     provider: Option<&ProviderConfig>,
     raw_body: &serde_json::Value,
     started_at: Instant,
@@ -306,4 +350,61 @@ fn set_etag_header(response: &mut axum::response::Response, etag: &str) {
         ETAG,
         HeaderValue::from_str(etag).expect("models etag should be a valid header value"),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{GatewayRequestEnvelope, deserialize_gateway_request};
+
+    #[test]
+    fn responses_passthrough_envelope_accepts_future_payload_shapes() {
+        let raw = json!({
+            "model": "gpt-5.4",
+            "stream": true,
+            "prompt_cache_key": "thread-1",
+            "previous_response_id": {
+                "id": "resp_123"
+            },
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "preview this image"
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": {
+                                "url": "data:image/png;base64,abc",
+                                "detail": "high"
+                            }
+                        }
+                    ]
+                }
+            ],
+            "unknown_future_field": {
+                "nested": {
+                    "shape": "must not block Responses passthrough"
+                }
+            }
+        });
+
+        let envelope: GatewayRequestEnvelope =
+            serde_json::from_value(raw.clone()).expect("envelope should parse");
+        assert_eq!(envelope.model, "gpt-5.4");
+        assert!(envelope.stream);
+        assert_eq!(envelope.prompt_cache_key.as_deref(), Some("thread-1"));
+
+        let full_parse = deserialize_gateway_request(raw).expect_err(
+            "full GatewayRequest parsing should still reject incompatible Responses-only fields",
+        );
+        assert!(
+            full_parse.contains("previous_response_id"),
+            "expected field path in error, got: {full_parse}"
+        );
+    }
 }

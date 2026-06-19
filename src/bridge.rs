@@ -302,8 +302,12 @@ pub async fn start_bridge(state: SharedState) {
                 }
                 let state = state.clone();
                 let api_registry = api_registry.clone();
+                let outbound_tx = outbound_tx.clone();
                 tasks.spawn(async move {
-                    if let Err(err) = handle_inbound(state.clone(), api_registry, message).await {
+                    if let Err(err) =
+                        handle_inbound(state.clone(), api_registry, outbound_tx.clone(), message)
+                            .await
+                    {
                         state
                             .push_event("error", "inbound_failed", err.to_string())
                             .await;
@@ -356,13 +360,14 @@ async fn install_default_feishu_route(
 async fn handle_inbound(
     state: SharedState,
     api_registry: ImApiRegistry,
+    outbound_tx: outbound::ImOutboundSender,
     message: InboundMessage,
 ) -> Result<()> {
     if message.platform == ImPlatformKind::Telegram {
-        return telegram_flow::handle_inbound(state, message).await;
+        return telegram_flow::handle_inbound(state, outbound_tx, message).await;
     }
     if message.platform == ImPlatformKind::Wechat {
-        return wechat_flow::handle_inbound(state, message).await;
+        return wechat_flow::handle_inbound(state, outbound_tx, message).await;
     }
     let route = RouteTarget {
         platform: message.platform,
@@ -378,7 +383,7 @@ async fn handle_inbound(
             message.account_id
         );
     };
-    feishu_flow::handle_inbound(state, api, message).await
+    feishu_flow::handle_inbound(state, api, outbound_tx, message).await
 }
 
 fn attachment_root(state_path: &PathBuf) -> PathBuf {
@@ -453,7 +458,7 @@ async fn codex_event_router(
                         {
                             let _ = events::send_next_approval(
                                 &state,
-                                &api_registry,
+                                &outbound_tx,
                                 &conversation_key,
                                 &next_approval,
                             )
@@ -540,7 +545,7 @@ async fn codex_event_router(
                 (should_send_now, approval)
             };
             if should_send_now {
-                let _ = events::send_approval(&state, &api_registry, &route, &approval).await;
+                let _ = events::send_approval(&state, &outbound_tx, &route, &approval).await;
             }
             let approval_details = approval_event_details(
                 &request_kind,

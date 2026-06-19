@@ -1,17 +1,27 @@
 //! Chat Completions response → Responses API response 转换。
 //! 参考 AxonHub `responses/outbound_convert.go` 的 `convertToResponsesAPIResponse`。
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::ai_gateway::model::{
-    ContentPart, InputTokensDetails, ItemContent, ItemType, OutputTokensDetails, ResponseItem,
-    ResponseObject, SummaryPart, Usage, generate_item_id, generate_response_id,
+    ContentPart, InputTokensDetails, ItemContent, ItemType, JsonString, OutputTokensDetails,
+    ResponseItem, ResponseObject, SummaryPart, Usage, generate_item_id, generate_response_id,
 };
+use crate::ai_gateway::tool_names::{ToolCallKind, ToolNameMap};
 
 /// 将 Chat Completions 非流式响应转为 Responses API ResponseObject。
+#[cfg(test)]
 pub fn convert_chat_response(
     chat_resp: &Value,
     request_model: &str,
+) -> Result<ResponseObject, String> {
+    convert_chat_response_with_tool_names(chat_resp, request_model, &ToolNameMap::default())
+}
+
+pub fn convert_chat_response_with_tool_names(
+    chat_resp: &Value,
+    request_model: &str,
+    tool_name_map: &ToolNameMap,
 ) -> Result<ResponseObject, String> {
     let resp_id = generate_response_id();
     let model = chat_resp
@@ -50,6 +60,8 @@ pub fn convert_chat_response(
                 input: None,
                 output: None,
                 status: Some("completed".into()),
+                execution: None,
+                tools: None,
                 image_url: None,
                 detail: None,
                 action: None,
@@ -81,6 +93,8 @@ pub fn convert_chat_response(
                 input: None,
                 output: None,
                 status: Some("completed".into()),
+                execution: None,
+                tools: None,
                 image_url: None,
                 detail: None,
                 action: None,
@@ -95,27 +109,54 @@ pub fn convert_chat_response(
         for tc in tool_calls {
             let func = tc.get("function").unwrap_or(&Value::Null);
             let raw_name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let (namespace, name) = decode_responses_function_call_name(raw_name);
+            let target = tool_name_map.decode(raw_name);
+            let arguments_text = func
+                .get("arguments")
+                .and_then(|v| v.as_str())
+                .unwrap_or("{}");
+            let (item_type, name, namespace, arguments, input, execution) = match target.kind {
+                ToolCallKind::ToolSearch => (
+                    ItemType::ToolSearchCall,
+                    None,
+                    None,
+                    Some(JsonString::Value(parse_json_or_empty_object(
+                        arguments_text,
+                    ))),
+                    None,
+                    Some("client".to_string()),
+                ),
+                ToolCallKind::Custom => (
+                    ItemType::CustomToolCall,
+                    Some(target.name),
+                    None,
+                    None,
+                    Some(extract_custom_tool_input(arguments_text)),
+                    None,
+                ),
+                ToolCallKind::Function => (
+                    ItemType::FunctionCall,
+                    Some(target.name),
+                    target.namespace,
+                    Some(JsonString::String(arguments_text.to_string())),
+                    None,
+                    None,
+                ),
+            };
             output.push(ResponseItem {
-                item_type: ItemType::FunctionCall,
+                item_type,
                 id: Some(generate_item_id()),
                 role: None,
                 content: None,
                 text: None,
-                name: if name.is_empty() {
-                    None
-                } else {
-                    Some(name.to_string())
-                },
-                namespace: namespace.map(str::to_string),
+                name,
+                namespace,
                 call_id: tc.get("id").and_then(|v| v.as_str()).map(|s| s.into()),
-                arguments: func
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.into()),
-                input: None,
+                arguments,
+                input,
                 output: None,
                 status: Some("completed".into()),
+                execution,
+                tools: None,
                 image_url: None,
                 detail: None,
                 action: None,
@@ -154,20 +195,20 @@ pub fn convert_chat_response(
     })
 }
 
-const RESPONSES_MCP_NAMESPACE_UNIT_MARKER: &str = "responses_unit__";
+fn parse_json_or_empty_object(text: &str) -> Value {
+    serde_json::from_str(text).unwrap_or_else(|_| json!({}))
+}
 
-fn decode_responses_function_call_name(name: &str) -> (Option<&str>, &str) {
-    let Some(idx) = name.find(RESPONSES_MCP_NAMESPACE_UNIT_MARKER) else {
-        return (None, name);
-    };
-
-    let namespace = &name[..idx];
-    let tool_name = &name[idx + RESPONSES_MCP_NAMESPACE_UNIT_MARKER.len()..];
-    if namespace.is_empty() || tool_name.is_empty() || !namespace.starts_with("mcp__") {
-        return (None, name);
-    }
-
-    (Some(namespace), tool_name)
+fn extract_custom_tool_input(arguments_text: &str) -> String {
+    serde_json::from_str::<Value>(arguments_text)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("input")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| arguments_text.to_string())
 }
 
 fn convert_usage(usage_val: Option<&Value>) -> Option<Usage> {
@@ -222,6 +263,7 @@ fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_gateway::tool_names::{ToolCallTarget, ToolNameMap};
     use serde_json::json;
 
     #[test]
@@ -342,6 +384,79 @@ mod tests {
         assert_eq!(resp.output[0].item_type, ItemType::FunctionCall);
         assert_eq!(resp.output[0].namespace.as_deref(), Some("mcp__arthas__"));
         assert_eq!(resp.output[0].name.as_deref(), Some("excelPeek"));
+    }
+
+    #[test]
+    fn test_codex_app_namespace_restored_from_tool_name_map() {
+        let mut tool_name_map = ToolNameMap::default();
+        tool_name_map.insert(
+            "codex_app__codexns__read_thread_terminal",
+            ToolCallTarget::function(Some("codex_app"), "read_thread_terminal"),
+        );
+        let chat_resp = json!({
+            "model": "deepseek-v4-flash",
+            "created": 1700000000,
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_app",
+                        "type": "function",
+                        "function": {
+                            "name": "codex_app__codexns__read_thread_terminal",
+                            "arguments": "{\"limit\":20}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let resp =
+            convert_chat_response_with_tool_names(&chat_resp, "deepseek-v4-flash", &tool_name_map)
+                .unwrap();
+
+        assert_eq!(resp.output[0].item_type, ItemType::FunctionCall);
+        assert_eq!(resp.output[0].namespace.as_deref(), Some("codex_app"));
+        assert_eq!(resp.output[0].name.as_deref(), Some("read_thread_terminal"));
+    }
+
+    #[test]
+    fn test_tool_search_tool_call_response_restores_tool_search_call() {
+        let mut tool_name_map = ToolNameMap::default();
+        tool_name_map.insert("tool_search", ToolCallTarget::tool_search());
+        let chat_resp = json!({
+            "model": "deepseek-v4-flash",
+            "created": 1700000000,
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "search_1",
+                        "type": "function",
+                        "function": {
+                            "name": "tool_search",
+                            "arguments": "{\"query\":\"chrome browser\",\"limit\":2}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let resp =
+            convert_chat_response_with_tool_names(&chat_resp, "deepseek-v4-flash", &tool_name_map)
+                .unwrap();
+
+        assert_eq!(resp.output[0].item_type, ItemType::ToolSearchCall);
+        assert_eq!(resp.output[0].call_id.as_deref(), Some("search_1"));
+        assert_eq!(resp.output[0].execution.as_deref(), Some("client"));
+        assert_eq!(
+            resp.output[0].arguments.as_ref().unwrap().to_value(),
+            json!({"query": "chrome browser", "limit": 2})
+        );
     }
 
     #[test]

@@ -58,6 +58,8 @@ where
             input: None,
             output: None,
             status: None,
+            execution: None,
+            tools: None,
             image_url: None,
             detail: None,
             action: None,
@@ -68,6 +70,79 @@ where
         Value::Null => Ok(Vec::new()),
         _ => Err(serde::de::Error::custom("input must be string or array")),
     }
+}
+
+fn deserialize_optional_json_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => Some(text),
+        Some(value) => Some(
+            serde_json::to_string(&value)
+                .map_err(|err| serde::de::Error::custom(err.to_string()))?,
+        ),
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JsonString {
+    String(String),
+    Value(Value),
+}
+
+impl JsonString {
+    pub fn to_chat_arguments(&self) -> String {
+        match self {
+            Self::String(text) => text.clone(),
+            Self::Value(value) => serde_json::to_string(value).unwrap_or_else(|_| "{}".to_string()),
+        }
+    }
+
+    pub fn to_value(&self) -> Value {
+        match self {
+            Self::String(text) => {
+                serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
+            }
+            Self::Value(value) => value.clone(),
+        }
+    }
+}
+
+impl From<String> for JsonString {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for JsonString {
+    fn from(value: &str) -> Self {
+        Self::String(value.to_string())
+    }
+}
+
+fn deserialize_optional_image_url<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(url)) => Some(url),
+        Some(Value::Object(mut object)) => object
+            .remove("url")
+            .or_else(|| object.remove("image_url"))
+            .or_else(|| object.remove("imageUrl"))
+            .and_then(|value| value.as_str().map(str::to_string)),
+        Some(value) => {
+            return Err(serde::de::Error::custom(format!(
+                "image_url must be string or object, got {value}"
+            )));
+        }
+    })
 }
 
 // ─── ResponseItem ──────────────────────────────────────────────
@@ -95,11 +170,15 @@ pub struct ResponseItem {
     /// function_call / function_call_output 的 call_id。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
-    /// function_call 的参数 JSON 字符串。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<String>,
+    /// function_call 的参数通常是 JSON 字符串；tool_search_call 使用对象。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arguments: Option<JsonString>,
     /// custom_tool_call 的 freeform input。
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_json_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub input: Option<String>,
     /// function_call_output / custom_tool_call_output 的结果。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -107,8 +186,18 @@ pub struct ResponseItem {
     /// item 状态。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
-    /// input_image / image_generation_call 的图片 URL 或 data URL。
+    /// tool_search_call / tool_search_output 的 execution 字段。
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution: Option<String>,
+    /// tool_search_output 暴露给下一轮模型的 loadable tools。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Value>>,
+    /// input_image / image_generation_call 的图片 URL 或 data URL。
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_image_url",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub image_url: Option<String>,
     /// input_image 的 detail。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +222,8 @@ pub enum ItemType {
     InputImage,
     FunctionCall,
     FunctionCallOutput,
+    ToolSearchCall,
+    ToolSearchOutput,
     CustomToolCall,
     CustomToolCallOutput,
     WebSearchCall,
@@ -160,7 +251,11 @@ pub struct ContentPart {
     pub part_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_image_url",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub image_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -239,7 +334,11 @@ pub struct FunctionCallOutputContentItem {
     pub item_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_image_url",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub image_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_content: Option<String>,

@@ -493,6 +493,25 @@ impl<S> ResponsesSseLogStream<S> {
     }
 }
 
+impl<S> Drop for ResponsesSseLogStream<S> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+
+        let update = RequestLogUpdate {
+            status: Some("client_disconnected".to_string()),
+            latency_ms: Some(elapsed_ms(self.context.started_at)),
+            error_message: Some("client disconnected before stream completed".to_string()),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) = update_record(&self.context.db_path, self.context.log_id, &update) {
+            log_update_error(err);
+        }
+        self.completed = true;
+    }
+}
+
 impl<S> Stream for ResponsesSseLogStream<S>
 where
     S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
@@ -529,14 +548,16 @@ where
                     {
                         log_update_error(update_err);
                     }
+                    this.completed = true;
                 }
                 Poll::Ready(Some(Err(err)))
             }
             Poll::Ready(None) => {
                 if !this.completed {
                     let update = RequestLogUpdate {
-                        status: Some("completed".to_string()),
+                        status: Some("failed".to_string()),
                         latency_ms: Some(elapsed_ms(this.context.started_at)),
+                        error_message: Some("stream closed before response.completed".to_string()),
                         ..RequestLogUpdate::default()
                     };
                     if let Err(update_err) =
@@ -707,7 +728,45 @@ fn compact_json(value: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use futures_util::{StreamExt, stream};
     use serde_json::json;
+
+    fn temp_db_path() -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "codex-remote-request-log-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ))
+    }
+
+    fn insert_running_test_log(db_path: &Path, request_id: &str) -> RequestLogContext {
+        let record = RequestLogRecord {
+            request_id: request_id.to_string(),
+            model_id: "deepseek-v4-flash".to_string(),
+            stream: true,
+            channel: "deepseek".to_string(),
+            provider_type: "chat_completions".to_string(),
+            status: "running".to_string(),
+            usage: LogUsage::default(),
+            cost_usd: None,
+            latency_ms: None,
+            ttft_ms: None,
+            created_at_ms: now_ms(),
+            error_message: None,
+            request_headers_json: None,
+            request_json: None,
+            upstream_request_headers_json: None,
+            upstream_request_json: None,
+            response_json: None,
+        };
+        let log_id = insert_record(db_path, &record).unwrap();
+        RequestLogContext {
+            db_path: db_path.to_path_buf(),
+            log_id,
+            started_at: Instant::now(),
+        }
+    }
 
     #[test]
     fn usage_from_responses_value_extracts_cache() {
@@ -839,6 +898,70 @@ mod tests {
         assert_eq!(
             detail.response_json.as_deref(),
             Some(r#"{"status":"completed"}"#)
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn dropping_unfinished_sse_log_stream_marks_client_disconnected() {
+        let db_path = temp_db_path();
+        let context = insert_running_test_log(&db_path, "req-client-disconnected");
+
+        let wrapped =
+            ResponsesSseLogStream::new(stream::pending::<Result<Bytes, std::io::Error>>(), context);
+        drop(wrapped);
+
+        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        assert_eq!(detail.summary.status, "client_disconnected");
+        assert!(detail.summary.latency_ms.is_some());
+        assert!(
+            detail
+                .summary
+                .error_message
+                .as_deref()
+                .is_some_and(|message| message.contains("client disconnected"))
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn sse_log_stream_end_before_completed_is_failed() {
+        let db_path = temp_db_path();
+        let context = insert_running_test_log(&db_path, "req-closed");
+        let mut wrapped =
+            ResponsesSseLogStream::new(stream::empty::<Result<Bytes, std::io::Error>>(), context);
+
+        assert!(wrapped.next().await.is_none());
+        drop(wrapped);
+
+        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        assert_eq!(detail.summary.status, "failed");
+        assert_eq!(
+            detail.summary.error_message.as_deref(),
+            Some("stream closed before response.completed")
+        );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn failed_sse_log_stream_is_not_overwritten_by_drop() {
+        let db_path = temp_db_path();
+        let context = insert_running_test_log(&db_path, "req-failed");
+        let inner = stream::iter(vec![Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "upstream closed",
+        ))]);
+        let mut wrapped = ResponsesSseLogStream::new(inner, context);
+
+        let item = wrapped.next().await.unwrap();
+        assert!(item.is_err());
+        drop(wrapped);
+
+        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        assert_eq!(detail.summary.status, "failed");
+        assert_eq!(
+            detail.summary.error_message.as_deref(),
+            Some("upstream closed")
         );
         let _ = std::fs::remove_file(db_path);
     }

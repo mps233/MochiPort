@@ -77,6 +77,8 @@ fn status_label(status: &str) -> String {
         "completed" => "Completed",
         "incomplete" => "Incomplete",
         "failed" => "Failed",
+        "client_disconnected" => "Client Disconnected",
+        "cancelled" => "Cancelled",
         "running" => "Running",
         other => other,
     }

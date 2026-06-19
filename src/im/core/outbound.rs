@@ -8,6 +8,8 @@ use crate::{
     chain_log,
     im::{
         core::accounts::ImApiRegistry,
+        core::i18n::im_text_for_state,
+        feishu::{FeishuAdapter, FeishuApi},
         telegram::{adapter::TelegramAdapter, api::TelegramApi},
         wechat::{
             adapter::{WECHAT_TEXT_CHUNK_CHARS, WechatAdapter},
@@ -15,7 +17,7 @@ use crate::{
             store as wechat_store,
         },
     },
-    im_runtime::RouteTarget,
+    im_runtime::{PendingApproval, RouteTarget},
     types::ImPlatformKind,
 };
 
@@ -43,11 +45,13 @@ pub(crate) enum ImOutboundKind {
     TurnReply,
     Item,
     ImageItem,
+    Approval,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) enum ImOutboundPayload {
     Text(String),
+    Approval(PendingApproval),
     Image {
         path: PathBuf,
         caption: Option<String>,
@@ -110,16 +114,11 @@ pub(crate) async fn run_worker(
                 send_wechat_outbound(&state, &api, message).await;
             }
             ImPlatformKind::Feishu => {
-                state
-                    .push_event(
-                        "warn",
-                        "im_outbound_unsupported",
-                        format!(
-                            "platform=feishu thread={} chat={} kind={:?}",
-                            message.thread_id, message.route.chat_id, message.kind
-                        ),
-                    )
-                    .await;
+                let Some(api) = api_registry.feishu_for_route(&message.route) else {
+                    log_missing_api(&state, &message).await;
+                    continue;
+                };
+                send_feishu_outbound(&state, &api, message).await;
             }
         }
     }
@@ -218,6 +217,9 @@ async fn send_telegram_outbound(
         ImOutboundPayload::Text(text) => {
             send_telegram_text(state, &adapter, &message, text).await;
         }
+        ImOutboundPayload::Approval(approval) => {
+            send_telegram_approval(state, &adapter, &message, approval).await;
+        }
         ImOutboundPayload::Image {
             path,
             caption,
@@ -236,6 +238,86 @@ async fn send_telegram_outbound(
     }
 }
 
+async fn send_feishu_outbound(
+    state: &SharedState,
+    feishu_api: &FeishuApi,
+    message: ImOutboundMessage,
+) {
+    let adapter = FeishuAdapter::new(feishu_api.clone());
+    match &message.payload {
+        ImOutboundPayload::Approval(approval) => {
+            send_feishu_approval(state, &adapter, &message, approval).await;
+        }
+        ImOutboundPayload::Text(_) | ImOutboundPayload::Image { .. } => {
+            state
+                .push_event(
+                    "warn",
+                    "im_outbound_unsupported",
+                    format!(
+                        "platform=feishu thread={} chat={} kind={:?}",
+                        message.thread_id, message.route.chat_id, message.kind
+                    ),
+                )
+                .await;
+        }
+    }
+}
+
+async fn send_feishu_approval(
+    state: &SharedState,
+    adapter: &FeishuAdapter,
+    message: &ImOutboundMessage,
+    approval: &PendingApproval,
+) {
+    state
+        .push_event(
+            "info",
+            "feishu_approval_send_begin",
+            format!(
+                "thread={} request_id={} chat={}",
+                message.thread_id, approval.request_id, message.route.chat_id
+            ),
+        )
+        .await;
+    match adapter
+        .send_approval(&message.route.chat_id, approval, im_text_for_state(state))
+        .await
+    {
+        Ok(message_id) => {
+            state
+                .runtime
+                .lock()
+                .await
+                .remember_approval_message_id(&approval.request_id, message_id.clone());
+            state
+                .push_event(
+                    "info",
+                    "approval_card_sent",
+                    format!(
+                        "conversation={} request_id={} message={}",
+                        message.route.conversation_key, approval.request_id, message_id
+                    ),
+                )
+                .await;
+        }
+        Err(err) => {
+            state
+                .push_event(
+                    "error",
+                    "feishu_approval_failed",
+                    format!(
+                        "conversation={} request_id={} chat={} err={}",
+                        message.route.conversation_key,
+                        approval.request_id,
+                        message.route.chat_id,
+                        err
+                    ),
+                )
+                .await;
+        }
+    }
+}
+
 async fn send_wechat_outbound(
     state: &SharedState,
     wechat_api: &WechatApi,
@@ -245,6 +327,11 @@ async fn send_wechat_outbound(
     match &message.payload {
         ImOutboundPayload::Text(text) => {
             send_wechat_text(state, &adapter, &message, text).await;
+        }
+        ImOutboundPayload::Approval(approval) => {
+            let text =
+                crate::im::wechat::adapter::approval_text(approval, im_text_for_state(state));
+            send_wechat_text(state, &adapter, &message, &text).await;
         }
         ImOutboundPayload::Image {
             path,
@@ -273,10 +360,12 @@ async fn send_wechat_text(
     let event_begin = match message.kind {
         ImOutboundKind::TurnReply => "wechat_turn_send_begin",
         ImOutboundKind::Item | ImOutboundKind::ImageItem => "wechat_item_send_begin",
+        ImOutboundKind::Approval => "wechat_approval_send_begin",
     };
     let event_done = match message.kind {
         ImOutboundKind::TurnReply => "wechat_turn_completed_sent",
         ImOutboundKind::Item | ImOutboundKind::ImageItem => "wechat_item_sent",
+        ImOutboundKind::Approval => "wechat_approval_sent",
     };
     state
         .push_event(
@@ -371,6 +460,7 @@ async fn send_wechat_text(
             let event_failed = match message.kind {
                 ImOutboundKind::TurnReply => "wechat_turn_completed_failed",
                 ImOutboundKind::Item | ImOutboundKind::ImageItem => "wechat_item_failed",
+                ImOutboundKind::Approval => "wechat_approval_failed",
             };
             state
                 .push_event(
@@ -472,7 +562,10 @@ async fn defer_wechat_outbound_if_waiting(
         recovery.awaiting_fresh_context_token.contains(&key)
     };
     if waiting {
-        if matches!(message.payload, ImOutboundPayload::Text(_)) {
+        if matches!(
+            message.payload,
+            ImOutboundPayload::Text(_) | ImOutboundPayload::Approval(_)
+        ) {
             log_outbound_result(
                 "wechat_context_token_waiting_text_allowed",
                 message,
@@ -490,7 +583,10 @@ async fn defer_wechat_outbound_if_waiting(
     )
     .await;
     if context_token.is_none() {
-        if matches!(message.payload, ImOutboundPayload::Text(_)) {
+        if matches!(
+            message.payload,
+            ImOutboundPayload::Text(_) | ImOutboundPayload::Approval(_)
+        ) {
             log_outbound_result(
                 "wechat_context_token_missing_text_allowed",
                 message,
@@ -617,6 +713,61 @@ fn wechat_recovery_key(account_id: &str, peer_id: &str) -> String {
     format!("{account_id}:{peer_id}")
 }
 
+async fn send_telegram_approval(
+    state: &SharedState,
+    adapter: &TelegramAdapter,
+    message: &ImOutboundMessage,
+    approval: &PendingApproval,
+) {
+    state
+        .push_event(
+            "info",
+            "telegram_approval_send_begin",
+            format!(
+                "thread={} request_id={} chat={}",
+                message.thread_id, approval.request_id, message.route.chat_id
+            ),
+        )
+        .await;
+    match adapter
+        .send_approval(&message.route.chat_id, approval, im_text_for_state(state))
+        .await
+    {
+        Ok(message_id) => {
+            state
+                .runtime
+                .lock()
+                .await
+                .remember_approval_message_id(&approval.request_id, message_id.clone());
+            state
+                .push_event(
+                    "info",
+                    "telegram_approval_sent",
+                    format!(
+                        "conversation={} request_id={} message={}",
+                        message.route.conversation_key, approval.request_id, message_id
+                    ),
+                )
+                .await;
+        }
+        Err(err) => {
+            state
+                .push_event(
+                    "error",
+                    "telegram_approval_failed",
+                    format!(
+                        "conversation={} request_id={} chat={} err={}",
+                        message.route.conversation_key,
+                        approval.request_id,
+                        message.route.chat_id,
+                        err
+                    ),
+                )
+                .await;
+        }
+    }
+}
+
 async fn send_telegram_text(
     state: &SharedState,
     adapter: &TelegramAdapter,
@@ -626,10 +777,12 @@ async fn send_telegram_text(
     let event_begin = match message.kind {
         ImOutboundKind::TurnReply => "telegram_turn_send_begin",
         ImOutboundKind::Item | ImOutboundKind::ImageItem => "telegram_item_send_begin",
+        ImOutboundKind::Approval => "telegram_approval_send_begin",
     };
     let event_done = match message.kind {
         ImOutboundKind::TurnReply => "telegram_turn_completed_sent",
         ImOutboundKind::Item | ImOutboundKind::ImageItem => "telegram_item_sent",
+        ImOutboundKind::Approval => "telegram_approval_sent",
     };
     state
         .push_event(
@@ -669,6 +822,7 @@ async fn send_telegram_text(
             let event_failed = match message.kind {
                 ImOutboundKind::TurnReply => "telegram_turn_completed_failed",
                 ImOutboundKind::Item | ImOutboundKind::ImageItem => "telegram_item_failed",
+                ImOutboundKind::Approval => "telegram_approval_failed",
             };
             state
                 .push_event(
@@ -697,6 +851,11 @@ fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&
         (ImOutboundPayload::Text(text), None) => {
             ("text", text.chars().count(), trace_preview(text, 500))
         }
+        (ImOutboundPayload::Approval(approval), None) => (
+            "approval",
+            approval.summary.chars().count(),
+            trace_preview(&approval.summary, 500),
+        ),
         (
             ImOutboundPayload::Image {
                 path,
