@@ -663,7 +663,7 @@ fn observe_sse_chunk(
     while let Some(pos) = line_buf.find('\n') {
         let line = line_buf[..pos].trim_end_matches('\r').to_string();
         *line_buf = line_buf[pos + 1..].to_string();
-        let Some(data) = line.strip_prefix("data: ") else {
+        let Some(data) = sse_data_value(&line) else {
             continue;
         };
         if data.trim() == "[DONE]" {
@@ -714,6 +714,11 @@ fn observe_sse_chunk(
 
 fn is_first_token_event(event_type: &str) -> bool {
     event_type.starts_with("response.") && event_type.ends_with(".delta")
+}
+
+fn sse_data_value(line: &str) -> Option<&str> {
+    let data = line.strip_prefix("data:")?;
+    Some(data.strip_prefix(' ').unwrap_or(data))
 }
 
 fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {

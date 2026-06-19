@@ -115,6 +115,10 @@ pub async fn passthrough(
             HeaderName::from_static("cache-control"),
             HeaderValue::from_static("no-cache"),
         );
+        headers.insert(
+            HeaderName::from_static("connection"),
+            HeaderValue::from_static("keep-alive"),
+        );
 
         let byte_stream = upstream_resp.bytes_stream().map(|result| {
             result.map_err(|e| {

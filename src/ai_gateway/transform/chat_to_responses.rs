@@ -23,7 +23,11 @@ pub fn convert_chat_response_with_tool_names(
     request_model: &str,
     tool_name_map: &ToolNameMap,
 ) -> Result<ResponseObject, String> {
-    let resp_id = generate_response_id();
+    let resp_id = chat_resp
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(generate_response_id);
     let model = chat_resp
         .get("model")
         .and_then(|v| v.as_str())
@@ -288,7 +292,7 @@ mod tests {
         });
 
         let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
-        assert!(resp.id.starts_with("gwresp_"));
+        assert_eq!(resp.id, "chatcmpl-123");
         assert_eq!(resp.status, "completed");
         assert_eq!(resp.output.len(), 1);
         assert_eq!(resp.output[0].item_type, ItemType::Message);
@@ -297,6 +301,25 @@ mod tests {
         let usage = resp.usage.unwrap();
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn test_missing_chat_response_id_generates_response_id() {
+        let chat_resp = json!({
+            "model": "deepseek-v4-flash",
+            "created": 1700000000,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello world!"
+                },
+                "finish_reason": "stop"
+            }]
+        });
+
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
+        assert!(resp.id.starts_with("gwresp_"));
     }
 
     #[test]

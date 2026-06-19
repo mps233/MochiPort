@@ -67,7 +67,7 @@ where
                         let line = this.line_buf[..pos].trim_end_matches('\r').to_string();
                         this.line_buf = this.line_buf[pos + 1..].to_string();
 
-                        if let Some(data) = line.strip_prefix("data: ") {
+                        if let Some(data) = sse_data_value(&line) {
                             if data.trim() == "[DONE]" {
                                 // 生成结束事件
                                 this.state.handle_done(&mut this.output_queue);
@@ -132,7 +132,10 @@ struct ResponsesStreamState {
     output_index: usize,
     content_index: usize,
     sequence_number: usize,
-    current_item_id: String,
+    message_item_id: String,
+    message_output_index: usize,
+    reasoning_item_id: String,
+    reasoning_output_index: usize,
 
     // 积累器
     accumulated_text: String,
@@ -155,8 +158,16 @@ struct ToolCallState {
     id: String,
     target: ToolCallTarget,
     arguments: String,
+    custom_emitted_input: String,
     item_id: String,
     output_index: usize,
+}
+
+struct ToolDeltaEvent {
+    event_type: &'static str,
+    item_id: String,
+    output_index: usize,
+    delta: String,
 }
 
 impl ResponsesStreamState {
@@ -179,7 +190,10 @@ impl ResponsesStreamState {
             output_index: 0,
             content_index: 0,
             sequence_number: 0,
-            current_item_id: String::new(),
+            message_item_id: String::new(),
+            message_output_index: 0,
+            reasoning_item_id: String::new(),
+            reasoning_output_index: 0,
             accumulated_text: String::new(),
             accumulated_reasoning: String::new(),
             completed_output: Vec::new(),
@@ -216,6 +230,9 @@ impl ResponsesStreamState {
         // 第一个 chunk：生成 response.created + response.in_progress
         if !self.has_started {
             self.has_started = true;
+            if let Some(id) = chunk.get("id").and_then(|v| v.as_str()) {
+                self.response_id = id.to_string();
+            }
             if let Some(model) = chunk.get("model").and_then(|v| v.as_str()) {
                 self.model = model.to_string();
             }
@@ -223,6 +240,7 @@ impl ResponsesStreamState {
                 self.created_at = created;
             }
             self.emit_response_created(queue);
+            self.emit_response_in_progress(queue);
         }
 
         let choice = match chunk
@@ -282,8 +300,13 @@ impl ResponsesStreamState {
     }
 
     fn handle_reasoning_delta(&mut self, text: &str, queue: &mut VecDeque<Bytes>) {
+        if self.message_item_started {
+            self.close_message_item(queue);
+        }
+
         if !self.reasoning_item_started {
-            self.current_item_id = generate_item_id();
+            self.reasoning_item_id = generate_item_id();
+            self.reasoning_output_index = self.output_index;
             let seq = self.next_seq();
             emit_sse(
                 queue,
@@ -291,16 +314,17 @@ impl ResponsesStreamState {
                 json!({
                     "type": "response.output_item.added",
                     "sequence_number": seq,
-                    "output_index": self.output_index,
+                    "output_index": self.reasoning_output_index,
                     "item": {
                         "type": "reasoning",
-                        "id": self.current_item_id,
+                        "id": self.reasoning_item_id,
                         "status": "in_progress",
                         "summary": [],
                     }
                 }),
             );
             self.reasoning_item_started = true;
+            self.output_index += 1;
         }
 
         if !self.reasoning_summary_part {
@@ -311,8 +335,8 @@ impl ResponsesStreamState {
                 json!({
                     "type": "response.reasoning_summary_part.added",
                     "sequence_number": seq,
-                    "item_id": self.current_item_id,
-                    "output_index": self.output_index,
+                    "item_id": self.reasoning_item_id,
+                    "output_index": self.reasoning_output_index,
                     "summary_index": 0,
                     "part": {"type": "summary_text", "text": ""},
                 }),
@@ -328,8 +352,8 @@ impl ResponsesStreamState {
             json!({
                 "type": "response.reasoning_summary_text.delta",
                 "sequence_number": seq,
-                "item_id": self.current_item_id,
-                "output_index": self.output_index,
+                "item_id": self.reasoning_item_id,
+                "output_index": self.reasoning_output_index,
                 "summary_index": 0,
                 "delta": text,
             }),
@@ -343,7 +367,7 @@ impl ResponsesStreamState {
 
         let item = json!({
             "type": "reasoning",
-            "id": self.current_item_id,
+            "id": self.reasoning_item_id,
             "status": "completed",
             "summary": [{"type": "summary_text", "text": self.accumulated_reasoning}],
         });
@@ -356,8 +380,8 @@ impl ResponsesStreamState {
             json!({
                 "type": "response.reasoning_summary_text.done",
                 "sequence_number": seq,
-                "item_id": self.current_item_id,
-                "output_index": self.output_index,
+                "item_id": self.reasoning_item_id,
+                "output_index": self.reasoning_output_index,
                 "summary_index": 0,
                 "text": self.accumulated_reasoning,
             }),
@@ -371,8 +395,8 @@ impl ResponsesStreamState {
             json!({
                 "type": "response.reasoning_summary_part.done",
                 "sequence_number": seq,
-                "item_id": self.current_item_id,
-                "output_index": self.output_index,
+                "item_id": self.reasoning_item_id,
+                "output_index": self.reasoning_output_index,
                 "summary_index": 0,
                 "part": {"type": "summary_text", "text": self.accumulated_reasoning},
             }),
@@ -386,15 +410,16 @@ impl ResponsesStreamState {
             json!({
                 "type": "response.output_item.done",
                 "sequence_number": seq,
-                "output_index": self.output_index,
+                "output_index": self.reasoning_output_index,
                 "item": item.clone(),
             }),
         );
 
         self.completed_output.push(item);
-        self.output_index += 1;
         self.reasoning_item_started = false;
         self.reasoning_summary_part = false;
+        self.reasoning_item_id.clear();
+        self.reasoning_output_index = 0;
         self.accumulated_reasoning.clear();
     }
 
@@ -405,7 +430,8 @@ impl ResponsesStreamState {
         }
 
         if !self.message_item_started {
-            self.current_item_id = generate_item_id();
+            self.message_item_id = generate_item_id();
+            self.message_output_index = self.output_index;
             let seq = self.next_seq();
             emit_sse(
                 queue,
@@ -413,10 +439,10 @@ impl ResponsesStreamState {
                 json!({
                     "type": "response.output_item.added",
                     "sequence_number": seq,
-                    "output_index": self.output_index,
+                    "output_index": self.message_output_index,
                     "item": {
                         "type": "message",
-                        "id": self.current_item_id,
+                        "id": self.message_item_id,
                         "role": "assistant",
                         "status": "in_progress",
                         "content": [],
@@ -424,6 +450,7 @@ impl ResponsesStreamState {
                 }),
             );
             self.message_item_started = true;
+            self.output_index += 1;
         }
 
         if !self.content_part_started {
@@ -434,8 +461,8 @@ impl ResponsesStreamState {
                 json!({
                     "type": "response.content_part.added",
                     "sequence_number": seq,
-                    "item_id": self.current_item_id,
-                    "output_index": self.output_index,
+                    "item_id": self.message_item_id,
+                    "output_index": self.message_output_index,
                     "content_index": self.content_index,
                     "part": {"type": "output_text", "text": "", "annotations": []},
                 }),
@@ -451,10 +478,11 @@ impl ResponsesStreamState {
             json!({
                 "type": "response.output_text.delta",
                 "sequence_number": seq,
-                "item_id": self.current_item_id,
-                "output_index": self.output_index,
+                "item_id": self.message_item_id,
+                "output_index": self.message_output_index,
                 "content_index": self.content_index,
                 "delta": text,
+                "logprobs": [],
             }),
         );
     }
@@ -472,10 +500,11 @@ impl ResponsesStreamState {
             json!({
                 "type": "response.output_text.done",
                 "sequence_number": seq,
-                "item_id": self.current_item_id,
-                "output_index": self.output_index,
+                "item_id": self.message_item_id,
+                "output_index": self.message_output_index,
                 "content_index": self.content_index,
                 "text": self.accumulated_text,
+                "logprobs": [],
             }),
         );
 
@@ -487,8 +516,8 @@ impl ResponsesStreamState {
             json!({
                 "type": "response.content_part.done",
                 "sequence_number": seq,
-                "item_id": self.current_item_id,
-                "output_index": self.output_index,
+                "item_id": self.message_item_id,
+                "output_index": self.message_output_index,
                 "content_index": self.content_index,
                 "part": {"type": "output_text", "text": self.accumulated_text, "annotations": []},
             }),
@@ -506,7 +535,7 @@ impl ResponsesStreamState {
 
         let item = json!({
             "type": "message",
-            "id": self.current_item_id,
+            "id": self.message_item_id,
             "role": "assistant",
             "status": "completed",
             "content": [{"type": "output_text", "text": self.accumulated_text, "annotations": []}],
@@ -520,14 +549,15 @@ impl ResponsesStreamState {
             json!({
                 "type": "response.output_item.done",
                 "sequence_number": seq,
-                "output_index": self.output_index,
+                "output_index": self.message_output_index,
                 "item": item.clone(),
             }),
         );
 
         self.completed_output.push(item);
-        self.output_index += 1;
         self.message_item_started = false;
+        self.message_item_id.clear();
+        self.message_output_index = 0;
         self.accumulated_text.clear();
     }
 
@@ -561,6 +591,7 @@ impl ResponsesStreamState {
                 id: call_id.clone(),
                 target: target.clone(),
                 arguments: String::new(),
+                custom_emitted_input: String::new(),
                 item_id: item_id.clone(),
                 output_index: self.output_index,
             };
@@ -585,23 +616,26 @@ impl ResponsesStreamState {
         // 积累 arguments
         if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
             if !args.is_empty() {
-                let seq = self.next_seq();
-                let tc_state = self.tool_calls.get_mut(&index).unwrap();
-                tc_state.arguments.push_str(args);
-                let item_id = tc_state.item_id.clone();
-                let output_index = tc_state.output_index;
+                let pending = {
+                    let tc_state = self.tool_calls.get_mut(&index).unwrap();
+                    tc_state.arguments.push_str(args);
+                    tool_delta_event(tc_state, args)
+                };
 
-                emit_sse(
-                    queue,
-                    "response.function_call_arguments.delta",
-                    json!({
-                        "type": "response.function_call_arguments.delta",
-                        "sequence_number": seq,
-                        "item_id": item_id,
-                        "output_index": output_index,
-                        "delta": args,
-                    }),
-                );
+                if let Some(pending) = pending {
+                    let seq = self.next_seq();
+                    emit_sse(
+                        queue,
+                        pending.event_type,
+                        json!({
+                            "type": pending.event_type,
+                            "sequence_number": seq,
+                            "item_id": pending.item_id,
+                            "output_index": pending.output_index,
+                            "delta": pending.delta,
+                        }),
+                    );
+                }
             }
         }
     }
@@ -618,19 +652,38 @@ impl ResponsesStreamState {
             let output_index = tc.output_index;
             let item = completed_tool_item(&item_id, &call_id, &target, &arguments);
 
-            // function_call_arguments.done
-            let seq = self.next_seq();
-            emit_sse(
-                queue,
-                "response.function_call_arguments.done",
-                json!({
-                    "type": "response.function_call_arguments.done",
-                    "sequence_number": seq,
-                    "item_id": item["id"].clone(),
-                    "output_index": output_index,
-                    "arguments": item["arguments"].clone(),
-                }),
-            );
+            match target.kind {
+                ToolCallKind::Custom => {
+                    let seq = self.next_seq();
+                    emit_sse(
+                        queue,
+                        "response.custom_tool_call_input.done",
+                        json!({
+                            "type": "response.custom_tool_call_input.done",
+                            "sequence_number": seq,
+                            "item_id": item["id"].clone(),
+                            "output_index": output_index,
+                            "input": item["input"].clone(),
+                        }),
+                    );
+                }
+                ToolCallKind::Function => {
+                    let seq = self.next_seq();
+                    emit_sse(
+                        queue,
+                        "response.function_call_arguments.done",
+                        json!({
+                            "type": "response.function_call_arguments.done",
+                            "sequence_number": seq,
+                            "item_id": item["id"].clone(),
+                            "output_index": output_index,
+                            "name": item["name"].clone(),
+                            "arguments": item["arguments"].clone(),
+                        }),
+                    );
+                }
+                ToolCallKind::ToolSearch => {}
+            }
 
             // output_item.done
             let seq = self.next_seq();
@@ -695,6 +748,19 @@ impl ResponsesStreamState {
         self.response_created = true;
     }
 
+    fn emit_response_in_progress(&mut self, queue: &mut VecDeque<Bytes>) {
+        let seq = self.next_seq();
+        emit_sse(
+            queue,
+            "response.in_progress",
+            json!({
+                "type": "response.in_progress",
+                "sequence_number": seq,
+                "response": self.response_object("in_progress"),
+            }),
+        );
+    }
+
     fn emit_response_completed(&mut self, queue: &mut VecDeque<Bytes>) {
         let status = match self.finish_reason.as_deref() {
             Some("length") => "incomplete",
@@ -723,6 +789,43 @@ impl ResponsesStreamState {
 
 // ─── 工具函数 ──────────────────────────────────────────────────
 
+fn tool_delta_event(tc_state: &mut ToolCallState, raw_delta: &str) -> Option<ToolDeltaEvent> {
+    match tc_state.target.kind {
+        ToolCallKind::Custom => {
+            let full_input = match partial_custom_tool_input(&tc_state.arguments) {
+                Some(input) => input,
+                None if !tc_state.arguments.trim_start().starts_with('{') => {
+                    tc_state.arguments.clone()
+                }
+                None => return None,
+            };
+            let delta = if let Some(input) = full_input.strip_prefix(&tc_state.custom_emitted_input)
+            {
+                input.to_string()
+            } else {
+                full_input.clone()
+            };
+            if delta.is_empty() {
+                return None;
+            }
+            tc_state.custom_emitted_input = full_input;
+            Some(ToolDeltaEvent {
+                event_type: "response.custom_tool_call_input.delta",
+                item_id: tc_state.item_id.clone(),
+                output_index: tc_state.output_index,
+                delta,
+            })
+        }
+        ToolCallKind::Function => Some(ToolDeltaEvent {
+            event_type: "response.function_call_arguments.delta",
+            item_id: tc_state.item_id.clone(),
+            output_index: tc_state.output_index,
+            delta: raw_delta.to_string(),
+        }),
+        ToolCallKind::ToolSearch => None,
+    }
+}
+
 fn in_progress_tool_item(item_id: &str, call_id: &str, target: &ToolCallTarget) -> Value {
     match target.kind {
         ToolCallKind::ToolSearch => json!({
@@ -739,7 +842,6 @@ fn in_progress_tool_item(item_id: &str, call_id: &str, target: &ToolCallTarget) 
             "call_id": call_id,
             "name": target.name.clone(),
             "input": "",
-            "status": "in_progress",
         }),
         ToolCallKind::Function => {
             let mut item = json!({
@@ -774,22 +876,13 @@ fn completed_tool_item(
             "status": "completed",
         }),
         ToolCallKind::Custom => {
-            let input = serde_json::from_str::<Value>(arguments)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("input")
-                        .and_then(Value::as_str)
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| arguments.to_string());
+            let input = extract_custom_tool_input(arguments);
             json!({
                 "type": "custom_tool_call",
                 "id": item_id,
                 "call_id": call_id,
                 "name": target.name.clone(),
                 "input": input,
-                "status": "completed",
             })
         }
         ToolCallKind::Function => {
@@ -809,9 +902,115 @@ fn completed_tool_item(
     }
 }
 
+fn extract_custom_tool_input(arguments: &str) -> String {
+    parse_custom_tool_input(arguments).unwrap_or_else(|| arguments.to_string())
+}
+
+fn parse_custom_tool_input(arguments: &str) -> Option<String> {
+    serde_json::from_str::<Value>(arguments)
+        .ok()?
+        .get("input")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn partial_custom_tool_input(arguments: &str) -> Option<String> {
+    parse_custom_tool_input(arguments).or_else(|| partial_wrapped_input_prefix(arguments))
+}
+
+fn partial_wrapped_input_prefix(arguments: &str) -> Option<String> {
+    let mut rest = arguments.trim_start();
+    rest = rest.strip_prefix('{')?.trim_start();
+
+    let (key, after_key) = parse_json_string_prefix(rest)?;
+    if key != "input" {
+        return None;
+    }
+
+    rest = after_key.trim_start();
+    rest = rest.strip_prefix(':')?.trim_start();
+    parse_json_string_prefix(rest).map(|(value, _)| value)
+}
+
+fn parse_json_string_prefix(input: &str) -> Option<(String, &str)> {
+    if !input.starts_with('"') {
+        return None;
+    }
+
+    let mut output = String::new();
+    let mut pos = 1;
+    while pos < input.len() {
+        let ch = input[pos..].chars().next()?;
+        match ch {
+            '"' => {
+                let next = pos + ch.len_utf8();
+                return Some((output, &input[next..]));
+            }
+            '\\' => {
+                pos += ch.len_utf8();
+                let escaped = input[pos..].chars().next()?;
+                match escaped {
+                    '"' => output.push('"'),
+                    '\\' => output.push('\\'),
+                    '/' => output.push('/'),
+                    'b' => output.push('\u{0008}'),
+                    'f' => output.push('\u{000c}'),
+                    'n' => output.push('\n'),
+                    'r' => output.push('\r'),
+                    't' => output.push('\t'),
+                    'u' => {
+                        let after_u = pos + escaped.len_utf8();
+                        let unicode = decode_json_unicode_escape(input, after_u)?;
+                        output.push(unicode.0);
+                        pos = unicode.1;
+                        continue;
+                    }
+                    _ => output.push(escaped),
+                }
+                pos += escaped.len_utf8();
+            }
+            _ => {
+                output.push(ch);
+                pos += ch.len_utf8();
+            }
+        }
+    }
+
+    Some((output, ""))
+}
+
+fn decode_json_unicode_escape(input: &str, offset: usize) -> Option<(char, usize)> {
+    let first = read_hex_u16(input, offset)?;
+    let first_end = offset + 4;
+    if (0xD800..=0xDBFF).contains(&first) {
+        let low_offset = first_end + 2;
+        if input.get(first_end..low_offset) != Some("\\u") {
+            return None;
+        }
+        let second = read_hex_u16(input, low_offset)?;
+        if !(0xDC00..=0xDFFF).contains(&second) {
+            return None;
+        }
+        let codepoint = 0x10000 + (((first as u32 - 0xD800) << 10) | (second as u32 - 0xDC00));
+        char::from_u32(codepoint).map(|ch| (ch, low_offset + 4))
+    } else {
+        char::from_u32(first as u32).map(|ch| (ch, first_end))
+    }
+}
+
+fn read_hex_u16(input: &str, offset: usize) -> Option<u16> {
+    let hex = input.get(offset..offset + 4)?;
+    u16::from_str_radix(hex, 16).ok()
+}
+
 fn emit_sse(queue: &mut VecDeque<Bytes>, event_type: &str, data: Value) {
     let line = format!("event: {}\ndata: {}\n\n", event_type, data.to_string());
     queue.push_back(Bytes::from(line));
+}
+
+fn sse_data_value(line: &str) -> Option<&str> {
+    let data = line.strip_prefix("data:")?;
+    Some(data.strip_prefix(' ').unwrap_or(data))
 }
 
 fn convert_usage_value(usage: &Value) -> Option<Value> {
@@ -861,6 +1060,7 @@ fn first_i64(value: &Value, keys: &[&str]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures_util::{StreamExt, stream};
     use serde_json::json;
 
     /// 辅助：直接对状态机喂 chunk，收集输出事件。
@@ -891,7 +1091,7 @@ mod tests {
             for line in text.lines() {
                 if let Some(et) = line.strip_prefix("event: ") {
                     event_type = et.to_string();
-                } else if let Some(d) = line.strip_prefix("data: ") {
+                } else if let Some(d) = sse_data_value(&line) {
                     data = d.to_string();
                 }
             }
@@ -907,12 +1107,115 @@ mod tests {
         events.iter().map(|(t, _)| t.as_str()).collect()
     }
 
+    #[test]
+    fn partial_wrapped_input_prefix_decodes_complete_prefix() {
+        assert_eq!(
+            partial_wrapped_input_prefix("{\"input\":\"line 1\\nline 2"),
+            Some("line 1\nline 2".to_string())
+        );
+        assert_eq!(
+            partial_wrapped_input_prefix("{\"input\":\"snowman: \\u2603"),
+            Some("snowman: \u{2603}".to_string())
+        );
+        assert_eq!(
+            partial_wrapped_input_prefix("{\"input\":\"emoji: \\ud83d\\ude03"),
+            Some("emoji: \u{1f603}".to_string())
+        );
+        assert_eq!(partial_wrapped_input_prefix("{\"input\":\"bad \\"), None);
+        assert_eq!(partial_wrapped_input_prefix("{\"other\":\"value"), None);
+    }
+
+    #[tokio::test]
+    async fn stream_adapter_accepts_data_line_without_space() {
+        let input = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                br#"data:{"id":"chatcmpl_abc","model":"deepseek-v4-flash","created":1700000000,"choices":[{"index":0,"delta":{"content":"hi"}}]}
+
+"#,
+            )),
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                br#"data:{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}
+
+"#,
+            )),
+            Ok::<_, std::io::Error>(Bytes::from_static(b"data:[DONE]\n\n")),
+        ]);
+        let mut stream = ChatSseToResponsesSse::new(input, "deepseek-v4-flash".to_string());
+        let mut queue = VecDeque::new();
+        while let Some(chunk) = stream.next().await {
+            queue.push_back(chunk.unwrap());
+        }
+
+        let events = parse_events(&queue);
+        let types = event_types(&events);
+        assert!(types.contains(&"response.output_text.delta"));
+        assert!(types.contains(&"response.completed"));
+        assert_eq!(events[0].1["response"]["id"], "chatcmpl_abc");
+    }
+
+    fn assert_codex_active_item_invariants(events: &[(String, Value)]) {
+        let mut active: Option<(String, String)> = None;
+
+        for (event_type, event) in events {
+            match event_type.as_str() {
+                "response.output_item.added" => {
+                    let item_type = event["item"]["type"].as_str().unwrap_or("");
+                    if matches!(item_type, "message" | "reasoning") {
+                        assert!(
+                            active.is_none(),
+                            "started {item_type} before closing active item {:?}",
+                            active
+                        );
+                        active = Some((
+                            item_type.to_string(),
+                            event["item"]["id"].as_str().unwrap_or("").to_string(),
+                        ));
+                    }
+                }
+                "response.output_item.done" => {
+                    let item_type = event["item"]["type"].as_str().unwrap_or("");
+                    if matches!(item_type, "message" | "reasoning") {
+                        let item_id = event["item"]["id"].as_str().unwrap_or("");
+                        assert_eq!(
+                            active.as_ref().map(|(kind, _)| kind.as_str()),
+                            Some(item_type),
+                            "{item_type}.done without matching active item"
+                        );
+                        assert_eq!(
+                            active.as_ref().map(|(_, id)| id.as_str()),
+                            Some(item_id),
+                            "{item_type}.done id mismatch"
+                        );
+                        active = None;
+                    }
+                }
+                "response.output_text.delta" => {
+                    assert_eq!(
+                        active.as_ref().map(|(kind, _)| kind.as_str()),
+                        Some("message"),
+                        "output_text.delta without active message item"
+                    );
+                }
+                "response.reasoning_summary_part.added"
+                | "response.reasoning_summary_text.delta" => {
+                    assert_eq!(
+                        active.as_ref().map(|(kind, _)| kind.as_str()),
+                        Some("reasoning"),
+                        "{event_type} without active reasoning item"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     // ─── 基本文本流 ────────────────────────────────────────────
 
     #[test]
     fn test_simple_text_stream() {
         let chunks = vec![
             json!({
+                "id": "chatcmpl_123",
                 "model": "deepseek-v4-flash",
                 "created": 1700000000,
                 "choices": [{"index": 0, "delta": {"content": "Hello"}}]
@@ -930,6 +1233,11 @@ mod tests {
         let types = event_types(&events);
 
         assert!(types.contains(&"response.created"));
+        assert!(types.contains(&"response.in_progress"));
+        assert_eq!(types[0], "response.created");
+        assert_eq!(types[1], "response.in_progress");
+        assert_eq!(events[0].1["response"]["id"], "chatcmpl_123");
+        assert_eq!(events[1].1["response"]["id"], "chatcmpl_123");
         assert!(types.contains(&"response.output_item.added"));
         assert!(types.contains(&"response.content_part.added"));
 
@@ -942,8 +1250,14 @@ mod tests {
         assert_eq!(deltas.len(), 2);
         assert_eq!(deltas[0]["delta"], "Hello");
         assert_eq!(deltas[1]["delta"], " world");
+        assert_eq!(deltas[0]["logprobs"], json!([]));
 
         assert!(types.contains(&"response.output_text.done"));
+        let output_text_done = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.output_text.done")
+            .unwrap();
+        assert_eq!(output_text_done.1["logprobs"], json!([]));
         assert!(types.contains(&"response.content_part.done"));
         assert!(types.contains(&"response.output_item.done"));
         assert!(types.contains(&"response.completed"));
@@ -1028,6 +1342,42 @@ mod tests {
             completed.1["response"]["output"][1]["content"][0]["text"],
             "The answer is 42."
         );
+        assert_codex_active_item_invariants(&events);
+    }
+
+    #[test]
+    fn test_interleaved_text_and_reasoning_closes_active_items() {
+        let chunks = vec![
+            json!({
+                "model": "deepseek-v4-pro",
+                "created": 1700000000,
+                "choices": [{"index": 0, "delta": {"content": "First"}}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {"reasoning_content": "think"}}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {"content": " second"}}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}
+            }),
+        ];
+
+        let events = feed_chunks(&chunks);
+        assert_codex_active_item_invariants(&events);
+
+        let message_items: Vec<&Value> = events
+            .iter()
+            .filter(|(t, v)| {
+                t == "response.output_item.done" && v["item"]["type"].as_str() == Some("message")
+            })
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(message_items.len(), 2);
+        assert_eq!(message_items[0]["item"]["content"][0]["text"], "First");
+        assert_eq!(message_items[1]["item"]["content"][0]["text"], " second");
     }
 
     // ─── tool call 流 ──────────────────────────────────────────
@@ -1091,9 +1441,76 @@ mod tests {
             .map(|(_, v)| v)
             .collect();
         assert_eq!(arg_done.len(), 1);
+        assert_eq!(arg_done[0]["name"], "get_weather");
         assert_eq!(arg_done[0]["arguments"], "{\"city\":\"NYC\"}");
 
         assert!(types.contains(&"response.completed"));
+    }
+
+    #[test]
+    fn test_custom_tool_call_stream_uses_custom_input_events() {
+        let mut tool_name_map = ToolNameMap::default();
+        tool_name_map.insert("apply_patch", ToolCallTarget::custom("apply_patch"));
+        let chunks = vec![
+            json!({
+                "model": "deepseek-v4-flash",
+                "created": 1700000000,
+                "choices": [{"index": 0, "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_patch",
+                        "type": "function",
+                        "function": {"name": "apply_patch", "arguments": ""}
+                    }]
+                }}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {
+                    "tool_calls": [{"index": 0, "function": {"arguments": "{\"input\":\"*** Begin Patch\\n"}}]
+                }}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {
+                    "tool_calls": [{"index": 0, "function": {"arguments": "*** End Patch\\n\"}"}}]
+                }}]
+            }),
+            json!({
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}
+            }),
+        ];
+
+        let events = feed_chunks_with_tool_names(&chunks, tool_name_map);
+        let types = event_types(&events);
+
+        assert!(types.contains(&"response.custom_tool_call_input.delta"));
+        assert!(types.contains(&"response.custom_tool_call_input.done"));
+        assert!(!types.contains(&"response.function_call_arguments.delta"));
+        assert!(!types.contains(&"response.function_call_arguments.done"));
+
+        let input_deltas: Vec<&str> = events
+            .iter()
+            .filter(|(t, _)| t == "response.custom_tool_call_input.delta")
+            .map(|(_, v)| v["delta"].as_str().unwrap())
+            .collect();
+        assert_eq!(input_deltas, vec!["*** Begin Patch\n", "*** End Patch\n"]);
+
+        let input_done = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.custom_tool_call_input.done")
+            .unwrap();
+        assert_eq!(input_done.1["input"], "*** Begin Patch\n*** End Patch\n");
+
+        let done = events
+            .iter()
+            .find(|(event_type, v)| {
+                event_type == "response.output_item.done"
+                    && v["item"]["type"].as_str() == Some("custom_tool_call")
+            })
+            .unwrap();
+        assert_eq!(done.1["item"]["call_id"], "call_patch");
+        assert_eq!(done.1["item"]["name"], "apply_patch");
+        assert_eq!(done.1["item"]["input"], "*** Begin Patch\n*** End Patch\n");
     }
 
     #[test]

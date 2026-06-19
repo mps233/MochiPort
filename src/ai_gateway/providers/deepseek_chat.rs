@@ -172,5 +172,9 @@ async fn handle_stream(
         HeaderName::from_static("cache-control"),
         HeaderValue::from_static("no-cache"),
     );
+    response.headers_mut().insert(
+        HeaderName::from_static("connection"),
+        HeaderValue::from_static("keep-alive"),
+    );
     Ok(response)
 }
