@@ -30,6 +30,7 @@ use crate::ai_gateway::tool_names::{ToolCallKind, ToolCallTarget, ToolNameMap};
 use super::{apply_total_request_timeout, execute_stream_start, map_upstream_response};
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const ANTHROPIC_WEB_SEARCH_TYPE: &str = "web_search_20260318";
 const DEFAULT_MAX_TOKENS: i64 = 4096;
 
 pub async fn handle(
@@ -353,6 +354,11 @@ fn build_anthropic_tools(request: &GatewayRequest, tool_name_map: &mut ToolNameM
                 Some("custom") => build_anthropic_custom_tool(obj, tool_name_map)
                     .map(|tool| vec![tool])
                     .unwrap_or_default(),
+                Some("web_search") | Some("web_search_preview") => {
+                    build_anthropic_web_search_tool(obj)
+                        .map(|tool| vec![tool])
+                        .unwrap_or_default()
+                }
                 _ => Vec::new(),
             }
         })
@@ -432,6 +438,41 @@ fn build_anthropic_custom_tool(
             "additionalProperties": false
         }
     }))
+}
+
+fn build_anthropic_web_search_tool(tool: &Map<String, Value>) -> Option<Value> {
+    let mut result = Map::new();
+    result.insert("type".to_string(), json!(ANTHROPIC_WEB_SEARCH_TYPE));
+    result.insert("name".to_string(), json!("web_search"));
+
+    let config = tool
+        .get("web_search")
+        .or_else(|| tool.get("web_search_preview"))
+        .and_then(Value::as_object)
+        .unwrap_or(tool);
+    copy_optional_fields(
+        config,
+        &mut result,
+        &[
+            "max_uses",
+            "allowed_domains",
+            "blocked_domains",
+            "user_location",
+        ],
+    );
+    Some(Value::Object(result))
+}
+
+fn copy_optional_fields(
+    source: &Map<String, Value>,
+    target: &mut Map<String, Value>,
+    keys: &[&str],
+) {
+    for key in keys {
+        if let Some(value) = source.get(*key) {
+            target.insert((*key).to_string(), value.clone());
+        }
+    }
 }
 
 fn tool_search_output_tools(items: &[ResponseItem]) -> Vec<Value> {
@@ -695,8 +736,90 @@ fn anthropic_content_to_response_item(
                 encrypted_content: None,
             })
         }
+        "server_tool_use" => {
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            if name != "web_search" {
+                return None;
+            }
+            Some(ResponseItem {
+                item_type: ItemType::WebSearchCall,
+                id: item
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .or_else(|| Some(generate_item_id())),
+                role: None,
+                content: None,
+                text: None,
+                name: None,
+                namespace: None,
+                call_id: item.get("id").and_then(Value::as_str).map(str::to_string),
+                arguments: None,
+                input: None,
+                output: None,
+                status: Some("completed".to_string()),
+                execution: None,
+                tools: None,
+                image_url: None,
+                detail: None,
+                action: Some(server_tool_action(item)),
+                summary: None,
+                encrypted_content: None,
+            })
+        }
+        "web_search_tool_result" => Some(ResponseItem {
+            item_type: ItemType::WebSearchCall,
+            id: item
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| Some(generate_item_id())),
+            role: None,
+            content: None,
+            text: None,
+            name: None,
+            namespace: None,
+            call_id: item
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            arguments: None,
+            input: None,
+            output: None,
+            status: Some(
+                if item
+                    .get("is_error")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    "failed"
+                } else {
+                    "completed"
+                }
+                .to_string(),
+            ),
+            execution: None,
+            tools: None,
+            image_url: None,
+            detail: None,
+            action: Some(json!({
+                "type": "web_search_tool_result",
+                "tool_use_id": item.get("tool_use_id").cloned().unwrap_or(Value::Null),
+                "content": item.get("content").cloned().unwrap_or(Value::Null),
+                "is_error": item.get("is_error").cloned().unwrap_or(Value::Bool(false)),
+            })),
+            summary: None,
+            encrypted_content: None,
+        }),
         _ => None,
     }
+}
+
+fn server_tool_action(item: &Value) -> Value {
+    json!({
+        "type": "web_search",
+        "input": item.get("input").cloned().unwrap_or_else(|| json!({})),
+    })
 }
 
 fn extract_custom_tool_input(input: &Value) -> String {
@@ -832,6 +955,7 @@ struct AnthropicStreamState {
     output_index: usize,
     message_item: Option<StreamMessageItem>,
     content_blocks: HashMap<usize, AnthropicContentBlockState>,
+    web_search_blocks: HashMap<usize, AnthropicWebSearchBlockState>,
     completed_output: Vec<Value>,
     usage: Option<Value>,
     stop_reason: Option<String>,
@@ -854,6 +978,14 @@ struct AnthropicContentBlockState {
     custom_emitted_input: String,
 }
 
+struct AnthropicWebSearchBlockState {
+    item_id: String,
+    output_index: usize,
+    call_id: String,
+    input: Value,
+    result: Option<Value>,
+}
+
 impl AnthropicStreamState {
     fn new(model: String, tool_name_map: ToolNameMap) -> Self {
         Self {
@@ -866,6 +998,7 @@ impl AnthropicStreamState {
             output_index: 0,
             message_item: None,
             content_blocks: HashMap::new(),
+            web_search_blocks: HashMap::new(),
             completed_output: Vec::new(),
             usage: None,
             stop_reason: None,
@@ -921,6 +1054,8 @@ impl AnthropicStreamState {
                 }
             }
             Some("tool_use") => self.start_tool_block(index, block, queue),
+            Some("server_tool_use") => self.start_server_tool_block(index, block, queue),
+            Some("web_search_tool_result") => self.attach_web_search_result(index, block),
             _ => {}
         }
     }
@@ -949,6 +1084,9 @@ impl AnthropicStreamState {
         if self.content_blocks.contains_key(&index) {
             self.close_tool_block(index, queue);
         }
+        if self.web_search_blocks.contains_key(&index) {
+            self.close_web_search_block(index, queue);
+        }
     }
 
     fn handle_message_delta(&mut self, event: &Value) {
@@ -971,6 +1109,11 @@ impl AnthropicStreamState {
         indices.sort_unstable();
         for index in indices {
             self.close_tool_block(index, queue);
+        }
+        let mut web_indices: Vec<usize> = self.web_search_blocks.keys().cloned().collect();
+        web_indices.sort_unstable();
+        for index in web_indices {
+            self.close_web_search_block(index, queue);
         }
         if !self.response_completed {
             self.emit_response_completed(queue);
@@ -1228,6 +1371,110 @@ impl AnthropicStreamState {
         self.completed_output.push(item);
     }
 
+    fn start_server_tool_block(
+        &mut self,
+        index: usize,
+        block: &Value,
+        queue: &mut VecDeque<Bytes>,
+    ) {
+        self.close_message_item(queue);
+        if self.web_search_blocks.contains_key(&index) {
+            return;
+        }
+        if block.get("name").and_then(Value::as_str) != Some("web_search") {
+            return;
+        }
+
+        let call_id = block
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let item_id = if call_id.is_empty() {
+            generate_item_id()
+        } else {
+            call_id.clone()
+        };
+        let output_index = self.output_index;
+        self.output_index += 1;
+        let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+        let added_item = web_search_item(&item_id, &call_id, "in_progress", input.clone(), None);
+        emit_sse(
+            queue,
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "sequence_number": self.next_seq(),
+                "output_index": output_index,
+                "item": added_item,
+            }),
+        );
+        self.web_search_blocks.insert(
+            index,
+            AnthropicWebSearchBlockState {
+                item_id,
+                output_index,
+                call_id,
+                input,
+                result: None,
+            },
+        );
+    }
+
+    fn attach_web_search_result(&mut self, index: usize, block: &Value) {
+        let tool_use_id = block.get("tool_use_id").and_then(Value::as_str);
+        let result = json!({
+            "type": "web_search_tool_result",
+            "tool_use_id": block.get("tool_use_id").cloned().unwrap_or(Value::Null),
+            "content": block.get("content").cloned().unwrap_or(Value::Null),
+            "is_error": block.get("is_error").cloned().unwrap_or(Value::Bool(false)),
+        });
+
+        if let Some(state) = self.web_search_blocks.get_mut(&index) {
+            state.result = Some(result);
+            return;
+        }
+        if let Some(tool_use_id) = tool_use_id {
+            if let Some(state) = self
+                .web_search_blocks
+                .values_mut()
+                .find(|state| state.call_id == tool_use_id)
+            {
+                state.result = Some(result);
+            }
+        }
+    }
+
+    fn close_web_search_block(&mut self, index: usize, queue: &mut VecDeque<Bytes>) {
+        let Some(state) = self.web_search_blocks.remove(&index) else {
+            return;
+        };
+        let failed = state
+            .result
+            .as_ref()
+            .and_then(|result| result.get("is_error"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let item = web_search_item(
+            &state.item_id,
+            &state.call_id,
+            if failed { "failed" } else { "completed" },
+            state.input,
+            state.result,
+        );
+        emit_sse(
+            queue,
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": self.next_seq(),
+                "output_index": state.output_index,
+                "item": item.clone(),
+            }),
+        );
+        self.completed_output.push(item);
+    }
+
     fn response_object(&self, status: &str) -> Value {
         let mut response = json!({
             "id": self.response_id,
@@ -1436,6 +1683,29 @@ fn completed_tool_item(
             item
         }
     }
+}
+
+fn web_search_item(
+    item_id: &str,
+    call_id: &str,
+    status: &str,
+    input: Value,
+    result: Option<Value>,
+) -> Value {
+    let mut action = json!({
+        "type": "web_search",
+        "input": input,
+    });
+    if let Some(result) = result {
+        action["result"] = result;
+    }
+    json!({
+        "type": "web_search_call",
+        "id": item_id,
+        "call_id": call_id,
+        "status": status,
+        "action": action,
+    })
 }
 
 fn partial_custom_tool_input(arguments: &str) -> Option<String> {
@@ -1772,6 +2042,24 @@ mod tests {
     }
 
     #[test]
+    fn builds_anthropic_web_search_server_tool() {
+        let mut req = request(vec![message("user", "latest rust news")]);
+        req.tools = vec![json!({
+            "type": "web_search_preview",
+            "web_search": {
+                "max_uses": 3,
+                "allowed_domains": ["www.rust-lang.org"]
+            }
+        })];
+
+        let (body, _) = build_anthropic_request(&req).unwrap();
+        assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
+        assert_eq!(body["tools"][0]["name"], "web_search");
+        assert_eq!(body["tools"][0]["max_uses"], 3);
+        assert_eq!(body["tools"][0]["allowed_domains"][0], "www.rust-lang.org");
+    }
+
+    #[test]
     fn converts_anthropic_text_response() {
         let response = json!({
             "id": "msg_123",
@@ -1835,6 +2123,46 @@ mod tests {
         assert_eq!(
             item.arguments.as_ref().unwrap().to_value()["url"],
             "https://example.com"
+        );
+    }
+
+    #[test]
+    fn converts_anthropic_server_web_search_response() {
+        let response = json!({
+            "id": "msg_123",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-sonnet-4-6",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srvtoolu_123",
+                    "name": "web_search",
+                    "input": {"query": "rust 2026"}
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srvtoolu_123",
+                    "content": [{"type": "web_search_result", "title": "Rust", "url": "https://www.rust-lang.org"}]
+                }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 3}
+        });
+
+        let converted =
+            convert_anthropic_response(&response, "fallback-model", &ToolNameMap::default());
+        assert_eq!(converted.output.len(), 2);
+        assert_eq!(converted.output[0].item_type, ItemType::WebSearchCall);
+        assert_eq!(converted.output[0].call_id.as_deref(), Some("srvtoolu_123"));
+        assert_eq!(
+            converted.output[0].action.as_ref().unwrap()["input"]["query"],
+            "rust 2026"
+        );
+        assert_eq!(converted.output[1].item_type, ItemType::WebSearchCall);
+        assert_eq!(
+            converted.output[1].action.as_ref().unwrap()["content"][0]["url"],
+            "https://www.rust-lang.org"
         );
     }
 
@@ -1934,6 +2262,59 @@ mod tests {
         assert_eq!(
             done.1["item"]["arguments"],
             "{\"url\":\"https://example.com\"}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streams_anthropic_web_search_as_responses_sse() {
+        let input = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_1\",\"name\":\"web_search\",\"input\":{\"query\":\"rust 2026\"}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_1\",\"content\":[{\"type\":\"web_search_result\",\"title\":\"Rust\",\"url\":\"https://www.rust-lang.org\"}]}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )),
+        ]);
+
+        let chunks = AnthropicSseToResponsesSse::new(
+            input,
+            "fallback-model".to_string(),
+            ToolNameMap::default(),
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+        let events = parse_events_from_bytes(&chunks);
+
+        assert!(
+            events
+                .iter()
+                .any(|(event, data)| event == "response.output_item.added"
+                    && data["item"]["type"] == "web_search_call"
+                    && data["item"]["status"] == "in_progress")
+        );
+        let done = events
+            .iter()
+            .find(|(event, data)| {
+                event == "response.output_item.done" && data["item"]["type"] == "web_search_call"
+            })
+            .unwrap();
+        assert_eq!(done.1["item"]["call_id"], "srvtoolu_1");
+        assert_eq!(done.1["item"]["action"]["input"]["query"], "rust 2026");
+        assert_eq!(
+            done.1["item"]["action"]["result"]["content"][0]["url"],
+            "https://www.rust-lang.org"
         );
     }
 }
