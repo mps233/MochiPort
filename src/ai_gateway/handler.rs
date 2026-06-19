@@ -19,7 +19,7 @@ use super::config::{ProviderConfig, ProviderType};
 use super::context::GatewayContext;
 use super::error::GatewayError;
 use super::model::GatewayRequest;
-use super::providers::{deepseek_chat, openai_responses};
+use super::providers::{anthropic_messages, deepseek_chat, openai_responses};
 use super::request_log::{self, RequestLogContext, RequestLogRecord, RequestLogUpdate};
 use super::router::resolve_provider;
 
@@ -140,6 +140,30 @@ pub async fn handle_responses(
                 }
             };
             match deepseek_chat::handle(&ctx, &request, provider, log_context.clone()).await {
+                Ok(mut resp) => {
+                    set_models_etag_header(&mut resp, &models_etag);
+                    resp.into_response()
+                }
+                Err(e) => {
+                    update_failed_log(&log_context, &e.message);
+                    e.into_response()
+                }
+            }
+        }
+        ProviderType::AnthropicMessages => {
+            let request = if let Some((request, _turn)) = decoded_turn.as_ref() {
+                request.clone()
+            } else {
+                match deserialize_gateway_request(raw_body.clone()) {
+                    Ok(request) => request,
+                    Err(e) => {
+                        update_failed_log(&log_context, &format!("invalid request: {e}"));
+                        return GatewayError::bad_request(format!("invalid request: {e}"))
+                            .into_response();
+                    }
+                }
+            };
+            match anthropic_messages::handle(&ctx, &request, provider, log_context.clone()).await {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
                     resp.into_response()
@@ -335,6 +359,7 @@ fn provider_type_key(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::OpenAiResponses => "responses",
         ProviderType::ChatCompletions => "chat_completions",
+        ProviderType::AnthropicMessages => "anthropic_messages",
     }
 }
 

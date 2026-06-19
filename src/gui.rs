@@ -1991,6 +1991,12 @@ fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig
             base_url: "https://api.deepseek.com/v1".to_string(),
             ..Default::default()
         },
+        ProviderType::AnthropicMessages => ProviderConfig {
+            name: "anthropic".to_string(),
+            provider_type: ProviderType::AnthropicMessages,
+            base_url: "https://api.anthropic.com/v1".to_string(),
+            ..Default::default()
+        },
     }
 }
 
@@ -2011,6 +2017,10 @@ fn set_ai_gw_dialog_provider_type(
         ProviderType::OpenAiResponses => {
             radio_openai.set_value(true);
             type_input.change_value(text.provider_type_openai_responses());
+        }
+        ProviderType::AnthropicMessages => {
+            radio_openai.set_value(true);
+            type_input.change_value("Anthropic Messages");
         }
     }
 }

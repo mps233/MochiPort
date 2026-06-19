@@ -192,6 +192,11 @@ POST /ai-gateway/v1/responses
        tools / tool_choice / reasoning 做兼容转换
        调用 /v1/chat/completions
        Chat SSE 转 Responses SSE
+  -> provider = anthropic_messages:
+       Responses input 转 Anthropic Messages
+       tools / tool_choice / tool_result 按 Anthropic content blocks 映射
+       调用 /v1/messages
+       Anthropic Message/SSE 转 Responses JSON/SSE
 ```
 
 ## 6. 内部模型
@@ -453,18 +458,20 @@ WebSocket 实现前置条件：
 - `prompt_cache_key` 提取和注入（6 级优先级）。
 - DeepSeek Chat 非流式和流式转换。
 - DeepSeek Chat SSE 转 Responses SSE（文本 + reasoning + tool_calls 完整事件链）。
+- Anthropic Messages 独立 provider（非流式 text/tools、基础 streaming text/tool_use）。
 - DeepSeek 严格约束处理（7 项，见 §8）。
 - Responses tools 转 Chat tools（含 Codex 专属工具类型过滤）。
 - Chat tool_calls SSE 转 Responses function_call events（含并行 tool_calls）。
 - `function_call_output` 转 Chat tool message。
 - 基础错误响应（Responses API 格式）。
-- 67 个单元测试全部通过。
+- AI Gateway 相关单元测试通过。
 
 验收：
 
 - Codex 配置 `base_url = http://127.0.0.1:3847/ai-gateway/v1` 可发起普通对话。
 - 模型为 `gpt-5.5` 时打 OpenAI Responses。
 - 模型为 `deepseek-v4-flash` 或 `deepseek-v4-pro` 时打 DeepSeek Chat。
+- 模型配置为 `anthropic_messages` provider 时打 Anthropic Messages。
 - DeepSeek 能触发 Codex 工具调用，工具结果回填后继续回答。
 - 日志能看到 session、thread、prompt_cache_key、provider route。
 

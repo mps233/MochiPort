@@ -110,6 +110,7 @@ impl ProviderType {
         match self {
             Self::OpenAiResponses => "openai_responses",
             Self::ChatCompletions => "chat_completions",
+            Self::AnthropicMessages => "anthropic_messages",
         }
     }
 }
@@ -147,7 +148,7 @@ pub struct ProviderConfig {
     pub name: String,
     /// 是否启用该 provider。
     pub enabled: bool,
-    /// provider 类型：`"openai_responses"` 或 `"chat_completions"`。
+    /// provider 类型：`"openai_responses"`、`"chat_completions"` 或 `"anthropic_messages"`。
     pub provider_type: ProviderType,
     /// 上游 API base URL。
     pub base_url: String,
@@ -194,6 +195,8 @@ pub enum ProviderType {
     OpenAiResponses,
     /// Chat Completions API（DeepSeek 等）。
     ChatCompletions,
+    /// Anthropic Messages API（Claude）。
+    AnthropicMessages,
 }
 
 #[cfg(test)]
@@ -480,10 +483,17 @@ mod tests {
             baseUrl = "https://api.deepseek.com"
             apiKey = "sk-yyy"
             models = ["deepseek-v4-flash"]
+
+            [[providers]]
+            name = "anthropic"
+            providerType = "anthropic_messages"
+            baseUrl = "https://api.anthropic.com"
+            apiKey = "sk-ant"
+            models = ["claude-sonnet-4-6"]
         "#;
         let config: AiGatewayConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);
-        assert_eq!(config.providers.len(), 2);
+        assert_eq!(config.providers.len(), 3);
         assert_eq!(
             config.providers[0].provider_type,
             ProviderType::OpenAiResponses
@@ -491,6 +501,10 @@ mod tests {
         assert_eq!(
             config.providers[1].provider_type,
             ProviderType::ChatCompletions
+        );
+        assert_eq!(
+            config.providers[2].provider_type,
+            ProviderType::AnthropicMessages
         );
         assert_eq!(config.providers[0].timeout_secs, 120);
         assert_eq!(

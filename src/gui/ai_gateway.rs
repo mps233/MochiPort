@@ -131,6 +131,7 @@ fn provider_logo_kind(provider_type: &ProviderType) -> ProviderLogoKind {
     match provider_type {
         ProviderType::OpenAiResponses => ProviderLogoKind::OpenAi,
         ProviderType::ChatCompletions => ProviderLogoKind::DeepSeek,
+        ProviderType::AnthropicMessages => ProviderLogoKind::OpenAi,
     }
 }
 
@@ -138,6 +139,7 @@ pub(super) fn provider_type_display(pt: &ProviderType) -> String {
     match pt {
         ProviderType::OpenAiResponses => "OpenAI Responses".to_string(),
         ProviderType::ChatCompletions => "Chat Completions".to_string(),
+        ProviderType::AnthropicMessages => "Anthropic Messages".to_string(),
     }
 }
 

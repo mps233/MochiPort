@@ -10,6 +10,7 @@
 
 - [`ai-gateway-architecture.zh-CN.md`](ai-gateway-architecture.zh-CN.md)：当前 AI Gateway 总体架构和 Phase 1 说明。
 - [`ai-gateway-impl.zh-CN.md`](ai-gateway-impl.zh-CN.md)：当前实现计划和落地记录。
+- [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md)：Anthropic Messages 独立 adapter 设计和验收计划。
 
 ## 1. 背景
 
@@ -826,6 +827,7 @@ Responses tools include tool_search
 - 新增 `src/ai_gateway/ir.rs` 和 `src/ai_gateway/codec/responses_inbound.rs`。
 - Handler 已对所有 `/v1/responses` 请求做 best-effort Responses inbound decode；OpenAI Responses provider 仍 raw passthrough，ChatCompletions 继续使用现有转换链路。
 - `GatewayRequest` 解析支持 `function_call.arguments` / `tool_search_call.arguments` 为 string 或 object。
+- Anthropic Messages 独立 adapter 设计已拆到专门文档，明确不复用 ChatCompletions adapter。
 
 本轮验证：
 
@@ -867,6 +869,13 @@ Responses tools include tool_search
 - 先覆盖 text + tools + tool_search。
 - reasoning 和高级 blocks 按官方文档实测逐步补齐。
 
+当前落地状态：
+
+- 已新增独立 `anthropic_messages` provider type 和 handler 分发。
+- 已覆盖非流式 text、function/custom/tool_search 主链路、tool_choice、tool_result。
+- 已覆盖基础 streaming text 和 `tool_use.input_json_delta` 到 Responses SSE。
+- 暂未抽取统一 `GatewayEvent -> ResponsesSseEncoder`，Anthropic 目前有 provider-local stream adapter。
+
 ### Step 6：Ledger
 
 - 写入 gateway-owned response record。
@@ -878,13 +887,12 @@ Responses tools include tool_search
 当前已知差距：
 
 - `src/ai_gateway/ir.rs` 已存在，但 Chat adapter 还没有完全迁移到 IR，当前 DeepSeek 仍主要走 `GatewayRequest` + transform 模块。
-- `responses_stream.rs` 当前是 Chat SSE 到 Responses SSE 的直接状态机，不适合复用到 Anthropic。
-- provider type 目前只有 `openai_responses` 和 `chat_completions`。
+- `responses_stream.rs` 当前是 Chat SSE 到 Responses SSE 的直接状态机；Anthropic 已用 provider-local adapter 先落地，后续仍应抽公共 encoder。
 - DeepSeek profile 规则写在 Chat 转换函数中，后续应拆成 profile。
 - builtin tools 当前仍按策略过滤/隐藏，还没有完整 `GatewayTransformNotice`。
 - `GatewayTransformNotice` / provider capability / adapter state 尚未落库或暴露到 request log。
 - Ledger / `previous_response_id` 全量还原尚未实现。
-- Anthropic Messages adapter 尚未实现。
+- Anthropic thinking/cache/高级 content blocks 尚未实现。
 
 已解决的旧差距：
 
