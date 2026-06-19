@@ -500,7 +500,7 @@ impl<S> Drop for ResponsesSseLogStream<S> {
         }
 
         let update = RequestLogUpdate {
-            status: Some("client_disconnected".to_string()),
+            status: Some("cancelled".to_string()),
             latency_ms: Some(elapsed_ms(self.context.started_at)),
             error_message: Some("client disconnected before stream completed".to_string()),
             ..RequestLogUpdate::default()
@@ -903,16 +903,16 @@ mod tests {
     }
 
     #[test]
-    fn dropping_unfinished_sse_log_stream_marks_client_disconnected() {
+    fn dropping_unfinished_sse_log_stream_marks_cancelled() {
         let db_path = temp_db_path();
-        let context = insert_running_test_log(&db_path, "req-client-disconnected");
+        let context = insert_running_test_log(&db_path, "req-cancelled");
 
         let wrapped =
             ResponsesSseLogStream::new(stream::pending::<Result<Bytes, std::io::Error>>(), context);
         drop(wrapped);
 
         let detail = get_detail(&db_path, 1).unwrap().unwrap();
-        assert_eq!(detail.summary.status, "client_disconnected");
+        assert_eq!(detail.summary.status, "cancelled");
         assert!(detail.summary.latency_ms.is_some());
         assert!(
             detail
