@@ -1,0 +1,166 @@
+//! Anthropic Messages 出站 provider。
+
+use axum::{
+    body::Body,
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
+    response::Response,
+};
+use serde_json::Value;
+use tracing::{debug, error};
+
+use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
+use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
+use crate::ai_gateway::error::GatewayError;
+use crate::ai_gateway::model::GatewayRequest;
+use crate::ai_gateway::request_log::{
+    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
+};
+use crate::ai_gateway::tool_names::ToolNameMap;
+
+use super::{apply_total_request_timeout, execute_stream_start, map_upstream_response};
+
+mod request;
+mod response;
+mod stream;
+mod types;
+
+#[cfg(test)]
+mod tests;
+
+use request::build_anthropic_request;
+use response::convert_anthropic_response;
+use stream::AnthropicSseToResponsesSse;
+use types::ANTHROPIC_VERSION;
+pub async fn handle(
+    ctx: &GatewayContext,
+    request: &GatewayRequest,
+    provider: &ProviderConfig,
+    log_context: Option<RequestLogContext>,
+) -> Result<Response<Body>, GatewayError> {
+    let (anthropic_body, tool_name_map) = build_anthropic_request(request)?;
+    let url = format!("{}/v1/messages", provider_api_root(&provider.base_url));
+    debug!(url = %url, stream = false, "proxying to anthropic messages");
+
+    let client = reqwest::Client::new();
+    let upstream_req = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("x-api-key", provider.api_key.clone())
+        .header("anthropic-version", ANTHROPIC_VERSION)
+        .json(&anthropic_body);
+    let upstream_req = apply_upstream_headers(
+        apply_total_request_timeout(upstream_req, provider.timeout_secs, request.stream),
+        &ctx.upstream_headers,
+    )
+    .build()
+    .map_err(|e| {
+        error!(error = %e, "build anthropic upstream request failed");
+        GatewayError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("build upstream request: {e}"),
+        )
+    })?;
+
+    if let Some(log_context) = &log_context {
+        let update = RequestLogUpdate {
+            upstream_request_headers_json: request_log::headers_to_json(upstream_req.headers()),
+            upstream_request_json: serde_json::to_string(&anthropic_body).ok(),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) =
+            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+        {
+            request_log::log_update_error(err);
+        }
+    }
+
+    let upstream_resp = if request.stream {
+        execute_stream_start(
+            &client,
+            upstream_req,
+            provider.timeout_secs,
+            "anthropic upstream request failed",
+        )
+        .await?
+    } else {
+        map_upstream_response(
+            client.execute(upstream_req).await,
+            "anthropic upstream request failed",
+        )?
+    };
+    let upstream_status = upstream_resp.status();
+    if !upstream_status.is_success() {
+        let status =
+            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+        let body_text = upstream_resp.text().await.unwrap_or_default();
+        return Err(GatewayError::upstream(status, body_text));
+    }
+
+    if request.stream {
+        return handle_stream(upstream_resp, &request.model, tool_name_map, log_context).await;
+    }
+
+    let anthropic_resp: Value = upstream_resp.json().await.map_err(|e| {
+        GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("parse upstream json: {e}"))
+    })?;
+    let response_obj = convert_anthropic_response(&anthropic_resp, &request.model, &tool_name_map);
+    let body_bytes = serde_json::to_vec(&response_obj).unwrap_or_default();
+
+    if let Some(log_context) = &log_context {
+        let response_value = serde_json::to_value(&response_obj).unwrap_or_default();
+        let update = RequestLogUpdate {
+            status: Some(response_obj.status.clone()),
+            usage: Some(request_log::usage_from_response_value(&response_value)),
+            latency_ms: Some(request_log::elapsed_ms(log_context.started_at)),
+            response_json: serde_json::to_string(&response_value).ok(),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) =
+            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
+        {
+            request_log::log_update_error(err);
+        }
+    }
+
+    let mut response = Response::new(Body::from(body_bytes));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static("application/json"),
+    );
+    Ok(response)
+}
+
+async fn handle_stream(
+    resp: reqwest::Response,
+    model: &str,
+    tool_name_map: ToolNameMap,
+    log_context: Option<RequestLogContext>,
+) -> Result<Response<Body>, GatewayError> {
+    let sse_stream =
+        AnthropicSseToResponsesSse::new(resp.bytes_stream(), model.to_string(), tool_name_map);
+    let body = if let Some(log_context) = log_context {
+        Body::from_stream(ResponsesSseLogStream::new(sse_stream, log_context))
+    } else {
+        Body::from_stream(sse_stream)
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        HeaderName::from_static("connection"),
+        HeaderValue::from_static("keep-alive"),
+    );
+
+    let mut response = Response::new(body);
+    *response.status_mut() = StatusCode::OK;
+    *response.headers_mut() = headers;
+    Ok(response)
+}
