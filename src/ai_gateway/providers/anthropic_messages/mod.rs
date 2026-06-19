@@ -20,6 +20,8 @@ use crate::ai_gateway::tool_names::ToolNameMap;
 use super::{apply_total_request_timeout, execute_stream_start, map_upstream_response};
 
 mod request;
+mod request_content;
+mod request_tools;
 mod response;
 mod stream;
 mod stream_events;
