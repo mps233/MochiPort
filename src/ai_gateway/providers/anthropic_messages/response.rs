@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use crate::ai_gateway::model::{
     ContentPart, InputTokensDetails, ItemContent, ItemType, JsonString, OutputTokensDetails,
-    ResponseItem, ResponseObject, Usage, generate_item_id, generate_response_id,
+    ResponseItem, ResponseObject, SummaryPart, Usage, generate_item_id, generate_response_id,
 };
 use crate::ai_gateway::tool_names::{ToolCallKind, ToolNameMap};
 pub(super) fn convert_anthropic_response(
@@ -78,6 +78,64 @@ fn anthropic_content_to_response_item(
                 encrypted_content: None,
             })
         }
+        "thinking" => {
+            let text = item.get("thinking").and_then(Value::as_str).unwrap_or("");
+            if text.is_empty() {
+                return None;
+            }
+            Some(ResponseItem {
+                item_type: ItemType::Reasoning,
+                id: Some(generate_item_id()),
+                role: None,
+                content: None,
+                text: None,
+                name: None,
+                namespace: None,
+                call_id: None,
+                arguments: None,
+                input: None,
+                output: None,
+                status: Some("completed".to_string()),
+                execution: None,
+                tools: None,
+                image_url: None,
+                detail: None,
+                action: None,
+                summary: Some(vec![SummaryPart {
+                    part_type: "summary_text".to_string(),
+                    text: text.to_string(),
+                }]),
+                encrypted_content: item
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            })
+        }
+        "redacted_thinking" => Some(ResponseItem {
+            item_type: ItemType::Reasoning,
+            id: Some(generate_item_id()),
+            role: None,
+            content: None,
+            text: None,
+            name: None,
+            namespace: None,
+            call_id: None,
+            arguments: None,
+            input: None,
+            output: None,
+            status: Some("completed".to_string()),
+            execution: None,
+            tools: None,
+            image_url: None,
+            detail: None,
+            action: None,
+            summary: None,
+            encrypted_content: item
+                .get("data")
+                .or_else(|| item.get("signature"))
+                .and_then(Value::as_str)
+                .map(str::to_string),
+        }),
         "tool_use" => {
             let raw_name = item.get("name").and_then(Value::as_str).unwrap_or("");
             let target = tool_name_map.decode(raw_name);

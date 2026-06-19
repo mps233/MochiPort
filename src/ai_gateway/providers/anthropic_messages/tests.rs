@@ -4,7 +4,7 @@ use super::stream::AnthropicSseToResponsesSse;
 use super::types::ANTHROPIC_WEB_SEARCH_TYPE;
 use crate::ai_gateway::model::{
     ContentPart, FunctionCallOutput, FunctionCallOutputContentItem, GatewayRequest, ItemContent,
-    ItemType, ResponseItem,
+    ItemType, Reasoning, ResponseItem,
 };
 use crate::ai_gateway::tool_names::ToolNameMap;
 use axum::body::Bytes;
@@ -184,6 +184,20 @@ fn builds_anthropic_web_search_server_tool() {
 }
 
 #[test]
+fn builds_anthropic_thinking_from_reasoning() {
+    let mut req = request(vec![message("user", "think carefully")]);
+    req.reasoning = Some(Reasoning {
+        effort: Some("high".to_string()),
+        budget_tokens: Some(2_048),
+        generate_summary: None,
+    });
+
+    let (body, _) = build_anthropic_request(&req).unwrap();
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert_eq!(body["thinking"]["budget_tokens"], 2_048);
+}
+
+#[test]
 fn converts_anthropic_text_response() {
     let response = json!({
         "id": "msg_123",
@@ -215,6 +229,42 @@ fn converts_anthropic_text_response() {
     assert_eq!(usage.output_tokens, 3);
     assert_eq!(usage.total_tokens, 13);
     assert_eq!(usage.input_tokens_details.unwrap().cached_tokens, 4);
+}
+
+#[test]
+fn converts_anthropic_thinking_response() {
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-6",
+        "content": [
+            {"type": "thinking", "thinking": "I should reason first.", "signature": "sig_123"},
+            {"type": "redacted_thinking", "data": "encrypted_456"},
+            {"type": "text", "text": "final"}
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let converted =
+        convert_anthropic_response(&response, "fallback-model", &ToolNameMap::default());
+    assert_eq!(converted.output.len(), 3);
+    assert_eq!(converted.output[0].item_type, ItemType::Reasoning);
+    assert_eq!(
+        converted.output[0].summary.as_ref().unwrap()[0].text,
+        "I should reason first."
+    );
+    assert_eq!(
+        converted.output[0].encrypted_content.as_deref(),
+        Some("sig_123")
+    );
+    assert_eq!(converted.output[1].item_type, ItemType::Reasoning);
+    assert_eq!(
+        converted.output[1].encrypted_content.as_deref(),
+        Some("encrypted_456")
+    );
+    assert_eq!(converted.output[2].item_type, ItemType::Message);
 }
 
 #[test]
@@ -288,6 +338,76 @@ fn converts_anthropic_server_web_search_response() {
         converted.output[1].action.as_ref().unwrap()["content"][0]["url"],
         "https://www.rust-lang.org"
     );
+}
+
+#[tokio::test]
+async fn streams_anthropic_thinking_as_responses_reasoning_sse() {
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"I should\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\" think\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_123\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"final\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    let chunks = AnthropicSseToResponsesSse::new(
+        input,
+        "fallback-model".to_string(),
+        ToolNameMap::default(),
+    )
+    .collect::<Vec<_>>()
+    .await
+    .into_iter()
+    .map(Result::unwrap)
+    .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+
+    assert!(events.iter().any(
+        |(event, data)| event == "response.reasoning_summary_text.delta"
+            && data["delta"] == "I should"
+    ));
+    let reasoning_done = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "reasoning"
+        })
+        .unwrap();
+    assert_eq!(
+        reasoning_done.1["item"]["summary"][0]["text"],
+        "I should think"
+    );
+    assert_eq!(reasoning_done.1["item"]["encrypted_content"], "sig_123");
+
+    let reasoning_done_pos = events
+        .iter()
+        .position(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "reasoning"
+        })
+        .unwrap();
+    let text_delta_pos = events
+        .iter()
+        .position(|(event, data)| event == "response.output_text.delta" && data["delta"] == "final")
+        .unwrap();
+    assert!(reasoning_done_pos < text_delta_pos);
 }
 
 #[tokio::test]

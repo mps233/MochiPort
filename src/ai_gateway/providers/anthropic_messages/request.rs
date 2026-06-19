@@ -5,6 +5,7 @@ use crate::ai_gateway::model::GatewayRequest;
 use crate::ai_gateway::tool_names::ToolNameMap;
 
 use super::request_content::build_anthropic_messages;
+use super::request_reasoning::anthropic_thinking;
 use super::request_tools::{build_anthropic_tools, convert_tool_choice_to_anthropic};
 use super::types::DEFAULT_MAX_TOKENS;
 
@@ -35,6 +36,9 @@ pub(super) fn build_anthropic_request(
     }
     if request.stream {
         body.insert("stream".to_string(), json!(true));
+    }
+    if let Some(thinking) = request.reasoning.as_ref().and_then(anthropic_thinking) {
+        body.insert("thinking".to_string(), thinking);
     }
 
     let messages = build_anthropic_messages(&request.input, &mut tool_name_map)?;

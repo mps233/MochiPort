@@ -35,6 +35,7 @@ impl AnthropicStreamState {
         block: &Value,
         queue: &mut VecDeque<Bytes>,
     ) {
+        self.close_reasoning_item(queue);
         self.close_message_item(queue);
         if self.content_blocks.contains_key(&index) {
             return;
@@ -164,6 +165,7 @@ impl AnthropicStreamState {
         block: &Value,
         queue: &mut VecDeque<Bytes>,
     ) {
+        self.close_reasoning_item(queue);
         self.close_message_item(queue);
         if self.web_search_blocks.contains_key(&index) {
             return;

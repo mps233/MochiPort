@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use super::stream_events::unix_timestamp;
 use super::stream_message::StreamMessageItem;
+use super::stream_reasoning::StreamReasoningItem;
 use super::stream_tools::{AnthropicContentBlockState, AnthropicWebSearchBlockState};
 use crate::ai_gateway::model::generate_response_id;
 use crate::ai_gateway::tool_names::ToolNameMap;
@@ -18,6 +19,7 @@ pub(super) struct AnthropicStreamState {
     pub(super) sequence_number: usize,
     pub(super) output_index: usize,
     pub(super) message_item: Option<StreamMessageItem>,
+    pub(super) reasoning_item: Option<StreamReasoningItem>,
     pub(super) content_blocks: HashMap<usize, AnthropicContentBlockState>,
     pub(super) web_search_blocks: HashMap<usize, AnthropicWebSearchBlockState>,
     pub(super) completed_output: Vec<Value>,
@@ -37,6 +39,7 @@ impl AnthropicStreamState {
             sequence_number: 0,
             output_index: 0,
             message_item: None,
+            reasoning_item: None,
             content_blocks: HashMap::new(),
             web_search_blocks: HashMap::new(),
             completed_output: Vec::new(),
@@ -62,6 +65,7 @@ impl AnthropicStreamState {
         if !self.has_started {
             return;
         }
+        self.close_reasoning_item(queue);
         self.close_message_item(queue);
         let mut indices: Vec<usize> = self.content_blocks.keys().cloned().collect();
         indices.sort_unstable();
@@ -84,6 +88,7 @@ impl AnthropicStreamState {
         let block = event.get("content_block").unwrap_or(&Value::Null);
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
+                self.close_reasoning_item(queue);
                 self.ensure_message_item(queue);
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
@@ -93,6 +98,14 @@ impl AnthropicStreamState {
             }
             Some("tool_use") => self.start_tool_block(index, block, queue),
             Some("server_tool_use") => self.start_server_tool_block(index, block, queue),
+            Some("thinking") => {
+                if let Some(text) = block.get("thinking").and_then(Value::as_str) {
+                    self.handle_thinking_delta(text, queue);
+                }
+            }
+            Some("redacted_thinking") => {
+                self.handle_redacted_thinking(block.get("data").and_then(Value::as_str));
+            }
             Some("web_search_tool_result") => self.attach_web_search_result(index, block),
             _ => {}
         }
@@ -104,11 +117,23 @@ impl AnthropicStreamState {
         let delta = event.get("delta").unwrap_or(&Value::Null);
         match delta.get("type").and_then(Value::as_str) {
             Some("text_delta") => {
+                self.close_reasoning_item(queue);
                 if let Some(text) = delta.get("text").and_then(Value::as_str) {
                     self.handle_text_delta(text, queue);
                 }
             }
+            Some("thinking_delta") => {
+                if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
+                    self.handle_thinking_delta(text, queue);
+                }
+            }
+            Some("signature_delta") => {
+                if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
+                    self.handle_thinking_signature(signature);
+                }
+            }
             Some("input_json_delta") => {
+                self.close_reasoning_item(queue);
                 if let Some(partial_json) = delta.get("partial_json").and_then(Value::as_str) {
                     self.handle_tool_delta(index, partial_json, queue);
                 }
