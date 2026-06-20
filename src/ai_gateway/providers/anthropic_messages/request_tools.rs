@@ -3,6 +3,7 @@ use serde_json::{Map, Value, json};
 use crate::ai_gateway::model::{GatewayRequest, ItemType, ResponseItem};
 use crate::ai_gateway::tool_names::ToolNameMap;
 
+use super::custom_tools::{custom_tool_description, custom_tool_input_description};
 use super::types::ANTHROPIC_WEB_SEARCH_TYPE;
 
 pub(super) fn build_anthropic_tools(
@@ -126,15 +127,16 @@ fn build_anthropic_custom_tool(
     tool_name_map: &mut ToolNameMap,
 ) -> Option<Value> {
     let name = tool.get("name").and_then(Value::as_str)?;
+    let description = custom_tool_description(tool);
     Some(json!({
         "name": tool_name_map.encode_custom(name),
-        "description": tool.get("description").cloned().unwrap_or_else(|| json!("")),
+        "description": description,
         "input_schema": {
             "type": "object",
             "properties": {
                 "input": {
                     "type": "string",
-                    "description": "Freeform input for the custom tool."
+                    "description": custom_tool_input_description(name)
                 }
             },
             "required": ["input"],

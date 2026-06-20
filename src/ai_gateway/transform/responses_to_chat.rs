@@ -8,6 +8,19 @@ use crate::ai_gateway::model::{
 };
 use crate::ai_gateway::tool_names::{TOOL_SEARCH_NAME, ToolNameMap};
 
+const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
+const APPLY_PATCH_INPUT_DESCRIPTION: &str = "The entire apply_patch patch body.";
+const APPLY_PATCH_DESCRIPTION: &str = "Use the `apply_patch` tool to edit files.\n\
+Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. A patch must use this envelope:\n\n\
+*** Begin Patch\n\
+[ one or more file sections ]\n\
+*** End Patch\n\n\
+Within that envelope, each file operation starts with one of these headers:\n\n\
+*** Add File: <path> - create a new file. Every following line is a + line.\n\
+*** Delete File: <path> - remove an existing file. Nothing follows.\n\
+*** Update File: <path> - patch an existing file in place, optionally followed by *** Move to: <new path>.\n\n\
+Update hunks start with @@ and contain lines prefixed with a space, -, or +. File references must be relative, never absolute.\n";
+
 /// Chat Completions 请求 body（JSON）。
 #[cfg(test)]
 pub fn build_chat_request(request: &GatewayRequest, deepseek_mode: bool) -> Result<Value, String> {
@@ -259,7 +272,10 @@ fn build_chat_custom_tool_object(
     let encoded_name = tool_name_map.encode_custom(name);
     let mut function = Map::new();
     function.insert("name".to_string(), json!(encoded_name));
-    if let Some(description) = tool.get("description") {
+    if name == APPLY_PATCH_TOOL_NAME {
+        function.insert("description".to_string(), json!(APPLY_PATCH_DESCRIPTION));
+        function.insert("strict".to_string(), Value::Bool(false));
+    } else if let Some(description) = tool.get("description") {
         function.insert("description".to_string(), description.clone());
     }
     function.insert(
@@ -269,7 +285,7 @@ fn build_chat_custom_tool_object(
             "properties": {
                 "input": {
                     "type": "string",
-                    "description": "Freeform input for the custom tool."
+                    "description": custom_tool_input_description(name)
                 }
             },
             "required": ["input"],
@@ -277,6 +293,14 @@ fn build_chat_custom_tool_object(
         }),
     );
     Some(Value::Object(function))
+}
+
+fn custom_tool_input_description(name: &str) -> &'static str {
+    if name == APPLY_PATCH_TOOL_NAME {
+        APPLY_PATCH_INPUT_DESCRIPTION
+    } else {
+        "Freeform input for the custom tool."
+    }
 }
 
 fn tool_search_output_tools(items: &[ResponseItem]) -> Vec<Value> {
@@ -1836,6 +1860,42 @@ mod tests {
 
         let body = build_chat_request(&req, false).unwrap();
         assert_eq!(body["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn test_apply_patch_custom_tool_converted_to_standard_chat_function() {
+        let mut req = make_request(vec![]);
+        req.tools = vec![json!({
+            "type": "custom",
+            "name": "apply_patch",
+            "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+            "format": {
+                "type": "grammar",
+                "syntax": "lark",
+                "definition": "start: begin_patch hunk+ end_patch"
+            }
+        })];
+
+        let (body, tool_name_map) = build_chat_request_with_tool_names(&req, false).unwrap();
+        let function = &body["tools"][0]["function"];
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(function["name"], "apply_patch");
+        assert_eq!(function["strict"], false);
+        assert_eq!(
+            function["description"],
+            "Use the `apply_patch` tool to edit files.\nYour patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. A patch must use this envelope:\n\n*** Begin Patch\n[ one or more file sections ]\n*** End Patch\n\nWithin that envelope, each file operation starts with one of these headers:\n\n*** Add File: <path> - create a new file. Every following line is a + line.\n*** Delete File: <path> - remove an existing file. Nothing follows.\n*** Update File: <path> - patch an existing file in place, optionally followed by *** Move to: <new path>.\n\nUpdate hunks start with @@ and contain lines prefixed with a space, -, or +. File references must be relative, never absolute.\n"
+        );
+        assert_eq!(function["parameters"]["type"], "object");
+        assert_eq!(function["parameters"]["required"], json!(["input"]));
+        assert_eq!(
+            function["parameters"]["properties"]["input"]["description"],
+            "The entire apply_patch patch body."
+        );
+        assert_eq!(function["parameters"]["additionalProperties"], false);
+        assert_eq!(
+            tool_name_map.decode("apply_patch").kind,
+            crate::ai_gateway::tool_names::ToolCallKind::Custom
+        );
     }
 
     #[test]

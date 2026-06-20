@@ -1,29 +1,77 @@
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::ai_gateway::model::Reasoning;
 
-pub(super) fn anthropic_thinking(reasoning: &Reasoning) -> Option<Value> {
-    let budget_tokens = reasoning
-        .budget_tokens
-        .or_else(|| effort_budget_tokens(reasoning.effort.as_deref()))?;
+use super::options::AnthropicProviderProfile;
 
-    if budget_tokens <= 0 {
-        return None;
+pub(super) fn insert_reasoning_options(
+    body: &mut Map<String, Value>,
+    profile: AnthropicProviderProfile,
+    reasoning: Option<&Reasoning>,
+) {
+    let Some(reasoning) = reasoning else {
+        return;
+    };
+
+    match profile {
+        AnthropicProviderProfile::Anthropic => insert_anthropic_reasoning(body, reasoning),
+        AnthropicProviderProfile::GlmAnthropic => insert_glm_reasoning(body, reasoning),
     }
-
-    Some(json!({
-        "type": "enabled",
-        "budget_tokens": budget_tokens,
-    }))
 }
 
-fn effort_budget_tokens(effort: Option<&str>) -> Option<i64> {
-    match effort {
+fn insert_anthropic_reasoning(body: &mut Map<String, Value>, reasoning: &Reasoning) {
+    if let Some(budget_tokens) = reasoning.budget_tokens {
+        if budget_tokens > 0 {
+            body.insert(
+                "thinking".to_string(),
+                json!({
+                    "type": "enabled",
+                    "budget_tokens": budget_tokens,
+                }),
+            );
+        }
+        return;
+    }
+
+    let Some(effort) = normalized_effort(reasoning.effort.as_deref()) else {
+        return;
+    };
+
+    body.insert("thinking".to_string(), json!({ "type": "adaptive" }));
+    body.insert(
+        "output_config".to_string(),
+        json!({
+            "effort": effort,
+        }),
+    );
+}
+
+fn insert_glm_reasoning(body: &mut Map<String, Value>, reasoning: &Reasoning) {
+    let Some(effort) = normalized_glm_effort(reasoning.effort.as_deref()) else {
+        body.insert("thinking".to_string(), json!({ "type": "disabled" }));
+        return;
+    };
+
+    body.insert("thinking".to_string(), json!({ "type": "enabled" }));
+    body.insert("reasoning_effort".to_string(), json!(effort));
+}
+
+fn normalized_effort(effort: Option<&str>) -> Option<&str> {
+    match effort.map(str::trim).filter(|value| !value.is_empty()) {
         Some("none") | Some("minimal") => None,
-        Some("low") => Some(1_024),
-        Some("medium") | None => Some(4_096),
-        Some("high") => Some(8_192),
-        Some("xhigh") | Some("max") => Some(16_384),
-        _ => Some(4_096),
+        Some("low") => Some("low"),
+        Some("medium") | None => Some("medium"),
+        Some("high") => Some("high"),
+        Some("xhigh") => Some("xhigh"),
+        Some("max") => Some("max"),
+        Some(other) => Some(other),
+    }
+}
+
+fn normalized_glm_effort(effort: Option<&str>) -> Option<&str> {
+    match normalized_effort(effort) {
+        Some("low") | Some("medium") | Some("high") => Some("high"),
+        Some("xhigh") | Some("max") => Some("max"),
+        other => other,
     }
 }

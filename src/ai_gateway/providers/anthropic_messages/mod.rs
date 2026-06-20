@@ -22,6 +22,7 @@ use super::{
     map_upstream_response,
 };
 
+mod custom_tools;
 mod glm_compat;
 mod options;
 mod request;
@@ -57,12 +58,13 @@ pub async fn handle(
     provider: &ProviderConfig,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
+    let options = AnthropicProviderOptions::from_provider(provider)?;
     let prompt_cache_retention = request
         .prompt_cache_retention
         .as_deref()
         .or(provider.prompt_cache_retention.as_deref());
-    let (anthropic_body, tool_name_map) = build_anthropic_request(request, prompt_cache_retention)?;
-    let options = AnthropicProviderOptions::from_provider(provider)?;
+    let (anthropic_body, tool_name_map) =
+        build_anthropic_request(request, options.profile, prompt_cache_retention)?;
     let url = options.messages_url(provider);
     debug!(url = %url, stream = false, "proxying to anthropic messages");
 

@@ -133,6 +133,7 @@ fn builds_anthropic_text_request() {
             message("assistant", "hi"),
             message("user", "continue"),
         ]),
+        AnthropicProviderProfile::Anthropic,
         None,
     )
     .unwrap();
@@ -151,8 +152,12 @@ fn builds_anthropic_text_request() {
 
 #[test]
 fn builds_anthropic_request_with_one_hour_prompt_cache_ttl() {
-    let (body, _) =
-        build_anthropic_request(&request(vec![message("user", "hello")]), Some("1h")).unwrap();
+    let (body, _) = build_anthropic_request(
+        &request(vec![message("user", "hello")]),
+        AnthropicProviderProfile::Anthropic,
+        Some("1h"),
+    )
+    .unwrap();
 
     assert_eq!(body["cache_control"]["type"], "ephemeral");
     assert_eq!(body["cache_control"]["ttl"], "1h");
@@ -174,8 +179,12 @@ fn builds_anthropic_tool_result_message() {
         },
     ]));
 
-    let (body, _) =
-        build_anthropic_request(&request(vec![message("user", "run"), output]), None).unwrap();
+    let (body, _) = build_anthropic_request(
+        &request(vec![message("user", "run"), output]),
+        AnthropicProviderProfile::Anthropic,
+        None,
+    )
+    .unwrap();
     assert_eq!(body["messages"][1]["role"], "user");
     assert_eq!(body["messages"][1]["content"][0]["type"], "tool_result");
     assert_eq!(
@@ -208,7 +217,8 @@ fn builds_anthropic_tools_and_tool_choice() {
         "name": "open page"
     }));
 
-    let (body, map) = build_anthropic_request(&req, None).unwrap();
+    let (body, map) =
+        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
     assert_eq!(body["tools"][0]["name"], "browser__codexns__open_page");
     assert_eq!(body["tools"][0]["description"], "Open a URL");
     assert_eq!(body["tools"][0]["input_schema"]["required"][0], "url");
@@ -218,6 +228,55 @@ fn builds_anthropic_tools_and_tool_choice() {
     let target = map.decode("browser__codexns__open_page");
     assert_eq!(target.namespace.as_deref(), Some("browser"));
     assert_eq!(target.name, "open page");
+}
+
+#[test]
+fn builds_anthropic_apply_patch_custom_tool() {
+    let mut req = request(vec![message("user", "edit a file")]);
+    req.tools = vec![json!({
+        "type": "custom",
+        "name": "apply_patch",
+        "description": "Use the `apply_patch` tool to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON.",
+        "format": {
+            "type": "grammar",
+            "syntax": "lark",
+            "definition": "start: begin_patch hunk+ end_patch\nbegin_patch: \"*** Begin Patch\" LF\nend_patch: \"*** End Patch\" LF?"
+        }
+    })];
+    req.tool_choice = Some(json!({
+        "type": "custom",
+        "name": "apply_patch"
+    }));
+
+    let (body, map) =
+        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    assert_eq!(body["tools"][0]["name"], "apply_patch");
+    assert_eq!(body["tools"][0]["input_schema"]["required"][0], "input");
+    assert_eq!(
+        body["tools"][0]["input_schema"]["properties"]["input"]["description"],
+        "The entire apply_patch patch body."
+    );
+    assert!(
+        body["tools"][0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Call this tool with JSON arguments matching")
+    );
+    assert!(
+        body["tools"][0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("final non-whitespace line must be exactly `*** End Patch`")
+    );
+    assert_eq!(body["tool_choice"]["type"], "tool");
+    assert_eq!(body["tool_choice"]["name"], "apply_patch");
+
+    let target = map.decode("apply_patch");
+    assert_eq!(
+        target.kind,
+        crate::ai_gateway::tool_names::ToolCallKind::Custom
+    );
+    assert_eq!(target.name, "apply_patch");
 }
 
 #[test]
@@ -231,7 +290,8 @@ fn builds_anthropic_web_search_server_tool() {
         }
     })];
 
-    let (body, _) = build_anthropic_request(&req, None).unwrap();
+    let (body, _) =
+        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
     assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
     assert_eq!(body["tools"][0]["name"], "web_search");
     assert_eq!(body["tools"][0]["max_uses"], 3);
@@ -248,7 +308,8 @@ fn preserves_native_anthropic_web_search_server_tool() {
         "allowed_domains": ["www.rust-lang.org"]
     })];
 
-    let (body, _) = build_anthropic_request(&req, None).unwrap();
+    let (body, _) =
+        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
     assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
     assert_eq!(body["tools"][0]["name"], "web_search");
     assert_eq!(body["tools"][0]["max_uses"], 3);
@@ -256,7 +317,23 @@ fn preserves_native_anthropic_web_search_server_tool() {
 }
 
 #[test]
-fn builds_anthropic_thinking_from_reasoning() {
+fn builds_anthropic_adaptive_thinking_from_reasoning_effort() {
+    let mut req = request(vec![message("user", "think carefully")]);
+    req.reasoning = Some(Reasoning {
+        effort: Some("max".to_string()),
+        budget_tokens: None,
+        generate_summary: None,
+    });
+
+    let (body, _) =
+        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(body["output_config"]["effort"], "max");
+    assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn builds_anthropic_budget_thinking_from_explicit_budget() {
     let mut req = request(vec![message("user", "think carefully")]);
     req.reasoning = Some(Reasoning {
         effort: Some("high".to_string()),
@@ -264,9 +341,57 @@ fn builds_anthropic_thinking_from_reasoning() {
         generate_summary: None,
     });
 
-    let (body, _) = build_anthropic_request(&req, None).unwrap();
+    let (body, _) =
+        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 2_048);
+    assert!(body.get("output_config").is_none());
+}
+
+#[test]
+fn builds_glm_reasoning_effort_from_reasoning() {
+    let mut req = request(vec![message("user", "think carefully")]);
+    req.reasoning = Some(Reasoning {
+        effort: Some("max".to_string()),
+        budget_tokens: None,
+        generate_summary: None,
+    });
+
+    let (body, _) =
+        build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic, None).unwrap();
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert_eq!(body["reasoning_effort"], "max");
+    assert!(body.get("output_config").is_none());
+}
+
+#[test]
+fn maps_glm_medium_reasoning_to_high() {
+    let mut req = request(vec![message("user", "think carefully")]);
+    req.reasoning = Some(Reasoning {
+        effort: Some("medium".to_string()),
+        budget_tokens: None,
+        generate_summary: None,
+    });
+
+    let (body, _) =
+        build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic, None).unwrap();
+    assert_eq!(body["thinking"]["type"], "enabled");
+    assert_eq!(body["reasoning_effort"], "high");
+}
+
+#[test]
+fn maps_glm_none_reasoning_to_disabled_thinking() {
+    let mut req = request(vec![message("user", "think carefully")]);
+    req.reasoning = Some(Reasoning {
+        effort: Some("none".to_string()),
+        budget_tokens: None,
+        generate_summary: None,
+    });
+
+    let (body, _) =
+        build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic, None).unwrap();
+    assert_eq!(body["thinking"]["type"], "disabled");
+    assert!(body.get("reasoning_effort").is_none());
 }
 
 #[test]
@@ -406,6 +531,77 @@ fn converts_anthropic_tool_use_response() {
         item.arguments.as_ref().unwrap().to_value()["url"],
         "https://example.com"
     );
+}
+
+#[test]
+fn converts_anthropic_apply_patch_tool_use_to_custom_tool_call() {
+    let mut map = ToolNameMap::default();
+    map.encode_custom("apply_patch");
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "content": [{
+            "type": "tool_use",
+            "id": "toolu_patch",
+            "name": "apply_patch",
+            "input": {
+                "input": "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"
+            }
+        }],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let converted = convert_anthropic_response(
+        &response,
+        "fallback-model",
+        &map,
+        AnthropicProviderProfile::Anthropic,
+    );
+    assert_eq!(converted.output.len(), 1);
+    let item = &converted.output[0];
+    assert_eq!(item.item_type, ItemType::CustomToolCall);
+    assert_eq!(item.name.as_deref(), Some("apply_patch"));
+    assert_eq!(item.call_id.as_deref(), Some("toolu_patch"));
+    assert_eq!(
+        item.input.as_deref(),
+        Some("*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n")
+    );
+    assert!(item.arguments.is_none());
+}
+
+#[test]
+fn passes_through_anthropic_apply_patch_tool_use_input() {
+    let mut map = ToolNameMap::default();
+    map.encode_custom("apply_patch");
+    let raw_input = "Here is the patch:\n```text\n*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n```\n";
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "content": [{
+            "type": "tool_use",
+            "id": "toolu_patch",
+            "name": "apply_patch",
+            "input": {
+                "input": raw_input
+            }
+        }],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let converted = convert_anthropic_response(
+        &response,
+        "fallback-model",
+        &map,
+        AnthropicProviderProfile::Anthropic,
+    );
+
+    assert_eq!(converted.output[0].input.as_deref(), Some(raw_input));
 }
 
 #[test]
@@ -704,6 +900,57 @@ async fn streams_anthropic_tool_use_as_responses_sse() {
     assert_eq!(
         done.1["item"]["arguments"],
         "{\"url\":\"https://example.com\"}"
+    );
+}
+
+#[tokio::test]
+async fn streams_anthropic_apply_patch_tool_use_as_custom_tool_call() {
+    let mut map = ToolNameMap::default();
+    map.encode_custom("apply_patch");
+    let input = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-8\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_patch\",\"name\":\"apply_patch\",\"input\":{}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"input\\\":\\\"Here is the patch:\\\\n*** Begin Patch\\\\n\"}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"*** Add File: hello.txt\\\\n+hello\\\\n*** End Patch\\\\n\\\"}\"}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )),
+        ]);
+
+    let chunks = response_stream(input, "fallback-model", map)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+
+    assert!(
+        events
+            .iter()
+            .any(|(event, _)| event == "response.custom_tool_call_input.done")
+    );
+    let done = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "custom_tool_call"
+        })
+        .unwrap();
+    assert_eq!(done.1["item"]["name"], "apply_patch");
+    assert_eq!(
+        done.1["item"]["input"],
+        "Here is the patch:\n*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch\n"
     );
 }
 

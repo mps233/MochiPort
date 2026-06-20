@@ -135,7 +135,6 @@ fn normalize_deepseek_model(model: &mut Value) {
     }
 
     if let Some(object) = model.as_object_mut() {
-        object.insert("apply_patch_tool_type".to_string(), Value::Null);
         object.insert("web_search_tool_type".to_string(), json!("text"));
         object.insert("supports_search_tool".to_string(), Value::Bool(false));
         object.insert(
@@ -179,7 +178,7 @@ mod tests {
             vec!["gpt-5.5", "deepseek-v4-pro", "deepseek-v4-flash"]
         );
         assert_eq!(response["models"][1]["display_name"], "deepseek-v4-pro");
-        assert_eq!(response["models"][1]["apply_patch_tool_type"], Value::Null);
+        assert_eq!(response["models"][1]["apply_patch_tool_type"], "freeform");
         assert_eq!(response["models"][1]["supports_search_tool"], false);
         assert_eq!(
             response["models"][1]["supports_image_detail_original"],
@@ -228,10 +227,10 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_models_disable_apply_patch_tool() {
+    fn deepseek_models_preserve_apply_patch_tool_from_catalog() {
         let response = configured_models_response(&config(&["deepseek-v4-pro"]));
         let model = &response["models"][0];
-        assert_eq!(model["apply_patch_tool_type"], Value::Null);
+        assert_eq!(model["apply_patch_tool_type"], "freeform");
         assert_eq!(model["supports_image_detail_original"], false);
         assert_eq!(model["input_modalities"], json!(["text"]));
         assert_eq!(model["web_search_tool_type"], "text");
