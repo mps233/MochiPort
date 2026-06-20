@@ -159,7 +159,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 installation_id: installation_id.clone(),
                 account_id: account_id.clone(),
                 subscribe_cursor: subscribe_cursor.clone(),
-                outbound_tx: Some(outbound_tx),
+                outbound_tx: Some(outbound_tx.clone()),
                 connected_at_ms: Some(connected_at_ms),
                 last_ws_inbound_at_ms: Some(connected_at_ms),
                 last_ws_ping_at_ms: None,
@@ -268,6 +268,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     });
 
     let reader_state = state.clone();
+    let reader_outbound_tx = outbound_tx.clone();
     let mut reader_task = tokio::spawn(async move {
         let mut ws_ping_interval = tokio::time::interval_at(
             tokio::time::Instant::now() + REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
@@ -312,7 +313,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                         match incoming.context("failed to read remote-control websocket")? {
                             Message::Text(text) => {
                                 mark_remote_ws_inbound(&reader_state, connection_epoch).await;
-                                handle_server_envelope(&reader_state, connection_epoch, &text, &mut chunks, &server_work_tx).await?;
+                                handle_server_envelope(&reader_state, &reader_outbound_tx, connection_epoch, &text, &mut chunks, &server_work_tx).await?;
                             }
                             Message::Ping(data) => {
                                 mark_remote_ws_inbound(&reader_state, connection_epoch).await;

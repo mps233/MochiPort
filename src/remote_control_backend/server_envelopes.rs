@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 
 use crate::{app_state::SharedState, chain_log, types::now_ms};
 
+use super::OutboundWsMessage;
 use super::diagnostics::{
     is_current_remote_stream, observe_command_output_delta_received,
     observe_server_envelope_window, observe_stale_server_envelope, record_remote_app_pong,
@@ -23,6 +24,7 @@ pub(in crate::remote_control_backend) type ServerChunkMap =
 
 pub(super) async fn handle_server_envelope(
     state: &SharedState,
+    outbound_tx: &tokio::sync::mpsc::UnboundedSender<OutboundWsMessage>,
     connection_epoch: u64,
     text: &str,
     chunks: &mut ServerChunkMap,
@@ -69,6 +71,7 @@ pub(super) async fn handle_server_envelope(
     if !is_current_remote_stream(state, connection_epoch, &client_id, &stream_id).await {
         ack_server_envelope(
             state,
+            outbound_tx,
             connection_epoch,
             &client_id,
             &stream_id,
@@ -101,6 +104,7 @@ pub(super) async fn handle_server_envelope(
     if is_duplicate_server_envelope(state, &client_id, &stream_id, seq_id, segment_id).await {
         ack_server_envelope(
             state,
+            outbound_tx,
             connection_epoch,
             &client_id,
             &stream_id,
@@ -150,6 +154,7 @@ pub(super) async fn handle_server_envelope(
             )?;
             ack_server_envelope(
                 state,
+                outbound_tx,
                 connection_epoch,
                 &client_id,
                 &stream_id,
@@ -226,6 +231,7 @@ pub(super) async fn handle_server_envelope(
             }
             ack_server_envelope(
                 state,
+                outbound_tx,
                 connection_epoch,
                 &client_id,
                 &stream_id,
@@ -266,6 +272,7 @@ pub(super) async fn handle_server_envelope(
             )?;
             ack_server_envelope(
                 state,
+                outbound_tx,
                 connection_epoch,
                 &client_id,
                 &stream_id,
@@ -310,6 +317,7 @@ pub(super) async fn handle_server_envelope(
             )?;
             ack_server_envelope(
                 state,
+                outbound_tx,
                 connection_epoch,
                 &client_id,
                 &stream_id,

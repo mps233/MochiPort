@@ -373,6 +373,34 @@ async fn record_remote_recent_event(
     );
 }
 
+fn try_record_remote_recent_event(
+    state: &SharedState,
+    direction: &'static str,
+    connection_epoch: u64,
+    client_id: &str,
+    stream_id: &str,
+    seq_id: Option<u64>,
+    kind: impl Into<String>,
+    summary: impl Into<String>,
+) {
+    let Ok(mut remote) = state.remote_control.inner.try_lock() else {
+        return;
+    };
+    if !connection_exists_locked(&remote, connection_epoch) {
+        return;
+    }
+    push_remote_recent_event_locked(
+        &mut remote,
+        direction,
+        connection_epoch,
+        client_id,
+        stream_id,
+        seq_id,
+        kind,
+        summary,
+    );
+}
+
 async fn ensure_remote_control_client_initialized(
     state: &SharedState,
     connection_epoch: u64,

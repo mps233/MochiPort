@@ -21,6 +21,7 @@ use super::protocol::{build_client_ack_envelope, build_client_message_envelopes}
 use super::{
     DEFAULT_REMOTE_CLIENT_KEY, OutboundWsMessage, ensure_remote_control_client_ready,
     next_remote_subscribe_cursor, next_request_id, record_remote_recent_event,
+    try_record_remote_recent_event,
 };
 
 pub async fn send_response_for_client(
@@ -200,23 +201,19 @@ pub(super) async fn send_initialized_for_stream(
 
 pub(super) async fn ack_server_envelope(
     state: &SharedState,
+    outbound_tx: &tokio::sync::mpsc::UnboundedSender<OutboundWsMessage>,
     connection_epoch: u64,
     client_id: &str,
     stream_id: &str,
     seq_id: u64,
     segment_id: Option<usize>,
 ) -> Result<()> {
-    let outbound_tx = {
-        let remote = state.remote_control.inner.lock().await;
-        outbound_tx_for_connection_epoch_locked(&remote, connection_epoch)
-            .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
-    };
     outbound_tx
         .send(OutboundWsMessage::Text(build_client_ack_envelope(
             client_id, stream_id, seq_id, segment_id,
         )))
         .map_err(|_| anyhow!("remote-control outbound channel closed"))?;
-    record_remote_recent_event(
+    try_record_remote_recent_event(
         state,
         "client_out",
         connection_epoch,
@@ -230,8 +227,7 @@ pub(super) async fn ack_server_envelope(
                 .map(|value| value.to_string())
                 .unwrap_or_default()
         ),
-    )
-    .await;
+    );
     Ok(())
 }
 

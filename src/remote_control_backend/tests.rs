@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use base64::Engine;
 use serde_json::{Value, json};
 
+use super::outbound::ack_server_envelope;
 use super::*;
 use crate::{
     app_state::{AppState, PendingRemoteRequest},
@@ -124,6 +125,7 @@ fn envelope_is_ack(envelope: &Value) -> bool {
 async fn setup_connected_default_client(
     state: &SharedState,
 ) -> (
+    tokio::sync::mpsc::UnboundedSender<OutboundWsMessage>,
     tokio::sync::mpsc::UnboundedReceiver<OutboundWsMessage>,
     String,
     String,
@@ -134,7 +136,7 @@ async fn setup_connected_default_client(
         let mut remote = state.remote_control.inner.lock().await;
         remote.connected = true;
         remote.connection_epoch = 7;
-        remote.outbound_tx = Some(outbound_tx);
+        remote.outbound_tx = Some(outbound_tx.clone());
         remote.stream_id = "stream-test".to_string();
         let client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
         client.initialized = true;
@@ -143,7 +145,13 @@ async fn setup_connected_default_client(
         sync_default_client_legacy_locked(&mut remote);
         (client_id, stream_id, remote.connection_epoch)
     };
-    (outbound_rx, client_id, stream_id, connection_epoch)
+    (
+        outbound_tx,
+        outbound_rx,
+        client_id,
+        stream_id,
+        connection_epoch,
+    )
 }
 
 #[test]
@@ -419,7 +427,7 @@ async fn record_remote_app_pong_unknown_requests_reinitialize_after_initialize()
 #[tokio::test]
 async fn unknown_reinitializes_same_stream_without_client_closed() {
     let state = test_state();
-    let (mut outbound_rx, client_id, stream_id, connection_epoch) =
+    let (_outbound_tx, mut outbound_rx, client_id, stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
 
     start_remote_control_client_recovery(
@@ -473,7 +481,7 @@ async fn unknown_reinitializes_same_stream_without_client_closed() {
 #[tokio::test]
 async fn unbound_thread_started_does_not_replace_bound_im_thread() {
     let state = test_state();
-    let (_outbound_rx, client_id, stream_id, connection_epoch) =
+    let (_outbound_tx, _outbound_rx, client_id, stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
     {
         let mut runtime = state.runtime.lock().await;
@@ -528,7 +536,7 @@ async fn unbound_thread_started_does_not_replace_bound_im_thread() {
 #[tokio::test]
 async fn non_owner_thread_notification_is_not_forwarded_to_im() {
     let state = test_state();
-    let (_outbound_rx, client_id, _default_stream_id, connection_epoch) =
+    let (_outbound_tx, _outbound_rx, client_id, _default_stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
     let feishu_key = "im:feishu:owner-chat";
     let wechat_key = "im:wechat:other-chat";
@@ -604,7 +612,7 @@ async fn non_owner_thread_notification_is_not_forwarded_to_im() {
 #[tokio::test]
 async fn non_owner_thread_server_request_is_not_forwarded_to_im() {
     let state = test_state();
-    let (_outbound_rx, client_id, _default_stream_id, connection_epoch) =
+    let (_outbound_tx, _outbound_rx, client_id, _default_stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
     let feishu_key = "im:feishu:owner-chat";
     let wechat_key = "im:wechat:other-chat";
@@ -682,7 +690,7 @@ async fn non_owner_thread_server_request_is_not_forwarded_to_im() {
 #[tokio::test]
 async fn recovery_resubscribes_bound_threads_without_changing_current_session() {
     let state = test_state();
-    let (mut outbound_rx, client_id, stream_id, connection_epoch) =
+    let (_outbound_tx, mut outbound_rx, client_id, stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
     {
         let mut remote = state.remote_control.inner.lock().await;
@@ -839,7 +847,7 @@ async fn initialize_remote_clients_for_connection_sends_connection_default_clien
 #[tokio::test]
 async fn server_flood_fast_ack_does_not_wait_for_work_queue_drain() {
     let state = test_state();
-    let (mut outbound_rx, client_id, stream_id, connection_epoch) =
+    let (outbound_tx, mut outbound_rx, client_id, stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
     let (server_work_tx, mut server_work_rx) = tokio::sync::mpsc::channel::<RemoteServerWorkItem>(
         REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY,
@@ -857,6 +865,7 @@ async fn server_flood_fast_ack_does_not_wait_for_work_queue_drain() {
         });
         handle_server_envelope(
             &state,
+            &outbound_tx,
             connection_epoch,
             &test_server_message_envelope(&client_id, &stream_id, seq_id, message),
             &mut chunks,
@@ -896,9 +905,44 @@ async fn server_flood_fast_ack_does_not_wait_for_work_queue_drain() {
 }
 
 #[tokio::test]
+async fn ack_server_envelope_does_not_wait_for_remote_control_inner_lock() {
+    let state = test_state();
+    let (outbound_tx, mut outbound_rx, client_id, stream_id, connection_epoch) =
+        setup_connected_default_client(&state).await;
+    let remote_guard = state.remote_control.inner.lock().await;
+
+    ack_server_envelope(
+        &state,
+        &outbound_tx,
+        connection_epoch,
+        &client_id,
+        &stream_id,
+        42,
+        None,
+    )
+    .await
+    .expect("ack should send without taking remote_control.inner");
+
+    let envelope = tokio::time::timeout(Duration::from_millis(100), outbound_rx.recv())
+        .await
+        .expect("ack should be queued while remote_control.inner is locked")
+        .expect("ack envelope");
+    drop(remote_guard);
+    match envelope {
+        OutboundWsMessage::Text(value) => {
+            assert!(envelope_is_ack(&value));
+            assert_eq!(value["client_id"], client_id);
+            assert_eq!(value["stream_id"], stream_id);
+            assert_eq!(value["seq_id"], 42);
+        }
+        _ => panic!("expected text ack envelope"),
+    }
+}
+
+#[tokio::test]
 async fn bad_server_chunk_is_acked_without_closing_connection() {
     let state = test_state();
-    let (mut outbound_rx, client_id, stream_id, connection_epoch) =
+    let (outbound_tx, mut outbound_rx, client_id, stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
     let (server_work_tx, mut server_work_rx) = tokio::sync::mpsc::channel::<RemoteServerWorkItem>(
         REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY,
@@ -910,6 +954,7 @@ async fn bad_server_chunk_is_acked_without_closing_connection() {
 
     handle_server_envelope(
         &state,
+        &outbound_tx,
         connection_epoch,
         &test_server_chunk_envelope(&client_id, &stream_id, 1, 0, 2, raw.len(), &raw[..split_at]),
         &mut chunks,
@@ -919,6 +964,7 @@ async fn bad_server_chunk_is_acked_without_closing_connection() {
     .expect("first chunk should be accepted");
     handle_server_envelope(
         &state,
+        &outbound_tx,
         connection_epoch,
         &test_server_chunk_envelope(&client_id, &stream_id, 1, 0, 2, raw.len(), b""),
         &mut chunks,
@@ -935,11 +981,10 @@ async fn bad_server_chunk_is_acked_without_closing_connection() {
     assert!(server_work_rx.try_recv().is_err());
     assert!(chunks.contains_key(&(client_id, stream_id, 1)));
 }
-
 #[tokio::test]
 async fn force_ws_reconnect_sends_close_message() {
     let state = test_state();
-    let (mut outbound_rx, _client_id, _stream_id, connection_epoch) =
+    let (_outbound_tx, mut outbound_rx, _client_id, _stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
 
     force_remote_control_ws_reconnect(
