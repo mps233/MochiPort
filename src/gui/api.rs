@@ -396,6 +396,7 @@ pub(super) struct RequestLogItem {
     pub(super) ttft_ms: Option<i64>,
     pub(super) created_at: String,
     pub(super) error_message: Option<String>,
+    pub(super) upstream_request_body_bytes: Option<i64>,
 }
 
 #[derive(Clone, Default, Deserialize)]

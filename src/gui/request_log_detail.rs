@@ -676,13 +676,14 @@ fn byte_len_to_i32(value: usize) -> i32 {
 
 fn summary_text(log: &RequestLogItem) -> String {
     format!(
-        "#{}   model={}   channel={}   protocol={}   stream={}   status={}   tokens={}   ttft={}   latency={}   created={}",
+        "#{}   model={}   channel={}   protocol={}   stream={}   status={}   req_size={}   tokens={}   ttft={}   latency={}   created={}",
         log.id,
         log.model_id,
         log.channel,
         log.provider_type,
         if log.stream { "true" } else { "false" },
         log.status,
+        format_bytes(log.upstream_request_body_bytes),
         format_tokens(log),
         format_duration(log.ttft_ms),
         format_duration(log.latency_ms),
@@ -701,4 +702,17 @@ fn format_tokens(log: &RequestLogItem) -> String {
 fn format_duration(ms: Option<i64>) -> String {
     ms.map(|value| format!("{value}ms"))
         .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_bytes(bytes: Option<i64>) -> String {
+    let Some(bytes) = bytes else {
+        return "-".to_string();
+    };
+    if bytes >= 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }

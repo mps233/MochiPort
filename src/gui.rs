@@ -717,43 +717,50 @@ fn build_ui() {
         DataViewColumnFlags::Resizable,
     );
     request_log_list.append_text_column(
-        text.request_log_col_read_cache(),
+        text.request_log_col_request_size(),
         6,
+        110,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    request_log_list.append_text_column(
+        text.request_log_col_read_cache(),
+        7,
         160,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     request_log_list.append_text_column(
         text.request_log_col_write_cache(),
-        7,
+        8,
         150,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     request_log_list.append_text_column(
         text.request_log_col_cost(),
-        8,
+        9,
         110,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     request_log_list.append_text_column(
         text.request_log_col_ttft(),
-        9,
+        10,
         95,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     request_log_list.append_text_column(
         text.request_log_col_latency(),
-        10,
+        11,
         110,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     request_log_list.append_text_column(
         text.request_log_col_created_at(),
-        11,
+        12,
         170,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,

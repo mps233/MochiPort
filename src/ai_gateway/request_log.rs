@@ -45,6 +45,7 @@ pub struct RequestLogRecord {
     pub error_message: Option<String>,
     pub request_headers_json: Option<String>,
     pub request_json: Option<String>,
+    pub upstream_request_body_bytes: Option<i64>,
     pub upstream_request_headers_json: Option<String>,
     pub upstream_request_json: Option<String>,
     pub response_json: Option<String>,
@@ -58,6 +59,7 @@ pub struct RequestLogUpdate {
     pub latency_ms: Option<i64>,
     pub ttft_ms: Option<i64>,
     pub error_message: Option<String>,
+    pub upstream_request_body_bytes: Option<i64>,
     pub upstream_request_headers_json: Option<String>,
     pub upstream_request_json: Option<String>,
     pub response_json: Option<String>,
@@ -85,6 +87,7 @@ pub struct RequestLogEntry {
     pub created_at_ms: i64,
     pub created_at: String,
     pub error_message: Option<String>,
+    pub upstream_request_body_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +153,12 @@ pub fn headers_to_json(headers: &HeaderMap) -> Option<String> {
     serde_json::to_string(&Value::Object(object)).ok()
 }
 
+pub fn json_body_size_bytes(value: &Value) -> Option<i64> {
+    serde_json::to_vec(value)
+        .ok()
+        .and_then(|bytes| i64::try_from(bytes.len()).ok())
+}
+
 pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Result<i64> {
     let conn = open(db_path)?;
     conn.execute(
@@ -158,8 +167,9 @@ pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Res
             input_tokens, output_tokens, total_tokens, read_cache_tokens,
             read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
             ttft_ms, created_at_ms, error_message, request_headers_json, request_json,
-            upstream_request_headers_json, upstream_request_json, response_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
+            upstream_request_body_bytes, upstream_request_headers_json, upstream_request_json,
+            response_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             &record.request_id,
             &record.model_id,
@@ -180,6 +190,7 @@ pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Res
             &record.error_message,
             &record.request_headers_json,
             &record.request_json,
+            record.upstream_request_body_bytes,
             &record.upstream_request_headers_json,
             &record.upstream_request_json,
             &record.response_json,
@@ -195,8 +206,8 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
             "SELECT
                 status, input_tokens, output_tokens, total_tokens, read_cache_tokens,
                 read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
-                ttft_ms, error_message, upstream_request_headers_json, upstream_request_json,
-                response_json
+                ttft_ms, error_message, upstream_request_body_bytes,
+                upstream_request_headers_json, upstream_request_json, response_json
              FROM ai_gateway_request_logs WHERE id = ?1",
             params![id],
             |row| {
@@ -212,9 +223,10 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
                     row.get::<_, Option<i64>>(8)?,
                     row.get::<_, Option<i64>>(9)?,
                     row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<i64>>(11)?,
                     row.get::<_, Option<String>>(12)?,
                     row.get::<_, Option<String>>(13)?,
+                    row.get::<_, Option<String>>(14)?,
                 ))
             },
         )
@@ -245,10 +257,11 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
             latency_ms = ?9,
             ttft_ms = ?10,
             error_message = ?11,
-            upstream_request_headers_json = ?12,
-            upstream_request_json = ?13,
-            response_json = ?14
-         WHERE id = ?15",
+            upstream_request_body_bytes = ?12,
+            upstream_request_headers_json = ?13,
+            upstream_request_json = ?14,
+            response_json = ?15
+         WHERE id = ?16",
         params![
             update.status.as_deref().unwrap_or(&existing.0),
             usage.input_tokens,
@@ -261,9 +274,10 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
             update.latency_ms.or(existing.8),
             update.ttft_ms.or(existing.9),
             update.error_message.clone().or(existing.10),
-            update.upstream_request_headers_json.clone().or(existing.11),
-            update.upstream_request_json.clone().or(existing.12),
-            update.response_json.clone().or(existing.13),
+            update.upstream_request_body_bytes.or(existing.11),
+            update.upstream_request_headers_json.clone().or(existing.12),
+            update.upstream_request_json.clone().or(existing.13),
+            update.response_json.clone().or(existing.14),
             id,
         ],
     )?;
@@ -279,7 +293,7 @@ pub fn list_recent(db_path: &Path, limit: usize) -> rusqlite::Result<Vec<Request
             read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
             ttft_ms, created_at_ms,
             datetime(created_at_ms / 1000, 'unixepoch', 'localtime') AS created_at,
-            error_message
+            error_message, upstream_request_body_bytes
          FROM ai_gateway_request_logs
          ORDER BY created_at_ms DESC, id DESC
          LIMIT ?1",
@@ -305,6 +319,7 @@ pub fn list_recent(db_path: &Path, limit: usize) -> rusqlite::Result<Vec<Request
             created_at_ms: row.get(16)?,
             created_at: row.get(17)?,
             error_message: row.get(18)?,
+            upstream_request_body_bytes: row.get(19)?,
         })
     })?;
 
@@ -338,7 +353,8 @@ pub fn get_detail(db_path: &Path, id: i64) -> rusqlite::Result<Option<RequestLog
             ttft_ms, created_at_ms,
             datetime(created_at_ms / 1000, 'unixepoch', 'localtime') AS created_at,
             error_message, request_headers_json, request_json,
-            upstream_request_headers_json, upstream_request_json, response_json
+            upstream_request_body_bytes, upstream_request_headers_json, upstream_request_json,
+            response_json
          FROM ai_gateway_request_logs
          WHERE id = ?1",
         params![id],
@@ -364,12 +380,13 @@ pub fn get_detail(db_path: &Path, id: i64) -> rusqlite::Result<Option<RequestLog
                     created_at_ms: row.get(16)?,
                     created_at: row.get(17)?,
                     error_message: row.get(18)?,
+                    upstream_request_body_bytes: row.get(21)?,
                 },
                 request_headers_json: row.get(19)?,
                 request_json: row.get(20)?,
-                upstream_request_headers_json: row.get(21)?,
-                upstream_request_json: row.get(22)?,
-                response_json: row.get(23)?,
+                upstream_request_headers_json: row.get(22)?,
+                upstream_request_json: row.get(23)?,
+                response_json: row.get(24)?,
             })
         },
     )
@@ -610,6 +627,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             error_message TEXT,
             request_headers_json TEXT,
             request_json TEXT,
+            upstream_request_body_bytes INTEGER,
             upstream_request_headers_json TEXT,
             upstream_request_json TEXT,
             response_json TEXT
@@ -618,6 +636,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     add_text_column_if_missing(conn, "request_headers_json")?;
+    add_integer_column_if_missing(conn, "upstream_request_body_bytes")?;
     add_text_column_if_missing(conn, "upstream_request_headers_json")?;
     add_text_column_if_missing(conn, "upstream_request_json")?;
 
@@ -638,6 +657,18 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 fn add_text_column_if_missing(conn: &Connection, column: &str) -> rusqlite::Result<()> {
     match conn.execute(
         &format!("ALTER TABLE ai_gateway_request_logs ADD COLUMN {column} TEXT"),
+        [],
+    ) {
+        Ok(_) => {}
+        Err(err) if is_duplicate_column_error(&err) => {}
+        Err(err) => return Err(err),
+    }
+    Ok(())
+}
+
+fn add_integer_column_if_missing(conn: &Connection, column: &str) -> rusqlite::Result<()> {
+    match conn.execute(
+        &format!("ALTER TABLE ai_gateway_request_logs ADD COLUMN {column} INTEGER"),
         [],
     ) {
         Ok(_) => {}
@@ -761,6 +792,7 @@ mod tests {
             error_message: None,
             request_headers_json: None,
             request_json: None,
+            upstream_request_body_bytes: None,
             upstream_request_headers_json: None,
             upstream_request_json: None,
             response_json: None,
@@ -848,6 +880,7 @@ mod tests {
             error_message: None,
             request_headers_json: Some(r#"{"user-agent":"Codex/1.0"}"#.to_string()),
             request_json: Some(r#"{"model":"deepseek-v4-flash"}"#.to_string()),
+            upstream_request_body_bytes: Some(42),
             upstream_request_headers_json: None,
             upstream_request_json: Some(
                 r#"{"model":"deepseek-v4-flash","messages":[]}"#.to_string(),
@@ -885,9 +918,11 @@ mod tests {
         assert_eq!(logs[0].status, "completed");
         assert_eq!(logs[0].total_tokens, Some(13));
         assert_eq!(logs[0].read_cache_tokens, Some(8));
+        assert_eq!(logs[0].upstream_request_body_bytes, Some(42));
         assert_eq!(logs[0].latency_ms, Some(1234));
         let detail = get_detail(&db_path, id).unwrap().unwrap();
         assert_eq!(detail.summary.id, id);
+        assert_eq!(detail.summary.upstream_request_body_bytes, Some(42));
         assert_eq!(
             detail.request_headers_json.as_deref(),
             Some(r#"{"user-agent":"Codex/1.0"}"#)
@@ -994,6 +1029,7 @@ mod tests {
                 error_message: None,
                 request_headers_json: None,
                 request_json: None,
+                upstream_request_body_bytes: None,
                 upstream_request_headers_json: None,
                 upstream_request_json: None,
                 response_json: None,
@@ -1031,6 +1067,7 @@ mod tests {
                 error_message: None,
                 request_headers_json: None,
                 request_json: None,
+                upstream_request_body_bytes: None,
                 upstream_request_headers_json: None,
                 upstream_request_json: None,
                 response_json: None,
@@ -1065,6 +1102,7 @@ mod tests {
             error_message: None,
             request_headers_json: None,
             request_json: None,
+            upstream_request_body_bytes: None,
             upstream_request_headers_json: None,
             upstream_request_json: None,
             response_json: None,

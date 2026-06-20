@@ -331,6 +331,7 @@ fn insert_initial_log(
         error_message: None,
         request_headers_json: request_log::headers_to_json(headers),
         request_json: serde_json::to_string(raw_body).ok(),
+        upstream_request_body_bytes: None,
         upstream_request_headers_json: None,
         upstream_request_json: None,
         response_json: None,

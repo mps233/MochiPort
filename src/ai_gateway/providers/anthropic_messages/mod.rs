@@ -88,6 +88,7 @@ pub async fn handle(
     if let Some(log_context) = &log_context {
         let update = RequestLogUpdate {
             upstream_request_headers_json: request_log::headers_to_json(upstream_req.headers()),
+            upstream_request_body_bytes: request_log::json_body_size_bytes(&anthropic_body),
             upstream_request_json: serde_json::to_string(&anthropic_body).ok(),
             ..RequestLogUpdate::default()
         };

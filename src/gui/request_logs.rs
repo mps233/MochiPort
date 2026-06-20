@@ -29,20 +29,21 @@ pub(super) fn request_log_cell(rows: &RequestLogRows, row: usize, col: usize) ->
         3 => log.channel.clone().into(),
         4 => status_label(&log.status).into(),
         5 => format_tokens(log).into(),
-        6 => format_read_cache(log).into(),
-        7 => log
+        6 => format_optional_bytes(log.upstream_request_body_bytes).into(),
+        7 => format_read_cache(log).into(),
+        8 => log
             .write_cache_tokens
             .map(format_int)
             .unwrap_or_else(|| "-".to_string())
             .into(),
-        8 => log
+        9 => log
             .cost_usd
             .map(|cost| format!("${cost:.6}"))
             .unwrap_or_else(|| "-".to_string())
             .into(),
-        9 => format_optional_duration(log.ttft_ms).into(),
-        10 => format_optional_duration(log.latency_ms).into(),
-        11 => log.created_at.clone().into(),
+        10 => format_optional_duration(log.ttft_ms).into(),
+        11 => format_optional_duration(log.latency_ms).into(),
+        12 => log.created_at.clone().into(),
         _ => String::new().into(),
     }
 }
@@ -112,6 +113,20 @@ fn format_read_cache(log: &RequestLogItem) -> String {
 
 fn format_optional_duration(ms: Option<i64>) -> String {
     ms.map(format_duration).unwrap_or_else(|| "-".to_string())
+}
+
+fn format_optional_bytes(bytes: Option<i64>) -> String {
+    bytes.map(format_bytes).unwrap_or_else(|| "-".to_string())
+}
+
+fn format_bytes(bytes: i64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.2} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn format_duration(ms: i64) -> String {

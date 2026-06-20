@@ -592,6 +592,13 @@ impl GuiText {
         }
     }
 
+    pub(super) fn request_log_col_request_size(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "REQ SIZE",
+            GuiLocale::EnUs => "REQ SIZE",
+        }
+    }
+
     pub(super) fn request_log_col_read_cache(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "READ CACHE",
