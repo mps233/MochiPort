@@ -23,7 +23,9 @@ pub(super) struct AiGwProviderRow {
     pub(super) enabled: bool,
     pub(super) name: String,
     pub(super) provider_type: ProviderType,
+    pub(super) compatibility: Option<String>,
     pub(super) base_url: String,
+    pub(super) models_url: Option<String>,
     pub(super) weight: u32,
 }
 
@@ -116,30 +118,41 @@ fn ai_gw_provider_list_rows(config: Option<&AiGatewayConfig>) -> Vec<AiGwProvide
             enabled: provider.enabled,
             name: provider.name.clone(),
             provider_type: provider.provider_type.clone(),
+            compatibility: provider.compatibility.clone(),
             base_url: provider.base_url.clone(),
+            models_url: provider.models_url.clone(),
             weight: provider.effective_weight(),
         })
         .collect()
 }
 
-pub(super) fn provider_logo_variant(provider_type: &ProviderType) -> Variant {
-    let bitmap = provider_logo_bitmap(provider_logo_kind(provider_type), 18);
+pub(super) fn provider_logo_variant(row: &AiGwProviderRow) -> Variant {
+    let bitmap = provider_logo_bitmap(provider_logo_kind(row), 18);
     (&bitmap).into()
 }
 
-fn provider_logo_kind(provider_type: &ProviderType) -> ProviderLogoKind {
-    match provider_type {
+fn provider_logo_kind(row: &AiGwProviderRow) -> ProviderLogoKind {
+    match row.provider_type {
         ProviderType::OpenAiResponses => ProviderLogoKind::OpenAi,
         ProviderType::ChatCompletions => ProviderLogoKind::DeepSeek,
-        ProviderType::AnthropicMessages => ProviderLogoKind::Anthropic,
+        ProviderType::AnthropicMessages => match row.compatibility.as_deref() {
+            Some("glm_anthropic" | "zhipu_anthropic") => ProviderLogoKind::Zhipu,
+            _ => ProviderLogoKind::Anthropic,
+        },
     }
 }
 
-pub(super) fn provider_type_display(pt: &ProviderType) -> String {
-    match pt {
+pub(super) fn provider_protocol_display(
+    provider_type: &ProviderType,
+    compatibility: Option<&str>,
+) -> String {
+    match provider_type {
         ProviderType::OpenAiResponses => "OpenAI Responses".to_string(),
         ProviderType::ChatCompletions => "Chat Completions".to_string(),
-        ProviderType::AnthropicMessages => "Anthropic Messages".to_string(),
+        ProviderType::AnthropicMessages => match compatibility {
+            Some("glm_anthropic" | "zhipu_anthropic") => "GLM Anthropic Messages".to_string(),
+            _ => "Anthropic Messages".to_string(),
+        },
     }
 }
 

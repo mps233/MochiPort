@@ -52,6 +52,7 @@ pub(super) enum ProviderLogoKind {
     OpenAi,
     DeepSeek,
     Anthropic,
+    Zhipu,
 }
 
 pub(super) fn status_panel<W: WxWidget>(
@@ -444,6 +445,10 @@ pub(super) fn provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap 
         ProviderLogoKind::Anthropic => (
             "anthropic.svg",
             include_bytes!("../../packaging/brand/providers/anthropic.svg").as_slice(),
+        ),
+        ProviderLogoKind::Zhipu => (
+            "zhipu.svg",
+            include_bytes!("../../packaging/brand/providers/zhipu.svg").as_slice(),
         ),
     };
     BitmapBundle::from_svg_data(bytes, Size::new(size, size))

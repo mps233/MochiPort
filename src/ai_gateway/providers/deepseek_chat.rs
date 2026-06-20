@@ -20,12 +20,17 @@ use crate::ai_gateway::transform::chat_to_responses::convert_chat_response_with_
 use crate::ai_gateway::transform::responses_stream::ChatSseToResponsesSse;
 use crate::ai_gateway::transform::responses_to_chat::build_chat_request_with_tool_names;
 
-use super::{apply_total_request_timeout, execute_stream_start, map_upstream_response};
+use super::{
+    apply_total_request_timeout, ensure_success_response, execute_stream_start,
+    map_upstream_response,
+};
 
 /// DeepSeek Chat Completions 出站处理。
 pub async fn handle(
+    client: &reqwest::Client,
     ctx: &GatewayContext,
     request: &GatewayRequest,
+    response_model: &str,
     provider: &ProviderConfig,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
@@ -41,7 +46,6 @@ pub async fn handle(
     debug!(url = %url, stream = request.stream, "proxying to deepseek chat");
 
     // 2. 发送上游请求
-    let client = reqwest::Client::new();
     let req_builder = client
         .post(&url)
         .header("content-type", "application/json")
@@ -74,7 +78,7 @@ pub async fn handle(
 
     let upstream_resp = if request.stream {
         execute_stream_start(
-            &client,
+            client,
             upstream_req,
             provider.timeout_secs,
             "deepseek upstream request failed",
@@ -87,19 +91,13 @@ pub async fn handle(
         )?
     };
 
-    let upstream_status = upstream_resp.status();
-    if !upstream_status.is_success() {
-        let status =
-            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let body_text = upstream_resp.text().await.unwrap_or_default();
-        return Err(GatewayError::upstream(status, body_text));
-    }
+    let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
 
     // 3. 流式 vs 非流式
     if request.stream {
-        handle_stream(upstream_resp, &request.model, tool_name_map, log_context).await
+        handle_stream(upstream_resp, response_model, tool_name_map, log_context).await
     } else {
-        handle_non_stream(upstream_resp, &request.model, tool_name_map, log_context).await
+        handle_non_stream(upstream_resp, response_model, tool_name_map, log_context).await
     }
 }
 

@@ -47,6 +47,24 @@ pub(super) fn map_upstream_response(
     })
 }
 
+pub(super) async fn ensure_success_response(
+    provider_name: &str,
+    response: reqwest::Response,
+) -> Result<reqwest::Response, GatewayError> {
+    let upstream_status = response.status();
+    if upstream_status.is_success() {
+        return Ok(response);
+    }
+
+    let status = StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let body_text = response.text().await.unwrap_or_default();
+    Err(GatewayError::from_upstream_body(
+        status,
+        provider_name,
+        &body_text,
+    ))
+}
+
 fn provider_timeout(timeout_secs: u64) -> Duration {
     Duration::from_secs(timeout_secs.max(1))
 }

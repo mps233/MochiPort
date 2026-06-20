@@ -23,6 +23,7 @@ packaging/brand/providers/
 - OpenAI：`packaging/brand/providers/openai.svg`
 - DeepSeek：`packaging/brand/providers/deepseek.svg`
 - Anthropic：`packaging/brand/providers/anthropic.svg`
+- 智谱：`packaging/brand/providers/zhipu.svg`
 - 来源记录：`packaging/brand/providers/SOURCES.md`
 
 ## 从 @lobehub/icons 提取

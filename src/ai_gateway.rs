@@ -1,9 +1,11 @@
 pub mod catalog;
+#[allow(dead_code)]
 pub mod codec;
 pub mod config;
 pub mod context;
 pub mod error;
 pub mod handler;
+#[allow(dead_code)]
 pub mod ir;
 pub mod model;
 pub mod providers;

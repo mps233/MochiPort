@@ -8,7 +8,7 @@ use axum::{
 use serde_json::Value;
 use tracing::{debug, error};
 
-use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
+use crate::ai_gateway::config::ProviderConfig;
 use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::GatewayRequest;
@@ -17,8 +17,12 @@ use crate::ai_gateway::request_log::{
 };
 use crate::ai_gateway::tool_names::ToolNameMap;
 
-use super::{apply_total_request_timeout, execute_stream_start, map_upstream_response};
+use super::{
+    apply_total_request_timeout, ensure_success_response, execute_stream_start,
+    map_upstream_response,
+};
 
+mod options;
 mod request;
 mod request_content;
 mod request_reasoning;
@@ -37,13 +41,16 @@ mod types;
 #[cfg(test)]
 mod tests;
 
+use options::{AnthropicAuthStyle, AnthropicProviderOptions, AnthropicVersionHeader};
 use request::build_anthropic_request;
 use response::convert_anthropic_response;
 use stream::AnthropicSseToResponsesSse;
-use types::ANTHROPIC_VERSION;
+
 pub async fn handle(
+    client: &reqwest::Client,
     ctx: &GatewayContext,
     request: &GatewayRequest,
+    response_model: &str,
     provider: &ProviderConfig,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
@@ -52,18 +59,18 @@ pub async fn handle(
         .as_deref()
         .or(provider.prompt_cache_retention.as_deref());
     let (anthropic_body, tool_name_map) = build_anthropic_request(request, prompt_cache_retention)?;
-    let url = format!("{}/v1/messages", provider_api_root(&provider.base_url));
+    let options = AnthropicProviderOptions::from_provider(provider)?;
+    let url = options.messages_url(provider);
     debug!(url = %url, stream = false, "proxying to anthropic messages");
 
-    let client = reqwest::Client::new();
-    let upstream_req = client
+    let req_builder = client
         .post(&url)
         .header("content-type", "application/json")
-        .header("x-api-key", provider.api_key.clone())
-        .header("anthropic-version", ANTHROPIC_VERSION)
         .json(&anthropic_body);
+    let req_builder = apply_anthropic_auth(req_builder, provider, &options);
+    let req_builder = apply_anthropic_version_header(req_builder, &options);
     let upstream_req = apply_upstream_headers(
-        apply_total_request_timeout(upstream_req, provider.timeout_secs, request.stream),
+        apply_total_request_timeout(req_builder, provider.timeout_secs, request.stream),
         &ctx.upstream_headers,
     )
     .build()
@@ -90,7 +97,7 @@ pub async fn handle(
 
     let upstream_resp = if request.stream {
         execute_stream_start(
-            &client,
+            client,
             upstream_req,
             provider.timeout_secs,
             "anthropic upstream request failed",
@@ -102,22 +109,16 @@ pub async fn handle(
             "anthropic upstream request failed",
         )?
     };
-    let upstream_status = upstream_resp.status();
-    if !upstream_status.is_success() {
-        let status =
-            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let body_text = upstream_resp.text().await.unwrap_or_default();
-        return Err(GatewayError::upstream(status, body_text));
-    }
+    let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
 
     if request.stream {
-        return handle_stream(upstream_resp, &request.model, tool_name_map, log_context).await;
+        return handle_stream(upstream_resp, response_model, tool_name_map, log_context).await;
     }
 
     let anthropic_resp: Value = upstream_resp.json().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("parse upstream json: {e}"))
     })?;
-    let response_obj = convert_anthropic_response(&anthropic_resp, &request.model, &tool_name_map);
+    let response_obj = convert_anthropic_response(&anthropic_resp, response_model, &tool_name_map);
     let body_bytes = serde_json::to_vec(&response_obj).unwrap_or_default();
 
     if let Some(log_context) = &log_context {
@@ -143,6 +144,25 @@ pub async fn handle(
         HeaderValue::from_static("application/json"),
     );
     Ok(response)
+}
+
+fn apply_anthropic_auth(
+    request: reqwest::RequestBuilder,
+    provider: &ProviderConfig,
+    options: &AnthropicProviderOptions,
+) -> reqwest::RequestBuilder {
+    match options.auth {
+        AnthropicAuthStyle::XApiKey => request.header("x-api-key", provider.api_key.clone()),
+    }
+}
+
+fn apply_anthropic_version_header(
+    request: reqwest::RequestBuilder,
+    options: &AnthropicProviderOptions,
+) -> reqwest::RequestBuilder {
+    match options.version_header {
+        AnthropicVersionHeader::Required(version) => request.header("anthropic-version", version),
+    }
 }
 
 async fn handle_stream(

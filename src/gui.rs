@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    collections::BTreeMap,
     process::Child,
     rc::Rc,
     sync::{
@@ -41,6 +42,7 @@ const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
 const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 const GUI_CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
 const GUI_STARTUP_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
+const GUI_MODEL_LIST_FETCH_TIMEOUT_SECS: u64 = 30;
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -53,6 +55,8 @@ const ID_MENU_LANGUAGE_EN_US: i32 = 10_005;
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
+type ModelMappingRows = Rc<RefCell<Vec<ModelMappingRow>>>;
+type ModelMappingModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
@@ -60,6 +64,13 @@ type RequestLogResultStore = Arc<Mutex<Option<Result<Vec<RequestLogItem>, String
 type RequestLogDetailResultStore =
     Arc<Mutex<Option<(i64, Result<self::api::RequestLogDetail, String>)>>>;
 type RequestLogClearResultStore = Arc<Mutex<Option<Result<usize, String>>>>;
+type FetchModelsResultStore = Arc<Mutex<Option<Result<(Vec<String>, String), String>>>>;
+
+#[derive(Clone, PartialEq, Eq)]
+struct ModelMappingRow {
+    upstream_model: String,
+    codex_models: Vec<String>,
+}
 
 mod ai_gateway;
 mod api;
@@ -77,8 +88,8 @@ mod widgets;
 use self::ai_gateway::{
     AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRow, AiGwProviderRows,
     PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
-    provider_logo_variant, provider_type_display, refresh_ai_gw_provider_list, save_ai_gw_provider,
-    set_ai_gw_actions_enabled, set_ai_gw_provider_enabled,
+    provider_logo_variant, provider_protocol_display, refresh_ai_gw_provider_list,
+    save_ai_gw_provider, set_ai_gw_actions_enabled, set_ai_gw_provider_enabled,
 };
 use self::api::{
     ApiClient, ConfigureTelegramBotRequest, DashboardSnapshot, DeleteImAccountRequest,
@@ -293,8 +304,12 @@ fn build_ui() {
                 match col {
                     0 => row_data.enabled.into(),
                     1 => row_data.name.clone().into(),
-                    2 => provider_logo_variant(&row_data.provider_type),
-                    3 => provider_type_display(&row_data.provider_type).into(),
+                    2 => provider_logo_variant(row_data),
+                    3 => provider_protocol_display(
+                        &row_data.provider_type,
+                        row_data.compatibility.as_deref(),
+                    )
+                    .into(),
                     4 => row_data.base_url.clone().into(),
                     5 => row_data.weight.to_string().into(),
                     _ => String::new().into(),
@@ -1595,6 +1610,13 @@ fn show_ai_gw_channel_dialog(
         Some(ProviderLogoKind::Anthropic),
         false,
     );
+    let radio_glm = ai_gw_service_option(
+        &service_panel,
+        &service_sizer,
+        text.ai_gw_service_glm(),
+        Some(ProviderLogoKind::Zhipu),
+        false,
+    );
     service_sizer.add_stretch_spacer(1);
     service_panel.set_sizer(service_sizer, true);
     workspace.add(&service_panel, 0, SizerFlag::Expand | SizerFlag::Right, 14);
@@ -1631,6 +1653,7 @@ fn show_ai_gw_channel_dialog(
     type_input.set_editable(false);
     let name_input = text_field_row(&form_panel, &grid, text.ai_gw_provider_name(), "");
     let base_url_input = text_field_row(&form_panel, &grid, text.ai_gw_col_base_url(), "");
+    let models_url_input = text_field_row(&form_panel, &grid, text.ai_gw_models_url(), "");
     let key_input = text_field_row(&form_panel, &grid, text.ai_gw_col_api_key(), "");
     let weight_input = text_field_row(&form_panel, &grid, text.ai_gw_weight(), "100");
 
@@ -1676,14 +1699,40 @@ fn show_ai_gw_channel_dialog(
         18,
     );
 
-    let models_list = ListBox::builder(&form_panel)
+    let model_mapping_rows: ModelMappingRows = Rc::new(RefCell::new(Vec::new()));
+    let model_mapping_model: ModelMappingModel =
+        Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
+            0,
+            model_mapping_rows.clone(),
+            model_mapping_cell,
+            None::<fn(&ModelMappingRows, usize, usize, &Variant) -> bool>,
+            None::<fn(&ModelMappingRows, usize, usize) -> Option<DataViewItemAttr>>,
+            None::<fn(&ModelMappingRows, usize, usize) -> bool>,
+        )));
+    let models_list = DataViewCtrl::builder(&form_panel)
         .with_style(
-            ListBoxStyle::Default
-                | ListBoxStyle::AlwaysScrollbar
-                | ListBoxStyle::HorizontalScrollbar,
+            DataViewStyle::Single
+                | DataViewStyle::RowLines
+                | DataViewStyle::HorizontalRules
+                | DataViewStyle::VerticalRules,
         )
-        .with_size(Size::new(-1, 170))
+        .with_size(Size::new(-1, 180))
         .build();
+    models_list.append_text_column(
+        text.ai_gw_upstream_model(),
+        0,
+        310,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    models_list.append_text_column(
+        text.ai_gw_codex_model_aliases(),
+        1,
+        360,
+        DataViewAlign::Left,
+        DataViewColumnFlags::Resizable,
+    );
+    models_list.associate_model(&*model_mapping_model.borrow());
     models_list.set_min_size(Size::new(420, 150));
     form_sizer.add(
         &models_list,
@@ -1736,17 +1785,27 @@ fn show_ai_gw_channel_dialog(
         &radio_openai,
         &radio_deepseek,
         &radio_anthropic,
+        &radio_glm,
         &type_input,
         &name_input,
         &base_url_input,
+        &models_url_input,
         &models_list,
+        &model_mapping_rows,
+        &model_mapping_model,
         &weight_input,
     );
+    let current_ai_gw_provider_template = Rc::new(RefCell::new(provider_with_default_models_url(
+        initial
+            .cloned()
+            .unwrap_or_else(|| default_ai_gw_service_provider(ProviderType::OpenAiResponses)),
+    )));
     if let Some(provider) = initial {
         key_input.change_value(&provider.api_key);
         radio_openai.enable(false);
         radio_deepseek.enable(false);
         radio_anthropic.enable(false);
+        radio_glm.enable(false);
     }
 
     let service_template_applying = Rc::new(RefCell::new(false));
@@ -1754,26 +1813,36 @@ fn show_ai_gw_channel_dialog(
         let type_input = type_input;
         let name_input = name_input;
         let base_url_input = base_url_input;
+        let models_url_input = models_url_input;
         let key_input = key_input;
         let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
         let weight_input = weight_input;
         let service_template_applying = service_template_applying.clone();
+        let current_ai_gw_provider_template = current_ai_gw_provider_template.clone();
         radio_openai.on_selected(move |_| {
             if radio_openai.get_value() && !*service_template_applying.borrow() {
+                let provider = default_ai_gw_service_provider(ProviderType::OpenAiResponses);
                 apply_ai_gw_service_template(
                     text,
-                    ProviderType::OpenAiResponses,
+                    provider.clone(),
                     &radio_openai,
                     &radio_deepseek,
                     &radio_anthropic,
+                    &radio_glm,
                     &type_input,
                     &name_input,
                     &base_url_input,
+                    &models_url_input,
                     &key_input,
                     &models_list,
+                    &model_mapping_rows,
+                    &model_mapping_model,
                     &weight_input,
                     &service_template_applying,
                 );
+                *current_ai_gw_provider_template.borrow_mut() = provider;
             }
         });
     }
@@ -1781,26 +1850,36 @@ fn show_ai_gw_channel_dialog(
         let type_input = type_input;
         let name_input = name_input;
         let base_url_input = base_url_input;
+        let models_url_input = models_url_input;
         let key_input = key_input;
         let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
         let weight_input = weight_input;
         let service_template_applying = service_template_applying.clone();
+        let current_ai_gw_provider_template = current_ai_gw_provider_template.clone();
         radio_deepseek.on_selected(move |_| {
             if radio_deepseek.get_value() && !*service_template_applying.borrow() {
+                let provider = default_ai_gw_service_provider(ProviderType::ChatCompletions);
                 apply_ai_gw_service_template(
                     text,
-                    ProviderType::ChatCompletions,
+                    provider.clone(),
                     &radio_openai,
                     &radio_deepseek,
                     &radio_anthropic,
+                    &radio_glm,
                     &type_input,
                     &name_input,
                     &base_url_input,
+                    &models_url_input,
                     &key_input,
                     &models_list,
+                    &model_mapping_rows,
+                    &model_mapping_model,
                     &weight_input,
                     &service_template_applying,
                 );
+                *current_ai_gw_provider_template.borrow_mut() = provider;
             }
         });
     }
@@ -1808,31 +1887,80 @@ fn show_ai_gw_channel_dialog(
         let type_input = type_input;
         let name_input = name_input;
         let base_url_input = base_url_input;
+        let models_url_input = models_url_input;
         let key_input = key_input;
         let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
         let weight_input = weight_input;
         let service_template_applying = service_template_applying.clone();
+        let current_ai_gw_provider_template = current_ai_gw_provider_template.clone();
         radio_anthropic.on_selected(move |_| {
             if radio_anthropic.get_value() && !*service_template_applying.borrow() {
+                let provider = default_ai_gw_service_provider(ProviderType::AnthropicMessages);
                 apply_ai_gw_service_template(
                     text,
-                    ProviderType::AnthropicMessages,
+                    provider.clone(),
                     &radio_openai,
                     &radio_deepseek,
                     &radio_anthropic,
+                    &radio_glm,
                     &type_input,
                     &name_input,
                     &base_url_input,
+                    &models_url_input,
                     &key_input,
                     &models_list,
+                    &model_mapping_rows,
+                    &model_mapping_model,
                     &weight_input,
                     &service_template_applying,
                 );
+                *current_ai_gw_provider_template.borrow_mut() = provider;
+            }
+        });
+    }
+    if initial.is_none() {
+        let type_input = type_input;
+        let name_input = name_input;
+        let base_url_input = base_url_input;
+        let models_url_input = models_url_input;
+        let key_input = key_input;
+        let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
+        let weight_input = weight_input;
+        let service_template_applying = service_template_applying.clone();
+        let current_ai_gw_provider_template = current_ai_gw_provider_template.clone();
+        radio_glm.on_selected(move |_| {
+            if radio_glm.get_value() && !*service_template_applying.borrow() {
+                let provider = default_ai_gw_glm_service_provider();
+                apply_ai_gw_service_template(
+                    text,
+                    provider.clone(),
+                    &radio_openai,
+                    &radio_deepseek,
+                    &radio_anthropic,
+                    &radio_glm,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &models_url_input,
+                    &key_input,
+                    &models_list,
+                    &model_mapping_rows,
+                    &model_mapping_model,
+                    &weight_input,
+                    &service_template_applying,
+                );
+                *current_ai_gw_provider_template.borrow_mut() = provider;
             }
         });
     }
     {
         let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
         add_model_button.on_click(move |_| {
             let input = TextEntryDialog::builder(
                 &dialog,
@@ -1857,30 +1985,70 @@ fn show_ai_gw_channel_dialog(
                 show_error(&dialog, text.ai_gw_model_id_empty());
                 return;
             }
-            append_models_to_list(&models_list, models);
+            append_model_mapping_rows(
+                &models_list,
+                &model_mapping_rows,
+                &model_mapping_model,
+                models,
+                None,
+            );
         });
     }
     {
         let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
         delete_model_button.on_click(move |_| {
-            let Some(index) = models_list.get_selection() else {
+            let Some(index) = models_list.get_selected_row() else {
                 show_error(&dialog, text.ai_gw_select_model());
                 return;
             };
-            models_list.delete(index);
-            let count = models_list.get_count();
-            if count > 0 {
-                models_list.set_selection(index.min(count - 1), true);
-            }
+            delete_model_mapping_row(
+                &models_list,
+                &model_mapping_rows,
+                &model_mapping_model,
+                index,
+            );
         });
     }
     {
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
+        models_list.on_item_activated(move |event| {
+            let row = event
+                .get_row()
+                .and_then(|row| usize::try_from(row).ok())
+                .or_else(|| models_list.get_selected_row());
+            let Some(row) = row else {
+                return;
+            };
+            edit_model_mapping_row(
+                &dialog,
+                text,
+                row,
+                &model_mapping_rows,
+                &model_mapping_model,
+            );
+        });
+    }
+    let fetch_models_result: FetchModelsResultStore = Arc::new(Mutex::new(None));
+    let fetch_models_in_flight = Arc::new(AtomicBool::new(false));
+    let fetch_models_closed = Arc::new(AtomicBool::new(false));
+    {
         let base_url_input = base_url_input;
+        let models_url_input = models_url_input;
         let key_input = key_input;
-        let models_list = models_list;
+        let current_ai_gw_provider_template = current_ai_gw_provider_template.clone();
+        let fetch_models_result = fetch_models_result.clone();
+        let fetch_models_in_flight = fetch_models_in_flight.clone();
+        let fetch_models_closed = fetch_models_closed.clone();
         fetch_models_button.on_click(move |_| {
+            if fetch_models_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
             let base_url = strip_nul(&base_url_input.get_value()).trim().to_string();
             if base_url.is_empty() {
+                fetch_models_in_flight.store(false, Ordering::SeqCst);
                 show_error(&dialog, text.ai_gw_base_url_empty());
                 return;
             }
@@ -1888,26 +2056,80 @@ fn show_ai_gw_channel_dialog(
             fetch_models_button.enable(false);
             fetch_models_button.set_label(text.ai_gw_fetching_models());
             let api_key = strip_nul(&key_input.get_value()).trim().to_string();
-            match fetch_remote_models(&base_url, &api_key, DEFAULT_PROVIDER_TIMEOUT_SECS) {
+            let mut template = current_ai_gw_provider_template.borrow().clone();
+            template.base_url = base_url.clone();
+            let models_url_value = strip_nul(&models_url_input.get_value());
+            let models_url = normalize_optional_url(Some(&models_url_value))
+                .or_else(|| default_models_url_for_provider(&template));
+            let fetch_models_result = fetch_models_result.clone();
+            let fetch_models_in_flight = fetch_models_in_flight.clone();
+            let fetch_models_closed = fetch_models_closed.clone();
+            thread::spawn(move || {
+                let outcome = fetch_remote_models(
+                    &base_url,
+                    models_url.as_deref(),
+                    &api_key,
+                    GUI_MODEL_LIST_FETCH_TIMEOUT_SECS,
+                );
+                if fetch_models_closed.load(Ordering::SeqCst) {
+                    fetch_models_in_flight.store(false, Ordering::SeqCst);
+                    return;
+                }
+                if let Ok(mut slot) = fetch_models_result.lock() {
+                    slot.replace(outcome);
+                }
+                fetch_models_in_flight.store(false, Ordering::SeqCst);
+            });
+        });
+    }
+    let fetch_models_timer = Timer::new(&dialog);
+    {
+        let fetch_models_result = fetch_models_result.clone();
+        let fetch_models_in_flight = fetch_models_in_flight.clone();
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
+        fetch_models_timer.on_tick(move |_| {
+            let Some(outcome) = fetch_models_result
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+            else {
+                return;
+            };
+            fetch_models_button.set_label(text.ai_gw_fetch_models());
+            fetch_models_button.enable(true);
+            fetch_models_in_flight.store(false, Ordering::SeqCst);
+            match outcome {
                 Ok((models, normalized_base_url)) => {
                     if models.is_empty() {
                         show_error(&dialog, text.ai_gw_models_empty());
                     } else {
                         base_url_input.change_value(&normalized_base_url);
-                        models_list.clear();
-                        let count = append_models_to_list(&models_list, models);
+                        let existing_aliases =
+                            model_mapping_aliases_by_upstream(&model_mapping_rows);
+                        replace_model_mapping_rows(
+                            &models_list,
+                            &model_mapping_rows,
+                            &model_mapping_model,
+                            &models,
+                            &existing_aliases,
+                        );
+                        let count = model_mapping_rows.borrow().len();
                         show_info(&dialog, &text.ai_gw_models_fetched(count));
                     }
                 }
                 Err(err) => show_error(&dialog, &text.ai_gw_models_fetch_failed(&err)),
             }
-            fetch_models_button.set_label(text.ai_gw_fetch_models());
-            fetch_models_button.enable(true);
         });
     }
+    fetch_models_timer.start(DASHBOARD_RESULT_POLL_MS, false);
     {
         let dialog = dialog;
-        cancel_button.on_click(move |_| dialog.end_modal(ID_CANCEL));
+        let fetch_models_closed = fetch_models_closed.clone();
+        cancel_button.on_click(move |_| {
+            fetch_models_closed.store(true, Ordering::SeqCst);
+            dialog.end_modal(ID_CANCEL);
+        });
     }
     {
         let dialog = dialog;
@@ -1925,8 +2147,19 @@ fn show_ai_gw_channel_dialog(
             None
         } else {
             let provider_type =
-                selected_ai_gw_dialog_provider_type(&radio_deepseek, &radio_anthropic);
-            let models = list_box_models(&models_list);
+                selected_ai_gw_dialog_provider_type(&radio_deepseek, &radio_anthropic, &radio_glm);
+            let compatibility =
+                selected_ai_gw_dialog_compatibility(&radio_anthropic, &radio_glm, initial);
+            let (models, explicit_aliases) = model_mapping_rows_to_config(&model_mapping_rows);
+            let model_aliases = build_model_aliases_for_save(&models, explicit_aliases);
+            let mut template = current_ai_gw_provider_template.borrow().clone();
+            template.name = name.clone();
+            template.provider_type = provider_type.clone();
+            template.compatibility = compatibility.clone();
+            template.base_url = strip_nul(&base_url_input.get_value()).trim().to_string();
+            let models_url_value = strip_nul(&models_url_input.get_value());
+            let models_url = normalize_optional_url(Some(&models_url_value))
+                .or_else(|| default_models_url_for_provider(&template));
             let weight = strip_nul(&weight_input.get_value())
                 .trim()
                 .parse::<u32>()
@@ -1936,8 +2169,11 @@ fn show_ai_gw_channel_dialog(
                 name,
                 enabled: initial.map(|provider| provider.enabled).unwrap_or(true),
                 provider_type,
-                base_url: strip_nul(&base_url_input.get_value()).trim().to_string(),
+                compatibility,
+                base_url: template.base_url,
+                models_url,
                 api_key: strip_nul(&key_input.get_value()).trim().to_string(),
+                model_aliases,
                 models,
                 prompt_cache_retention: initial
                     .and_then(|provider| provider.prompt_cache_retention.clone()),
@@ -1951,6 +2187,8 @@ fn show_ai_gw_channel_dialog(
         None
     };
 
+    fetch_models_closed.store(true, Ordering::SeqCst);
+    fetch_models_timer.stop();
     dialog.destroy();
     provider
 }
@@ -1961,59 +2199,78 @@ fn apply_ai_gw_dialog_template(
     radio_openai: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
+    radio_glm: &RadioButton,
     type_input: &TextCtrl,
     name_input: &TextCtrl,
     base_url_input: &TextCtrl,
-    models_list: &ListBox,
+    models_url_input: &TextCtrl,
+    models_list: &DataViewCtrl,
+    model_mapping_rows: &ModelMappingRows,
+    model_mapping_model: &ModelMappingModel,
     weight_input: &TextCtrl,
 ) {
-    let provider = provider.cloned().unwrap_or_else(|| ProviderConfig {
-        name: "openai".to_string(),
-        provider_type: ProviderType::OpenAiResponses,
-        base_url: "https://api.openai.com/v1".to_string(),
-        ..Default::default()
-    });
+    let provider = provider_with_default_models_url(
+        provider
+            .cloned()
+            .unwrap_or_else(|| default_ai_gw_service_provider(ProviderType::OpenAiResponses)),
+    );
 
     set_ai_gw_dialog_provider_type(
         text,
         provider.provider_type.clone(),
+        provider.compatibility.as_deref(),
         radio_openai,
         radio_deepseek,
         radio_anthropic,
+        radio_glm,
         type_input,
     );
     name_input.change_value(&provider.name);
     base_url_input.change_value(&provider.base_url);
-    replace_model_list(models_list, &provider.models);
+    models_url_input.change_value(provider.models_url.as_deref().unwrap_or_default());
+    replace_model_mapping_rows(
+        models_list,
+        model_mapping_rows,
+        model_mapping_model,
+        &provider.models,
+        &provider.model_aliases,
+    );
     weight_input.change_value(&provider.effective_weight().to_string());
 }
 
 fn apply_ai_gw_service_template(
     text: GuiText,
-    provider_type: ProviderType,
+    provider: ProviderConfig,
     radio_openai: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
+    radio_glm: &RadioButton,
     type_input: &TextCtrl,
     name_input: &TextCtrl,
     base_url_input: &TextCtrl,
+    models_url_input: &TextCtrl,
     key_input: &TextCtrl,
-    models_list: &ListBox,
+    models_list: &DataViewCtrl,
+    model_mapping_rows: &ModelMappingRows,
+    model_mapping_model: &ModelMappingModel,
     weight_input: &TextCtrl,
     service_template_applying: &Rc<RefCell<bool>>,
 ) {
     *service_template_applying.borrow_mut() = true;
-    let provider = default_ai_gw_service_provider(provider_type);
     apply_ai_gw_dialog_template(
         text,
         Some(&provider),
         radio_openai,
         radio_deepseek,
         radio_anthropic,
+        radio_glm,
         type_input,
         name_input,
         base_url_input,
+        models_url_input,
         models_list,
+        model_mapping_rows,
+        model_mapping_model,
         weight_input,
     );
     key_input.change_value("");
@@ -2026,34 +2283,105 @@ fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig
             name: "openai".to_string(),
             provider_type: ProviderType::OpenAiResponses,
             base_url: "https://api.openai.com/v1".to_string(),
+            models_url: Some("https://api.openai.com/v1/models".to_string()),
             ..Default::default()
         },
         ProviderType::ChatCompletions => ProviderConfig {
             name: "deepseek".to_string(),
             provider_type: ProviderType::ChatCompletions,
             base_url: "https://api.deepseek.com/v1".to_string(),
+            models_url: Some("https://api.deepseek.com/v1/models".to_string()),
             ..Default::default()
         },
         ProviderType::AnthropicMessages => ProviderConfig {
             name: "anthropic".to_string(),
             provider_type: ProviderType::AnthropicMessages,
+            compatibility: Some("anthropic".to_string()),
             base_url: "https://api.anthropic.com/v1".to_string(),
+            models_url: Some("https://api.anthropic.com/v1/models".to_string()),
             ..Default::default()
         },
     }
 }
 
+fn default_ai_gw_glm_service_provider() -> ProviderConfig {
+    ProviderConfig {
+        name: "glm".to_string(),
+        provider_type: ProviderType::AnthropicMessages,
+        compatibility: Some("glm_anthropic".to_string()),
+        base_url: "https://open.bigmodel.cn/api/anthropic".to_string(),
+        models_url: Some("https://open.bigmodel.cn/api/paas/v4/models".to_string()),
+        ..Default::default()
+    }
+}
+
+fn provider_with_default_models_url(mut provider: ProviderConfig) -> ProviderConfig {
+    provider.models_url = normalize_optional_url(provider.models_url.as_deref())
+        .or_else(|| default_models_url_for_provider(&provider));
+    provider
+}
+
+fn default_models_url_for_provider(provider: &ProviderConfig) -> Option<String> {
+    let provider_name = provider.name.trim();
+    if matches!(
+        provider.compatibility.as_deref(),
+        Some("glm_anthropic" | "zhipu_anthropic")
+    ) || provider_name.eq_ignore_ascii_case("glm")
+        || provider_name.eq_ignore_ascii_case("zhipu")
+    {
+        return Some("https://open.bigmodel.cn/api/paas/v4/models".to_string());
+    }
+
+    if provider_name.eq_ignore_ascii_case("openai") {
+        return Some("https://api.openai.com/v1/models".to_string());
+    }
+    if provider_name.eq_ignore_ascii_case("deepseek") {
+        return Some("https://api.deepseek.com/v1/models".to_string());
+    }
+    if provider_name.eq_ignore_ascii_case("anthropic")
+        || provider
+            .compatibility
+            .as_deref()
+            .is_some_and(|value| value.eq_ignore_ascii_case("anthropic"))
+    {
+        return Some("https://api.anthropic.com/v1/models".to_string());
+    }
+
+    let base = provider_display_base_url(&provider.base_url);
+    if base.is_empty() {
+        match provider.provider_type {
+            ProviderType::OpenAiResponses => Some("https://api.openai.com/v1/models".to_string()),
+            ProviderType::ChatCompletions => Some("https://api.deepseek.com/v1/models".to_string()),
+            ProviderType::AnthropicMessages => {
+                Some("https://api.anthropic.com/v1/models".to_string())
+            }
+        }
+    } else {
+        Some(format!("{}/models", base.trim_end_matches('/')))
+    }
+}
+
+fn normalize_optional_url(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.trim_end_matches('/').to_string())
+}
+
 fn set_ai_gw_dialog_provider_type(
     text: GuiText,
     provider_type: ProviderType,
+    compatibility: Option<&str>,
     radio_openai: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
+    radio_glm: &RadioButton,
     type_input: &TextCtrl,
 ) {
     radio_openai.set_value(false);
     radio_deepseek.set_value(false);
     radio_anthropic.set_value(false);
+    radio_glm.set_value(false);
     match provider_type {
         ProviderType::ChatCompletions => {
             radio_deepseek.set_value(true);
@@ -2064,57 +2392,43 @@ fn set_ai_gw_dialog_provider_type(
             type_input.change_value(text.provider_type_openai_responses());
         }
         ProviderType::AnthropicMessages => {
-            radio_anthropic.set_value(true);
-            type_input.change_value(text.provider_type_anthropic_messages());
+            if matches!(compatibility, Some("glm_anthropic" | "zhipu_anthropic")) {
+                radio_glm.set_value(true);
+                type_input.change_value(text.provider_type_glm_anthropic_messages());
+            } else {
+                radio_anthropic.set_value(true);
+                type_input.change_value(text.provider_type_anthropic_messages());
+            }
         }
+    }
+}
+
+fn selected_ai_gw_dialog_compatibility(
+    radio_anthropic: &RadioButton,
+    radio_glm: &RadioButton,
+    initial: Option<&ProviderConfig>,
+) -> Option<String> {
+    if radio_glm.get_value() {
+        Some("glm_anthropic".to_string())
+    } else if radio_anthropic.get_value() {
+        Some("anthropic".to_string())
+    } else {
+        initial.and_then(|provider| provider.compatibility.clone())
     }
 }
 
 fn selected_ai_gw_dialog_provider_type(
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
+    radio_glm: &RadioButton,
 ) -> ProviderType {
-    if radio_anthropic.get_value() {
+    if radio_anthropic.get_value() || radio_glm.get_value() {
         ProviderType::AnthropicMessages
     } else if radio_deepseek.get_value() {
         ProviderType::ChatCompletions
     } else {
         ProviderType::OpenAiResponses
     }
-}
-
-fn replace_model_list(list: &ListBox, models: &[String]) {
-    list.clear();
-    append_models_to_list(list, models.iter().cloned());
-}
-
-fn append_models_to_list(list: &ListBox, models: impl IntoIterator<Item = String>) -> usize {
-    let mut added = 0;
-    for model in models {
-        let model = model.trim();
-        if model.is_empty() || list_box_contains(list, model) {
-            continue;
-        }
-        list.append(model);
-        added += 1;
-    }
-    added
-}
-
-fn list_box_contains(list: &ListBox, model: &str) -> bool {
-    (0..list.get_count()).any(|index| {
-        list.get_string(index)
-            .map(|value| value == model)
-            .unwrap_or(false)
-    })
-}
-
-fn list_box_models(list: &ListBox) -> Vec<String> {
-    (0..list.get_count())
-        .filter_map(|index| list.get_string(index))
-        .map(|model| model.trim().to_string())
-        .filter(|model| !model.is_empty())
-        .collect()
 }
 
 fn parse_model_ids(value: &str) -> Vec<String> {
@@ -2126,18 +2440,266 @@ fn parse_model_ids(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn model_mapping_cell(rows: &ModelMappingRows, row: usize, col: usize) -> Variant {
+    let rows = rows.borrow();
+    let Some(row_data) = rows.get(row) else {
+        return String::new().into();
+    };
+    match col {
+        0 => row_data.upstream_model.clone().into(),
+        1 => row_data.codex_models.join(", ").into(),
+        _ => String::new().into(),
+    }
+}
+
+fn replace_model_mapping_rows(
+    list: &DataViewCtrl,
+    rows: &ModelMappingRows,
+    model: &ModelMappingModel,
+    upstream_models: &[String],
+    aliases: &BTreeMap<String, String>,
+) {
+    let new_rows = model_mapping_rows_from_config(upstream_models, aliases);
+    replace_model_mapping_rows_data(list, rows, model, new_rows);
+}
+
+fn replace_model_mapping_rows_data(
+    list: &DataViewCtrl,
+    rows: &ModelMappingRows,
+    model: &ModelMappingModel,
+    new_rows: Vec<ModelMappingRow>,
+) {
+    let new_len = new_rows.len();
+    {
+        let mut current_rows = rows.borrow_mut();
+        *current_rows = new_rows;
+    }
+    model.borrow_mut().reset(new_len);
+    if new_len > 0 {
+        list.select_row(0);
+    }
+}
+
+fn append_model_mapping_rows(
+    list: &DataViewCtrl,
+    rows: &ModelMappingRows,
+    model: &ModelMappingModel,
+    upstream_models: impl IntoIterator<Item = String>,
+    aliases: Option<&BTreeMap<String, String>>,
+) -> usize {
+    let mut added = 0;
+    let mut select_row = None;
+    {
+        let mut current_rows = rows.borrow_mut();
+        for upstream_model in upstream_models {
+            let upstream_model = upstream_model.trim().to_string();
+            if upstream_model.is_empty()
+                || current_rows
+                    .iter()
+                    .any(|row| row.upstream_model == upstream_model)
+            {
+                continue;
+            }
+            let codex_models = aliases
+                .map(|aliases| aliases_for_upstream_model(aliases, &upstream_model))
+                .unwrap_or_default();
+            current_rows.push(ModelMappingRow {
+                upstream_model,
+                codex_models,
+            });
+            select_row = Some(current_rows.len() - 1);
+            added += 1;
+        }
+    }
+    if added > 0 {
+        let len = rows.borrow().len();
+        model.borrow_mut().reset(len);
+        if let Some(row) = select_row {
+            list.select_row(row);
+        }
+    }
+    added
+}
+
+fn delete_model_mapping_row(
+    list: &DataViewCtrl,
+    rows: &ModelMappingRows,
+    model: &ModelMappingModel,
+    index: usize,
+) {
+    let new_len = {
+        let mut current_rows = rows.borrow_mut();
+        if index >= current_rows.len() {
+            return;
+        }
+        current_rows.remove(index);
+        current_rows.len()
+    };
+    model.borrow_mut().reset(new_len);
+    if new_len > 0 {
+        list.select_row(index.min(new_len - 1));
+    }
+}
+
+fn edit_model_mapping_row(
+    parent: &dyn WxWidget,
+    text: GuiText,
+    row: usize,
+    rows: &ModelMappingRows,
+    model: &ModelMappingModel,
+) {
+    let (upstream_model, current_aliases) = {
+        let current_rows = rows.borrow();
+        let Some(row_data) = current_rows.get(row) else {
+            return;
+        };
+        (
+            row_data.upstream_model.clone(),
+            row_data.codex_models.join(", "),
+        )
+    };
+    let input = TextEntryDialog::builder(
+        parent,
+        &text.ai_gw_model_alias_prompt(&upstream_model),
+        text.ai_gw_edit_model_aliases(),
+    )
+    .with_default_value(&current_aliases)
+    .with_style(
+        TextEntryDialogStyle::Ok | TextEntryDialogStyle::Cancel | TextEntryDialogStyle::Centre,
+    )
+    .build();
+    let result = input.show_modal();
+    if result != ID_OK {
+        return;
+    }
+    let Some(value) = input.get_value() else {
+        return;
+    };
+    let aliases = parse_model_ids(&value);
+    {
+        let mut current_rows = rows.borrow_mut();
+        let Some(row_data) = current_rows.get_mut(row) else {
+            return;
+        };
+        row_data.codex_models = aliases;
+    }
+    model.borrow().row_changed(row);
+}
+
+fn model_mapping_rows_from_config(
+    upstream_models: &[String],
+    aliases: &BTreeMap<String, String>,
+) -> Vec<ModelMappingRow> {
+    let mut rows: Vec<ModelMappingRow> = upstream_models
+        .iter()
+        .map(|upstream_model| ModelMappingRow {
+            upstream_model: upstream_model.clone(),
+            codex_models: aliases_for_upstream_model(aliases, upstream_model),
+        })
+        .collect();
+    for upstream_model in aliases.values() {
+        if upstream_model.trim().is_empty()
+            || rows
+                .iter()
+                .any(|row| row.upstream_model.as_str() == upstream_model)
+        {
+            continue;
+        }
+        rows.push(ModelMappingRow {
+            upstream_model: upstream_model.clone(),
+            codex_models: aliases_for_upstream_model(aliases, upstream_model),
+        });
+    }
+    rows
+}
+
+fn aliases_for_upstream_model(
+    aliases: &BTreeMap<String, String>,
+    upstream_model: &str,
+) -> Vec<String> {
+    let mut codex_models = Vec::new();
+    for (codex_model, mapped_upstream) in aliases {
+        if mapped_upstream == upstream_model && !codex_models.iter().any(|item| item == codex_model)
+        {
+            codex_models.push(codex_model.clone());
+        }
+    }
+    codex_models
+}
+
+fn model_mapping_aliases_by_upstream(rows: &ModelMappingRows) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for row in rows.borrow().iter() {
+        for codex_model in &row.codex_models {
+            aliases.insert(codex_model.clone(), row.upstream_model.clone());
+        }
+    }
+    aliases
+}
+
+fn model_mapping_rows_to_config(
+    rows: &ModelMappingRows,
+) -> (Vec<String>, BTreeMap<String, String>) {
+    let mut models = Vec::new();
+    let mut aliases = BTreeMap::new();
+    for row in rows.borrow().iter() {
+        let upstream_model = row.upstream_model.trim();
+        if upstream_model.is_empty() || models.iter().any(|model| model == upstream_model) {
+            continue;
+        }
+        models.push(upstream_model.to_string());
+        for codex_model in &row.codex_models {
+            let codex_model = codex_model.trim();
+            if codex_model.is_empty() || codex_model == upstream_model {
+                continue;
+            }
+            aliases.insert(codex_model.to_string(), upstream_model.to_string());
+        }
+    }
+    (models, aliases)
+}
+
+fn build_model_aliases_for_save(
+    models: &[String],
+    mut explicit_aliases: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    for (codex_model, upstream_model) in inferred_model_aliases(models) {
+        explicit_aliases
+            .entry(codex_model)
+            .or_insert(upstream_model);
+    }
+    explicit_aliases
+}
+
+fn inferred_model_aliases(models: &[String]) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for model in models {
+        let canonical = canonical_model_alias_key(model);
+        if canonical != model.as_str() && models.iter().all(|item| item != &canonical) {
+            aliases.insert(canonical, model.clone());
+        }
+    }
+    aliases
+}
+
+fn canonical_model_alias_key(model: &str) -> String {
+    model.trim().to_ascii_lowercase()
+}
+
 fn fetch_remote_models(
     base_url: &str,
+    models_url: Option<&str>,
     api_key: &str,
     timeout_secs: u64,
 ) -> Result<(Vec<String>, String), String> {
     let timeout = Duration::from_secs(timeout_secs.max(1));
     let client = reqwest::blocking::Client::builder()
         .timeout(timeout)
+        .connect_timeout(Duration::from_secs(5))
         .build()
         .map_err(|err| err.to_string())?;
     let mut errors = Vec::new();
-    for candidate in model_list_candidates(base_url) {
+    for candidate in model_list_candidates(base_url, models_url) {
         let mut request = client.get(&candidate.url);
         if !api_key.trim().is_empty() {
             request = request.header("authorization", format!("Bearer {}", api_key.trim()));
@@ -2184,14 +2746,18 @@ struct ModelListCandidate {
     normalized_base_url: String,
 }
 
-fn model_list_candidates(base_url: &str) -> Vec<ModelListCandidate> {
+fn model_list_candidates(base_url: &str, models_url: Option<&str>) -> Vec<ModelListCandidate> {
     let raw = base_url.trim().trim_end_matches('/');
     if raw.is_empty() {
         return Vec::new();
     }
 
-    let root = provider_api_root(raw);
     let mut candidates = Vec::new();
+    if let Some(models_url) = models_url.map(str::trim).filter(|value| !value.is_empty()) {
+        push_configured_model_list_candidates(&mut candidates, models_url, raw);
+    }
+
+    let root = provider_api_root(raw);
     push_model_list_candidate(&mut candidates, format!("{raw}/models"), raw.to_string());
     push_model_list_candidate(
         &mut candidates,
@@ -2199,6 +2765,31 @@ fn model_list_candidates(base_url: &str) -> Vec<ModelListCandidate> {
         provider_display_base_url(&root),
     );
     candidates
+}
+
+fn push_configured_model_list_candidates(
+    candidates: &mut Vec<ModelListCandidate>,
+    models_url: &str,
+    base_url: &str,
+) {
+    let configured = models_url.trim().trim_end_matches('/');
+    if configured.is_empty() {
+        return;
+    }
+
+    let normalized_base_url = provider_display_base_url(base_url);
+    if configured.to_ascii_lowercase().ends_with("/models") {
+        push_model_list_candidate(candidates, configured.to_string(), normalized_base_url);
+        return;
+    }
+
+    push_model_list_candidate(
+        candidates,
+        format!("{configured}/models"),
+        normalized_base_url.clone(),
+    );
+    let root = provider_api_root(configured);
+    push_model_list_candidate(candidates, format!("{root}/v1/models"), normalized_base_url);
 }
 
 fn push_model_list_candidate(

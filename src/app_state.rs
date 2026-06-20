@@ -26,6 +26,7 @@ pub type SharedState = Arc<AppState>;
 pub struct AppState {
     pub config_path: PathBuf,
     pub config: Mutex<AppConfig>,
+    pub ai_gateway_http_client: reqwest::Client,
     pub persisted: Mutex<PersistedState>,
     pub runtime: Mutex<RuntimeState>,
     pub remote_control: RemoteControlState,
@@ -326,6 +327,7 @@ impl AppState {
         Arc::new(Self {
             config_path,
             config: Mutex::new(config),
+            ai_gateway_http_client: reqwest::Client::new(),
             persisted: Mutex::new(persisted),
             runtime: Mutex::new(runtime),
             remote_control: RemoteControlState::new(),

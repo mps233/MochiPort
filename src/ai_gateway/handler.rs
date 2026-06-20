@@ -9,12 +9,11 @@ use axum::{
 };
 use serde::{Deserialize, de::IntoDeserializer};
 use serde_json::json;
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::app_state::SharedState;
 
 use super::catalog::{configured_models_etag, configured_models_response_with_etag};
-use super::codec::responses_inbound::decode_gateway_turn;
 use super::config::{ProviderConfig, ProviderType};
 use super::context::GatewayContext;
 use super::error::GatewayError;
@@ -85,22 +84,6 @@ pub async fn handle_responses(
         created_at_ms,
     );
 
-    let decoded_turn = match deserialize_gateway_request(raw_body.clone()) {
-        Ok(request) => {
-            let turn = decode_gateway_turn(&request, raw_body.clone());
-            debug!(
-                input_items = turn.input.len(),
-                tools = turn.tools.len(),
-                "ai-gateway request decoded to gateway ir"
-            );
-            Some((request, turn))
-        }
-        Err(err) => {
-            debug!(error = %err, "ai-gateway request ir decode skipped");
-            None
-        }
-    };
-
     info!(
         model = %envelope.model,
         provider = %provider.name,
@@ -112,9 +95,21 @@ pub async fn handle_responses(
     );
 
     // 4. 按 provider_type 分发
+    let upstream_model = provider
+        .resolve_upstream_model(&envelope.model)
+        .unwrap_or(envelope.model.as_str())
+        .to_string();
     match provider.provider_type {
         ProviderType::OpenAiResponses => {
-            match openai_responses::passthrough(&ctx, raw_body, provider, log_context.clone()).await
+            match openai_responses::passthrough(
+                &state.ai_gateway_http_client,
+                &ctx,
+                raw_body,
+                &upstream_model,
+                provider,
+                log_context.clone(),
+            )
+            .await
             {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
@@ -127,19 +122,26 @@ pub async fn handle_responses(
             }
         }
         ProviderType::ChatCompletions => {
-            let request = if let Some((request, _turn)) = decoded_turn.as_ref() {
-                request.clone()
-            } else {
-                match deserialize_gateway_request(raw_body.clone()) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        update_failed_log(&log_context, &format!("invalid request: {e}"));
-                        return GatewayError::bad_request(format!("invalid request: {e}"))
-                            .into_response();
-                    }
+            let request = match deserialize_gateway_request(raw_body.clone()) {
+                Ok(request) => request,
+                Err(e) => {
+                    update_failed_log(&log_context, &format!("invalid request: {e}"));
+                    return GatewayError::bad_request(format!("invalid request: {e}"))
+                        .into_response();
                 }
             };
-            match deepseek_chat::handle(&ctx, &request, provider, log_context.clone()).await {
+            let mut upstream_request = request.clone();
+            upstream_request.model = upstream_model;
+            match deepseek_chat::handle(
+                &state.ai_gateway_http_client,
+                &ctx,
+                &upstream_request,
+                &request.model,
+                provider,
+                log_context.clone(),
+            )
+            .await
+            {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
                     resp.into_response()
@@ -151,19 +153,26 @@ pub async fn handle_responses(
             }
         }
         ProviderType::AnthropicMessages => {
-            let request = if let Some((request, _turn)) = decoded_turn.as_ref() {
-                request.clone()
-            } else {
-                match deserialize_gateway_request(raw_body.clone()) {
-                    Ok(request) => request,
-                    Err(e) => {
-                        update_failed_log(&log_context, &format!("invalid request: {e}"));
-                        return GatewayError::bad_request(format!("invalid request: {e}"))
-                            .into_response();
-                    }
+            let request = match deserialize_gateway_request(raw_body.clone()) {
+                Ok(request) => request,
+                Err(e) => {
+                    update_failed_log(&log_context, &format!("invalid request: {e}"));
+                    return GatewayError::bad_request(format!("invalid request: {e}"))
+                        .into_response();
                 }
             };
-            match anthropic_messages::handle(&ctx, &request, provider, log_context.clone()).await {
+            let mut upstream_request = request.clone();
+            upstream_request.model = upstream_model;
+            match anthropic_messages::handle(
+                &state.ai_gateway_http_client,
+                &ctx,
+                &upstream_request,
+                &request.model,
+                provider,
+                log_context.clone(),
+            )
+            .await
+            {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
                     resp.into_response()

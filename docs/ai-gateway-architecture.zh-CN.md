@@ -4,15 +4,25 @@
 
 本文记录 `codex-remote` 内置 AI Gateway 的目标、协议边界、缓存策略和分期实现计划。它是后续实现的约束文档，不代表当前代码已经完成这些能力。
 
-实现细节和逐步计划见 [`ai-gateway-impl.zh-CN.md`](ai-gateway-impl.zh-CN.md)。
+实现细节和逐步计划见 [`ai-gateway-impl.zh-CN.md`](ai-gateway-impl.zh-CN.md)。后续 provider 接入重心见 [`ai-gateway-anthropic-first-roadmap.zh-CN.md`](ai-gateway-anthropic-first-roadmap.zh-CN.md)。智谱 GLM 的具体对接流程见 [`ai-gateway-glm-anthropic-integration.zh-CN.md`](ai-gateway-glm-anthropic-integration.zh-CN.md)。
 
-目标链路：
+当前已落地链路：
 
 ```text
 Codex (OpenAI Responses)
   <-> codex-remote AI Gateway
   <-> OpenAI / gpt-5.5 (Responses)
    |-> DeepSeek (Chat Completions)
+   |-> Anthropic-compatible (Messages)
+```
+
+后续战略链路：
+
+```text
+Codex (OpenAI Responses)
+  <-> codex-remote AI Gateway
+  <-> OpenAI Responses
+   |-> Anthropic Messages-compatible providers
 ```
 
 ## 1. 目标
@@ -24,8 +34,9 @@ AI Gateway 要解决的是：Codex 只按 OpenAI Responses 协议发请求，但
 - Codex 侧继续配置一个 OpenAI-compatible `base_url`，例如 `http://127.0.0.1:3847/ai-gateway/v1`。
 - Codex 发出的 `/responses` HTTP/SSE 请求由 gateway 接收。
 - `gpt-5.5` 等 OpenAI Responses 模型走 OpenAI `/v1/responses`。
-- `deepseek` 等 Chat Completions 模型走 DeepSeek `/v1/chat/completions`。
-- Gateway 负责 Responses 与 Chat Completions 之间的协议转换。
+- Anthropic Messages 兼容模型优先走 `/v1/messages` 形态的出站 adapter。
+- 既有 `deepseek` Chat Completions 链路保留为 legacy/fallback，不再作为新增 provider 的主要扩展方向。
+- Gateway 负责 Responses 与 Anthropic Messages 之间的协议转换；Chat Completions 转换只继续维护既有能力。
 - Gateway 保留并稳定传递 cache 相关信号，尤其是 `prompt_cache_key`、`Session-Id`、`thread-id`。
 
 第一阶段不做完整多租户、计费、渠道池、复杂 fallback。AxonHub 已经覆盖这些大系统能力，本项目更适合先做一个贴合 Codex 的小内核。
@@ -89,6 +100,17 @@ AI Gateway 要解决的是：Codex 只按 OpenAI Responses 协议发请求，但
 
 - AxonHub 是完整渠道编排系统，包含 endpoint pool、鉴权、计费、fallback、指标等。本项目第一阶段不需要这些复杂度。
 - AxonHub 的 `previous_response_id` 更偏同一上游 channel 的透传；我们的跨 provider 切换最终需要 gateway-owned id 和 ledger，而不是只透传上游 id。
+
+### 3.3 本轮架构收敛
+
+2026-06 本轮优化先处理低风险、高收益的运行时路径，不改变对外协议：
+
+- **复用上游 HTTP client**：`reqwest::Client` 必须由 `AppState` 持有并在 provider 间共享，provider 只接收引用或 clone。这样保留连接池、TLS session 和 keep-alive 复用，避免每个请求重新创建 client。
+- **移除热路径中的未消费 IR 解码**：`GatewayTurn` / `GatewayItem` 是后续统一 IR 与 ledger 的目标模型，但当前 production 转换仍以 `GatewayRequest` 为输入。默认请求路径不应为了日志提前 decode `GatewayTurn`；需要诊断时再按需启用。
+- **暂不加入入站 bearer token 校验**：AI Gateway 当前定位为本机工具，默认绑定 `127.0.0.1`。本轮不改变本地调用鉴权行为，后续如果要支持非本机监听或多用户场景，再引入强制 token 校验。
+- **归一化上游错误**：provider 非 2xx 响应不再把整段上游 body 当成纯字符串返回。Gateway 先解析 OpenAI/DeepSeek Chat 类 `{ error: ... }` 和 Anthropic `{ type: "error", error: ... }` 结构，再输出稳定的 Responses 风格错误，同时保留原 HTTP status。
+
+后续如果进入 Phase 3 / Phase 4，应把 `GatewayTurn` 扶正为转换层和 ledger 的唯一内部语义模型，而不是继续维护 `GatewayRequest` 与 `GatewayTurn` 两套并行模型。
 
 ## 4. 配置设计
 

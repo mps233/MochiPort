@@ -1818,9 +1818,9 @@ impl GuiText {
 
     pub(super) fn ai_gw_channel_editor_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "选择 OpenAI、DeepSeek 或 Anthropic，并填写渠道连接信息。",
+            GuiLocale::ZhCn => "选择 OpenAI、DeepSeek、Anthropic 或智谱 GLM，并填写渠道连接信息。",
             GuiLocale::EnUs => {
-                "Choose OpenAI, DeepSeek, or Anthropic and fill in the channel connection details."
+                "Choose OpenAI, DeepSeek, Anthropic, or GLM and fill in the channel connection details."
             }
         }
     }
@@ -1900,8 +1900,22 @@ impl GuiText {
         "Anthropic"
     }
 
+    pub(super) fn ai_gw_service_glm(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "智谱 GLM",
+            GuiLocale::EnUs => "GLM",
+        }
+    }
+
     pub(super) fn ai_gw_col_base_url(self) -> &'static str {
         "Base URL"
+    }
+
+    pub(super) fn ai_gw_models_url(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "模型列表接口",
+            GuiLocale::EnUs => "Models URL",
+        }
     }
 
     pub(super) fn ai_gw_col_api_key(self) -> &'static str {
@@ -1919,6 +1933,20 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "模型列表",
             GuiLocale::EnUs => "Models",
+        }
+    }
+
+    pub(super) fn ai_gw_upstream_model(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "上游模型",
+            GuiLocale::EnUs => "Upstream Model",
+        }
+    }
+
+    pub(super) fn ai_gw_codex_model_aliases(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex 映射模型",
+            GuiLocale::EnUs => "Codex Model Aliases",
         }
     }
 
@@ -1950,6 +1978,13 @@ impl GuiText {
         }
     }
 
+    pub(super) fn ai_gw_edit_model_aliases(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "编辑模型映射",
+            GuiLocale::EnUs => "Edit Model Aliases",
+        }
+    }
+
     pub(super) fn ai_gw_model_id_prompt(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "请输入模型 ID。多个模型可以用逗号或换行分隔。",
@@ -1961,6 +1996,21 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "请输入模型 ID。",
             GuiLocale::EnUs => "Please enter a model ID.",
+        }
+    }
+
+    pub(super) fn ai_gw_model_alias_prompt(self, upstream_model: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                format!(
+                    "上游模型：{upstream_model}\n请输入 Codex 侧模型 ID，多个用逗号或换行分隔。留空会清除映射。"
+                )
+            }
+            GuiLocale::EnUs => {
+                format!(
+                    "Upstream model: {upstream_model}\nEnter Codex-side model IDs. Use commas or new lines for multiple aliases. Leave empty to clear aliases."
+                )
+            }
         }
     }
 
@@ -2030,6 +2080,10 @@ impl GuiText {
 
     pub(super) fn provider_type_anthropic_messages(self) -> &'static str {
         "Anthropic Messages"
+    }
+
+    pub(super) fn provider_type_glm_anthropic_messages(self) -> &'static str {
+        "GLM Anthropic Messages"
     }
 
     pub(super) fn ai_gw_saved(self) -> &'static str {

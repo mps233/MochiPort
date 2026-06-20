@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -36,7 +38,7 @@ impl Default for AiGatewayConfig {
 }
 
 impl AiGatewayConfig {
-    /// 按 model 名选择已启用的 provider：只匹配显式配置的 model。
+    /// 按 model 名选择已启用的 provider：匹配显式 model 或 model alias。
     pub fn select_provider(&self, model: &str) -> Option<&ProviderConfig> {
         self.select_provider_for_session(model, None)
     }
@@ -54,7 +56,7 @@ impl AiGatewayConfig {
         let candidates = self
             .providers
             .iter()
-            .filter(|provider| provider.enabled && provider.models.iter().any(|m| m == model));
+            .filter(|provider| provider.enabled && provider.matches_model(model));
         let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
             return candidates
                 .into_iter()
@@ -150,12 +152,23 @@ pub struct ProviderConfig {
     pub enabled: bool,
     /// provider 类型：`"openai_responses"`、`"chat_completions"` 或 `"anthropic_messages"`。
     pub provider_type: ProviderType,
+    /// provider 兼容 profile。Anthropic Messages 兼容厂商优先使用该字段表达差异。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<String>,
     /// 上游 API base URL。
     pub base_url: String,
+    /// 可选的模型列表 API URL。为空时 GUI 按 base_url 推导 `/models`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models_url: Option<String>,
     /// API key。
     pub api_key: String,
     /// 该 provider 支持的 model 列表（精确匹配用）。
     pub models: Vec<String>,
+    /// Codex 侧 model 到上游 provider model 的映射。
+    ///
+    /// 例如 `glm-5.2 = "GLM-5.2"`。路由使用 key 匹配 Codex 请求，出站使用 value。
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub model_aliases: BTreeMap<String, String>,
     /// 可选的 prompt_cache_retention 覆盖。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prompt_cache_retention: Option<String>,
@@ -171,9 +184,12 @@ impl Default for ProviderConfig {
             name: String::new(),
             enabled: true,
             provider_type: ProviderType::OpenAiResponses,
+            compatibility: None,
             base_url: String::new(),
+            models_url: None,
             api_key: String::new(),
             models: Vec::new(),
+            model_aliases: BTreeMap::new(),
             prompt_cache_retention: None,
             weight: DEFAULT_PROVIDER_WEIGHT,
             timeout_secs: DEFAULT_PROVIDER_TIMEOUT_SECS,
@@ -184,6 +200,34 @@ impl Default for ProviderConfig {
 impl ProviderConfig {
     pub fn effective_weight(&self) -> u32 {
         self.weight.max(1)
+    }
+
+    pub fn matches_model(&self, model: &str) -> bool {
+        self.resolve_upstream_model(model).is_some()
+    }
+
+    pub fn resolve_upstream_model<'a>(&'a self, model: &'a str) -> Option<&'a str> {
+        if let Some(mapped) = self.model_aliases.get(model).map(String::as_str) {
+            return Some(mapped);
+        }
+        if let Some((_, mapped)) = self
+            .model_aliases
+            .iter()
+            .find(|(codex_model, _)| codex_model.eq_ignore_ascii_case(model))
+        {
+            return Some(mapped.as_str());
+        }
+        if let Some(configured) = self
+            .models
+            .iter()
+            .find(|configured| configured.as_str() == model)
+        {
+            return Some(configured.as_str());
+        }
+        self.models
+            .iter()
+            .find(|configured| configured.eq_ignore_ascii_case(model))
+            .map(String::as_str)
     }
 }
 
@@ -290,6 +334,36 @@ mod tests {
         ]);
         let p = config.select_provider("deepseek-v4-flash").unwrap();
         assert_eq!(p.name, "other");
+    }
+
+    #[test]
+    fn test_model_match_is_case_insensitive() {
+        let config = make_config(vec![make_provider(
+            "glm",
+            ProviderType::AnthropicMessages,
+            vec!["GLM-5.2"],
+        )]);
+
+        let provider = config.select_provider("glm-5.2").unwrap();
+        assert_eq!(provider.name, "glm");
+        assert_eq!(provider.resolve_upstream_model("glm-5.2"), Some("GLM-5.2"));
+    }
+
+    #[test]
+    fn test_model_alias_routes_to_provider_model() {
+        let mut provider =
+            make_provider("glm", ProviderType::AnthropicMessages, vec!["xx-GLM-5-2"]);
+        provider
+            .model_aliases
+            .insert("glm-5.2".to_string(), "xx-GLM-5-2".to_string());
+        let config = make_config(vec![provider]);
+
+        let provider = config.select_provider("glm-5.2").unwrap();
+        assert_eq!(provider.name, "glm");
+        assert_eq!(
+            provider.resolve_upstream_model("glm-5.2"),
+            Some("xx-GLM-5-2")
+        );
     }
 
     #[test]
@@ -487,13 +561,24 @@ mod tests {
             [[providers]]
             name = "anthropic"
             providerType = "anthropic_messages"
+            compatibility = "anthropic"
             baseUrl = "https://api.anthropic.com"
             apiKey = "sk-ant"
             models = ["claude-sonnet-4-6"]
+
+            [[providers]]
+            name = "glm"
+            providerType = "anthropic_messages"
+            compatibility = "glm_anthropic"
+            baseUrl = "https://open.bigmodel.cn/api/anthropic"
+            modelsUrl = "https://open.bigmodel.cn/api/paas/v4/models"
+            apiKey = "sk-glm"
+            models = ["glm-4.6"]
+            modelAliases = { "glm-5.2" = "GLM-5.2" }
         "#;
         let config: AiGatewayConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);
-        assert_eq!(config.providers.len(), 3);
+        assert_eq!(config.providers.len(), 4);
         assert_eq!(
             config.providers[0].provider_type,
             ProviderType::OpenAiResponses
@@ -506,6 +591,10 @@ mod tests {
             config.providers[2].provider_type,
             ProviderType::AnthropicMessages
         );
+        assert_eq!(
+            config.providers[3].provider_type,
+            ProviderType::AnthropicMessages
+        );
         assert_eq!(config.providers[0].timeout_secs, 120);
         assert_eq!(
             config.providers[1].timeout_secs,
@@ -513,6 +602,26 @@ mod tests {
         );
         assert_eq!(config.providers[0].weight, DEFAULT_PROVIDER_WEIGHT);
         assert_eq!(config.providers[1].weight, DEFAULT_PROVIDER_WEIGHT);
+        assert_eq!(config.providers[0].compatibility, None);
+        assert_eq!(
+            config.providers[2].compatibility.as_deref(),
+            Some("anthropic")
+        );
+        assert_eq!(
+            config.providers[3].compatibility.as_deref(),
+            Some("glm_anthropic")
+        );
+        assert_eq!(
+            config.providers[3].models_url.as_deref(),
+            Some("https://open.bigmodel.cn/api/paas/v4/models")
+        );
+        assert_eq!(
+            config.providers[3]
+                .model_aliases
+                .get("glm-5.2")
+                .map(String::as_str),
+            Some("GLM-5.2")
+        );
     }
 
     #[test]

@@ -14,12 +14,17 @@ use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
 };
 
-use super::{apply_total_request_timeout, execute_stream_start, map_upstream_response};
+use super::{
+    apply_total_request_timeout, ensure_success_response, execute_stream_start,
+    map_upstream_response,
+};
 
 /// OpenAI Responses API 透传：补齐 cache 字段后代理到上游。
 pub async fn passthrough(
+    client: &reqwest::Client,
     ctx: &GatewayContext,
     mut raw_body: serde_json::Value,
+    upstream_model: &str,
     provider: &ProviderConfig,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
@@ -38,6 +43,7 @@ pub async fn passthrough(
             raw_body["prompt_cache_retention"] = json!(retention);
         }
     }
+    raw_body["model"] = json!(upstream_model);
 
     let is_stream = raw_body
         .get("stream")
@@ -47,7 +53,6 @@ pub async fn passthrough(
     // 3. 构建上游请求
     let url = format!("{}/v1/responses", provider_api_root(&provider.base_url));
 
-    let client = reqwest::Client::new();
     let req_builder = client
         .post(&url)
         .header("content-type", "application/json")
@@ -81,7 +86,7 @@ pub async fn passthrough(
 
     let upstream_resp = if is_stream {
         execute_stream_start(
-            &client,
+            client,
             upstream_req,
             provider.timeout_secs,
             "upstream request failed",
@@ -94,15 +99,7 @@ pub async fn passthrough(
         )?
     };
 
-    let upstream_status = upstream_resp.status();
-
-    // 5. 非 2xx 直接透传错误
-    if !upstream_status.is_success() {
-        let status =
-            StatusCode::from_u16(upstream_status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-        let body_text = upstream_resp.text().await.unwrap_or_default();
-        return Err(GatewayError::upstream(status, body_text));
-    }
+    let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
 
     // 6. 流式：透传 SSE 流
     if is_stream {
