@@ -1,3 +1,4 @@
+use super::options::AnthropicProviderProfile;
 use super::request::build_anthropic_request;
 use super::response::convert_anthropic_response;
 use super::stream::AnthropicSseToResponsesSse;
@@ -10,6 +11,46 @@ use crate::ai_gateway::tool_names::ToolNameMap;
 use axum::body::Bytes;
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
+
+fn convert_response(response: &Value) -> crate::ai_gateway::model::ResponseObject {
+    convert_anthropic_response(
+        response,
+        "fallback-model",
+        &ToolNameMap::default(),
+        AnthropicProviderProfile::Anthropic,
+    )
+}
+
+fn convert_glm_response(response: &Value) -> crate::ai_gateway::model::ResponseObject {
+    convert_anthropic_response(
+        response,
+        "fallback-model",
+        &ToolNameMap::default(),
+        AnthropicProviderProfile::GlmAnthropic,
+    )
+}
+
+fn response_stream<S>(input: S, model: &str, map: ToolNameMap) -> AnthropicSseToResponsesSse<S> {
+    AnthropicSseToResponsesSse::new(
+        input,
+        model.to_string(),
+        map,
+        AnthropicProviderProfile::Anthropic,
+    )
+}
+
+fn glm_response_stream<S>(
+    input: S,
+    model: &str,
+    map: ToolNameMap,
+) -> AnthropicSseToResponsesSse<S> {
+    AnthropicSseToResponsesSse::new(
+        input,
+        model.to_string(),
+        map,
+        AnthropicProviderProfile::GlmAnthropic,
+    )
+}
 
 fn request(input: Vec<ResponseItem>) -> GatewayRequest {
     GatewayRequest {
@@ -245,8 +286,7 @@ fn converts_anthropic_text_response() {
         }
     });
 
-    let converted =
-        convert_anthropic_response(&response, "fallback-model", &ToolNameMap::default());
+    let converted = convert_response(&response);
     assert_eq!(converted.id, "msg_123");
     assert_eq!(converted.model, "claude-sonnet-4-6");
     assert_eq!(converted.status, "completed");
@@ -285,8 +325,7 @@ fn converts_anthropic_cache_creation_breakdown_usage() {
         }
     });
 
-    let converted =
-        convert_anthropic_response(&response, "fallback-model", &ToolNameMap::default());
+    let converted = convert_response(&response);
     let usage = converted.usage.unwrap();
     assert_eq!(usage.input_tokens, 5833);
     assert_eq!(usage.output_tokens, 73);
@@ -312,8 +351,7 @@ fn converts_anthropic_thinking_response() {
         "usage": {"input_tokens": 10, "output_tokens": 3}
     });
 
-    let converted =
-        convert_anthropic_response(&response, "fallback-model", &ToolNameMap::default());
+    let converted = convert_response(&response);
     assert_eq!(converted.output.len(), 3);
     assert_eq!(converted.output[0].item_type, ItemType::Reasoning);
     assert_eq!(
@@ -351,7 +389,12 @@ fn converts_anthropic_tool_use_response() {
         "usage": {"input_tokens": 10, "output_tokens": 3}
     });
 
-    let converted = convert_anthropic_response(&response, "fallback-model", &map);
+    let converted = convert_anthropic_response(
+        &response,
+        "fallback-model",
+        &map,
+        AnthropicProviderProfile::Anthropic,
+    );
     assert_eq!(converted.status, "completed");
     assert_eq!(converted.output.len(), 1);
     let item = &converted.output[0];
@@ -389,8 +432,7 @@ fn converts_anthropic_server_web_search_response() {
         "usage": {"input_tokens": 10, "output_tokens": 3}
     });
 
-    let converted =
-        convert_anthropic_response(&response, "fallback-model", &ToolNameMap::default());
+    let converted = convert_response(&response);
     assert_eq!(converted.output.len(), 1);
     assert_eq!(converted.output[0].item_type, ItemType::WebSearchCall);
     assert_eq!(converted.output[0].call_id.as_deref(), Some("srvtoolu_123"));
@@ -399,9 +441,101 @@ fn converts_anthropic_server_web_search_response() {
         "rust 2026"
     );
     assert_eq!(
-        converted.output[0].action.as_ref().unwrap()["result"]["content"][0]["url"],
-        "https://www.rust-lang.org"
+        converted.output[0].action.as_ref().unwrap().get("result"),
+        None
     );
+}
+
+#[test]
+fn converts_glm_web_search_prime_response() {
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "glm-5.2",
+        "content": [
+            {
+                "type": "server_tool_use",
+                "id": "call_search_1",
+                "name": "web_search_prime",
+                "input": {"search_query": "OpenAI June 2026", "location": "us"}
+            },
+            {
+                "type": "tool_result",
+                "tool_use_id": "call_search_1",
+                "content": "[{'text': [{'title': 'OpenAI News', 'link': 'https://openai.com/news/', 'content': 'Latest ...'}], 'type': 'text'}]"
+            },
+            {"type": "text", "text": "Done"}
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let converted = convert_glm_response(&response);
+    assert_eq!(converted.output.len(), 2);
+    assert_eq!(converted.output[0].item_type, ItemType::WebSearchCall);
+    assert_eq!(
+        converted.output[0].call_id.as_deref(),
+        Some("call_search_1")
+    );
+    assert_eq!(
+        converted.output[0].action.as_ref().unwrap()["query"],
+        "OpenAI June 2026"
+    );
+    assert_eq!(
+        converted.output[0].action.as_ref().unwrap().get("result"),
+        None
+    );
+    assert_eq!(converted.output[1].item_type, ItemType::Message);
+}
+
+#[test]
+fn filters_glm_private_web_search_text_from_response() {
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "glm-5.2",
+        "content": [
+            {
+                "type": "text",
+                "text": "**\u{1f310} Z.ai Built-in Tool: web_search_prime**\n\n**Input:**\n```json\n{\"search_query\":\"OpenAI June 2026\"}\n```\n*Executing on server...*\n"
+            },
+            {
+                "type": "server_tool_use",
+                "id": "call_search_1",
+                "name": "web_search_prime",
+                "input": {"search_query": "OpenAI June 2026"}
+            },
+            {
+                "type": "tool_result",
+                "tool_use_id": "call_search_1",
+                "content": "[{\"text\":[{\"title\":\"OpenAI News\"}],\"type\":\"text\"}]"
+            },
+            {
+                "type": "text",
+                "text": "**Output:**\n**web_search_prime_result_summary:** [{\"text\":[{\"title\":\"OpenAI News\"}]}]\n                                                Final answer"
+            }
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let converted = convert_glm_response(&response);
+    assert_eq!(converted.output.len(), 2);
+    assert_eq!(converted.output[0].item_type, ItemType::WebSearchCall);
+    assert_eq!(
+        converted.output[0].action.as_ref().unwrap().get("result"),
+        None
+    );
+    assert_eq!(converted.output[1].item_type, ItemType::Message);
+    let Some(ItemContent::Parts(parts)) = converted.output[1].content.as_ref() else {
+        panic!("expected message parts");
+    };
+    assert_eq!(parts[0].text.as_deref(), Some("Final answer"));
+    let encoded = serde_json::to_string(&converted).unwrap();
+    assert!(!encoded.contains("web_search_prime"));
+    assert!(!encoded.contains("web_search_prime_result_summary"));
 }
 
 #[tokio::test]
@@ -433,16 +567,12 @@ async fn streams_anthropic_thinking_as_responses_reasoning_sse() {
         )),
     ]);
 
-    let chunks = AnthropicSseToResponsesSse::new(
-        input,
-        "fallback-model".to_string(),
-        ToolNameMap::default(),
-    )
-    .collect::<Vec<_>>()
-    .await
-    .into_iter()
-    .map(Result::unwrap)
-    .collect::<Vec<_>>();
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
     let events = parse_events_from_bytes(&chunks);
 
     assert!(events.iter().any(
@@ -494,16 +624,12 @@ async fn streams_anthropic_text_as_responses_sse() {
             )),
         ]);
 
-    let chunks = AnthropicSseToResponsesSse::new(
-        input,
-        "fallback-model".to_string(),
-        ToolNameMap::default(),
-    )
-    .collect::<Vec<_>>()
-    .await
-    .into_iter()
-    .map(Result::unwrap)
-    .collect::<Vec<_>>();
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
     let events = parse_events_from_bytes(&chunks);
 
     assert!(events.iter().any(|(event, _)| event == "response.created"));
@@ -555,7 +681,7 @@ async fn streams_anthropic_tool_use_as_responses_sse() {
             )),
         ]);
 
-    let chunks = AnthropicSseToResponsesSse::new(input, "fallback-model".to_string(), map)
+    let chunks = response_stream(input, "fallback-model", map)
         .collect::<Vec<_>>()
         .await
         .into_iter()
@@ -607,16 +733,12 @@ async fn streams_anthropic_web_search_as_responses_sse() {
             )),
         ]);
 
-    let chunks = AnthropicSseToResponsesSse::new(
-        input,
-        "fallback-model".to_string(),
-        ToolNameMap::default(),
-    )
-    .collect::<Vec<_>>()
-    .await
-    .into_iter()
-    .map(Result::unwrap)
-    .collect::<Vec<_>>();
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
     let events = parse_events_from_bytes(&chunks);
 
     assert!(
@@ -635,8 +757,115 @@ async fn streams_anthropic_web_search_as_responses_sse() {
     assert_eq!(done.1["item"]["call_id"], "srvtoolu_1");
     assert_eq!(done.1["item"]["action"]["type"], "search");
     assert_eq!(done.1["item"]["action"]["query"], "rust 2026");
-    assert_eq!(
-        done.1["item"]["action"]["result"]["content"][0]["url"],
-        "https://www.rust-lang.org"
+    assert!(done.1["item"]["action"].get("result").is_none());
+}
+
+#[tokio::test]
+async fn streams_glm_web_search_prime_as_responses_sse() {
+    let input = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.2\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"call_search_1\",\"name\":\"web_search_prime\",\"input\":{\"search_query\":\"OpenAI June 2026\"}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_result\",\"tool_use_id\":\"call_search_1\",\"content\":\"[{\\\"text\\\":[{\\\"title\\\":\\\"OpenAI News\\\",\\\"link\\\":\\\"https://openai.com/news/\\\"}],\\\"type\\\":\\\"text\\\"}]\"}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )),
+        ]);
+
+    let chunks = glm_response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+
+    assert!(
+        events
+            .iter()
+            .any(|(event, data)| event == "response.output_item.added"
+                && data["item"]["type"] == "web_search_call"
+                && data["item"]["action"]["query"] == "OpenAI June 2026")
+    );
+    let done = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "web_search_call"
+        })
+        .unwrap();
+    assert_eq!(done.1["item"]["call_id"], "call_search_1");
+    assert_eq!(done.1["item"]["action"]["query"], "OpenAI June 2026");
+    assert!(done.1["item"]["action"].get("result").is_none());
+}
+
+#[tokio::test]
+async fn streams_glm_private_web_search_text_is_filtered() {
+    let input = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.2\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"**\u{1f310} Z.ai Built-in Tool: web_search_prime**\\n\\n**Input:**\\n```json\\n{\\\"search_query\\\":\\\"OpenAI June 2026\\\"}\\n```\\n*Executing on server...*\\n\"}}\n\n".as_bytes(),
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"call_search_1\",\"name\":\"web_search_prime\",\"input\":{\"search_query\":\"OpenAI June 2026\"}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_result\",\"tool_use_id\":\"call_search_1\",\"content\":\"[{\\\"text\\\":[{\\\"title\\\":\\\"OpenAI News\\\"}],\\\"type\\\":\\\"text\\\"}]\"}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"text_delta\",\"text\":\"**Output:**\\n**web_search_prime_result_summary:** [{\\\"text\\\":[{\\\"title\\\":\\\"OpenAI News\\\"}]}]\\n                                                Final answer\"}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":3}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+            )),
+        ]);
+
+    let chunks = glm_response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let raw = String::from_utf8_lossy(&chunks.concat()).into_owned();
+    assert!(!raw.contains("web_search_prime"));
+    assert!(!raw.contains("web_search_prime_result_summary"));
+
+    let events = parse_events_from_bytes(&chunks);
+    assert!(
+        events
+            .iter()
+            .any(|(event, data)| event == "response.output_text.delta"
+                && data["delta"] == "Final answer")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(event, data)| event == "response.output_item.done"
+                && data["item"]["type"] == "web_search_call"
+                && data["item"]["action"].get("result").is_none())
     );
 }

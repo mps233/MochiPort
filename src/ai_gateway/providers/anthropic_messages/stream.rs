@@ -8,6 +8,7 @@ use axum::body::Bytes;
 use futures_util::Stream;
 use serde_json::Value;
 
+use super::options::AnthropicProviderProfile;
 use super::stream_state::AnthropicStreamState;
 use crate::ai_gateway::tool_names::ToolNameMap;
 
@@ -21,10 +22,15 @@ pub(super) struct AnthropicSseToResponsesSse<S> {
 }
 
 impl<S> AnthropicSseToResponsesSse<S> {
-    pub(super) fn new(inner: S, model: String, tool_name_map: ToolNameMap) -> Self {
+    pub(super) fn new(
+        inner: S,
+        model: String,
+        tool_name_map: ToolNameMap,
+        profile: AnthropicProviderProfile,
+    ) -> Self {
         Self {
             inner,
-            state: AnthropicStreamState::new(model, tool_name_map),
+            state: AnthropicStreamState::new(model, tool_name_map, profile),
             line_buf: String::new(),
             event_name: None,
             data_lines: Vec::new(),

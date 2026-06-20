@@ -5,15 +5,20 @@ use crate::ai_gateway::model::{
     ResponseItem, ResponseObject, SummaryPart, Usage, generate_item_id, generate_response_id,
 };
 use crate::ai_gateway::tool_names::{ToolCallKind, ToolNameMap};
+
+use super::glm_compat;
+use super::options::AnthropicProviderProfile;
+
 pub(super) fn convert_anthropic_response(
     response: &Value,
     request_model: &str,
     tool_name_map: &ToolNameMap,
+    profile: AnthropicProviderProfile,
 ) -> ResponseObject {
     let output = response
         .get("content")
         .and_then(Value::as_array)
-        .map(|items| convert_anthropic_content(items, tool_name_map))
+        .map(|items| convert_anthropic_content(items, tool_name_map, profile))
         .unwrap_or_default();
     let usage = response.get("usage").map(convert_usage_value);
     let status = match response.get("stop_reason").and_then(Value::as_str) {
@@ -41,14 +46,26 @@ pub(super) fn convert_anthropic_response(
     }
 }
 
-fn convert_anthropic_content(items: &[Value], tool_name_map: &ToolNameMap) -> Vec<ResponseItem> {
+fn convert_anthropic_content(
+    items: &[Value],
+    tool_name_map: &ToolNameMap,
+    profile: AnthropicProviderProfile,
+) -> Vec<ResponseItem> {
     let mut output = Vec::new();
     for item in items {
-        if item.get("type").and_then(Value::as_str) == Some("web_search_tool_result") {
-            attach_web_search_result(&mut output, item);
-            continue;
+        match item.get("type").and_then(Value::as_str) {
+            Some("web_search_tool_result") => {
+                attach_web_search_result(&mut output, item, true);
+                continue;
+            }
+            Some("tool_result") if matches!(profile, AnthropicProviderProfile::GlmAnthropic) => {
+                if attach_web_search_result(&mut output, item, false) {
+                    continue;
+                }
+            }
+            _ => {}
         }
-        if let Some(item) = anthropic_content_to_response_item(item, tool_name_map) {
+        if let Some(item) = anthropic_content_to_response_item(item, tool_name_map, profile) {
             output.push(item);
         }
     }
@@ -58,10 +75,18 @@ fn convert_anthropic_content(items: &[Value], tool_name_map: &ToolNameMap) -> Ve
 fn anthropic_content_to_response_item(
     item: &Value,
     tool_name_map: &ToolNameMap,
+    profile: AnthropicProviderProfile,
 ) -> Option<ResponseItem> {
     match item.get("type").and_then(Value::as_str)? {
         "text" => {
-            let text = item.get("text").and_then(Value::as_str).unwrap_or("");
+            let mut text = item
+                .get("text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if matches!(profile, AnthropicProviderProfile::GlmAnthropic) {
+                text = glm_compat::clean_private_web_search_text(&text)?;
+            }
             if text.is_empty() {
                 return None;
             }
@@ -202,7 +227,7 @@ fn anthropic_content_to_response_item(
         }
         "server_tool_use" => {
             let name = item.get("name").and_then(Value::as_str).unwrap_or("");
-            if name != "web_search" {
+            if !profile.is_web_search_server_tool(name) {
                 return None;
             }
             Some(ResponseItem {
@@ -231,39 +256,32 @@ fn anthropic_content_to_response_item(
                 encrypted_content: None,
             })
         }
-        "web_search_tool_result" => None,
+        "web_search_tool_result" | "tool_result" => None,
         _ => None,
     }
 }
 
-fn attach_web_search_result(output: &mut Vec<ResponseItem>, item: &Value) {
+fn attach_web_search_result(
+    output: &mut Vec<ResponseItem>,
+    item: &Value,
+    allow_orphan: bool,
+) -> bool {
     let tool_use_id = item.get("tool_use_id").and_then(Value::as_str);
     let failed = item
         .get("is_error")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let result = json!({
-        "type": "web_search_tool_result",
-        "tool_use_id": item.get("tool_use_id").cloned().unwrap_or(Value::Null),
-        "content": item.get("content").cloned().unwrap_or(Value::Null),
-        "is_error": item.get("is_error").cloned().unwrap_or(Value::Bool(false)),
-    });
-
     if let Some(existing) = tool_use_id.and_then(|tool_use_id| {
         output
             .iter_mut()
             .find(|candidate| candidate.call_id.as_deref() == Some(tool_use_id))
     }) {
         existing.status = Some(if failed { "failed" } else { "completed" }.to_string());
-        let mut action = existing
-            .action
-            .take()
-            .unwrap_or_else(|| json!({"type": "search", "query": ""}));
-        if let Some(action) = action.as_object_mut() {
-            action.insert("result".to_string(), result);
-        }
-        existing.action = Some(action);
-        return;
+        return true;
+    }
+
+    if !allow_orphan {
+        return false;
     }
 
     output.push(ResponseItem {
@@ -288,11 +306,11 @@ fn attach_web_search_result(output: &mut Vec<ResponseItem>, item: &Value) {
         action: Some(json!({
             "type": "search",
             "query": "",
-            "result": result,
         })),
         summary: None,
         encrypted_content: None,
     });
+    true
 }
 
 fn server_tool_action(item: &Value) -> Value {
@@ -300,7 +318,7 @@ fn server_tool_action(item: &Value) -> Value {
         "type": "search",
         "query": item
             .get("input")
-            .and_then(|input| input.get("query"))
+            .and_then(|input| input.get("query").or_else(|| input.get("search_query")))
             .and_then(Value::as_str)
             .unwrap_or_default(),
     })

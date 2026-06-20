@@ -123,24 +123,16 @@ pub(super) fn completed_tool_item(
     }
 }
 
-pub(super) fn web_search_item(
-    item_id: &str,
-    call_id: &str,
-    status: &str,
-    input: Value,
-    result: Option<Value>,
-) -> Value {
+pub(super) fn web_search_item(item_id: &str, call_id: &str, status: &str, input: Value) -> Value {
     let query = input
         .get("query")
+        .or_else(|| input.get("search_query"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let mut action = json!({
+    let action = json!({
         "type": "search",
         "query": query,
     });
-    if let Some(result) = result {
-        action["result"] = result;
-    }
     json!({
         "type": "web_search_call",
         "id": item_id,

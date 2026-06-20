@@ -23,6 +23,10 @@ impl AnthropicProviderProfile {
             ))),
         }
     }
+
+    pub(super) fn is_web_search_server_tool(self, name: &str) -> bool {
+        name == "web_search" || matches!(self, Self::GlmAnthropic) && name == "web_search_prime"
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

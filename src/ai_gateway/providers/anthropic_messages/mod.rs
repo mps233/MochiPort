@@ -22,6 +22,7 @@ use super::{
     map_upstream_response,
 };
 
+mod glm_compat;
 mod options;
 mod request;
 mod request_content;
@@ -41,7 +42,9 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-use options::{AnthropicAuthStyle, AnthropicProviderOptions, AnthropicVersionHeader};
+use options::{
+    AnthropicAuthStyle, AnthropicProviderOptions, AnthropicProviderProfile, AnthropicVersionHeader,
+};
 use request::build_anthropic_request;
 use response::convert_anthropic_response;
 use stream::AnthropicSseToResponsesSse;
@@ -112,13 +115,25 @@ pub async fn handle(
     let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
 
     if request.stream {
-        return handle_stream(upstream_resp, response_model, tool_name_map, log_context).await;
+        return handle_stream(
+            upstream_resp,
+            response_model,
+            tool_name_map,
+            options.profile,
+            log_context,
+        )
+        .await;
     }
 
     let anthropic_resp: Value = upstream_resp.json().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("parse upstream json: {e}"))
     })?;
-    let response_obj = convert_anthropic_response(&anthropic_resp, response_model, &tool_name_map);
+    let response_obj = convert_anthropic_response(
+        &anthropic_resp,
+        response_model,
+        &tool_name_map,
+        options.profile,
+    );
     let body_bytes = serde_json::to_vec(&response_obj).unwrap_or_default();
 
     if let Some(log_context) = &log_context {
@@ -169,10 +184,15 @@ async fn handle_stream(
     resp: reqwest::Response,
     model: &str,
     tool_name_map: ToolNameMap,
+    profile: AnthropicProviderProfile,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
-    let sse_stream =
-        AnthropicSseToResponsesSse::new(resp.bytes_stream(), model.to_string(), tool_name_map);
+    let sse_stream = AnthropicSseToResponsesSse::new(
+        resp.bytes_stream(),
+        model.to_string(),
+        tool_name_map,
+        profile,
+    );
     let body = if let Some(log_context) = log_context {
         Body::from_stream(ResponsesSseLogStream::new(sse_stream, log_context))
     } else {

@@ -171,7 +171,8 @@ impl AnthropicStreamState {
         if self.web_search_blocks.contains_key(&index) {
             return;
         }
-        if block.get("name").and_then(Value::as_str) != Some("web_search") {
+        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+        if !self.profile.is_web_search_server_tool(name) {
             return;
         }
 
@@ -193,7 +194,7 @@ impl AnthropicStreamState {
         } else {
             serde_json::to_string(&input).unwrap_or_default()
         };
-        let added_item = web_search_item(&item_id, &call_id, "in_progress", input.clone(), None);
+        let added_item = web_search_item(&item_id, &call_id, "in_progress", input.clone());
         emit_sse(
             queue,
             "response.output_item.added",
@@ -285,7 +286,6 @@ impl AnthropicStreamState {
             &state.call_id,
             if failed { "failed" } else { "completed" },
             input,
-            state.result,
         );
         emit_sse(
             queue,

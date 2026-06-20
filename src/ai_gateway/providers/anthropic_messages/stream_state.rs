@@ -3,6 +3,7 @@ use std::collections::{HashMap, VecDeque};
 use axum::body::Bytes;
 use serde_json::Value;
 
+use super::options::AnthropicProviderProfile;
 use super::stream_events::unix_timestamp;
 use super::stream_message::StreamMessageItem;
 use super::stream_reasoning::StreamReasoningItem;
@@ -26,10 +27,16 @@ pub(super) struct AnthropicStreamState {
     pub(super) usage: Option<Value>,
     pub(super) stop_reason: Option<String>,
     pub(super) tool_name_map: ToolNameMap,
+    pub(super) profile: AnthropicProviderProfile,
+    pub(super) glm_pending_text: Option<String>,
 }
 
 impl AnthropicStreamState {
-    pub(super) fn new(model: String, tool_name_map: ToolNameMap) -> Self {
+    pub(super) fn new(
+        model: String,
+        tool_name_map: ToolNameMap,
+        profile: AnthropicProviderProfile,
+    ) -> Self {
         Self {
             has_started: false,
             response_completed: false,
@@ -46,6 +53,8 @@ impl AnthropicStreamState {
             usage: None,
             stop_reason: None,
             tool_name_map,
+            profile,
+            glm_pending_text: None,
         }
     }
 
@@ -66,6 +75,7 @@ impl AnthropicStreamState {
             return;
         }
         self.close_reasoning_item(queue);
+        self.flush_glm_pending_text(queue);
         self.close_message_item(queue);
         let mut indices: Vec<usize> = self.content_blocks.keys().cloned().collect();
         indices.sort_unstable();
@@ -89,7 +99,11 @@ impl AnthropicStreamState {
         match block.get("type").and_then(Value::as_str) {
             Some("text") => {
                 self.close_reasoning_item(queue);
-                self.ensure_message_item(queue);
+                if matches!(self.profile, AnthropicProviderProfile::GlmAnthropic) {
+                    self.glm_pending_text.get_or_insert_with(String::new);
+                } else {
+                    self.ensure_message_item(queue);
+                }
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
                         self.handle_text_delta(text, queue);
@@ -107,6 +121,11 @@ impl AnthropicStreamState {
                 self.handle_redacted_thinking(block.get("data").and_then(Value::as_str));
             }
             Some("web_search_tool_result") => self.attach_web_search_result(index, block, queue),
+            Some("tool_result")
+                if matches!(self.profile, AnthropicProviderProfile::GlmAnthropic) =>
+            {
+                self.attach_web_search_result(index, block, queue)
+            }
             _ => {}
         }
     }
@@ -148,6 +167,9 @@ impl AnthropicStreamState {
 
     fn handle_content_block_stop(&mut self, event: &Value, queue: &mut VecDeque<Bytes>) {
         let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+        if self.glm_pending_text.is_some() {
+            self.flush_glm_pending_text(queue);
+        }
         if self.content_blocks.contains_key(&index) {
             self.close_tool_block(index, queue);
         }

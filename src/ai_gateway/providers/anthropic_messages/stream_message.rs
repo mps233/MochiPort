@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use axum::body::Bytes;
 use serde_json::json;
 
+use super::glm_compat;
+use super::options::AnthropicProviderProfile;
 use super::stream_events::emit_sse;
 use super::stream_state::AnthropicStreamState;
 use crate::ai_gateway::model::generate_item_id;
@@ -50,6 +52,27 @@ impl AnthropicStreamState {
         if text.is_empty() {
             return;
         }
+        if matches!(self.profile, AnthropicProviderProfile::GlmAnthropic) {
+            self.glm_pending_text
+                .get_or_insert_with(String::new)
+                .push_str(text);
+            return;
+        }
+        self.emit_message_text(text, queue);
+    }
+
+    pub(super) fn flush_glm_pending_text(&mut self, queue: &mut VecDeque<Bytes>) {
+        let Some(text) = self.glm_pending_text.take() else {
+            return;
+        };
+        let Some(cleaned) = glm_compat::clean_private_web_search_text(&text) else {
+            return;
+        };
+        self.emit_message_text(&cleaned, queue);
+        self.close_message_item(queue);
+    }
+
+    fn emit_message_text(&mut self, text: &str, queue: &mut VecDeque<Bytes>) {
         self.ensure_message_item(queue);
 
         let mut added_part = None;
