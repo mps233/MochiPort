@@ -314,8 +314,26 @@ impl GuiText {
 
     pub(super) fn image_generation_feature_note(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "仅 VS Code 插件和 Codex CLI 有效",
-            GuiLocale::EnUs => "Only affects VS Code extension and Codex CLI",
+            GuiLocale::ZhCn => "随写入配置一起保存",
+            GuiLocale::EnUs => "Saved when writing config",
+        }
+    }
+
+    pub(super) fn codex_local_config(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex 本地配置",
+            GuiLocale::EnUs => "Codex Local Config",
+        }
+    }
+
+    pub(super) fn codex_local_config_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "管理本工具写入的 Codex 本地配置，包括接入地址和生图开关；不影响下方 AI Gateway 渠道配置。"
+            }
+            GuiLocale::EnUs => {
+                "Manage local Codex settings written by this tool, including access URL and image generation; does not affect AI Gateway providers below."
+            }
         }
     }
 
@@ -371,43 +389,43 @@ impl GuiText {
 
     pub(super) fn clear_codex_access(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "清除 Codex 接入",
-            GuiLocale::EnUs => "Clear Codex Access",
+            GuiLocale::ZhCn => "移除 Codex 配置",
+            GuiLocale::EnUs => "Remove Codex Config",
         }
     }
 
     pub(super) fn clear_codex_access_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "移除本工具写入的 Codex App 本地接入配置",
-            GuiLocale::EnUs => "Remove local Codex App access settings written by this tool",
+            GuiLocale::ZhCn => "移除本工具写入的 Codex 本地配置",
+            GuiLocale::EnUs => "Remove local Codex settings written by this tool",
         }
     }
 
     pub(super) fn inject_codex_access(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "注入 Codex 配置",
-            GuiLocale::EnUs => "Inject Codex Config",
+            GuiLocale::ZhCn => "写入 Codex 配置",
+            GuiLocale::EnUs => "Write Codex Config",
         }
     }
 
     pub(super) fn inject_codex_access_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "写入本工具管理的 Codex App 本地接入配置",
-            GuiLocale::EnUs => "Write the local Codex App access settings managed by this tool",
+            GuiLocale::ZhCn => "写入本工具管理的 Codex 本地配置",
+            GuiLocale::EnUs => "Write local Codex settings managed by this tool",
         }
     }
 
     pub(super) fn injecting_codex_access(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "注入中...",
-            GuiLocale::EnUs => "Injecting...",
+            GuiLocale::ZhCn => "写入中...",
+            GuiLocale::EnUs => "Writing...",
         }
     }
 
     pub(super) fn clearing_codex_access(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "清除中...",
-            GuiLocale::EnUs => "Clearing...",
+            GuiLocale::ZhCn => "移除中...",
+            GuiLocale::EnUs => "Removing...",
         }
     }
 
@@ -1178,18 +1196,18 @@ impl GuiText {
 
     pub(super) fn codex_app_config_uninstalled(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex App 本地接入配置已卸载。请重启 Codex App 以恢复官方连接。",
+            GuiLocale::ZhCn => "Codex 本地配置已移除。请重启 Codex App 以恢复官方连接。",
             GuiLocale::EnUs => {
-                "Local Codex App access settings were removed. Restart Codex App to restore the official connection."
+                "Local Codex settings were removed. Restart Codex App to restore the official connection."
             }
         }
     }
 
     pub(super) fn codex_app_config_injected(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex App 本地接入配置已注入。请重启 Codex App 生效。",
+            GuiLocale::ZhCn => "Codex 本地配置已写入。请重启 Codex App 生效。",
             GuiLocale::EnUs => {
-                "Local Codex App access settings were injected. Restart Codex App to apply them."
+                "Local Codex settings were written. Restart Codex App to apply them."
             }
         }
     }
@@ -1375,18 +1393,18 @@ impl GuiText {
     pub(super) fn confirm_uninstall_codex_app_message(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "卸载会移除本工具写入的 chatgpt_base_url、本地认证信息和 Codex App 环境变量。确认继续？"
+                "移除配置会从当前 config.toml 中清理本工具可识别的 Codex 本地字段，不回滚 Codex App 后续写入的其它配置；auth.json 会优先恢复首次写入前的备份。确认继续？"
             }
             GuiLocale::EnUs => {
-                "Uninstalling removes chatgpt_base_url, local auth data, and Codex App environment variables written by this tool. Continue?"
+                "Removing config cleans only Codex local fields this tool can identify from the current config.toml without rolling back later Codex App writes. auth.json is restored from the first-write backup when available. Continue?"
             }
         }
     }
 
     pub(super) fn confirm_uninstall_codex_app_title(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "卸载 Codex App 配置",
-            GuiLocale::EnUs => "Uninstall Codex App Settings",
+            GuiLocale::ZhCn => "移除 Codex 配置",
+            GuiLocale::EnUs => "Remove Codex Config",
         }
     }
 

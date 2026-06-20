@@ -9,8 +9,9 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     HWND_BROADCAST, SMTO_ABORTIFHUNG, SendMessageTimeoutW, WM_SETTINGCHANGE,
@@ -30,9 +31,14 @@ const CODEX_APP_DEV_DB: &str = "codex-dev.db";
 const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
+const CODEX_REMOTE_HOME_ENV: &str = "CODEX_REMOTE_HOME";
 
 const LOCAL_AUTH_MODE: &str = "chatgptAuthTokens";
 const LEGACY_LOCAL_AUTH_MODE: &str = "chatgpt";
+
+const MANAGED_BACKUP_VERSION: u32 = 1;
+const MANAGED_BACKUP_MANIFEST: &str = "manifest.json";
+const MANAGED_BACKUP_AUTH: &str = "auth.json";
 
 #[derive(Debug, Clone)]
 pub struct ConfigureCodexAppOptions {
@@ -142,6 +148,15 @@ pub struct CodexAppProviderStatus {
     pub supports_websockets: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ManagedCodexAppBackupManifest {
+    version: u32,
+    created_at_ms: i64,
+    codex_home: PathBuf,
+    config_existed: bool,
+    auth_existed: bool,
+}
+
 pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<ConfigureCodexAppReport> {
     let codex_home = options
         .codex_home
@@ -157,6 +172,8 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
         .with_context(|| format!("failed to create Codex home {}", codex_home.display()))?;
 
     let config_path = codex_home.join("config.toml");
+    let auth_path = codex_home.join("auth.json");
+    ensure_managed_backup(&codex_home, &config_path, &auth_path)?;
     chain_log::write_line(format!(
         "[codex_app_config] event=write_config_start path={}",
         config_path.display()
@@ -167,7 +184,6 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
         config_path.display()
     ));
 
-    let auth_path = codex_home.join("auth.json");
     chain_log::write_line(format!(
         "[codex_app_config] event=write_auth_start path={}",
         auth_path.display()
@@ -209,9 +225,20 @@ pub fn uninstall_codex_app(
     let config_path = codex_home.join("config.toml");
     let auth_path = codex_home.join("auth.json");
 
-    let (removed_chatgpt_base_url, removed_model_provider) =
-        uninstall_config_toml(&config_path, backend_url)?;
-    let removed_auth = false;
+    let backup = managed_backup_paths(&codex_home);
+    let (removed_chatgpt_base_url, removed_model_provider, removed_auth) =
+        if backup.manifest_path.exists() {
+            uninstall_with_managed_state(&backup, &config_path, &auth_path, backend_url)?
+        } else {
+            let (removed_chatgpt_base_url, removed_model_provider) =
+                uninstall_config_toml(&config_path, backend_url)?;
+            let removed_auth = uninstall_auth_json(&auth_path)?;
+            (
+                removed_chatgpt_base_url,
+                removed_model_provider,
+                removed_auth,
+            )
+        };
     let gui_api_base = inspect_gui_api_base_url(backend_url);
 
     Ok(UninstallCodexAppReport {
@@ -980,33 +1007,66 @@ fn normalize_config_toml_order(raw: &str) -> String {
 }
 
 fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)> {
-    if !path.exists() {
-        return Ok((false, false));
-    }
-    let mut doc = parse_existing_config_toml(path)?;
+    cleanup_codex_remote_config(path, backend_url, true)
+}
 
-    let removed_chatgpt_base_url = doc
-        .get("chatgpt_base_url")
+fn managed_provider_names_in_config(
+    doc: &toml_edit::DocumentMut,
+    backend_url: &str,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    let ai_gateway_base_url = ai_gateway_base_url_from_backend_url(backend_url);
+    let Some(providers) = doc.get("model_providers").and_then(|item| item.as_table()) else {
+        return names;
+    };
+
+    for provider_name in [AI_GATEWAY_PROVIDER_NAME, DEFAULT_PROVIDER_NAME] {
+        let Some(provider) = providers
+            .get(provider_name)
+            .and_then(|item| item.as_table())
+        else {
+            continue;
+        };
+        let local_gateway_provider = provider
+            .get("base_url")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .map(|value| backend_urls_equivalent(value, &ai_gateway_base_url))
+            .unwrap_or(false);
+        if local_gateway_provider && provider_table_has_codex_remote_shape(provider, provider_name)
+        {
+            names.insert(provider_name.to_string());
+        }
+    }
+
+    names
+}
+
+fn ai_gateway_base_url_from_backend_url(backend_url: &str) -> String {
+    let backend = backend_url.trim_end_matches('/');
+    if let Some(base) = backend.strip_suffix("/backend-api") {
+        format!("{base}/ai-gateway/v1")
+    } else {
+        format!("{backend}/ai-gateway/v1")
+    }
+}
+
+fn provider_table_has_codex_remote_shape(provider: &toml_edit::Table, provider_name: &str) -> bool {
+    let name_matches = provider
+        .get("name")
         .and_then(|item| item.as_str())
         .map(str::trim)
-        .map(|value| backend_urls_equivalent(value, backend_url))
-        .unwrap_or(false);
-    if removed_chatgpt_base_url {
-        doc.remove("chatgpt_base_url");
-    }
-
-    let removed_model_provider = doc.get("model_provider").is_some();
-    if removed_model_provider {
-        doc.remove("model_provider");
-    }
-
-    if removed_chatgpt_base_url || removed_model_provider {
-        backup_existing(path)?;
-        std::fs::write(path, normalize_config_toml_order(&doc.to_string()))
-            .with_context(|| format!("failed to write {}", path.display()))?;
-    }
-
-    Ok((removed_chatgpt_base_url, removed_model_provider))
+        .is_none_or(|name| name == provider_name);
+    let responses_wire_api = provider
+        .get("wire_api")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        == Some("responses");
+    let requires_openai_auth = provider
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool())
+        == Some(true);
+    name_matches && responses_wire_api && requires_openai_auth
 }
 
 fn backend_urls_equivalent(actual: &str, expected: &str) -> bool {
@@ -1071,7 +1131,6 @@ fn delete_provider_from_config_toml(path: &Path, requested_provider_name: &str) 
         .with_context(|| format!("failed to write {}", path.display()))
 }
 
-#[cfg(test)]
 fn uninstall_auth_json(path: &Path) -> Result<bool> {
     if !path.exists() {
         return Ok(false);
@@ -1305,6 +1364,305 @@ fn is_codex_remote_local_jwt(token: &str) -> bool {
         .and_then(|value| value.as_bool())
         == Some(true);
     local_subject && local_auth
+}
+
+#[derive(Debug, Clone)]
+struct ManagedBackupPaths {
+    dir: PathBuf,
+    manifest_path: PathBuf,
+    auth_path: PathBuf,
+}
+
+fn ensure_managed_backup(codex_home: &Path, config_path: &Path, auth_path: &Path) -> Result<()> {
+    let backup = managed_backup_paths(codex_home);
+    if backup.manifest_path.exists() {
+        chain_log::write_line(format!(
+            "[codex_app_config] event=managed_backup_exists path={}",
+            backup.manifest_path.display()
+        ));
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&backup.dir).with_context(|| {
+        format!(
+            "failed to create managed backup dir {}",
+            backup.dir.display()
+        )
+    })?;
+    let manifest = ManagedCodexAppBackupManifest {
+        version: MANAGED_BACKUP_VERSION,
+        created_at_ms: unix_now_millis()?,
+        codex_home: codex_home.to_path_buf(),
+        config_existed: config_path.exists(),
+        auth_existed: auth_path.exists(),
+    };
+    if manifest.auth_existed {
+        std::fs::copy(auth_path, &backup.auth_path).with_context(|| {
+            format!(
+                "failed to backup existing {} to {}",
+                auth_path.display(),
+                backup.auth_path.display()
+            )
+        })?;
+    }
+
+    let raw = serde_json::to_string_pretty(&manifest)?;
+    std::fs::write(&backup.manifest_path, format!("{raw}\n")).with_context(|| {
+        format!(
+            "failed to write managed backup manifest {}",
+            backup.manifest_path.display()
+        )
+    })?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=managed_backup_created path={} config_existed={} auth_existed={}",
+        backup.manifest_path.display(),
+        manifest.config_existed,
+        manifest.auth_existed
+    ));
+    Ok(())
+}
+
+fn uninstall_with_managed_state(
+    backup: &ManagedBackupPaths,
+    config_path: &Path,
+    auth_path: &Path,
+    backend_url: &str,
+) -> Result<(bool, bool, bool)> {
+    let manifest = read_managed_backup_manifest(&backup.manifest_path)?;
+    let (removed_chatgpt_base_url, removed_model_provider) =
+        cleanup_codex_remote_config(config_path, backend_url, manifest.config_existed)?;
+    let removed_auth = restore_or_remove_managed_file(
+        auth_path,
+        &backup.auth_path,
+        manifest.auth_existed,
+        Some(is_codex_remote_auth_file),
+    )?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=managed_backup_restored path={}",
+        backup.manifest_path.display()
+    ));
+    if let Err(err) = std::fs::remove_dir_all(&backup.dir) {
+        chain_log::write_line(format!(
+            "[codex_app_config] event=managed_backup_cleanup_failed path={} error={}",
+            backup.dir.display(),
+            err
+        ));
+    }
+    Ok((
+        removed_chatgpt_base_url,
+        removed_model_provider,
+        removed_auth,
+    ))
+}
+
+fn cleanup_codex_remote_config(
+    path: &Path,
+    backend_url: &str,
+    config_existed_before_first_write: bool,
+) -> Result<(bool, bool)> {
+    if !path.exists() {
+        return Ok((false, false));
+    }
+    let mut doc = parse_existing_config_toml(path)?;
+    let managed_provider_names = managed_provider_names_in_config(&doc, backend_url);
+
+    let removed_chatgpt_base_url = doc
+        .get("chatgpt_base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .map(|value| backend_urls_equivalent(value, backend_url))
+        .unwrap_or(false);
+    if removed_chatgpt_base_url {
+        doc.remove("chatgpt_base_url");
+    }
+
+    let removed_model_provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(|active| managed_provider_names.contains(active));
+    if removed_model_provider {
+        doc.remove("model_provider");
+    }
+    for provider_name in managed_provider_names {
+        remove_provider_table(&mut doc, &provider_name);
+    }
+    if !config_existed_before_first_write {
+        remove_created_feature_defaults(&mut doc);
+        remove_created_openai_bundled_marketplace(&mut doc);
+    }
+
+    if doc.iter().next().is_none() {
+        std::fs::remove_file(path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+    } else {
+        backup_existing(path)?;
+        std::fs::write(path, normalize_config_toml_order(&doc.to_string()))
+            .with_context(|| format!("failed to write {}", path.display()))?;
+    }
+
+    Ok((removed_chatgpt_base_url, removed_model_provider))
+}
+
+fn remove_created_feature_defaults(doc: &mut toml_edit::DocumentMut) {
+    let features_empty =
+        if let Some(features) = doc.get_mut("features").and_then(|item| item.as_table_mut()) {
+            if features
+                .get("apps")
+                .and_then(|item| item.as_bool())
+                .is_some_and(|enabled| !enabled)
+            {
+                features.remove("apps");
+            }
+            features.remove("image_generation");
+            features.is_empty()
+        } else {
+            false
+        };
+    if features_empty {
+        doc.remove("features");
+    }
+}
+
+fn remove_created_openai_bundled_marketplace(doc: &mut toml_edit::DocumentMut) {
+    let marketplaces_empty = if let Some(marketplaces) = doc
+        .get_mut("marketplaces")
+        .and_then(|item| item.as_table_mut())
+    {
+        let remove_openai_bundled = marketplaces
+            .get("openai-bundled")
+            .and_then(|item| item.as_table())
+            .is_some_and(|marketplace| {
+                marketplace
+                    .get("source_type")
+                    .and_then(|item| item.as_str())
+                    .map(str::trim)
+                    == Some("local")
+                    && marketplace
+                        .get("source")
+                        .and_then(|item| item.as_str())
+                        .map(|source| source.replace('\\', "/").contains("openai-bundled"))
+                        .unwrap_or(false)
+            });
+        if remove_openai_bundled {
+            marketplaces.remove("openai-bundled");
+        }
+        marketplaces.is_empty()
+    } else {
+        false
+    };
+    if marketplaces_empty {
+        doc.remove("marketplaces");
+    }
+}
+
+fn restore_or_remove_managed_file(
+    target_path: &Path,
+    backup_path: &Path,
+    originally_existed: bool,
+    remove_guard: Option<fn(&Path) -> Result<bool>>,
+) -> Result<bool> {
+    if originally_existed {
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::copy(backup_path, target_path).with_context(|| {
+            format!(
+                "failed to restore managed backup {} to {}",
+                backup_path.display(),
+                target_path.display()
+            )
+        })?;
+        return Ok(true);
+    }
+
+    if !target_path.exists() {
+        return Ok(false);
+    }
+    if let Some(remove_guard) = remove_guard {
+        if !remove_guard(target_path)? {
+            return Ok(false);
+        }
+    }
+    std::fs::remove_file(target_path)
+        .with_context(|| format!("failed to remove {}", target_path.display()))?;
+    Ok(true)
+}
+
+fn read_managed_backup_manifest(path: &Path) -> Result<ManagedCodexAppBackupManifest> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read managed backup manifest {}", path.display()))?;
+    let manifest: ManagedCodexAppBackupManifest = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse managed backup manifest {}", path.display()))?;
+    if manifest.version != MANAGED_BACKUP_VERSION {
+        return Err(anyhow!(
+            "unsupported managed backup manifest version {} in {}",
+            manifest.version,
+            path.display()
+        ));
+    }
+    Ok(manifest)
+}
+
+fn managed_backup_paths(codex_home: &Path) -> ManagedBackupPaths {
+    let dir = codex_remote_app_support_dir()
+        .join("backups")
+        .join("codex-app")
+        .join(codex_home_backup_id(codex_home));
+    ManagedBackupPaths {
+        manifest_path: dir.join(MANAGED_BACKUP_MANIFEST),
+        auth_path: dir.join(MANAGED_BACKUP_AUTH),
+        dir,
+    }
+}
+
+fn codex_home_backup_id(codex_home: &Path) -> String {
+    let normalized = codex_home
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase();
+    let digest = Sha256::digest(normalized.as_bytes());
+    hex::encode(&digest[..16])
+}
+
+fn codex_remote_app_support_dir() -> PathBuf {
+    if let Some(base) = std::env::var_os(CODEX_REMOTE_HOME_ENV).map(PathBuf::from) {
+        return base;
+    }
+    platform_codex_remote_app_support_dir()
+}
+
+#[cfg(test)]
+fn platform_codex_remote_app_support_dir() -> PathBuf {
+    std::env::temp_dir().join("codex-remote-managed-backups-tests")
+}
+
+#[cfg(all(target_os = "windows", not(test)))]
+fn platform_codex_remote_app_support_dir() -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Codex Remote")
+}
+
+#[cfg(all(not(target_os = "windows"), not(test)))]
+fn platform_codex_remote_app_support_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support/Codex Remote"))
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn is_codex_remote_auth_file(path: &Path) -> Result<bool> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let auth = serde_json::from_str::<serde_json::Value>(&raw)
+        .with_context(|| format!("failed to parse {}", path.display()))?;
+    Ok(is_codex_remote_auth_json(&auth))
 }
 
 fn backup_existing(path: &Path) -> Result<()> {
@@ -1974,40 +2332,99 @@ experimental_bearer_token = "****未配�"
     }
 
     #[test]
-    fn uninstall_codex_app_removes_root_routing_only() {
+    fn configure_codex_app_creates_managed_state_and_auth_backup() {
         let codex_home = unique_temp_dir();
         let config_path = codex_home.join("config.toml");
         let auth_path = codex_home.join("auth.json");
-        std::fs::write(
-            &config_path,
-            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
-model_provider = "codex"
+        let original_config = "model = \"gpt-5.5\"\n";
+        let original_auth = "{\n  \"auth_mode\": \"chatgpt\"\n}\n";
+        std::fs::write(&config_path, original_config).expect("write original config");
+        std::fs::write(&auth_path, original_auth).expect("write original auth");
+
+        configure_codex_app(test_configure_options(codex_home.clone()))
+            .expect("configure codex app");
+
+        let backup = managed_backup_paths(&codex_home);
+        let manifest = read_managed_backup_manifest(&backup.manifest_path).expect("manifest");
+        assert_eq!(manifest.version, MANAGED_BACKUP_VERSION);
+        assert_eq!(manifest.codex_home, codex_home);
+        assert!(manifest.config_existed);
+        assert!(manifest.auth_existed);
+        assert!(!backup.dir.join("config.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(&backup.auth_path).expect("read backup auth"),
+            original_auth
+        );
+
+        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_does_not_overwrite_first_auth_backup() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let auth_path = codex_home.join("auth.json");
+        let original_auth = "{\n  \"auth_mode\": \"first\"\n}\n";
+        std::fs::write(&config_path, "model = \"first\"\n").expect("write original config");
+        std::fs::write(&auth_path, original_auth).expect("write original auth");
+
+        configure_codex_app(test_configure_options(codex_home.clone())).expect("first configure");
+        std::fs::write(&config_path, "model = \"second\"\n").expect("mutate config");
+        std::fs::write(&auth_path, "{\n  \"auth_mode\": \"second\"\n}\n").expect("mutate auth");
+        configure_codex_app(test_configure_options(codex_home.clone())).expect("second configure");
+
+        let backup = managed_backup_paths(&codex_home);
+        assert!(!backup.dir.join("config.toml").exists());
+        assert_eq!(
+            std::fs::read_to_string(&backup.auth_path).expect("read backup auth"),
+            original_auth
+        );
+
+        let _ = std::fs::remove_dir_all(backup.dir);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn uninstall_codex_app_cleans_config_without_reverting_codex_app_writes() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let auth_path = codex_home.join("auth.json");
+        let original_config = r#"model_provider = "openai"
 model = "gpt-5.5"
 
-[model_providers.codex]
-name = "codex"
-base_url = "https://api.example.invalid"
-"#,
-        )
-        .expect("write config");
-        write_auth_json(
-            &auth_path,
-            &ConfigureCodexAppOptions {
-                codex_home: Some(codex_home.clone()),
-                backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
-                account_id: "acct_test".to_string(),
-                user_id: "user_test".to_string(),
-                email: "local@example.test".to_string(),
-                plan_type: "pro".to_string(),
-                provider_name: None,
-                provider_base_url: None,
-                provider_key: None,
-                activate_provider: true,
-                image_generation_enabled: None,
-                provider_supports_websockets: None,
-            },
-        )
-        .expect("write auth");
+[features]
+image_generation = true
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+"#;
+        let original_auth = "{\n  \"auth_mode\": \"chatgpt\"\n}\n";
+        std::fs::write(&config_path, original_config).expect("write original config");
+        std::fs::write(&auth_path, original_auth).expect("write original auth");
+        configure_codex_app(test_configure_options(codex_home.clone()))
+            .expect("configure codex app");
+        let codex_app_updated_config = r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+model = "codex-app-later-model"
+
+[features]
+image_generation = true
+new_codex_app_flag = true
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "dummy-token"
+
+[model_providers.openai]
+name = "openai"
+base_url = "https://api.openai.com/v1"
+"#;
+        std::fs::write(&config_path, codex_app_updated_config).expect("simulate codex app write");
 
         let report = uninstall_codex_app(
             Some(codex_home.clone()),
@@ -2017,15 +2434,92 @@ base_url = "https://api.example.invalid"
 
         assert!(report.removed_chatgpt_base_url);
         assert!(report.removed_model_provider);
-        assert!(!report.removed_auth);
+        assert!(report.removed_auth);
+        let config = std::fs::read_to_string(&config_path).expect("read cleaned config");
+        assert!(!config.contains("chatgpt_base_url"));
+        assert!(!config.contains("model_provider = \"ai-gateway\""));
+        assert!(!config.contains("[model_providers.ai-gateway]"));
+        assert!(config.contains("model = \"codex-app-later-model\""));
+        assert!(config.contains("new_codex_app_flag = true"));
+        assert!(config.contains("[model_providers.openai]"));
+        assert_eq!(
+            std::fs::read_to_string(&auth_path).expect("read restored auth"),
+            original_auth
+        );
+
+        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn uninstall_codex_app_cleans_files_absent_before_first_write() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let auth_path = codex_home.join("auth.json");
+
+        configure_codex_app(test_configure_options(codex_home.clone()))
+            .expect("configure codex app");
+        let report = uninstall_codex_app(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        )
+        .expect("uninstall config");
+
+        assert!(report.removed_chatgpt_base_url);
+        assert!(report.removed_model_provider);
+        assert!(report.removed_auth);
+        assert!(!config_path.exists());
+        assert!(!auth_path.exists());
+
+        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn uninstall_codex_app_without_backup_falls_back_to_safe_cleanup() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let auth_path = codex_home.join("auth.json");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+model = "gpt-5.5"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "dummy-token"
+
+[model_providers.keep]
+name = "keep"
+base_url = "https://api.example.invalid"
+"#,
+        )
+        .expect("write config");
+        write_auth_json(&auth_path, &test_configure_options(codex_home.clone()))
+            .expect("write auth");
+
+        let report = uninstall_codex_app(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        )
+        .expect("uninstall config");
+
+        assert!(report.removed_chatgpt_base_url);
+        assert!(report.removed_model_provider);
+        assert!(report.removed_auth);
 
         let config = std::fs::read_to_string(&config_path).expect("read config");
         assert!(!config.contains("chatgpt_base_url"));
-        assert!(!config.contains("model_provider = \"codex\""));
+        assert!(!config.contains("model_provider = \"ai-gateway\""));
+        assert!(!config.contains("[model_providers.ai-gateway]"));
         assert!(config.contains("model = \"gpt-5.5\""));
-        assert!(config.contains("[model_providers.codex]"));
+        assert!(config.contains("[model_providers.keep]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
-        assert!(auth_path.exists());
+        assert!(!auth_path.exists());
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -2053,6 +2547,55 @@ base_url = "https://api.example.invalid"
         assert!(auth_path.exists());
 
         let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn uninstall_codex_app_without_backup_preserves_user_active_provider() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "keep"
+
+[model_providers.keep]
+name = "keep"
+base_url = "https://api.example.invalid"
+"#,
+        )
+        .expect("write config");
+
+        let report = uninstall_codex_app(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        )
+        .expect("uninstall config");
+
+        assert!(report.removed_chatgpt_base_url);
+        assert!(!report.removed_model_provider);
+        let config = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(!config.contains("chatgpt_base_url"));
+        assert!(config.contains("model_provider = \"keep\""));
+        assert!(config.contains("[model_providers.keep]"));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    fn test_configure_options(codex_home: PathBuf) -> ConfigureCodexAppOptions {
+        ConfigureCodexAppOptions {
+            codex_home: Some(codex_home),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "local@example.test".to_string(),
+            plan_type: "pro".to_string(),
+            provider_name: None,
+            provider_base_url: None,
+            provider_key: None,
+            activate_provider: true,
+            image_generation_enabled: None,
+            provider_supports_websockets: None,
+        }
     }
 
     fn unique_temp_dir() -> PathBuf {

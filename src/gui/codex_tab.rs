@@ -46,12 +46,29 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
     page.set_background_color(Colour::rgb(250, 251, 253));
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let provider_image_generation = CheckBox::builder(&page)
+    let local_config_box = StaticBox::builder(&page)
+        .with_label(text.codex_local_config())
+        .build();
+    local_config_box.set_tooltip(text.codex_local_config_help());
+    let local_config_section =
+        StaticBoxSizerBuilder::new_with_box(&local_config_box, Orientation::Vertical).build();
+    let local_config_hint = StaticText::builder(&local_config_box)
+        .with_label(text.codex_local_config_help())
+        .build();
+    local_config_hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    local_config_section.add(
+        &local_config_hint,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+
+    let provider_image_generation = CheckBox::builder(&local_config_box)
         .with_label(text.image_generation_feature())
         .with_value(false)
         .build();
     provider_image_generation.set_tooltip(text.image_generation_feature_help());
-    let provider_image_generation_note = StaticText::builder(&page)
+    let provider_image_generation_note = StaticText::builder(&local_config_box)
         .with_label(text.image_generation_feature_note())
         .build();
     provider_image_generation_note.set_foreground_color(Colour::rgb(103, 111, 124));
@@ -68,10 +85,35 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         SizerFlag::AlignCenterVertical,
         0,
     );
-    sizer.add_sizer(
+    local_config_section.add_sizer(
         &provider_image_generation_row,
         0,
-        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+
+    let inject_button = Button::builder(&local_config_box)
+        .with_label(text.inject_codex_access())
+        .build();
+    inject_button.set_tooltip(text.inject_codex_access_help());
+    let clear_button = Button::builder(&local_config_box)
+        .with_label(text.clear_codex_access())
+        .build();
+    clear_button.set_tooltip(text.clear_codex_access_help());
+    let local_config_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    local_config_actions.add_stretch_spacer(1);
+    local_config_actions.add(&inject_button, 0, SizerFlag::Right, 8);
+    local_config_actions.add(&clear_button, 0, SizerFlag::Right, 0);
+    local_config_section.add_sizer(
+        &local_config_actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        10,
+    );
+    sizer.add_sizer(
+        &local_config_section,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
     );
 
@@ -138,26 +180,6 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         12,
-    );
-
-    let inject_button = Button::builder(&page)
-        .with_label(text.inject_codex_access())
-        .build();
-    inject_button.set_tooltip(text.inject_codex_access_help());
-    let clear_button = Button::builder(&page)
-        .with_label(text.clear_codex_access())
-        .build();
-    clear_button.set_tooltip(text.clear_codex_access_help());
-    let maintenance_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    maintenance_actions.add_stretch_spacer(1);
-    maintenance_actions.add(&inject_button, 0, SizerFlag::Right, 8);
-    maintenance_actions.add(&clear_button, 0, SizerFlag::Right, 0);
-    sizer.add_stretch_spacer(1);
-    sizer.add_sizer(
-        &maintenance_actions,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        20,
     );
 
     page.set_sizer(sizer, true);
