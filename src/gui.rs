@@ -81,6 +81,7 @@ mod onboarding;
 mod provider;
 mod request_log_detail;
 mod request_logs;
+mod session_history;
 mod text;
 mod update;
 mod widgets;
@@ -110,6 +111,7 @@ use self::provider::strip_nul;
 use self::request_logs::{
     RequestLogModel, RequestLogRows, refresh_request_log_list, request_log_cell,
 };
+use self::session_history::show_session_history_window;
 use self::text::{GuiLocale, GuiText};
 use self::widgets::{
     ImStatusPanel, ProviderLogoKind, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap,
@@ -3144,12 +3146,11 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
 
     if let Some(codex_status) = &snapshot.codex_app {
         codex_tab::refresh_configured(&handles.codex_tab, codex_status.configured);
-        codex_tab::refresh_image_generation(
-            &handles.codex_tab,
-            codex_status.image_generation_enabled,
-        );
     } else {
         codex_tab::refresh_configured(&handles.codex_tab, false);
+    }
+    if let Some(gw) = &snapshot.ai_gateway {
+        codex_tab::refresh_image_generation(&handles.codex_tab, gw.filter_image_generation_tool);
     }
 
     if let Some(status) = &snapshot.status {
@@ -3176,6 +3177,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     let remote_status = snapshot.remote.as_ref();
     let codex_app_remote_ready = remote_connection_ready(remote_status, "codex_app")
         || remote_active_ready(remote_status, "codex_app");
+    codex_tab::refresh_remote_ready(&handles.codex_tab, codex_app_remote_ready);
     let vscode_remote_ready = remote_connection_ready(remote_status, "vscode")
         || remote_active_ready(remote_status, "vscode");
     let cli_remote_ready =

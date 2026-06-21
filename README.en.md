@@ -7,8 +7,10 @@
 | Feature | Description |
 | --- | --- |
 | Remote and local side by side | Use Feishu, WeChat, and Telegram to control local Codex App, the Codex VS Code extension, and Codex CLI. The same Codex session can stay synchronized between IM and local clients. |
-| Non-invasive Codex access | Does not modify Codex frontend code. It writes local config so Codex remote-control can connect to the local backend. |
+| Unlock Codex plugin capabilities | Does not modify Codex frontend code. Local access enables Codex App plugins, Computer Use, and Fast Speed capabilities. |
+| Codex session management | Manage Codex session history from the GUI. After switching providers or enabling AI Gateway, move old sessions into the current entry so they still appear in the Codex App sidebar. |
 | Manage Codex sessions from IM | Use the native Codex remote-control protocol to create and resume Codex sessions from IM. |
+| Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
 
 <p align="center">
   <img src="docs/assets/product/main.png" alt="Codex Remote GUI status and config UI" width="900">
@@ -16,6 +18,11 @@
 <p align="center">
   <img src="docs/assets/product/codex-app-chat.png" alt="Codex App session sync and image result" width="900">
 </p>
+<p align="center">
+  <img src="docs/assets/product/deepseek.jpg" alt="Codex App using DeepSeek through AI Gateway" width="900">
+</p>
+
+AI Gateway is a local model entry built into `codex-remote`. Codex App keeps sending normal Responses-style requests, while `codex-remote` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
 
 <p align="center">
   <img src="docs/assets/product/feishu-mobile-image.jpg" alt="Feishu mobile Codex image result" width="360">
@@ -27,15 +34,15 @@
 
 ## Quick Start
 
-### For Codex App and the VS Code extension, you usually only need to download the app, fill the provider key, enable it, scan the IM QR code, then restart Codex App or the VS Code extension. Codex CLI still requires starting its own app-server.
+For Codex App and the VS Code extension, the usual flow is: download the app -> configure AI Gateway -> write Codex config -> restart Codex. Connect an IM channel only when you need Feishu, WeChat, or Telegram remote control. Codex CLI still requires starting its own app-server in step 7.
 
 ### 0. Prerequisites
 
 - macOS, Windows, or Linux device
 - Codex App, the Codex VS Code extension, or Codex CLI
 - No ChatGPT account and no acceleration network required
-- A third-party key for a GPT-5.x-compatible model
-- At least one IM channel: Feishu, Telegram Bot, or WeChat bot
+- At least one model API key: OpenAI Responses, DeepSeek, Anthropic/Claude, Zhipu GLM, or another compatible provider
+- Optional IM channel: needed only for Feishu, WeChat, or Telegram remote control
 
 ### 1. Install
 
@@ -51,7 +58,7 @@ Open `Codex Remote`. The GUI starts the local backend automatically and stops th
 
 Continue when the status overview shows the local service is running.
 
-### 3. Connect An IM Channel
+### 3. Connect An IM Channel (Optional, For Remote Control)
 
 Open the `消息接入` page and choose one channel:
 
@@ -61,21 +68,25 @@ Open the `消息接入` page and choose one channel:
 
 After a channel is connected, the `IM 通道` status panel becomes available. Normal use does not require scanning or entering the token again unless you switch bots.
 
-### 4. Fill Model Info
+### 4. Configure AI Gateway
 
-Open the `Codex 接入` page, click `新增`, then fill your model service settings:
+Open the `Codex 接入` page and add a model provider in the AI Gateway area. The GUI includes common provider templates, and you can also enter provider details manually:
 
 - Provider name
+- Provider type
 - Third-party Base URL
 - API Key
+- Model list
 
-Provider name can be empty. If it is empty but Base URL or API Key is filled, the default provider name is `ai-codex`.
+If the upstream model name differs from the name you want to expose in Codex, use `Edit Model Aliases`. For example, the upstream model can be `GLM-5.2` while Codex shows `glm-5.2`.
 
-### 5. Enable Provider
+If a provider rejects Codex's image generation tool, enable `Filter image generation tool`. It takes effect immediately and removes `image_generation` from outgoing AI Gateway requests.
 
-Click `保存` to save the current provider only. Click `启用` to save the current provider and make Codex App use it.
+### 5. Write Codex Config
 
-Enabling a provider backs up the old config, points Codex remote control to local `codex-remote`, and writes local auth plus the current model provider.
+Click `Write Codex Config` on the `Codex 接入` page. This points Codex App and the Codex VS Code extension at the local `codex-remote` service and routes model requests through the local AI Gateway.
+
+To go back to the previous Codex connection, click `Restore Codex Config`. The restore action is shown only after Codex config has been written.
 
 ### 6. Open Codex
 
@@ -115,9 +126,26 @@ If the IM chat is not bound to a Codex thread yet, the bot first asks you to cre
 
 The WeChat path depends on a context token issued by the WeChat client. During long tasks or when the phone client has been inactive for a while, the token may expire and the local backend may temporarily be unable to send messages. If this happens, send `!` or `?` in WeChat to refresh the token. These activation messages are only used to recover the send path and are not forwarded to Codex.
 
+## AI Gateway
+
+AI Gateway solves one practical problem: Codex expects its native model entry, but users often want to use more model providers. After providers are configured in the GUI, Codex App still sees a normal model list; `codex-remote` handles provider routing and protocol conversion locally.
+
+Current highlights:
+
+- OpenAI Responses providers for native or compatible Responses services.
+- DeepSeek / Chat Completions providers with conversion back to Codex-compatible Responses output.
+- Anthropic Messages providers for Claude / Anthropic-compatible models, including text, images, tool calls, thinking output, and web search conversion.
+- Zhipu GLM through the Anthropic-compatible path, including GLM web search normalization.
+- Model aliases for case differences, provider-specific names, and third-party relay names.
+- Codex visible model selection.
+- Request logs with original Codex request, upstream request, response or error, tokens, cache usage, cost, latency, TTFT, and request body size.
+- Image generation tool filtering, disabled by default.
+
+All of this is configured from the GUI. Users do not need to hand-edit config files.
+
 ## Community And Support
 
-The WeChat public account is recommended for technical notes, implementation write-ups, and project updates.
+For questions or feedback, open a GitHub issue or message me through the WeChat public account.
 
 <img src="docs/assets/wechat-public-account.jpg" alt="WeChat public account" width="220">
 
@@ -135,12 +163,11 @@ Only `/q` is needed in normal use. Follow the card prompts for other actions.
 
 Approval prompts are updated after selection where the platform supports it.
 
-## Clear Codex Access
+## Restore Codex Config
 
-Click `清除 Codex 接入` in the GUI to remove this project's root Codex routing entries:
+Click `Restore Codex Config` in the GUI to restore the Codex connection from before setup. After restore, Codex App no longer sends model requests through the local AI Gateway.
 
-- `chatgpt_base_url`
-- `model_provider`
+This does not uninstall Codex and does not delete Codex session history.
 
 ## Project Boundary
 
@@ -200,62 +227,6 @@ Thread binding model:
 - Resuming a thread from IM subscribes to that thread's future remote-control events.
 - IM-origin turns are tracked by turn id to avoid `userMessage` echo.
 
-## Commands
-
-```text
-codex-remote [--config PATH] daemon
-codex-remote [--config PATH] status
-codex-remote [--config PATH] on
-codex-remote [--config PATH] off
-codex-remote [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
-codex-remote [--config PATH] uninstall-codex-app [--codex-home PATH]
-```
-
-`on` / `off` enable or pause the IM bridge.
-
-`configure-codex-app` is the CLI equivalent of enabling a provider in the GUI. If model provider config is written, the default provider is `ai-codex` and the default model is `gpt-5.5`.
-
-## Configuration
-
-`config.toml` is for `codex-remote` itself:
-
-```toml
-bind = "127.0.0.1:3847"
-statePath = "codex-remote-state.json"
-
-[feishu]
-appId = ""
-appSecret = ""
-mentionOnly = true
-allowedOpenIds = []
-allowedChatIds = []
-
-[telegram]
-botToken = ""
-allowedChatIds = []
-
-[wechat]
-accountId = "wechat"
-botToken = ""
-baseUrl = ""
-userId = ""
-botType = "3"
-allowedUserIds = []
-
-[bridge]
-enabled = true
-accountId = "default"
-sendStreaming = true
-```
-
-Telegram is for the simple private-chat flow: create your own bot with BotFather, then chat with that bot in Telegram. Group chats are intentionally ignored so group members cannot control the host machine through the bot. `allowedChatIds = []` means "bind the first private chat"; the first private chat that messages the bot is written to the allowlist automatically, and later private chats are rejected. You can also prefill `allowedChatIds = ["123456789"]` to lock it to your own Telegram private chat.
-
-WeChat config is normally written by GUI QR onboarding. `botType = "3"` follows the current OpenClaw WeChat bot path. Do not commit real `botToken` values.
-
-Codex client config is separate and usually lives at `~/.codex/config.toml`.
-
-See [config.example.toml](config.example.toml) and [docs/configuration.md](docs/configuration.md).
-
 ## Development
 
 ```powershell
@@ -276,8 +247,7 @@ GET http://127.0.0.1:3847/api/events
 ## Security Notes
 
 - The daemon binds to `127.0.0.1` by default. Do not expose it publicly.
-- `config.toml` stores Feishu `appId` / `appSecret`, Telegram `botToken`, and WeChat `botToken`; do not commit it.
-- Codex App `auth.json` and third-party provider keys are local secrets; do not commit them.
+- Locally saved IM tokens, model API keys, and Codex auth data are secrets; do not commit them.
 - Attachments from Feishu are downloaded to a local state-adjacent `.im/attachments/feishu/` directory.
 - Restrict access with `allowedOpenIds` and/or `allowedChatIds` for real usage.
 - The bridge can send approval decisions to Codex. Treat Feishu / Telegram / WeChat access as equivalent to local Codex approval access.
@@ -285,7 +255,6 @@ GET http://127.0.0.1:3847/api/events
 ## More Docs
 
 - [Architecture](docs/architecture.md)
-- [Configuration](docs/configuration.md)
 - [WeChat integration plan](docs/wechat-integration-plan.zh-CN.md)
 - [Auth notes](docs/auth-notes.md)
 - [Troubleshooting](docs/troubleshooting.md)

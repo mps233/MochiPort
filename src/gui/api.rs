@@ -2,12 +2,15 @@ use std::{thread, time::Duration};
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value;
 
 use crate::ai_gateway::config::AiGatewayConfig;
 use crate::config::AppConfig;
 
 use super::text::GuiText;
 use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
+
+const GUI_SESSION_HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(super) struct ApiClient {
@@ -182,6 +185,25 @@ impl ApiClient {
         self.post_empty_with_timeout("/api/codex-app/uninstall", GUI_CONFIG_TIMEOUT)
     }
 
+    pub(super) fn codex_app_sessions(&self) -> Result<CodexAppSessionsResponse, String> {
+        self.get_with_timeout("/api/codex-app/sessions", GUI_SESSION_HISTORY_TIMEOUT)
+    }
+
+    pub(super) fn codex_app_status(&self) -> Result<CodexAppStatus, String> {
+        self.get_with_timeout("/api/codex-app/status", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn move_codex_app_session_provider(
+        &self,
+        request: &MoveCodexAppSessionProviderRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout(
+            "/api/codex-app/session/provider",
+            request,
+            GUI_CONFIG_TIMEOUT,
+        )
+    }
+
     pub(super) fn repair_codex_app_gui_environment(&self) -> Result<serde_json::Value, String> {
         self.post_empty_with_timeout("/api/codex-app/repair-gui-environment", GUI_CONFIG_TIMEOUT)
     }
@@ -345,6 +367,7 @@ pub(super) struct CodexAppStatus {
     #[serde(default)]
     pub(super) providers: Vec<CodexAppProviderStatus>,
     #[serde(default = "default_true")]
+    #[allow(dead_code)]
     pub(super) image_generation_enabled: bool,
 }
 
@@ -356,6 +379,44 @@ pub(super) struct CodexAppProviderStatus {
     pub(super) key: Option<String>,
     #[serde(default)]
     pub(super) supports_websockets: bool,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CodexAppSessionsResponse {
+    #[allow(dead_code)]
+    pub(super) ok: bool,
+    #[serde(default)]
+    pub(super) threads: Vec<CodexAppThread>,
+    #[serde(default)]
+    pub(super) providers: Vec<String>,
+    #[serde(default)]
+    pub(super) total: usize,
+}
+
+#[derive(Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CodexAppThread {
+    pub(super) id: String,
+    #[serde(default)]
+    pub(super) preview: String,
+    pub(super) model_provider: String,
+    #[serde(default)]
+    pub(super) updated_at: i64,
+    #[serde(default)]
+    pub(super) path: Option<String>,
+    #[serde(default)]
+    pub(super) cwd: Option<Value>,
+    #[serde(default)]
+    pub(super) name: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MoveCodexAppSessionProviderRequest {
+    pub(super) thread_id: String,
+    pub(super) rollout_path: Option<String>,
+    pub(super) target_provider: String,
 }
 
 fn default_true() -> bool {

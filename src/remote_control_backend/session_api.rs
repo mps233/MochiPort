@@ -455,6 +455,36 @@ pub async fn thread_list_for_client(
     if let Some(model_provider) = non_empty(model_provider) {
         params["modelProviders"] = json!([model_provider]);
     }
+    request_thread_list_with_params(state, client_key, params).await
+}
+
+pub async fn thread_list_all_providers_for_client(
+    state: &SharedState,
+    client_key: &str,
+    cursor: Option<&str>,
+    limit: Option<u32>,
+    archived: bool,
+) -> Result<Value> {
+    let mut params = json!({
+        "sortKey": "updated_at",
+        "sourceKinds": ["cli", "vscode", "appServer"],
+        "archived": archived,
+        "modelProviders": [],
+    });
+    if let Some(cursor) = cursor {
+        params["cursor"] = json!(cursor);
+    }
+    if let Some(limit) = limit {
+        params["limit"] = json!(limit);
+    }
+    request_thread_list_with_params(state, client_key, params).await
+}
+
+async fn request_thread_list_with_params(
+    state: &SharedState,
+    client_key: &str,
+    params: Value,
+) -> Result<Value> {
     request_with_timeout_for_client(
         state,
         client_key,

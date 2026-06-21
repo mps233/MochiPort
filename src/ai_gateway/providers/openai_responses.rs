@@ -76,9 +76,7 @@ pub async fn passthrough(
             upstream_request_json: serde_json::to_string(&raw_body).ok(),
             ..RequestLogUpdate::default()
         };
-        if let Err(err) =
-            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
-        {
+        if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
             request_log::log_update_error(err);
         }
     }
@@ -161,9 +159,7 @@ pub async fn passthrough(
             response_json: response_text,
             ..RequestLogUpdate::default()
         };
-        if let Err(err) =
-            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
-        {
+        if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
             request_log::log_update_error(err);
         }
     }

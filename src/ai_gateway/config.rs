@@ -23,6 +23,8 @@ pub struct AiGatewayConfig {
     ///
     /// 该列表只控制 `/models` 暴露给 Codex App 的 catalog 模型，不参与上游 provider 路由。
     pub codex_visible_models: Vec<String>,
+    /// 是否过滤 Codex 请求中的 image_generation tool。
+    pub filter_image_generation_tool: bool,
 }
 
 impl Default for AiGatewayConfig {
@@ -33,6 +35,7 @@ impl Default for AiGatewayConfig {
             prompt_cache_retention: None,
             providers: Vec::new(),
             codex_visible_models: Vec::new(),
+            filter_image_generation_tool: false,
         }
     }
 }

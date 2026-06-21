@@ -1,10 +1,11 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
     app_state::SharedState,
     codex_app_config::{self, ConfigureCodexAppOptions},
+    codex_session_history, remote_control_backend,
 };
 
 #[derive(Deserialize)]
@@ -15,6 +16,7 @@ pub(super) struct ConfigureCodexAppRequest {
     provider_base_url: Option<String>,
     provider_key: Option<String>,
     activate: Option<bool>,
+    #[allow(dead_code)]
     image_generation_enabled: Option<bool>,
     supports_websockets: Option<bool>,
 }
@@ -30,6 +32,23 @@ pub(super) struct DeleteCodexAppProviderRequest {
 pub(super) struct SetCodexAppProviderWebSocketRequest {
     provider_name: String,
     enabled: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct MoveCodexAppSessionProviderRequest {
+    thread_id: String,
+    rollout_path: Option<String>,
+    target_provider: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexAppSessionsResponse {
+    ok: bool,
+    threads: Vec<serde_json::Value>,
+    providers: Vec<String>,
+    total: usize,
 }
 
 pub(super) async fn configure_codex_app(
@@ -63,9 +82,6 @@ pub(super) async fn configure_codex_app(
         .as_ref()
         .and_then(|value| value.activate)
         .unwrap_or(true);
-    let image_generation_enabled = request
-        .as_ref()
-        .and_then(|value| value.image_generation_enabled);
     let provider_supports_websockets = request.as_ref().and_then(|value| value.supports_websockets);
 
     let backend_url = config.remote_control_base_url();
@@ -91,7 +107,7 @@ pub(super) async fn configure_codex_app(
         provider_base_url,
         provider_key,
         activate_provider,
-        image_generation_enabled,
+        image_generation_enabled: None,
         provider_supports_websockets,
     }) {
         Ok(report) => {
@@ -239,6 +255,100 @@ pub(super) async fn uninstall_codex_app(State(state): State<SharedState>) -> imp
                 Json(json!({ "ok": true, "report": report })),
             )
         }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        ),
+    }
+}
+
+pub(super) async fn codex_app_sessions(State(state): State<SharedState>) -> impl IntoResponse {
+    const PAGE_LIMIT: u32 = 100;
+    const MAX_PAGES: usize = 20;
+    let mut cursor: Option<String> = None;
+    let mut threads = Vec::<serde_json::Value>::new();
+
+    for _ in 0..MAX_PAGES {
+        let response = match remote_control_backend::thread_list_all_providers_for_client(
+            &state,
+            remote_control_backend::default_remote_client_key(),
+            cursor.as_deref(),
+            Some(PAGE_LIMIT),
+            false,
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "ok": false, "error": err.to_string() })),
+                );
+            }
+        };
+        if let Some(items) = response.get("data").and_then(|value| value.as_array()) {
+            threads.extend(items.iter().cloned());
+        }
+        cursor = response
+            .get("nextCursor")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    let mut providers = threads
+        .iter()
+        .filter_map(|thread| thread.get("modelProvider").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    providers.sort();
+    providers.dedup();
+
+    (
+        StatusCode::OK,
+        Json(json!(CodexAppSessionsResponse {
+            ok: true,
+            total: threads.len(),
+            threads,
+            providers,
+        })),
+    )
+}
+
+pub(super) async fn move_codex_app_session_provider(
+    Json(request): Json<MoveCodexAppSessionProviderRequest>,
+) -> impl IntoResponse {
+    let rollout_path = request
+        .rollout_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from);
+    let target_provider = request
+        .target_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let result = match target_provider {
+        Some(provider) => codex_session_history::move_thread_to_provider(
+            None,
+            request.thread_id.as_str(),
+            rollout_path,
+            provider,
+        ),
+        None => codex_session_history::move_thread_to_ai_gateway(
+            None,
+            request.thread_id.as_str(),
+            rollout_path,
+        ),
+    };
+    match result {
+        Ok(report) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "report": report })),
+        ),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "ok": false, "error": err.to_string() })),

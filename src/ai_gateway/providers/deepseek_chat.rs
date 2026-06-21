@@ -70,9 +70,7 @@ pub async fn handle(
             upstream_request_json: serde_json::to_string(&chat_body).ok(),
             ..RequestLogUpdate::default()
         };
-        if let Err(err) =
-            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
-        {
+        if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
             request_log::log_update_error(err);
         }
     }
@@ -128,9 +126,7 @@ async fn handle_non_stream(
             response_json: serde_json::to_string(&response_value).ok(),
             ..RequestLogUpdate::default()
         };
-        if let Err(err) =
-            request_log::update_record(&log_context.db_path, log_context.log_id, &update)
-        {
+        if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
             request_log::log_update_error(err);
         }
     }

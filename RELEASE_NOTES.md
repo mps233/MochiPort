@@ -1,30 +1,35 @@
-# Codex Remote v0.2.14-ai-gateway-preview.1
+# Codex Remote v0.2.15
 
-这是一个 AI Gateway 临时预览版本，用于验证 Codex App 接入本地 AI Gateway、OpenAI Responses 透传、DeepSeek Chat 协议转换和请求日志调试链路。该功能仍在快速迭代中，不作为稳定正式版本推荐给普通用户自动升级。
+这是一个 AI Gateway 正式功能版本。Codex App 仍然使用原生 Responses 入口，`codex-remote` 在本地负责模型渠道管理、协议转换、请求日志和 Codex 配置写入，让用户可以在 GUI 里接入 OpenAI、DeepSeek、Anthropic/Claude、智谱 GLM 等模型渠道。
 
-## 更新内容
+有问题可以提 GitHub issue，也可以关注 README 里的公众号后直接发消息给我。
 
-- 新增内置 AI Gateway：Codex 侧可配置 `http://127.0.0.1:3847/ai-gateway/v1` 作为 OpenAI-compatible Responses 入口。
-- 支持 OpenAI Responses 透传，补齐 prompt cache key，透传 Codex 关键 header。
-- 支持 DeepSeek Chat Completions 协议转换，覆盖文本、reasoning、tool calls、tool result 回填和 SSE 转 Responses SSE。
-- 新增 AI Gateway 渠道配置 GUI，可添加 OpenAI / DeepSeek 渠道，维护上游模型列表和 Codex 可见模型白名单。
-- 新增 `GET /ai-gateway/v1/models` 模型 catalog 返回和 ETag / `x-models-etag` 刷新机制。
-- 新增 Codex 配置注入：维护 `model_providers.ai-gateway`、`model_provider = "ai-gateway"` 和 `chatgpt_base_url`。
-- 新增 AI Gateway 请求日志 tab，记录 id、model id、stream、channel、status、tokens、cache、cost、TTFT、latency、created at。
-- 请求日志详情支持查看 Codex 原始请求、转换后的上游请求、响应和错误，使用 wxDragon `StyledTextCtrl` 展示 JSON。
-- 请求日志支持清理 3 天之前日志和清理全部日志。
+## 重点更新
 
-## 兼容性说明
+- AI Gateway 从预览能力升级为正式入口：Codex 请求进入本地 `/ai-gateway/v1/responses`，由 `codex-remote` 选择上游渠道并返回 Codex 可消费的 Responses 结果。
+- 新增 Anthropic Messages 协议接入，支持 Claude / Anthropic-compatible 模型的文本、图片、工具调用、思考输出、web search 和 apply_patch 工具转换。
+- 新增智谱 GLM Anthropic-compatible profile，兼容 GLM 的 web search 返回差异，避免上游私有搜索字段泄漏到 Codex 应用层。
+- DeepSeek / Chat Completions 链路补齐 apply_patch 工具支持，不再简单过滤 Codex 的 apply_patch 能力。
+- 新增模型映射能力，解决上游模型名大小写、别名或第三方转发命名不一致的问题，例如把 Codex 侧 `glm-5.2` 映射到上游 `GLM-5.2`。
+- 新增 Codex 可见模型管理，用户可以在 GUI 中选择 Codex App 模型列表要展示的模型。
+- 新增请求日志增强：记录 Codex 原始请求、发给上游的请求、响应或错误、token、cache、cost、TTFT、latency 和上游请求包大小。
+- 请求日志详情优化 JSON 查看和搜索体验，方便排查协议转换、超时、首帧慢和上游错误。
+- 新增“过滤生图工具”开关。默认不过滤；打开后 AI Gateway 会从 Codex 请求中移除 `image_generation` 工具，适合不支持生图工具的渠道。
+- 新增 Codex 会话管理入口。切换 provider 或接入 AI Gateway 后，可以把旧会话移动到当前入口，让 Codex App 左侧继续看到历史会话。
+- Codex 本地配置写入和恢复流程优化：第一次使用时只展示写入入口，写入后才展示“恢复 Codex 原有配置”。
+- ChatGPT 登录形态的本地 Codex auth 兼容优化，减少接入 `codex-remote` 后账号身份显示混淆。
+- README 更新为 GUI 产品说明，不再引导普通用户手写配置文件。
 
-- AI Gateway 仍是预览功能，Responses 与 Chat Completions 的转换还在补齐边界 case。
-- 当前只固定支持 OpenAI Responses 和 DeepSeek Chat Completions；暂不开放自定义协议选择。
-- Codex 可见模型由 `aiGateway.codexVisibleModels` 显式白名单控制，不会自动展示上游渠道所有模型。
-- Codex App 的模型列表有本地缓存，保存可见模型后通常会在 5 分钟内刷新；必要时退出 Codex App 并删除 `models_cache.json` 后重启验证。
-- 请求日志使用本地 SQLite 存储，默认数据库文件为 `ai-gateway-request-logs.sqlite`。
+## 使用提示
+
+- 只使用 AI Gateway 时，不需要接入飞书、微信或 Telegram；IM 接入只在需要远程控制 Codex 时使用。
+- Codex App / VS Code 插件常规流程是：下载程序 -> 配置 AI Gateway -> 写入 Codex 配置 -> 重启 Codex。
+- Codex CLI 仍需要单独启动 `codex app-server --remote-control` 后再连接本地 TUI。
+- 如果 Codex App 模型列表没有立刻刷新，重启 Codex App 通常可以解决。
+- 请求日志保存在本地应用数据目录，升级后旧版 exe 目录下的日志数据库会尽量自动迁移。
 
 ## 验证
 
 - `cargo fmt`
-- `cargo fmt --check`
-- `cargo test --release --features gui sqlite_delete -- --nocapture`
+- `cargo test`
 - `cargo build --release --features gui --bin codex-remote`

@@ -7,6 +7,7 @@ mod chain_log;
 mod cli;
 mod codex;
 mod codex_app_config;
+mod codex_session_history;
 mod config;
 #[cfg(feature = "gui")]
 mod gui;

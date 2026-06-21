@@ -296,22 +296,24 @@ impl GuiText {
 
     pub(super) fn image_generation_feature(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "启用生图工具",
-            GuiLocale::EnUs => "Enable image generation",
+            GuiLocale::ZhCn => "过滤生图工具",
+            GuiLocale::EnUs => "Filter image generation tool",
         }
     }
 
     pub(super) fn image_generation_feature_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "让支持的 Codex 客户端显示生图能力。",
-            GuiLocale::EnUs => "Show image generation in supported Codex clients.",
+            GuiLocale::ZhCn => "勾选后，AI Gateway 会从 Codex 请求中移除 image_generation 工具。",
+            GuiLocale::EnUs => {
+                "When checked, AI Gateway removes image_generation tools from Codex requests."
+            }
         }
     }
 
     pub(super) fn image_generation_feature_note(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "写入配置后生效",
-            GuiLocale::EnUs => "Applies after writing config",
+            GuiLocale::ZhCn => "实时生效",
+            GuiLocale::EnUs => "Applies immediately",
         }
     }
 
@@ -340,6 +342,198 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "选择 Codex 里要显示的模型。",
             GuiLocale::EnUs => "Choose which models are shown in Codex.",
+        }
+    }
+
+    pub(super) fn codex_session_history(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "会话管理",
+            GuiLocale::EnUs => "Session History",
+        }
+    }
+
+    pub(super) fn codex_session_history_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "把以前的 Codex 会话归到当前入口，之后在 Codex App 左侧可以继续看到并打开。"
+            }
+            GuiLocale::EnUs => {
+                "Move existing Codex sessions into the current entry so they appear in the Codex App sidebar."
+            }
+        }
+    }
+
+    pub(super) fn open_codex_session_history(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "打开会话管理",
+            GuiLocale::EnUs => "Open Session History",
+        }
+    }
+
+    pub(super) fn session_history_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex 会话管理",
+            GuiLocale::EnUs => "Codex Session History",
+        }
+    }
+
+    pub(super) fn other_provider_sessions(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "其它会话",
+            GuiLocale::EnUs => "Other Sessions",
+        }
+    }
+
+    pub(super) fn ai_gateway_sessions(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "AI Gateway 会话",
+            GuiLocale::EnUs => "AI Gateway Sessions",
+        }
+    }
+
+    pub(super) fn refresh(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "刷新",
+            GuiLocale::EnUs => "Refresh",
+        }
+    }
+
+    pub(super) fn move_to_ai_gateway(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "归到 AI Gateway",
+            GuiLocale::EnUs => "Move to AI Gateway",
+        }
+    }
+
+    pub(super) fn move_to_ai_gateway_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "把选中的会话移动到 AI Gateway",
+            GuiLocale::EnUs => "Move selected sessions to AI Gateway",
+        }
+    }
+
+    pub(super) fn move_back_provider(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "移动到 Provider...",
+            GuiLocale::EnUs => "Move to Provider...",
+        }
+    }
+
+    pub(super) fn move_back_provider_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "把选中的会话移动到其它 Provider",
+            GuiLocale::EnUs => "Move selected sessions to another provider",
+        }
+    }
+
+    pub(super) fn session_history_selection_hint(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "可按 Ctrl 多选、Shift 连续选择，也可以右键操作。移动后如果 Codex 侧边栏仍看不到，请在 Codex 里重新添加对应 workspace。"
+            }
+            GuiLocale::EnUs => {
+                "Use Ctrl for multiple selection, Shift for ranges, or right-click. If moved sessions still do not appear in Codex, add the workspace again in Codex."
+            }
+        }
+    }
+
+    pub(super) fn session_col_provider(self) -> &'static str {
+        "Provider"
+    }
+
+    pub(super) fn session_col_preview(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "会话",
+            GuiLocale::EnUs => "Session",
+        }
+    }
+
+    pub(super) fn session_col_workspace(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Workspace",
+            GuiLocale::EnUs => "Workspace",
+        }
+    }
+
+    pub(super) fn session_select_left_first(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请先在左侧选择一个会话。",
+            GuiLocale::EnUs => "Select a session on the left first.",
+        }
+    }
+
+    pub(super) fn session_select_right_first(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请先在右侧选择一个会话。",
+            GuiLocale::EnUs => "Select a session on the right first.",
+        }
+    }
+
+    pub(super) fn session_select_provider_first(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请选择目标 Provider。",
+            GuiLocale::EnUs => "Choose a target provider.",
+        }
+    }
+
+    pub(super) fn session_target_provider_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "选择 Provider",
+            GuiLocale::EnUs => "Choose Provider",
+        }
+    }
+
+    pub(super) fn session_target_provider_prompt(self, count: usize) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                if count <= 1 {
+                    "把选中的会话移动到：".to_string()
+                } else {
+                    format!("把选中的 {count} 个会话移动到：")
+                }
+            }
+            GuiLocale::EnUs => {
+                if count <= 1 {
+                    "Move the selected session to:".to_string()
+                } else {
+                    format!("Move {count} selected sessions to:")
+                }
+            }
+        }
+    }
+
+    pub(super) fn move_sessions_confirm(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "移动",
+            GuiLocale::EnUs => "Move",
+        }
+    }
+
+    pub(super) fn session_no_target_provider(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "没有可选的 Provider。请先在 Codex 配置里添加其它 Provider。",
+            GuiLocale::EnUs => {
+                "No provider is available. Add another provider in Codex settings first."
+            }
+        }
+    }
+
+    pub(super) fn session_move_done(self, count: usize) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                if count <= 1 {
+                    "会话归属已更新。".to_string()
+                } else {
+                    format!("{count} 个会话归属已更新。")
+                }
+            }
+            GuiLocale::EnUs => {
+                if count <= 1 {
+                    "Session updated.".to_string()
+                } else {
+                    format!("{count} sessions updated.")
+                }
+            }
         }
     }
 

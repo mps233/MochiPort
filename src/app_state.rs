@@ -13,6 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::{
+    ai_gateway::request_log::RequestLogStore,
     chain_log,
     codex::CodexNotification,
     config::AppConfig,
@@ -27,6 +28,7 @@ pub struct AppState {
     pub config_path: PathBuf,
     pub config: Mutex<AppConfig>,
     pub ai_gateway_http_client: reqwest::Client,
+    pub ai_gateway_request_logs: RequestLogStore,
     pub persisted: Mutex<PersistedState>,
     pub runtime: Mutex<RuntimeState>,
     pub remote_control: RemoteControlState,
@@ -324,10 +326,14 @@ impl AppState {
     ) -> SharedState {
         let persisted = PersistedState::load(&config.state_path);
         let runtime = RuntimeState::default();
+        let request_log_db_path = crate::ai_gateway::request_log::database_path(&config);
+        crate::ai_gateway::request_log::migrate_legacy_database(&config, &request_log_db_path);
+        let ai_gateway_request_logs = RequestLogStore::new(request_log_db_path);
         Arc::new(Self {
             config_path,
             config: Mutex::new(config),
             ai_gateway_http_client: reqwest::Client::new(),
+            ai_gateway_request_logs,
             persisted: Mutex::new(persisted),
             runtime: Mutex::new(runtime),
             remote_control: RemoteControlState::new(),

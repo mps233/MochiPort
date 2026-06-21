@@ -52,6 +52,7 @@ pub struct ConfigureCodexAppOptions {
     pub provider_base_url: Option<String>,
     pub provider_key: Option<String>,
     pub activate_provider: bool,
+    #[allow(dead_code)]
     pub image_generation_enabled: Option<bool>,
     pub provider_supports_websockets: Option<bool>,
 }
@@ -867,7 +868,6 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
 
     doc["chatgpt_base_url"] = toml_edit::value(&options.backend_url);
     disable_codex_apps_feature_if_unset(&mut doc);
-    set_hosted_image_generation_feature(&mut doc, options.image_generation_enabled);
 
     let explicit_provider_name = non_empty(options.provider_name.as_deref());
     let explicit_provider_base_url = options.provider_base_url.as_deref().and_then(config_value);
@@ -939,23 +939,6 @@ fn disable_codex_apps_feature_if_unset(doc: &mut toml_edit::DocumentMut) {
     };
     if features.get("apps").is_none() && features.get("connectors").is_none() {
         features["apps"] = toml_edit::value(false);
-    }
-}
-
-fn set_hosted_image_generation_feature(doc: &mut toml_edit::DocumentMut, enabled: Option<bool>) {
-    if !doc.contains_key("features") {
-        doc["features"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-
-    let Some(features) = doc["features"].as_table_mut() else {
-        return;
-    };
-    match enabled {
-        Some(enabled) => features["image_generation"] = toml_edit::value(enabled),
-        None if features.get("image_generation").is_none() => {
-            features["image_generation"] = toml_edit::value(false);
-        }
-        None => {}
     }
 }
 
@@ -1349,101 +1332,10 @@ fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()
 }
 
 fn derive_local_auth_identity(
-    path: &Path,
+    _path: &Path,
     options: &ConfigureCodexAppOptions,
 ) -> LocalAuthIdentity {
-    let defaults = LocalAuthIdentity::from_options(options);
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return defaults;
-    };
-    let Ok(auth) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return defaults;
-    };
-    let auth_mode = auth.get("auth_mode").and_then(|value| value.as_str());
-    if !matches!(
-        auth_mode,
-        Some(LOCAL_AUTH_MODE) | Some(LEGACY_LOCAL_AUTH_MODE)
-    ) {
-        return defaults;
-    }
-    if is_codex_remote_auth_json(&auth) {
-        return defaults;
-    }
-
-    let Some(payload) = auth
-        .pointer("/tokens/id_token")
-        .and_then(|value| value.as_str())
-        .and_then(decode_jwt_payload_value)
-        .or_else(|| {
-            auth.pointer("/tokens/access_token")
-                .and_then(|value| value.as_str())
-                .and_then(decode_jwt_payload_value)
-        })
-    else {
-        return defaults;
-    };
-    let claim_auth = payload
-        .get("https://api.openai.com/auth")
-        .and_then(|value| value.as_object());
-    let account_id = auth
-        .pointer("/tokens/account_id")
-        .and_then(|value| value.as_str())
-        .and_then(|value| non_empty(Some(value)))
-        .map(str::to_string)
-        .or_else(|| {
-            claim_auth
-                .and_then(|value| value.get("chatgpt_account_id"))
-                .and_then(|value| value.as_str())
-                .and_then(|value| non_empty(Some(value)))
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            claim_auth
-                .and_then(|value| value.get("account_id"))
-                .and_then(|value| value.as_str())
-                .and_then(|value| non_empty(Some(value)))
-                .map(str::to_string)
-        });
-    let Some(account_id) = account_id else {
-        return defaults;
-    };
-
-    LocalAuthIdentity {
-        account_id,
-        user_id: claim_auth
-            .and_then(|value| value.get("chatgpt_user_id"))
-            .and_then(|value| value.as_str())
-            .or_else(|| {
-                claim_auth
-                    .and_then(|value| value.get("user_id"))
-                    .and_then(|value| value.as_str())
-            })
-            .and_then(|value| non_empty(Some(value)))
-            .unwrap_or(defaults.user_id.as_str())
-            .to_string(),
-        email: payload
-            .get("email")
-            .and_then(|value| value.as_str())
-            .or_else(|| {
-                payload
-                    .get("https://api.openai.com/profile")
-                    .and_then(|value| value.get("email"))
-                    .and_then(|value| value.as_str())
-            })
-            .and_then(|value| non_empty(Some(value)))
-            .unwrap_or(defaults.email.as_str())
-            .to_string(),
-        plan_type: claim_auth
-            .and_then(|value| value.get("chatgpt_plan_type"))
-            .and_then(|value| value.as_str())
-            .and_then(|value| non_empty(Some(value)))
-            .unwrap_or(defaults.plan_type.as_str())
-            .to_string(),
-        account_is_fedramp: claim_auth
-            .and_then(|value| value.get("chatgpt_account_is_fedramp"))
-            .and_then(|value| value.as_bool())
-            .unwrap_or(defaults.account_is_fedramp),
-    }
+    LocalAuthIdentity::from_options(options)
 }
 
 fn is_codex_remote_auth_json(auth: &serde_json::Value) -> bool {
@@ -1954,7 +1846,7 @@ mod tests {
         assert!(!config.contains("windows_wsl_setup_acknowledged"));
         assert!(config.contains("[features]"));
         assert!(config.contains("apps = false"));
-        assert!(config.contains("image_generation = false"));
+        assert!(!config.contains("image_generation = false"));
         assert!(config.contains("[model_providers.ai-codex]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(config.contains("wire_api = \"responses\""));
@@ -2004,7 +1896,7 @@ mod tests {
     }
 
     #[test]
-    fn configure_codex_app_reuses_existing_chatgpt_auth_identity() {
+    fn configure_codex_app_keeps_local_auth_identity_when_chatgpt_auth_exists() {
         let codex_home = unique_temp_dir();
         let auth_path = codex_home.join("auth.json");
         std::fs::write(
@@ -2026,7 +1918,7 @@ mod tests {
         assert_eq!(
             auth.pointer("/tokens/account_id")
                 .and_then(|value| value.as_str()),
-            Some("acct_official")
+            Some("acct_test")
         );
         let payload = auth
             .pointer("/tokens/id_token")
@@ -2040,29 +1932,29 @@ mod tests {
             claim_auth
                 .get("chatgpt_account_id")
                 .and_then(|value| value.as_str()),
-            Some("acct_official")
+            Some("acct_test")
         );
         assert_eq!(
             claim_auth
                 .get("chatgpt_user_id")
                 .and_then(|value| value.as_str()),
-            Some("user_official")
+            Some("user_test")
         );
         assert_eq!(
             claim_auth
                 .get("chatgpt_plan_type")
                 .and_then(|value| value.as_str()),
-            Some("plus")
+            Some("pro")
         );
         assert_eq!(
             claim_auth
                 .get("chatgpt_account_is_fedramp")
                 .and_then(|value| value.as_bool()),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             payload.get("email").and_then(|value| value.as_str()),
-            Some("official@example.test")
+            Some("local@example.test")
         );
 
         let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);

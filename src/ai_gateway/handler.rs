@@ -19,7 +19,9 @@ use super::context::GatewayContext;
 use super::error::GatewayError;
 use super::model::GatewayRequest;
 use super::providers::{anthropic_messages, deepseek_chat, openai_responses};
-use super::request_log::{self, RequestLogContext, RequestLogRecord, RequestLogUpdate};
+use super::request_log::{
+    self, RequestLogContext, RequestLogRecord, RequestLogStore, RequestLogUpdate,
+};
 use super::router::resolve_provider;
 
 /// POST /ai-gateway/v1/responses
@@ -31,18 +33,19 @@ pub async fn handle_responses(
     let started_at = Instant::now();
     let created_at_ms = request_log::now_ms();
     let config = state.config.lock().await;
-    let log_db_path = request_log::database_path(&config);
     let gw_config = config.ai_gateway.clone();
+    let filter_image_generation_tool = gw_config.filter_image_generation_tool;
     let models_etag = configured_models_etag(&gw_config);
     drop(config);
 
     // 1. 解析请求 body
-    let raw_body: serde_json::Value = match serde_json::from_slice(&body) {
+    let mut raw_body: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
             return GatewayError::bad_request(format!("invalid JSON: {e}")).into_response();
         }
     };
+    filter_image_generation_tools(&mut raw_body, filter_image_generation_tool);
     let envelope: GatewayRequestEnvelope = match serde_json::from_value(raw_body.clone()) {
         Ok(envelope) => envelope,
         Err(e) => {
@@ -60,7 +63,7 @@ pub async fn handle_responses(
         Ok(p) => p,
         Err(e) => {
             let log_context = insert_initial_log(
-                &log_db_path,
+                &state.ai_gateway_request_logs,
                 &ctx,
                 &headers,
                 &envelope,
@@ -74,7 +77,7 @@ pub async fn handle_responses(
         }
     };
     let log_context = insert_initial_log(
-        &log_db_path,
+        &state.ai_gateway_request_logs,
         &ctx,
         &headers,
         &envelope,
@@ -191,6 +194,26 @@ fn deserialize_gateway_request(raw_body: serde_json::Value) -> Result<GatewayReq
     serde_path_to_error::deserialize(deserializer).map_err(|err| err.to_string())
 }
 
+fn filter_image_generation_tools(raw_body: &mut serde_json::Value, filter_enabled: bool) {
+    if !filter_enabled {
+        return;
+    }
+
+    let Some(tools) = raw_body
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    tools.retain(|tool| !is_image_generation_tool(tool));
+}
+
+fn is_image_generation_tool(tool: &serde_json::Value) -> bool {
+    tool.get("type")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|tool_type| tool_type == "image_generation")
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct GatewayRequestEnvelope {
     model: String,
@@ -227,11 +250,10 @@ pub async fn handle_request_logs(
     State(state): State<SharedState>,
     Query(query): Query<RequestLogsQuery>,
 ) -> impl IntoResponse {
-    let config = state.config.lock().await;
-    let db_path = request_log::database_path(&config);
-    drop(config);
-
-    match request_log::list_recent(&db_path, query.limit.unwrap_or(200)) {
+    match state
+        .ai_gateway_request_logs
+        .list_recent(query.limit.unwrap_or(200))
+    {
         Ok(logs) => Json(json!({ "logs": logs })).into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -243,11 +265,7 @@ pub async fn handle_request_logs(
 
 /// DELETE /ai-gateway/request-logs
 pub async fn handle_clear_request_logs(State(state): State<SharedState>) -> impl IntoResponse {
-    let config = state.config.lock().await;
-    let db_path = request_log::database_path(&config);
-    drop(config);
-
-    match request_log::delete_all(&db_path) {
+    match state.ai_gateway_request_logs.delete_all() {
         Ok(deleted) => Json(json!({ "deleted": deleted })).into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -262,13 +280,9 @@ pub async fn handle_clear_old_request_logs(
     State(state): State<SharedState>,
     Query(query): Query<ClearOldRequestLogsQuery>,
 ) -> impl IntoResponse {
-    let config = state.config.lock().await;
-    let db_path = request_log::database_path(&config);
-    drop(config);
-
     let days = query.days.unwrap_or(3).clamp(1, 3650);
     let cutoff_ms = request_log::now_ms().saturating_sub((days as i64) * 24 * 60 * 60 * 1000);
-    match request_log::delete_older_than(&db_path, cutoff_ms) {
+    match state.ai_gateway_request_logs.delete_older_than(cutoff_ms) {
         Ok(deleted) => Json(json!({ "deleted": deleted })).into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -283,11 +297,7 @@ pub async fn handle_request_log_detail(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    let config = state.config.lock().await;
-    let db_path = request_log::database_path(&config);
-    drop(config);
-
-    match request_log::get_detail(&db_path, id) {
+    match state.ai_gateway_request_logs.get_detail(id) {
         Ok(Some(log)) => Json(json!({ "log": log })).into_response(),
         Ok(None) => (
             axum::http::StatusCode::NOT_FOUND,
@@ -303,7 +313,7 @@ pub async fn handle_request_log_detail(
 }
 
 fn insert_initial_log(
-    db_path: &std::path::Path,
+    store: &RequestLogStore,
     ctx: &GatewayContext,
     headers: &HeaderMap,
     request: &GatewayRequestEnvelope,
@@ -336,9 +346,9 @@ fn insert_initial_log(
         upstream_request_json: None,
         response_json: None,
     };
-    match request_log::insert_record(db_path, &record) {
+    match store.insert_record(&record) {
         Ok(log_id) => Some(RequestLogContext {
-            db_path: db_path.to_path_buf(),
+            store: store.clone(),
             log_id,
             started_at,
         }),
@@ -359,8 +369,7 @@ fn update_failed_log(log_context: &Option<RequestLogContext>, message: &str) {
         error_message: Some(message.to_string()),
         ..RequestLogUpdate::default()
     };
-    if let Err(err) = request_log::update_record(&log_context.db_path, log_context.log_id, &update)
-    {
+    if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
         request_log::log_update_error(err);
     }
 }
@@ -391,7 +400,40 @@ fn set_etag_header(response: &mut axum::response::Response, etag: &str) {
 mod tests {
     use serde_json::json;
 
-    use super::{GatewayRequestEnvelope, deserialize_gateway_request};
+    use super::{
+        GatewayRequestEnvelope, deserialize_gateway_request, filter_image_generation_tools,
+    };
+
+    #[test]
+    fn filter_image_generation_tools_removes_only_builtin_image_tool() {
+        let mut body = json!({
+            "model": "gpt-5.5",
+            "tools": [
+                {"type": "image_generation", "output_format": "png"},
+                {"type": "web_search"},
+                {"type": "function", "name": "apply_patch"}
+            ]
+        });
+
+        filter_image_generation_tools(&mut body, true);
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["type"], "web_search");
+        assert_eq!(tools[1]["type"], "function");
+    }
+
+    #[test]
+    fn filter_image_generation_tools_keeps_tools_when_filter_disabled() {
+        let mut body = json!({
+            "model": "gpt-5.5",
+            "tools": [{"type": "image_generation", "output_format": "png"}]
+        });
+
+        filter_image_generation_tools(&mut body, false);
+
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+    }
 
     #[test]
     fn responses_passthrough_envelope_accepts_future_payload_shapes() {

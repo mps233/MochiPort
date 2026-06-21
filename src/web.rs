@@ -58,6 +58,14 @@ pub fn router(state: SharedState) -> Router {
             post(codex_app::uninstall_codex_app),
         )
         .route("/api/codex-app/status", get(codex_app::codex_app_status))
+        .route(
+            "/api/codex-app/sessions",
+            get(codex_app::codex_app_sessions),
+        )
+        .route(
+            "/api/codex-app/session/provider",
+            post(codex_app::move_codex_app_session_provider),
+        )
         .route("/api/bridge/start", post(im_api::start_bridge))
         .route("/api/bridge/stop", post(im_api::stop_bridge))
         .route(

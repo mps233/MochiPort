@@ -1,8 +1,10 @@
 use std::{
     collections::BTreeMap,
     collections::VecDeque,
+    fs,
     path::{Path, PathBuf},
     pin::Pin,
+    sync::{Arc, Mutex, MutexGuard},
     task::{Context, Poll},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -104,18 +106,219 @@ pub struct RequestLogDetail {
 
 #[derive(Clone)]
 pub struct RequestLogContext {
-    pub db_path: PathBuf,
+    pub store: RequestLogStore,
     pub log_id: i64,
     pub started_at: Instant,
 }
 
+#[derive(Clone)]
+pub struct RequestLogStore {
+    inner: Arc<RequestLogStoreInner>,
+}
+
+struct RequestLogStoreInner {
+    db_path: PathBuf,
+    conn: Mutex<Option<Connection>>,
+}
+
+impl RequestLogStore {
+    pub fn new(db_path: PathBuf) -> Self {
+        let conn = match open(&db_path) {
+            Ok(conn) => Some(conn),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    path = %db_path.display(),
+                    "failed to open AI Gateway request log database"
+                );
+                None
+            }
+        };
+        Self {
+            inner: Arc::new(RequestLogStoreInner {
+                db_path,
+                conn: Mutex::new(conn),
+            }),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn db_path(&self) -> &Path {
+        &self.inner.db_path
+    }
+
+    pub fn insert_record(&self, record: &RequestLogRecord) -> rusqlite::Result<i64> {
+        self.with_conn(|conn| insert_record_with_conn(conn, record))
+    }
+
+    pub fn update_record(&self, id: i64, update: &RequestLogUpdate) -> rusqlite::Result<()> {
+        self.with_conn(|conn| update_record_with_conn(conn, id, update))
+    }
+
+    pub fn list_recent(&self, limit: usize) -> rusqlite::Result<Vec<RequestLogEntry>> {
+        self.with_conn(|conn| list_recent_with_conn(conn, limit))
+    }
+
+    pub fn delete_older_than(&self, cutoff_ms: i64) -> rusqlite::Result<usize> {
+        self.with_conn(|conn| delete_older_than_with_conn(conn, cutoff_ms))
+    }
+
+    pub fn delete_all(&self) -> rusqlite::Result<usize> {
+        self.with_conn(delete_all_with_conn)
+    }
+
+    pub fn get_detail(&self, id: i64) -> rusqlite::Result<Option<RequestLogDetail>> {
+        self.with_conn(|conn| get_detail_with_conn(conn, id))
+    }
+
+    fn with_conn<T>(
+        &self,
+        operation: impl FnOnce(&Connection) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
+        let mut guard = lock_connection(&self.inner.conn);
+        if guard.is_none() {
+            *guard = Some(open(&self.inner.db_path)?);
+        }
+        operation(guard.as_ref().expect("request log connection initialized"))
+    }
+}
+
+fn lock_connection(mutex: &Mutex<Option<Connection>>) -> MutexGuard<'_, Option<Connection>> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("AI Gateway request log connection lock was poisoned; continuing");
+            poisoned.into_inner()
+        }
+    }
+}
+
 pub fn database_path(config: &AppConfig) -> PathBuf {
+    #[cfg(test)]
+    {
+        return legacy_database_path(config);
+    }
+
+    #[cfg(not(test))]
+    if let Some(dir) = app_data_dir() {
+        return dir.join(DB_FILE_NAME);
+    }
+
+    #[allow(unreachable_code)]
+    legacy_database_path(config)
+}
+
+pub fn migrate_legacy_database(config: &AppConfig, target_path: &Path) {
+    let source_path = legacy_database_path(config);
+    if paths_equivalent(&source_path, target_path) || !source_path.exists() || target_path.exists()
+    {
+        return;
+    }
+
+    if let Some(parent) = target_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        if let Err(err) = fs::create_dir_all(parent) {
+            warn!(
+                error = %err,
+                path = %parent.display(),
+                "failed to create AI Gateway request log directory"
+            );
+            return;
+        }
+    }
+
+    let source_conn = match Connection::open(&source_path) {
+        Ok(conn) => conn,
+        Err(err) => {
+            warn!(
+                error = %err,
+                source = %source_path.display(),
+                target = %target_path.display(),
+                "failed to open legacy AI Gateway request log database for migration"
+            );
+            return;
+        }
+    };
+    let _ = source_conn.busy_timeout(std::time::Duration::from_millis(1000));
+    let escaped_target = target_path.to_string_lossy().replace('\'', "''");
+    if let Err(err) = source_conn.execute_batch(&format!("VACUUM INTO '{escaped_target}'")) {
+        warn!(
+            error = %err,
+            source = %source_path.display(),
+            target = %target_path.display(),
+            "failed to migrate legacy AI Gateway request log database"
+        );
+        return;
+    }
+    drop(source_conn);
+
+    remove_legacy_database_files(&source_path);
+}
+
+fn legacy_database_path(config: &AppConfig) -> PathBuf {
     config
         .state_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(DB_FILE_NAME)
+}
+
+#[cfg(not(test))]
+fn app_data_dir() -> Option<PathBuf> {
+    if let Some(base) = std::env::var_os("CODEX_REMOTE_HOME").map(PathBuf::from) {
+        return Some(base);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var_os("LOCALAPPDATA")
+            .or_else(|| std::env::var_os("APPDATA"))
+            .map(PathBuf::from)
+            .map(|base| base.join("Codex Remote"))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|home| home.join("Library/Application Support/Codex Remote"))
+    }
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn remove_legacy_database_files(db_path: &Path) {
+    for path in companion_database_paths(db_path) {
+        if !path.exists() {
+            continue;
+        }
+        if let Err(err) = fs::remove_file(&path) {
+            warn!(
+                error = %err,
+                path = %path.display(),
+                "failed to remove legacy AI Gateway request log file"
+            );
+        }
+    }
+}
+
+fn companion_database_paths(db_path: &Path) -> [PathBuf; 3] {
+    [
+        db_path.to_path_buf(),
+        PathBuf::from(format!("{}-wal", db_path.display())),
+        PathBuf::from(format!("{}-shm", db_path.display())),
+    ]
 }
 
 pub fn now_ms() -> i64 {
@@ -159,8 +362,13 @@ pub fn json_body_size_bytes(value: &Value) -> Option<i64> {
         .and_then(|bytes| i64::try_from(bytes.len()).ok())
 }
 
+#[cfg(test)]
 pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Result<i64> {
     let conn = open(db_path)?;
+    insert_record_with_conn(&conn, record)
+}
+
+fn insert_record_with_conn(conn: &Connection, record: &RequestLogRecord) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO ai_gateway_request_logs (
             request_id, model_id, stream, channel, provider_type, status,
@@ -199,8 +407,17 @@ pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Res
     Ok(conn.last_insert_rowid())
 }
 
+#[cfg(test)]
 pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusqlite::Result<()> {
     let conn = open(db_path)?;
+    update_record_with_conn(&conn, id, update)
+}
+
+fn update_record_with_conn(
+    conn: &Connection,
+    id: i64,
+    update: &RequestLogUpdate,
+) -> rusqlite::Result<()> {
     let existing = conn
         .query_row(
             "SELECT
@@ -284,8 +501,16 @@ pub fn update_record(db_path: &Path, id: i64, update: &RequestLogUpdate) -> rusq
     Ok(())
 }
 
+#[cfg(test)]
 pub fn list_recent(db_path: &Path, limit: usize) -> rusqlite::Result<Vec<RequestLogEntry>> {
     let conn = open(db_path)?;
+    list_recent_with_conn(&conn, limit)
+}
+
+fn list_recent_with_conn(
+    conn: &Connection,
+    limit: usize,
+) -> rusqlite::Result<Vec<RequestLogEntry>> {
     let mut stmt = conn.prepare(
         "SELECT
             id, request_id, model_id, stream, channel, provider_type, status,
@@ -330,21 +555,36 @@ pub fn list_recent(db_path: &Path, limit: usize) -> rusqlite::Result<Vec<Request
     Ok(logs)
 }
 
+#[cfg(test)]
 pub fn delete_older_than(db_path: &Path, cutoff_ms: i64) -> rusqlite::Result<usize> {
     let conn = open(db_path)?;
+    delete_older_than_with_conn(&conn, cutoff_ms)
+}
+
+fn delete_older_than_with_conn(conn: &Connection, cutoff_ms: i64) -> rusqlite::Result<usize> {
     conn.execute(
         "DELETE FROM ai_gateway_request_logs WHERE created_at_ms < ?1",
         params![cutoff_ms],
     )
 }
 
+#[cfg(test)]
 pub fn delete_all(db_path: &Path) -> rusqlite::Result<usize> {
     let conn = open(db_path)?;
+    delete_all_with_conn(&conn)
+}
+
+fn delete_all_with_conn(conn: &Connection) -> rusqlite::Result<usize> {
     conn.execute("DELETE FROM ai_gateway_request_logs", [])
 }
 
+#[cfg(test)]
 pub fn get_detail(db_path: &Path, id: i64) -> rusqlite::Result<Option<RequestLogDetail>> {
     let conn = open(db_path)?;
+    get_detail_with_conn(&conn, id)
+}
+
+fn get_detail_with_conn(conn: &Connection, id: i64) -> rusqlite::Result<Option<RequestLogDetail>> {
     conn.query_row(
         "SELECT
             id, request_id, model_id, stream, channel, provider_type, status,
@@ -522,7 +762,11 @@ impl<S> Drop for ResponsesSseLogStream<S> {
             error_message: Some("client disconnected before stream completed".to_string()),
             ..RequestLogUpdate::default()
         };
-        if let Err(err) = update_record(&self.context.db_path, self.context.log_id, &update) {
+        if let Err(err) = self
+            .context
+            .store
+            .update_record(self.context.log_id, &update)
+        {
             log_update_error(err);
         }
         self.completed = true;
@@ -560,8 +804,10 @@ where
                         error_message: Some(err.to_string()),
                         ..RequestLogUpdate::default()
                     };
-                    if let Err(update_err) =
-                        update_record(&this.context.db_path, this.context.log_id, &update)
+                    if let Err(update_err) = this
+                        .context
+                        .store
+                        .update_record(this.context.log_id, &update)
                     {
                         log_update_error(update_err);
                     }
@@ -577,8 +823,10 @@ where
                         error_message: Some("stream closed before response.completed".to_string()),
                         ..RequestLogUpdate::default()
                     };
-                    if let Err(update_err) =
-                        update_record(&this.context.db_path, this.context.log_id, &update)
+                    if let Err(update_err) = this
+                        .context
+                        .store
+                        .update_record(this.context.log_id, &update)
                     {
                         log_update_error(update_err);
                     }
@@ -709,7 +957,7 @@ fn observe_sse_chunk(
                 ttft_ms: Some(elapsed_ms(context.started_at)),
                 ..RequestLogUpdate::default()
             };
-            if let Err(err) = update_record(&context.db_path, context.log_id, &update) {
+            if let Err(err) = context.store.update_record(context.log_id, &update) {
                 log_update_error(err);
             }
             *ttft_recorded = true;
@@ -736,7 +984,7 @@ fn observe_sse_chunk(
             response_json: Some(compact_json(response)),
             ..RequestLogUpdate::default()
         };
-        if let Err(err) = update_record(&context.db_path, context.log_id, &update) {
+        if let Err(err) = context.store.update_record(context.log_id, &update) {
             log_update_error(err);
         }
         *completed = true;
@@ -776,7 +1024,12 @@ mod tests {
         ))
     }
 
+    fn test_store(db_path: &Path) -> RequestLogStore {
+        RequestLogStore::new(db_path.to_path_buf())
+    }
+
     fn insert_running_test_log(db_path: &Path, request_id: &str) -> RequestLogContext {
+        let store = test_store(db_path);
         let record = RequestLogRecord {
             request_id: request_id.to_string(),
             model_id: "deepseek-v4-flash".to_string(),
@@ -797,9 +1050,9 @@ mod tests {
             upstream_request_json: None,
             response_json: None,
         };
-        let log_id = insert_record(db_path, &record).unwrap();
+        let log_id = store.insert_record(&record).unwrap();
         RequestLogContext {
-            db_path: db_path.to_path_buf(),
+            store,
             log_id,
             started_at: Instant::now(),
         }
@@ -857,6 +1110,61 @@ mod tests {
         let value: Value = serde_json::from_str(&headers_to_json(&headers).unwrap()).unwrap();
         assert_eq!(value["authorization"], "Bearer local-key");
         assert_eq!(value["x-debug"], json!(["one", "two"]));
+    }
+
+    #[test]
+    fn database_path_follows_state_path_in_tests() {
+        let config = AppConfig {
+            state_path: std::env::temp_dir().join("codex-remote-test-state.json"),
+            ..AppConfig::default()
+        };
+
+        assert_eq!(
+            database_path(&config),
+            config.state_path.parent().unwrap().join(DB_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn request_log_store_reuses_open_connection() {
+        let db_path = temp_db_path();
+        let store = test_store(&db_path);
+        let record = RequestLogRecord {
+            request_id: "req-store".to_string(),
+            model_id: "deepseek-v4-flash".to_string(),
+            stream: false,
+            channel: "deepseek".to_string(),
+            provider_type: "chat_completions".to_string(),
+            status: "running".to_string(),
+            usage: LogUsage::default(),
+            cost_usd: None,
+            latency_ms: None,
+            ttft_ms: None,
+            created_at_ms: now_ms(),
+            error_message: None,
+            request_headers_json: None,
+            request_json: None,
+            upstream_request_body_bytes: None,
+            upstream_request_headers_json: None,
+            upstream_request_json: None,
+            response_json: None,
+        };
+
+        let id = store.insert_record(&record).unwrap();
+        store
+            .update_record(
+                id,
+                &RequestLogUpdate {
+                    status: Some("completed".to_string()),
+                    ..RequestLogUpdate::default()
+                },
+            )
+            .unwrap();
+
+        let logs = store.list_recent(10).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].status, "completed");
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]
@@ -1108,9 +1416,10 @@ mod tests {
             response_json: None,
         };
 
-        let log_id = insert_record(&db_path, &record).unwrap();
+        let store = test_store(&db_path);
+        let log_id = store.insert_record(&record).unwrap();
         let context = RequestLogContext {
-            db_path: db_path.clone(),
+            store,
             log_id,
             started_at: Instant::now(),
         };

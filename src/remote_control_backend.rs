@@ -64,7 +64,7 @@ pub use session_api::{
     ThreadStartOptions, clear_thread_for_client, clear_turn_for_client, config_read_for_client,
     current_thread_for_client, interrupt_turn_for_client, model_list_for_client,
     resume_thread_for_client, start_thread_for_client, start_turn_for_client,
-    thread_list_for_client, thread_loaded_list_for_client,
+    thread_list_all_providers_for_client, thread_list_for_client, thread_loaded_list_for_client,
 };
 pub use status::{RemoteControlStatusResponse, status_snapshot};
 use utils::*;

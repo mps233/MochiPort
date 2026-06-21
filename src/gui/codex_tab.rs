@@ -24,6 +24,8 @@ use super::{
 type CodexModelSlugs = Rc<Vec<String>>;
 type CodexModelsInitialized = Rc<Cell<bool>>;
 type CodexConfigured = Rc<Cell<bool>>;
+type CodexRemoteReady = Rc<Cell<bool>>;
+type CodexServiceEnabled = Rc<Cell<bool>>;
 
 pub(super) type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
 
@@ -34,11 +36,14 @@ pub(super) struct CodexTab {
     provider_image_generation: CheckBox,
     inject_button: Button,
     clear_button: Button,
+    session_history_button: Button,
     save_models_button: Button,
     model_list: CheckListBox,
     model_slugs: CodexModelSlugs,
     models_initialized: CodexModelsInitialized,
     configured: CodexConfigured,
+    remote_ready: CodexRemoteReady,
+    service_enabled: CodexServiceEnabled,
 }
 
 pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
@@ -117,6 +122,41 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         &local_config_section,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        12,
+    );
+
+    let session_box = StaticBox::builder(&page)
+        .with_label(text.codex_session_history())
+        .build();
+    let session_section =
+        StaticBoxSizerBuilder::new_with_box(&session_box, Orientation::Vertical).build();
+    let session_hint = StaticText::builder(&session_box)
+        .with_label(text.codex_session_history_help())
+        .build();
+    session_hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    session_section.add(
+        &session_hint,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+    let session_history_button = Button::builder(&session_box)
+        .with_label(text.open_codex_session_history())
+        .build();
+    session_history_button.enable(false);
+    let session_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    session_actions.add_stretch_spacer(1);
+    session_actions.add(&session_history_button, 0, SizerFlag::Right, 0);
+    session_section.add_sizer(
+        &session_actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        10,
+    );
+    sizer.add_sizer(
+        &session_section,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         12,
     );
 
@@ -204,11 +244,14 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         provider_image_generation,
         inject_button,
         clear_button,
+        session_history_button,
         save_models_button,
         model_list,
         model_slugs,
         models_initialized: Rc::new(Cell::new(false)),
         configured: Rc::new(Cell::new(false)),
+        remote_ready: Rc::new(Cell::new(false)),
+        service_enabled: Rc::new(Cell::new(false)),
     }
 }
 
@@ -220,17 +263,21 @@ pub(super) fn bind_actions(
     result: &CodexActionResultStore,
     in_flight: &Arc<AtomicBool>,
 ) {
+    bind_image_generation_action(api, tab, refresh, result);
     bind_inject_action(api, frame, tab, refresh, result, in_flight);
     bind_save_models_action(api, frame, tab, refresh, result, in_flight);
     bind_clear_action(api, frame, tab, refresh, result, in_flight);
+    bind_session_history_action(api, frame, tab, refresh);
 }
 
 pub(super) fn set_actions_enabled(tab: &CodexTab, enabled: bool) {
+    tab.service_enabled.set(enabled);
     tab.provider_image_generation.enable(enabled);
     tab.save_models_button.enable(enabled);
     tab.model_list.enable(enabled);
-    tab.inject_button.enable(enabled);
-    tab.clear_button.enable(enabled && tab.configured.get());
+    refresh_config_buttons(tab, enabled);
+    tab.session_history_button
+        .enable(enabled && tab.remote_ready.get());
 }
 
 pub(super) fn refresh_image_generation(tab: &CodexTab, enabled: bool) {
@@ -241,7 +288,12 @@ pub(super) fn refresh_image_generation(tab: &CodexTab, enabled: bool) {
 
 pub(super) fn refresh_configured(tab: &CodexTab, configured: bool) {
     tab.configured.set(configured);
-    tab.clear_button.enable(configured);
+    refresh_config_buttons(tab, tab.service_enabled.get());
+}
+
+pub(super) fn refresh_remote_ready(tab: &CodexTab, remote_ready: bool) {
+    tab.remote_ready.set(remote_ready);
+    tab.session_history_button.enable(remote_ready);
 }
 
 pub(super) fn initialize_visible_model_checks(tab: &CodexTab, gateway_config: &AiGatewayConfig) {
@@ -276,8 +328,7 @@ pub(super) fn apply_pending_action(
     tab.inject_button.set_label(text.inject_codex_access());
     tab.clear_button.set_label(text.clear_codex_access());
     tab.save_models_button.set_label(text.save_codex_models());
-    tab.inject_button.enable(true);
-    tab.clear_button.enable(tab.configured.get());
+    refresh_config_buttons(tab, true);
     tab.save_models_button.enable(true);
 
     match result {
@@ -305,14 +356,28 @@ pub(super) fn apply_pending_action(
             show_error(frame, &err);
             force_dashboard_refresh(api, refresh);
         }
+        CodexActionResult::ImageGeneration(Ok(_enabled)) => {
+            force_dashboard_refresh(api, refresh);
+        }
+        CodexActionResult::ImageGeneration(Err(err)) => {
+            show_error(frame, &err);
+            force_dashboard_refresh(api, refresh);
+        }
     }
     true
+}
+
+fn refresh_config_buttons(tab: &CodexTab, service_enabled: bool) {
+    let configured = tab.configured.get();
+    tab.inject_button.enable(service_enabled && !configured);
+    tab.clear_button.enable(service_enabled && configured);
 }
 
 pub(super) enum CodexActionResult {
     Inject(Result<serde_json::Value, String>),
     Clear(Result<serde_json::Value, String>),
     SaveModels(Result<(), String>),
+    ImageGeneration(Result<bool, String>),
 }
 
 fn bind_inject_action(
@@ -346,7 +411,7 @@ fn bind_inject_action(
             provider_base_url: None,
             provider_key: None,
             activate: true,
-            image_generation_enabled: Some(tab.provider_image_generation.get_value()),
+            image_generation_enabled: None,
             supports_websockets: false,
         };
         let thread_api = api.clone();
@@ -358,6 +423,30 @@ fn bind_inject_action(
                 slot.replace(CodexActionResult::Inject(outcome));
             }
             in_flight.store(false, Ordering::SeqCst);
+        });
+        schedule_dashboard_refresh(&api, &refresh);
+    });
+}
+
+fn bind_image_generation_action(
+    api: &ApiClient,
+    tab: &CodexTab,
+    refresh: &DashboardRefresh,
+    result: &CodexActionResultStore,
+) {
+    let api = api.clone();
+    let refresh = refresh.clone();
+    let result = result.clone();
+    let input = tab.provider_image_generation;
+    input.on_toggled(move |_| {
+        let enabled = input.get_value();
+        let thread_api = api.clone();
+        let result = result.clone();
+        thread::spawn(move || {
+            let outcome = save_filter_image_generation_tool(&thread_api, enabled).map(|()| enabled);
+            if let Ok(mut slot) = result.lock() {
+                slot.replace(CodexActionResult::ImageGeneration(outcome));
+            }
         });
         schedule_dashboard_refresh(&api, &refresh);
     });
@@ -447,6 +536,25 @@ fn bind_clear_action(
     });
 }
 
+fn bind_session_history_action(
+    api: &ApiClient,
+    frame: &Frame,
+    tab: &CodexTab,
+    refresh: &DashboardRefresh,
+) {
+    let api = api.clone();
+    let frame = *frame;
+    let tab = tab.clone();
+    let refresh = refresh.clone();
+    let button = tab.session_history_button;
+    button.on_click(move |_| {
+        if !ensure_service_ready_for_action(&api, &frame, &refresh) {
+            return;
+        }
+        super::show_session_history_window(&frame, tab.text, api.clone());
+    });
+}
+
 fn selected_visible_models(tab: &CodexTab) -> Vec<String> {
     tab.model_slugs
         .iter()
@@ -462,6 +570,13 @@ fn selected_visible_models(tab: &CodexTab) -> Vec<String> {
 fn save_visible_models(api: &ApiClient, models: Vec<String>) -> Result<(), String> {
     let mut config = api.get_app_config()?;
     config.ai_gateway.codex_visible_models = models;
+    api.save_app_config(&config)?;
+    Ok(())
+}
+
+fn save_filter_image_generation_tool(api: &ApiClient, enabled: bool) -> Result<(), String> {
+    let mut config = api.get_app_config()?;
+    config.ai_gateway.filter_image_generation_tool = enabled;
     api.save_app_config(&config)?;
     Ok(())
 }
