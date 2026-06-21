@@ -1307,8 +1307,30 @@ fn provider_name(value: Option<&str>) -> Result<String> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct LocalAuthIdentity {
+    account_id: String,
+    user_id: String,
+    email: String,
+    plan_type: String,
+    account_is_fedramp: bool,
+}
+
+impl LocalAuthIdentity {
+    fn from_options(options: &ConfigureCodexAppOptions) -> Self {
+        Self {
+            account_id: options.account_id.clone(),
+            user_id: options.user_id.clone(),
+            email: options.email.clone(),
+            plan_type: options.plan_type.clone(),
+            account_is_fedramp: false,
+        }
+    }
+}
+
 fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()> {
-    let jwt = local_chatgpt_jwt(options)?;
+    let identity = derive_local_auth_identity(path, options);
+    let jwt = local_chatgpt_jwt(&identity)?;
     let auth = json!({
         "auth_mode": LOCAL_AUTH_MODE,
         "OPENAI_API_KEY": null,
@@ -1316,7 +1338,7 @@ fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()
             "id_token": jwt,
             "access_token": jwt,
             "refresh_token": "",
-            "account_id": options.account_id,
+            "account_id": identity.account_id,
         },
         "last_refresh": rfc3339_now(),
     });
@@ -1324,6 +1346,104 @@ fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()
     backup_existing(path)?;
     std::fs::write(path, format!("{raw}\n"))
         .with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn derive_local_auth_identity(
+    path: &Path,
+    options: &ConfigureCodexAppOptions,
+) -> LocalAuthIdentity {
+    let defaults = LocalAuthIdentity::from_options(options);
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return defaults;
+    };
+    let Ok(auth) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return defaults;
+    };
+    let auth_mode = auth.get("auth_mode").and_then(|value| value.as_str());
+    if !matches!(
+        auth_mode,
+        Some(LOCAL_AUTH_MODE) | Some(LEGACY_LOCAL_AUTH_MODE)
+    ) {
+        return defaults;
+    }
+    if is_codex_remote_auth_json(&auth) {
+        return defaults;
+    }
+
+    let Some(payload) = auth
+        .pointer("/tokens/id_token")
+        .and_then(|value| value.as_str())
+        .and_then(decode_jwt_payload_value)
+        .or_else(|| {
+            auth.pointer("/tokens/access_token")
+                .and_then(|value| value.as_str())
+                .and_then(decode_jwt_payload_value)
+        })
+    else {
+        return defaults;
+    };
+    let claim_auth = payload
+        .get("https://api.openai.com/auth")
+        .and_then(|value| value.as_object());
+    let account_id = auth
+        .pointer("/tokens/account_id")
+        .and_then(|value| value.as_str())
+        .and_then(|value| non_empty(Some(value)))
+        .map(str::to_string)
+        .or_else(|| {
+            claim_auth
+                .and_then(|value| value.get("chatgpt_account_id"))
+                .and_then(|value| value.as_str())
+                .and_then(|value| non_empty(Some(value)))
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            claim_auth
+                .and_then(|value| value.get("account_id"))
+                .and_then(|value| value.as_str())
+                .and_then(|value| non_empty(Some(value)))
+                .map(str::to_string)
+        });
+    let Some(account_id) = account_id else {
+        return defaults;
+    };
+
+    LocalAuthIdentity {
+        account_id,
+        user_id: claim_auth
+            .and_then(|value| value.get("chatgpt_user_id"))
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                claim_auth
+                    .and_then(|value| value.get("user_id"))
+                    .and_then(|value| value.as_str())
+            })
+            .and_then(|value| non_empty(Some(value)))
+            .unwrap_or(defaults.user_id.as_str())
+            .to_string(),
+        email: payload
+            .get("email")
+            .and_then(|value| value.as_str())
+            .or_else(|| {
+                payload
+                    .get("https://api.openai.com/profile")
+                    .and_then(|value| value.get("email"))
+                    .and_then(|value| value.as_str())
+            })
+            .and_then(|value| non_empty(Some(value)))
+            .unwrap_or(defaults.email.as_str())
+            .to_string(),
+        plan_type: claim_auth
+            .and_then(|value| value.get("chatgpt_plan_type"))
+            .and_then(|value| value.as_str())
+            .and_then(|value| non_empty(Some(value)))
+            .unwrap_or(defaults.plan_type.as_str())
+            .to_string(),
+        account_is_fedramp: claim_auth
+            .and_then(|value| value.get("chatgpt_account_is_fedramp"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(defaults.account_is_fedramp),
+    }
 }
 
 fn is_codex_remote_auth_json(auth: &serde_json::Value) -> bool {
@@ -1345,13 +1465,7 @@ fn is_codex_remote_auth_json(auth: &serde_json::Value) -> bool {
 }
 
 fn is_codex_remote_local_jwt(token: &str) -> bool {
-    let Some(payload) = token.split('.').nth(1) else {
-        return false;
-    };
-    let Ok(payload) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) else {
-        return false;
-    };
-    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&payload) else {
+    let Some(payload) = decode_jwt_payload_value(token) else {
         return false;
     };
     let local_subject = payload
@@ -1364,6 +1478,14 @@ fn is_codex_remote_local_jwt(token: &str) -> bool {
         .and_then(|value| value.as_bool())
         == Some(true);
     local_subject && local_auth
+}
+
+fn decode_jwt_payload_value(token: &str) -> Option<serde_json::Value> {
+    let payload = token.split('.').nth(1)?;
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice::<serde_json::Value>(&payload).ok()
 }
 
 #[derive(Debug, Clone)]
@@ -1684,7 +1806,7 @@ fn backup_existing(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn local_chatgpt_jwt(options: &ConfigureCodexAppOptions) -> Result<String> {
+fn local_chatgpt_jwt(identity: &LocalAuthIdentity) -> Result<String> {
     let now = unix_now()?;
     let exp = now + 10 * 365 * 24 * 60 * 60;
     let payload = json!({
@@ -1693,26 +1815,26 @@ fn local_chatgpt_jwt(options: &ConfigureCodexAppOptions) -> Result<String> {
         "iat": now,
         "nbf": now,
         "exp": exp,
-        "sub": format!("local|{}", options.user_id),
-        "email": options.email,
+        "sub": format!("local|{}", identity.user_id),
+        "email": identity.email,
         "email_verified": true,
         "https://api.openai.com/profile": {
-            "email": options.email,
+            "email": identity.email,
             "email_verified": true,
         },
         "https://api.openai.com/auth": {
-            "chatgpt_account_id": options.account_id,
-            "account_id": options.account_id,
-            "chatgpt_account_user_id": format!("{}__{}", options.user_id, options.account_id),
-            "account_user_id": format!("{}__{}", options.user_id, options.account_id),
-            "chatgpt_plan_type": options.plan_type,
-            "chatgpt_user_id": options.user_id,
-            "user_id": options.user_id,
-            "chatgpt_account_is_fedramp": false,
+            "chatgpt_account_id": identity.account_id,
+            "account_id": identity.account_id,
+            "chatgpt_account_user_id": format!("{}__{}", identity.user_id, identity.account_id),
+            "account_user_id": format!("{}__{}", identity.user_id, identity.account_id),
+            "chatgpt_plan_type": identity.plan_type,
+            "chatgpt_user_id": identity.user_id,
+            "user_id": identity.user_id,
+            "chatgpt_account_is_fedramp": identity.account_is_fedramp,
             "localhost": true,
             "groups": [],
             "organizations": [{
-                "id": options.account_id,
+                "id": identity.account_id,
                 "is_default": true,
                 "role": "owner",
                 "title": "Codex Remote Local",
@@ -1878,6 +2000,109 @@ mod tests {
         assert!(config.contains("supports_websockets = false"));
         assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
 
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_reuses_existing_chatgpt_auth_identity() {
+        let codex_home = unique_temp_dir();
+        let auth_path = codex_home.join("auth.json");
+        std::fs::write(
+            &auth_path,
+            official_chatgpt_auth_json(
+                "acct_official",
+                "user_official",
+                "official@example.test",
+                "plus",
+                true,
+            ),
+        )
+        .expect("write existing auth");
+
+        let report =
+            configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
+        let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
+        let auth = serde_json::from_str::<serde_json::Value>(&auth).expect("parse auth");
+        assert_eq!(
+            auth.pointer("/tokens/account_id")
+                .and_then(|value| value.as_str()),
+            Some("acct_official")
+        );
+        let payload = auth
+            .pointer("/tokens/id_token")
+            .and_then(|value| value.as_str())
+            .and_then(decode_jwt_payload_value)
+            .expect("local jwt payload");
+        let claim_auth = payload
+            .get("https://api.openai.com/auth")
+            .expect("auth claims");
+        assert_eq!(
+            claim_auth
+                .get("chatgpt_account_id")
+                .and_then(|value| value.as_str()),
+            Some("acct_official")
+        );
+        assert_eq!(
+            claim_auth
+                .get("chatgpt_user_id")
+                .and_then(|value| value.as_str()),
+            Some("user_official")
+        );
+        assert_eq!(
+            claim_auth
+                .get("chatgpt_plan_type")
+                .and_then(|value| value.as_str()),
+            Some("plus")
+        );
+        assert_eq!(
+            claim_auth
+                .get("chatgpt_account_is_fedramp")
+                .and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            payload.get("email").and_then(|value| value.as_str()),
+            Some("official@example.test")
+        );
+
+        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_ignores_existing_api_key_auth_identity() {
+        let codex_home = unique_temp_dir();
+        let auth_path = codex_home.join("auth.json");
+        std::fs::write(
+            &auth_path,
+            r#"{
+  "auth_mode": "apiKey",
+  "OPENAI_API_KEY": "sk-test"
+}
+"#,
+        )
+        .expect("write api key auth");
+
+        let report =
+            configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
+        let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
+        let auth = serde_json::from_str::<serde_json::Value>(&auth).expect("parse auth");
+        assert_eq!(
+            auth.pointer("/tokens/account_id")
+                .and_then(|value| value.as_str()),
+            Some("acct_test")
+        );
+        let payload = auth
+            .pointer("/tokens/id_token")
+            .and_then(|value| value.as_str())
+            .and_then(decode_jwt_payload_value)
+            .expect("local jwt payload");
+        assert_eq!(
+            payload.get("email").and_then(|value| value.as_str()),
+            Some("local@example.test")
+        );
+
+        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
         let _ = std::fs::remove_dir_all(codex_home);
     }
 
@@ -2610,6 +2835,51 @@ base_url = "https://api.example.invalid"
         ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
+    }
+
+    fn official_chatgpt_auth_json(
+        account_id: &str,
+        user_id: &str,
+        email: &str,
+        plan_type: &str,
+        fedramp: bool,
+    ) -> String {
+        let jwt = test_jwt(&json!({
+            "sub": user_id,
+            "email": email,
+            "https://api.openai.com/profile": {
+                "email": email,
+            },
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": account_id,
+                "account_id": account_id,
+                "chatgpt_user_id": user_id,
+                "user_id": user_id,
+                "chatgpt_plan_type": plan_type,
+                "chatgpt_account_is_fedramp": fedramp,
+            }
+        }));
+        serde_json::to_string_pretty(&json!({
+            "auth_mode": LEGACY_LOCAL_AUTH_MODE,
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": jwt,
+                "access_token": jwt,
+                "refresh_token": "refresh",
+                "account_id": account_id,
+            },
+            "last_refresh": "2026-01-01T00:00:00Z",
+        }))
+        .expect("serialize auth")
+    }
+
+    fn test_jwt(payload: &serde_json::Value) -> String {
+        format!(
+            "{}.{}.{}",
+            b64url_json(&json!({ "alg": "none", "typ": "JWT" })).expect("jwt header"),
+            b64url_json(payload).expect("jwt payload"),
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig")
+        )
     }
 
     #[test]
