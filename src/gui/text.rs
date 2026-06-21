@@ -303,19 +303,15 @@ impl GuiText {
 
     pub(super) fn image_generation_feature_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => {
-                "写入 ~/.codex/config.toml 的 [features].image_generation；仅用于影响 Codex CLI 和 VS Code 插件。Codex App 本地会话可能使用自己的 feature gate，本开关不能保证干预。"
-            }
-            GuiLocale::EnUs => {
-                "Writes [features].image_generation in ~/.codex/config.toml for Codex CLI and the VS Code extension. Codex App local sessions may use their own feature gates, so this switch cannot reliably control them."
-            }
+            GuiLocale::ZhCn => "让支持的 Codex 客户端显示生图能力。",
+            GuiLocale::EnUs => "Show image generation in supported Codex clients.",
         }
     }
 
     pub(super) fn image_generation_feature_note(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "随写入配置一起保存",
-            GuiLocale::EnUs => "Saved when writing config",
+            GuiLocale::ZhCn => "写入配置后生效",
+            GuiLocale::EnUs => "Applies after writing config",
         }
     }
 
@@ -328,12 +324,8 @@ impl GuiText {
 
     pub(super) fn codex_local_config_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => {
-                "管理本工具写入的 Codex 本地配置，包括接入地址和生图开关；不影响下方 AI Gateway 渠道配置。"
-            }
-            GuiLocale::EnUs => {
-                "Manage local Codex settings written by this tool, including access URL and image generation; does not affect AI Gateway providers below."
-            }
+            GuiLocale::ZhCn => "让 Codex 连接到本地服务，可随时移除。",
+            GuiLocale::EnUs => "Connect Codex to the local service. You can remove this anytime.",
         }
     }
 
@@ -346,12 +338,8 @@ impl GuiText {
 
     pub(super) fn codex_visible_models_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => {
-                "只控制 Codex App 模型选择器展示哪些 models.json 中可用的模型；不影响 AI Gateway 渠道路由。"
-            }
-            GuiLocale::EnUs => {
-                "Controls which available models from models.json are shown in the Codex App picker; does not affect AI Gateway routing."
-            }
+            GuiLocale::ZhCn => "选择 Codex 里要显示的模型。",
+            GuiLocale::EnUs => "Choose which models are shown in Codex.",
         }
     }
 
@@ -389,15 +377,15 @@ impl GuiText {
 
     pub(super) fn clear_codex_access(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "移除 Codex 配置",
-            GuiLocale::EnUs => "Remove Codex Config",
+            GuiLocale::ZhCn => "恢复 Codex 原有配置",
+            GuiLocale::EnUs => "Restore Codex Config",
         }
     }
 
     pub(super) fn clear_codex_access_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "移除本工具写入的 Codex 本地配置",
-            GuiLocale::EnUs => "Remove local Codex settings written by this tool",
+            GuiLocale::ZhCn => "恢复写入前的 Codex 连接",
+            GuiLocale::EnUs => "Restore the Codex connection from before setup",
         }
     }
 
@@ -410,8 +398,8 @@ impl GuiText {
 
     pub(super) fn inject_codex_access_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "写入本工具管理的 Codex 本地配置",
-            GuiLocale::EnUs => "Write local Codex settings managed by this tool",
+            GuiLocale::ZhCn => "让 Codex 使用本地服务",
+            GuiLocale::EnUs => "Use the local service from Codex",
         }
     }
 
@@ -424,8 +412,8 @@ impl GuiText {
 
     pub(super) fn clearing_codex_access(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "移除中...",
-            GuiLocale::EnUs => "Removing...",
+            GuiLocale::ZhCn => "恢复中...",
+            GuiLocale::EnUs => "Restoring...",
         }
     }
 
@@ -1196,10 +1184,8 @@ impl GuiText {
 
     pub(super) fn codex_app_config_uninstalled(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex 本地配置已移除。请重启 Codex App 以恢复官方连接。",
-            GuiLocale::EnUs => {
-                "Local Codex settings were removed. Restart Codex App to restore the official connection."
-            }
+            GuiLocale::ZhCn => "Codex 原有配置已恢复。请重启 Codex App 生效。",
+            GuiLocale::EnUs => "Codex configuration was restored. Restart Codex App to apply it.",
         }
     }
 
@@ -1393,18 +1379,18 @@ impl GuiText {
     pub(super) fn confirm_uninstall_codex_app_message(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "移除配置会从当前 config.toml 中清理本工具可识别的 Codex 本地字段，不回滚 Codex App 后续写入的其它配置；auth.json 会优先恢复首次写入前的备份。确认继续？"
+                "移除后，Codex 会恢复默认连接。本工具会保留 Codex 后续产生的其它设置，并尽量恢复原来的登录状态。确认继续？"
             }
             GuiLocale::EnUs => {
-                "Removing config cleans only Codex local fields this tool can identify from the current config.toml without rolling back later Codex App writes. auth.json is restored from the first-write backup when available. Continue?"
+                "After removal, Codex will use its default connection again. Other settings added later are kept, and the previous sign-in state is restored when available. Continue?"
             }
         }
     }
 
     pub(super) fn confirm_uninstall_codex_app_title(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "移除 Codex 配置",
-            GuiLocale::EnUs => "Remove Codex Config",
+            GuiLocale::ZhCn => "恢复 Codex 原有配置",
+            GuiLocale::EnUs => "Restore Codex Config",
         }
     }
 

@@ -3143,10 +3143,13 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     set_actions_enabled(handles, true);
 
     if let Some(codex_status) = &snapshot.codex_app {
+        codex_tab::refresh_configured(&handles.codex_tab, codex_status.configured);
         codex_tab::refresh_image_generation(
             &handles.codex_tab,
             codex_status.image_generation_enabled,
         );
+    } else {
+        codex_tab::refresh_configured(&handles.codex_tab, false);
     }
 
     if let Some(status) = &snapshot.status {

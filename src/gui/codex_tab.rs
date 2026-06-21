@@ -23,6 +23,7 @@ use super::{
 
 type CodexModelSlugs = Rc<Vec<String>>;
 type CodexModelsInitialized = Rc<Cell<bool>>;
+type CodexConfigured = Rc<Cell<bool>>;
 
 pub(super) type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
 
@@ -37,6 +38,7 @@ pub(super) struct CodexTab {
     model_list: CheckListBox,
     model_slugs: CodexModelSlugs,
     models_initialized: CodexModelsInitialized,
+    configured: CodexConfigured,
 }
 
 pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
@@ -100,6 +102,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_label(text.clear_codex_access())
         .build();
     clear_button.set_tooltip(text.clear_codex_access_help());
+    clear_button.enable(false);
     let local_config_actions = BoxSizer::builder(Orientation::Horizontal).build();
     local_config_actions.add_stretch_spacer(1);
     local_config_actions.add(&inject_button, 0, SizerFlag::Right, 8);
@@ -205,6 +208,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         model_list,
         model_slugs,
         models_initialized: Rc::new(Cell::new(false)),
+        configured: Rc::new(Cell::new(false)),
     }
 }
 
@@ -226,13 +230,18 @@ pub(super) fn set_actions_enabled(tab: &CodexTab, enabled: bool) {
     tab.save_models_button.enable(enabled);
     tab.model_list.enable(enabled);
     tab.inject_button.enable(enabled);
-    tab.clear_button.enable(enabled);
+    tab.clear_button.enable(enabled && tab.configured.get());
 }
 
 pub(super) fn refresh_image_generation(tab: &CodexTab, enabled: bool) {
     if !tab.provider_image_generation.has_focus() {
         tab.provider_image_generation.set_value(enabled);
     }
+}
+
+pub(super) fn refresh_configured(tab: &CodexTab, configured: bool) {
+    tab.configured.set(configured);
+    tab.clear_button.enable(configured);
 }
 
 pub(super) fn initialize_visible_model_checks(tab: &CodexTab, gateway_config: &AiGatewayConfig) {
@@ -268,7 +277,7 @@ pub(super) fn apply_pending_action(
     tab.clear_button.set_label(text.clear_codex_access());
     tab.save_models_button.set_label(text.save_codex_models());
     tab.inject_button.enable(true);
-    tab.clear_button.enable(true);
+    tab.clear_button.enable(tab.configured.get());
     tab.save_models_button.enable(true);
 
     match result {
