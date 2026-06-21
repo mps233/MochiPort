@@ -125,6 +125,40 @@ impl From<i32> for FindFlags {
     }
 }
 
+/// Indicator drawing styles for StyledTextCtrl.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndicatorStyle {
+    Plain = 0,
+    Squiggle = 1,
+    TT = 2,
+    Diagonal = 3,
+    Strike = 4,
+    Hidden = 5,
+    Box = 6,
+    RoundBox = 7,
+    StraightBox = 8,
+    Dash = 9,
+    Dots = 10,
+    SquiggleLow = 11,
+    DotBox = 12,
+    SquigglePixmap = 13,
+    CompositionThick = 14,
+    CompositionThin = 15,
+    FullBox = 16,
+    TextFore = 17,
+    Point = 18,
+    PointCharacter = 19,
+    Gradient = 20,
+    GradientCentre = 21,
+}
+
+impl From<IndicatorStyle> for i32 {
+    fn from(val: IndicatorStyle) -> Self {
+        val as i32
+    }
+}
+
 /// Whitespace visibility modes for StyledTextCtrl
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -915,6 +949,71 @@ impl StyledTextCtrl {
         unsafe { ffi::wxd_StyledTextCtrl_MarkerSetBackground(ptr, marker_number, color.into()) };
     }
 
+    // --- Indicator Operations ---
+
+    /// Sets the drawing style for an indicator.
+    pub fn indicator_set_style(&self, indicator: i32, style: IndicatorStyle) {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_IndicatorSetStyle(ptr, indicator, style.into()) };
+    }
+
+    /// Sets the foreground color for an indicator.
+    pub fn indicator_set_foreground(&self, indicator: i32, color: Colour) {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_IndicatorSetForeground(ptr, indicator, color.into()) };
+    }
+
+    /// Sets the fill alpha for an indicator.
+    pub fn indicator_set_alpha(&self, indicator: i32, alpha: i32) {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_IndicatorSetAlpha(ptr, indicator, alpha) };
+    }
+
+    /// Sets the outline alpha for an indicator.
+    pub fn indicator_set_outline_alpha(&self, indicator: i32, alpha: i32) {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_IndicatorSetOutlineAlpha(ptr, indicator, alpha) };
+    }
+
+    /// Selects the indicator used by fill/clear operations.
+    pub fn set_indicator_current(&self, indicator: i32) {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_SetIndicatorCurrent(ptr, indicator) };
+    }
+
+    /// Fills an indicator over a text range.
+    pub fn indicator_fill_range(&self, start: i32, length: i32) {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_IndicatorFillRange(ptr, start, length) };
+    }
+
+    /// Clears an indicator over a text range.
+    pub fn indicator_clear_range(&self, start: i32, length: i32) {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_StyledTextCtrl_IndicatorClearRange(ptr, start, length) };
+    }
+
     // --- Styling Operations ---
 
     /// Sets the font for a specific style.
@@ -1216,6 +1315,37 @@ impl StyledTextCtrl {
     /// Search previous with type-safe flags
     pub fn search_prev_typed(&self, search_flags: FindFlags, text: &str) -> Option<i32> {
         self.search_prev(search_flags, text)
+    }
+
+    /// Finds text from a position, selects it, scrolls it into view, and optionally wraps.
+    pub fn find_and_select(
+        &self,
+        start_pos: i32,
+        text: &str,
+        flags: FindFlags,
+        backwards: bool,
+        wrap: bool,
+    ) -> Option<i32> {
+        let ptr = self.stc_ptr();
+        if ptr.is_null() || text.is_empty() {
+            return None;
+        }
+        let c_text = CString::new(text).unwrap_or_default();
+        if c_text.as_bytes().is_empty() {
+            return None;
+        }
+
+        let result = unsafe {
+            ffi::wxd_StyledTextCtrl_FindAndSelect(
+                ptr,
+                start_pos,
+                c_text.as_ptr(),
+                flags.bits_i32(),
+                backwards,
+                wrap,
+            )
+        };
+        if result >= 0 { Some(result) } else { None }
     }
 
     /// Replace the current selection with text

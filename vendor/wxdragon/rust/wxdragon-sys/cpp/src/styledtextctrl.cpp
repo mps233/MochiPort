@@ -7,6 +7,8 @@
 #include "wx/stc/stc.h"
 #include "../include/wxdragon.h"
 #include "wxd_utils.h"
+#include <algorithm>
+#include <cstring>
 
 extern "C" {
 
@@ -425,6 +427,73 @@ wxd_StyledTextCtrl_MarkerSetBackground(wxd_StyledTextCtrl_t* self, int markerNum
     }
 }
 
+// Indicator operations
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorSetStyle(wxd_StyledTextCtrl_t* self, int indicator,
+                                     int indicator_style)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl) {
+        ctrl->IndicatorSetStyle(indicator, indicator_style);
+    }
+}
+
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorSetForeground(wxd_StyledTextCtrl_t* self, int indicator,
+                                          wxd_Colour_t colour)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl) {
+        wxColour wxCol(colour.r, colour.g, colour.b, colour.a);
+        ctrl->IndicatorSetForeground(indicator, wxCol);
+    }
+}
+
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorSetAlpha(wxd_StyledTextCtrl_t* self, int indicator, int alpha)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl) {
+        ctrl->IndicatorSetAlpha(indicator, alpha);
+    }
+}
+
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorSetOutlineAlpha(wxd_StyledTextCtrl_t* self, int indicator, int alpha)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl) {
+        ctrl->IndicatorSetOutlineAlpha(indicator, alpha);
+    }
+}
+
+WXD_EXPORTED void
+wxd_StyledTextCtrl_SetIndicatorCurrent(wxd_StyledTextCtrl_t* self, int indicator)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl) {
+        ctrl->SetIndicatorCurrent(indicator);
+    }
+}
+
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorFillRange(wxd_StyledTextCtrl_t* self, int start, int length)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl && start >= 0 && length > 0) {
+        ctrl->IndicatorFillRange(start, length);
+    }
+}
+
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorClearRange(wxd_StyledTextCtrl_t* self, int start, int length)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (ctrl && start >= 0 && length > 0) {
+        ctrl->IndicatorClearRange(start, length);
+    }
+}
+
 // Styling operations
 WXD_EXPORTED void
 wxd_StyledTextCtrl_StyleSetFont(wxd_StyledTextCtrl_t* self, int style, wxd_Font_t* font)
@@ -676,6 +745,30 @@ wxd_StyledTextCtrl_FindText(wxd_StyledTextCtrl_t* self, int min_pos, int max_pos
     return -1;
 }
 
+static int
+wxd_find_text(wxStyledTextCtrl* ctrl, int min_pos, int max_pos, const char* text, int flags)
+{
+    if (!ctrl || !text || text[0] == '\0') {
+        return -1;
+    }
+    return ctrl->FindText(min_pos, max_pos, wxString::FromUTF8(text), flags);
+}
+
+static void
+wxd_select_found_text(wxStyledTextCtrl* ctrl, int position, const char* text)
+{
+    if (!ctrl || position < 0 || !text) {
+        return;
+    }
+
+    int length = static_cast<int>(strlen(text));
+    int end = position + length;
+    ctrl->GotoPos(position);
+    ctrl->ScrollToLine(std::max(0, ctrl->LineFromPosition(position) - 3));
+    ctrl->SetSelection(position, end);
+    ctrl->EnsureCaretVisible();
+}
+
 // Additional Find and Replace functions
 WXD_EXPORTED int
 wxd_StyledTextCtrl_SearchNext(wxd_StyledTextCtrl_t* self, int search_flags, const char* text)
@@ -695,6 +788,38 @@ wxd_StyledTextCtrl_SearchPrev(wxd_StyledTextCtrl_t* self, int search_flags, cons
         return ctrl->SearchPrev(search_flags, wxString::FromUTF8(text));
     }
     return -1;
+}
+
+WXD_EXPORTED int
+wxd_StyledTextCtrl_FindAndSelect(wxd_StyledTextCtrl_t* self, int start_pos, const char* text,
+                                 int flags, bool backwards, bool wrap)
+{
+    wxStyledTextCtrl* ctrl = (wxStyledTextCtrl*)self;
+    if (!ctrl || !text || text[0] == '\0') {
+        return -1;
+    }
+
+    int length = ctrl->GetLength();
+    int start = std::max(0, std::min(start_pos, length));
+    int position = -1;
+
+    if (backwards) {
+        position = wxd_find_text(ctrl, start, 0, text, flags);
+        if (position < 0 && wrap) {
+            position = wxd_find_text(ctrl, length, start, text, flags);
+        }
+    }
+    else {
+        position = wxd_find_text(ctrl, start, length, text, flags);
+        if (position < 0 && wrap) {
+            position = wxd_find_text(ctrl, 0, start, text, flags);
+        }
+    }
+
+    if (position >= 0) {
+        wxd_select_found_text(ctrl, position, text);
+    }
+    return position;
 }
 
 WXD_EXPORTED void

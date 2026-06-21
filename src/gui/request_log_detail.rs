@@ -4,6 +4,7 @@ use std::rc::Rc;
 use wxdragon::prelude::*;
 
 use super::api::{RequestLogDetail, RequestLogItem};
+use super::provider::strip_nul;
 use super::text::GuiText;
 
 const STYLE_JSON_DEFAULT: i32 = 0;
@@ -12,9 +13,9 @@ const STYLE_JSON_STRING: i32 = 2;
 const STYLE_JSON_NUMBER: i32 = 3;
 const STYLE_JSON_KEYWORD: i32 = 4;
 const STYLE_JSON_PUNCT: i32 = 5;
-const STYLE_FIND_MATCH: i32 = 6;
 const STYLE_LINE_NUMBER: i32 = 33;
 const STYLE_INDENT_GUIDE: i32 = 37;
+const INDICATOR_FIND_MATCH: i32 = 8;
 const FOLD_BASE: i32 = 0x400;
 const FOLD_HEADER: i32 = 0x2000;
 const FOLD_MARGIN: i32 = 2;
@@ -28,12 +29,13 @@ const MARKER_FOLDER_TAIL: i32 = 28;
 const MARKER_FOLDER_SUB: i32 = 29;
 const MARKER_FOLDER: i32 = 30;
 const MARKER_FOLDER_OPEN: i32 = 31;
+const KEY_F3: i32 = 342;
+const KEY_CTRL_F: i32 = 6;
+const KEY_ESCAPE: i32 = 27;
 
 #[derive(Default)]
 struct SearchState {
     query: String,
-    matches: Vec<i32>,
-    current: usize,
 }
 
 pub(super) fn show(parent: &Frame, text: GuiText, detail: &RequestLogDetail) {
@@ -161,46 +163,61 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
     let panel = Panel::builder(parent).build();
     panel.set_background_color(Colour::rgb(255, 255, 255));
 
-    let search_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let search_label = StaticText::builder(&panel)
-        .with_label(match text.locale {
-            super::text::GuiLocale::ZhCn => "查找",
-            super::text::GuiLocale::EnUs => "Find",
-        })
+    let search_bar = Panel::builder(&panel).build();
+    search_bar.set_background_color(Colour::rgb(243, 246, 250));
+    let search_input = SearchCtrl::builder(&search_bar)
+        .with_style(SearchCtrlStyle::ProcessEnter)
+        .with_size(Size::new(360, -1))
         .build();
-    let search_input = TextCtrl::builder(&panel)
-        .with_style(TextCtrlStyle::Default | TextCtrlStyle::ProcessEnter)
+    search_input.show_search_button(true);
+    search_input.show_cancel_button(true);
+    let prev_button = Button::builder(&search_bar)
+        .with_label(search_prev_text(text))
         .build();
-    search_input.set_min_size(Size::new(320, 28));
-    let previous_button = Button::builder(&panel)
-        .with_label(match text.locale {
-            super::text::GuiLocale::ZhCn => "上一个",
-            super::text::GuiLocale::EnUs => "Previous",
-        })
+    let next_button = Button::builder(&search_bar)
+        .with_label(search_next_text(text))
         .build();
-    let next_button = Button::builder(&panel)
-        .with_label(match text.locale {
-            super::text::GuiLocale::ZhCn => "下一个",
-            super::text::GuiLocale::EnUs => "Next",
-        })
+    let close_search_button = Button::builder(&search_bar)
+        .with_label(search_close_text(text))
         .build();
-    let search_status = StaticText::builder(&panel).with_label("").build();
+    let search_status = StaticText::builder(&search_bar)
+        .with_label(search_idle_text(text))
+        .build();
     search_status.set_foreground_color(Colour::rgb(94, 103, 117));
-    search_row.add(
-        &search_label,
+
+    let search_bar_sizer = BoxSizer::builder(Orientation::Horizontal).build();
+    search_bar_sizer.add(
+        &search_input,
         0,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        8,
+        SizerFlag::Left | SizerFlag::Top | SizerFlag::Bottom | SizerFlag::AlignCenterVertical,
+        6,
     );
-    search_row.add(&search_input, 0, SizerFlag::Right, 8);
-    search_row.add(&previous_button, 0, SizerFlag::Right, 6);
-    search_row.add(&next_button, 0, SizerFlag::Right, 10);
-    search_row.add(
+    search_bar_sizer.add(
+        &prev_button,
+        0,
+        SizerFlag::Left | SizerFlag::AlignCenterVertical,
+        6,
+    );
+    search_bar_sizer.add(
+        &next_button,
+        0,
+        SizerFlag::Left | SizerFlag::AlignCenterVertical,
+        6,
+    );
+    search_bar_sizer.add(
+        &close_search_button,
+        0,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::AlignCenterVertical,
+        6,
+    );
+    search_bar_sizer.add(
         &search_status,
-        0,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        0,
+        1,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::AlignCenterVertical,
+        6,
     );
+    search_bar.set_sizer(search_bar_sizer, true);
+    search_bar.hide();
 
     let editor = StyledTextCtrl::builder(&panel)
         .with_size(Size::new(1200, 720))
@@ -208,71 +225,56 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
     configure_json_editor(&editor, &display);
     let search_state = Rc::new(RefCell::new(SearchState::default()));
     {
+        let panel = panel;
         let editor = editor;
+        let search_bar = search_bar;
         let search_input = search_input;
         let search_status = search_status;
         let search_state = Rc::clone(&search_state);
-        let display = display.clone();
-        search_input.on_text_changed(move |_| {
-            update_editor_search(
-                &editor,
-                &display,
-                &search_input.get_value(),
-                &search_status,
-                &search_state,
-                0,
-            );
-        });
+        bind_search_shortcuts(
+            &editor,
+            panel,
+            editor,
+            search_bar,
+            search_input,
+            search_status,
+            search_state,
+            text,
+        );
     }
+    bind_search_bar_controls(
+        panel,
+        search_bar,
+        search_input,
+        prev_button,
+        next_button,
+        close_search_button,
+        editor,
+        search_status,
+        Rc::clone(&search_state),
+        text,
+    );
     {
-        let editor = editor;
+        let panel = panel;
+        let search_bar = search_bar;
         let search_input = search_input;
         let search_status = search_status;
         let search_state = Rc::clone(&search_state);
-        let display = display.clone();
-        search_input.on_text_enter(move |_| {
-            update_editor_search(
-                &editor,
-                &display,
-                &search_input.get_value(),
-                &search_status,
+        search_input.on_key_down(move |event| {
+            if handle_search_input_key(
+                &event,
+                panel,
+                search_bar,
+                search_input,
+                editor,
+                search_status,
                 &search_state,
-                1,
-            );
-        });
-    }
-    {
-        let editor = editor;
-        let search_input = search_input;
-        let search_status = search_status;
-        let search_state = Rc::clone(&search_state);
-        let display = display.clone();
-        previous_button.on_click(move |_| {
-            update_editor_search(
-                &editor,
-                &display,
-                &search_input.get_value(),
-                &search_status,
-                &search_state,
-                -1,
-            );
-        });
-    }
-    {
-        let editor = editor;
-        let search_input = search_input;
-        let search_status = search_status;
-        let search_state = Rc::clone(&search_state);
-        let display = display.clone();
-        next_button.on_click(move |_| {
-            update_editor_search(
-                &editor,
-                &display,
-                &search_input.get_value(),
-                &search_status,
-                &search_state,
-                1,
-            );
+                text,
+            ) {
+                event.skip(false);
+            } else {
+                event.skip(true);
+            }
         });
     }
     {
@@ -293,7 +295,7 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
     }
 
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    sizer.add_sizer(&search_row, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    sizer.add(&search_bar, 0, SizerFlag::Expand | SizerFlag::All, 0);
     sizer.add(&editor, 1, SizerFlag::Expand | SizerFlag::All, 8);
     panel.set_sizer(sizer, true);
     parent.add_page(&panel, label, false, None);
@@ -301,85 +303,403 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
 
 fn update_editor_search(
     editor: &StyledTextCtrl,
-    content: &str,
     query: &str,
     status: &StaticText,
     state: &Rc<RefCell<SearchState>>,
-    step: i32,
+    backwards: bool,
+    text: GuiText,
 ) {
-    apply_json_stc_highlight(editor, content);
-
+    let query = strip_nul(query);
     let query = query.trim();
-    if query.is_empty() || query.contains('\0') {
+    clear_search_indicators(editor);
+    if query.is_empty() {
         editor.set_selection(0, 0);
-        status.set_label("");
+        status.set_label(search_idle_text(text));
         *state.borrow_mut() = SearchState::default();
         return;
     }
 
-    let mut state = state.borrow_mut();
-    if state.query != query {
-        state.query = query.to_string();
-        state.matches = find_all_matches(editor, content, query);
-        state.current = 0;
-    } else if !state.matches.is_empty() {
-        state.current = move_match_index(state.current, state.matches.len(), step);
-    }
-
-    apply_search_match_styles(editor, query, &state.matches);
-    if let Some(position) = state.matches.get(state.current).copied() {
-        select_search_match(editor, position, query);
-        status.set_label(&format!("{}/{}", state.current + 1, state.matches.len()));
+    let same_query = state.borrow().query == query;
+    let start_pos = search_start_position(editor, backwards, same_query);
+    let match_count = mark_search_matches(editor, query);
+    if let Some(position) =
+        editor.find_and_select(start_pos, query, FindFlags::None, backwards, true)
+    {
+        state.borrow_mut().query = query.to_string();
+        status.set_label(&search_result_text(
+            text,
+            query,
+            search_match_index(editor, query, position, match_count),
+            match_count,
+        ));
     } else {
         editor.set_selection(0, 0);
-        status.set_label("0/0");
+        status.set_label(&search_result_text(text, query, 0, 0));
+        state.borrow_mut().query = query.to_string();
     }
 }
 
-fn find_all_matches(editor: &StyledTextCtrl, content: &str, query: &str) -> Vec<i32> {
-    let mut matches = Vec::new();
+fn bind_search_shortcuts(
+    editor: &StyledTextCtrl,
+    panel: Panel,
+    target: StyledTextCtrl,
+    search_bar: Panel,
+    search_input: SearchCtrl,
+    status: StaticText,
+    state: Rc<RefCell<SearchState>>,
+    text: GuiText,
+) {
+    {
+        let panel = panel;
+        let target = target;
+        let search_bar = search_bar;
+        let search_input = search_input;
+        let status = status;
+        let state = Rc::clone(&state);
+        editor.on_key_down(move |event| {
+            if handle_search_shortcut(
+                &event,
+                panel,
+                target,
+                search_bar,
+                search_input,
+                status,
+                &state,
+                text,
+            ) {
+                event.skip(false);
+            } else {
+                event.skip(true);
+            }
+        });
+    }
+    {
+        let panel = panel;
+        let target = target;
+        let search_bar = search_bar;
+        let search_input = search_input;
+        let status = status;
+        let state = Rc::clone(&state);
+        editor.on_char(move |event| {
+            if handle_search_shortcut(
+                &event,
+                panel,
+                target,
+                search_bar,
+                search_input,
+                status,
+                &state,
+                text,
+            ) {
+                event.skip(false);
+            } else {
+                event.skip(true);
+            }
+        });
+    }
+}
+
+fn handle_search_shortcut(
+    event: &WindowEventData,
+    panel: Panel,
+    editor: StyledTextCtrl,
+    search_bar: Panel,
+    search_input: SearchCtrl,
+    status: StaticText,
+    state: &Rc<RefCell<SearchState>>,
+    text: GuiText,
+) -> bool {
+    let WindowEventData::Keyboard(key_event) = event else {
+        return false;
+    };
+    let key_code = key_event.get_key_code().unwrap_or_default();
+    let unicode_key = key_event.get_unicode_key().unwrap_or_default();
+    let is_find = key_code == KEY_CTRL_F
+        || unicode_key == KEY_CTRL_F
+        || (key_event.cmd_down()
+            && (key_code == b'F' as i32
+                || key_code == b'f' as i32
+                || unicode_key == b'F' as i32
+                || unicode_key == b'f' as i32));
+    if is_find {
+        show_search_bar(panel, search_bar, search_input, editor, status, state, text);
+        return true;
+    }
+    if key_code == KEY_F3 {
+        let query = state.borrow().query.clone();
+        update_editor_search(
+            &editor,
+            &query,
+            &status,
+            state,
+            key_event.shift_down(),
+            text,
+        );
+        return true;
+    }
+    false
+}
+
+fn bind_search_bar_controls(
+    panel: Panel,
+    search_bar: Panel,
+    search_input: SearchCtrl,
+    prev_button: Button,
+    next_button: Button,
+    close_search_button: Button,
+    editor: StyledTextCtrl,
+    status: StaticText,
+    state: Rc<RefCell<SearchState>>,
+    text: GuiText,
+) {
+    {
+        let editor = editor;
+        let status = status;
+        let state = Rc::clone(&state);
+        search_input.on_text_updated(move |_| {
+            let query = search_input.get_value();
+            update_editor_search(&editor, &query, &status, &state, false, text);
+        });
+    }
+    {
+        let editor = editor;
+        let status = status;
+        let state = Rc::clone(&state);
+        search_input.on_enter_pressed(move |_| {
+            let query = search_input.get_value();
+            update_editor_search(&editor, &query, &status, &state, false, text);
+        });
+    }
+    {
+        let editor = editor;
+        let status = status;
+        let state = Rc::clone(&state);
+        search_input.on_search_button_clicked(move |_| {
+            let query = search_input.get_value();
+            update_editor_search(&editor, &query, &status, &state, false, text);
+        });
+    }
+    {
+        let editor = editor;
+        let status = status;
+        let state = Rc::clone(&state);
+        search_input.on_cancel_button_clicked(move |_| {
+            search_input.set_value("");
+            clear_search_indicators(&editor);
+            editor.set_selection(0, 0);
+            status.set_label(search_idle_text(text));
+            *state.borrow_mut() = SearchState::default();
+        });
+    }
+    {
+        let editor = editor;
+        let status = status;
+        let state = Rc::clone(&state);
+        prev_button.on_click(move |_| {
+            let query = search_input.get_value();
+            update_editor_search(&editor, &query, &status, &state, true, text);
+        });
+    }
+    {
+        let editor = editor;
+        let status = status;
+        let state = Rc::clone(&state);
+        next_button.on_click(move |_| {
+            let query = search_input.get_value();
+            update_editor_search(&editor, &query, &status, &state, false, text);
+        });
+    }
+    {
+        let editor = editor;
+        let status = status;
+        let state = Rc::clone(&state);
+        close_search_button.on_click(move |_| {
+            hide_search_bar(panel, search_bar, editor, status, &state, text);
+        });
+    }
+}
+
+fn handle_search_input_key(
+    event: &WindowEventData,
+    panel: Panel,
+    search_bar: Panel,
+    search_input: SearchCtrl,
+    editor: StyledTextCtrl,
+    status: StaticText,
+    state: &Rc<RefCell<SearchState>>,
+    text: GuiText,
+) -> bool {
+    let WindowEventData::Keyboard(key_event) = event else {
+        return false;
+    };
+    let key_code = key_event.get_key_code().unwrap_or_default();
+    if key_code == KEY_ESCAPE {
+        hide_search_bar(panel, search_bar, editor, status, state, text);
+        return true;
+    }
+    if key_code == KEY_F3 {
+        let query = search_input.get_value();
+        update_editor_search(
+            &editor,
+            &query,
+            &status,
+            state,
+            key_event.shift_down(),
+            text,
+        );
+        return true;
+    }
+    false
+}
+
+fn show_search_bar(
+    panel: Panel,
+    search_bar: Panel,
+    search_input: SearchCtrl,
+    editor: StyledTextCtrl,
+    status: StaticText,
+    state: &Rc<RefCell<SearchState>>,
+    text: GuiText,
+) {
+    if !search_bar.is_shown() {
+        search_bar.show(true);
+        panel.layout();
+    }
+    let selected_text = strip_nul(&editor.get_selected_text()).trim().to_string();
+    let query = if selected_text.is_empty() {
+        state.borrow().query.clone()
+    } else {
+        selected_text
+    };
+    if !query.is_empty() && search_input.get_value() != query {
+        search_input.set_value(&query);
+    }
+    status.set_label(search_idle_text(text));
+    search_input.set_focus();
+}
+
+fn hide_search_bar(
+    panel: Panel,
+    search_bar: Panel,
+    editor: StyledTextCtrl,
+    status: StaticText,
+    state: &Rc<RefCell<SearchState>>,
+    text: GuiText,
+) {
+    clear_search_indicators(&editor);
+    editor.set_selection(0, 0);
+    status.set_label(search_idle_text(text));
+    *state.borrow_mut() = SearchState::default();
+    search_bar.hide();
+    panel.layout();
+    editor.set_focus();
+}
+
+fn search_idle_text(text: GuiText) -> &'static str {
+    match text.locale {
+        super::text::GuiLocale::ZhCn => {
+            "输入关键词查找。Enter/下一个继续，Shift+F3/上一个返回，Esc 关闭。"
+        }
+        super::text::GuiLocale::EnUs => {
+            "Type to find. Enter/Next continues, Shift+F3/Previous goes back, Esc closes."
+        }
+    }
+}
+
+fn search_prev_text(text: GuiText) -> &'static str {
+    match text.locale {
+        super::text::GuiLocale::ZhCn => "上一个",
+        super::text::GuiLocale::EnUs => "Previous",
+    }
+}
+
+fn search_next_text(text: GuiText) -> &'static str {
+    match text.locale {
+        super::text::GuiLocale::ZhCn => "下一个",
+        super::text::GuiLocale::EnUs => "Next",
+    }
+}
+
+fn search_close_text(text: GuiText) -> &'static str {
+    match text.locale {
+        super::text::GuiLocale::ZhCn => "关闭查找",
+        super::text::GuiLocale::EnUs => "Close Find",
+    }
+}
+
+fn search_result_text(text: GuiText, query: &str, current: usize, total: usize) -> String {
+    match text.locale {
+        super::text::GuiLocale::ZhCn => {
+            format!("查找：{query}  {current}/{total}。F3 下一个，Shift+F3 上一个。")
+        }
+        super::text::GuiLocale::EnUs => {
+            format!("Find: {query}  {current}/{total}. F3 next, Shift+F3 previous.")
+        }
+    }
+}
+
+fn search_start_position(editor: &StyledTextCtrl, backwards: bool, same_query: bool) -> i32 {
+    if !same_query {
+        return if backwards { editor.get_length() } else { 0 };
+    }
+    if backwards {
+        editor.get_selection_start().saturating_sub(1)
+    } else {
+        editor.get_selection_end()
+    }
+}
+
+fn mark_search_matches(editor: &StyledTextCtrl, query: &str) -> usize {
+    let query_len = byte_len_to_i32(query.len());
+    if query_len <= 0 {
+        return 0;
+    }
+
+    let mut count = 0usize;
     let mut start = 0;
-    let end = byte_len_to_i32(content.len());
-    let query_len = byte_len_to_i32(query.len()).max(1);
-    while start < end {
-        let Some(position) = editor.find_text(start, end, query, FindFlags::None) else {
+    let length = editor.get_length();
+    while start <= length {
+        let Some(position) = editor.find_text(start, length, query, FindFlags::None) else {
             break;
         };
-        matches.push(position);
-        start = position.saturating_add(query_len);
+        editor.set_indicator_current(INDICATOR_FIND_MATCH);
+        editor.indicator_fill_range(position, query_len);
+        count += 1;
+        start = position.saturating_add(query_len.max(1));
     }
-    matches
+    count
 }
 
-fn move_match_index(current: usize, len: usize, step: i32) -> usize {
-    if len == 0 || step == 0 {
-        return current;
+fn search_match_index(
+    editor: &StyledTextCtrl,
+    query: &str,
+    selected_position: i32,
+    total: usize,
+) -> usize {
+    if total == 0 {
+        return 0;
     }
-    if step > 0 {
-        (current + 1) % len
-    } else if current == 0 {
-        len - 1
-    } else {
-        current - 1
+
+    let query_len = byte_len_to_i32(query.len());
+    let mut index = 0usize;
+    let mut start = 0;
+    let length = editor.get_length();
+    while start <= length {
+        let Some(position) = editor.find_text(start, length, query, FindFlags::None) else {
+            break;
+        };
+        index += 1;
+        if position == selected_position {
+            return index;
+        }
+        start = position.saturating_add(query_len.max(1));
     }
+    1
 }
 
-fn apply_search_match_styles(editor: &StyledTextCtrl, query: &str, matches: &[i32]) {
-    if matches.is_empty() {
-        return;
-    }
-    let len = byte_len_to_i32(query.len());
-    for position in matches {
-        editor.start_styling(*position);
-        editor.set_styling(len, STYLE_FIND_MATCH);
-    }
-}
-
-fn select_search_match(editor: &StyledTextCtrl, position: i32, query: &str) {
-    let end = position.saturating_add(byte_len_to_i32(query.len()));
-    editor.goto_pos(position);
-    editor.set_selection(position, end);
-    editor.ensure_caret_visible();
+fn clear_search_indicators(editor: &StyledTextCtrl) {
+    editor.set_indicator_current(INDICATOR_FIND_MATCH);
+    editor.indicator_clear_range(0, editor.get_length());
 }
 
 fn format_json_pretty(value: &serde_json::Value) -> Option<String> {
@@ -435,12 +755,14 @@ fn configure_json_editor(editor: &StyledTextCtrl, content: &str) {
     editor.style_set_foreground(STYLE_JSON_NUMBER, Colour::rgb(151, 71, 0));
     editor.style_set_foreground(STYLE_JSON_KEYWORD, Colour::rgb(128, 61, 150));
     editor.style_set_foreground(STYLE_JSON_PUNCT, Colour::rgb(92, 99, 112));
-    editor.style_set_foreground(STYLE_FIND_MATCH, Colour::rgb(25, 31, 42));
-    editor.style_set_background(STYLE_FIND_MATCH, Colour::rgb(255, 232, 128));
     editor.style_set_foreground(STYLE_LINE_NUMBER, Colour::rgb(94, 103, 117));
     editor.style_set_background(STYLE_LINE_NUMBER, Colour::rgb(243, 246, 250));
     editor.style_set_foreground(STYLE_INDENT_GUIDE, Colour::rgb(174, 184, 199));
     editor.style_set_background(STYLE_INDENT_GUIDE, Colour::rgb(255, 255, 255));
+    editor.indicator_set_style(INDICATOR_FIND_MATCH, IndicatorStyle::RoundBox);
+    editor.indicator_set_foreground(INDICATOR_FIND_MATCH, Colour::rgb(245, 188, 45));
+    editor.indicator_set_alpha(INDICATOR_FIND_MATCH, 80);
+    editor.indicator_set_outline_alpha(INDICATOR_FIND_MATCH, 180);
 
     editor.set_text(content);
     apply_json_stc_highlight(editor, content);

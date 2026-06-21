@@ -113,6 +113,25 @@ WXD_EXPORTED void
 wxd_StyledTextCtrl_MarkerSetBackground(wxd_StyledTextCtrl_t* self, int markerNumber,
                                        wxd_Colour_t colour);
 
+// Indicator operations
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorSetStyle(wxd_StyledTextCtrl_t* self, int indicator,
+                                     int indicator_style);
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorSetForeground(wxd_StyledTextCtrl_t* self, int indicator,
+                                          wxd_Colour_t colour);
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorSetAlpha(wxd_StyledTextCtrl_t* self, int indicator, int alpha);
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorSetOutlineAlpha(wxd_StyledTextCtrl_t* self, int indicator,
+                                            int alpha);
+WXD_EXPORTED void
+wxd_StyledTextCtrl_SetIndicatorCurrent(wxd_StyledTextCtrl_t* self, int indicator);
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorFillRange(wxd_StyledTextCtrl_t* self, int start, int length);
+WXD_EXPORTED void
+wxd_StyledTextCtrl_IndicatorClearRange(wxd_StyledTextCtrl_t* self, int start, int length);
+
 // Styling operations
 WXD_EXPORTED void
 wxd_StyledTextCtrl_StyleSetFont(wxd_StyledTextCtrl_t* self, int style, wxd_Font_t* font);
@@ -181,6 +200,9 @@ WXD_EXPORTED int
 wxd_StyledTextCtrl_SearchNext(wxd_StyledTextCtrl_t* self, int search_flags, const char* text);
 WXD_EXPORTED int
 wxd_StyledTextCtrl_SearchPrev(wxd_StyledTextCtrl_t* self, int search_flags, const char* text);
+WXD_EXPORTED int
+wxd_StyledTextCtrl_FindAndSelect(wxd_StyledTextCtrl_t* self, int start_pos, const char* text,
+                                 int flags, bool backwards, bool wrap);
 WXD_EXPORTED void
 wxd_StyledTextCtrl_ReplaceSelection(wxd_StyledTextCtrl_t* self, const char* text);
 WXD_EXPORTED int
