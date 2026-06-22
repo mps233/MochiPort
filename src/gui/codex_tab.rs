@@ -15,7 +15,10 @@ use crate::ai_gateway::catalog::visible_catalog_model_options;
 use crate::ai_gateway::config::AiGatewayConfig;
 
 use super::api::{ApiClient, ConfigureRequest};
+use super::controls::{ButtonVariant, ThemeButton, theme_button};
 use super::text::GuiText;
+use super::theme;
+use super::widgets::card_section;
 use super::{
     DashboardRefresh, confirm_uninstall_codex_app_config, ensure_service_ready_for_action,
     force_dashboard_refresh, schedule_dashboard_refresh, show_error, show_info,
@@ -33,11 +36,10 @@ pub(super) type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
 pub(super) struct CodexTab {
     pub(super) page: ScrolledWindow,
     text: GuiText,
-    provider_image_generation: CheckBox,
-    inject_button: Button,
-    clear_button: Button,
-    session_history_button: Button,
-    save_models_button: Button,
+    inject_button: ThemeButton,
+    clear_button: ThemeButton,
+    session_history_button: ThemeButton,
+    save_models_button: ThemeButton,
     model_list: CheckListBox,
     model_slugs: CodexModelSlugs,
     models_initialized: CodexModelsInitialized,
@@ -50,126 +52,91 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
     let page = ScrolledWindow::builder(parent)
         .with_style(ScrolledWindowStyle::VScroll)
         .build();
-    page.set_background_color(Colour::rgb(250, 251, 253));
+    page.set_background_color(theme::theme().bg_card_alt);
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let local_config_box = StaticBox::builder(&page)
-        .with_label(text.codex_local_config())
-        .build();
+    let (local_config_box, local_config_section) = card_section(&page, text.codex_local_config());
     local_config_box.set_tooltip(text.codex_local_config_help());
-    let local_config_section =
-        StaticBoxSizerBuilder::new_with_box(&local_config_box, Orientation::Vertical).build();
     let local_config_hint = StaticText::builder(&local_config_box)
         .with_label(text.codex_local_config_help())
         .build();
-    local_config_hint.set_foreground_color(Colour::rgb(103, 111, 124));
-    local_config_section.add(
+    local_config_hint.set_foreground_color(theme::theme().ink_muted);
+    let inject_button = theme_button(
+        &local_config_box,
+        text.inject_codex_access(),
+        ButtonVariant::Primary,
+    );
+    inject_button.set_tooltip(text.inject_codex_access_help());
+    let clear_button = theme_button(
+        &local_config_box,
+        text.clear_codex_access(),
+        ButtonVariant::Secondary,
+    );
+    clear_button.set_tooltip(text.clear_codex_access_help());
+    clear_button.enable(false);
+    let local_config_row = BoxSizer::builder(Orientation::Horizontal).build();
+    local_config_row.add(
         &local_config_hint,
+        1,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        12,
+    );
+    local_config_row.add(
+        &inject_button,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        8,
+    );
+    local_config_row.add(&clear_button, 0, SizerFlag::AlignCenterVertical, 0);
+    local_config_section.add_sizer(
+        &local_config_row,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
     );
 
-    let provider_image_generation = CheckBox::builder(&local_config_box)
-        .with_label(text.image_generation_feature())
-        .with_value(false)
+    let session_hint = StaticText::builder(&local_config_box)
+        .with_label(text.codex_session_history_help())
         .build();
-    provider_image_generation.set_tooltip(text.image_generation_feature_help());
-    let provider_image_generation_note = StaticText::builder(&local_config_box)
-        .with_label(text.image_generation_feature_note())
-        .build();
-    provider_image_generation_note.set_foreground_color(Colour::rgb(103, 111, 124));
-    let provider_image_generation_row = BoxSizer::builder(Orientation::Horizontal).build();
-    provider_image_generation_row.add(
-        &provider_image_generation,
-        0,
-        SizerFlag::Right | SizerFlag::AlignCenterVertical,
-        8,
+    session_hint.set_foreground_color(theme::theme().ink_muted);
+    let session_history_button = theme_button(
+        &local_config_box,
+        text.open_codex_session_history(),
+        ButtonVariant::Secondary,
     );
-    provider_image_generation_row.add(
-        &provider_image_generation_note,
+    session_history_button.enable(false);
+    let session_row = BoxSizer::builder(Orientation::Horizontal).build();
+    session_row.add(
+        &session_hint,
+        1,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        12,
+    );
+    session_row.add(
+        &session_history_button,
         0,
         SizerFlag::AlignCenterVertical,
         0,
     );
     local_config_section.add_sizer(
-        &provider_image_generation_row,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        10,
-    );
-
-    let inject_button = Button::builder(&local_config_box)
-        .with_label(text.inject_codex_access())
-        .build();
-    inject_button.set_tooltip(text.inject_codex_access_help());
-    let clear_button = Button::builder(&local_config_box)
-        .with_label(text.clear_codex_access())
-        .build();
-    clear_button.set_tooltip(text.clear_codex_access_help());
-    clear_button.enable(false);
-    let local_config_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    local_config_actions.add_stretch_spacer(1);
-    local_config_actions.add(&inject_button, 0, SizerFlag::Right, 8);
-    local_config_actions.add(&clear_button, 0, SizerFlag::Right, 0);
-    local_config_section.add_sizer(
-        &local_config_actions,
+        &session_row,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         10,
     );
-    sizer.add_sizer(
-        &local_config_section,
+    sizer.add(
+        &local_config_box,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
     );
 
-    let session_box = StaticBox::builder(&page)
-        .with_label(text.codex_session_history())
-        .build();
-    let session_section =
-        StaticBoxSizerBuilder::new_with_box(&session_box, Orientation::Vertical).build();
-    let session_hint = StaticText::builder(&session_box)
-        .with_label(text.codex_session_history_help())
-        .build();
-    session_hint.set_foreground_color(Colour::rgb(103, 111, 124));
-    session_section.add(
-        &session_hint,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        10,
-    );
-    let session_history_button = Button::builder(&session_box)
-        .with_label(text.open_codex_session_history())
-        .build();
-    session_history_button.enable(false);
-    let session_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    session_actions.add_stretch_spacer(1);
-    session_actions.add(&session_history_button, 0, SizerFlag::Right, 0);
-    session_section.add_sizer(
-        &session_actions,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
-        10,
-    );
-    sizer.add_sizer(
-        &session_section,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        12,
-    );
-
-    let models_box = StaticBox::builder(&page)
-        .with_label(text.codex_visible_models())
-        .build();
+    let (models_box, models_section) = card_section(&page, text.codex_visible_models());
     models_box.set_tooltip(text.codex_visible_models_help());
-    let models_section =
-        StaticBoxSizerBuilder::new_with_box(&models_box, Orientation::Vertical).build();
     let models_hint = StaticText::builder(&models_box)
         .with_label(text.codex_visible_models_help())
         .build();
-    models_hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    models_hint.set_foreground_color(theme::theme().ink_muted);
     models_section.add(
         &models_hint,
         0,
@@ -198,7 +165,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_choices(model_labels)
         .with_style(CheckListBoxStyle::AlwaysSB)
         .build();
-    model_list.set_min_size(Size::new(360, 170));
+    model_list.set_min_size(Size::new(360, 120));
     models_section.add(
         &model_list,
         1,
@@ -206,9 +173,11 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         10,
     );
 
-    let save_models_button = Button::builder(&models_box)
-        .with_label(text.save_codex_models())
-        .build();
+    let save_models_button = theme_button(
+        &models_box,
+        text.save_codex_models(),
+        ButtonVariant::Primary,
+    );
     let models_actions = BoxSizer::builder(Orientation::Horizontal).build();
     models_actions.add_stretch_spacer(1);
     models_actions.add(&save_models_button, 0, SizerFlag::Right, 0);
@@ -218,9 +187,9 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         10,
     );
-    sizer.add_sizer(
-        &models_section,
-        0,
+    sizer.add(
+        &models_box,
+        1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         12,
     );
@@ -241,7 +210,6 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
     CodexTab {
         page,
         text,
-        provider_image_generation,
         inject_button,
         clear_button,
         session_history_button,
@@ -263,7 +231,6 @@ pub(super) fn bind_actions(
     result: &CodexActionResultStore,
     in_flight: &Arc<AtomicBool>,
 ) {
-    bind_image_generation_action(api, tab, refresh, result);
     bind_inject_action(api, frame, tab, refresh, result, in_flight);
     bind_save_models_action(api, frame, tab, refresh, result, in_flight);
     bind_clear_action(api, frame, tab, refresh, result, in_flight);
@@ -272,18 +239,11 @@ pub(super) fn bind_actions(
 
 pub(super) fn set_actions_enabled(tab: &CodexTab, enabled: bool) {
     tab.service_enabled.set(enabled);
-    tab.provider_image_generation.enable(enabled);
     tab.save_models_button.enable(enabled);
     tab.model_list.enable(enabled);
     refresh_config_buttons(tab, enabled);
     tab.session_history_button
         .enable(enabled && tab.remote_ready.get());
-}
-
-pub(super) fn refresh_image_generation(tab: &CodexTab, enabled: bool) {
-    if !tab.provider_image_generation.has_focus() {
-        tab.provider_image_generation.set_value(enabled);
-    }
 }
 
 pub(super) fn refresh_configured(tab: &CodexTab, configured: bool) {
@@ -356,13 +316,6 @@ pub(super) fn apply_pending_action(
             show_error(frame, &err);
             force_dashboard_refresh(api, refresh);
         }
-        CodexActionResult::ImageGeneration(Ok(_enabled)) => {
-            force_dashboard_refresh(api, refresh);
-        }
-        CodexActionResult::ImageGeneration(Err(err)) => {
-            show_error(frame, &err);
-            force_dashboard_refresh(api, refresh);
-        }
     }
     true
 }
@@ -377,7 +330,6 @@ pub(super) enum CodexActionResult {
     Inject(Result<serde_json::Value, String>),
     Clear(Result<serde_json::Value, String>),
     SaveModels(Result<(), String>),
-    ImageGeneration(Result<bool, String>),
 }
 
 fn bind_inject_action(
@@ -423,30 +375,6 @@ fn bind_inject_action(
                 slot.replace(CodexActionResult::Inject(outcome));
             }
             in_flight.store(false, Ordering::SeqCst);
-        });
-        schedule_dashboard_refresh(&api, &refresh);
-    });
-}
-
-fn bind_image_generation_action(
-    api: &ApiClient,
-    tab: &CodexTab,
-    refresh: &DashboardRefresh,
-    result: &CodexActionResultStore,
-) {
-    let api = api.clone();
-    let refresh = refresh.clone();
-    let result = result.clone();
-    let input = tab.provider_image_generation;
-    input.on_toggled(move |_| {
-        let enabled = input.get_value();
-        let thread_api = api.clone();
-        let result = result.clone();
-        thread::spawn(move || {
-            let outcome = save_filter_image_generation_tool(&thread_api, enabled).map(|()| enabled);
-            if let Ok(mut slot) = result.lock() {
-                slot.replace(CodexActionResult::ImageGeneration(outcome));
-            }
         });
         schedule_dashboard_refresh(&api, &refresh);
     });
@@ -570,13 +498,6 @@ fn selected_visible_models(tab: &CodexTab) -> Vec<String> {
 fn save_visible_models(api: &ApiClient, models: Vec<String>) -> Result<(), String> {
     let mut config = api.get_app_config()?;
     config.ai_gateway.codex_visible_models = models;
-    api.save_app_config(&config)?;
-    Ok(())
-}
-
-fn save_filter_image_generation_tool(api: &ApiClient, enabled: bool) -> Result<(), String> {
-    let mut config = api.get_app_config()?;
-    config.ai_gateway.filter_image_generation_tool = enabled;
     api.save_app_config(&config)?;
     Ok(())
 }

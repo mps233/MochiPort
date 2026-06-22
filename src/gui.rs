@@ -51,6 +51,9 @@ const ID_MENU_MINIMIZE: i32 = 10_002;
 const ID_MENU_CHECK_UPDATE: i32 = 10_003;
 const ID_MENU_LANGUAGE_ZH_CN: i32 = 10_004;
 const ID_MENU_LANGUAGE_EN_US: i32 = 10_005;
+const ID_MENU_THEME_SYSTEM: i32 = 10_006;
+const ID_MENU_THEME_LIGHT: i32 = 10_007;
+const ID_MENU_THEME_DARK: i32 = 10_008;
 
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
@@ -75,6 +78,7 @@ struct ModelMappingRow {
 mod ai_gateway;
 mod api;
 mod codex_tab;
+mod controls;
 mod daemon;
 mod im_accounts;
 mod onboarding;
@@ -83,20 +87,23 @@ mod request_log_detail;
 mod request_logs;
 mod session_history;
 mod text;
+mod theme;
 mod update;
 mod widgets;
 
 use self::ai_gateway::{
     AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRow, AiGwProviderRows,
     PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
-    provider_logo_variant, provider_protocol_display, refresh_ai_gw_provider_list,
-    save_ai_gw_provider, set_ai_gw_actions_enabled, set_ai_gw_provider_enabled,
+    provider_logo_variant, provider_protocol_display, refresh_ai_gw_filter_image_generation,
+    refresh_ai_gw_provider_list, save_ai_gw_provider, set_ai_gw_actions_enabled,
+    set_ai_gw_provider_enabled, set_filter_image_generation_tool,
 };
 use self::api::{
     ApiClient, ConfigureTelegramBotRequest, DashboardSnapshot, DeleteImAccountRequest,
     RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
 };
 use self::codex_tab::{CodexActionResultStore, CodexTab};
+use self::controls::{ButtonVariant, ThemeButton, theme_button};
 use self::daemon::{
     app_support_config_path, daemon_config_path, start_daemon_for_gui_async, stop_daemon_on_exit,
     stop_pending_startup_daemon,
@@ -113,11 +120,12 @@ use self::request_logs::{
 };
 use self::session_history::show_session_history_window;
 use self::text::{GuiLocale, GuiText};
+use self::theme::ThemeMode;
 use self::widgets::{
     ImStatusPanel, ProviderLogoKind, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap,
-    centered_status_panel, im_status_panel, provider_logo_bitmap, set_disabled_status_panel,
-    set_im_channel_row, set_status_panel, status_panel, text_field_row, topology_connector,
-    topology_splitter,
+    card_section, centered_status_panel, im_status_panel, provider_logo_bitmap,
+    set_disabled_status_panel, set_im_channel_row, set_status_panel, status_panel, text_field_row,
+    topology_connector, topology_splitter,
 };
 
 #[derive(Clone)]
@@ -154,6 +162,14 @@ pub fn run() {
 }
 
 fn build_ui() {
+    // Apply the saved appearance and install the matching design tokens *before*
+    // any window is built: `set_appearance` returns `CannotChange` once a window
+    // exists, so this ordering is required.
+    let theme_mode = load_gui_theme();
+    let _ = set_appearance(theme_mode.appearance());
+    theme::init(theme_mode);
+    let app_theme = theme::theme();
+
     let locale = load_gui_locale();
     let text = GuiText::new(locale);
     let api = ApiClient::new(default_base_url(), text);
@@ -161,11 +177,13 @@ fn build_ui() {
 
     let frame = Frame::builder()
         .with_title("Codex Remote")
-        .with_size(Size::new(1280, 760))
+        // Keep the first launch below a typical 1080p work area. The key controls
+        // remain visible, while oversized lists use their own scrolling region.
+        .with_size(Size::new(1280, 860))
         .build();
     frame.set_icon(&app_icon_bitmap(48));
     install_system_menu(&frame, &gui_timers, text);
-    frame.set_background_color(Colour::rgb(246, 247, 250));
+    frame.set_background_color(app_theme.bg_app);
     let _status_bar = StatusBar::builder(&frame)
         .with_fields_count(1)
         .with_status_widths(vec![-1])
@@ -173,15 +191,11 @@ fn build_ui() {
         .build();
 
     let root = Panel::builder(&frame).build();
-    root.set_background_color(Colour::rgb(246, 247, 250));
+    root.set_background_color(app_theme.bg_app);
 
     let root_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let status_box = StaticBox::builder(&root)
-        .with_label(text.status_overview())
-        .build();
-    let status_section =
-        StaticBoxSizerBuilder::new_with_box(&status_box, Orientation::Vertical).build();
+    let (status_box, status_section) = card_section(&root, text.status_overview());
     let status_row = BoxSizer::builder(Orientation::Horizontal).build();
     let codex_status = status_panel(
         &status_box,
@@ -260,15 +274,15 @@ fn build_ui() {
     let ai_gw_status_label = StaticText::builder(&status_box)
         .with_label(&text.ai_gw_status_enabled(0))
         .build();
-    ai_gw_status_label.set_foreground_color(Colour::rgb(103, 111, 124));
+    ai_gw_status_label.set_foreground_color(theme::theme().ink_muted);
     status_section.add(
         &ai_gw_status_label,
         0,
         SizerFlag::Left | SizerFlag::Bottom,
         8,
     );
-    root_sizer.add_sizer(
-        &status_section,
+    root_sizer.add(
+        &status_box,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         14,
@@ -282,14 +296,47 @@ fn build_ui() {
     let ai_gw_page = ScrolledWindow::builder(&notebook)
         .with_style(ScrolledWindowStyle::VScroll)
         .build();
-    ai_gw_page.set_background_color(Colour::rgb(250, 251, 253));
+    ai_gw_page.set_background_color(theme::theme().bg_card_alt);
     let ai_gw_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let ai_gw_list_box = StaticBox::builder(&ai_gw_page)
-        .with_label(text.ai_gw_channel_list())
+    let (ai_gw_behavior_box, ai_gw_behavior_section) =
+        card_section(&ai_gw_page, text.ai_gw_behavior());
+    let ai_gw_filter_image_generation = CheckBox::builder(&ai_gw_behavior_box)
+        .with_label(text.image_generation_feature())
+        .with_value(false)
         .build();
-    let ai_gw_list_section =
-        StaticBoxSizerBuilder::new_with_box(&ai_gw_list_box, Orientation::Vertical).build();
+    ai_gw_filter_image_generation.set_tooltip(text.image_generation_feature_help());
+    let ai_gw_filter_image_generation_note = StaticText::builder(&ai_gw_behavior_box)
+        .with_label(text.image_generation_feature_note())
+        .build();
+    ai_gw_filter_image_generation_note.set_foreground_color(theme::theme().ink_muted);
+    let ai_gw_behavior_row = BoxSizer::builder(Orientation::Horizontal).build();
+    ai_gw_behavior_row.add(
+        &ai_gw_filter_image_generation,
+        0,
+        SizerFlag::Right | SizerFlag::AlignCenterVertical,
+        8,
+    );
+    ai_gw_behavior_row.add(
+        &ai_gw_filter_image_generation_note,
+        0,
+        SizerFlag::AlignCenterVertical,
+        0,
+    );
+    ai_gw_behavior_section.add_sizer(
+        &ai_gw_behavior_row,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        10,
+    );
+    ai_gw_sizer.add(
+        &ai_gw_behavior_box,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+
+    let (ai_gw_list_box, ai_gw_list_section) = card_section(&ai_gw_page, text.ai_gw_channel_list());
 
     let ai_gw_provider_rows: AiGwProviderRows = Rc::new(RefCell::new(Vec::new()));
     let pending_ai_gw_channel_toggle: PendingAiGwChannelToggle = Rc::new(RefCell::new(None));
@@ -391,15 +438,21 @@ fn build_ui() {
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.associate_model(&*ai_gw_provider_model.borrow());
-    let ai_gw_new_button = Button::builder(&ai_gw_list_box)
-        .with_label(text.ai_gw_add_channel())
-        .build();
-    let ai_gw_edit_button = Button::builder(&ai_gw_list_box)
-        .with_label(text.ai_gw_edit_channel())
-        .build();
-    let ai_gw_delete_button = Button::builder(&ai_gw_list_box)
-        .with_label(text.ai_gw_delete_channel())
-        .build();
+    let ai_gw_new_button = theme_button(
+        &ai_gw_list_box,
+        text.ai_gw_add_channel(),
+        ButtonVariant::Primary,
+    );
+    let ai_gw_edit_button = theme_button(
+        &ai_gw_list_box,
+        text.ai_gw_edit_channel(),
+        ButtonVariant::Secondary,
+    );
+    let ai_gw_delete_button = theme_button(
+        &ai_gw_list_box,
+        text.ai_gw_delete_channel(),
+        ButtonVariant::Danger,
+    );
     let ai_gw_list_actions = BoxSizer::builder(Orientation::Horizontal).build();
     ai_gw_list_actions.add_stretch_spacer(1);
     ai_gw_list_actions.add(&ai_gw_new_button, 0, SizerFlag::Right, 8);
@@ -418,8 +471,8 @@ fn build_ui() {
         10,
     );
 
-    ai_gw_sizer.add_sizer(
-        &ai_gw_list_section,
+    ai_gw_sizer.add(
+        &ai_gw_list_box,
         1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
@@ -441,13 +494,13 @@ fn build_ui() {
     let feishu_page = ScrolledWindow::builder(&notebook)
         .with_style(ScrolledWindowStyle::VScroll)
         .build();
-    feishu_page.set_background_color(Colour::rgb(250, 251, 253));
+    feishu_page.set_background_color(theme::theme().bg_card_alt);
     let feishu_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let im_access_hint = StaticText::builder(&feishu_page)
         .with_label(text.im_access_hint())
         .build();
-    im_access_hint.set_foreground_color(Colour::rgb(64, 72, 86));
+    im_access_hint.set_foreground_color(theme::theme().ink_secondary);
     im_access_hint.wrap(1180);
     feishu_sizer.add(
         &im_access_hint,
@@ -456,11 +509,7 @@ fn build_ui() {
         12,
     );
 
-    let im_accounts_static_box = StaticBox::builder(&feishu_page)
-        .with_label(text.bot_pool())
-        .build();
-    let im_accounts_box =
-        StaticBoxSizerBuilder::new_with_box(&im_accounts_static_box, Orientation::Vertical).build();
+    let (im_accounts_static_box, im_accounts_box) = card_section(&feishu_page, text.bot_pool());
     let im_account_rows: ImAccountRows = Rc::new(RefCell::new(Vec::new()));
     let pending_im_toggle: PendingImToggle = Rc::new(RefCell::new(None));
     let pending_im_toggle_for_model = pending_im_toggle.clone();
@@ -563,9 +612,11 @@ fn build_ui() {
     );
     let im_account_actions = BoxSizer::builder(Orientation::Horizontal).build();
     im_account_actions.add_stretch_spacer(1);
-    let delete_im_account_button = Button::builder(&im_accounts_static_box)
-        .with_label(text.delete_selected())
-        .build();
+    let delete_im_account_button = theme_button(
+        &im_accounts_static_box,
+        text.delete_selected(),
+        ButtonVariant::Danger,
+    );
     delete_im_account_button.set_tooltip(text.delete_im_account_help());
     im_account_actions.add(&delete_im_account_button, 0, SizerFlag::Right, 0);
     im_accounts_box.add_sizer(
@@ -574,23 +625,25 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         10,
     );
-    let add_im_static_box = StaticBox::builder(&feishu_page)
-        .with_label(text.add_bot())
-        .build();
-    let add_im_box =
-        StaticBoxSizerBuilder::new_with_box(&add_im_static_box, Orientation::Vertical).build();
+    let (add_im_static_box, add_im_box) = card_section(&feishu_page, text.add_bot());
     let add_im_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    let change_bot_button = Button::builder(&add_im_static_box)
-        .with_label(text.add_feishu_bot())
-        .build();
+    let change_bot_button = theme_button(
+        &add_im_static_box,
+        text.add_feishu_bot(),
+        ButtonVariant::Secondary,
+    );
     change_bot_button.set_tooltip(text.add_feishu_bot_help());
-    let save_telegram_button = Button::builder(&add_im_static_box)
-        .with_label(text.add_telegram_bot())
-        .build();
+    let save_telegram_button = theme_button(
+        &add_im_static_box,
+        text.add_telegram_bot(),
+        ButtonVariant::Primary,
+    );
     save_telegram_button.set_tooltip(text.add_telegram_bot_help());
-    let connect_wechat_button = Button::builder(&add_im_static_box)
-        .with_label(text.add_wechat_bot())
-        .build();
+    let connect_wechat_button = theme_button(
+        &add_im_static_box,
+        text.add_wechat_bot(),
+        ButtonVariant::Secondary,
+    );
     connect_wechat_button.set_tooltip(text.add_wechat_bot_help());
     add_im_actions.add(&change_bot_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&save_telegram_button, 0, SizerFlag::Right, 10);
@@ -598,7 +651,7 @@ fn build_ui() {
     let wechat_context_warning = StaticText::builder(&add_im_static_box)
         .with_label(text.wechat_context_token_warning())
         .build();
-    wechat_context_warning.set_foreground_color(Colour::rgb(210, 36, 36));
+    wechat_context_warning.set_foreground_color(theme::theme().error);
     wechat_context_warning.wrap(620);
     add_im_actions.add(
         &wechat_context_warning,
@@ -612,8 +665,13 @@ fn build_ui() {
         SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
     );
-    feishu_sizer.add_sizer(&add_im_box, 0, SizerFlag::Expand | SizerFlag::All, 8);
-    feishu_sizer.add_sizer(&im_accounts_box, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    feishu_sizer.add(&add_im_static_box, 0, SizerFlag::Expand | SizerFlag::All, 8);
+    feishu_sizer.add(
+        &im_accounts_static_box,
+        0,
+        SizerFlag::Expand | SizerFlag::All,
+        8,
+    );
     feishu_sizer.add_stretch_spacer(1);
     feishu_page.set_sizer(feishu_sizer, true);
     let feishu_best_size = feishu_page.get_best_size();
@@ -629,19 +687,23 @@ fn build_ui() {
 
     // --- Request Logs Tab ---
     let request_logs_page = Panel::builder(&notebook).build();
-    request_logs_page.set_background_color(Colour::rgb(250, 251, 253));
+    request_logs_page.set_background_color(theme::theme().bg_card_alt);
     let request_logs_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let request_log_hint = StaticText::builder(&request_logs_page)
         .with_label(text.request_log_open_hint())
         .build();
-    request_log_hint.set_foreground_color(Colour::rgb(64, 72, 86));
-    let request_log_clear_old_button = Button::builder(&request_logs_page)
-        .with_label(text.request_log_clear_old())
-        .build();
-    let request_log_clear_all_button = Button::builder(&request_logs_page)
-        .with_label(text.request_log_clear_all())
-        .build();
+    request_log_hint.set_foreground_color(theme::theme().ink_secondary);
+    let request_log_clear_old_button = theme_button(
+        &request_logs_page,
+        text.request_log_clear_old(),
+        ButtonVariant::Secondary,
+    );
+    let request_log_clear_all_button = theme_button(
+        &request_logs_page,
+        text.request_log_clear_all(),
+        ButtonVariant::Danger,
+    );
     let request_log_toolbar = BoxSizer::builder(Orientation::Horizontal).build();
     request_log_toolbar.add(&request_log_hint, 0, SizerFlag::AlignCenterVertical, 0);
     request_log_toolbar.add_stretch_spacer(1);
@@ -654,11 +716,8 @@ fn build_ui() {
         10,
     );
 
-    let request_log_box = StaticBox::builder(&request_logs_page)
-        .with_label(text.request_logs())
-        .build();
-    let request_log_section =
-        StaticBoxSizerBuilder::new_with_box(&request_log_box, Orientation::Vertical).build();
+    let (request_log_box, request_log_section) =
+        card_section(&request_logs_page, text.request_logs());
     let request_log_rows: RequestLogRows = Rc::new(RefCell::new(Vec::new()));
     let request_log_model: RequestLogModel =
         Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
@@ -773,8 +832,8 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         10,
     );
-    request_logs_sizer.add_sizer(
-        &request_log_section,
+    request_logs_sizer.add(
+        &request_log_box,
         1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         10,
@@ -818,6 +877,7 @@ fn build_ui() {
         ai_gw_provider_rows,
         ai_gw_provider_model,
         pending_ai_gw_channel_toggle,
+        ai_gw_filter_image_generation,
         ai_gw_delete_button,
         ai_gw_new_button,
         ai_gw_edit_button,
@@ -1043,6 +1103,25 @@ fn build_ui() {
     // --- AI Gateway event handlers ---
     let ai_gw_action_result: AiGwActionResultStore = Arc::new(Mutex::new(None));
     let ai_gw_action_in_flight = Arc::new(AtomicBool::new(false));
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        let input = handles.ai_gw_filter_image_generation;
+        input.on_toggled(move |_| {
+            let enabled = input.get_value();
+            let worker_api = api.clone();
+            let ai_gw_action_result = ai_gw_action_result.clone();
+            thread::spawn(move || {
+                let outcome = set_filter_image_generation_tool(&worker_api, enabled);
+                if let Ok(mut slot) = ai_gw_action_result.lock() {
+                    slot.replace(AiGwActionResult::FilterImageGeneration(outcome));
+                }
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
 
     {
         let api = api.clone();
@@ -1383,6 +1462,21 @@ fn save_gui_locale(locale: GuiLocale) -> Result<(), String> {
     config.save(&path).map_err(|err| err.to_string())
 }
 
+fn load_gui_theme() -> ThemeMode {
+    daemon_config_path()
+        .and_then(|path| AppConfig::load_or_default(&path).ok())
+        .and_then(|config| config.theme)
+        .and_then(|theme| ThemeMode::from_code(&theme))
+        .unwrap_or_default()
+}
+
+fn save_gui_theme(mode: ThemeMode) -> Result<(), String> {
+    let path = daemon_config_path().unwrap_or_else(app_support_config_path);
+    let mut config = AppConfig::load_or_default(&path).map_err(|err| err.to_string())?;
+    config.theme = Some(mode.code().to_string());
+    config.save(&path).map_err(|err| err.to_string())
+}
+
 fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
     let file_menu = Menu::builder()
         .append_item(
@@ -1408,6 +1502,27 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
         .build();
     language_menu.check_item(ID_MENU_LANGUAGE_ZH_CN, text.locale == GuiLocale::ZhCn);
     language_menu.check_item(ID_MENU_LANGUAGE_EN_US, text.locale == GuiLocale::EnUs);
+    let theme_mode = load_gui_theme();
+    let theme_menu = Menu::builder()
+        .append_radio_item(
+            ID_MENU_THEME_SYSTEM,
+            text.theme_system(),
+            text.theme_restart_message(),
+        )
+        .append_radio_item(
+            ID_MENU_THEME_LIGHT,
+            text.theme_light(),
+            text.theme_restart_message(),
+        )
+        .append_radio_item(
+            ID_MENU_THEME_DARK,
+            text.theme_dark(),
+            text.theme_restart_message(),
+        )
+        .build();
+    theme_menu.check_item(ID_MENU_THEME_SYSTEM, theme_mode == ThemeMode::System);
+    theme_menu.check_item(ID_MENU_THEME_LIGHT, theme_mode == ThemeMode::Light);
+    theme_menu.check_item(ID_MENU_THEME_DARK, theme_mode == ThemeMode::Dark);
     let help_menu = Menu::builder()
         .append_item(
             ID_MENU_CHECK_UPDATE,
@@ -1420,6 +1535,7 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
     let menu_bar = MenuBar::builder()
         .append(file_menu, text.file_menu())
         .append(language_menu, text.language_menu())
+        .append(theme_menu, text.theme_menu())
         .append(help_menu, text.help_menu())
         .build();
     frame.set_menu_bar(menu_bar);
@@ -1439,6 +1555,9 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
         ID_MENU_LANGUAGE_EN_US => {
             handle_language_selected(&frame, text, GuiLocale::EnUs);
         }
+        ID_MENU_THEME_SYSTEM => handle_theme_selected(&frame, text, ThemeMode::System),
+        ID_MENU_THEME_LIGHT => handle_theme_selected(&frame, text, ThemeMode::Light),
+        ID_MENU_THEME_DARK => handle_theme_selected(&frame, text, ThemeMode::Dark),
         ID_ABOUT => show_about_dialog(&frame),
         _ => event.skip(true),
     });
@@ -1454,7 +1573,7 @@ fn ai_gw_service_option(
     let row_panel = Panel::builder(parent)
         .with_style(PanelStyle::BorderStatic)
         .build();
-    row_panel.set_background_color(Colour::rgb(250, 251, 253));
+    row_panel.set_background_color(theme::theme().bg_card_alt);
     row_panel.set_min_size(Size::new(0, 46));
 
     let row = BoxSizer::builder(Orientation::Horizontal).build();
@@ -1551,16 +1670,17 @@ fn show_ai_gw_channel_dialog(
         .with_size(1120, 760)
         .build();
     dialog.set_min_size(Size::new(920, 640));
-    dialog.set_background_color(Colour::rgb(250, 251, 253));
+    dialog.set_background_color(theme::theme().bg_card_alt);
 
     let panel = Panel::builder(&dialog).build();
-    panel.set_background_color(Colour::rgb(250, 251, 253));
+    panel.set_background_color(theme::theme().bg_card_alt);
     let root = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
         .with_label(text.ai_gw_channel_editor())
         .build();
-    title.set_foreground_color(Colour::rgb(21, 25, 31));
+    title.set_foreground_color(theme::theme().ink_primary);
+    title.set_font(&theme::font(theme::TextRole::Title));
     root.add(
         &title,
         0,
@@ -1571,7 +1691,7 @@ fn show_ai_gw_channel_dialog(
     let help = StaticText::builder(&panel)
         .with_label(text.ai_gw_channel_editor_help())
         .build();
-    help.set_foreground_color(Colour::rgb(103, 111, 124));
+    help.set_foreground_color(theme::theme().ink_muted);
     root.add(
         &help,
         0,
@@ -1584,13 +1704,14 @@ fn show_ai_gw_channel_dialog(
     let service_panel = Panel::builder(&panel)
         .with_style(PanelStyle::BorderStatic)
         .build();
-    service_panel.set_background_color(Colour::rgb(255, 255, 255));
+    service_panel.set_background_color(theme::theme().bg_card);
     service_panel.set_min_size(Size::new(300, 500));
     let service_sizer = BoxSizer::builder(Orientation::Vertical).build();
     let service_title = StaticText::builder(&service_panel)
         .with_label(text.ai_gw_provider_service())
         .build();
-    service_title.set_foreground_color(Colour::rgb(21, 25, 31));
+    service_title.set_foreground_color(theme::theme().ink_primary);
+    service_title.set_font(&theme::font(theme::TextRole::Title));
     service_sizer.add(
         &service_title,
         0,
@@ -1632,13 +1753,14 @@ fn show_ai_gw_channel_dialog(
     let form_panel = Panel::builder(&panel)
         .with_style(PanelStyle::BorderStatic)
         .build();
-    form_panel.set_background_color(Colour::rgb(255, 255, 255));
+    form_panel.set_background_color(theme::theme().bg_card);
     form_panel.set_min_size(Size::new(620, 500));
     let form_sizer = BoxSizer::builder(Orientation::Vertical).build();
     let form_title = StaticText::builder(&form_panel)
         .with_label(text.ai_gw_channel_settings())
         .build();
-    form_title.set_foreground_color(Colour::rgb(21, 25, 31));
+    form_title.set_foreground_color(theme::theme().ink_primary);
+    form_title.set_font(&theme::font(theme::TextRole::Title));
     form_sizer.add(
         &form_title,
         0,
@@ -1676,16 +1798,22 @@ fn show_ai_gw_channel_dialog(
     let model_title = StaticText::builder(&form_panel)
         .with_label(text.ai_gw_models())
         .build();
-    model_title.set_foreground_color(Colour::rgb(78, 86, 98));
-    let fetch_models_button = Button::builder(&form_panel)
-        .with_label(text.ai_gw_fetch_models())
-        .build();
-    let add_model_button = Button::builder(&form_panel)
-        .with_label(text.ai_gw_add_model())
-        .build();
-    let delete_model_button = Button::builder(&form_panel)
-        .with_label(text.ai_gw_delete_model())
-        .build();
+    model_title.set_foreground_color(theme::theme().ink_secondary);
+    let fetch_models_button = theme_button(
+        &form_panel,
+        text.ai_gw_fetch_models(),
+        ButtonVariant::Secondary,
+    );
+    let add_model_button = theme_button(
+        &form_panel,
+        text.ai_gw_add_model(),
+        ButtonVariant::Secondary,
+    );
+    let delete_model_button = theme_button(
+        &form_panel,
+        text.ai_gw_delete_model(),
+        ButtonVariant::Danger,
+    );
     model_header.add(&model_title, 1, SizerFlag::AlignCenterVertical, 0);
     model_header.add(
         &fetch_models_button,
@@ -2859,6 +2987,18 @@ fn handle_language_selected(frame: &Frame, text: GuiText, locale: GuiLocale) {
     }
 }
 
+fn handle_theme_selected(frame: &Frame, text: GuiText, mode: ThemeMode) {
+    if let Some(menu_bar) = frame.get_menu_bar() {
+        menu_bar.check_item(ID_MENU_THEME_SYSTEM, mode == ThemeMode::System);
+        menu_bar.check_item(ID_MENU_THEME_LIGHT, mode == ThemeMode::Light);
+        menu_bar.check_item(ID_MENU_THEME_DARK, mode == ThemeMode::Dark);
+    }
+    match save_gui_theme(mode) {
+        Ok(()) => show_info(frame, text.theme_restart_message()),
+        Err(err) => show_error(frame, &format!("{}: {err}", text.theme_save_failed())),
+    }
+}
+
 #[derive(Clone)]
 struct UiHandles {
     text: GuiText,
@@ -2871,19 +3011,20 @@ struct UiHandles {
     im_account_rows: ImAccountRows,
     im_account_model: ImAccountModel,
     pending_im_toggle: PendingImToggle,
-    delete_im_account_button: Button,
-    save_telegram_button: Button,
-    connect_wechat_button: Button,
-    change_bot_button: Button,
+    delete_im_account_button: ThemeButton,
+    save_telegram_button: ThemeButton,
+    connect_wechat_button: ThemeButton,
+    change_bot_button: ThemeButton,
     codex_tab: CodexTab,
     // AI Gateway fields
     ai_gw_provider_list: DataViewCtrl,
     ai_gw_provider_rows: AiGwProviderRows,
     ai_gw_provider_model: AiGwProviderModel,
     pending_ai_gw_channel_toggle: PendingAiGwChannelToggle,
-    ai_gw_delete_button: Button,
-    ai_gw_new_button: Button,
-    ai_gw_edit_button: Button,
+    ai_gw_filter_image_generation: CheckBox,
+    ai_gw_delete_button: ThemeButton,
+    ai_gw_new_button: ThemeButton,
+    ai_gw_edit_button: ThemeButton,
     ai_gw_status_label: StaticText,
     // Request logs fields
     request_log_list: DataViewCtrl,
@@ -3149,7 +3290,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         codex_tab::refresh_configured(&handles.codex_tab, false);
     }
     if let Some(gw) = &snapshot.ai_gateway {
-        codex_tab::refresh_image_generation(&handles.codex_tab, gw.filter_image_generation_tool);
+        refresh_ai_gw_filter_image_generation(handles, gw.filter_image_generation_tool);
     }
 
     if let Some(status) = &snapshot.status {
@@ -3358,8 +3499,8 @@ fn apply_pending_request_logs(handles: &UiHandles, result_store: &RequestLogResu
 fn apply_pending_request_log_clear(
     frame: &Frame,
     text: GuiText,
-    clear_old_button: &Button,
-    clear_all_button: &Button,
+    clear_old_button: &ThemeButton,
+    clear_all_button: &ThemeButton,
     result_store: &RequestLogClearResultStore,
 ) -> bool {
     let result = result_store.lock().ok().and_then(|mut slot| slot.take());
@@ -3405,16 +3546,17 @@ fn show_about_dialog(parent: &Frame) {
         .with_size(520, 260)
         .build();
     dialog.set_icon(&app_icon_bitmap(48));
-    dialog.set_background_color(Colour::rgb(255, 255, 255));
+    dialog.set_background_color(theme::theme().bg_card);
 
     let panel = Panel::builder(&dialog).build();
-    panel.set_background_color(Colour::rgb(255, 255, 255));
+    panel.set_background_color(theme::theme().bg_card);
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
         .with_label(&format!("Codex Remote {}", env!("CARGO_PKG_VERSION")))
         .build();
-    title.set_foreground_color(Colour::rgb(21, 25, 31));
+    title.set_foreground_color(theme::theme().ink_primary);
+    title.set_font(&theme::font(theme::TextRole::Title));
     sizer.add(
         &title,
         0,
@@ -3425,7 +3567,7 @@ fn show_about_dialog(parent: &Frame) {
     let description = StaticText::builder(&panel)
         .with_label(&GuiText::new(load_gui_locale()).about_description())
         .build();
-    description.set_foreground_color(Colour::rgb(88, 96, 108));
+    description.set_foreground_color(theme::theme().ink_secondary);
     description.wrap(460);
     sizer.add(
         &description,

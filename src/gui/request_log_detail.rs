@@ -4,8 +4,10 @@ use std::rc::Rc;
 use wxdragon::prelude::*;
 
 use super::api::{RequestLogDetail, RequestLogItem};
+use super::controls::{ButtonVariant, ThemeButton, theme_button};
 use super::provider::strip_nul;
 use super::text::GuiText;
+use super::theme;
 
 const STYLE_JSON_DEFAULT: i32 = 0;
 const STYLE_JSON_KEY: i32 = 1;
@@ -47,17 +49,17 @@ pub(super) fn show(parent: &Frame, text: GuiText, detail: &RequestLogDetail) {
         .with_size(1480, 900)
         .build();
     dialog.set_min_size(Size::new(1120, 760));
-    dialog.set_background_color(Colour::rgb(250, 251, 253));
+    dialog.set_background_color(theme::theme().bg_card_alt);
 
     let panel = Panel::builder(&dialog).build();
-    panel.set_background_color(Colour::rgb(250, 251, 253));
+    panel.set_background_color(theme::theme().bg_card_alt);
 
     let root = BoxSizer::builder(Orientation::Vertical).build();
 
     let summary = StaticText::builder(&panel)
         .with_label(&summary_text(&detail.summary))
         .build();
-    summary.set_foreground_color(Colour::rgb(57, 65, 80));
+    summary.set_foreground_color(theme::theme().ink_secondary);
     root.add(
         &summary,
         0,
@@ -161,29 +163,32 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
         .unwrap_or_else(|| content.to_string());
 
     let panel = Panel::builder(parent).build();
-    panel.set_background_color(Colour::rgb(255, 255, 255));
+    panel.set_background_color(theme::theme().bg_card);
 
     let search_bar = Panel::builder(&panel).build();
-    search_bar.set_background_color(Colour::rgb(243, 246, 250));
+    search_bar.set_background_color(theme::theme().bg_muted);
     let search_input = SearchCtrl::builder(&search_bar)
         .with_style(SearchCtrlStyle::ProcessEnter)
         .with_size(Size::new(360, -1))
         .build();
     search_input.show_search_button(true);
     search_input.show_cancel_button(true);
-    let prev_button = Button::builder(&search_bar)
-        .with_label(search_prev_text(text))
-        .build();
-    let next_button = Button::builder(&search_bar)
-        .with_label(search_next_text(text))
-        .build();
-    let close_search_button = Button::builder(&search_bar)
-        .with_label(search_close_text(text))
-        .build();
+    let prev_button = theme_button(
+        &search_bar,
+        search_prev_text(text),
+        ButtonVariant::Secondary,
+    );
+    let next_button = theme_button(
+        &search_bar,
+        search_next_text(text),
+        ButtonVariant::Secondary,
+    );
+    let close_search_button =
+        theme_button(&search_bar, search_close_text(text), ButtonVariant::Ghost);
     let search_status = StaticText::builder(&search_bar)
         .with_label(search_idle_text(text))
         .build();
-    search_status.set_foreground_color(Colour::rgb(94, 103, 117));
+    search_status.set_foreground_color(theme::theme().ink_muted);
 
     let search_bar_sizer = BoxSizer::builder(Orientation::Horizontal).build();
     search_bar_sizer.add(
@@ -444,9 +449,9 @@ fn bind_search_bar_controls(
     panel: Panel,
     search_bar: Panel,
     search_input: SearchCtrl,
-    prev_button: Button,
-    next_button: Button,
-    close_search_button: Button,
+    prev_button: ThemeButton,
+    next_button: ThemeButton,
+    close_search_button: ThemeButton,
     editor: StyledTextCtrl,
     status: StaticText,
     state: Rc<RefCell<SearchState>>,
@@ -712,7 +717,7 @@ fn format_json_pretty(value: &serde_json::Value) -> Option<String> {
 
 fn add_text_tab(parent: &Notebook, label: &str, content: &str) {
     let panel = Panel::builder(parent).build();
-    panel.set_background_color(Colour::rgb(255, 255, 255));
+    panel.set_background_color(theme::theme().bg_card);
 
     let editor = TextCtrl::builder(&panel)
         .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly | TextCtrlStyle::DontWrap)
@@ -742,25 +747,26 @@ fn configure_json_editor(editor: &StyledTextCtrl, content: &str) {
     configure_fold_markers(editor);
     editor.set_indentation_guides_typed(IndentationGuide::LookBoth);
     editor.set_view_white_space_typed(WhiteSpaceView::Invisible);
+    let t = theme::theme();
     editor.set_caret_line_visible(true);
-    editor.set_caret_line_background(Colour::rgb(244, 247, 251));
+    editor.set_caret_line_background(t.code_caret_line);
 
-    editor.style_set_foreground(STYLE_JSON_DEFAULT, Colour::rgb(38, 45, 56));
-    editor.style_set_background(STYLE_JSON_DEFAULT, Colour::rgb(255, 255, 255));
+    editor.style_set_foreground(STYLE_JSON_DEFAULT, t.code_fg);
+    editor.style_set_background(STYLE_JSON_DEFAULT, t.code_bg);
     editor.style_set_size(STYLE_JSON_DEFAULT, 10);
     editor.style_clear_all();
-    editor.style_set_foreground(STYLE_JSON_KEY, Colour::rgb(26, 84, 160));
+    editor.style_set_foreground(STYLE_JSON_KEY, t.code_key);
     editor.style_set_bold(STYLE_JSON_KEY, true);
-    editor.style_set_foreground(STYLE_JSON_STRING, Colour::rgb(20, 124, 74));
-    editor.style_set_foreground(STYLE_JSON_NUMBER, Colour::rgb(151, 71, 0));
-    editor.style_set_foreground(STYLE_JSON_KEYWORD, Colour::rgb(128, 61, 150));
-    editor.style_set_foreground(STYLE_JSON_PUNCT, Colour::rgb(92, 99, 112));
-    editor.style_set_foreground(STYLE_LINE_NUMBER, Colour::rgb(94, 103, 117));
-    editor.style_set_background(STYLE_LINE_NUMBER, Colour::rgb(243, 246, 250));
-    editor.style_set_foreground(STYLE_INDENT_GUIDE, Colour::rgb(174, 184, 199));
-    editor.style_set_background(STYLE_INDENT_GUIDE, Colour::rgb(255, 255, 255));
+    editor.style_set_foreground(STYLE_JSON_STRING, t.code_string);
+    editor.style_set_foreground(STYLE_JSON_NUMBER, t.code_number);
+    editor.style_set_foreground(STYLE_JSON_KEYWORD, t.code_keyword);
+    editor.style_set_foreground(STYLE_JSON_PUNCT, t.code_punct);
+    editor.style_set_foreground(STYLE_LINE_NUMBER, t.code_line_number);
+    editor.style_set_background(STYLE_LINE_NUMBER, t.code_gutter_bg);
+    editor.style_set_foreground(STYLE_INDENT_GUIDE, t.code_indent_guide);
+    editor.style_set_background(STYLE_INDENT_GUIDE, t.code_bg);
     editor.indicator_set_style(INDICATOR_FIND_MATCH, IndicatorStyle::RoundBox);
-    editor.indicator_set_foreground(INDICATOR_FIND_MATCH, Colour::rgb(245, 188, 45));
+    editor.indicator_set_foreground(INDICATOR_FIND_MATCH, t.code_find_match);
     editor.indicator_set_alpha(INDICATOR_FIND_MATCH, 80);
     editor.indicator_set_outline_alpha(INDICATOR_FIND_MATCH, 180);
 
@@ -772,8 +778,9 @@ fn configure_json_editor(editor: &StyledTextCtrl, content: &str) {
 }
 
 fn configure_fold_markers(editor: &StyledTextCtrl) {
-    let marker_foreground = Colour::rgb(92, 99, 112);
-    let marker_background = Colour::rgb(243, 246, 250);
+    let t = theme::theme();
+    let marker_foreground = t.code_punct;
+    let marker_background = t.code_gutter_bg;
     editor.marker_define_symbol(
         MARKER_FOLDER,
         MarkerSymbol::BoxPlus,

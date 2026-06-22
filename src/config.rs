@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub bind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
     pub state_path: PathBuf,
     pub logging: LoggingConfig,
     pub feishu: FeishuConfig,
@@ -85,6 +87,7 @@ impl Default for AppConfig {
         Self {
             bind: DEFAULT_BIND.to_string(),
             language: None,
+            theme: None,
             state_path: PathBuf::from("codex-remote-state.json"),
             logging: LoggingConfig::default(),
             feishu: FeishuConfig::default(),

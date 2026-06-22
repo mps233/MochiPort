@@ -112,6 +112,48 @@ impl GuiText {
         }
     }
 
+    pub(super) fn theme_menu(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "主题",
+            GuiLocale::EnUs => "&Theme",
+        }
+    }
+
+    pub(super) fn theme_system(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "跟随系统",
+            GuiLocale::EnUs => "Follow System",
+        }
+    }
+
+    pub(super) fn theme_light(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "浅色",
+            GuiLocale::EnUs => "Light",
+        }
+    }
+
+    pub(super) fn theme_dark(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "深色",
+            GuiLocale::EnUs => "Dark",
+        }
+    }
+
+    pub(super) fn theme_restart_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "主题设置已保存，重启 Codex Remote 后生效。",
+            GuiLocale::EnUs => "Theme saved. Restart Codex Remote to apply it.",
+        }
+    }
+
+    pub(super) fn theme_save_failed(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "主题设置保存失败",
+            GuiLocale::EnUs => "Failed to save theme setting",
+        }
+    }
+
     pub(super) fn help_menu(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "帮助",
@@ -317,17 +359,26 @@ impl GuiText {
         }
     }
 
+    pub(super) fn ai_gw_behavior(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "网关行为",
+            GuiLocale::EnUs => "Gateway Behavior",
+        }
+    }
+
     pub(super) fn codex_local_config(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex 本地配置",
-            GuiLocale::EnUs => "Codex Local Config",
+            GuiLocale::ZhCn => "Codex 初始化",
+            GuiLocale::EnUs => "Codex Setup",
         }
     }
 
     pub(super) fn codex_local_config_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "让 Codex 连接到本地服务，可随时移除。",
-            GuiLocale::EnUs => "Connect Codex to the local service. You can remove this anytime.",
+            GuiLocale::ZhCn => "初始化 Codex Remote 所需配置，可随时恢复原有配置。",
+            GuiLocale::EnUs => {
+                "Set up Codex Remote integration. You can restore the original config anytime."
+            }
         }
     }
 
@@ -347,7 +398,7 @@ impl GuiText {
 
     pub(super) fn codex_session_history(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "会话管理",
+            GuiLocale::ZhCn => "会话历史管理",
             GuiLocale::EnUs => "Session History",
         }
     }
@@ -365,8 +416,8 @@ impl GuiText {
 
     pub(super) fn open_codex_session_history(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "打开会话管理",
-            GuiLocale::EnUs => "Open Session History",
+            GuiLocale::ZhCn => "会话历史管理",
+            GuiLocale::EnUs => "Manage Session History",
         }
     }
 
@@ -585,8 +636,8 @@ impl GuiText {
 
     pub(super) fn inject_codex_access(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "写入 Codex 配置",
-            GuiLocale::EnUs => "Write Codex Config",
+            GuiLocale::ZhCn => "初始化 Codex 配置",
+            GuiLocale::EnUs => "Set Up Codex Config",
         }
     }
 
@@ -599,8 +650,8 @@ impl GuiText {
 
     pub(super) fn injecting_codex_access(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "写入中...",
-            GuiLocale::EnUs => "Writing...",
+            GuiLocale::ZhCn => "初始化中...",
+            GuiLocale::EnUs => "Setting up...",
         }
     }
 

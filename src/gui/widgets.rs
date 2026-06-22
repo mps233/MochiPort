@@ -2,6 +2,7 @@ use image::imageops::FilterType;
 use wxdragon::prelude::*;
 
 use super::text::GuiText;
+use super::theme::{self, Theme};
 
 #[derive(Clone, Copy)]
 pub(super) struct StatusPanel {
@@ -55,6 +56,41 @@ pub(super) enum ProviderLogoKind {
     Zhipu,
 }
 
+/// Build a flat "card" section: a `bg_card` surface with a bold title header and
+/// a content sizer for the caller's children. Replaces the dated etched
+/// `StaticBox` group frames.
+///
+/// Returns `(card_panel, content_sizer)`. Parent children to `card_panel` and add
+/// their layout to `content_sizer`; add `card_panel` itself to the page sizer.
+pub(super) fn card_section<W: WxWidget>(parent: &W, title: &str) -> (Panel, BoxSizer) {
+    let t = theme::theme();
+    let card = Panel::builder(parent)
+        .with_style(PanelStyle::BorderSimple)
+        .build();
+    card.set_background_color(t.bg_card);
+
+    let outer = BoxSizer::builder(Orientation::Vertical).build();
+    let header = StaticText::builder(&card).with_label(title).build();
+    header.set_foreground_color(t.ink_primary);
+    header.set_font(&theme::font(theme::TextRole::Title));
+    outer.add(
+        &header,
+        0,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        theme::SPACE_MD,
+    );
+
+    let content = BoxSizer::builder(Orientation::Vertical).build();
+    outer.add_sizer(
+        &content,
+        1,
+        SizerFlag::Expand | SizerFlag::All,
+        theme::SPACE_XS,
+    );
+    card.set_sizer(outer, true);
+    (card, content)
+}
+
 pub(super) fn status_panel<W: WxWidget>(
     parent: &W,
     title: &str,
@@ -80,11 +116,16 @@ fn build_status_panel<W: WxWidget>(
     text: GuiText,
     center_content: bool,
 ) -> StatusPanel {
+    let t = theme::theme();
+    // Flat card: no native etched border; the white surface separates from the
+    // deeper app background via colour contrast.
     let panel = Panel::builder(parent)
-        .with_style(PanelStyle::BorderStatic)
+        .with_style(PanelStyle::BorderSimple)
         .build();
-    panel.set_background_color(Colour::rgb(255, 255, 255));
-    panel.set_min_size(Size::new(230, 58));
+    panel.set_background_color(t.bg_card);
+    // Height fits three lines (title + state + detail) with headroom; the cards
+    // split the row evenly via proportion in the parent column.
+    panel.set_min_size(Size::new(230, 66));
 
     let row = BoxSizer::builder(Orientation::Horizontal).build();
     if center_content {
@@ -109,21 +150,21 @@ fn build_status_panel<W: WxWidget>(
     text_col.add_stretch_spacer(1);
     let title_row = BoxSizer::builder(Orientation::Horizontal).build();
     let marker = StaticText::builder(&panel).with_label("●").build();
-    marker.set_foreground_color(Colour::rgb(116, 124, 136));
+    marker.set_foreground_color(t.ink_muted);
     title_row.add(&marker, 0, SizerFlag::Right, 5);
     let title_label = StaticText::builder(&panel).with_label(title).build();
-    title_label.set_foreground_color(Colour::rgb(91, 100, 114));
+    title_label.set_foreground_color(t.ink_secondary);
     title_row.add(&title_label, 0, SizerFlag::Bottom, 0);
     text_col.add_sizer(&title_row, 0, SizerFlag::Bottom, 4);
 
     let state = StaticText::builder(&panel)
         .with_label(text.detecting())
         .build();
-    state.set_foreground_color(Colour::rgb(34, 39, 47));
+    state.set_foreground_color(t.ink_primary);
     text_col.add(&state, 0, SizerFlag::Bottom, 4);
 
     let detail = StaticText::builder(&panel).with_label("").build();
-    detail.set_foreground_color(Colour::rgb(103, 111, 124));
+    detail.set_foreground_color(t.ink_muted);
     detail.wrap(250);
     text_col.add(&detail, 0, SizerFlag::Expand, 0);
     text_col.add_stretch_spacer(1);
@@ -148,7 +189,7 @@ fn build_status_panel<W: WxWidget>(
 
 pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatusPanel {
     let panel = Panel::builder(parent).build();
-    panel.set_background_color(Colour::rgb(246, 247, 250));
+    panel.set_background_color(theme::theme().bg_app);
     panel.set_min_size(Size::new(260, 190));
 
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
@@ -187,10 +228,11 @@ pub(super) fn im_channel_row(
     bottom_margin: i32,
     text: GuiText,
 ) -> ImChannelRow {
+    let t = theme::theme();
     let row_panel = Panel::builder(parent)
-        .with_style(PanelStyle::BorderStatic)
+        .with_style(PanelStyle::BorderSimple)
         .build();
-    row_panel.set_background_color(Colour::rgb(255, 255, 255));
+    row_panel.set_background_color(t.bg_card);
     row_panel.set_min_size(Size::new(250, 58));
     let row = BoxSizer::builder(Orientation::Horizontal).build();
 
@@ -211,22 +253,22 @@ pub(super) fn im_channel_row(
     let text_col = BoxSizer::builder(Orientation::Vertical).build();
     let title_row = BoxSizer::builder(Orientation::Horizontal).build();
     let marker = StaticText::builder(&row_panel).with_label("●").build();
-    marker.set_foreground_color(Colour::rgb(116, 124, 136));
+    marker.set_foreground_color(t.ink_muted);
     title_row.add(&marker, 0, SizerFlag::Right, 5);
 
     let name_label = StaticText::builder(&row_panel).with_label(name).build();
-    name_label.set_foreground_color(Colour::rgb(91, 100, 114));
+    name_label.set_foreground_color(t.ink_secondary);
     title_row.add(&name_label, 0, SizerFlag::Right, 8);
 
     let state = StaticText::builder(&row_panel)
         .with_label(text.detecting())
         .build();
-    state.set_foreground_color(Colour::rgb(102, 110, 122));
+    state.set_foreground_color(t.ink_muted);
     title_row.add(&state, 0, SizerFlag::Right, 0);
     text_col.add_sizer(&title_row, 0, SizerFlag::Bottom, 2);
 
     let detail = StaticText::builder(&row_panel).with_label("").build();
-    detail.set_foreground_color(Colour::rgb(103, 111, 124));
+    detail.set_foreground_color(t.ink_muted);
     detail.wrap(220);
     text_col.add(&detail, 0, SizerFlag::Expand, 0);
 
@@ -278,7 +320,7 @@ pub(super) fn topology_splitter<W: WxWidget>(parent: &W) -> StaticBitmap {
 
 pub(super) fn topology_connector_bitmap(width: usize, height: usize) -> Bitmap {
     let mut canvas = IconCanvas::new_with_size(width, height, [0, 0, 0, 0]);
-    let colour = [118, 127, 140, 210];
+    let colour = Theme::rgba(theme::theme().divider, 210);
     let trunk_x = 30usize;
     let top_y = 33usize;
     let mid_y = height / 2;
@@ -292,7 +334,7 @@ pub(super) fn topology_connector_bitmap(width: usize, height: usize) -> Bitmap {
 
 pub(super) fn topology_splitter_bitmap(width: usize, height: usize) -> Bitmap {
     let mut canvas = IconCanvas::new_with_size(width, height, [0, 0, 0, 0]);
-    let colour = [118, 127, 140, 210];
+    let colour = Theme::rgba(theme::theme().divider, 210);
     let trunk_x = 34usize;
     let top_y = 31usize;
     let mid_y = height / 2;
@@ -625,7 +667,7 @@ pub(super) fn text_field_row<W: WxWidget>(
     value: &str,
 ) -> TextCtrl {
     let label_widget = StaticText::builder(parent).with_label(label).build();
-    label_widget.set_foreground_color(Colour::rgb(78, 86, 98));
+    label_widget.set_foreground_color(theme::theme().ink_secondary);
     sizer.add(
         &label_widget,
         0,
@@ -652,17 +694,19 @@ pub(super) enum StateTone {
 
 impl StateTone {
     fn colour(self) -> Colour {
+        let t = theme::theme();
         match self {
-            StateTone::Ok => Colour::rgb(28, 127, 89),
-            StateTone::Warn => Colour::rgb(169, 104, 24),
-            StateTone::Error => Colour::rgb(185, 55, 55),
-            StateTone::Muted => Colour::rgb(102, 110, 122),
+            StateTone::Ok => t.ok,
+            StateTone::Warn => t.warn,
+            StateTone::Error => t.error,
+            StateTone::Muted => t.ink_muted,
         }
     }
 }
 
 pub(super) fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, tone: StateTone) {
-    let title_colour = Colour::rgb(91, 100, 114);
+    let t = theme::theme();
+    let title_colour = t.ink_secondary;
     let tone_colour = tone.colour();
     if panel.state.get_label() == state
         && panel.detail.get_label() == detail
@@ -672,7 +716,7 @@ pub(super) fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, t
         return;
     }
 
-    panel.panel.set_background_color(Colour::rgb(255, 255, 255));
+    panel.panel.set_background_color(t.bg_card);
     if panel.title.get_foreground_color() != title_colour {
         panel
             .icon
@@ -683,9 +727,7 @@ pub(super) fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, t
     panel.state.set_label(state);
     panel.state.set_foreground_color(tone_colour);
     panel.detail.set_label(detail);
-    panel
-        .detail
-        .set_foreground_color(Colour::rgb(103, 111, 124));
+    panel.detail.set_foreground_color(t.ink_muted);
     panel.detail.wrap(220);
     panel.panel.layout();
     panel.panel.refresh(true, None);
@@ -697,12 +739,9 @@ pub(super) fn set_im_channel_row(row: &ImChannelRow, state: &str, detail: &str, 
         return;
     }
 
+    let t = theme::theme();
     let muted = matches!(tone, StateTone::Muted);
-    let name_colour = if muted {
-        Colour::rgb(145, 151, 160)
-    } else {
-        Colour::rgb(91, 100, 114)
-    };
+    let name_colour = if muted { t.ink_muted } else { t.ink_secondary };
     row.icon
         .set_bitmap(&im_channel_icon_bitmap(row.kind, muted, 24));
     row.name.set_foreground_color(name_colour);
@@ -710,11 +749,7 @@ pub(super) fn set_im_channel_row(row: &ImChannelRow, state: &str, detail: &str, 
     row.state.set_label(state);
     row.state.set_foreground_color(tone.colour());
     row.detail.set_label(detail);
-    row.detail.set_foreground_color(if muted {
-        Colour::rgb(145, 151, 160)
-    } else {
-        Colour::rgb(103, 111, 124)
-    });
+    row.detail.set_foreground_color(t.ink_muted);
     row.detail.wrap(220);
 }
 
@@ -723,8 +758,8 @@ pub(super) fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail
         return;
     }
 
-    let muted = Colour::rgb(145, 151, 160);
-    panel.panel.set_background_color(Colour::rgb(242, 244, 247));
+    let muted = theme::theme().ink_muted;
+    panel.panel.set_background_color(theme::theme().bg_muted);
     if panel.title.get_foreground_color() != muted {
         panel
             .icon

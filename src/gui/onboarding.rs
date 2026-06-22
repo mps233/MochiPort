@@ -13,6 +13,7 @@ use super::api::{ApiClient, WechatOnboardPoll};
 use super::provider::strip_nul;
 use super::show_error;
 use super::text::GuiText;
+use super::theme;
 
 fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {
     let code = QrCode::new(value.as_bytes()).ok()?;
@@ -52,16 +53,17 @@ pub(super) fn prompt_telegram_bot_token(parent: &Frame, text: GuiText) -> Option
         .with_size(520, 300)
         .build();
     dialog.set_min_size(Size::new(520, 280));
-    dialog.set_background_color(Colour::rgb(255, 255, 255));
+    dialog.set_background_color(theme::theme().bg_card);
 
     let panel = Panel::builder(&dialog).build();
-    panel.set_background_color(Colour::rgb(255, 255, 255));
+    panel.set_background_color(theme::theme().bg_card);
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
         .with_label(text.telegram_token_title())
         .build();
-    title.set_foreground_color(Colour::rgb(21, 25, 31));
+    title.set_foreground_color(theme::theme().ink_primary);
+    title.set_font(&theme::font(theme::TextRole::Title));
     sizer.add(
         &title,
         0,
@@ -84,7 +86,7 @@ pub(super) fn prompt_telegram_bot_token(parent: &Frame, text: GuiText) -> Option
     let hint = StaticText::builder(&panel)
         .with_label(text.telegram_private_hint())
         .build();
-    hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    hint.set_foreground_color(theme::theme().ink_muted);
     sizer.add(
         &hint,
         0,
@@ -160,21 +162,22 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, text: GuiText, api: Api
         .with_size(660, 760)
         .build();
     dialog.set_min_size(Size::new(560, 660));
-    dialog.set_background_color(Colour::rgb(255, 255, 255));
+    dialog.set_background_color(theme::theme().bg_card);
 
     let panel = Panel::builder(&dialog).build();
-    panel.set_background_color(Colour::rgb(255, 255, 255));
+    panel.set_background_color(theme::theme().bg_card);
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
         .with_label(text.scan_feishu())
         .build();
-    title.set_foreground_color(Colour::rgb(21, 25, 31));
+    title.set_foreground_color(theme::theme().ink_primary);
+    title.set_font(&theme::font(theme::TextRole::Title));
     sizer.add(&title, 0, SizerFlag::All, 18);
 
     if let Some((bitmap, qr_size)) = qr_bitmap(&start.verification_uri_complete) {
         let qr_panel = Panel::builder(&panel).build();
-        qr_panel.set_background_color(Colour::rgb(255, 255, 255));
+        qr_panel.set_background_color(theme::theme().bg_card);
         qr_panel.set_min_size(Size::new(500, 500));
 
         let qr = StaticBitmap::builder(&qr_panel)
@@ -198,7 +201,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, text: GuiText, api: Api
         let qr_error = StaticText::builder(&panel)
             .with_label(text.qr_open_browser_failed())
             .build();
-        qr_error.set_foreground_color(Colour::rgb(185, 55, 55));
+        qr_error.set_foreground_color(theme::theme().error);
         sizer.add(
             &qr_error,
             0,
@@ -221,7 +224,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, text: GuiText, api: Api
     let info = StaticText::builder(&panel)
         .with_label(text.scan_done_auto_close())
         .build();
-    info.set_foreground_color(Colour::rgb(88, 96, 108));
+    info.set_foreground_color(theme::theme().ink_secondary);
     info.wrap(600);
     sizer.add(
         &info,
@@ -294,21 +297,22 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, text: GuiText, api: Api
         .with_size(660, 760)
         .build();
     dialog.set_min_size(Size::new(560, 660));
-    dialog.set_background_color(Colour::rgb(255, 255, 255));
+    dialog.set_background_color(theme::theme().bg_card);
 
     let panel = Panel::builder(&dialog).build();
-    panel.set_background_color(Colour::rgb(255, 255, 255));
+    panel.set_background_color(theme::theme().bg_card);
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
         .with_label(text.scan_wechat())
         .build();
-    title.set_foreground_color(Colour::rgb(21, 25, 31));
+    title.set_foreground_color(theme::theme().ink_primary);
+    title.set_font(&theme::font(theme::TextRole::Title));
     sizer.add(&title, 0, SizerFlag::All, 18);
 
     if let Some((bitmap, qr_size)) = qr_bitmap(&start.qrcode_url) {
         let qr_panel = Panel::builder(&panel).build();
-        qr_panel.set_background_color(Colour::rgb(255, 255, 255));
+        qr_panel.set_background_color(theme::theme().bg_card);
         qr_panel.set_min_size(Size::new(500, 500));
 
         let qr = StaticBitmap::builder(&qr_panel)
@@ -332,7 +336,7 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, text: GuiText, api: Api
         let qr_error = StaticText::builder(&panel)
             .with_label(text.qr_retry_failed())
             .build();
-        qr_error.set_foreground_color(Colour::rgb(185, 55, 55));
+        qr_error.set_foreground_color(theme::theme().error);
         sizer.add(
             &qr_error,
             0,
@@ -345,7 +349,7 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, text: GuiText, api: Api
     let verify_label = StaticText::builder(&panel)
         .with_label(text.verify_code())
         .build();
-    verify_label.set_foreground_color(Colour::rgb(78, 86, 98));
+    verify_label.set_foreground_color(theme::theme().ink_secondary);
     let verify_code = TextCtrl::builder(&panel).with_value("").build();
     verify_code.set_min_size(Size::new(220, 30));
     verify_code.enable(false);
@@ -366,7 +370,7 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, text: GuiText, api: Api
     let info = StaticText::builder(&panel)
         .with_label(&text.wechat_expire_notice(start.expires_in))
         .build();
-    info.set_foreground_color(Colour::rgb(88, 96, 108));
+    info.set_foreground_color(theme::theme().ink_secondary);
     info.wrap(600);
     sizer.add(
         &info,

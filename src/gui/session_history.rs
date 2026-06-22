@@ -14,8 +14,11 @@ use super::{
     api::{
         ApiClient, CodexAppSessionsResponse, CodexAppThread, MoveCodexAppSessionProviderRequest,
     },
+    controls::{ButtonVariant, ThemeButton, theme_button},
     show_error, show_info,
     text::GuiText,
+    theme,
+    widgets::card_section,
 };
 
 const AI_GATEWAY_PROVIDER: &str = "ai-gateway";
@@ -44,20 +47,16 @@ pub(super) fn show_session_history_window(parent: &Frame, text: GuiText, api: Ap
         .with_title(text.session_history_title())
         .with_size(Size::new(1120, 620))
         .build();
-    frame.set_background_color(Colour::rgb(250, 251, 253));
+    frame.set_background_color(theme::theme().bg_card_alt);
 
     let root = Panel::builder(&frame).build();
-    root.set_background_color(Colour::rgb(250, 251, 253));
+    root.set_background_color(theme::theme().bg_card_alt);
     let root_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let toolbar = BoxSizer::builder(Orientation::Horizontal).build();
-    let refresh_button = Button::builder(&root).with_label(text.refresh()).build();
-    let move_to_button = Button::builder(&root)
-        .with_label(text.move_to_ai_gateway())
-        .build();
-    let move_back_button = Button::builder(&root)
-        .with_label(text.move_back_provider())
-        .build();
+    let refresh_button = theme_button(&root, text.refresh(), ButtonVariant::Secondary);
+    let move_to_button = theme_button(&root, text.move_to_ai_gateway(), ButtonVariant::Primary);
+    let move_back_button = theme_button(&root, text.move_back_provider(), ButtonVariant::Secondary);
     toolbar.add(&refresh_button, 0, SizerFlag::Right, 8);
     toolbar.add(&move_to_button, 0, SizerFlag::Right, 8);
     toolbar.add(&move_back_button, 0, SizerFlag::Right, 0);
@@ -71,7 +70,7 @@ pub(super) fn show_session_history_window(parent: &Frame, text: GuiText, api: Ap
     let hint = StaticText::builder(&root)
         .with_label(text.session_history_selection_hint())
         .build();
-    hint.set_foreground_color(Colour::rgb(103, 111, 124));
+    hint.set_foreground_color(theme::theme().ink_muted);
     root_sizer.add(
         &hint,
         0,
@@ -80,15 +79,8 @@ pub(super) fn show_session_history_window(parent: &Frame, text: GuiText, api: Ap
     );
 
     let content = BoxSizer::builder(Orientation::Horizontal).build();
-    let left_box = StaticBox::builder(&root)
-        .with_label(text.other_provider_sessions())
-        .build();
-    let right_box = StaticBox::builder(&root)
-        .with_label(text.ai_gateway_sessions())
-        .build();
-    let left_sizer = StaticBoxSizerBuilder::new_with_box(&left_box, Orientation::Vertical).build();
-    let right_sizer =
-        StaticBoxSizerBuilder::new_with_box(&right_box, Orientation::Vertical).build();
+    let (left_box, left_sizer) = card_section(&root, text.other_provider_sessions());
+    let (right_box, right_sizer) = card_section(&root, text.ai_gateway_sessions());
 
     let left_rows: SessionRows = Rc::new(RefCell::new(Vec::new()));
     let right_rows: SessionRows = Rc::new(RefCell::new(Vec::new()));
@@ -108,8 +100,8 @@ pub(super) fn show_session_history_window(parent: &Frame, text: GuiText, api: Ap
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         10,
     );
-    content.add_sizer(&left_sizer, 1, SizerFlag::Expand | SizerFlag::All, 10);
-    content.add_sizer(&right_sizer, 1, SizerFlag::Expand | SizerFlag::All, 10);
+    content.add(&left_box, 1, SizerFlag::Expand | SizerFlag::All, 10);
+    content.add(&right_box, 1, SizerFlag::Expand | SizerFlag::All, 10);
     root_sizer.add_sizer(&content, 1, SizerFlag::Expand, 0);
     root.set_sizer(root_sizer, true);
     frame.set_sizer(BoxSizer::builder(Orientation::Vertical).build(), true);
@@ -221,7 +213,7 @@ pub(super) fn show_session_history_window(parent: &Frame, text: GuiText, api: Ap
     frame.show(true);
 }
 
-fn create_session_list(parent: &StaticBox, text: GuiText) -> ListCtrl {
+fn create_session_list<W: WxWidget>(parent: &W, text: GuiText) -> ListCtrl {
     let list = ListCtrl::builder(parent)
         .with_style(ListCtrlStyle::Report | ListCtrlStyle::HRules | ListCtrlStyle::VRules)
         .with_size(Size::new(-1, 470))
@@ -233,7 +225,7 @@ fn create_session_list(parent: &StaticBox, text: GuiText) -> ListCtrl {
 }
 
 fn bind_refresh(
-    button: &Button,
+    button: &ThemeButton,
     api: ApiClient,
     fetch_result: SessionFetchResult,
     in_flight: Arc<AtomicBool>,
@@ -245,7 +237,7 @@ fn bind_refresh(
 }
 
 fn bind_move_to_gateway(
-    button: &Button,
+    button: &ThemeButton,
     frame: &Frame,
     text: GuiText,
     api: ApiClient,
@@ -353,7 +345,7 @@ fn bind_session_context_menus(
 }
 
 fn bind_move_back(
-    button: &Button,
+    button: &ThemeButton,
     frame: &Frame,
     text: GuiText,
     api: ApiClient,
@@ -392,16 +384,16 @@ fn prompt_target_provider(
     let dialog = Dialog::builder(frame, text.session_target_provider_title())
         .with_size(520, 240)
         .build();
-    dialog.set_background_color(Colour::rgb(255, 255, 255));
+    dialog.set_background_color(theme::theme().bg_card);
 
     let panel = Panel::builder(&dialog).build();
-    panel.set_background_color(Colour::rgb(255, 255, 255));
+    panel.set_background_color(theme::theme().bg_card);
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let prompt = StaticText::builder(&panel)
         .with_label(&text.session_target_provider_prompt(selected_count))
         .build();
-    prompt.set_foreground_color(Colour::rgb(21, 25, 31));
+    prompt.set_foreground_color(theme::theme().ink_primary);
     sizer.add(
         &prompt,
         0,

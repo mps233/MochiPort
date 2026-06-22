@@ -33,6 +33,7 @@ pub(super) enum AiGwActionResult {
     Save(Result<(), String>),
     Delete(Result<(), String>),
     ChannelToggle(Result<(), String>),
+    FilterImageGeneration(Result<bool, String>),
 }
 
 pub(super) fn save_ai_gw_provider(
@@ -79,6 +80,22 @@ pub(super) fn set_ai_gw_provider_enabled(
     provider.enabled = enabled;
     api.save_app_config(&config)?;
     Ok(())
+}
+
+pub(super) fn set_filter_image_generation_tool(
+    api: &ApiClient,
+    enabled: bool,
+) -> Result<bool, String> {
+    let mut config = api.get_app_config()?;
+    config.ai_gateway.filter_image_generation_tool = enabled;
+    api.save_app_config(&config)?;
+    Ok(enabled)
+}
+
+pub(super) fn refresh_ai_gw_filter_image_generation(handles: &UiHandles, enabled: bool) {
+    if !handles.ai_gw_filter_image_generation.has_focus() {
+        handles.ai_gw_filter_image_generation.set_value(enabled);
+    }
 }
 
 pub(super) fn refresh_ai_gw_provider_list(handles: &UiHandles, config: Option<&AiGatewayConfig>) {
@@ -188,6 +205,10 @@ pub(super) fn apply_pending_ai_gw_action(
         AiGwActionResult::ChannelToggle(Err(err)) => {
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
+        AiGwActionResult::FilterImageGeneration(Ok(_enabled)) => {}
+        AiGwActionResult::FilterImageGeneration(Err(err)) => {
+            super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
+        }
     }
     true
 }
@@ -197,4 +218,5 @@ pub(super) fn set_ai_gw_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.ai_gw_new_button.enable(enabled);
     handles.ai_gw_edit_button.enable(enabled);
     handles.ai_gw_provider_list.enable(enabled);
+    handles.ai_gw_filter_image_generation.enable(enabled);
 }
