@@ -1,3 +1,5 @@
+use crate::config::LocalConnectionMode;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GuiLocale {
     ZhCn,
@@ -217,6 +219,98 @@ impl GuiText {
         }
     }
 
+    pub(super) fn local_connection_standard(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "标准连接",
+            GuiLocale::EnUs => "Standard connection",
+        }
+    }
+
+    pub(super) fn local_connection_vpn_compatible(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "VPN 兼容连接",
+            GuiLocale::EnUs => "VPN-compatible connection",
+        }
+    }
+
+    pub(super) fn local_connection_label(self, mode: LocalConnectionMode) -> &'static str {
+        match mode {
+            LocalConnectionMode::Standard => self.local_connection_standard(),
+            LocalConnectionMode::VpnCompatible => self.local_connection_vpn_compatible(),
+        }
+    }
+
+    pub(super) fn local_connection_settings(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "连接设置",
+            GuiLocale::EnUs => "Connection settings",
+        }
+    }
+
+    pub(super) fn local_connection_settings_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "切换本地服务连接方式",
+            GuiLocale::EnUs => "Switch how the local service is reached",
+        }
+    }
+
+    pub(super) fn switch_to_vpn_compatible_connection(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "切换到 VPN 兼容连接",
+            GuiLocale::EnUs => "Switch to VPN-compatible connection",
+        }
+    }
+
+    pub(super) fn switch_to_standard_connection(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "切回标准连接",
+            GuiLocale::EnUs => "Switch to standard connection",
+        }
+    }
+
+    pub(super) fn local_connection_switch_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "切换后需要重启 Codex Remote，之后再重新初始化 Codex 配置。",
+            GuiLocale::EnUs => {
+                "Restart Codex Remote after switching, then initialize Codex config again."
+            }
+        }
+    }
+
+    pub(super) fn local_connection_restart_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "连接模式已更新。请重启 Codex Remote，之后再重新初始化 Codex 配置。",
+            GuiLocale::EnUs => {
+                "Connection mode updated. Restart Codex Remote, then initialize Codex config again."
+            }
+        }
+    }
+
+    pub(super) fn local_connection_save_failed(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "连接模式保存失败",
+            GuiLocale::EnUs => "Failed to save connection mode",
+        }
+    }
+
+    pub(super) fn local_connection_detected_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "本地连接异常",
+            GuiLocale::EnUs => "Local Connection Issue",
+        }
+    }
+
+    pub(super) fn local_connection_detected_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "检测到当前网络环境可能影响本地连接，建议切换到 VPN 兼容连接。切换后需要重启 Codex Remote。"
+            }
+            GuiLocale::EnUs => {
+                "The current network environment may affect local connections. Switch to VPN-compatible connection, then restart Codex Remote."
+            }
+        }
+    }
+
     pub(super) fn detecting(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "检测中",
@@ -391,8 +485,23 @@ impl GuiText {
 
     pub(super) fn codex_visible_models_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "选择 Codex 里要显示的模型。",
-            GuiLocale::EnUs => "Choose which models are shown in Codex.",
+            GuiLocale::ZhCn => {
+                "选择 Codex 里要显示的模型。这里勾选只决定 Codex 能看到哪些模型名称。"
+            }
+            GuiLocale::EnUs => {
+                "Choose which models are shown in Codex. This only controls the model names Codex can see."
+            }
+        }
+    }
+
+    pub(super) fn codex_visible_models_warning(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "注意：如果 Codex 报 “not configured in any provider”，请在 AI Gateway 里添加对应渠道并配置模型；也可以设置模型映射，例如把 Codex 里的 gpt-5.4-mini 映射到实际可用的 deepseek-v4-flash。"
+            }
+            GuiLocale::EnUs => {
+                "Note: If Codex reports \"not configured in any provider\", add the matching provider and model in AI Gateway, or map a Codex model name such as gpt-5.4-mini to an available upstream model such as deepseek-v4-flash."
+            }
         }
     }
 
@@ -605,10 +714,10 @@ impl GuiText {
     pub(super) fn codex_models_saved(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "Codex 可见模型列表已保存。\n无需重启 Codex，Codex 端通常会在 5 分钟内更新列表。"
+                "Codex 可见模型列表已保存。\nCodex 端模型列表有缓存，通常会在 5 分钟内更新。"
             }
             GuiLocale::EnUs => {
-                "Codex visible model list saved.\nNo Codex restart is needed; Codex usually updates the list within 5 minutes."
+                "Codex visible model list saved.\nCodex caches the model picker list and usually updates it within 5 minutes."
             }
         }
     }
@@ -1110,12 +1219,16 @@ impl GuiText {
         }
     }
 
-    pub(super) fn gui_auto_start_service(self) -> &'static str {
+    pub(super) fn local_service_offline_detail(self, mode: LocalConnectionMode) -> String {
         match self.locale {
-            GuiLocale::ZhCn => "GUI 会自动启动本地服务；如果一直未运行，请重启 Codex Remote。",
-            GuiLocale::EnUs => {
-                "The GUI starts the local service automatically. Restart Codex Remote if it stays offline."
-            }
+            GuiLocale::ZhCn => format!(
+                "{} · GUI 会自动启动本地服务；如果一直未运行，请重启 Codex Remote。",
+                self.local_connection_label(mode)
+            ),
+            GuiLocale::EnUs => format!(
+                "{} · The GUI starts the local service automatically. Restart Codex Remote if it stays offline.",
+                self.local_connection_label(mode)
+            ),
         }
     }
 
@@ -1133,10 +1246,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn listening(self, bind: &str) -> String {
+    pub(super) fn local_service_detail(self, bind: &str, mode: &str) -> String {
         match self.locale {
-            GuiLocale::ZhCn => format!("监听 {bind}"),
-            GuiLocale::EnUs => format!("Listening on {bind}"),
+            GuiLocale::ZhCn => format!("{mode} · 监听 {bind}"),
+            GuiLocale::EnUs => format!("{mode} · {bind}"),
         }
     }
 

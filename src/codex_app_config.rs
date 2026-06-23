@@ -19,7 +19,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(target_os = "windows")]
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
-use crate::chain_log;
+use crate::{chain_log, config::LocalConnectionMode};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
@@ -29,6 +29,7 @@ const CODEX_APP_SQLITE_DIR: &str = "sqlite";
 const CODEX_APP_PRIMARY_DB: &str = "codex.db";
 const CODEX_APP_DEV_DB: &str = "codex-dev.db";
 const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
+const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
 const CODEX_REMOTE_HOME_ENV: &str = "CODEX_REMOTE_HOME";
@@ -44,6 +45,7 @@ const MANAGED_BACKUP_AUTH: &str = "auth.json";
 pub struct ConfigureCodexAppOptions {
     pub codex_home: Option<PathBuf>,
     pub backend_url: String,
+    pub connection_mode: LocalConnectionMode,
     pub account_id: String,
     pub user_id: String,
     pub email: String,
@@ -58,8 +60,13 @@ pub struct ConfigureCodexAppOptions {
 }
 
 impl ConfigureCodexAppOptions {
+    fn codex_backend_url(&self) -> String {
+        codex_connection_url(&self.backend_url, self.connection_mode)
+    }
+
     fn ai_gateway_base_url(&self) -> String {
-        let backend = self.backend_url.trim_end_matches('/');
+        let backend_url = self.codex_backend_url();
+        let backend = backend_url.trim_end_matches('/');
         if let Some(base) = backend.strip_suffix("/backend-api") {
             format!("{base}/ai-gateway/v1")
         } else {
@@ -111,6 +118,7 @@ pub struct CodexAppConfigStatus {
     pub configured: bool,
     pub config_ok: bool,
     pub auth_ok: bool,
+    pub provider_ok: bool,
     pub config_error: Option<String>,
     pub auth_error: Option<String>,
     pub gui_api_base: CodexAppGuiApiBaseStatus,
@@ -118,6 +126,7 @@ pub struct CodexAppConfigStatus {
     pub provider: Option<CodexAppProviderStatus>,
     pub providers: Vec<CodexAppProviderStatus>,
     pub image_generation_enabled: bool,
+    pub connection_mode: LocalConnectionMode,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,6 +204,15 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
         auth_path.display()
     ));
 
+    chain_log::write_line(format!(
+        "[codex_app_config] event=clear_models_cache_start codex_home={}",
+        codex_home.display()
+    ));
+    let removed_models_cache = clear_codex_models_cache(Some(codex_home.clone()))?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=clear_models_cache_done removed={removed_models_cache}"
+    ));
+
     chain_log::write_line("[codex_app_config] event=remote_control_switch_start");
     let remote_control_switch = enable_remote_control_switch_in_home(&codex_home)?;
     chain_log::write_line(format!(
@@ -264,6 +282,8 @@ pub fn inspect_codex_app_config(
     let (config_ok, config_error) = inspect_config_toml(&config_path, backend_url);
     let (auth_ok, auth_error) = inspect_auth_json(&auth_path);
     let (provider, providers, image_generation_enabled) = inspect_provider_catalog(&config_path);
+    let provider_ok = inspect_managed_ai_gateway_provider(&config_path, backend_url);
+    let connection_mode = inspect_connection_mode(&config_path, backend_url);
 
     let gui_api_base = inspect_gui_api_base_url(backend_url);
     let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
@@ -274,9 +294,10 @@ pub fn inspect_codex_app_config(
         codex_home,
         config_path,
         auth_path,
-        configured: config_ok && auth_ok && gui_ok && remote_control_ok,
+        configured: config_ok && auth_ok && provider_ok && gui_ok && remote_control_ok,
         config_ok,
         auth_ok,
+        provider_ok,
         config_error,
         auth_error,
         gui_api_base,
@@ -284,6 +305,7 @@ pub fn inspect_codex_app_config(
         provider,
         providers,
         image_generation_enabled,
+        connection_mode,
     }
 }
 
@@ -756,6 +778,21 @@ fn inspect_config_toml(path: &Path, backend_url: &str) -> (bool, Option<String>)
     }
 }
 
+fn inspect_managed_ai_gateway_provider(path: &Path, backend_url: &str) -> bool {
+    let Ok(doc) = parse_existing_config_toml(path) else {
+        return false;
+    };
+    let Some(active_provider) = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    managed_provider_names_in_config(&doc, backend_url).contains(active_provider)
+}
+
 fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -866,7 +903,8 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         toml_edit::DocumentMut::new()
     };
 
-    doc["chatgpt_base_url"] = toml_edit::value(&options.backend_url);
+    let codex_backend_url = options.codex_backend_url();
+    doc["chatgpt_base_url"] = toml_edit::value(&codex_backend_url);
     disable_codex_apps_feature_if_unset(&mut doc);
 
     let explicit_provider_name = non_empty(options.provider_name.as_deref());
@@ -1031,6 +1069,57 @@ fn ai_gateway_base_url_from_backend_url(backend_url: &str) -> String {
         format!("{base}/ai-gateway/v1")
     } else {
         format!("{backend}/ai-gateway/v1")
+    }
+}
+
+fn codex_connection_url(url: &str, mode: LocalConnectionMode) -> String {
+    if mode == LocalConnectionMode::Standard {
+        return url.to_string();
+    }
+
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return url.to_string();
+    };
+    let Some(host) = parsed.host_str() else {
+        return url.to_string();
+    };
+    if matches!(host, "127.0.0.1" | "::1" | "localhost") {
+        if parsed.set_host(Some("localhost")).is_ok() {
+            return parsed.to_string();
+        }
+    }
+    url.to_string()
+}
+
+fn inspect_connection_mode(path: &Path, backend_url: &str) -> LocalConnectionMode {
+    let Ok(doc) = parse_existing_config_toml(path) else {
+        return LocalConnectionMode::Standard;
+    };
+    let Some(value) = doc
+        .get("chatgpt_base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+    else {
+        return LocalConnectionMode::Standard;
+    };
+    let Ok(actual_url) = url::Url::parse(value) else {
+        return LocalConnectionMode::Standard;
+    };
+    let Ok(expected_url) = url::Url::parse(&codex_connection_url(
+        backend_url,
+        LocalConnectionMode::VpnCompatible,
+    )) else {
+        return LocalConnectionMode::Standard;
+    };
+    if actual_url.host_str() == Some("localhost")
+        && actual_url.scheme() == expected_url.scheme()
+        && actual_url.path().trim_end_matches('/') == expected_url.path().trim_end_matches('/')
+        && actual_url.query() == expected_url.query()
+        && actual_url.port_or_known_default() == expected_url.port_or_known_default()
+    {
+        LocalConnectionMode::VpnCompatible
+    } else {
+        LocalConnectionMode::Standard
     }
 }
 
@@ -1811,6 +1900,17 @@ pub(crate) fn default_codex_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 
+pub(crate) fn clear_codex_models_cache(codex_home: Option<PathBuf>) -> Result<bool> {
+    let cache_path = codex_home
+        .unwrap_or_else(default_codex_home)
+        .join(CODEX_MODELS_CACHE_FILE);
+    match std::fs::remove_file(&cache_path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("failed to remove {}", cache_path.display())),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1821,6 +1921,7 @@ mod tests {
         let report = configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -1868,6 +1969,7 @@ mod tests {
         let report = configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -1892,6 +1994,78 @@ mod tests {
         assert!(config.contains("supports_websockets = false"));
         assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
 
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn inspect_managed_ai_gateway_provider_requires_active_gateway_provider() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+"#,
+        )
+        .expect("write partial config");
+
+        assert!(!inspect_managed_ai_gateway_provider(
+            &config_path,
+            "http://127.0.0.1:3847/backend-api",
+        ));
+
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "dummy-token"
+"#,
+        )
+        .expect("write gateway config");
+
+        assert!(inspect_managed_ai_gateway_provider(
+            &config_path,
+            "http://127.0.0.1:3847/backend-api",
+        ));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_compatible_connection_uses_localhost() {
+        let codex_home = unique_temp_dir();
+        configure_codex_app(ConfigureCodexAppOptions {
+            codex_home: Some(codex_home.clone()),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::VpnCompatible,
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "test@example.com".to_string(),
+            plan_type: "pro".to_string(),
+            provider_name: None,
+            provider_base_url: None,
+            provider_key: None,
+            activate_provider: true,
+            image_generation_enabled: None,
+            provider_supports_websockets: Some(false),
+        })
+        .expect("configure");
+
+        let config_path = codex_home.join("config.toml");
+        let config = std::fs::read_to_string(&config_path).expect("read config");
+        assert!(config.contains("chatgpt_base_url = \"http://localhost:3847/backend-api\""));
+        assert!(config.contains("base_url = \"http://localhost:3847/ai-gateway/v1\""));
+
+        let status = inspect_codex_app_config(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        );
+        assert_eq!(status.connection_mode, LocalConnectionMode::VpnCompatible);
         let _ = std::fs::remove_dir_all(codex_home);
     }
 
@@ -2023,6 +2197,7 @@ command = "print-token"
         configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -2069,6 +2244,7 @@ env_key = "AI_GATEWAY_API_KEY"
         configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -2112,6 +2288,7 @@ name = "old-provider"
         let report = configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -2187,6 +2364,7 @@ experimental_bearer_token = "existing-qwen-key"
         let report = configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -2231,6 +2409,7 @@ base_url = "https://old.example.invalid"
         let report = configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -2352,6 +2531,7 @@ requires_openai_auth = true
         configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -2702,6 +2882,7 @@ base_url = "https://api.example.invalid"
         ConfigureCodexAppOptions {
             codex_home: Some(codex_home),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            connection_mode: LocalConnectionMode::Standard,
             account_id: "acct_test".to_string(),
             user_id: "user_test".to_string(),
             email: "local@example.test".to_string(),
@@ -2796,5 +2977,30 @@ base_url = "https://api.example.invalid"
         }
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn clear_codex_models_cache_removes_cache_file() {
+        let codex_home = unique_temp_dir();
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        let cache_path = codex_home.join(CODEX_MODELS_CACHE_FILE);
+        std::fs::write(&cache_path, "{}").expect("write cache");
+
+        let removed = clear_codex_models_cache(Some(codex_home.clone())).expect("clear cache");
+
+        assert!(removed);
+        assert!(!cache_path.exists());
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn clear_codex_models_cache_ignores_missing_cache_file() {
+        let codex_home = unique_temp_dir();
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+
+        let removed = clear_codex_models_cache(Some(codex_home.clone())).expect("clear cache");
+
+        assert!(!removed);
+        let _ = std::fs::remove_dir_all(codex_home);
     }
 }

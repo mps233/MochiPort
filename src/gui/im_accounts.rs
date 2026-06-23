@@ -3,7 +3,7 @@ use wxdragon::prelude::*;
 use super::api::{ApiClient, DashboardSnapshot, ImAccountItem};
 use super::text::GuiText;
 use super::widgets::{ImStatusPanel, StateTone, set_im_channel_row};
-use super::{DashboardRefresh, ImActionResult, ImActionResultStore, UiHandles};
+use super::{DashboardRefresh, ImActionResult, ImActionResultStore, UiHandles, revert_im_toggle};
 use super::{cached_dashboard_snapshot, force_dashboard_refresh, schedule_dashboard_refresh};
 use super::{show_error, show_info};
 
@@ -19,36 +19,53 @@ pub(super) fn apply_pending_im_action(
         return false;
     };
 
-    handles
-        .save_telegram_button
-        .set_label(handles.text.add_telegram_bot());
-    handles.save_telegram_button.enable(true);
-    handles
-        .delete_im_account_button
-        .set_label(handles.text.delete_selected());
-    handles.delete_im_account_button.enable(true);
-
     match result {
         ImActionResult::TelegramConfigure(Ok(_)) => {
+            handles
+                .save_telegram_button
+                .set_label(handles.text.add_telegram_bot());
+            handles.save_telegram_button.enable(true);
             show_info(frame, handles.text.telegram_saved());
             schedule_dashboard_refresh(api, refresh);
         }
         ImActionResult::TelegramConfigure(Err(err)) => {
+            handles
+                .save_telegram_button
+                .set_label(handles.text.add_telegram_bot());
+            handles.save_telegram_button.enable(true);
             show_error(frame, &err);
             schedule_dashboard_refresh(api, refresh);
         }
-        ImActionResult::AccountToggle(Ok(_)) => {
-            force_dashboard_refresh(api, refresh);
+        ImActionResult::AccountToggle {
+            row,
+            previous_enabled: _,
+            result: Ok(_),
+        } => {
+            handles.im_account_model.borrow().row_value_changed(row, 4);
+            schedule_dashboard_refresh(api, refresh);
         }
-        ImActionResult::AccountToggle(Err(err)) => {
+        ImActionResult::AccountToggle {
+            row,
+            previous_enabled,
+            result: Err(err),
+        } => {
+            revert_im_toggle(handles, row, previous_enabled);
             show_error(frame, &err);
-            force_dashboard_refresh(api, refresh);
+            schedule_dashboard_refresh(api, refresh);
         }
         ImActionResult::AccountDelete(Ok(_)) => {
+            handles
+                .delete_im_account_button
+                .set_label(handles.text.delete_selected());
+            handles.delete_im_account_button.enable(true);
             show_info(frame, handles.text.im_account_deleted());
             force_dashboard_refresh(api, refresh);
         }
         ImActionResult::AccountDelete(Err(err)) => {
+            handles
+                .delete_im_account_button
+                .set_label(handles.text.delete_selected());
+            handles.delete_im_account_button.enable(true);
             show_error(frame, &err);
             schedule_dashboard_refresh(api, refresh);
         }
@@ -122,6 +139,7 @@ pub(super) fn refresh_im_account_list(handles: &UiHandles, snapshot: &DashboardS
     }
 
     let previous_len = current_rows.len();
+    let previous_rows = current_rows.clone();
     let selected_row = handles.im_account_list.get_selected_row();
     let new_len = rows.len();
     *current_rows = rows;
@@ -134,8 +152,11 @@ pub(super) fn refresh_im_account_list(handles: &UiHandles, snapshot: &DashboardS
         }
     } else {
         let model = handles.im_account_model.borrow();
+        let current_rows = handles.im_account_rows.borrow();
         for row in 0..new_len {
-            model.row_changed(row);
+            if previous_rows.get(row) != current_rows.get(row) {
+                model.row_changed(row);
+            }
         }
     }
 }

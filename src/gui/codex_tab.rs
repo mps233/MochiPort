@@ -13,9 +13,9 @@ use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 
 use crate::ai_gateway::catalog::visible_catalog_model_options;
 use crate::ai_gateway::config::AiGatewayConfig;
+use crate::config::LocalConnectionMode;
 
 use super::api::{ApiClient, ConfigureRequest};
-use super::controls::{ButtonVariant, ThemeButton, theme_button};
 use super::text::GuiText;
 use super::theme;
 use super::widgets::card_section;
@@ -36,16 +36,17 @@ pub(super) type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
 pub(super) struct CodexTab {
     pub(super) page: ScrolledWindow,
     text: GuiText,
-    inject_button: ThemeButton,
-    clear_button: ThemeButton,
-    session_history_button: ThemeButton,
-    save_models_button: ThemeButton,
+    inject_button: Button,
+    clear_button: Button,
+    session_history_button: Button,
+    save_models_button: Button,
     model_list: CheckListBox,
     model_slugs: CodexModelSlugs,
     models_initialized: CodexModelsInitialized,
     configured: CodexConfigured,
     remote_ready: CodexRemoteReady,
     service_enabled: CodexServiceEnabled,
+    local_connection_mode: Rc<Cell<LocalConnectionMode>>,
 }
 
 pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
@@ -61,17 +62,14 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_label(text.codex_local_config_help())
         .build();
     local_config_hint.set_foreground_color(theme::theme().ink_muted);
-    let inject_button = theme_button(
-        &local_config_box,
-        text.inject_codex_access(),
-        ButtonVariant::Primary,
-    );
+    let inject_button = Button::builder(&local_config_box)
+        .with_label(text.inject_codex_access())
+        .build();
     inject_button.set_tooltip(text.inject_codex_access_help());
-    let clear_button = theme_button(
-        &local_config_box,
-        text.clear_codex_access(),
-        ButtonVariant::Secondary,
-    );
+    inject_button.enable(false);
+    let clear_button = Button::builder(&local_config_box)
+        .with_label(text.clear_codex_access())
+        .build();
     clear_button.set_tooltip(text.clear_codex_access_help());
     clear_button.enable(false);
     let local_config_row = BoxSizer::builder(Orientation::Horizontal).build();
@@ -99,11 +97,9 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_label(text.codex_session_history_help())
         .build();
     session_hint.set_foreground_color(theme::theme().ink_muted);
-    let session_history_button = theme_button(
-        &local_config_box,
-        text.open_codex_session_history(),
-        ButtonVariant::Secondary,
-    );
+    let session_history_button = Button::builder(&local_config_box)
+        .with_label(text.open_codex_session_history())
+        .build();
     session_history_button.enable(false);
     let session_row = BoxSizer::builder(Orientation::Horizontal).build();
     session_row.add(
@@ -143,6 +139,16 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
     );
+    let models_warning = StaticText::builder(&models_box)
+        .with_label(text.codex_visible_models_warning())
+        .build();
+    models_warning.set_foreground_color(theme::theme().warn);
+    models_section.add(
+        &models_warning,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        6,
+    );
 
     let model_options = visible_catalog_model_options();
     let model_slugs: CodexModelSlugs = Rc::new(
@@ -166,6 +172,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_style(CheckListBoxStyle::AlwaysSB)
         .build();
     model_list.set_min_size(Size::new(360, 120));
+    model_list.enable(false);
     models_section.add(
         &model_list,
         1,
@@ -173,11 +180,10 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         10,
     );
 
-    let save_models_button = theme_button(
-        &models_box,
-        text.save_codex_models(),
-        ButtonVariant::Primary,
-    );
+    let save_models_button = Button::builder(&models_box)
+        .with_label(text.save_codex_models())
+        .build();
+    save_models_button.enable(false);
     let models_actions = BoxSizer::builder(Orientation::Horizontal).build();
     models_actions.add_stretch_spacer(1);
     models_actions.add(&save_models_button, 0, SizerFlag::Right, 0);
@@ -220,6 +226,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         configured: Rc::new(Cell::new(false)),
         remote_ready: Rc::new(Cell::new(false)),
         service_enabled: Rc::new(Cell::new(false)),
+        local_connection_mode: Rc::new(Cell::new(LocalConnectionMode::Standard)),
     }
 }
 
@@ -251,9 +258,14 @@ pub(super) fn refresh_configured(tab: &CodexTab, configured: bool) {
     refresh_config_buttons(tab, tab.service_enabled.get());
 }
 
+pub(super) fn refresh_local_connection_mode(tab: &CodexTab, mode: LocalConnectionMode) {
+    tab.local_connection_mode.set(mode);
+}
+
 pub(super) fn refresh_remote_ready(tab: &CodexTab, remote_ready: bool) {
     tab.remote_ready.set(remote_ready);
-    tab.session_history_button.enable(remote_ready);
+    tab.session_history_button
+        .enable(tab.service_enabled.get() && remote_ready);
 }
 
 pub(super) fn initialize_visible_model_checks(tab: &CodexTab, gateway_config: &AiGatewayConfig) {
@@ -288,8 +300,9 @@ pub(super) fn apply_pending_action(
     tab.inject_button.set_label(text.inject_codex_access());
     tab.clear_button.set_label(text.clear_codex_access());
     tab.save_models_button.set_label(text.save_codex_models());
-    refresh_config_buttons(tab, true);
-    tab.save_models_button.enable(true);
+    let service_enabled = tab.service_enabled.get();
+    refresh_config_buttons(tab, service_enabled);
+    tab.save_models_button.enable(service_enabled);
 
     match result {
         CodexActionResult::Inject(Ok(_)) => {
@@ -359,6 +372,7 @@ fn bind_inject_action(
             .set_label(tab.text.injecting_codex_access());
         tab.inject_button.enable(false);
         let request = ConfigureRequest {
+            connection_mode: tab.local_connection_mode.get(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
@@ -499,5 +513,6 @@ fn save_visible_models(api: &ApiClient, models: Vec<String>) -> Result<(), Strin
     let mut config = api.get_app_config()?;
     config.ai_gateway.codex_visible_models = models;
     api.save_app_config(&config)?;
+    let _ = api.refresh_codex_app_models();
     Ok(())
 }

@@ -5,13 +5,16 @@ use serde_json::json;
 use crate::{
     app_state::SharedState,
     codex_app_config::{self, ConfigureCodexAppOptions},
-    codex_session_history, remote_control_backend,
+    codex_session_history,
+    config::LocalConnectionMode,
+    remote_control_backend,
 };
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ConfigureCodexAppRequest {
     codex_home: Option<String>,
+    connection_mode: Option<LocalConnectionMode>,
     provider_name: Option<String>,
     provider_base_url: Option<String>,
     provider_key: Option<String>,
@@ -83,6 +86,10 @@ pub(super) async fn configure_codex_app(
         .and_then(|value| value.activate)
         .unwrap_or(true);
     let provider_supports_websockets = request.as_ref().and_then(|value| value.supports_websockets);
+    let connection_mode = request
+        .as_ref()
+        .and_then(|value| value.connection_mode)
+        .unwrap_or(config.local_connection_mode);
 
     let backend_url = config.remote_control_base_url();
     state
@@ -99,6 +106,7 @@ pub(super) async fn configure_codex_app(
     match codex_app_config::configure_codex_app(ConfigureCodexAppOptions {
         codex_home,
         backend_url: backend_url.clone(),
+        connection_mode,
         account_id: "acct_codex_remote_local".to_string(),
         user_id: "user_codex_remote_local".to_string(),
         email: "codex-remote-local@example.local".to_string(),
@@ -259,6 +267,64 @@ pub(super) async fn uninstall_codex_app(State(state): State<SharedState>) -> imp
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "ok": false, "error": err.to_string() })),
         ),
+    }
+}
+
+pub(super) async fn refresh_codex_app_models(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let cache_removed = match codex_app_config::clear_codex_models_cache(None) {
+        Ok(removed) => removed,
+        Err(err) => {
+            state
+                .push_event(
+                    "warn",
+                    "codex_app_models_cache_clear_failed",
+                    err.to_string(),
+                )
+                .await;
+            false
+        }
+    };
+
+    let model_list_result = remote_control_backend::model_list_for_client(
+        &state,
+        remote_control_backend::default_remote_client_key(),
+        true,
+        Some(200),
+    )
+    .await;
+
+    match model_list_result {
+        Ok(value) => {
+            let count = value
+                .get("data")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0);
+            state
+                .push_event(
+                    "info",
+                    "codex_app_models_refreshed",
+                    format!("cache_removed={cache_removed} count={count}"),
+                )
+                .await;
+            Json(
+                json!({ "ok": true, "cacheRemoved": cache_removed, "modelListRefreshed": true, "count": count }),
+            )
+        }
+        Err(err) => {
+            state
+                .push_event(
+                    "warn",
+                    "codex_app_models_refresh_skipped",
+                    format!("cache_removed={cache_removed} err={err}"),
+                )
+                .await;
+            Json(
+                json!({ "ok": true, "cacheRemoved": cache_removed, "modelListRefreshed": false, "error": err.to_string() }),
+            )
+        }
     }
 }
 

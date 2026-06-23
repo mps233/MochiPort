@@ -12,8 +12,7 @@ use std::{
 };
 
 use wxdragon::widgets::dataview::{
-    CustomDataViewVirtualListModel, DataViewAlign, DataViewColumnFlags, DataViewCtrl,
-    DataViewItemAttr, DataViewStyle, Variant,
+    CustomDataViewVirtualListModel, DataViewAlign, DataViewColumnFlags, DataViewCtrl, Variant,
 };
 use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
@@ -22,7 +21,7 @@ use crate::ai_gateway::config::{
     DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderConfig, ProviderType, provider_api_root,
     provider_display_base_url,
 };
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LocalConnectionMode};
 
 #[cfg(target_os = "windows")]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
@@ -54,10 +53,11 @@ const ID_MENU_LANGUAGE_EN_US: i32 = 10_005;
 const ID_MENU_THEME_SYSTEM: i32 = 10_006;
 const ID_MENU_THEME_LIGHT: i32 = 10_007;
 const ID_MENU_THEME_DARK: i32 = 10_008;
+const ID_SERVICE_CONNECTION_SWITCH: i32 = 10_009;
 
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
-type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
+type PendingImToggle = Rc<RefCell<Option<ImAccountToggle>>>;
 type ModelMappingRows = Rc<RefCell<Vec<ModelMappingRow>>>;
 type ModelMappingModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 
@@ -75,10 +75,18 @@ struct ModelMappingRow {
     codex_models: Vec<String>,
 }
 
+#[derive(Clone)]
+struct ImAccountToggle {
+    row: usize,
+    platform: String,
+    account_id: String,
+    enabled: bool,
+    previous_enabled: bool,
+}
+
 mod ai_gateway;
 mod api;
 mod codex_tab;
-mod controls;
 mod daemon;
 mod im_accounts;
 mod onboarding;
@@ -92,8 +100,8 @@ mod update;
 mod widgets;
 
 use self::ai_gateway::{
-    AiGwActionResult, AiGwActionResultStore, AiGwProviderModel, AiGwProviderRow, AiGwProviderRows,
-    PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
+    AiGwActionResult, AiGwActionResultStore, AiGwChannelToggle, AiGwProviderModel, AiGwProviderRow,
+    AiGwProviderRows, PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
     provider_logo_variant, provider_protocol_display, refresh_ai_gw_filter_image_generation,
     refresh_ai_gw_provider_list, save_ai_gw_provider, set_ai_gw_actions_enabled,
     set_ai_gw_provider_enabled, set_filter_image_generation_tool,
@@ -103,7 +111,6 @@ use self::api::{
     RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
 };
 use self::codex_tab::{CodexActionResultStore, CodexTab};
-use self::controls::{ButtonVariant, ThemeButton, theme_button};
 use self::daemon::{
     app_support_config_path, daemon_config_path, start_daemon_for_gui_async, stop_daemon_on_exit,
     stop_pending_startup_daemon,
@@ -123,8 +130,9 @@ use self::text::{GuiLocale, GuiText};
 use self::theme::ThemeMode;
 use self::widgets::{
     ImStatusPanel, ProviderLogoKind, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap,
-    card_section, centered_status_panel, im_status_panel, provider_logo_bitmap,
-    set_disabled_status_panel, set_im_channel_row, set_status_panel, status_panel, text_field_row,
+    apply_dataview_theme, apply_notebook_theme, card_section, centered_status_panel,
+    dataview_table_style, im_status_panel, provider_logo_bitmap, set_disabled_status_panel,
+    set_im_channel_row, set_status_panel, status_panel, table_cell_attr, text_field_row,
     topology_connector, topology_splitter,
 };
 
@@ -228,6 +236,25 @@ fn build_ui() {
         StatusIconKind::Service,
         text,
     );
+    let service_settings_button = Button::builder(&service_status.panel)
+        .with_label(text.local_connection_settings())
+        .build();
+    service_settings_button.set_tooltip(text.local_connection_settings_help());
+    let service_settings_row = BoxSizer::builder(Orientation::Horizontal).build();
+    service_settings_row.add_stretch_spacer(1);
+    service_settings_row.add(
+        &service_settings_button,
+        0,
+        SizerFlag::AlignCenterVertical,
+        0,
+    );
+    service_status.extra.add_sizer(
+        &service_settings_row,
+        0,
+        SizerFlag::Expand | SizerFlag::Top,
+        2,
+    );
+    service_settings_button.hide();
     let im_status = im_status_panel(&status_box, text);
     let entry_connector = topology_connector(&status_box);
     let bridge_connector = topology_splitter(&status_box);
@@ -289,6 +316,7 @@ fn build_ui() {
     );
 
     let notebook = Notebook::builder(&root).build();
+    apply_notebook_theme(&notebook);
 
     let codex_tab = codex_tab::create(&notebook, text);
 
@@ -305,6 +333,8 @@ fn build_ui() {
         .with_label(text.image_generation_feature())
         .with_value(false)
         .build();
+    ai_gw_filter_image_generation.set_background_color(theme::theme().bg_card);
+    ai_gw_filter_image_generation.set_foreground_color(theme::theme().ink_primary);
     ai_gw_filter_image_generation.set_tooltip(text.image_generation_feature_help());
     let ai_gw_filter_image_generation_note = StaticText::builder(&ai_gw_behavior_box)
         .with_label(text.image_generation_feature_note())
@@ -380,21 +410,30 @@ fn build_ui() {
                     if name.trim().is_empty() {
                         return false;
                     }
-                    pending_ai_gw_channel_toggle_for_model
-                        .borrow_mut()
-                        .replace((name, enabled));
-                    false
+                    let previous_enabled = row_data.enabled;
+                    if previous_enabled == enabled {
+                        return true;
+                    }
+                    row_data.enabled = enabled;
+                    pending_ai_gw_channel_toggle_for_model.borrow_mut().replace(
+                        AiGwChannelToggle {
+                            row,
+                            name,
+                            enabled,
+                            previous_enabled,
+                        },
+                    );
+                    true
                 },
             ),
-            None::<fn(&AiGwProviderRows, usize, usize) -> Option<DataViewItemAttr>>,
+            Some(|_: &AiGwProviderRows, row, _| table_cell_attr(row)),
             None::<fn(&AiGwProviderRows, usize, usize) -> bool>,
         )));
     let ai_gw_provider_list = DataViewCtrl::builder(&ai_gw_list_box)
-        .with_style(
-            DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
-        )
+        .with_style(dataview_table_style(false))
         .with_size(Size::new(-1, 330))
         .build();
+    apply_dataview_theme(&ai_gw_provider_list);
     ai_gw_provider_list.append_toggle_column(
         text.enable(),
         0,
@@ -438,21 +477,15 @@ fn build_ui() {
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.associate_model(&*ai_gw_provider_model.borrow());
-    let ai_gw_new_button = theme_button(
-        &ai_gw_list_box,
-        text.ai_gw_add_channel(),
-        ButtonVariant::Primary,
-    );
-    let ai_gw_edit_button = theme_button(
-        &ai_gw_list_box,
-        text.ai_gw_edit_channel(),
-        ButtonVariant::Secondary,
-    );
-    let ai_gw_delete_button = theme_button(
-        &ai_gw_list_box,
-        text.ai_gw_delete_channel(),
-        ButtonVariant::Danger,
-    );
+    let ai_gw_new_button = Button::builder(&ai_gw_list_box)
+        .with_label(text.ai_gw_add_channel())
+        .build();
+    let ai_gw_edit_button = Button::builder(&ai_gw_list_box)
+        .with_label(text.ai_gw_edit_channel())
+        .build();
+    let ai_gw_delete_button = Button::builder(&ai_gw_list_box)
+        .with_label(text.ai_gw_delete_channel())
+        .build();
     let ai_gw_list_actions = BoxSizer::builder(Orientation::Horizontal).build();
     ai_gw_list_actions.add_stretch_spacer(1);
     ai_gw_list_actions.add(&ai_gw_new_button, 0, SizerFlag::Right, 8);
@@ -553,21 +586,31 @@ fn build_ui() {
                     if account_id.trim().is_empty() {
                         return false;
                     }
+                    let previous_enabled = row_data[4] == "true";
+                    if previous_enabled == enabled {
+                        return true;
+                    }
+                    row_data[4] = enabled.to_string();
                     pending_im_toggle_for_model
                         .borrow_mut()
-                        .replace((platform, account_id, enabled));
-                    false
+                        .replace(ImAccountToggle {
+                            row,
+                            platform,
+                            account_id,
+                            enabled,
+                            previous_enabled,
+                        });
+                    true
                 },
             ),
-            None::<fn(&ImAccountRows, usize, usize) -> Option<DataViewItemAttr>>,
+            Some(|_: &ImAccountRows, row, _| table_cell_attr(row)),
             None::<fn(&ImAccountRows, usize, usize) -> bool>,
         )));
     let im_account_list = DataViewCtrl::builder(&im_accounts_static_box)
-        .with_style(
-            DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
-        )
+        .with_style(dataview_table_style(false))
         .with_size(Size::new(-1, 190))
         .build();
+    apply_dataview_theme(&im_account_list);
     im_account_list.append_text_column(
         text.bot(),
         0,
@@ -612,11 +655,9 @@ fn build_ui() {
     );
     let im_account_actions = BoxSizer::builder(Orientation::Horizontal).build();
     im_account_actions.add_stretch_spacer(1);
-    let delete_im_account_button = theme_button(
-        &im_accounts_static_box,
-        text.delete_selected(),
-        ButtonVariant::Danger,
-    );
+    let delete_im_account_button = Button::builder(&im_accounts_static_box)
+        .with_label(text.delete_selected())
+        .build();
     delete_im_account_button.set_tooltip(text.delete_im_account_help());
     im_account_actions.add(&delete_im_account_button, 0, SizerFlag::Right, 0);
     im_accounts_box.add_sizer(
@@ -627,23 +668,17 @@ fn build_ui() {
     );
     let (add_im_static_box, add_im_box) = card_section(&feishu_page, text.add_bot());
     let add_im_actions = BoxSizer::builder(Orientation::Horizontal).build();
-    let change_bot_button = theme_button(
-        &add_im_static_box,
-        text.add_feishu_bot(),
-        ButtonVariant::Secondary,
-    );
+    let change_bot_button = Button::builder(&add_im_static_box)
+        .with_label(text.add_feishu_bot())
+        .build();
     change_bot_button.set_tooltip(text.add_feishu_bot_help());
-    let save_telegram_button = theme_button(
-        &add_im_static_box,
-        text.add_telegram_bot(),
-        ButtonVariant::Primary,
-    );
+    let save_telegram_button = Button::builder(&add_im_static_box)
+        .with_label(text.add_telegram_bot())
+        .build();
     save_telegram_button.set_tooltip(text.add_telegram_bot_help());
-    let connect_wechat_button = theme_button(
-        &add_im_static_box,
-        text.add_wechat_bot(),
-        ButtonVariant::Secondary,
-    );
+    let connect_wechat_button = Button::builder(&add_im_static_box)
+        .with_label(text.add_wechat_bot())
+        .build();
     connect_wechat_button.set_tooltip(text.add_wechat_bot_help());
     add_im_actions.add(&change_bot_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&save_telegram_button, 0, SizerFlag::Right, 10);
@@ -694,16 +729,12 @@ fn build_ui() {
         .with_label(text.request_log_open_hint())
         .build();
     request_log_hint.set_foreground_color(theme::theme().ink_secondary);
-    let request_log_clear_old_button = theme_button(
-        &request_logs_page,
-        text.request_log_clear_old(),
-        ButtonVariant::Secondary,
-    );
-    let request_log_clear_all_button = theme_button(
-        &request_logs_page,
-        text.request_log_clear_all(),
-        ButtonVariant::Danger,
-    );
+    let request_log_clear_old_button = Button::builder(&request_logs_page)
+        .with_label(text.request_log_clear_old())
+        .build();
+    let request_log_clear_all_button = Button::builder(&request_logs_page)
+        .with_label(text.request_log_clear_all())
+        .build();
     let request_log_toolbar = BoxSizer::builder(Orientation::Horizontal).build();
     request_log_toolbar.add(&request_log_hint, 0, SizerFlag::AlignCenterVertical, 0);
     request_log_toolbar.add_stretch_spacer(1);
@@ -725,15 +756,14 @@ fn build_ui() {
             request_log_rows.clone(),
             request_log_cell,
             None::<fn(&RequestLogRows, usize, usize, &Variant) -> bool>,
-            None::<fn(&RequestLogRows, usize, usize) -> Option<DataViewItemAttr>>,
+            Some(|_: &RequestLogRows, row, _| table_cell_attr(row)),
             None::<fn(&RequestLogRows, usize, usize) -> bool>,
         )));
     let request_log_list = DataViewCtrl::builder(&request_log_box)
-        .with_style(
-            DataViewStyle::Single | DataViewStyle::RowLines | DataViewStyle::HorizontalRules,
-        )
+        .with_style(dataview_table_style(false))
         .with_size(Size::new(-1, 520))
         .build();
+    apply_dataview_theme(&request_log_list);
     request_log_list.append_text_column(
         text.request_log_col_id(),
         0,
@@ -860,6 +890,7 @@ fn build_ui() {
     let handles = UiHandles {
         text,
         service_status,
+        service_settings_button,
         im_status,
         codex_status,
         vscode_status,
@@ -901,6 +932,8 @@ fn build_ui() {
         &codex_action_result,
         &codex_action_in_flight,
     );
+
+    bind_service_connection_settings(&frame, &handles);
 
     {
         let api = api.clone();
@@ -1036,7 +1069,7 @@ fn build_ui() {
         let frame = frame;
         let codex_action_result = codex_action_result.clone();
         result_timer.on_tick(move |_| {
-            apply_pending_dashboard(&handles, &dashboard_refresh);
+            apply_pending_dashboard(&handles, &dashboard_refresh, &api, &frame);
             codex_tab::apply_pending_action(
                 &api,
                 &handles.codex_tab,
@@ -1062,27 +1095,31 @@ fn build_ui() {
         let im_action_in_flight = im_action_in_flight.clone();
         im_action_timer.on_tick(move |_| {
             if !im_action_in_flight.load(Ordering::SeqCst)
-                && let Some((platform, account_id, enabled)) =
-                    handles.pending_im_toggle.borrow_mut().take()
+                && let Some(toggle) = handles.pending_im_toggle.borrow_mut().take()
             {
                 if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                    force_dashboard_refresh(&api, &dashboard_refresh);
+                    revert_im_toggle(&handles, toggle.row, toggle.previous_enabled);
                     return;
                 }
                 im_action_in_flight.store(true, Ordering::SeqCst);
-                set_actions_enabled(&handles, false);
                 let request = SetImAccountEnabledRequest {
-                    platform,
-                    account_id,
-                    enabled,
+                    platform: toggle.platform,
+                    account_id: toggle.account_id,
+                    enabled: toggle.enabled,
                 };
+                let row = toggle.row;
+                let previous_enabled = toggle.previous_enabled;
                 let thread_api = api.clone();
                 let im_action_result = im_action_result.clone();
                 let im_action_in_flight = im_action_in_flight.clone();
                 thread::spawn(move || {
                     let outcome = thread_api.set_im_account_enabled(&request);
                     if let Ok(mut slot) = im_action_result.lock() {
-                        slot.replace(ImActionResult::AccountToggle(outcome));
+                        slot.replace(ImActionResult::AccountToggle {
+                            row,
+                            previous_enabled,
+                            result: outcome,
+                        });
                     }
                     im_action_in_flight.store(false, Ordering::SeqCst);
                 });
@@ -1252,28 +1289,34 @@ fn build_ui() {
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
         ai_gw_action_timer.on_tick(move |_| {
             if !ai_gw_action_in_flight.load(Ordering::SeqCst)
-                && let Some((name, enabled)) =
-                    handles.pending_ai_gw_channel_toggle.borrow_mut().take()
+                && let Some(toggle) = handles.pending_ai_gw_channel_toggle.borrow_mut().take()
             {
                 if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                    force_dashboard_refresh(&api, &dashboard_refresh);
+                    revert_ai_gw_toggle(&handles, toggle.row, toggle.previous_enabled);
                     return;
                 }
                 ai_gw_action_in_flight.store(true, Ordering::SeqCst);
-                set_ai_gw_actions_enabled(&handles, false);
+                let row = toggle.row;
+                let previous_enabled = toggle.previous_enabled;
+                let name = toggle.name;
+                let enabled = toggle.enabled;
                 let worker_api = api.clone();
                 let ai_gw_action_result = ai_gw_action_result.clone();
                 let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
                 thread::spawn(move || {
                     let outcome = set_ai_gw_provider_enabled(&worker_api, &name, enabled);
                     if let Ok(mut slot) = ai_gw_action_result.lock() {
-                        slot.replace(AiGwActionResult::ChannelToggle(outcome));
+                        slot.replace(AiGwActionResult::ChannelToggle {
+                            row,
+                            previous_enabled,
+                            result: outcome,
+                        });
                     }
                     ai_gw_action_in_flight.store(false, Ordering::SeqCst);
                 });
             }
             if apply_pending_ai_gw_action(&handles, &frame, &ai_gw_action_result) {
-                force_dashboard_refresh(&api, &dashboard_refresh);
+                schedule_dashboard_refresh(&api, &dashboard_refresh);
             }
         });
     }
@@ -1444,7 +1487,28 @@ fn default_base_url() -> String {
     std::env::var("CODEX_REMOTE_GUI_BASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
+        .unwrap_or_else(|| local_service_base_url(load_local_connection_mode()))
+}
+
+fn local_service_base_url(mode: LocalConnectionMode) -> String {
+    match mode {
+        LocalConnectionMode::Standard => DEFAULT_BASE_URL.to_string(),
+        LocalConnectionMode::VpnCompatible => "http://localhost:3847".to_string(),
+    }
+}
+
+fn load_local_connection_mode() -> LocalConnectionMode {
+    daemon_config_path()
+        .and_then(|path| AppConfig::load_or_default(&path).ok())
+        .map(|config| config.local_connection_mode)
+        .unwrap_or_default()
+}
+
+fn save_local_connection_mode(mode: LocalConnectionMode) -> Result<(), String> {
+    let path = daemon_config_path().unwrap_or_else(app_support_config_path);
+    let mut config = AppConfig::load_or_default(&path).map_err(|err| err.to_string())?;
+    config.local_connection_mode = mode;
+    config.save(&path).map_err(|err| err.to_string())
 }
 
 fn load_gui_locale() -> GuiLocale {
@@ -1570,9 +1634,7 @@ fn ai_gw_service_option(
     logo: Option<ProviderLogoKind>,
     first_in_group: bool,
 ) -> RadioButton {
-    let row_panel = Panel::builder(parent)
-        .with_style(PanelStyle::BorderStatic)
-        .build();
+    let row_panel = Panel::builder(parent).build();
     row_panel.set_background_color(theme::theme().bg_card_alt);
     row_panel.set_min_size(Size::new(0, 46));
 
@@ -1603,6 +1665,8 @@ fn ai_gw_service_option(
     } else {
         builder.build()
     };
+    radio.set_background_color(theme::theme().bg_card_alt);
+    radio.set_foreground_color(theme::theme().ink_primary);
     radio.set_tooltip(label);
     row.add(&radio, 1, SizerFlag::AlignCenterVertical, 0);
     row.add_spacer(12);
@@ -1701,9 +1765,7 @@ fn show_ai_gw_channel_dialog(
 
     let workspace = BoxSizer::builder(Orientation::Horizontal).build();
 
-    let service_panel = Panel::builder(&panel)
-        .with_style(PanelStyle::BorderStatic)
-        .build();
+    let service_panel = Panel::builder(&panel).build();
     service_panel.set_background_color(theme::theme().bg_card);
     service_panel.set_min_size(Size::new(300, 500));
     let service_sizer = BoxSizer::builder(Orientation::Vertical).build();
@@ -1750,9 +1812,7 @@ fn show_ai_gw_channel_dialog(
     service_panel.set_sizer(service_sizer, true);
     workspace.add(&service_panel, 0, SizerFlag::Expand | SizerFlag::Right, 14);
 
-    let form_panel = Panel::builder(&panel)
-        .with_style(PanelStyle::BorderStatic)
-        .build();
+    let form_panel = Panel::builder(&panel).build();
     form_panel.set_background_color(theme::theme().bg_card);
     form_panel.set_min_size(Size::new(620, 500));
     let form_sizer = BoxSizer::builder(Orientation::Vertical).build();
@@ -1799,21 +1859,15 @@ fn show_ai_gw_channel_dialog(
         .with_label(text.ai_gw_models())
         .build();
     model_title.set_foreground_color(theme::theme().ink_secondary);
-    let fetch_models_button = theme_button(
-        &form_panel,
-        text.ai_gw_fetch_models(),
-        ButtonVariant::Secondary,
-    );
-    let add_model_button = theme_button(
-        &form_panel,
-        text.ai_gw_add_model(),
-        ButtonVariant::Secondary,
-    );
-    let delete_model_button = theme_button(
-        &form_panel,
-        text.ai_gw_delete_model(),
-        ButtonVariant::Danger,
-    );
+    let fetch_models_button = Button::builder(&form_panel)
+        .with_label(text.ai_gw_fetch_models())
+        .build();
+    let add_model_button = Button::builder(&form_panel)
+        .with_label(text.ai_gw_add_model())
+        .build();
+    let delete_model_button = Button::builder(&form_panel)
+        .with_label(text.ai_gw_delete_model())
+        .build();
     model_header.add(&model_title, 1, SizerFlag::AlignCenterVertical, 0);
     model_header.add(
         &fetch_models_button,
@@ -1842,18 +1896,14 @@ fn show_ai_gw_channel_dialog(
             model_mapping_rows.clone(),
             model_mapping_cell,
             None::<fn(&ModelMappingRows, usize, usize, &Variant) -> bool>,
-            None::<fn(&ModelMappingRows, usize, usize) -> Option<DataViewItemAttr>>,
+            Some(|_: &ModelMappingRows, row, _| table_cell_attr(row)),
             None::<fn(&ModelMappingRows, usize, usize) -> bool>,
         )));
     let models_list = DataViewCtrl::builder(&form_panel)
-        .with_style(
-            DataViewStyle::Single
-                | DataViewStyle::RowLines
-                | DataViewStyle::HorizontalRules
-                | DataViewStyle::VerticalRules,
-        )
+        .with_style(dataview_table_style(false))
         .with_size(Size::new(-1, 180))
         .build();
+    apply_dataview_theme(&models_list);
     models_list.append_text_column(
         text.ai_gw_upstream_model(),
         0,
@@ -1938,13 +1988,22 @@ fn show_ai_gw_channel_dialog(
     )));
     if let Some(provider) = initial {
         key_input.change_value(&provider.api_key);
-        radio_openai.enable(false);
-        radio_deepseek.enable(false);
-        radio_anthropic.enable(false);
-        radio_glm.enable(false);
     }
 
     let service_template_applying = Rc::new(RefCell::new(false));
+    if let Some(provider) = initial {
+        bind_locked_ai_gw_service_selection(
+            text,
+            provider.provider_type.clone(),
+            provider.compatibility.as_deref().map(ToOwned::to_owned),
+            &radio_openai,
+            &radio_deepseek,
+            &radio_anthropic,
+            &radio_glm,
+            &type_input,
+            service_template_applying.clone(),
+        );
+    }
     if initial.is_none() {
         let type_input = type_input;
         let name_input = name_input;
@@ -2282,10 +2341,18 @@ fn show_ai_gw_channel_dialog(
             show_error(parent, text.ai_gw_provider_name_empty());
             None
         } else {
-            let provider_type =
-                selected_ai_gw_dialog_provider_type(&radio_deepseek, &radio_anthropic, &radio_glm);
-            let compatibility =
-                selected_ai_gw_dialog_compatibility(&radio_anthropic, &radio_glm, initial);
+            let provider_type = initial
+                .map(|provider| provider.provider_type.clone())
+                .unwrap_or_else(|| {
+                    selected_ai_gw_dialog_provider_type(
+                        &radio_deepseek,
+                        &radio_anthropic,
+                        &radio_glm,
+                    )
+                });
+            let compatibility = initial
+                .and_then(|provider| provider.compatibility.clone())
+                .or_else(|| selected_ai_gw_dialog_compatibility(&radio_anthropic, &radio_glm));
             let (models, explicit_aliases) = model_mapping_rows_to_config(&model_mapping_rows);
             let model_aliases = build_model_aliases_for_save(&models, explicit_aliases);
             let mut template = current_ai_gw_provider_template.borrow().clone();
@@ -2411,6 +2478,104 @@ fn apply_ai_gw_service_template(
     );
     key_input.change_value("");
     *service_template_applying.borrow_mut() = false;
+}
+
+fn bind_locked_ai_gw_service_selection(
+    text: GuiText,
+    provider_type: ProviderType,
+    compatibility: Option<String>,
+    radio_openai: &RadioButton,
+    radio_deepseek: &RadioButton,
+    radio_anthropic: &RadioButton,
+    radio_glm: &RadioButton,
+    type_input: &TextCtrl,
+    service_template_applying: Rc<RefCell<bool>>,
+) {
+    bind_locked_ai_gw_service_radio(
+        text,
+        provider_type.clone(),
+        compatibility.clone(),
+        radio_openai,
+        radio_openai,
+        radio_deepseek,
+        radio_anthropic,
+        radio_glm,
+        type_input,
+        service_template_applying.clone(),
+    );
+    bind_locked_ai_gw_service_radio(
+        text,
+        provider_type.clone(),
+        compatibility.clone(),
+        radio_deepseek,
+        radio_openai,
+        radio_deepseek,
+        radio_anthropic,
+        radio_glm,
+        type_input,
+        service_template_applying.clone(),
+    );
+    bind_locked_ai_gw_service_radio(
+        text,
+        provider_type.clone(),
+        compatibility.clone(),
+        radio_anthropic,
+        radio_openai,
+        radio_deepseek,
+        radio_anthropic,
+        radio_glm,
+        type_input,
+        service_template_applying.clone(),
+    );
+    bind_locked_ai_gw_service_radio(
+        text,
+        provider_type,
+        compatibility,
+        radio_glm,
+        radio_openai,
+        radio_deepseek,
+        radio_anthropic,
+        radio_glm,
+        type_input,
+        service_template_applying,
+    );
+}
+
+fn bind_locked_ai_gw_service_radio(
+    text: GuiText,
+    provider_type: ProviderType,
+    compatibility: Option<String>,
+    radio: &RadioButton,
+    radio_openai: &RadioButton,
+    radio_deepseek: &RadioButton,
+    radio_anthropic: &RadioButton,
+    radio_glm: &RadioButton,
+    type_input: &TextCtrl,
+    service_template_applying: Rc<RefCell<bool>>,
+) {
+    let radio = *radio;
+    let radio_openai = *radio_openai;
+    let radio_deepseek = *radio_deepseek;
+    let radio_anthropic = *radio_anthropic;
+    let radio_glm = *radio_glm;
+    let type_input = *type_input;
+    radio.on_selected(move |_| {
+        if *service_template_applying.borrow() {
+            return;
+        }
+        *service_template_applying.borrow_mut() = true;
+        set_ai_gw_dialog_provider_type(
+            text,
+            provider_type.clone(),
+            compatibility.as_deref(),
+            &radio_openai,
+            &radio_deepseek,
+            &radio_anthropic,
+            &radio_glm,
+            &type_input,
+        );
+        *service_template_applying.borrow_mut() = false;
+    });
 }
 
 fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig {
@@ -2542,14 +2707,13 @@ fn set_ai_gw_dialog_provider_type(
 fn selected_ai_gw_dialog_compatibility(
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
-    initial: Option<&ProviderConfig>,
 ) -> Option<String> {
     if radio_glm.get_value() {
         Some("glm_anthropic".to_string())
     } else if radio_anthropic.get_value() {
         Some("anthropic".to_string())
     } else {
-        initial.and_then(|provider| provider.compatibility.clone())
+        None
     }
 }
 
@@ -2999,10 +3163,57 @@ fn handle_theme_selected(frame: &Frame, text: GuiText, mode: ThemeMode) {
     }
 }
 
+fn bind_service_connection_settings(frame: &Frame, handles: &UiHandles) {
+    let button = handles.service_settings_button;
+    let text = handles.text;
+    let frame_for_button = *frame;
+    button.on_click(move |_| {
+        let current = load_local_connection_mode();
+        let (label, help) = match current {
+            LocalConnectionMode::Standard => (
+                text.switch_to_vpn_compatible_connection(),
+                text.local_connection_switch_help(),
+            ),
+            LocalConnectionMode::VpnCompatible => (
+                text.switch_to_standard_connection(),
+                text.local_connection_switch_help(),
+            ),
+        };
+        let mut menu = Menu::builder()
+            .append_item(ID_SERVICE_CONNECTION_SWITCH, label, help)
+            .build();
+        frame_for_button.popup_menu(&mut menu, None);
+    });
+
+    let frame_for_menu = *frame;
+    frame.on_menu_selected(move |event| {
+        if event.get_id() != ID_SERVICE_CONNECTION_SWITCH {
+            return;
+        }
+        let current = load_local_connection_mode();
+        let next = match current {
+            LocalConnectionMode::Standard => LocalConnectionMode::VpnCompatible,
+            LocalConnectionMode::VpnCompatible => LocalConnectionMode::Standard,
+        };
+        handle_local_connection_selected(&frame_for_menu, text, next);
+    });
+}
+
+fn handle_local_connection_selected(frame: &Frame, text: GuiText, mode: LocalConnectionMode) {
+    match save_local_connection_mode(mode) {
+        Ok(()) => show_info(frame, text.local_connection_restart_message()),
+        Err(err) => show_error(
+            frame,
+            &format!("{}: {err}", text.local_connection_save_failed()),
+        ),
+    }
+}
+
 #[derive(Clone)]
 struct UiHandles {
     text: GuiText,
     service_status: StatusPanel,
+    service_settings_button: Button,
     im_status: ImStatusPanel,
     codex_status: StatusPanel,
     vscode_status: StatusPanel,
@@ -3011,10 +3222,10 @@ struct UiHandles {
     im_account_rows: ImAccountRows,
     im_account_model: ImAccountModel,
     pending_im_toggle: PendingImToggle,
-    delete_im_account_button: ThemeButton,
-    save_telegram_button: ThemeButton,
-    connect_wechat_button: ThemeButton,
-    change_bot_button: ThemeButton,
+    delete_im_account_button: Button,
+    save_telegram_button: Button,
+    connect_wechat_button: Button,
+    change_bot_button: Button,
     codex_tab: CodexTab,
     // AI Gateway fields
     ai_gw_provider_list: DataViewCtrl,
@@ -3022,9 +3233,9 @@ struct UiHandles {
     ai_gw_provider_model: AiGwProviderModel,
     pending_ai_gw_channel_toggle: PendingAiGwChannelToggle,
     ai_gw_filter_image_generation: CheckBox,
-    ai_gw_delete_button: ThemeButton,
-    ai_gw_new_button: ThemeButton,
-    ai_gw_edit_button: ThemeButton,
+    ai_gw_delete_button: Button,
+    ai_gw_new_button: Button,
+    ai_gw_edit_button: Button,
     ai_gw_status_label: StaticText,
     // Request logs fields
     request_log_list: DataViewCtrl,
@@ -3040,6 +3251,8 @@ struct DashboardRefresh {
     daemon_starting: Arc<AtomicBool>,
     generation: Arc<AtomicU64>,
     closing: Arc<AtomicBool>,
+    connection_prompt_shown: Arc<AtomicBool>,
+    compatible_probe_hits: Arc<AtomicU64>,
     pending_startup_child: Arc<Mutex<Option<Child>>>,
 }
 
@@ -3052,6 +3265,8 @@ impl DashboardRefresh {
             daemon_starting: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
             closing: Arc::new(AtomicBool::new(false)),
+            connection_prompt_shown: Arc::new(AtomicBool::new(false)),
+            compatible_probe_hits: Arc::new(AtomicU64::new(0)),
             pending_startup_child: Arc::new(Mutex::new(None)),
         }
     }
@@ -3059,8 +3274,29 @@ impl DashboardRefresh {
 
 enum ImActionResult {
     TelegramConfigure(Result<serde_json::Value, String>),
-    AccountToggle(Result<serde_json::Value, String>),
+    AccountToggle {
+        row: usize,
+        previous_enabled: bool,
+        result: Result<serde_json::Value, String>,
+    },
     AccountDelete(Result<serde_json::Value, String>),
+}
+
+fn revert_im_toggle(handles: &UiHandles, row: usize, previous_enabled: bool) {
+    if let Some(row_data) = handles.im_account_rows.borrow_mut().get_mut(row) {
+        row_data[4] = previous_enabled.to_string();
+    }
+    handles.im_account_model.borrow().row_value_changed(row, 4);
+}
+
+fn revert_ai_gw_toggle(handles: &UiHandles, row: usize, previous_enabled: bool) {
+    if let Some(row_data) = handles.ai_gw_provider_rows.borrow_mut().get_mut(row) {
+        row_data.enabled = previous_enabled;
+    }
+    handles
+        .ai_gw_provider_model
+        .borrow()
+        .row_value_changed(row, 0);
 }
 
 fn schedule_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh) -> bool {
@@ -3099,7 +3335,12 @@ fn spawn_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh, generati
     });
 }
 
-fn apply_pending_dashboard(handles: &UiHandles, refresh: &DashboardRefresh) -> bool {
+fn apply_pending_dashboard(
+    handles: &UiHandles,
+    refresh: &DashboardRefresh,
+    api: &ApiClient,
+    frame: &Frame,
+) -> bool {
     let result = refresh.result.lock().ok().and_then(|mut slot| slot.take());
     let Some((generation, snapshot)) = result else {
         return false;
@@ -3110,6 +3351,7 @@ fn apply_pending_dashboard(handles: &UiHandles, refresh: &DashboardRefresh) -> b
 
     let daemon_starting = refresh.daemon_starting.load(Ordering::SeqCst);
     update_dashboard(handles, &snapshot, daemon_starting);
+    maybe_prompt_compatible_connection(handles, refresh, api, frame, &snapshot, daemon_starting);
     if let Ok(mut last_snapshot) = refresh.last_snapshot.lock() {
         last_snapshot.replace(snapshot);
     }
@@ -3122,6 +3364,42 @@ fn cached_dashboard_snapshot(refresh: &DashboardRefresh) -> Option<DashboardSnap
         .lock()
         .ok()
         .and_then(|snapshot| snapshot.clone())
+}
+
+fn maybe_prompt_compatible_connection(
+    handles: &UiHandles,
+    refresh: &DashboardRefresh,
+    api: &ApiClient,
+    frame: &Frame,
+    snapshot: &DashboardSnapshot,
+    daemon_starting: bool,
+) {
+    if snapshot.service_online
+        || daemon_starting
+        || snapshot.local_connection_mode != LocalConnectionMode::Standard
+        || !snapshot.compatible_connection_available
+    {
+        refresh.compatible_probe_hits.store(0, Ordering::SeqCst);
+        return;
+    }
+    let hits = refresh.compatible_probe_hits.fetch_add(1, Ordering::SeqCst) + 1;
+    if hits < 3 || api.is_online() || refresh.connection_prompt_shown.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    if confirm_switch_compatible_connection(frame, handles.text) {
+        handle_local_connection_selected(frame, handles.text, LocalConnectionMode::VpnCompatible);
+    }
+}
+
+fn local_connection_display_addr(bind: &str, mode: LocalConnectionMode) -> String {
+    let port = bind
+        .rsplit_once(':')
+        .and_then(|(_, value)| value.parse::<u16>().ok())
+        .unwrap_or(3847);
+    match mode {
+        LocalConnectionMode::Standard => format!("127.0.0.1:{port}"),
+        LocalConnectionMode::VpnCompatible => format!("localhost:{port}"),
+    }
 }
 
 fn ensure_service_ready_for_action(
@@ -3153,7 +3431,7 @@ fn show_dashboard_starting(handles: &UiHandles) {
     set_status_panel(
         &handles.service_status,
         text.starting(),
-        "",
+        text.local_connection_label(load_local_connection_mode()),
         StateTone::Warn,
     );
     set_im_channel_row(
@@ -3228,6 +3506,7 @@ fn show_dashboard_startup_error(handles: &UiHandles, detail: &str) {
 
 fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_starting: bool) {
     let text = handles.text;
+    refresh_service_settings_button(handles, snapshot);
     if !snapshot.service_online {
         if daemon_starting {
             show_dashboard_starting(handles);
@@ -3236,7 +3515,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         set_status_panel(
             &handles.service_status,
             text.not_running(),
-            text.gui_auto_start_service(),
+            &text.local_service_offline_detail(snapshot.local_connection_mode),
             StateTone::Error,
         );
         set_im_channel_row(
@@ -3289,6 +3568,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     } else {
         codex_tab::refresh_configured(&handles.codex_tab, false);
     }
+    codex_tab::refresh_local_connection_mode(&handles.codex_tab, snapshot.local_connection_mode);
     if let Some(gw) = &snapshot.ai_gateway {
         refresh_ai_gw_filter_image_generation(handles, gw.filter_image_generation_tool);
     }
@@ -3297,7 +3577,10 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         set_status_panel(
             &handles.service_status,
             text.running(),
-            &text.listening(&status.bind),
+            &text.local_service_detail(
+                &local_connection_display_addr(&status.bind, status.local_connection_mode),
+                text.local_connection_label(status.local_connection_mode),
+            ),
             StateTone::Ok,
         );
     }
@@ -3390,6 +3673,19 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             .set_label(&text.ai_gw_status_enabled(0));
         refresh_ai_gw_provider_list(handles, None);
     }
+}
+
+fn refresh_service_settings_button(handles: &UiHandles, snapshot: &DashboardSnapshot) {
+    let should_show = snapshot.local_connection_mode == LocalConnectionMode::VpnCompatible
+        || (!snapshot.service_online
+            && snapshot.local_connection_mode == LocalConnectionMode::Standard
+            && snapshot.compatible_connection_available);
+    if should_show {
+        handles.service_settings_button.show(true);
+    } else {
+        handles.service_settings_button.hide();
+    }
+    handles.service_status.panel.layout();
 }
 
 fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
@@ -3499,8 +3795,8 @@ fn apply_pending_request_logs(handles: &UiHandles, result_store: &RequestLogResu
 fn apply_pending_request_log_clear(
     frame: &Frame,
     text: GuiText,
-    clear_old_button: &ThemeButton,
-    clear_all_button: &ThemeButton,
+    clear_old_button: &Button,
+    clear_all_button: &Button,
     result_store: &RequestLogClearResultStore,
 ) -> bool {
     let result = result_store.lock().ok().and_then(|mut slot| slot.take());
@@ -3629,6 +3925,18 @@ fn confirm_open_update_release(parent: &dyn WxWidget, text: GuiText, message: &s
         .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
         .build()
         .show_modal()
+        == ID_YES
+}
+
+fn confirm_switch_compatible_connection(parent: &dyn WxWidget, text: GuiText) -> bool {
+    MessageDialog::builder(
+        parent,
+        text.local_connection_detected_message(),
+        text.local_connection_detected_title(),
+    )
+    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+    .build()
+    .show_modal()
         == ID_YES
 }
 

@@ -10,6 +10,7 @@ const LEGACY_DEFAULT_BIND: &str = "127.0.0.1:8000";
 #[serde(default, rename_all = "camelCase")]
 pub struct AppConfig {
     pub bind: String,
+    pub local_connection_mode: LocalConnectionMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -24,6 +25,14 @@ pub struct AppConfig {
     pub wechat_accounts: Vec<WechatConfig>,
     pub bridge: BridgeConfig,
     pub ai_gateway: crate::ai_gateway::config::AiGatewayConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LocalConnectionMode {
+    #[default]
+    Standard,
+    VpnCompatible,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +95,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             bind: DEFAULT_BIND.to_string(),
+            local_connection_mode: LocalConnectionMode::default(),
             language: None,
             theme: None,
             state_path: PathBuf::from("codex-remote-state.json"),
@@ -181,13 +191,20 @@ impl AppConfig {
     }
 
     pub fn remote_control_base_url(&self) -> String {
+        self.remote_control_base_url_for_mode(self.local_connection_mode)
+    }
+
+    pub fn remote_control_base_url_for_mode(&self, mode: LocalConnectionMode) -> String {
         let host_port = self
             .bind
             .parse::<SocketAddr>()
             .ok()
             .map(|addr| {
                 let host = if addr.ip().is_loopback() || addr.ip().is_unspecified() {
-                    "127.0.0.1".to_string()
+                    match mode {
+                        LocalConnectionMode::Standard => "127.0.0.1".to_string(),
+                        LocalConnectionMode::VpnCompatible => "localhost".to_string(),
+                    }
                 } else {
                     let host = addr.ip().to_string();
                     if host.contains(':') {

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::ai_gateway::config::AiGatewayConfig;
-use crate::config::AppConfig;
+use crate::config::{AppConfig, LocalConnectionMode};
 
 use super::text::GuiText;
 use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
@@ -24,6 +24,8 @@ impl ApiClient {
         let http = Client::builder()
             .connect_timeout(GUI_CONNECT_TIMEOUT)
             .timeout(GUI_ACTION_TIMEOUT)
+            // GUI API calls only target the local daemon; system proxies can break loopback.
+            .no_proxy()
             .build()
             .expect("build HTTP client");
         Self {
@@ -130,13 +132,21 @@ impl ApiClient {
     }
 
     pub(super) fn dashboard(&self) -> DashboardSnapshot {
+        let offline_snapshot = DashboardSnapshot {
+            local_connection_mode: self.connection_mode(),
+            ..DashboardSnapshot::default()
+        };
         let status = match self.get_quick::<ServerStatus>("/api/status") {
             Ok(status) => status,
             Err(_err) => {
-                return DashboardSnapshot {
-                    service_online: false,
-                    ..DashboardSnapshot::default()
-                };
+                if self.connection_mode() == LocalConnectionMode::Standard {
+                    return DashboardSnapshot {
+                        compatible_connection_available: self
+                            .probe_base_url("http://localhost:3847"),
+                        ..offline_snapshot
+                    };
+                }
+                return offline_snapshot;
             }
         };
 
@@ -155,12 +165,34 @@ impl ApiClient {
 
         DashboardSnapshot {
             service_online: true,
+            local_connection_mode: status.local_connection_mode,
+            compatible_connection_available: false,
             remote: join_optional(remote),
             codex_app: join_optional(codex_app),
             im_accounts: join_optional(im_accounts),
             status: Some(status),
             ai_gateway: join_optional(ai_gateway_config),
         }
+    }
+
+    pub(super) fn connection_mode(&self) -> LocalConnectionMode {
+        if self
+            .base_url
+            .to_ascii_lowercase()
+            .starts_with("http://localhost:")
+        {
+            LocalConnectionMode::VpnCompatible
+        } else {
+            LocalConnectionMode::Standard
+        }
+    }
+
+    fn probe_base_url(&self, base_url: &str) -> bool {
+        let url = format!("{}/api/status", base_url.trim_end_matches('/'));
+        let Ok(response) = self.http.get(url).timeout(GUI_STATUS_TIMEOUT).send() else {
+            return false;
+        };
+        response.status().is_success()
     }
 
     pub(super) fn get_quick_optional_async<T>(
@@ -206,6 +238,10 @@ impl ApiClient {
 
     pub(super) fn repair_codex_app_gui_environment(&self) -> Result<serde_json::Value, String> {
         self.post_empty_with_timeout("/api/codex-app/repair-gui-environment", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn refresh_codex_app_models(&self) -> Result<serde_json::Value, String> {
+        self.post_empty_with_timeout("/api/codex-app/models/refresh", GUI_CONFIG_TIMEOUT)
     }
 
     pub(super) fn set_im_account_enabled(
@@ -307,6 +343,8 @@ fn join_optional<T>(handle: thread::JoinHandle<Option<T>>) -> Option<T> {
 #[derive(Clone, Default)]
 pub(super) struct DashboardSnapshot {
     pub(super) service_online: bool,
+    pub(super) local_connection_mode: LocalConnectionMode,
+    pub(super) compatible_connection_available: bool,
     pub(super) status: Option<ServerStatus>,
     pub(super) remote: Option<RemoteControlStatus>,
     pub(super) codex_app: Option<CodexAppStatus>,
@@ -318,6 +356,8 @@ pub(super) struct DashboardSnapshot {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ServerStatus {
     pub(super) bind: String,
+    #[serde(default)]
+    pub(super) local_connection_mode: LocalConnectionMode,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -481,6 +521,7 @@ pub(super) struct RequestLogDetail {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ConfigureRequest {
+    pub(super) connection_mode: LocalConnectionMode,
     pub(super) provider_name: Option<String>,
     pub(super) provider_base_url: Option<String>,
     pub(super) provider_key: Option<String>,

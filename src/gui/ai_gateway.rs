@@ -15,7 +15,7 @@ use super::widgets::{ProviderLogoKind, provider_logo_bitmap};
 
 pub(super) type AiGwProviderRows = Rc<RefCell<Vec<AiGwProviderRow>>>;
 pub(super) type AiGwProviderModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
-pub(super) type PendingAiGwChannelToggle = Rc<RefCell<Option<(String, bool)>>>;
+pub(super) type PendingAiGwChannelToggle = Rc<RefCell<Option<AiGwChannelToggle>>>;
 pub(super) type AiGwActionResultStore = Arc<Mutex<Option<AiGwActionResult>>>;
 
 #[derive(Clone, PartialEq, Eq)]
@@ -29,10 +29,22 @@ pub(super) struct AiGwProviderRow {
     pub(super) weight: u32,
 }
 
+#[derive(Clone)]
+pub(super) struct AiGwChannelToggle {
+    pub(super) row: usize,
+    pub(super) name: String,
+    pub(super) enabled: bool,
+    pub(super) previous_enabled: bool,
+}
+
 pub(super) enum AiGwActionResult {
     Save(Result<(), String>),
     Delete(Result<(), String>),
-    ChannelToggle(Result<(), String>),
+    ChannelToggle {
+        row: usize,
+        previous_enabled: bool,
+        result: Result<(), String>,
+    },
     FilterImageGeneration(Result<bool, String>),
 }
 
@@ -106,6 +118,7 @@ pub(super) fn refresh_ai_gw_provider_list(handles: &UiHandles, config: Option<&A
     }
 
     let previous_len = current_rows.len();
+    let previous_rows = current_rows.clone();
     let selected_row = handles.ai_gw_provider_list.get_selected_row();
     let new_len = rows.len();
     *current_rows = rows;
@@ -118,8 +131,11 @@ pub(super) fn refresh_ai_gw_provider_list(handles: &UiHandles, config: Option<&A
         }
     } else {
         let model = handles.ai_gw_provider_model.borrow();
+        let current_rows = handles.ai_gw_provider_rows.borrow();
         for row in 0..new_len {
-            model.row_changed(row);
+            if previous_rows.get(row) != current_rows.get(row) {
+                model.row_changed(row);
+            }
         }
     }
 }
@@ -183,26 +199,57 @@ pub(super) fn apply_pending_ai_gw_action(
         return false;
     };
 
-    handles
-        .ai_gw_delete_button
-        .set_label(handles.text.ai_gw_delete_channel());
-    set_ai_gw_actions_enabled(handles, true);
-
     match result {
         AiGwActionResult::Save(Ok(())) => {
+            handles
+                .ai_gw_delete_button
+                .set_label(handles.text.ai_gw_delete_channel());
+            set_ai_gw_actions_enabled(handles, true);
             super::show_info(frame, handles.text.ai_gw_saved());
         }
         AiGwActionResult::Save(Err(err)) => {
+            handles
+                .ai_gw_delete_button
+                .set_label(handles.text.ai_gw_delete_channel());
+            set_ai_gw_actions_enabled(handles, true);
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
         AiGwActionResult::Delete(Ok(())) => {
+            handles
+                .ai_gw_delete_button
+                .set_label(handles.text.ai_gw_delete_channel());
+            set_ai_gw_actions_enabled(handles, true);
             super::show_info(frame, handles.text.ai_gw_deleted());
         }
         AiGwActionResult::Delete(Err(err)) => {
+            handles
+                .ai_gw_delete_button
+                .set_label(handles.text.ai_gw_delete_channel());
+            set_ai_gw_actions_enabled(handles, true);
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
-        AiGwActionResult::ChannelToggle(Ok(())) => {}
-        AiGwActionResult::ChannelToggle(Err(err)) => {
+        AiGwActionResult::ChannelToggle {
+            row,
+            previous_enabled: _,
+            result: Ok(()),
+        } => {
+            handles
+                .ai_gw_provider_model
+                .borrow()
+                .row_value_changed(row, 0);
+        }
+        AiGwActionResult::ChannelToggle {
+            row,
+            previous_enabled,
+            result: Err(err),
+        } => {
+            if let Some(row_data) = handles.ai_gw_provider_rows.borrow_mut().get_mut(row) {
+                row_data.enabled = previous_enabled;
+            }
+            handles
+                .ai_gw_provider_model
+                .borrow()
+                .row_value_changed(row, 0);
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
         AiGwActionResult::FilterImageGeneration(Ok(_enabled)) => {}

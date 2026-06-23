@@ -14,11 +14,12 @@ use super::{
     api::{
         ApiClient, CodexAppSessionsResponse, CodexAppThread, MoveCodexAppSessionProviderRequest,
     },
-    controls::{ButtonVariant, ThemeButton, theme_button},
     show_error, show_info,
     text::GuiText,
     theme,
-    widgets::card_section,
+    widgets::{
+        apply_listctrl_row_theme, apply_listctrl_theme, card_section, listctrl_report_style,
+    },
 };
 
 const AI_GATEWAY_PROVIDER: &str = "ai-gateway";
@@ -54,9 +55,13 @@ pub(super) fn show_session_history_window(parent: &Frame, text: GuiText, api: Ap
     let root_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let toolbar = BoxSizer::builder(Orientation::Horizontal).build();
-    let refresh_button = theme_button(&root, text.refresh(), ButtonVariant::Secondary);
-    let move_to_button = theme_button(&root, text.move_to_ai_gateway(), ButtonVariant::Primary);
-    let move_back_button = theme_button(&root, text.move_back_provider(), ButtonVariant::Secondary);
+    let refresh_button = Button::builder(&root).with_label(text.refresh()).build();
+    let move_to_button = Button::builder(&root)
+        .with_label(text.move_to_ai_gateway())
+        .build();
+    let move_back_button = Button::builder(&root)
+        .with_label(text.move_back_provider())
+        .build();
     toolbar.add(&refresh_button, 0, SizerFlag::Right, 8);
     toolbar.add(&move_to_button, 0, SizerFlag::Right, 8);
     toolbar.add(&move_back_button, 0, SizerFlag::Right, 0);
@@ -215,17 +220,18 @@ pub(super) fn show_session_history_window(parent: &Frame, text: GuiText, api: Ap
 
 fn create_session_list<W: WxWidget>(parent: &W, text: GuiText) -> ListCtrl {
     let list = ListCtrl::builder(parent)
-        .with_style(ListCtrlStyle::Report | ListCtrlStyle::HRules | ListCtrlStyle::VRules)
+        .with_style(listctrl_report_style())
         .with_size(Size::new(-1, 470))
         .build();
     list.insert_column(0, text.session_col_provider(), ListColumnFormat::Left, 130);
     list.insert_column(1, text.session_col_preview(), ListColumnFormat::Left, 330);
     list.insert_column(2, text.session_col_workspace(), ListColumnFormat::Left, 260);
+    apply_listctrl_theme(&list);
     list
 }
 
 fn bind_refresh(
-    button: &ThemeButton,
+    button: &Button,
     api: ApiClient,
     fetch_result: SessionFetchResult,
     in_flight: Arc<AtomicBool>,
@@ -237,7 +243,7 @@ fn bind_refresh(
 }
 
 fn bind_move_to_gateway(
-    button: &ThemeButton,
+    button: &Button,
     frame: &Frame,
     text: GuiText,
     api: ApiClient,
@@ -345,7 +351,7 @@ fn bind_session_context_menus(
 }
 
 fn bind_move_back(
-    button: &ThemeButton,
+    button: &Button,
     frame: &Frame,
     text: GuiText,
     api: ApiClient,
@@ -595,6 +601,7 @@ fn populate_session_list(list: &ListCtrl, rows: &[SessionRow]) {
         list.insert_item(index, &provider_display_name(&row.provider), None);
         list.set_item_text_by_column(index, 1, &row.preview);
         list.set_item_text_by_column(index, 2, &row.workspace);
+        apply_listctrl_row_theme(list, index);
     }
 }
 

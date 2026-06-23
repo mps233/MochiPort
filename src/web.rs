@@ -59,6 +59,10 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/codex-app/status", get(codex_app::codex_app_status))
         .route(
+            "/api/codex-app/models/refresh",
+            post(codex_app::refresh_codex_app_models),
+        )
+        .route(
             "/api/codex-app/sessions",
             get(codex_app::codex_app_sessions),
         )
@@ -183,6 +187,7 @@ async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
 struct StatusResponse {
     running: bool,
     bind: String,
+    local_connection_mode: crate::config::LocalConnectionMode,
     state_path: String,
     feishu_ws: FeishuWsState,
     telegram: TelegramState,
@@ -212,6 +217,7 @@ async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
     Json(StatusResponse {
         running,
         bind: config.bind.clone(),
+        local_connection_mode: config.local_connection_mode,
         state_path: config.state_path.to_string_lossy().to_string(),
         feishu_ws,
         telegram,

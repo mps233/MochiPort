@@ -21,13 +21,15 @@ mod web;
 
 use std::{
     env,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use anyhow::Context;
+use anyhow::{Context, Result};
+use axum::Router;
 use serde_json::Value;
+use tokio::{net::TcpListener, sync::watch};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -75,6 +77,7 @@ async fn main() -> anyhow::Result<()> {
                 codex_app_config::ConfigureCodexAppOptions {
                     codex_home,
                     backend_url: backend_url.clone(),
+                    connection_mode: config.local_connection_mode,
                     account_id: "acct_codex_remote_local".to_string(),
                     user_id: "user_codex_remote_local".to_string(),
                     email: "codex-remote-local@example.local".to_string(),
@@ -145,6 +148,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     let bind = config.bind.clone();
     let chain_log_path = chain_log_path(&config);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
     let state = AppState::new(config_path, config, Some(shutdown_tx));
     {
         let config = state.config.lock().await;
@@ -172,13 +176,60 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid bind address `{bind}`"))?;
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let listener = TcpListener::bind(addr).await?;
     println!("codex-remote web: http://{addr}");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = shutdown_rx.await;
-        })
-        .await?;
+
+    let companion = compatible_loopback_addr(addr);
+    let mut companion_task = None;
+    if let Some(companion_addr) = companion {
+        match TcpListener::bind(companion_addr).await {
+            Ok(companion_listener) => {
+                println!("codex-remote web: http://{companion_addr}");
+                companion_task = Some(tokio::spawn(serve_http(
+                    companion_listener,
+                    app.clone(),
+                    server_shutdown_rx.clone(),
+                )));
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "codex_remote::server",
+                    addr = %companion_addr,
+                    error = %err,
+                    "compatible loopback listener unavailable"
+                );
+            }
+        }
+    }
+
+    let shutdown_task_tx = server_shutdown_tx.clone();
+    tokio::spawn(async move {
+        let _ = shutdown_rx.await;
+        let _ = shutdown_task_tx.send(true);
+    });
+
+    let primary_result = serve_http(listener, app, server_shutdown_rx).await;
+    let _ = server_shutdown_tx.send(true);
+    if let Some(task) = companion_task {
+        match task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    target: "codex_remote::server",
+                    error = %err,
+                    "compatible loopback server stopped with error"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "codex_remote::server",
+                    error = %err,
+                    "compatible loopback server task failed"
+                );
+            }
+        }
+    }
+    primary_result?;
     match vscode_extension_patch::restore_remote_control() {
         Ok(report) => {
             tracing::info!(
@@ -197,6 +248,35 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             );
         }
     }
+    Ok(())
+}
+
+fn compatible_loopback_addr(addr: SocketAddr) -> Option<SocketAddr> {
+    let port = addr.port();
+    match addr.ip() {
+        IpAddr::V4(ip) if ip == Ipv4Addr::LOCALHOST => {
+            Some(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port))
+        }
+        IpAddr::V6(ip) if ip == Ipv6Addr::LOCALHOST => {
+            Some(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+        }
+        _ => None,
+    }
+}
+
+async fn serve_http(
+    listener: TcpListener,
+    app: Router,
+    mut shutdown_rx: watch::Receiver<bool>,
+) -> Result<()> {
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            if *shutdown_rx.borrow() {
+                return;
+            }
+            let _ = shutdown_rx.changed().await;
+        })
+        .await?;
     Ok(())
 }
 
@@ -426,7 +506,7 @@ async fn print_status(config: &AppConfig) -> anyhow::Result<()> {
 async fn notify_daemon_bridge(config: &AppConfig, enabled: bool) -> anyhow::Result<()> {
     let action = if enabled { "start" } else { "stop" };
     let url = format!("http://{}/api/bridge/{action}", config.bind);
-    reqwest::Client::new()
+    local_daemon_http_client()?
         .post(url)
         .timeout(Duration::from_millis(700))
         .send()
@@ -436,7 +516,7 @@ async fn notify_daemon_bridge(config: &AppConfig, enabled: bool) -> anyhow::Resu
 
 async fn query_daemon_backend_status(config: &AppConfig) -> anyhow::Result<Value> {
     let url = format!("http://{}/api/remote-control/backend-status", config.bind);
-    let response = reqwest::Client::new()
+    let response = local_daemon_http_client()?
         .get(url)
         .timeout(Duration::from_millis(700))
         .send()
@@ -447,6 +527,13 @@ async fn query_daemon_backend_status(config: &AppConfig) -> anyhow::Result<Value
     response.json::<Value>().await.map_err(Into::into)
 }
 
+fn local_daemon_http_client() -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .context("failed to build local daemon HTTP client")
+}
+
 fn absolutize(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -454,5 +541,26 @@ fn absolutize(path: PathBuf) -> PathBuf {
         std::env::current_dir()
             .map(|cwd| cwd.join(&path))
             .unwrap_or_else(|_| path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compatible_loopback_addr_pairs_ipv4_and_ipv6_localhost() {
+        let ipv4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 3847);
+        let ipv6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 3847);
+
+        assert_eq!(compatible_loopback_addr(ipv4), Some(ipv6));
+        assert_eq!(compatible_loopback_addr(ipv6), Some(ipv4));
+    }
+
+    #[test]
+    fn compatible_loopback_addr_ignores_non_loopback() {
+        let public_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 3847);
+
+        assert_eq!(compatible_loopback_addr(public_addr), None);
     }
 }

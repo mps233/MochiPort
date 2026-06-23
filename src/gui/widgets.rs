@@ -1,5 +1,7 @@
 use image::imageops::FilterType;
+use image::{Rgba, RgbaImage};
 use wxdragon::prelude::*;
+use wxdragon::widgets::dataview::DataViewItemAttr;
 
 use super::text::GuiText;
 use super::theme::{self, Theme};
@@ -12,6 +14,7 @@ pub(super) struct StatusPanel {
     pub(super) title: StaticText,
     pub(super) state: StaticText,
     pub(super) detail: StaticText,
+    pub(super) extra: BoxSizer,
     pub(super) icon_kind: StatusIconKind,
 }
 
@@ -54,6 +57,85 @@ pub(super) enum ProviderLogoKind {
     DeepSeek,
     Anthropic,
     Zhipu,
+}
+
+pub(super) fn table_cell_attr(row: usize) -> Option<DataViewItemAttr> {
+    let t = theme::theme();
+    Some(
+        DataViewItemAttr::new()
+            .with_text_colour(
+                t.ink_primary.r,
+                t.ink_primary.g,
+                t.ink_primary.b,
+                t.ink_primary.a,
+            )
+            .with_bg_colour(
+                table_row_colour(row).r,
+                table_row_colour(row).g,
+                table_row_colour(row).b,
+                table_row_colour(row).a,
+            ),
+    )
+}
+
+pub(super) fn apply_dataview_theme(list: &DataViewCtrl) {
+    let t = theme::theme();
+    list.set_background_color(t.table_row);
+    let _ = list.set_alternate_row_colour(&t.table_row_alt);
+}
+
+pub(super) fn dataview_table_style(vertical_rules: bool) -> DataViewStyle {
+    let base = DataViewStyle::Single;
+    if theme::theme().is_dark {
+        base
+    } else if vertical_rules {
+        base | DataViewStyle::RowLines
+            | DataViewStyle::HorizontalRules
+            | DataViewStyle::VerticalRules
+    } else {
+        base | DataViewStyle::RowLines | DataViewStyle::HorizontalRules
+    }
+}
+
+pub(super) fn apply_listctrl_theme(list: &ListCtrl) {
+    let t = theme::theme();
+    list.set_background_color(t.table_row);
+    list.set_foreground_color(t.ink_primary);
+}
+
+pub(super) fn listctrl_report_style() -> ListCtrlStyle {
+    if theme::theme().is_dark {
+        ListCtrlStyle::Report
+    } else {
+        ListCtrlStyle::Report | ListCtrlStyle::HRules | ListCtrlStyle::VRules
+    }
+}
+
+pub(super) fn apply_listctrl_row_theme(list: &ListCtrl, row: i64) {
+    let t = theme::theme();
+    list.set_item_background_colour(row, &table_row_colour(row as usize));
+    list.set_item_text_colour(row, &t.ink_primary);
+}
+
+pub(super) fn apply_notebook_theme(notebook: &Notebook) {
+    let t = theme::theme();
+    notebook.set_background_color(t.bg_card_alt);
+    notebook.set_foreground_color(t.ink_primary);
+}
+
+pub(super) fn apply_textctrl_theme(input: &TextCtrl) {
+    let t = theme::theme();
+    input.set_background_color(t.bg_muted);
+    input.set_foreground_color(t.ink_primary);
+}
+
+fn table_row_colour(row: usize) -> Colour {
+    let t = theme::theme();
+    if row % 2 == 0 {
+        t.table_row
+    } else {
+        t.table_row_alt
+    }
 }
 
 /// Build a flat "card" section: a `bg_card` surface with a bold title header and
@@ -167,6 +249,8 @@ fn build_status_panel<W: WxWidget>(
     detail.set_foreground_color(t.ink_muted);
     detail.wrap(250);
     text_col.add(&detail, 0, SizerFlag::Expand, 0);
+    let extra = BoxSizer::builder(Orientation::Vertical).build();
+    text_col.add_sizer(&extra, 0, SizerFlag::Expand, 0);
     text_col.add_stretch_spacer(1);
 
     row.add_sizer(&text_col, 1, SizerFlag::Expand, 0);
@@ -183,6 +267,7 @@ fn build_status_panel<W: WxWidget>(
         title: title_label,
         state,
         detail,
+        extra,
         icon_kind,
     }
 }
@@ -357,67 +442,71 @@ pub(super) fn topology_splitter_bitmap(width: usize, height: usize) -> Bitmap {
 pub(super) fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     match kind {
         StatusIconKind::Codex => {
-            return brand_bitmap(
-                "codex-app-logo.png",
-                include_bytes!("../../packaging/brand/codex-app-logo.png"),
+            return svg_brand_bitmap(
+                "codex.svg",
+                include_bytes!("../../packaging/brand/codex.svg"),
                 size,
             );
         }
         StatusIconKind::VsCodeCodex => {
-            return brand_bitmap(
-                "codex-vscode-logo.png",
-                include_bytes!("../../packaging/brand/codex-vscode-logo.png"),
+            return svg_brand_bitmap(
+                "openai-badge.svg",
+                include_bytes!("../../packaging/brand/openai-badge.svg"),
                 size,
             );
         }
         StatusIconKind::CodexCli => {
-            return brand_bitmap(
-                "codex-cli-terminal.png",
-                include_bytes!("../../packaging/brand/codex-cli-terminal.png"),
+            return svg_brand_bitmap(
+                "codex-cli.svg",
+                include_bytes!("../../packaging/brand/codex-cli.svg"),
                 size,
             );
         }
-        StatusIconKind::Service => {}
+        StatusIconKind::Service => {
+            return svg_brand_bitmap(
+                "service-server.svg",
+                include_bytes!("../../packaging/brand/service-server.svg"),
+                size,
+            );
+        }
     }
-
-    let mut canvas = IconCanvas::new(size, [0, 0, 0, 0]);
-    draw_service_icon(&mut canvas);
-    Bitmap::from_rgba(&canvas.rgba, size as u32, size as u32).expect("status icon bitmap")
 }
 
 pub(super) fn disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     match kind {
         StatusIconKind::Codex => {
-            return disabled_brand_bitmap(
-                "codex-app-logo.png",
-                include_bytes!("../../packaging/brand/codex-app-logo.png"),
+            return disabled_svg_brand_bitmap(
+                "codex.svg",
+                include_bytes!("../../packaging/brand/codex.svg"),
                 size,
             );
         }
         StatusIconKind::VsCodeCodex => {
-            return disabled_brand_bitmap(
-                "codex-vscode-logo.png",
-                include_bytes!("../../packaging/brand/codex-vscode-logo.png"),
+            return disabled_svg_brand_bitmap(
+                "openai-badge.svg",
+                include_bytes!("../../packaging/brand/openai-badge.svg"),
                 size,
             );
         }
         StatusIconKind::CodexCli => {
-            return disabled_brand_bitmap(
-                "codex-cli-terminal.png",
-                include_bytes!("../../packaging/brand/codex-cli-terminal.png"),
+            return disabled_svg_brand_bitmap(
+                "codex-cli.svg",
+                include_bytes!("../../packaging/brand/codex-cli.svg"),
                 size,
             );
         }
-        StatusIconKind::Service => {}
+        StatusIconKind::Service => {
+            return disabled_svg_brand_bitmap(
+                "service-server.svg",
+                include_bytes!("../../packaging/brand/service-server.svg"),
+                size,
+            );
+        }
     }
-
-    let mut canvas = IconCanvas::new(size, [0, 0, 0, 0]);
-    draw_disabled_service_icon(&mut canvas);
-    Bitmap::from_rgba(&canvas.rgba, size as u32, size as u32).expect("disabled status icon bitmap")
 }
 
 pub(super) fn app_icon_bitmap(size: usize) -> Bitmap {
-    brand_bitmap(
+    png_brand_bitmap(
         "dolphin-rounded-256.png",
         include_bytes!("../../packaging/icons/dolphin-rounded-256.png"),
         size,
@@ -428,13 +517,13 @@ pub(super) fn im_channel_icon_bitmap(kind: ImChannelKind, disabled: bool, size: 
     match kind {
         ImChannelKind::Feishu => {
             if disabled {
-                disabled_brand_bitmap(
+                disabled_png_brand_bitmap(
                     "feishu-logo.png",
                     include_bytes!("../../packaging/brand/feishu-logo.png"),
                     size,
                 )
             } else {
-                brand_bitmap(
+                png_brand_bitmap(
                     "feishu-logo.png",
                     include_bytes!("../../packaging/brand/feishu-logo.png"),
                     size,
@@ -443,30 +532,30 @@ pub(super) fn im_channel_icon_bitmap(kind: ImChannelKind, disabled: bool, size: 
         }
         ImChannelKind::Telegram => {
             if disabled {
-                disabled_brand_bitmap(
-                    "telegram-logo.png",
-                    include_bytes!("../../packaging/brand/telegram-logo.png"),
+                disabled_svg_brand_bitmap(
+                    "telegram-logo.svg",
+                    include_bytes!("../../packaging/brand/telegram-logo.svg"),
                     size,
                 )
             } else {
-                brand_bitmap(
-                    "telegram-logo.png",
-                    include_bytes!("../../packaging/brand/telegram-logo.png"),
+                svg_brand_bitmap(
+                    "telegram-logo.svg",
+                    include_bytes!("../../packaging/brand/telegram-logo.svg"),
                     size,
                 )
             }
         }
         ImChannelKind::Wechat => {
             if disabled {
-                disabled_brand_bitmap(
-                    "wechat-logo.png",
-                    include_bytes!("../../packaging/brand/wechat-logo.png"),
+                disabled_svg_brand_bitmap(
+                    "wechat-logo.svg",
+                    include_bytes!("../../packaging/brand/wechat-logo.svg"),
                     size,
                 )
             } else {
-                brand_bitmap(
-                    "wechat-logo.png",
-                    include_bytes!("../../packaging/brand/wechat-logo.png"),
+                svg_brand_bitmap(
+                    "wechat-logo.svg",
+                    include_bytes!("../../packaging/brand/wechat-logo.svg"),
                     size,
                 )
             }
@@ -493,12 +582,29 @@ pub(super) fn provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap 
             include_bytes!("../../packaging/brand/providers/zhipu.svg").as_slice(),
         ),
     };
-    BitmapBundle::from_svg_data(bytes, Size::new(size, size))
+    let bitmap = BitmapBundle::from_svg_data(bytes, Size::new(size, size))
         .and_then(|bundle| bundle.get_bitmap(Size::new(size, size)))
-        .unwrap_or_else(|| panic!("failed to load provider logo {file_name}"))
+        .unwrap_or_else(|| panic!("failed to load provider logo {file_name}"));
+    if theme::theme().is_dark {
+        recolor_dark_provider_logo(&bitmap, file_name)
+    } else {
+        bitmap
+    }
 }
 
-pub(super) fn brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
+pub(super) fn svg_brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
+    let size = size as i32;
+    BitmapBundle::from_svg_data(bytes, Size::new(size, size))
+        .and_then(|bundle| bundle.get_bitmap(Size::new(size, size)))
+        .unwrap_or_else(|| panic!("failed to load brand svg {file_name}"))
+}
+
+pub(super) fn disabled_svg_brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
+    let bitmap = svg_brand_bitmap(file_name, bytes, size);
+    disabled_bitmap(&bitmap, file_name)
+}
+
+pub(super) fn png_brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
     let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
         .unwrap_or_else(|err| panic!("failed to load brand image {file_name}: {err}"))
         .resize(size as u32, size as u32, FilterType::Lanczos3)
@@ -508,27 +614,68 @@ pub(super) fn brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap
         .unwrap_or_else(|| panic!("failed to create bitmap from {file_name}"))
 }
 
-pub(super) fn disabled_brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
-    let mut image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
-        .unwrap_or_else(|err| panic!("failed to load brand image {file_name}: {err}"))
-        .resize(size as u32, size as u32, FilterType::Lanczos3)
-        .into_rgba8();
+fn recolor_dark_provider_logo(bitmap: &Bitmap, file_name: &str) -> Bitmap {
+    let width = bitmap.get_width() as u32;
+    let height = bitmap.get_height() as u32;
+    let rgba = bitmap
+        .get_rgba_data()
+        .unwrap_or_else(|| panic!("failed to read provider logo data from {file_name}"));
+    let mut image = RgbaImage::from_raw(width, height, rgba)
+        .unwrap_or_else(|| panic!("failed to decode provider logo data from {file_name}"));
+    let tint = theme::theme().ink_primary;
+
     for pixel in image.pixels_mut() {
         let alpha = pixel[3];
         if alpha == 0 {
             continue;
         }
-        let gray =
-            ((pixel[0] as u16 * 30 + pixel[1] as u16 * 59 + pixel[2] as u16 * 11) / 100) as u8;
-        let soft = (gray as u16 + 180) / 2;
-        pixel[0] = soft as u8;
-        pixel[1] = soft as u8;
-        pixel[2] = soft as u8;
-        pixel[3] = ((alpha as u16 * 50) / 100) as u8;
+        let luminance = (pixel[0] as u16 * 30 + pixel[1] as u16 * 59 + pixel[2] as u16 * 11) / 100;
+        if luminance < 96 {
+            *pixel = Rgba([tint.r, tint.g, tint.b, alpha]);
+        }
+    }
+
+    Bitmap::from_rgba(image.as_raw(), width, height)
+        .unwrap_or_else(|| panic!("failed to recolor provider logo {file_name}"))
+}
+
+pub(super) fn disabled_png_brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
+    let mut image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .unwrap_or_else(|err| panic!("failed to load brand image {file_name}: {err}"))
+        .resize(size as u32, size as u32, FilterType::Lanczos3)
+        .into_rgba8();
+    for pixel in image.pixels_mut() {
+        soften_disabled_pixel(&mut pixel.0);
     }
     let (width, height) = image.dimensions();
     Bitmap::from_rgba(image.as_raw(), width, height)
         .unwrap_or_else(|| panic!("failed to create disabled bitmap from {file_name}"))
+}
+
+fn disabled_bitmap(bitmap: &Bitmap, file_name: &str) -> Bitmap {
+    let width = bitmap.get_width() as u32;
+    let height = bitmap.get_height() as u32;
+    let mut rgba = bitmap
+        .get_rgba_data()
+        .unwrap_or_else(|| panic!("failed to read bitmap data from {file_name}"));
+    for pixel in rgba.chunks_exact_mut(4) {
+        soften_disabled_pixel(pixel);
+    }
+    Bitmap::from_rgba(&rgba, width, height)
+        .unwrap_or_else(|| panic!("failed to create disabled bitmap from {file_name}"))
+}
+
+fn soften_disabled_pixel(pixel: &mut [u8]) {
+    let alpha = pixel[3];
+    if alpha == 0 {
+        return;
+    }
+    let gray = ((pixel[0] as u16 * 30 + pixel[1] as u16 * 59 + pixel[2] as u16 * 11) / 100) as u8;
+    let soft = (gray as u16 + 180) / 2;
+    pixel[0] = soft as u8;
+    pixel[1] = soft as u8;
+    pixel[2] = soft as u8;
+    pixel[3] = ((alpha as u16 * 50) / 100) as u8;
 }
 
 pub(super) struct IconCanvas {
@@ -538,10 +685,6 @@ pub(super) struct IconCanvas {
 }
 
 impl IconCanvas {
-    fn new(size: usize, background: [u8; 4]) -> Self {
-        Self::new_with_size(size, size, background)
-    }
-
     fn new_with_size(width: usize, height: usize, background: [u8; 4]) -> Self {
         let mut rgba = vec![0; width * height * 4];
         for pixel in rgba.chunks_exact_mut(4) {
@@ -551,23 +694,6 @@ impl IconCanvas {
             width,
             height,
             rgba,
-        }
-    }
-
-    fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
-        let min_x = (cx - radius).floor().max(0.0) as usize;
-        let max_x = (cx + radius).ceil().min((self.width - 1) as f32) as usize;
-        let min_y = (cy - radius).floor().max(0.0) as usize;
-        let max_y = (cy + radius).ceil().min((self.height - 1) as f32) as usize;
-        let radius_sq = radius * radius;
-        for y in min_y..=max_y {
-            for x in min_x..=max_x {
-                let dx = x as f32 + 0.5 - cx;
-                let dy = y as f32 + 0.5 - cy;
-                if dx * dx + dy * dy <= radius_sq {
-                    self.set_pixel(x, y, color);
-                }
-            }
         }
     }
 
@@ -601,63 +727,10 @@ impl IconCanvas {
         }
     }
 
-    fn fill_round_rect(
-        &mut self,
-        x: usize,
-        y: usize,
-        width: usize,
-        height: usize,
-        radius: usize,
-        color: [u8; 4],
-    ) {
-        let x2 = x + width - 1;
-        let y2 = y + height - 1;
-        let radius = radius as f32;
-        for yy in y..=y2.min(self.height - 1) {
-            for xx in x..=x2.min(self.width - 1) {
-                let cx = if xx < x + radius as usize {
-                    x as f32 + radius
-                } else if xx > x2.saturating_sub(radius as usize) {
-                    x2 as f32 - radius
-                } else {
-                    xx as f32
-                };
-                let cy = if yy < y + radius as usize {
-                    y as f32 + radius
-                } else if yy > y2.saturating_sub(radius as usize) {
-                    y2 as f32 - radius
-                } else {
-                    yy as f32
-                };
-                let dx = xx as f32 - cx;
-                let dy = yy as f32 - cy;
-                if dx * dx + dy * dy <= radius * radius {
-                    self.set_pixel(xx, yy, color);
-                }
-            }
-        }
-    }
-
     fn set_pixel(&mut self, x: usize, y: usize, color: [u8; 4]) {
         let offset = (y * self.width + x) * 4;
         self.rgba[offset..offset + 4].copy_from_slice(&color);
     }
-}
-
-pub(super) fn draw_service_icon(canvas: &mut IconCanvas) {
-    canvas.fill_circle(17.0, 17.0, 17.0, [229, 247, 239, 255]);
-    canvas.fill_round_rect(9, 9, 16, 16, 3, [29, 142, 103, 255]);
-    canvas.fill_round_rect(12, 12, 10, 3, 1, [246, 255, 251, 255]);
-    canvas.fill_round_rect(12, 17, 10, 3, 1, [246, 255, 251, 255]);
-    canvas.fill_rect(12, 22, 3, 2, [246, 255, 251, 255]);
-}
-
-pub(super) fn draw_disabled_service_icon(canvas: &mut IconCanvas) {
-    canvas.fill_circle(17.0, 17.0, 17.0, [229, 232, 236, 180]);
-    canvas.fill_round_rect(9, 9, 16, 16, 3, [151, 158, 168, 130]);
-    canvas.fill_round_rect(12, 12, 10, 3, 1, [247, 248, 250, 180]);
-    canvas.fill_round_rect(12, 17, 10, 3, 1, [247, 248, 250, 180]);
-    canvas.fill_rect(12, 22, 3, 2, [247, 248, 250, 180]);
 }
 
 pub(super) fn text_field_row<W: WxWidget>(
@@ -679,6 +752,7 @@ pub(super) fn text_field_row<W: WxWidget>(
         .with_value(value)
         .with_style(TextCtrlStyle::Default)
         .build();
+    apply_textctrl_theme(&input);
     input.set_min_size(Size::new(420, 30));
     sizer.add(&input, 1, SizerFlag::Expand, 0);
     input

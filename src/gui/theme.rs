@@ -147,6 +147,10 @@ pub(super) struct Theme {
     pub(super) bg_card_alt: Colour,
     /// Muted / disabled surface.
     pub(super) bg_muted: Colour,
+    /// Table/list normal row background.
+    pub(super) table_row: Colour,
+    /// Table/list alternate row background.
+    pub(super) table_row_alt: Colour,
 
     // Lines.
     /// Card border / outline.
@@ -204,6 +208,8 @@ impl Theme {
             bg_card: Colour::rgb(255, 255, 255),
             bg_card_alt: Colour::rgb(248, 250, 252),
             bg_muted: Colour::rgb(238, 241, 245),
+            table_row: Colour::rgb(255, 255, 255),
+            table_row_alt: Colour::rgb(244, 247, 251),
 
             border: Colour::rgb(208, 214, 222),
             divider: Colour::rgb(150, 159, 172),
@@ -247,9 +253,11 @@ impl Theme {
             bg_card: Colour::rgb(33, 36, 43),
             bg_card_alt: Colour::rgb(39, 43, 51),
             bg_muted: Colour::rgb(30, 33, 39),
+            table_row: Colour::rgb(28, 31, 37),
+            table_row_alt: Colour::rgb(34, 37, 44),
 
-            border: Colour::rgb(57, 62, 72),
-            divider: Colour::rgb(96, 104, 118),
+            border: Colour::rgb(48, 53, 62),
+            divider: Colour::rgb(64, 70, 82),
 
             ink_primary: Colour::rgb(232, 235, 240),
             ink_secondary: Colour::rgb(178, 186, 198),

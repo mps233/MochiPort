@@ -4,10 +4,10 @@ use std::rc::Rc;
 use wxdragon::prelude::*;
 
 use super::api::{RequestLogDetail, RequestLogItem};
-use super::controls::{ButtonVariant, ThemeButton, theme_button};
 use super::provider::strip_nul;
 use super::text::GuiText;
 use super::theme;
+use super::widgets::apply_notebook_theme;
 
 const STYLE_JSON_DEFAULT: i32 = 0;
 const STYLE_JSON_KEY: i32 = 1;
@@ -68,6 +68,7 @@ pub(super) fn show(parent: &Frame, text: GuiText, detail: &RequestLogDetail) {
     );
 
     let notebook = Notebook::builder(&panel).build();
+    apply_notebook_theme(&notebook);
     let codex_request_detail = request_detail_json(
         detail.request_headers_json.as_deref(),
         detail.request_json.as_deref(),
@@ -173,18 +174,15 @@ fn add_json_tab(parent: &Notebook, label: &str, content: Option<&str>, text: Gui
         .build();
     search_input.show_search_button(true);
     search_input.show_cancel_button(true);
-    let prev_button = theme_button(
-        &search_bar,
-        search_prev_text(text),
-        ButtonVariant::Secondary,
-    );
-    let next_button = theme_button(
-        &search_bar,
-        search_next_text(text),
-        ButtonVariant::Secondary,
-    );
-    let close_search_button =
-        theme_button(&search_bar, search_close_text(text), ButtonVariant::Ghost);
+    let prev_button = Button::builder(&search_bar)
+        .with_label(search_prev_text(text))
+        .build();
+    let next_button = Button::builder(&search_bar)
+        .with_label(search_next_text(text))
+        .build();
+    let close_search_button = Button::builder(&search_bar)
+        .with_label(search_close_text(text))
+        .build();
     let search_status = StaticText::builder(&search_bar)
         .with_label(search_idle_text(text))
         .build();
@@ -449,9 +447,9 @@ fn bind_search_bar_controls(
     panel: Panel,
     search_bar: Panel,
     search_input: SearchCtrl,
-    prev_button: ThemeButton,
-    next_button: ThemeButton,
-    close_search_button: ThemeButton,
+    prev_button: Button,
+    next_button: Button,
+    close_search_button: Button,
     editor: StyledTextCtrl,
     status: StaticText,
     state: Rc<RefCell<SearchState>>,
