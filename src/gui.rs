@@ -129,11 +129,12 @@ use self::session_history::show_session_history_window;
 use self::text::{GuiLocale, GuiText};
 use self::theme::ThemeMode;
 use self::widgets::{
-    ImStatusPanel, ProviderLogoKind, StateTone, StatusIconKind, StatusPanel, app_icon_bitmap,
-    apply_dataview_theme, apply_notebook_theme, card_section, centered_status_panel,
-    dataview_table_style, im_status_panel, provider_logo_bitmap, set_disabled_status_panel,
-    set_im_channel_row, set_status_panel, status_panel, table_cell_attr, text_field_row,
-    topology_connector, topology_splitter,
+    ImStatusPanel, LucideIconKind, ProviderLogoKind, StateTone, StatusIconKind, StatusPanel,
+    app_icon_bitmap, apply_dataview_theme, apply_notebook_theme, card_section,
+    centered_status_panel, dataview_table_style, im_status_panel, lucide_icon_bitmap,
+    provider_logo_bitmap, set_disabled_status_panel, set_im_channel_row, set_status_panel,
+    status_icon_bitmap, status_panel, table_cell_attr, text_field_row, topology_connector,
+    topology_splitter,
 };
 
 #[derive(Clone)]
@@ -317,6 +318,7 @@ fn build_ui() {
 
     let notebook = Notebook::builder(&root).build();
     apply_notebook_theme(&notebook);
+    let tab_icons = create_main_tab_icons(&notebook);
 
     let codex_tab = codex_tab::create(&notebook, text);
 
@@ -870,10 +872,15 @@ fn build_ui() {
     );
     request_logs_page.set_sizer(request_logs_sizer, true);
 
-    notebook.add_page(&codex_tab.page, text.codex_tab(), true, None);
-    notebook.add_page(&ai_gw_page, text.ai_gateway_tab(), false, None);
-    notebook.add_page(&feishu_page, text.chat_tab(), false, None);
-    notebook.add_page(&request_logs_page, text.request_logs_tab(), false, None);
+    notebook.add_page(&codex_tab.page, text.codex_tab(), true, tab_icons[0]);
+    notebook.add_page(&ai_gw_page, text.ai_gateway_tab(), false, tab_icons[1]);
+    notebook.add_page(&feishu_page, text.chat_tab(), false, tab_icons[2]);
+    notebook.add_page(
+        &request_logs_page,
+        text.request_logs_tab(),
+        false,
+        tab_icons[3],
+    );
 
     root_sizer.add(
         &notebook,
@@ -1481,6 +1488,21 @@ fn build_ui() {
 
     frame.centre();
     frame.show(true);
+}
+
+fn create_main_tab_icons(notebook: &Notebook) -> [Option<i32>; 4] {
+    let image_list = ImageList::new(16, 16, true, 4);
+    let image_ids = [
+        image_list.add_bitmap(&status_icon_bitmap(StatusIconKind::Codex, 16)),
+        image_list.add_bitmap(&lucide_icon_bitmap(LucideIconKind::Router, 16)),
+        image_list.add_bitmap(&lucide_icon_bitmap(LucideIconKind::MessagesSquare, 16)),
+        image_list.add_bitmap(&lucide_icon_bitmap(LucideIconKind::ScrollText, 16)),
+    ];
+    let icons = image_ids.map(|id| (id >= 0).then_some(id));
+    if icons.iter().any(Option::is_some) {
+        notebook.set_image_list(image_list);
+    }
+    icons
 }
 
 fn default_base_url() -> String {

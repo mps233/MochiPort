@@ -11,6 +11,7 @@ use super::text::GuiText;
 use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
 
 const GUI_SESSION_HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
+const GUI_WECHAT_ONBOARD_POLL_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Clone)]
 pub(super) struct ApiClient {
@@ -292,12 +293,13 @@ impl ApiClient {
         session_key: &str,
         verify_code: Option<&str>,
     ) -> Result<WechatOnboardPoll, String> {
-        self.post_json(
+        self.post_json_with_timeout(
             "/api/wechat/onboard/poll",
             &serde_json::json!({
                 "sessionKey": session_key,
                 "verifyCode": verify_code,
             }),
+            GUI_WECHAT_ONBOARD_POLL_TIMEOUT,
         )
     }
 

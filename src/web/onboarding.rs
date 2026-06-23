@@ -274,6 +274,13 @@ pub(super) async fn wechat_onboard_poll(
     }
     if unix_now_millis().saturating_sub(session.started_at_ms) > WECHAT_ONBOARD_TTL_MS {
         *state.wechat_onboard.lock().await = None;
+        state
+            .push_event(
+                "warn",
+                "wechat_onboard_expired",
+                "local onboarding session expired",
+            )
+            .await;
         return (
             StatusCode::OK,
             Json(json!({ "done": false, "status": "expired", "error": "expired" })),
@@ -426,6 +433,16 @@ pub(super) async fn wechat_onboard_poll(
                 "status": result.status,
             })),
         );
+    }
+
+    if result.status == "expired" {
+        state
+            .push_event(
+                "warn",
+                "wechat_onboard_expired",
+                "upstream QR status expired",
+            )
+            .await;
     }
 
     (

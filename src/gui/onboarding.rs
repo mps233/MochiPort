@@ -425,8 +425,10 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, text: GuiText, api: Api
                         info.set_label(&wechat_onboard_status_text(text, &result));
                         info.wrap(600);
                     }
-                    Err(_) => {
-                        info.set_label(text.onboard_failed_retry());
+                    Err(err) => {
+                        if !err.to_ascii_lowercase().contains("timeout") {
+                            info.set_label(text.onboard_failed_retry());
+                        }
                     }
                 }
             }

@@ -59,6 +59,13 @@ pub(super) enum ProviderLogoKind {
     Zhipu,
 }
 
+#[derive(Clone, Copy)]
+pub(super) enum LucideIconKind {
+    Router,
+    MessagesSquare,
+    ScrollText,
+}
+
 pub(super) fn table_cell_attr(row: usize) -> Option<DataViewItemAttr> {
     let t = theme::theme();
     Some(
@@ -585,6 +592,37 @@ pub(super) fn provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap 
     } else {
         bitmap
     }
+}
+
+pub(super) fn lucide_icon_bitmap(kind: LucideIconKind, size: usize) -> Bitmap {
+    let (file_name, bytes) = match kind {
+        LucideIconKind::Router => (
+            "router.svg",
+            include_bytes!("../../packaging/brand/lucide/router.svg").as_slice(),
+        ),
+        LucideIconKind::MessagesSquare => (
+            "messages-square.svg",
+            include_bytes!("../../packaging/brand/lucide/messages-square.svg").as_slice(),
+        ),
+        LucideIconKind::ScrollText => (
+            "scroll-text.svg",
+            include_bytes!("../../packaging/brand/lucide/scroll-text.svg").as_slice(),
+        ),
+    };
+    let t = theme::theme();
+    let color = if t.is_dark {
+        t.ink_primary
+    } else {
+        t.ink_secondary
+    };
+    let stroke = format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b);
+    let svg = std::str::from_utf8(bytes)
+        .unwrap_or_else(|err| panic!("failed to parse lucide svg {file_name}: {err}"))
+        .replace("stroke=\"currentColor\"", &format!("stroke=\"{stroke}\""));
+    let size = size as i32;
+    BitmapBundle::from_svg_data(svg.as_bytes(), Size::new(size, size))
+        .and_then(|bundle| bundle.get_bitmap(Size::new(size, size)))
+        .unwrap_or_else(|| panic!("failed to load lucide icon {file_name}"))
 }
 
 pub(super) fn svg_brand_bitmap(file_name: &str, bytes: &[u8], size: usize) -> Bitmap {
