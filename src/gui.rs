@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     cell::RefCell,
     collections::BTreeMap,
     process::Child,
@@ -102,9 +102,10 @@ mod widgets;
 use self::ai_gateway::{
     AiGwActionResult, AiGwActionResultStore, AiGwChannelToggle, AiGwProviderModel, AiGwProviderRow,
     AiGwProviderRows, PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
-    provider_logo_variant, provider_protocol_display, refresh_ai_gw_filter_image_generation,
-    refresh_ai_gw_provider_list, save_ai_gw_provider, set_ai_gw_actions_enabled,
-    set_ai_gw_provider_enabled, set_filter_image_generation_tool,
+    provider_logo_variant, provider_protocol_display, refresh_ai_gw_enable_logging,
+    refresh_ai_gw_filter_image_generation, refresh_ai_gw_provider_list, save_ai_gw_provider,
+    set_ai_gw_actions_enabled, set_ai_gw_provider_enabled, set_filter_image_generation_tool,
+    set_request_logging_enabled,
 };
 use self::api::{
     ApiClient, ConfigureTelegramBotRequest, DashboardSnapshot, DeleteImAccountRequest,
@@ -731,6 +732,20 @@ fn build_ui() {
         .with_label(text.request_log_open_hint())
         .build();
     request_log_hint.set_foreground_color(theme::theme().ink_secondary);
+
+    let request_log_disabled_hint = StaticText::builder(&request_logs_page)
+        .with_label(text.request_logging_disabled_hint())
+        .build();
+    request_log_disabled_hint.set_foreground_color(theme::theme().ink_muted);
+    request_log_disabled_hint.show(false);
+    let ai_gw_enable_logging = CheckBox::builder(&request_logs_page)
+        .with_label(text.enable_request_logging())
+        .with_value(true)
+        .build();
+    ai_gw_enable_logging.set_background_color(theme::theme().bg_card_alt);
+    ai_gw_enable_logging.set_foreground_color(theme::theme().ink_primary);
+    ai_gw_enable_logging.set_tooltip(text.enable_request_logging_help());
+
     let request_log_clear_old_button = Button::builder(&request_logs_page)
         .with_label(text.request_log_clear_old())
         .build();
@@ -739,7 +754,19 @@ fn build_ui() {
         .build();
     let request_log_toolbar = BoxSizer::builder(Orientation::Horizontal).build();
     request_log_toolbar.add(&request_log_hint, 0, SizerFlag::AlignCenterVertical, 0);
+    request_log_toolbar.add(
+        &request_log_disabled_hint,
+        0,
+        SizerFlag::AlignCenterVertical,
+        0,
+    );
     request_log_toolbar.add_stretch_spacer(1);
+    request_log_toolbar.add(
+        &ai_gw_enable_logging,
+        0,
+        SizerFlag::Right | SizerFlag::AlignCenterVertical,
+        10,
+    );
     request_log_toolbar.add(&request_log_clear_old_button, 0, SizerFlag::Right, 8);
     request_log_toolbar.add(&request_log_clear_all_button, 0, SizerFlag::Right, 0);
     request_logs_sizer.add_sizer(
@@ -908,6 +935,7 @@ fn build_ui() {
         ai_gw_provider_model,
         pending_ai_gw_channel_toggle,
         ai_gw_filter_image_generation,
+        ai_gw_enable_logging,
         ai_gw_delete_button,
         ai_gw_new_button,
         ai_gw_edit_button,
@@ -915,6 +943,7 @@ fn build_ui() {
         request_log_list,
         request_log_rows,
         request_log_model,
+        request_log_disabled_hint,
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
@@ -1325,6 +1354,42 @@ fn build_ui() {
         .replace(ai_gw_action_timer);
     gui_timers.track(&ai_gw_action_timer_store);
 
+    // AI Gateway checkbox event handlers
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        ai_gw_filter_image_generation.on_toggled(move |event| {
+            let enabled = event.is_checked();
+            let worker_api = api.clone();
+            let ai_gw_action_result = ai_gw_action_result.clone();
+            thread::spawn(move || {
+                let outcome = set_filter_image_generation_tool(&worker_api, enabled);
+                if let Ok(mut slot) = ai_gw_action_result.lock() {
+                    slot.replace(AiGwActionResult::FilterImageGeneration(outcome));
+                }
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let ai_gw_action_result = ai_gw_action_result.clone();
+        ai_gw_enable_logging.on_toggled(move |event| {
+            let enabled = event.is_checked();
+            let worker_api = api.clone();
+            let ai_gw_action_result = ai_gw_action_result.clone();
+            thread::spawn(move || {
+                let outcome = set_request_logging_enabled(&worker_api, enabled);
+                if let Ok(mut slot) = ai_gw_action_result.lock() {
+                    slot.replace(AiGwActionResult::RequestLogging(outcome));
+                }
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
     let request_log_result: RequestLogResultStore = Arc::new(Mutex::new(None));
     let request_log_in_flight = Arc::new(AtomicBool::new(false));
     let request_log_detail_result: RequestLogDetailResultStore = Arc::new(Mutex::new(None));
@@ -1483,12 +1548,20 @@ fn build_ui() {
 }
 
 fn create_main_tab_icons(notebook: &Notebook) -> [Option<i32>; 4] {
-    let image_list = ImageList::new(16, 16, true, 4);
+    // Use 24x24 for better quality on high-DPI displays
+    let size = 24;
+    let image_list = ImageList::new(size, size, true, 4);
     let image_ids = [
-        image_list.add_bitmap(&status_icon_bitmap(StatusIconKind::Codex, 16)),
-        image_list.add_bitmap(&lucide_icon_bitmap(LucideIconKind::Router, 16)),
-        image_list.add_bitmap(&lucide_icon_bitmap(LucideIconKind::MessagesSquare, 16)),
-        image_list.add_bitmap(&lucide_icon_bitmap(LucideIconKind::ScrollText, 16)),
+        image_list.add_bitmap(&status_icon_bitmap(StatusIconKind::Codex, size as usize)),
+        image_list.add_bitmap(&lucide_icon_bitmap(LucideIconKind::Router, size as usize)),
+        image_list.add_bitmap(&lucide_icon_bitmap(
+            LucideIconKind::MessagesSquare,
+            size as usize,
+        )),
+        image_list.add_bitmap(&lucide_icon_bitmap(
+            LucideIconKind::ScrollText,
+            size as usize,
+        )),
     ];
     let icons = image_ids.map(|id| (id >= 0).then_some(id));
     if icons.iter().any(Option::is_some) {
@@ -3235,6 +3308,7 @@ struct UiHandles {
     ai_gw_provider_model: AiGwProviderModel,
     pending_ai_gw_channel_toggle: PendingAiGwChannelToggle,
     ai_gw_filter_image_generation: CheckBox,
+    ai_gw_enable_logging: CheckBox,
     ai_gw_delete_button: Button,
     ai_gw_new_button: Button,
     ai_gw_edit_button: Button,
@@ -3243,6 +3317,7 @@ struct UiHandles {
     request_log_list: DataViewCtrl,
     request_log_rows: RequestLogRows,
     request_log_model: RequestLogModel,
+    request_log_disabled_hint: StaticText,
 }
 
 #[derive(Clone)]
@@ -3573,6 +3648,7 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     codex_tab::refresh_local_connection_mode(&handles.codex_tab, snapshot.local_connection_mode);
     if let Some(gw) = &snapshot.ai_gateway {
         refresh_ai_gw_filter_image_generation(handles, gw.filter_image_generation_tool);
+        refresh_ai_gw_enable_logging(handles, gw.request_logging_enabled);
     }
 
     if let Some(status) = &snapshot.status {

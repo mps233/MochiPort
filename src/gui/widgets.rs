@@ -456,7 +456,11 @@ pub(super) fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
             );
         }
         StatusIconKind::VsCodeCodex => {
-            return provider_logo_bitmap(ProviderLogoKind::OpenAi, size as i32);
+            return svg_brand_bitmap(
+                "vscode-logo.svg",
+                include_bytes!("../../packaging/brand/vscode-logo.svg"),
+                size,
+            );
         }
         StatusIconKind::CodexCli => {
             return svg_brand_bitmap(
@@ -485,9 +489,10 @@ pub(super) fn disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> 
             );
         }
         StatusIconKind::VsCodeCodex => {
-            return disabled_bitmap(
-                &provider_logo_bitmap(ProviderLogoKind::OpenAi, size as i32),
-                "openai.svg",
+            return disabled_svg_brand_bitmap(
+                "vscode-logo.svg",
+                include_bytes!("../../packaging/brand/vscode-logo.svg"),
+                size,
             );
         }
         StatusIconKind::CodexCli => {

@@ -46,6 +46,7 @@ pub(super) enum AiGwActionResult {
         result: Result<(), String>,
     },
     FilterImageGeneration(Result<bool, String>),
+    RequestLogging(Result<bool, String>),
 }
 
 pub(super) fn save_ai_gw_provider(
@@ -107,6 +108,25 @@ pub(super) fn set_filter_image_generation_tool(
 pub(super) fn refresh_ai_gw_filter_image_generation(handles: &UiHandles, enabled: bool) {
     if !handles.ai_gw_filter_image_generation.has_focus() {
         handles.ai_gw_filter_image_generation.set_value(enabled);
+    }
+}
+
+pub(super) fn set_request_logging_enabled(api: &ApiClient, enabled: bool) -> Result<bool, String> {
+    let mut config = api.get_app_config()?;
+    config.ai_gateway.request_logging_enabled = enabled;
+    api.save_app_config(&config)?;
+    Ok(enabled)
+}
+
+pub(super) fn refresh_ai_gw_enable_logging(handles: &UiHandles, enabled: bool) {
+    if !handles.ai_gw_enable_logging.has_focus() {
+        handles.ai_gw_enable_logging.set_value(enabled);
+    }
+    // Show/hide the disabled hint based on logging state
+    if enabled {
+        handles.request_log_disabled_hint.show(false);
+    } else {
+        handles.request_log_disabled_hint.show(true);
     }
 }
 
@@ -254,6 +274,10 @@ pub(super) fn apply_pending_ai_gw_action(
         }
         AiGwActionResult::FilterImageGeneration(Ok(_enabled)) => {}
         AiGwActionResult::FilterImageGeneration(Err(err)) => {
+            super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
+        }
+        AiGwActionResult::RequestLogging(Ok(_enabled)) => {}
+        AiGwActionResult::RequestLogging(Err(err)) => {
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
     }

@@ -1,4 +1,4 @@
-﻿use crate::config::LocalConnectionMode;
+use crate::config::LocalConnectionMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GuiLocale {
@@ -789,6 +789,31 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "请求日志",
             GuiLocale::EnUs => "Request Logs",
+        }
+    }
+
+    pub(super) fn enable_request_logging(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启用请求日志",
+            GuiLocale::EnUs => "Enable request logging",
+        }
+    }
+
+    pub(super) fn enable_request_logging_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "开启后会记录所有 AI Gateway 请求详情，便于调试和分析",
+            GuiLocale::EnUs => {
+                "When enabled, records all AI Gateway request details for debugging and analysis"
+            }
+        }
+    }
+
+    pub(super) fn request_logging_disabled_hint(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请求日志已关闭。如需查看日志，请在 AI Gateway 管理中启用日志记录。",
+            GuiLocale::EnUs => {
+                "Request logging is disabled. To view logs, enable logging in AI Gateway management."
+            }
         }
     }
 

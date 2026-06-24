@@ -1,0 +1,9 @@
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <linearGradient id="vscode-grad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#0065A9;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#007ACC;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  <path fill="url(#vscode-grad)" d="M95.3 11.7L73.8 1.3c-1.6-.8-3.5-.7-5 .2L29.4 33.4 12.2 19.6c-1.2-.9-2.9-1-4.2-.1L2.5 23c-1.6 1.1-1.6 3.6 0 4.7l14.3 11.4L2.5 50.5c-1.6 1.1-1.6 3.6 0 4.7L8 58.7c1.3.9 3 .8 4.2-.1l17.2-13.8 39.4 31.9c1.5.9 3.4 1 5 .2l21.5-10.4c2-.9 3.2-2.9 3.2-5.1V16.8c0-2.2-1.2-4.2-3.2-5.1zM73.8 65.3L45.2 50l28.6-15.3v30.6z"/>
+</svg>

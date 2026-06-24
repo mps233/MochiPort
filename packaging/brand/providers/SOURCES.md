@@ -16,9 +16,14 @@ Lucide UI icons are copied from Lucide Icons and covered by `packaging/brand/LIC
 
 Fallback local assets:
 
-- Telegram: `packaging/brand/telegram-logo.svg`; `@lobehub/icons` 5.8.0 has no Telegram component.
-- WeChat: `packaging/brand/wechat-logo.svg`; `@lobehub/icons` 5.8.0 has no WeChat/Wechat component.
-- Feishu: `packaging/brand/feishu-logo.png`; `@lobehub/icons` 5.8.0 has no Feishu/Lark component.
+- Telegram: `packaging/brand/telegram-logo.svg`; official SVG from https://telegram.org/img/t_logo.svg
+- WeChat: `packaging/brand/wechat-logo.svg`; from Simple Icons (https://simpleicons.org), CC0 1.0 Universal
+- Feishu: `packaging/brand/feishu-logo.png`; official GitHub avatar from https://avatars.githubusercontent.com/u/54944174?s=200&v=4
+- VS Code: `packaging/brand/vscode-logo.svg`; custom SVG using official VS Code brand colors (#007ACC)
 - App icon: `packaging/icons/dolphin-rounded-256.png`; this is the CodexHub application icon.
 
 The `references/` directory is intentionally ignored by git, so extracted and fallback assets live under `packaging/brand/` or `packaging/icons/` for compile-time embedding in the GUI.
+
+## High-DPI Rendering
+
+All logo SVGs are designed to render crisply at any scale, including Retina and high-DPI displays. The GUI uses `BitmapBundle::from_svg_data()` to create resolution-independent graphics that automatically scale to the display's pixel density.

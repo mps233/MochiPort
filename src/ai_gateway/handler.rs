@@ -35,6 +35,7 @@ pub async fn handle_responses(
     let config = state.config.lock().await;
     let gw_config = config.ai_gateway.clone();
     let filter_image_generation_tool = gw_config.filter_image_generation_tool;
+    let request_logging_enabled = gw_config.request_logging_enabled;
     let models_etag = configured_models_etag(&gw_config);
     drop(config);
 
@@ -62,30 +63,38 @@ pub async fn handle_responses(
     let provider = match resolve_provider(&envelope.model, ctx.session_id.as_deref(), &gw_config) {
         Ok(p) => p,
         Err(e) => {
-            let log_context = insert_initial_log(
-                &state.ai_gateway_request_logs,
-                &ctx,
-                &headers,
-                &envelope,
-                None,
-                &raw_body,
-                started_at,
-                created_at_ms,
-            );
+            let log_context = request_logging_enabled
+                .then(|| {
+                    insert_initial_log(
+                        &state.ai_gateway_request_logs,
+                        &ctx,
+                        &headers,
+                        &envelope,
+                        None,
+                        &raw_body,
+                        started_at,
+                        created_at_ms,
+                    )
+                })
+                .flatten();
             update_failed_log(&log_context, &e.message);
             return e.into_response();
         }
     };
-    let log_context = insert_initial_log(
-        &state.ai_gateway_request_logs,
-        &ctx,
-        &headers,
-        &envelope,
-        Some(provider),
-        &raw_body,
-        started_at,
-        created_at_ms,
-    );
+    let log_context = request_logging_enabled
+        .then(|| {
+            insert_initial_log(
+                &state.ai_gateway_request_logs,
+                &ctx,
+                &headers,
+                &envelope,
+                Some(provider),
+                &raw_body,
+                started_at,
+                created_at_ms,
+            )
+        })
+        .flatten();
 
     info!(
         model = %envelope.model,
