@@ -268,6 +268,11 @@ fn builds_anthropic_apply_patch_custom_tool() {
             .unwrap()
             .contains("final non-whitespace line must be exactly `*** End Patch`")
     );
+    let description = body["tools"][0]["description"].as_str().unwrap();
+    assert!(description.contains("Few-shot examples:"));
+    assert!(description.contains("*** Add File: notes.md\n+# Notes\n+"));
+    assert!(description.contains("*** Update File: src/example.txt"));
+    assert!(description.contains("*** Delete File: old.txt"));
     assert_eq!(body["tool_choice"]["type"], "tool");
     assert_eq!(body["tool_choice"]["name"], "apply_patch");
 
@@ -643,6 +648,79 @@ fn converts_anthropic_server_web_search_response() {
 }
 
 #[test]
+fn converts_anthropic_tool_use_web_search_response() {
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "tooluse_5gdkvmCM90l5foLBnddBYO",
+                "name": "web_search",
+                "input": {"query": "Portugal Uzbekistan World Cup 2026 result Ronaldo goal"}
+            }
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let converted = convert_response(&response);
+    assert_eq!(converted.output.len(), 1);
+    assert_eq!(converted.output[0].item_type, ItemType::WebSearchCall);
+    assert_eq!(
+        converted.output[0].call_id.as_deref(),
+        Some("tooluse_5gdkvmCM90l5foLBnddBYO")
+    );
+    assert_eq!(
+        converted.output[0].action.as_ref().unwrap()["query"],
+        "Portugal Uzbekistan World Cup 2026 result Ronaldo goal"
+    );
+}
+
+#[test]
+fn preserves_mapped_function_named_web_search_response() {
+    let mut map = ToolNameMap::default();
+    map.encode_function(None, "web_search");
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "tooluse_function_search",
+                "name": "web_search",
+                "input": {"query": "local function call"}
+            }
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let converted = convert_anthropic_response(
+        &response,
+        "fallback-model",
+        &map,
+        AnthropicProviderProfile::Anthropic,
+    );
+
+    assert_eq!(converted.output.len(), 1);
+    assert_eq!(converted.output[0].item_type, ItemType::FunctionCall);
+    assert_eq!(converted.output[0].name.as_deref(), Some("web_search"));
+    assert_eq!(
+        converted.output[0]
+            .arguments
+            .as_ref()
+            .map(|arguments| arguments.to_chat_arguments())
+            .as_deref(),
+        Some("{\"query\":\"local function call\"}")
+    );
+}
+
+#[test]
 fn converts_glm_web_search_prime_response() {
     let response = json!({
         "id": "msg_123",
@@ -1005,6 +1083,51 @@ async fn streams_anthropic_web_search_as_responses_sse() {
     assert_eq!(done.1["item"]["action"]["type"], "search");
     assert_eq!(done.1["item"]["action"]["query"], "rust 2026");
     assert!(done.1["item"]["action"].get("result").is_none());
+}
+
+#[tokio::test]
+async fn streams_anthropic_tool_use_web_search_as_responses_sse() {
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-8\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tooluse_5gdkvmCM90l5foLBnddBYO\",\"name\":\"web_search\",\"input\":{\"query\":\"Portugal Uzbekistan World Cup 2026 result Ronaldo goal\"}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+
+    assert!(
+        events
+            .iter()
+            .any(|(event, data)| event == "response.output_item.added"
+                && data["item"]["type"] == "web_search_call"
+                && data["item"]["status"] == "in_progress")
+    );
+    let done = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "web_search_call"
+        })
+        .unwrap();
+    assert_eq!(done.1["item"]["call_id"], "tooluse_5gdkvmCM90l5foLBnddBYO");
+    assert_eq!(
+        done.1["item"]["action"]["query"],
+        "Portugal Uzbekistan World Cup 2026 result Ronaldo goal"
+    );
 }
 
 #[tokio::test]

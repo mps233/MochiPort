@@ -110,7 +110,13 @@ impl AnthropicStreamState {
                     }
                 }
             }
-            Some("tool_use") => self.start_tool_block(index, block, queue),
+            Some("tool_use") => {
+                if self.is_unmapped_web_search_tool_use(block) {
+                    self.start_server_tool_block(index, block, queue);
+                } else {
+                    self.start_tool_block(index, block, queue);
+                }
+            }
             Some("server_tool_use") => self.start_server_tool_block(index, block, queue),
             Some("thinking") => {
                 if let Some(text) = block.get("thinking").and_then(Value::as_str) {
@@ -172,6 +178,9 @@ impl AnthropicStreamState {
         }
         if self.content_blocks.contains_key(&index) {
             self.close_tool_block(index, queue);
+        }
+        if self.web_search_blocks.contains_key(&index) {
+            self.close_web_search_tool_use_block(index, queue);
         }
     }
 }

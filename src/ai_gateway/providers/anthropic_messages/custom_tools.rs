@@ -1,6 +1,8 @@
 use serde_json::{Map, Value};
 
-const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
+use crate::ai_gateway::apply_patch_tool::{
+    APPLY_PATCH_DESCRIPTION, APPLY_PATCH_INPUT_DESCRIPTION, APPLY_PATCH_TOOL_NAME,
+};
 
 pub(super) fn custom_tool_description(tool: &Map<String, Value>) -> String {
     let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
@@ -10,7 +12,7 @@ pub(super) fn custom_tool_description(tool: &Map<String, Value>) -> String {
         .unwrap_or("")
         .trim();
     if name == APPLY_PATCH_TOOL_NAME {
-        return apply_patch_description();
+        return APPLY_PATCH_DESCRIPTION.to_string();
     }
 
     let mut description = if base_description.is_empty() {
@@ -55,23 +57,8 @@ object, or add extra wrapper text inside `input`.",
 
 pub(super) fn custom_tool_input_description(name: &str) -> &'static str {
     if name == APPLY_PATCH_TOOL_NAME {
-        "The entire apply_patch patch body."
+        APPLY_PATCH_INPUT_DESCRIPTION
     } else {
         "The entire freeform input for the custom tool."
     }
-}
-
-fn apply_patch_description() -> String {
-    "Use the `apply_patch` tool to edit files.\n\
-Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. A patch must use this envelope:\n\n\
-*** Begin Patch\n\
-[ one or more file sections ]\n\
-*** End Patch\n\n\
-Within that envelope, each file operation starts with one of these headers:\n\n\
-*** Add File: <path> - create a new file. Every following line is a + line.\n\
-*** Delete File: <path> - remove an existing file. Nothing follows.\n\
-*** Update File: <path> - patch an existing file in place, optionally followed by *** Move to: <new path>.\n\n\
-Update hunks start with @@ and contain lines prefixed with a space, -, or +. File references must be relative, never absolute.\n\n\
-Call this tool with JSON arguments matching {\"input\":\"<the entire patch body>\"}. The `input` value must contain only the patch body and its final non-whitespace line must be exactly `*** End Patch`."
-        .to_string()
 }

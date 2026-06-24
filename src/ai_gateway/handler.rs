@@ -344,6 +344,7 @@ fn insert_initial_log(
         upstream_request_body_bytes: None,
         upstream_request_headers_json: None,
         upstream_request_json: None,
+        upstream_response_sse: None,
         response_json: None,
     };
     match store.insert_record(&record) {

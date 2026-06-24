@@ -467,7 +467,7 @@ Anthropic Messages 使用 `cache_control` 开启 prompt caching。Gateway 策略
 - function_call/tool_use 双向映射
 - function_call_output/tool_result 映射
 - tool_search 映射
-- web_search / web_search_preview -> Anthropic server tool `web_search_20260318`
+- web_search / web_search_preview -> Anthropic server tool `web_search_20260209`
 - Anthropic `server_tool_use(name=web_search)` / `web_search_tool_result` -> Responses `web_search_call`
 - custom tool 包装降级
 - 单测：function/tool_choice/tool_result/tool_use/web_search 主链路

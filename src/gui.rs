@@ -749,8 +749,6 @@ fn build_ui() {
         10,
     );
 
-    let (request_log_box, request_log_section) =
-        card_section(&request_logs_page, text.request_logs());
     let request_log_rows: RequestLogRows = Rc::new(RefCell::new(Vec::new()));
     let request_log_model: RequestLogModel =
         Rc::new(RefCell::new(CustomDataViewVirtualListModel::new(
@@ -761,7 +759,7 @@ fn build_ui() {
             Some(|_: &RequestLogRows, row, _| table_cell_attr(row)),
             None::<fn(&RequestLogRows, usize, usize) -> bool>,
         )));
-    let request_log_list = DataViewCtrl::builder(&request_log_box)
+    let request_log_list = DataViewCtrl::builder(&request_logs_page)
         .with_style(dataview_table_style(false))
         .with_size(Size::new(-1, 520))
         .build();
@@ -858,14 +856,8 @@ fn build_ui() {
         DataViewColumnFlags::Resizable,
     );
     request_log_list.associate_model(&*request_log_model.borrow());
-    request_log_section.add(
-        &request_log_list,
-        1,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        10,
-    );
     request_logs_sizer.add(
-        &request_log_box,
+        &request_log_list,
         1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         10,

@@ -100,6 +100,10 @@ impl ToolNameMap {
             .unwrap_or_else(|| decode_provider_tool_name(encoded))
     }
 
+    pub fn has_encoded(&self, encoded: &str) -> bool {
+        self.encoded_to_target.contains_key(encoded)
+    }
+
     fn allocate_encoded_name(&self, preferred: &str, target: &ToolCallTarget) -> String {
         let base = provider_safe_tool_name(preferred);
         if base.len() <= PROVIDER_TOOL_NAME_MAX_LEN {

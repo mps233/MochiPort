@@ -3,23 +3,13 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::ai_gateway::apply_patch_tool::{
+    APPLY_PATCH_DESCRIPTION, APPLY_PATCH_INPUT_DESCRIPTION, APPLY_PATCH_TOOL_NAME,
+};
 use crate::ai_gateway::model::{
     GatewayRequest, ItemContent, ItemType, JsonString, Reasoning, ResponseItem, TextFormat,
 };
 use crate::ai_gateway::tool_names::{TOOL_SEARCH_NAME, ToolNameMap};
-
-const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
-const APPLY_PATCH_INPUT_DESCRIPTION: &str = "The entire apply_patch patch body.";
-const APPLY_PATCH_DESCRIPTION: &str = "Use the `apply_patch` tool to edit files.\n\
-Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. A patch must use this envelope:\n\n\
-*** Begin Patch\n\
-[ one or more file sections ]\n\
-*** End Patch\n\n\
-Within that envelope, each file operation starts with one of these headers:\n\n\
-*** Add File: <path> - create a new file. Every following line is a + line.\n\
-*** Delete File: <path> - remove an existing file. Nothing follows.\n\
-*** Update File: <path> - patch an existing file in place, optionally followed by *** Move to: <new path>.\n\n\
-Update hunks start with @@ and contain lines prefixed with a space, -, or +. File references must be relative, never absolute.\n";
 
 /// Chat Completions 请求 body（JSON）。
 #[cfg(test)]
@@ -775,6 +765,7 @@ fn apply_response_format(body: &mut Value, format: &TextFormat, deepseek_mode: b
             if deepseek_mode {
                 // DeepSeek 不支持 json_schema，降级为 json_object
                 body["response_format"] = json!({"type": "json_object"});
+                inject_json_output_instruction(body, format);
             } else {
                 let mut rf = json!({"type": "json_schema"});
                 if let Some(schema) = &format.schema {
@@ -788,9 +779,140 @@ fn apply_response_format(body: &mut Value, format: &TextFormat, deepseek_mode: b
         }
         "json_object" => {
             body["response_format"] = json!({"type": "json_object"});
+            if deepseek_mode {
+                inject_json_output_instruction(body, format);
+            }
         }
         _ => {}
     }
+}
+
+fn inject_json_output_instruction(body: &mut Value, format: &TextFormat) {
+    let instruction = build_json_output_instruction(format);
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    if let Some(first) = messages.first_mut() {
+        if first.get("role").and_then(Value::as_str) == Some("system") {
+            if let Some(content) = first.get_mut("content") {
+                if let Some(existing) = content.as_str() {
+                    *content = json!(format!("{existing}\n\n{instruction}"));
+                    return;
+                }
+            }
+        }
+    }
+
+    messages.insert(
+        0,
+        json!({
+            "role": "system",
+            "content": instruction,
+        }),
+    );
+}
+
+fn build_json_output_instruction(format: &TextFormat) -> String {
+    let mut instruction = String::from(
+        "You must respond with a valid JSON object only. Do not output markdown, code fences, \
+         commentary, or whitespace outside the JSON object.",
+    );
+
+    if let Some(schema) = &format.schema {
+        if let Some(name) = format.name.as_deref().filter(|name| !name.is_empty()) {
+            instruction.push_str("\nThe JSON object must conform to this JSON Schema named ");
+            instruction.push_str(name);
+            instruction.push(':');
+        } else {
+            instruction.push_str("\nThe JSON object must conform to this JSON Schema:");
+        }
+
+        instruction.push('\n');
+        instruction.push_str(&serde_json::to_string_pretty(schema).unwrap_or_else(|_| {
+            serde_json::to_string(schema).unwrap_or_else(|_| "{}".to_string())
+        }));
+
+        instruction.push_str("\nExample JSON output:\n");
+        instruction.push_str(
+            &serde_json::to_string_pretty(&json_schema_example(schema))
+                .unwrap_or_else(|_| "{}".to_string()),
+        );
+    } else {
+        instruction.push_str("\nExample JSON output:\n{}");
+    }
+
+    instruction
+}
+
+fn json_schema_example(schema: &Value) -> Value {
+    if let Some(value) = schema.get("const") {
+        return value.clone();
+    }
+    if let Some(first_enum) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+    {
+        return first_enum.clone();
+    }
+    if let Some(first_one_of) = schema
+        .get("oneOf")
+        .or_else(|| schema.get("anyOf"))
+        .and_then(Value::as_array)
+        .and_then(|items| items.first())
+    {
+        return json_schema_example(first_one_of);
+    }
+
+    match schema_type(schema).as_deref() {
+        Some("object") => json_schema_object_example(schema),
+        Some("array") => json!([json_schema_example(
+            schema.get("items").unwrap_or(&Value::Null)
+        )]),
+        Some("integer") => json!(0),
+        Some("number") => json!(0),
+        Some("boolean") => json!(false),
+        Some("null") => Value::Null,
+        Some("string") | _ => json!("string"),
+    }
+}
+
+fn schema_type(schema: &Value) -> Option<String> {
+    match schema.get("type") {
+        Some(Value::String(schema_type)) => Some(schema_type.clone()),
+        Some(Value::Array(types)) => types
+            .iter()
+            .filter_map(Value::as_str)
+            .find(|schema_type| *schema_type != "null")
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
+fn json_schema_object_example(schema: &Value) -> Value {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return json!({});
+    };
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<std::collections::HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let include_all = required.is_empty();
+
+    let mut object = Map::new();
+    for (name, property_schema) in properties {
+        if include_all || required.contains(name.as_str()) {
+            object.insert(name.clone(), json_schema_example(property_schema));
+        }
+    }
+    Value::Object(object)
 }
 
 /// DeepSeek: thinking 启用时，所有 assistant message 缺少 reasoning_content 的补空字符串。
@@ -1398,6 +1520,62 @@ mod tests {
     }
 
     #[test]
+    fn test_deepseek_json_schema_injects_json_instruction() {
+        let mut item = make_item(ItemType::InputText);
+        item.content = Some(ItemContent::Text("make a title".into()));
+        let mut req = make_request(vec![item]);
+        req.text = Some(TextOptions {
+            format: Some(TextFormat {
+                format_type: "json_schema".into(),
+                schema: Some(json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string"}
+                    },
+                    "required": ["title"],
+                    "additionalProperties": false
+                })),
+                name: Some("codex_output_schema".into()),
+            }),
+        });
+
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(body["response_format"]["type"], "json_object");
+        assert_eq!(msgs[0]["role"], "system");
+        let instruction = msgs[0]["content"].as_str().unwrap();
+        assert!(instruction.contains("valid JSON object only"));
+        assert!(instruction.contains("codex_output_schema"));
+        assert!(instruction.contains("\"title\""));
+        assert!(instruction.contains("Example JSON output"));
+    }
+
+    #[test]
+    fn test_deepseek_json_object_injects_json_instruction() {
+        let mut item = make_item(ItemType::InputText);
+        item.content = Some(ItemContent::Text("return json".into()));
+        let mut req = make_request(vec![item]);
+        req.text = Some(TextOptions {
+            format: Some(TextFormat {
+                format_type: "json_object".into(),
+                schema: None,
+                name: None,
+            }),
+        });
+
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(body["response_format"]["type"], "json_object");
+        assert_eq!(msgs[0]["role"], "system");
+        assert!(
+            msgs[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("valid JSON object only")
+        );
+    }
+
+    #[test]
     fn test_openai_json_schema_preserved() {
         let mut req = make_request(vec![]);
         req.text = Some(TextOptions {
@@ -1881,10 +2059,12 @@ mod tests {
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(function["name"], "apply_patch");
         assert_eq!(function["strict"], false);
-        assert_eq!(
-            function["description"],
-            "Use the `apply_patch` tool to edit files.\nYour patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. A patch must use this envelope:\n\n*** Begin Patch\n[ one or more file sections ]\n*** End Patch\n\nWithin that envelope, each file operation starts with one of these headers:\n\n*** Add File: <path> - create a new file. Every following line is a + line.\n*** Delete File: <path> - remove an existing file. Nothing follows.\n*** Update File: <path> - patch an existing file in place, optionally followed by *** Move to: <new path>.\n\nUpdate hunks start with @@ and contain lines prefixed with a space, -, or +. File references must be relative, never absolute.\n"
-        );
+        assert_eq!(function["description"], APPLY_PATCH_DESCRIPTION);
+        let description = function["description"].as_str().unwrap();
+        assert!(description.contains("Few-shot examples:"));
+        assert!(description.contains("*** Add File: notes.md\n+# Notes\n+"));
+        assert!(description.contains("*** Update File: src/example.txt"));
+        assert!(description.contains("*** Delete File: old.txt"));
         assert_eq!(function["parameters"]["type"], "object");
         assert_eq!(function["parameters"]["required"], json!(["input"]));
         assert_eq!(

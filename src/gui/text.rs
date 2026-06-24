@@ -892,6 +892,13 @@ impl GuiText {
         }
     }
 
+    pub(super) fn request_log_detail_upstream_sse(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "上游 SSE",
+            GuiLocale::EnUs => "Upstream SSE",
+        }
+    }
+
     pub(super) fn request_log_detail_response(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "响应",

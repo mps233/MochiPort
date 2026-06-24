@@ -517,6 +517,7 @@ pub(super) struct RequestLogDetail {
     pub(super) request_json: Option<String>,
     pub(super) upstream_request_headers_json: Option<String>,
     pub(super) upstream_request_json: Option<String>,
+    pub(super) upstream_response_sse: Option<String>,
     pub(super) response_json: Option<String>,
 }
 

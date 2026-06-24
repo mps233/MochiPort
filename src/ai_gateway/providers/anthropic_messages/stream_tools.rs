@@ -27,6 +27,7 @@ pub(super) struct AnthropicWebSearchBlockState {
     input: Value,
     arguments: String,
     result: Option<Value>,
+    close_on_block_stop: bool,
 }
 
 impl AnthropicStreamState {
@@ -78,6 +79,11 @@ impl AnthropicStreamState {
             }
         }
         self.content_blocks.insert(index, state);
+    }
+
+    pub(super) fn is_unmapped_web_search_tool_use(&self, block: &Value) -> bool {
+        let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+        self.profile.is_web_search_server_tool(name) && !self.tool_name_map.has_encoded(name)
     }
 
     pub(super) fn handle_tool_delta(
@@ -214,6 +220,7 @@ impl AnthropicStreamState {
                 input,
                 arguments,
                 result: None,
+                close_on_block_stop: block.get("type").and_then(Value::as_str) == Some("tool_use"),
             },
         );
     }
@@ -298,5 +305,20 @@ impl AnthropicStreamState {
             }),
         );
         self.completed_output.push(item);
+    }
+
+    pub(super) fn close_web_search_tool_use_block(
+        &mut self,
+        index: usize,
+        queue: &mut VecDeque<Bytes>,
+    ) {
+        if self
+            .web_search_blocks
+            .get(&index)
+            .map(|state| state.close_on_block_stop)
+            .unwrap_or(false)
+        {
+            self.close_web_search_block(index, queue);
+        }
     }
 }

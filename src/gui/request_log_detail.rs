@@ -89,6 +89,14 @@ pub(super) fn show(parent: &Frame, text: GuiText, detail: &RequestLogDetail) {
         upstream_request_detail.as_deref(),
         text,
     );
+    add_text_tab(
+        &notebook,
+        text.request_log_detail_upstream_sse(),
+        detail
+            .upstream_response_sse
+            .as_deref()
+            .unwrap_or_else(|| text.request_log_detail_empty()),
+    );
     add_json_tab(
         &notebook,
         text.request_log_detail_response(),

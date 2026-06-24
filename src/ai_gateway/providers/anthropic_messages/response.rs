@@ -172,6 +172,9 @@ fn anthropic_content_to_response_item(
         }),
         "tool_use" => {
             let raw_name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            if is_unmapped_web_search_tool_use(raw_name, tool_name_map, profile) {
+                return Some(web_search_response_item(item));
+            }
             let target = tool_name_map.decode(raw_name);
             let input = item.get("input").cloned().unwrap_or_else(|| json!({}));
             let (item_type, name, namespace, arguments, custom_input, execution) = match target.kind
@@ -230,34 +233,46 @@ fn anthropic_content_to_response_item(
             if !profile.is_web_search_server_tool(name) {
                 return None;
             }
-            Some(ResponseItem {
-                item_type: ItemType::WebSearchCall,
-                id: item
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| Some(generate_item_id())),
-                role: None,
-                content: None,
-                text: None,
-                name: None,
-                namespace: None,
-                call_id: item.get("id").and_then(Value::as_str).map(str::to_string),
-                arguments: None,
-                input: None,
-                output: None,
-                status: Some("completed".to_string()),
-                execution: None,
-                tools: None,
-                image_url: None,
-                detail: None,
-                action: Some(server_tool_action(item)),
-                summary: None,
-                encrypted_content: None,
-            })
+            Some(web_search_response_item(item))
         }
         "web_search_tool_result" | "tool_result" => None,
         _ => None,
+    }
+}
+
+fn is_unmapped_web_search_tool_use(
+    raw_name: &str,
+    tool_name_map: &ToolNameMap,
+    profile: AnthropicProviderProfile,
+) -> bool {
+    profile.is_web_search_server_tool(raw_name) && !tool_name_map.has_encoded(raw_name)
+}
+
+fn web_search_response_item(item: &Value) -> ResponseItem {
+    ResponseItem {
+        item_type: ItemType::WebSearchCall,
+        id: item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| Some(generate_item_id())),
+        role: None,
+        content: None,
+        text: None,
+        name: None,
+        namespace: None,
+        call_id: item.get("id").and_then(Value::as_str).map(str::to_string),
+        arguments: None,
+        input: None,
+        output: None,
+        status: Some("completed".to_string()),
+        execution: None,
+        tools: None,
+        image_url: None,
+        detail: None,
+        action: Some(server_tool_action(item)),
+        summary: None,
+        encrypted_content: None,
     }
 }
 

@@ -1,3 +1,4 @@
+pub mod apply_patch_tool;
 pub mod catalog;
 #[allow(dead_code)]
 pub mod codec;

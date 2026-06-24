@@ -50,6 +50,7 @@ pub struct RequestLogRecord {
     pub upstream_request_body_bytes: Option<i64>,
     pub upstream_request_headers_json: Option<String>,
     pub upstream_request_json: Option<String>,
+    pub upstream_response_sse: Option<String>,
     pub response_json: Option<String>,
 }
 
@@ -64,6 +65,7 @@ pub struct RequestLogUpdate {
     pub upstream_request_body_bytes: Option<i64>,
     pub upstream_request_headers_json: Option<String>,
     pub upstream_request_json: Option<String>,
+    pub upstream_response_sse: Option<String>,
     pub response_json: Option<String>,
 }
 
@@ -101,6 +103,7 @@ pub struct RequestLogDetail {
     pub request_json: Option<String>,
     pub upstream_request_headers_json: Option<String>,
     pub upstream_request_json: Option<String>,
+    pub upstream_response_sse: Option<String>,
     pub response_json: Option<String>,
 }
 
@@ -376,8 +379,8 @@ fn insert_record_with_conn(conn: &Connection, record: &RequestLogRecord) -> rusq
             read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
             ttft_ms, created_at_ms, error_message, request_headers_json, request_json,
             upstream_request_body_bytes, upstream_request_headers_json, upstream_request_json,
-            response_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+            upstream_response_sse, response_json
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             &record.request_id,
             &record.model_id,
@@ -401,6 +404,7 @@ fn insert_record_with_conn(conn: &Connection, record: &RequestLogRecord) -> rusq
             record.upstream_request_body_bytes,
             &record.upstream_request_headers_json,
             &record.upstream_request_json,
+            &record.upstream_response_sse,
             &record.response_json,
         ],
     )?;
@@ -424,7 +428,8 @@ fn update_record_with_conn(
                 status, input_tokens, output_tokens, total_tokens, read_cache_tokens,
                 read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
                 ttft_ms, error_message, upstream_request_body_bytes,
-                upstream_request_headers_json, upstream_request_json, response_json
+                upstream_request_headers_json, upstream_request_json, upstream_response_sse,
+                response_json
              FROM ai_gateway_request_logs WHERE id = ?1",
             params![id],
             |row| {
@@ -444,6 +449,7 @@ fn update_record_with_conn(
                     row.get::<_, Option<String>>(12)?,
                     row.get::<_, Option<String>>(13)?,
                     row.get::<_, Option<String>>(14)?,
+                    row.get::<_, Option<String>>(15)?,
                 ))
             },
         )
@@ -477,8 +483,9 @@ fn update_record_with_conn(
             upstream_request_body_bytes = ?12,
             upstream_request_headers_json = ?13,
             upstream_request_json = ?14,
-            response_json = ?15
-         WHERE id = ?16",
+            upstream_response_sse = ?15,
+            response_json = ?16
+         WHERE id = ?17",
         params![
             update.status.as_deref().unwrap_or(&existing.0),
             usage.input_tokens,
@@ -494,7 +501,8 @@ fn update_record_with_conn(
             update.upstream_request_body_bytes.or(existing.11),
             update.upstream_request_headers_json.clone().or(existing.12),
             update.upstream_request_json.clone().or(existing.13),
-            update.response_json.clone().or(existing.14),
+            update.upstream_response_sse.clone().or(existing.14),
+            update.response_json.clone().or(existing.15),
             id,
         ],
     )?;
@@ -594,7 +602,7 @@ fn get_detail_with_conn(conn: &Connection, id: i64) -> rusqlite::Result<Option<R
             datetime(created_at_ms / 1000, 'unixepoch', 'localtime') AS created_at,
             error_message, request_headers_json, request_json,
             upstream_request_body_bytes, upstream_request_headers_json, upstream_request_json,
-            response_json
+            upstream_response_sse, response_json
          FROM ai_gateway_request_logs
          WHERE id = ?1",
         params![id],
@@ -626,7 +634,8 @@ fn get_detail_with_conn(conn: &Connection, id: i64) -> rusqlite::Result<Option<R
                 request_json: row.get(20)?,
                 upstream_request_headers_json: row.get(22)?,
                 upstream_request_json: row.get(23)?,
-                response_json: row.get(24)?,
+                upstream_response_sse: row.get(24)?,
+                response_json: row.get(25)?,
             })
         },
     )
@@ -735,6 +744,98 @@ pub struct ResponsesSseLogStream<S> {
     completed: bool,
     ttft_recorded: bool,
     output_queue: VecDeque<Result<Bytes, std::io::Error>>,
+}
+
+const UPSTREAM_SSE_LOG_LIMIT_BYTES: usize = 512 * 1024;
+
+pub struct UpstreamSseCaptureStream<S> {
+    inner: S,
+    context: RequestLogContext,
+    captured: Vec<u8>,
+    truncated: bool,
+    saved: bool,
+}
+
+impl<S> UpstreamSseCaptureStream<S> {
+    pub fn new(inner: S, context: RequestLogContext) -> Self {
+        Self {
+            inner,
+            context,
+            captured: Vec::new(),
+            truncated: false,
+            saved: false,
+        }
+    }
+
+    fn capture_chunk(&mut self, chunk: &Bytes) {
+        if self.captured.len() >= UPSTREAM_SSE_LOG_LIMIT_BYTES {
+            self.truncated = true;
+            return;
+        }
+
+        let remaining = UPSTREAM_SSE_LOG_LIMIT_BYTES - self.captured.len();
+        let take = remaining.min(chunk.len());
+        self.captured.extend_from_slice(&chunk[..take]);
+        if take < chunk.len() {
+            self.truncated = true;
+        }
+    }
+
+    fn save(&mut self) {
+        if self.saved || self.captured.is_empty() {
+            self.saved = true;
+            return;
+        }
+
+        let mut text = String::from_utf8_lossy(&self.captured).to_string();
+        if self.truncated {
+            text.push_str("\n\n: [codex-remote] upstream SSE log truncated\n");
+        }
+        let update = RequestLogUpdate {
+            upstream_response_sse: Some(text),
+            ..RequestLogUpdate::default()
+        };
+        if let Err(err) = self
+            .context
+            .store
+            .update_record(self.context.log_id, &update)
+        {
+            log_update_error(err);
+        }
+        self.saved = true;
+    }
+}
+
+impl<S> Drop for UpstreamSseCaptureStream<S> {
+    fn drop(&mut self) {
+        self.save();
+    }
+}
+
+impl<S, E> Stream for UpstreamSseCaptureStream<S>
+where
+    S: Stream<Item = Result<Bytes, E>> + Unpin,
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match Pin::new(&mut this.inner).poll_next(cx) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                this.capture_chunk(&chunk);
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            Poll::Ready(Some(Err(err))) => {
+                this.save();
+                Poll::Ready(Some(Err(err)))
+            }
+            Poll::Ready(None) => {
+                this.save();
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
 }
 
 impl<S> ResponsesSseLogStream<S> {
@@ -878,6 +979,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             upstream_request_body_bytes INTEGER,
             upstream_request_headers_json TEXT,
             upstream_request_json TEXT,
+            upstream_response_sse TEXT,
             response_json TEXT
         );
         "#,
@@ -887,6 +989,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     add_integer_column_if_missing(conn, "upstream_request_body_bytes")?;
     add_text_column_if_missing(conn, "upstream_request_headers_json")?;
     add_text_column_if_missing(conn, "upstream_request_json")?;
+    add_text_column_if_missing(conn, "upstream_response_sse")?;
 
     conn.execute_batch(
         r#"
@@ -1048,6 +1151,7 @@ mod tests {
             upstream_request_body_bytes: None,
             upstream_request_headers_json: None,
             upstream_request_json: None,
+            upstream_response_sse: None,
             response_json: None,
         };
         let log_id = store.insert_record(&record).unwrap();
@@ -1147,6 +1251,7 @@ mod tests {
             upstream_request_body_bytes: None,
             upstream_request_headers_json: None,
             upstream_request_json: None,
+            upstream_response_sse: None,
             response_json: None,
         };
 
@@ -1193,6 +1298,7 @@ mod tests {
             upstream_request_json: Some(
                 r#"{"model":"deepseek-v4-flash","messages":[]}"#.to_string(),
             ),
+            upstream_response_sse: None,
             response_json: None,
         };
 
@@ -1214,6 +1320,7 @@ mod tests {
                 upstream_request_headers_json: Some(
                     r#"{"authorization":"Bearer provider-key"}"#.to_string(),
                 ),
+                upstream_response_sse: Some("event: message_start\n".to_string()),
                 response_json: Some(r#"{"status":"completed"}"#.to_string()),
                 ..RequestLogUpdate::default()
             },
@@ -1242,6 +1349,10 @@ mod tests {
         assert_eq!(
             detail.upstream_request_json.as_deref(),
             Some(r#"{"model":"deepseek-v4-flash","messages":[]}"#)
+        );
+        assert_eq!(
+            detail.upstream_response_sse.as_deref(),
+            Some("event: message_start\n")
         );
         assert_eq!(
             detail.response_json.as_deref(),
@@ -1314,6 +1425,32 @@ mod tests {
         let _ = std::fs::remove_file(db_path);
     }
 
+    #[tokio::test]
+    async fn upstream_sse_capture_stream_records_raw_events() {
+        let db_path = temp_db_path();
+        let context = insert_running_test_log(&db_path, "req-upstream-sse");
+        let inner = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
+            )),
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n",
+            )),
+        ]);
+        let mut wrapped = UpstreamSseCaptureStream::new(inner, context);
+
+        while let Some(item) = wrapped.next().await {
+            assert!(item.is_ok());
+        }
+        drop(wrapped);
+
+        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        let captured = detail.upstream_response_sse.unwrap();
+        assert!(captured.contains("event: message_start"));
+        assert!(captured.contains("event: content_block_delta"));
+        let _ = std::fs::remove_file(db_path);
+    }
+
     #[test]
     fn sqlite_delete_older_than_keeps_recent_logs() {
         let db_path = std::env::temp_dir().join(format!(
@@ -1340,6 +1477,7 @@ mod tests {
                 upstream_request_body_bytes: None,
                 upstream_request_headers_json: None,
                 upstream_request_json: None,
+                upstream_response_sse: None,
                 response_json: None,
             };
             insert_record(&db_path, &record).unwrap();
@@ -1378,6 +1516,7 @@ mod tests {
                 upstream_request_body_bytes: None,
                 upstream_request_headers_json: None,
                 upstream_request_json: None,
+                upstream_response_sse: None,
                 response_json: None,
             };
             insert_record(&db_path, &record).unwrap();
@@ -1413,6 +1552,7 @@ mod tests {
             upstream_request_body_bytes: None,
             upstream_request_headers_json: None,
             upstream_request_json: None,
+            upstream_response_sse: None,
             response_json: None,
         };
 

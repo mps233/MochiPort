@@ -13,7 +13,7 @@ use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::GatewayRequest;
 use crate::ai_gateway::request_log::{
-    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
+    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
 use crate::ai_gateway::tool_names::ToolNameMap;
 
@@ -186,15 +186,23 @@ async fn handle_stream(
     profile: AnthropicProviderProfile,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
-    let sse_stream = AnthropicSseToResponsesSse::new(
-        resp.bytes_stream(),
-        model.to_string(),
-        tool_name_map,
-        profile,
-    );
+    let upstream_bytes = resp.bytes_stream();
     let body = if let Some(log_context) = log_context {
+        let captured_upstream = UpstreamSseCaptureStream::new(upstream_bytes, log_context.clone());
+        let sse_stream = AnthropicSseToResponsesSse::new(
+            captured_upstream,
+            model.to_string(),
+            tool_name_map,
+            profile,
+        );
         Body::from_stream(ResponsesSseLogStream::new(sse_stream, log_context))
     } else {
+        let sse_stream = AnthropicSseToResponsesSse::new(
+            upstream_bytes,
+            model.to_string(),
+            tool_name_map,
+            profile,
+        );
         Body::from_stream(sse_stream)
     };
 
