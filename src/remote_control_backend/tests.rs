@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 
 use base64::Engine;
 use serde_json::{Value, json};
@@ -14,8 +14,7 @@ use crate::{
 
 fn test_state() -> SharedState {
     let mut config = AppConfig::default();
-    config.state_path =
-        std::env::temp_dir().join(format!("codexhub-test-{}.json", uuid_like()));
+    config.state_path = std::env::temp_dir().join(format!("codexhub-test-{}.json", uuid_like()));
     AppState::new(
         std::env::temp_dir().join("codexhub-test-config.toml"),
         config,

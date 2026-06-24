@@ -1,4 +1,4 @@
-﻿#[cfg(target_os = "macos")]
+#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::{
     collections::{HashMap, HashSet},
@@ -1054,8 +1054,7 @@ fn managed_provider_names_in_config(
             .map(str::trim)
             .map(|value| backend_urls_equivalent(value, &ai_gateway_base_url))
             .unwrap_or(false);
-        if local_gateway_provider && provider_table_has_codexhub_shape(provider, provider_name)
-        {
+        if local_gateway_provider && provider_table_has_codexhub_shape(provider, provider_name) {
             names.insert(provider_name.to_string());
         }
     }
@@ -2901,11 +2900,8 @@ base_url = "https://api.example.invalid"
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after UNIX epoch")
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!(
-            "codexhub-test-{}-{}",
-            std::process::id(),
-            nanos
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("codexhub-test-{}-{}", std::process::id(), nanos));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }

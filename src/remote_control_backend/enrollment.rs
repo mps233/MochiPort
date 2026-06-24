@@ -1,4 +1,4 @@
-﻿use std::time::Duration;
+use std::time::Duration;
 
 use axum::{
     Json,
@@ -234,8 +234,8 @@ async fn remember_remote_control_client(
 
 fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> String {
     let now = unix_now_u64();
-    let account_id = header_str(headers, "chatgpt-account-id")
-        .unwrap_or_else(|| "acct_codexhub_local".into());
+    let account_id =
+        header_str(headers, "chatgpt-account-id").unwrap_or_else(|| "acct_codexhub_local".into());
     let account_user_id = remote_control_account_user_id(headers);
     let payload = json!({
         "iss": "codexhub-local",
@@ -269,8 +269,8 @@ fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> St
 
 fn local_remote_control_server_token(headers: &HeaderMap, server_id: &str) -> String {
     let now = unix_now_u64();
-    let account_id = header_str(headers, "chatgpt-account-id")
-        .unwrap_or_else(|| "acct_codexhub_local".into());
+    let account_id =
+        header_str(headers, "chatgpt-account-id").unwrap_or_else(|| "acct_codexhub_local".into());
     let account_user_id = remote_control_account_user_id(headers);
     let payload = json!({
         "iss": "codexhub-local",
