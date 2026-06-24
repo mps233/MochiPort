@@ -6,8 +6,8 @@ use crate::ai_gateway::model::{
 };
 use crate::ai_gateway::tool_names::{ToolCallKind, ToolNameMap};
 
-use super::glm_compat;
 use super::options::AnthropicProviderProfile;
+use super::{citations, glm_compat};
 
 pub(super) fn convert_anthropic_response(
     response: &Value,
@@ -90,11 +90,18 @@ fn anthropic_content_to_response_item(
             if text.is_empty() {
                 return None;
             }
+            let annotations = item
+                .get("citations")
+                .and_then(Value::as_array)
+                .map(|items| citations::convert_anthropic_citations(items, 0, text.chars().count()))
+                .unwrap_or_default();
+            let mut content_part = ContentPart::output_text(text);
+            content_part.annotations = Some(annotations);
             Some(ResponseItem {
                 item_type: ItemType::Message,
                 id: Some(generate_item_id()),
                 role: Some("assistant".to_string()),
-                content: Some(ItemContent::Parts(vec![ContentPart::output_text(text)])),
+                content: Some(ItemContent::Parts(vec![content_part])),
                 text: None,
                 name: None,
                 namespace: None,
@@ -233,6 +240,9 @@ fn anthropic_content_to_response_item(
             if !profile.is_web_search_server_tool(name) {
                 return None;
             }
+            if web_search_query(item).is_empty() {
+                return None;
+            }
             Some(web_search_response_item(item))
         }
         "web_search_tool_result" | "tool_result" => None,
@@ -295,7 +305,7 @@ fn attach_web_search_result(
         return true;
     }
 
-    if !allow_orphan {
+    if !allow_orphan || tool_use_id.is_none() {
         return false;
     }
 
@@ -331,12 +341,15 @@ fn attach_web_search_result(
 fn server_tool_action(item: &Value) -> Value {
     json!({
         "type": "search",
-        "query": item
-            .get("input")
-            .and_then(|input| input.get("query").or_else(|| input.get("search_query")))
-            .and_then(Value::as_str)
-            .unwrap_or_default(),
+        "query": web_search_query(item),
     })
+}
+
+fn web_search_query(item: &Value) -> &str {
+    item.get("input")
+        .and_then(|input| input.get("query").or_else(|| input.get("search_query")))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
 }
 
 fn extract_custom_tool_input(input: &Value) -> String {

@@ -165,6 +165,14 @@ fn build_anthropic_web_search_tool(tool: &Map<String, Value>) -> Option<Value> {
             "user_location",
         ],
     );
+    if !result.contains_key("allowed_domains")
+        && let Some(allowed_domains) = config
+            .get("filters")
+            .and_then(Value::as_object)
+            .and_then(|filters| filters.get("allowed_domains"))
+    {
+        result.insert("allowed_domains".to_string(), allowed_domains.clone());
+    }
     Some(Value::Object(result))
 }
 

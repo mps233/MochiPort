@@ -104,6 +104,11 @@ impl AnthropicStreamState {
                 } else {
                     self.ensure_message_item(queue);
                 }
+                if let Some(citations) = block.get("citations").and_then(Value::as_array) {
+                    for citation in citations {
+                        self.handle_citation_delta(citation, queue);
+                    }
+                }
                 if let Some(text) = block.get("text").and_then(Value::as_str) {
                     if !text.is_empty() {
                         self.handle_text_delta(text, queue);
@@ -147,6 +152,12 @@ impl AnthropicStreamState {
                     self.handle_text_delta(text, queue);
                 }
             }
+            Some("citations_delta") => {
+                self.close_reasoning_item(queue);
+                if let Some(citation) = delta.get("citation") {
+                    self.handle_citation_delta(citation, queue);
+                }
+            }
             Some("thinking_delta") => {
                 if let Some(text) = delta.get("thinking").and_then(Value::as_str) {
                     self.handle_thinking_delta(text, queue);
@@ -161,7 +172,7 @@ impl AnthropicStreamState {
                 self.close_reasoning_item(queue);
                 if let Some(partial_json) = delta.get("partial_json").and_then(Value::as_str) {
                     if self.web_search_blocks.contains_key(&index) {
-                        self.handle_web_search_delta(index, partial_json);
+                        self.handle_web_search_delta(index, partial_json, queue);
                     } else {
                         self.handle_tool_delta(index, partial_json, queue);
                     }

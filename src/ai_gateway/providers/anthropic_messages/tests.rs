@@ -322,6 +322,27 @@ fn preserves_native_anthropic_web_search_server_tool() {
 }
 
 #[test]
+fn maps_responses_web_search_filters_to_anthropic_allowed_domains() {
+    let mut req = request(vec![message("user", "latest rust news")]);
+    req.tools = vec![json!({
+        "type": "web_search",
+        "external_web_access": true,
+        "search_content_types": ["text", "image"],
+        "filters": {
+            "allowed_domains": ["www.rust-lang.org"]
+        }
+    })];
+
+    let (body, _) =
+        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
+    assert_eq!(body["tools"][0]["name"], "web_search");
+    assert_eq!(body["tools"][0]["allowed_domains"][0], "www.rust-lang.org");
+    assert!(body["tools"][0].get("external_web_access").is_none());
+    assert!(body["tools"][0].get("search_content_types").is_none());
+}
+
+#[test]
 fn builds_anthropic_adaptive_thinking_from_reasoning_effort() {
     let mut req = request(vec![message("user", "think carefully")]);
     req.reasoning = Some(Reasoning {
@@ -433,6 +454,41 @@ fn converts_anthropic_text_response() {
     let details = usage.input_tokens_details.unwrap();
     assert_eq!(details.cached_tokens, 4);
     assert_eq!(details.cache_creation_tokens, 6);
+}
+
+#[test]
+fn converts_anthropic_text_citations_to_responses_annotations() {
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-6",
+        "content": [{
+            "type": "text",
+            "text": "Rust is maintained by the Rust Foundation.",
+            "citations": [{
+                "type": "web_search_result_location",
+                "url": "https://www.rust-lang.org/",
+                "title": "Rust",
+                "cited_text": "Rust language homepage"
+            }]
+        }],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 3
+        }
+    });
+
+    let converted = convert_response(&response);
+    let Some(ItemContent::Parts(parts)) = converted.output[0].content.as_ref() else {
+        panic!("expected output_text content part");
+    };
+    let annotations = parts[0].annotations.as_ref().expect("expected annotations");
+    assert_eq!(annotations.len(), 1);
+    assert_eq!(annotations[0]["type"], "url_citation");
+    assert_eq!(annotations[0]["url"], "https://www.rust-lang.org/");
+    assert_eq!(annotations[0]["title"], "Rust");
 }
 
 #[test]
@@ -676,6 +732,53 @@ fn converts_anthropic_tool_use_web_search_response() {
     assert_eq!(
         converted.output[0].action.as_ref().unwrap()["query"],
         "Portugal Uzbekistan World Cup 2026 result Ronaldo goal"
+    );
+}
+
+#[test]
+fn skips_empty_anthropic_internal_web_search_response() {
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "tooluse_search",
+                "name": "web_search",
+                "input": {"query": "Portugal World Cup 2026 result"}
+            },
+            {
+                "type": "server_tool_use",
+                "id": "srvtoolu_internal",
+                "name": "web_search"
+            },
+            {
+                "type": "web_search_tool_result",
+                "content": [
+                    {
+                        "type": "web_search_result",
+                        "title": "Portugal wins",
+                        "url": "https://example.com"
+                    }
+                ]
+            }
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let converted = convert_response(&response);
+    assert_eq!(converted.output.len(), 1);
+    assert_eq!(converted.output[0].item_type, ItemType::WebSearchCall);
+    assert_eq!(
+        converted.output[0].call_id.as_deref(),
+        Some("tooluse_search")
+    );
+    assert_eq!(
+        converted.output[0].action.as_ref().unwrap()["query"],
+        "Portugal World Cup 2026 result"
     );
 }
 
@@ -1086,6 +1189,56 @@ async fn streams_anthropic_web_search_as_responses_sse() {
 }
 
 #[tokio::test]
+async fn streams_anthropic_citations_as_responses_annotations() {
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"citations_delta\",\"citation\":{\"type\":\"web_search_result_location\",\"url\":\"https://www.rust-lang.org/\",\"title\":\"Rust\",\"cited_text\":\"Rust language homepage\"}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Rust has a homepage.\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+
+    assert!(events.iter().any(
+        |(event, data)| event == "response.output_text.annotation.added"
+            && data["annotation"]["type"] == "url_citation"
+            && data["annotation"]["url"] == "https://www.rust-lang.org/"
+    ));
+    let done = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "message"
+        })
+        .unwrap();
+    let annotation = &done.1["item"]["content"][0]["annotations"][0];
+    assert_eq!(annotation["type"], "url_citation");
+    assert_eq!(annotation["url"], "https://www.rust-lang.org/");
+    assert_eq!(annotation["title"], "Rust");
+    assert_eq!(annotation["start_index"], 0);
+    assert_eq!(annotation["end_index"], 20);
+}
+
+#[tokio::test]
 async fn streams_anthropic_tool_use_web_search_as_responses_sse() {
     let input = stream::iter(vec![
         Ok::<_, std::io::Error>(Bytes::from_static(
@@ -1127,6 +1280,60 @@ async fn streams_anthropic_tool_use_web_search_as_responses_sse() {
     assert_eq!(
         done.1["item"]["action"]["query"],
         "Portugal Uzbekistan World Cup 2026 result Ronaldo goal"
+    );
+}
+
+#[tokio::test]
+async fn streams_skip_empty_anthropic_internal_web_search_sse() {
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-8\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tooluse_search\",\"name\":\"web_search\",\"input\":{}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\": \\\"Portugal World Cup 2026 result\\\"}\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_internal\",\"name\":\"web_search\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"web_search_tool_result\",\"content\":[{\"type\":\"web_search_result\",\"title\":\"Portugal wins\",\"url\":\"https://example.com\"}]}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+    let done_searches = events
+        .iter()
+        .filter(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "web_search_call"
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(done_searches.len(), 1);
+    assert_eq!(done_searches[0].1["item"]["call_id"], "tooluse_search");
+    assert_eq!(
+        done_searches[0].1["item"]["action"]["query"],
+        "Portugal World Cup 2026 result"
     );
 }
 

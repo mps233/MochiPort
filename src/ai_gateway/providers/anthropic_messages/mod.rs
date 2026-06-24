@@ -22,6 +22,7 @@ use super::{
     map_upstream_response,
 };
 
+mod citations;
 mod custom_tools;
 mod glm_compat;
 mod options;

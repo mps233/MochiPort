@@ -22,7 +22,7 @@ pub(super) struct AnthropicContentBlockState {
 
 pub(super) struct AnthropicWebSearchBlockState {
     item_id: String,
-    output_index: usize,
+    output_index: Option<usize>,
     call_id: String,
     input: Value,
     arguments: String,
@@ -181,6 +181,8 @@ impl AnthropicStreamState {
         if !self.profile.is_web_search_server_tool(name) {
             return;
         }
+        let is_tool_use_web_search = block.get("type").and_then(Value::as_str) == Some("tool_use");
+        let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
 
         let call_id = block
             .get("id")
@@ -192,25 +194,13 @@ impl AnthropicStreamState {
         } else {
             call_id.clone()
         };
-        let output_index = self.output_index;
-        self.output_index += 1;
-        let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
         let arguments = if input.is_null() || input == json!({}) {
             String::new()
         } else {
             serde_json::to_string(&input).unwrap_or_default()
         };
-        let added_item = web_search_item(&item_id, &call_id, "in_progress", input.clone());
-        emit_sse(
-            queue,
-            "response.output_item.added",
-            json!({
-                "type": "response.output_item.added",
-                "sequence_number": self.next_seq(),
-                "output_index": output_index,
-                "item": added_item,
-            }),
-        );
+        let output_index =
+            self.emit_web_search_added_if_ready(&item_id, &call_id, input.clone(), queue);
         self.web_search_blocks.insert(
             index,
             AnthropicWebSearchBlockState {
@@ -220,21 +210,44 @@ impl AnthropicStreamState {
                 input,
                 arguments,
                 result: None,
-                close_on_block_stop: block.get("type").and_then(Value::as_str) == Some("tool_use"),
+                close_on_block_stop: is_tool_use_web_search,
             },
         );
     }
 
-    pub(super) fn handle_web_search_delta(&mut self, index: usize, partial_json: &str) {
+    pub(super) fn handle_web_search_delta(
+        &mut self,
+        index: usize,
+        partial_json: &str,
+        queue: &mut VecDeque<Bytes>,
+    ) {
         if partial_json.is_empty() {
             return;
         }
-        let Some(state) = self.web_search_blocks.get_mut(&index) else {
+        let Some((item_id, call_id, input, should_emit)) =
+            self.web_search_blocks.get_mut(&index).map(|state| {
+                state.arguments.push_str(partial_json);
+                if let Ok(input) = serde_json::from_str::<Value>(&state.arguments) {
+                    state.input = input;
+                }
+                (
+                    state.item_id.clone(),
+                    state.call_id.clone(),
+                    state.input.clone(),
+                    state.output_index.is_none() && !web_search_query(&state.input).is_empty(),
+                )
+            })
+        else {
             return;
         };
-        state.arguments.push_str(partial_json);
-        if let Ok(input) = serde_json::from_str::<Value>(&state.arguments) {
-            state.input = input;
+        if should_emit {
+            let output_index =
+                self.emit_web_search_added_if_ready(&item_id, &call_id, input, queue);
+            if let Some(output_index) = output_index
+                && let Some(state) = self.web_search_blocks.get_mut(&index)
+            {
+                state.output_index = Some(output_index);
+            }
         }
     }
 
@@ -288,6 +301,22 @@ impl AnthropicStreamState {
         } else {
             state.input
         };
+        let output_index = if let Some(output_index) = state.output_index {
+            output_index
+        } else {
+            if web_search_query(&input).is_empty() {
+                return;
+            }
+            let Some(output_index) = self.emit_web_search_added_if_ready(
+                &state.item_id,
+                &state.call_id,
+                input.clone(),
+                queue,
+            ) else {
+                return;
+            };
+            output_index
+        };
         let item = web_search_item(
             &state.item_id,
             &state.call_id,
@@ -300,7 +329,7 @@ impl AnthropicStreamState {
             json!({
                 "type": "response.output_item.done",
                 "sequence_number": self.next_seq(),
-                "output_index": state.output_index,
+                "output_index": output_index,
                 "item": item.clone(),
             }),
         );
@@ -321,4 +350,38 @@ impl AnthropicStreamState {
             self.close_web_search_block(index, queue);
         }
     }
+
+    fn emit_web_search_added_if_ready(
+        &mut self,
+        item_id: &str,
+        call_id: &str,
+        input: Value,
+        queue: &mut VecDeque<Bytes>,
+    ) -> Option<usize> {
+        if web_search_query(&input).is_empty() {
+            return None;
+        }
+        let output_index = self.output_index;
+        self.output_index += 1;
+        let added_item = web_search_item(item_id, call_id, "in_progress", input);
+        emit_sse(
+            queue,
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "sequence_number": self.next_seq(),
+                "output_index": output_index,
+                "item": added_item,
+            }),
+        );
+        Some(output_index)
+    }
+}
+
+fn web_search_query(input: &Value) -> &str {
+    input
+        .get("query")
+        .or_else(|| input.get("search_query"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
 }
