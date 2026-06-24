@@ -1,18 +1,18 @@
-# 认证说明
+﻿# 认证说明
 
 这份文档说明 Codex App remote-control 路径里的本地 auth 边界。
 
 ## 当前决策
 
-`codex-remote` 使用本地 `chatgptAuthTokens` auth 形态作为 Codex App remote-control 身份。
+`codexhub` 使用本地 `chatgptAuthTokens` auth 形态作为 Codex App remote-control 身份。
 
 含义是：
 
 - Codex App 仍然负责 app-server 启动，并读取它正常的 Codex home
-- `chatgpt_base_url` 指向本地 `codex-remote` backend
+- `chatgpt_base_url` 指向本地 `codexhub` backend
 - Codex App 的 `auth.json` 使用 `auth_mode = "chatgptAuthTokens"`
 - 第三方模型 key 仍然放在 Codex model provider 配置里
-- app-server 连上 remote-control 后，`codex-remote` 再把协议流量桥到飞书
+- app-server 连上 remote-control 后，`codexhub` 再把协议流量桥到飞书
 
 ## 为什么不能只用 API Key
 
@@ -36,20 +36,20 @@ remote control requires ChatGPT authentication; API key auth is not supported
     "id_token": "<本地 ChatGPT-shaped JWT>",
     "access_token": "<本地 ChatGPT-shaped JWT>",
     "refresh_token": "",
-    "account_id": "acct_codex_remote_local"
+    "account_id": "acct_codexhub_local"
   },
   "last_refresh": "2026-05-26T00:00:00Z"
 }
 ```
 
-这个 JWT 是本地材料。Codex 读取它的 claims 来拿 account/user 元数据。`codex-remote` 不会用它去请求 OpenAI。
+这个 JWT 是本地材料。Codex 读取它的 claims 来拿 account/user 元数据。`codexhub` 不会用它去请求 OpenAI。
 
 ## 辅助命令
 
 使用：
 
 ```powershell
-codex-remote --config config.toml configure-codex-app
+codexhub --config config.toml configure-codex-app
 ```
 
 它会显式写入：
@@ -60,7 +60,7 @@ codex-remote --config config.toml configure-codex-app
 也可以顺手写第三方 provider 配置：
 
 ```powershell
-codex-remote --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
+codexhub --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
 ```
 
 如果写 provider 字段但不传 `--provider-name`，helper 默认使用 `llmx`。
@@ -69,7 +69,7 @@ codex-remote --config config.toml configure-codex-app --provider-name llmx --pro
 
 ## 运行边界
 
-`codex-remote` 读取：
+`codexhub` 读取：
 
 - `config.toml`
 - 本地 bridge 状态
@@ -81,7 +81,7 @@ Codex App 读取：
 - Codex App `auth.json`
 - model provider 配置和 key
 
-当 Codex App 启动 remote-control 之后，`codex-remote` 真正关心的是：
+当 Codex App 启动 remote-control 之后，`codexhub` 真正关心的是：
 
 - app-server 是否连到了 `/backend-api/wham/remote/control/server`
 - remote-control 的 `initialize` / `initialized`

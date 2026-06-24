@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -209,7 +209,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         host.as_deref().unwrap_or_default()
     ));
     info!(
-        target: "codex_remote::remote_control",
+        target: "codexhub::remote_control",
         event = "remote_control_ws_open",
         connection_epoch,
         client_id,

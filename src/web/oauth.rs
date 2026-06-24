@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     Json,
     extract::{Form, Query},
     http::StatusCode,
@@ -24,7 +24,7 @@ pub(super) async fn oauth_authorize(Query(query): Query<OAuthAuthorizeQuery>) ->
     let account_id = query
         .current_workspace_id
         .or(query.allowed_workspace_id)
-        .unwrap_or_else(|| "acct_codex_remote_local".to_string());
+        .unwrap_or_else(|| "acct_codexhub_local".to_string());
     let code = local_step_up_code(&account_id);
     let mut redirect_uri = match reqwest::Url::parse(&query.redirect_uri) {
         Ok(url) => url,
@@ -42,12 +42,12 @@ pub(super) async fn oauth_authorize(Query(query): Query<OAuthAuthorizeQuery>) ->
 
 pub(super) async fn oauth_token(Form(request): Form<OAuthTokenRequest>) -> impl IntoResponse {
     let account_id = account_id_from_step_up_code(&request.code)
-        .unwrap_or_else(|| "acct_codex_remote_local".to_string());
-    let user_id = "user_codex_remote_local";
+        .unwrap_or_else(|| "acct_codexhub_local".to_string());
+    let user_id = "user_codexhub_local";
     let account_user_id = format!("{user_id}__{account_id}");
     let now = unix_now();
     let token = jwt_none(&serde_json::json!({
-        "iss": "codex-remote-local",
+        "iss": "codexhub-local",
         "aud": ["https://api.openai.com/v1"],
         "iat": now,
         "nbf": now,

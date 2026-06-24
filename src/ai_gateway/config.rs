@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+﻿use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -91,7 +91,7 @@ fn weighted_hrw_score(session_id: &str, provider: &ProviderConfig) -> f64 {
 
 fn hrw_hash_u64(session_id: &str, provider: &ProviderConfig) -> u64 {
     let mut hasher = Sha256::new();
-    hasher.update(b"codex-remote-ai-gateway-weighted-hrw-v1\0");
+    hasher.update(b"codexhub-ai-gateway-weighted-hrw-v1\0");
     hasher.update(session_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(provider_route_id(provider).as_bytes());

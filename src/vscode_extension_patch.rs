@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     env, fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -10,8 +10,8 @@ use sha2::{Digest, Sha256};
 
 const ORIGINAL_ARGS: &str = r#"["--analytics-default-enabled"]"#;
 const PATCHED_ARGS: &str = r#"["--analytics-default-enabled","--remote-control"]"#;
-const BACKUP_SUFFIX: &str = ".bak-codex-remote";
-const STATE_SUFFIX: &str = ".codex-remote-state.json";
+const BACKUP_SUFFIX: &str = ".bak-codexhub";
+const STATE_SUFFIX: &str = ".codexhub-state.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -130,7 +130,7 @@ pub fn restore_remote_control() -> Result<VsCodeExtensionPatchReport> {
             extension_js: Some(extension_js),
             backup_path: Some(backup_path),
             action: "no_backup".to_string(),
-            message: "没有找到 Codex Remote 创建的插件备份，未还原。".to_string(),
+            message: "没有找到 CodexHub 创建的插件备份，未还原。".to_string(),
         });
     }
 
@@ -155,7 +155,7 @@ pub fn restore_remote_control() -> Result<VsCodeExtensionPatchReport> {
             extension_js: Some(extension_js),
             backup_path: Some(backup_path),
             action: "skipped_unmanaged".to_string(),
-            message: "当前插件文件不像 Codex Remote 写入的版本，未自动还原。".to_string(),
+            message: "当前插件文件不像 CodexHub 写入的版本，未自动还原。".to_string(),
         });
     }
 

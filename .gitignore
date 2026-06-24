@@ -3,7 +3,7 @@
 /outputs
 .DS_Store
 config.toml
-codex-remote-state.json
+codexhub-state.json
 *.log
 .im/
 .claude/

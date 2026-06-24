@@ -1,4 +1,4 @@
-# AI Gateway Web Search 协议对接说明
+﻿# AI Gateway Web Search 协议对接说明
 
 状态：已落地。本文记录 Codex 使用的 OpenAI Responses `web_search` 工具与 Anthropic Messages `web_search` server tool 之间的转换规则。
 
@@ -307,10 +307,10 @@ Gateway 在 `GlmAnthropic` profile 中：
 当前应保持通过：
 
 ```powershell
-cargo test --features gui --bin codex-remote anthropic_web_search
-cargo test --features gui --bin codex-remote anthropic_internal_web_search
-cargo test --features gui --bin codex-remote anthropic_citations
-cargo check --features gui --bin codex-remote
+cargo test --features gui --bin codexhub anthropic_web_search
+cargo test --features gui --bin codexhub anthropic_internal_web_search
+cargo test --features gui --bin codexhub anthropic_citations
+cargo check --features gui --bin codexhub
 ```
 
 重点测试点：

@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::BTreeMap,
     fs::FileTimes,
     path::{Path, PathBuf},
@@ -292,7 +292,7 @@ fn read_migration_records(path: &Path) -> Result<BTreeMap<String, SessionProvide
 }
 
 fn migration_log_path(codex_home: &Path) -> PathBuf {
-    codex_remote_app_support_dir()
+    codexhub_app_support_dir()
         .join("codex-app")
         .join(codex_home_id(codex_home))
         .join(MIGRATION_LOG_FILE)
@@ -332,8 +332,8 @@ fn open_state_db_write(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-fn codex_remote_app_support_dir() -> PathBuf {
-    if let Some(base) = std::env::var_os("CODEX_REMOTE_HOME").map(PathBuf::from) {
+fn codexhub_app_support_dir() -> PathBuf {
+    if let Some(base) = std::env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
         return base;
     }
     #[cfg(target_os = "windows")]
@@ -343,13 +343,13 @@ fn codex_remote_app_support_dir() -> PathBuf {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("Codex Remote")
+            .join("CodexHub")
     }
     #[cfg(not(target_os = "windows"))]
     {
         std::env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|home| home.join("Library/Application Support/Codex Remote"))
+            .map(|home| home.join("Library/Application Support/CodexHub"))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."))
     }
@@ -492,7 +492,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "codex-remote-session-history-test-{}-{nanos}",
+            "codexhub-session-history-test-{}-{nanos}",
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();

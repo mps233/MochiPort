@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 
 use crate::{
     app_state::{RemoteControlClientState, RemoteControlInner, RemoteControlSourceKind},
@@ -230,7 +230,7 @@ pub(in crate::remote_control_backend) fn source_kind_from_user_agent(
         RemoteControlSourceKind::CodexApp
     } else if user_agent.starts_with("codex_vscode/") {
         RemoteControlSourceKind::Vscode
-    } else if user_agent.starts_with("codex-remote/")
+    } else if user_agent.starts_with("codexhub/")
         || user_agent.contains("WindowsTerminal")
         || user_agent.contains("Terminal")
     {

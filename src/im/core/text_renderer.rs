@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 
 use std::collections::HashMap;
 
@@ -762,7 +762,7 @@ mod tests {
     #[test]
     fn agent_message_local_markdown_image_is_rendered_as_text_and_extracted() {
         let path =
-            std::env::temp_dir().join(format!("codex-remote-md-image-{}.png", std::process::id()));
+            std::env::temp_dir().join(format!("codexhub-md-image-{}.png", std::process::id()));
         std::fs::write(&path, b"png").expect("write temp image");
         let text = format!("看图：![preview]({})", path.display());
 
@@ -780,7 +780,7 @@ mod tests {
     #[test]
     fn markdown_image_target_can_be_replaced_with_uploaded_key() {
         let path = std::env::temp_dir().join(format!(
-            "codex-remote-md-image-replace-{}.png",
+            "codexhub-md-image-replace-{}.png",
             std::process::id()
         ));
         std::fs::write(&path, b"png").expect("write temp image");

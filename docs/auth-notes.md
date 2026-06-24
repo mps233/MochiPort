@@ -1,18 +1,18 @@
-# Auth Notes
+﻿# Auth Notes
 
 This document describes the local auth boundary for the Codex App remote-control path.
 
 ## Decision
 
-`codex-remote` uses a local `chatgptAuthTokens` auth shape for Codex App remote-control identity.
+`codexhub` uses a local `chatgptAuthTokens` auth shape for Codex App remote-control identity.
 
 That means:
 
 - Codex App still owns app-server startup and reads its normal Codex home.
-- `chatgpt_base_url` points Codex App at the local `codex-remote` backend.
+- `chatgpt_base_url` points Codex App at the local `codexhub` backend.
 - Codex App `auth.json` uses `auth_mode = "chatgptAuthTokens"`.
 - The third-party model key stays in Codex model provider config.
-- `codex-remote` bridges remote-control protocol traffic to Feishu after the app-server connects.
+- `codexhub` bridges remote-control protocol traffic to Feishu after the app-server connects.
 
 ## Why Not API Key Auth
 
@@ -36,20 +36,20 @@ The local auth record is intentionally ChatGPT-shaped because that is what Codex
     "id_token": "<local ChatGPT-shaped JWT>",
     "access_token": "<local ChatGPT-shaped JWT>",
     "refresh_token": "",
-    "account_id": "acct_codex_remote_local"
+    "account_id": "acct_codexhub_local"
   },
   "last_refresh": "2026-05-26T00:00:00Z"
 }
 ```
 
-The JWT is local material. Codex reads its claims to find account/user metadata. `codex-remote` does not use it to call OpenAI.
+The JWT is local material. Codex reads its claims to find account/user metadata. `codexhub` does not use it to call OpenAI.
 
 ## Helper Command
 
 Use:
 
 ```powershell
-codex-remote --config config.toml configure-codex-app
+codexhub --config config.toml configure-codex-app
 ```
 
 This explicitly writes:
@@ -60,7 +60,7 @@ This explicitly writes:
 Optional provider fields can also be written:
 
 ```powershell
-codex-remote --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
+codexhub --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
 ```
 
 If provider fields are supplied without `--provider-name`, the helper uses `llmx`.
@@ -69,7 +69,7 @@ The command is explicit. The daemon does not modify Codex App config or auth sta
 
 ## Runtime Boundary
 
-`codex-remote` reads:
+`codexhub` reads:
 
 - `config.toml`
 - local bridge state
@@ -81,7 +81,7 @@ Codex App reads:
 - Codex App `auth.json`
 - model provider settings and keys
 
-After Codex App starts remote-control, `codex-remote` only cares about:
+After Codex App starts remote-control, `codexhub` only cares about:
 
 - app-server connecting to `/backend-api/wham/remote/control/server`
 - remote-control `initialize` / `initialized`

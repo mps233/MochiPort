@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     cell::Cell,
     rc::Rc,
     sync::{
@@ -27,7 +27,7 @@ use super::{
 type CodexModelSlugs = Rc<Vec<String>>;
 type CodexModelsInitialized = Rc<Cell<bool>>;
 type CodexConfigured = Rc<Cell<bool>>;
-type CodexRemoteReady = Rc<Cell<bool>>;
+type CodexHubReady = Rc<Cell<bool>>;
 type CodexServiceEnabled = Rc<Cell<bool>>;
 
 pub(super) type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
@@ -44,7 +44,7 @@ pub(super) struct CodexTab {
     model_slugs: CodexModelSlugs,
     models_initialized: CodexModelsInitialized,
     configured: CodexConfigured,
-    remote_ready: CodexRemoteReady,
+    remote_ready: CodexHubReady,
     service_enabled: CodexServiceEnabled,
     local_connection_mode: Rc<Cell<LocalConnectionMode>>,
 }

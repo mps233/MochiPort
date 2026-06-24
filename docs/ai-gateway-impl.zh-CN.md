@@ -1,9 +1,9 @@
-# AI Gateway 实现细节
+﻿# AI Gateway 实现细节
 
 更新时间：2026-06-15
 
 本文档基于 [架构设计](ai-gateway-architecture.zh-CN.md) 的约束，参考 AxonHub（`references/axonhub-unstable`）的
-Inbound/Outbound Transformer 架构，记录 `codex-remote` AI Gateway 的 Rust 实现细节和逐步计划。
+Inbound/Outbound Transformer 架构，记录 `codexhub` AI Gateway 的 Rust 实现细节和逐步计划。
 
 ---
 
@@ -54,9 +54,9 @@ Codex (SSE 事件流)
 
 ### 2.1 与 AxonHub 的区别
 
-| AxonHub | codex-remote AI Gateway |
+| AxonHub | codexhub AI Gateway |
 |---|---|
-| Go，独立服务，多租户、计费、RBAC | Rust，内嵌到 codex-remote daemon |
+| Go，独立服务，多租户、计费、RBAC | Rust，内嵌到 codexhub daemon |
 | 通用 LLM 网关，支持 embedding/image/audio/video | 只服务 Codex `/responses` |
 | Pipeline 有 retry/failover/middleware | Phase 1 不做 retry |
 | 完整 Responses WebSocket outbound | Phase 1 只做 HTTP/SSE |
@@ -114,7 +114,7 @@ Cache key 确定优先级（参考架构文档第 7 节）：
 3. header `session-id`
 4. header `thread-id`
 5. `X-Codex-Turn-Metadata` JSON 的 `session_id`
-6. fallback `codex-remote:<uuid>`
+6. fallback `codexhub:<uuid>`
 
 上游请求 header 处理参考 AxonHub `llm/httpclient/utils.go`：
 
@@ -440,7 +440,7 @@ Chat SSE chunk → 状态机 → Responses SSE 事件（按第 4 节状态机处
 
 ```text
 candidates = enabled providers where provider.models contains request.model
-score = sha256("codex-remote-ai-gateway-hrw-v1", session_id, provider_route_id)
+score = sha256("codexhub-ai-gateway-hrw-v1", session_id, provider_route_id)
 selected_provider = candidate with max(score)
 ```
 
@@ -708,7 +708,7 @@ Codex App
 | `transform/chat_to_responses.rs` | 11 | 简单/reasoning/tool_calls/多 tool_calls 响应、空内容跳过、usage 详情、无 usage 字段 |
 | `transform/responses_stream.rs` | 13 | 纯文本流、reasoning→text 切换、并行 tool_calls、reasoning→tool_calls、序列号单调递增、finish/completion |
 
-运行命令：`cargo test --bin codex-remote ai_gateway`
+运行命令：`cargo test --bin codexhub ai_gateway`
 
 ---
 
@@ -718,7 +718,7 @@ Codex App
 |---|---|
 | OpenAI 走透传而非转换 | 避免序列化损失，保留 OpenAI 原生 cache/WebSocket 能力 |
 | 中间格式只保留 Responses 子集 | 不需要 embedding/image/audio 等不相关类型 |
-| SSE 状态机在 gateway 内实现 | 不依赖外部库，与 codex-remote 的 tokio 运行时一致 |
+| SSE 状态机在 gateway 内实现 | 不依赖外部库，与 codexhub 的 tokio 运行时一致 |
 | Phase 1 不做 previous_response_id ledger | Codex HTTP/SSE 模式下发完整 input，不需要 |
 | reasoning effort 映射放在 DeepSeek outbound | 不同 provider 的 reasoning 参数格式不同 |
 | 错误用 Responses API 格式返回 | Codex 期望的错误格式 |

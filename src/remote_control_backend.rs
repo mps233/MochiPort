@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -88,9 +88,9 @@ const REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY: usize = 4096;
 const REMOTE_CONTROL_RECENT_EVENT_LIMIT: usize = 96;
 const REMOTE_CONTROL_DIAGNOSTIC_WINDOW_MS: u128 = 10_000;
 const REMOTE_CONTROL_SOURCE_HINT_TTL_MS: u128 = 30_000;
-const FEISHU_BRIDGE_CLIENT_ID: &str = "codex-remote-feishu";
-const FEISHU_BRIDGE_ENV_ID: &str = "env_codex_remote_feishu_bridge";
-const FEISHU_BRIDGE_INSTALLATION_ID: &str = "codex-remote-feishu-bridge";
+const FEISHU_BRIDGE_CLIENT_ID: &str = "codexhub-feishu";
+const FEISHU_BRIDGE_ENV_ID: &str = "env_codexhub_feishu_bridge";
+const FEISHU_BRIDGE_INSTALLATION_ID: &str = "codexhub-feishu-bridge";
 const DEFAULT_REMOTE_CLIENT_KEY: &str = "default";
 
 #[allow(dead_code)]
@@ -466,7 +466,7 @@ async fn ensure_remote_control_client_ready(state: &SharedState, client_key: &st
         let mut remote = state.remote_control.inner.lock().await;
         if !remote.connected {
             return Err(anyhow!(
-                "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 codex-remote 的 /backend-api。"
+                "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 codexhub 的 /backend-api。"
             ));
         }
         let connection_epoch = connection_epoch_for_client_key_locked(
@@ -530,7 +530,7 @@ async fn replay_pending_requests(
 
 async fn next_remote_subscribe_cursor(state: &SharedState) -> String {
     let cursor = format!(
-        "codex-remote:{}",
+        "codexhub:{}",
         REMOTE_SUBSCRIBE_CURSOR_ID.fetch_add(1, Ordering::Relaxed)
     );
     let mut remote = state.remote_control.inner.lock().await;

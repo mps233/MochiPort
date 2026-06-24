@@ -1,25 +1,25 @@
-# Configuration
+﻿# Configuration
 
 There are two separate config surfaces:
 
-- `codex-remote` config, usually this repository's `config.toml`
+- `codexhub` config, usually this repository's `config.toml`
 - Codex App config, usually `~/.codex/config.toml`
 
-Do not mix them. `codex-remote` stores IM channel and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
+Do not mix them. `codexhub` stores IM channel and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
 
-## `codex-remote` Config
+## `codexhub` Config
 
 Use an explicit config path for predictable behavior:
 
 ```powershell
-codex-remote --config D:\path\to\config.toml daemon
+codexhub --config D:\path\to\config.toml daemon
 ```
 
 Example:
 
 ```toml
 bind = "127.0.0.1:3847"
-statePath = "codex-remote-state.json"
+statePath = "codexhub-state.json"
 
 [feishu]
 appId = ""
@@ -121,7 +121,7 @@ Existing configs may still contain `mentionOnly`; it is kept for compatibility b
 
 Allowlist of Telegram private chat ids as strings.
 
-Empty means "bind the first private chat". After the first private Telegram message is accepted, `codex-remote` writes that chat id into `allowedChatIds` and rejects other private chats.
+Empty means "bind the first private chat". After the first private Telegram message is accepted, `codexhub` writes that chat id into `allowedChatIds` and rejects other private chats.
 
 For stricter setup, prefill this list before starting the bridge:
 
@@ -229,7 +229,7 @@ experimental_bearer_token = "your-third-party-key"
 ```
 
 `chatgpt_base_url` is not the model API base URL. It is the ChatGPT backend-shaped URL used by Codex App features such as remote-control enrollment.
-`codex-remote` does not manage Codex App runtime settings such as `[features]`, `[windows]`, `[desktop]`, `[mcp_servers]`, or per-plugin `enabled` flags.
+`codexhub` does not manage Codex App runtime settings such as `[features]`, `[windows]`, `[desktop]`, `[mcp_servers]`, or per-plugin `enabled` flags.
 
 ## Codex App Auth
 
@@ -245,7 +245,7 @@ For this local backend, use `chatgpt` in Codex App's `auth.json`:
     "id_token": "<local ChatGPT-shaped JWT>",
     "access_token": "<local ChatGPT-shaped JWT>",
     "refresh_token": "",
-    "account_id": "acct_codex_remote_local"
+    "account_id": "acct_codexhub_local"
   },
   "last_refresh": "2026-05-26T00:00:00Z"
 }
@@ -255,11 +255,11 @@ The local JWT needs to parse as a JWT and include the ChatGPT-shaped auth metada
 
 ```json
 {
-  "email": "codex-remote-local@example.local",
+  "email": "codexhub-local@example.local",
   "https://api.openai.com/auth": {
-    "chatgpt_account_id": "acct_codex_remote_local",
-    "chatgpt_user_id": "user_codex_remote_local",
-    "user_id": "user_codex_remote_local",
+    "chatgpt_account_id": "acct_codexhub_local",
+    "chatgpt_user_id": "user_codexhub_local",
+    "user_id": "user_codexhub_local",
     "chatgpt_plan_type": "pro",
     "chatgpt_account_is_fedramp": false
   }
@@ -273,13 +273,13 @@ The desktop GUI provides Codex App configuration controls that write the local C
 The CLI equivalent is:
 
 ```powershell
-codex-remote --config config.toml configure-codex-app
+codexhub --config config.toml configure-codex-app
 ```
 
 Optional provider fields:
 
 ```powershell
-codex-remote --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
+codexhub --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
 ```
 
 When provider fields are supplied without `--provider-name`, `llmx` is used as the provider name.
@@ -311,7 +311,7 @@ These should stay ignored:
 
 ```text
 config.toml
-codex-remote-state.json
+codexhub-state.json
 *.log
 .im/
 target/

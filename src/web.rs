@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     Json, Router,
     body::Body,
     extract::State,
@@ -172,7 +172,7 @@ async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
         elapsed_ms
     ));
     tracing::info!(
-        target: "codex_remote::http",
+        target: "codexhub::http",
         method = %method,
         path,
         status = status.as_u16(),

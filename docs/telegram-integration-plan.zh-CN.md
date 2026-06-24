@@ -1,6 +1,6 @@
-# Telegram 集成计划
+﻿# Telegram 集成计划
 
-本文档定义 `codex-remote` 接入 Telegram 的落地边界。目标是先支持一个可用的 Telegram Bot 通道，而不是把飞书和 Telegram 抽象成同一种 UI。
+本文档定义 `codexhub` 接入 Telegram 的落地边界。目标是先支持一个可用的 Telegram Bot 通道，而不是把飞书和 Telegram 抽象成同一种 UI。
 
 ## 目标
 

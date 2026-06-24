@@ -1,4 +1,4 @@
-use crate::config::LocalConnectionMode;
+﻿use crate::config::LocalConnectionMode;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum GuiLocale {
@@ -83,8 +83,8 @@ impl GuiText {
 
     pub(super) fn quit(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "退出 Codex Remote\tCtrl+Q",
-            GuiLocale::EnUs => "&Quit Codex Remote\tCtrl+Q",
+            GuiLocale::ZhCn => "退出 CodexHub\tCtrl+Q",
+            GuiLocale::EnUs => "&Quit CodexHub\tCtrl+Q",
         }
     }
 
@@ -102,8 +102,8 @@ impl GuiText {
 
     pub(super) fn language_restart_message(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "语言设置已保存，重启 Codex Remote 后生效。",
-            GuiLocale::EnUs => "Language saved. Restart Codex Remote to apply it.",
+            GuiLocale::ZhCn => "语言设置已保存，重启 CodexHub 后生效。",
+            GuiLocale::EnUs => "Language saved. Restart CodexHub to apply it.",
         }
     }
 
@@ -144,8 +144,8 @@ impl GuiText {
 
     pub(super) fn theme_restart_message(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "主题设置已保存，重启 Codex Remote 后生效。",
-            GuiLocale::EnUs => "Theme saved. Restart Codex Remote to apply it.",
+            GuiLocale::ZhCn => "主题设置已保存，重启 CodexHub 后生效。",
+            GuiLocale::EnUs => "Theme saved. Restart CodexHub to apply it.",
         }
     }
 
@@ -173,14 +173,14 @@ impl GuiText {
     pub(super) fn check_updates_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "检查 GitHub Releases 是否有新版本",
-            GuiLocale::EnUs => "Check GitHub Releases for a newer Codex Remote version",
+            GuiLocale::EnUs => "Check GitHub Releases for a newer CodexHub version",
         }
     }
 
     pub(super) fn about(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "关于 Codex Remote",
-            GuiLocale::EnUs => "&About Codex Remote",
+            GuiLocale::ZhCn => "关于 CodexHub",
+            GuiLocale::EnUs => "&About CodexHub",
         }
     }
 
@@ -270,18 +270,18 @@ impl GuiText {
 
     pub(super) fn local_connection_switch_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "切换后需要重启 Codex Remote，之后再重新初始化 Codex 配置。",
+            GuiLocale::ZhCn => "切换后需要重启 CodexHub，之后再重新初始化 Codex 配置。",
             GuiLocale::EnUs => {
-                "Restart Codex Remote after switching, then initialize Codex config again."
+                "Restart CodexHub after switching, then initialize Codex config again."
             }
         }
     }
 
     pub(super) fn local_connection_restart_message(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "连接模式已更新。请重启 Codex Remote，之后再重新初始化 Codex 配置。",
+            GuiLocale::ZhCn => "连接模式已更新。请重启 CodexHub，之后再重新初始化 Codex 配置。",
             GuiLocale::EnUs => {
-                "Connection mode updated. Restart Codex Remote, then initialize Codex config again."
+                "Connection mode updated. Restart CodexHub, then initialize Codex config again."
             }
         }
     }
@@ -303,10 +303,10 @@ impl GuiText {
     pub(super) fn local_connection_detected_message(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "检测到当前网络环境可能影响本地连接，建议切换到 VPN 兼容连接。切换后需要重启 Codex Remote。"
+                "检测到当前网络环境可能影响本地连接，建议切换到 VPN 兼容连接。切换后需要重启 CodexHub。"
             }
             GuiLocale::EnUs => {
-                "The current network environment may affect local connections. Switch to VPN-compatible connection, then restart Codex Remote."
+                "The current network environment may affect local connections. Switch to VPN-compatible connection, then restart CodexHub."
             }
         }
     }
@@ -469,9 +469,9 @@ impl GuiText {
 
     pub(super) fn codex_local_config_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "初始化 Codex Remote 所需配置，可随时恢复原有配置。",
+            GuiLocale::ZhCn => "初始化 CodexHub 所需配置，可随时恢复原有配置。",
             GuiLocale::EnUs => {
-                "Set up Codex Remote integration. You can restore the original config anytime."
+                "Set up CodexHub integration. You can restore the original config anytime."
             }
         }
     }
@@ -1229,11 +1229,11 @@ impl GuiText {
     pub(super) fn local_service_offline_detail(self, mode: LocalConnectionMode) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!(
-                "{} · GUI 会自动启动本地服务；如果一直未运行，请重启 Codex Remote。",
+                "{} · GUI 会自动启动本地服务；如果一直未运行，请重启 CodexHub。",
                 self.local_connection_label(mode)
             ),
             GuiLocale::EnUs => format!(
-                "{} · The GUI starts the local service automatically. Restart Codex Remote if it stays offline.",
+                "{} · The GUI starts the local service automatically. Restart CodexHub if it stays offline.",
                 self.local_connection_label(mode)
             ),
         }
@@ -1580,10 +1580,10 @@ impl GuiText {
     pub(super) fn service_not_ready_retry(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "本地服务还没有启动完成，请稍后再试。如果一直未运行，请重启 Codex Remote。"
+                "本地服务还没有启动完成，请稍后再试。如果一直未运行，请重启 CodexHub。"
             }
             GuiLocale::EnUs => {
-                "The local service is not ready yet. Try again shortly. Restart Codex Remote if it stays offline."
+                "The local service is not ready yet. Try again shortly. Restart CodexHub if it stays offline."
             }
         }
     }
@@ -1597,8 +1597,8 @@ impl GuiText {
 
     pub(super) fn update_dialog_title(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex Remote 更新",
-            GuiLocale::EnUs => "Codex Remote Update",
+            GuiLocale::ZhCn => "CodexHub 更新",
+            GuiLocale::EnUs => "CodexHub Update",
         }
     }
 
@@ -2129,10 +2129,10 @@ impl GuiText {
     pub(super) fn daemon_start_timeout(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "本地服务已启动，但 10 秒内没有响应。请检查 logs/codex-remote-chain.log。"
+                "本地服务已启动，但 10 秒内没有响应。请检查 logs/codexhub-chain.log。"
             }
             GuiLocale::EnUs => {
-                "The local service started, but did not respond within 10 seconds. Check logs/codex-remote-chain.log."
+                "The local service started, but did not respond within 10 seconds. Check logs/codexhub-chain.log."
             }
         }
     }
@@ -2140,10 +2140,10 @@ impl GuiText {
     pub(super) fn daemon_watchdog_timeout(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "本地服务启动超过 30 秒仍未完成。请检查旧进程占用或 logs/codex-remote-chain.log。"
+                "本地服务启动超过 30 秒仍未完成。请检查旧进程占用或 logs/codexhub-chain.log。"
             }
             GuiLocale::EnUs => {
-                "The local service has not finished starting after 30 seconds. Check for an old process or logs/codex-remote-chain.log."
+                "The local service has not finished starting after 30 seconds. Check for an old process or logs/codexhub-chain.log."
             }
         }
     }

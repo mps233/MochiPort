@@ -1,8 +1,8 @@
-# GUI 视觉改造 + 暗色模式
+﻿# GUI 视觉改造 + 暗色模式
 
 ## 背景（为什么做）
 
-`codex-remote` 的 GUI 是原生 wxWidgets（wxdragon）。当前观感偏「丑」的根因不是框架，而是**没有设计系统**：
+`codexhub` 的 GUI 是原生 wxWidgets（wxdragon）。当前观感偏「丑」的根因不是框架，而是**没有设计系统**：
 
 - 全项目 ~98 处 `Colour::rgb(...)` 硬编码，散落在 `src/gui.rs` 与 `src/gui/*.rs`，其中**近 30 种几乎一样的脏灰**（103/111/124、91/100/114、88/96/108、78/86/98…）——对比度低、色系不统一。
 - 一次都没用过自绘能力（`on_paint` / `custom_widget!` / `AutoBufferedPaintDC` 在 `src/` 里 0 命中）；按钮全是原生灰控件，section 全是 `PanelStyle::BorderStatic` 生硬线框。
@@ -60,7 +60,7 @@
 - 文档：本文件
 
 ## 验证
-- `cargo fmt && cargo build --release --features gui --bin codex-remote`
+- `cargo fmt && cargo build --release --features gui --bin codexhub`
 - 运行 GUI：默认（system）观感统一、无脏灰；菜单切「暗」并重启 → 整体暗色、文字可读、自绘位图与原生控件色系一致；切「亮」重启回亮色。
 - `cargo test`（确认 config 序列化/反序列化含新 `theme` 字段不破坏现有用例）。
 - 逐页目检：主页状态区 / Codex 接入 / 聊天工具接入 / 请求日志 / 会话历史 在亮暗两态都正常。

@@ -1,4 +1,4 @@
-name: release-macos
+﻿name: release-macos
 
 on:
   workflow_dispatch:
@@ -51,20 +51,20 @@ jobs:
       - name: Build App Bundle
         run: |
           set -euo pipefail
-          APP_NAME="Codex Remote"
+          APP_NAME="CodexHub"
           APP="target/dist/$APP_NAME.app"
           CONTENTS="$APP/Contents"
           MACOS="$CONTENTS/MacOS"
           RESOURCES="$CONTENTS/Resources"
 
-          PATH="/opt/homebrew/bin:$PATH" cargo build --release --features gui --bin codex-remote
+          PATH="/opt/homebrew/bin:$PATH" cargo build --release --features gui --bin codexhub
 
           rm -rf "$APP"
           mkdir -p "$MACOS" "$RESOURCES/brand"
           cp "packaging/macos/Info.plist" "$CONTENTS/Info.plist"
           cp "packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
           cp packaging/brand/*.png "$RESOURCES/brand/"
-          cp "target/release/codex-remote" "$MACOS/$APP_NAME"
+          cp "target/release/codexhub" "$MACOS/$APP_NAME"
           chmod +x "$MACOS/$APP_NAME"
 
       - name: Sign And Notarize
@@ -79,10 +79,10 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
-          APP="target/dist/Codex Remote.app"
-          DMG="target/dist/Codex Remote.dmg"
+          APP="target/dist/CodexHub.app"
+          DMG="target/dist/CodexHub.dmg"
           DMG_STAGING="target/dist/dmg"
-          ZIP="target/dist/Codex Remote.zip"
+          ZIP="target/dist/CodexHub.zip"
           ENTITLEMENTS="packaging/macos/entitlements.plist"
 
           if [ -n "${APPLE_API_KEY_P8:-}" ]; then
@@ -123,10 +123,10 @@ jobs:
 
           rm -rf "$DMG_STAGING"
           mkdir -p "$DMG_STAGING"
-          ditto "$APP" "$DMG_STAGING/Codex Remote.app"
+          ditto "$APP" "$DMG_STAGING/CodexHub.app"
           ln -s /Applications "$DMG_STAGING/Applications"
 
-          hdiutil create -volname "Codex Remote" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+          hdiutil create -volname "CodexHub" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
           codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$DMG"
           notary_submit "$DMG"
           xcrun stapler staple "$DMG"
@@ -163,8 +163,8 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Codex-Remote-macOS
-          path: target/dist/Codex Remote.dmg
+          name: CodexHub-macOS
+          path: target/dist/CodexHub.dmg
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -175,5 +175,5 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/Codex Remote.dmg
+            target/dist/CodexHub.dmg
             target/dist/latest.json

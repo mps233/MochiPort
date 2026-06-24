@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
@@ -157,7 +157,7 @@ pub async fn upsert_streaming_card_state(
             format!("delta_len={}", delta.len()),
         );
         info!(
-            target: "codex_remote::feishu",
+            target: "codexhub::feishu",
             event = "feishu_stream_upsert",
             thread_id,
             item_id,
@@ -226,7 +226,7 @@ pub async fn ensure_started_streaming_card_state(
         entry.dirty = true;
         write_stream_log("started", thread_id, item_id, entry, "");
         info!(
-            target: "codex_remote::feishu",
+            target: "codexhub::feishu",
             event = "feishu_stream_started",
             thread_id,
             item_id,
@@ -275,7 +275,7 @@ pub async fn complete_existing_item_card(
                 entry.dirty = true;
                 write_stream_log("completed", thread_id, item_id, entry, "");
                 info!(
-                    target: "codex_remote::feishu",
+                    target: "codexhub::feishu",
                     event = "feishu_stream_completed",
                     thread_id,
                     item_id,
@@ -389,7 +389,7 @@ async fn drive_streaming_card_state(
         let send_result = if state_snapshot.kind == "agentMessage" {
             write_stream_log("send_begin", thread_id, item_id, &state_snapshot, "");
             info!(
-                target: "codex_remote::feishu",
+                target: "codexhub::feishu",
                 event = "feishu_stream_send_begin",
                 thread_id,
                 item_id,
@@ -412,7 +412,7 @@ async fn drive_streaming_card_state(
         } else {
             write_stream_log("send_begin", thread_id, item_id, &state_snapshot, "");
             info!(
-                target: "codex_remote::feishu",
+                target: "codexhub::feishu",
                 event = "feishu_stream_send_begin",
                 thread_id,
                 item_id,
@@ -465,7 +465,7 @@ async fn drive_streaming_card_state(
                         ),
                     );
                     info!(
-                        target: "codex_remote::feishu",
+                        target: "codexhub::feishu",
                         event = "feishu_stream_send_ok",
                         thread_id,
                         item_id,
@@ -510,7 +510,7 @@ async fn drive_streaming_card_state(
                         format!("err={}", err),
                     );
                     warn!(
-                        target: "codex_remote::feishu",
+                        target: "codexhub::feishu",
                         event = "feishu_stream_send_failed",
                         thread_id,
                         item_id,
@@ -605,7 +605,7 @@ pub async fn resolve_agent_message_markdown_images(api: &FeishuApi, text: &str) 
                     err
                 ));
                 warn!(
-                    target: "codex_remote::feishu",
+                    target: "codexhub::feishu",
                     event = "feishu_agent_message_image_upload_failed",
                     path = %image.path.display(),
                     err = %err,

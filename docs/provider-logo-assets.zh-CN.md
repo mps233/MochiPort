@@ -1,4 +1,4 @@
-# 品牌图标资源接入说明
+﻿# 品牌图标资源接入说明
 
 GUI 首页状态栏、IM 通道、AI Gateway 渠道列表和新增渠道弹窗都会展示品牌图标。当前项目不从运行时加载第三方包，所有实际使用的图标都要落地到仓库内，并通过 `include_bytes!` 编译进 GUI。
 
@@ -118,8 +118,8 @@ Some(ProviderLogoKind::NewProvider)
 7. 运行验证：
 
 ```powershell
-cargo build --release --features gui --bin codex-remote
-cargo test --bin codex-remote ai_gateway
+cargo build --release --features gui --bin codexhub
+cargo test --bin codexhub ai_gateway
 ```
 
 ## 注意事项

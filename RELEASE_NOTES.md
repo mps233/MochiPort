@@ -1,4 +1,4 @@
-# Codex Remote v0.2.16
+﻿# CodexHub v0.2.16
 
 这是 `v0.2.15` 之后的一个小版本，主要修复 macOS 上 AI Gateway 渠道列表过高时，渠道操作入口需要滚动到底部才能看到的问题。
 
@@ -12,4 +12,4 @@
 ## 验证
 
 - `cargo fmt`
-- `cargo build --release --features gui --bin codex-remote`
+- `cargo build --release --features gui --bin codexhub`

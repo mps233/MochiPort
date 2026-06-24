@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -182,7 +182,7 @@ fn provider_safe_tool_name(name: &str) -> String {
 
 fn target_hash(target: &ToolCallTarget) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"codex-remote-tool-name-v1\0");
+    hasher.update(b"codexhub-tool-name-v1\0");
     hasher.update(format!("{:?}", target.kind).as_bytes());
     hasher.update(b"\0");
     hasher.update(target.namespace.as_deref().unwrap_or("").as_bytes());

@@ -1,8 +1,8 @@
-# Codex Remote-Control 协议审计
+﻿# Codex Remote-Control 协议审计
 
 更新时间：2026-06-04
 
-本文只记录 Codex 官方 remote-control 协议事实、当前 `codex-remote` 的对接现状，以及下一步排查方向。不把 IM 绑定兜底、图片发送、Telegram/微信/飞书渲染作为协议原因。
+本文只记录 Codex 官方 remote-control 协议事实、当前 `codexhub` 的对接现状，以及下一步排查方向。不把 IM 绑定兜底、图片发送、Telegram/微信/飞书渲染作为协议原因。
 
 ## 1. 参考源码
 
@@ -33,7 +33,7 @@
 
 - `ClientEnvelope`：remote-control backend 发给 Codex app-server 的 envelope。
 - `ServerEnvelope`：Codex app-server 发给 remote-control backend 的 envelope。
-- 我们的 `codex-remote` 在这个协议里扮演 remote-control backend。
+- 我们的 `codexhub` 在这个协议里扮演 remote-control backend。
 - Codex Desktop/App 的 app-server 会主动连接我们的 `/backend-api/wham/remote/control/server` WebSocket。
 
 因此我们代码里的 `OutgoingClientEnvelope` 对应官方 `ClientEnvelope`；`IncomingServerEnvelope` 对应官方 `ServerEnvelope`。
@@ -272,7 +272,7 @@ ACK 的提交点：
 - `remote_control_client_unknown` 前，backend 收到 app-server 的 `pong status:"unknown"`。
 - 这个 `unknown` 是 app-server 返回的，不是 IM 层生成的。
 - clean case 中出现时当前 `(client_id, stream_id)` 为：
-  - `client_id = codex-remote-feishu`
+  - `client_id = codexhub-feishu`
   - `stream_id = stream_3d922febc185190d`
 - 该现象发生在 `computer-use` 读取技能说明期间，前面出现大量 `item/commandExecution/outputDelta`。
 - 当前实现没有在 transport ACK 后跳过 `item/commandExecution/outputDelta`；日志显示它会进入 `server_work_begin` / `server_message_in` / `im_trace`，随后才在通知分发前返回。

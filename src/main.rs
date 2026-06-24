@@ -1,4 +1,4 @@
-#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
+﻿#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
 
 mod ai_gateway;
 mod app_state;
@@ -52,9 +52,9 @@ async fn main() -> anyhow::Result<()> {
     normalize_config_paths(&mut config, &config_path);
     let log_path = init_logging(&config)?;
     tracing::info!(
-        target: "codex_remote::logging",
+        target: "codexhub::logging",
         path = %log_path.display(),
-        "codex-remote chain log initialized"
+        "codexhub chain log initialized"
     );
     if should_save_config {
         config.save(&config_path)?;
@@ -78,9 +78,9 @@ async fn main() -> anyhow::Result<()> {
                     codex_home,
                     backend_url: backend_url.clone(),
                     connection_mode: config.local_connection_mode,
-                    account_id: "acct_codex_remote_local".to_string(),
-                    user_id: "user_codex_remote_local".to_string(),
-                    email: "codex-remote-local@example.local".to_string(),
+                    account_id: "acct_codexhub_local".to_string(),
+                    user_id: "user_codexhub_local".to_string(),
+                    email: "codexhub-local@example.local".to_string(),
                     plan_type: "pro".to_string(),
                     provider_name,
                     provider_base_url,
@@ -140,7 +140,7 @@ fn run_gui_command() -> anyhow::Result<()> {
 
     #[cfg(not(feature = "gui"))]
     {
-        anyhow::bail!("this codex-remote build does not include GUI support")
+        anyhow::bail!("this codexhub build does not include GUI support")
     }
 }
 
@@ -177,14 +177,14 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         .parse()
         .with_context(|| format!("invalid bind address `{bind}`"))?;
     let listener = TcpListener::bind(addr).await?;
-    println!("codex-remote web: http://{addr}");
+    println!("codexhub web: http://{addr}");
 
     let companion = compatible_loopback_addr(addr);
     let mut companion_task = None;
     if let Some(companion_addr) = companion {
         match TcpListener::bind(companion_addr).await {
             Ok(companion_listener) => {
-                println!("codex-remote web: http://{companion_addr}");
+                println!("codexhub web: http://{companion_addr}");
                 companion_task = Some(tokio::spawn(serve_http(
                     companion_listener,
                     app.clone(),
@@ -193,7 +193,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             }
             Err(err) => {
                 tracing::warn!(
-                    target: "codex_remote::server",
+                    target: "codexhub::server",
                     addr = %companion_addr,
                     error = %err,
                     "compatible loopback listener unavailable"
@@ -215,14 +215,14 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 tracing::warn!(
-                    target: "codex_remote::server",
+                    target: "codexhub::server",
                     error = %err,
                     "compatible loopback server stopped with error"
                 );
             }
             Err(err) => {
                 tracing::warn!(
-                    target: "codex_remote::server",
+                    target: "codexhub::server",
                     error = %err,
                     "compatible loopback server task failed"
                 );
@@ -233,7 +233,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     match vscode_extension_patch::restore_remote_control() {
         Ok(report) => {
             tracing::info!(
-                target: "codex_remote::vscode_extension_patch",
+                target: "codexhub::vscode_extension_patch",
                 action = %report.action,
                 extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
                 message = %report.message,
@@ -242,7 +242,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         }
         Err(err) => {
             tracing::warn!(
-                target: "codex_remote::vscode_extension_patch",
+                target: "codexhub::vscode_extension_patch",
                 error = %err,
                 "VS Code Codex extension restore failed"
             );
@@ -324,7 +324,7 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
         return absolutize(path);
     }
 
-    if env::var_os("CODEX_REMOTE_HOME").is_some() {
+    if env::var_os("CODEXHUB_HOME").is_some() {
         return app_support_config_path();
     }
 
@@ -332,7 +332,7 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
         return path;
     }
 
-    if env::var_os("CODEX_REMOTE_USE_REPO_CONFIG").is_none() {
+    if env::var_os("CODEXHUB_USE_REPO_CONFIG").is_none() {
         return app_support_config_path();
     }
 
@@ -347,7 +347,7 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
 }
 
 fn app_support_config_path() -> PathBuf {
-    if let Some(base) = env::var_os("CODEX_REMOTE_HOME").map(PathBuf::from) {
+    if let Some(base) = env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
         return base.join("config.toml");
     }
     platform_app_support_config_path()
@@ -357,7 +357,7 @@ fn app_support_config_path() -> PathBuf {
 fn platform_app_support_config_path() -> PathBuf {
     let legacy = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/Codex Remote/config.toml"));
+        .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
     if let Some(path) = legacy.filter(|path| path.exists()) {
         return path;
     }
@@ -366,14 +366,14 @@ fn platform_app_support_config_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("Codex Remote").join("config.toml")
+    base.join("CodexHub").join("config.toml")
 }
 
 #[cfg(not(target_os = "windows"))]
 fn platform_app_support_config_path() -> PathBuf {
     let base = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/Codex Remote"))
+        .map(|home| home.join("Library/Application Support/CodexHub"))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("config.toml")
@@ -423,7 +423,7 @@ fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
     )?;
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("codex_remote=info".parse()?))
+        .with_env_filter(EnvFilter::from_default_env().add_directive("codexhub=info".parse()?))
         .with_ansi(false)
         .init();
     Ok(path)
@@ -434,7 +434,7 @@ fn effective_chain_log_diagnostic(config: &AppConfig) -> bool {
 }
 
 fn chain_log_path(config: &AppConfig) -> PathBuf {
-    log_dir_from_config(config).join("codex-remote-chain.log")
+    log_dir_from_config(config).join("codexhub-chain.log")
 }
 
 fn log_dir_from_config(config: &AppConfig) -> PathBuf {
@@ -452,7 +452,7 @@ async fn set_bridge_enabled(config_path: &Path, enabled: bool) -> anyhow::Result
     config.save(&config_path.to_path_buf())?;
     let _ = notify_daemon_bridge(&config, enabled).await;
     println!(
-        "codex-remote Feishu bridge {}",
+        "codexhub Feishu bridge {}",
         if enabled { "enabled" } else { "disabled" }
     );
     Ok(())

@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     fs::{File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -43,7 +43,7 @@ pub fn init(
         .with_context(|| format!("failed to open chain log {}", path.display()))?;
     let _ = writeln!(
         file,
-        "\n===== codex-remote start ts_ms={} =====",
+        "\n===== codexhub start ts_ms={} =====",
         timestamp_ms()
     );
     let written_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
@@ -189,7 +189,7 @@ fn cleanup_old_logs(log_dir: &Path, active_path: &Path, retention_days: u64) -> 
         .unwrap_or(UNIX_EPOCH);
     for entry in entries.flatten() {
         let path = entry.path();
-        if path == active_path || !is_codex_remote_log_path(&path) {
+        if path == active_path || !is_codexhub_log_path(&path) {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {
@@ -209,10 +209,10 @@ fn cleanup_old_logs(log_dir: &Path, active_path: &Path, retention_days: u64) -> 
     Ok(())
 }
 
-fn is_codex_remote_log_path(path: &Path) -> bool {
+fn is_codexhub_log_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|value| value.to_str())
-        .is_some_and(|name| name.starts_with("codex-remote") && name.contains(".log"))
+        .is_some_and(|name| name.starts_with("codexhub") && name.contains(".log"))
 }
 
 fn rotated_path(path: &Path) -> PathBuf {
@@ -220,7 +220,7 @@ fn rotated_path(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("codex-remote-chain.log");
+        .unwrap_or("codexhub-chain.log");
     rotated.set_file_name(format!("{file_name}.1"));
     rotated
 }
@@ -242,9 +242,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("codex-remote-chain-log-test-{unique}"));
+        let dir = std::env::temp_dir().join(format!("codexhub-chain-log-test-{unique}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("codex-remote-chain.log");
+        let path = dir.join("codexhub-chain.log");
         std::fs::write(&path, "old\n").unwrap();
         let file = OpenOptions::new()
             .create(true)

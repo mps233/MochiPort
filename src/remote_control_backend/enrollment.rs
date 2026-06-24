@@ -1,4 +1,4 @@
-use std::time::Duration;
+﻿use std::time::Duration;
 
 use axum::{
     Json,
@@ -235,10 +235,10 @@ async fn remember_remote_control_client(
 fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> String {
     let now = unix_now_u64();
     let account_id = header_str(headers, "chatgpt-account-id")
-        .unwrap_or_else(|| "acct_codex_remote_local".into());
+        .unwrap_or_else(|| "acct_codexhub_local".into());
     let account_user_id = remote_control_account_user_id(headers);
     let payload = json!({
-        "iss": "codex-remote-local",
+        "iss": "codexhub-local",
         "aud": "remote_control_controller_websocket",
         "iat": now,
         "nbf": now,
@@ -253,7 +253,7 @@ fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> St
             "account_user_id": account_user_id,
             "user_id": jwt_bearer_claim(headers, "user_id")
                 .or_else(|| jwt_bearer_claim(headers, "chatgpt_user_id"))
-                .unwrap_or_else(|| "user_codex_remote_local".into()),
+                .unwrap_or_else(|| "user_codexhub_local".into()),
         },
     });
     format!(
@@ -270,10 +270,10 @@ fn local_remote_control_client_token(headers: &HeaderMap, client_id: &str) -> St
 fn local_remote_control_server_token(headers: &HeaderMap, server_id: &str) -> String {
     let now = unix_now_u64();
     let account_id = header_str(headers, "chatgpt-account-id")
-        .unwrap_or_else(|| "acct_codex_remote_local".into());
+        .unwrap_or_else(|| "acct_codexhub_local".into());
     let account_user_id = remote_control_account_user_id(headers);
     let payload = json!({
-        "iss": "codex-remote-local",
+        "iss": "codexhub-local",
         "aud": "remote_control_server_websocket",
         "iat": now,
         "nbf": now,
@@ -288,7 +288,7 @@ fn local_remote_control_server_token(headers: &HeaderMap, server_id: &str) -> St
             "account_user_id": account_user_id,
             "user_id": jwt_bearer_claim(headers, "user_id")
                 .or_else(|| jwt_bearer_claim(headers, "chatgpt_user_id"))
-                .unwrap_or_else(|| "user_codex_remote_local".into()),
+                .unwrap_or_else(|| "user_codexhub_local".into()),
         },
     });
     format!(
@@ -306,7 +306,7 @@ fn remote_control_account_user_id(headers: &HeaderMap) -> String {
     jwt_bearer_claim(headers, "chatgpt_account_user_id")
         .or_else(|| jwt_bearer_claim(headers, "account_user_id"))
         .or_else(|| jwt_bearer_claim(headers, "user_id"))
-        .unwrap_or_else(|| "user_codex_remote_local__acct_codex_remote_local".into())
+        .unwrap_or_else(|| "user_codexhub_local__acct_codexhub_local".into())
 }
 
 fn jwt_bearer_claim(headers: &HeaderMap, claim: &str) -> Option<String> {

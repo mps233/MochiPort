@@ -1,4 +1,4 @@
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+﻿use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -107,9 +107,9 @@ pub(super) async fn configure_codex_app(
         codex_home,
         backend_url: backend_url.clone(),
         connection_mode,
-        account_id: "acct_codex_remote_local".to_string(),
-        user_id: "user_codex_remote_local".to_string(),
-        email: "codex-remote-local@example.local".to_string(),
+        account_id: "acct_codexhub_local".to_string(),
+        user_id: "user_codexhub_local".to_string(),
+        email: "codexhub-local@example.local".to_string(),
         plan_type: "pro".to_string(),
         provider_name,
         provider_base_url,

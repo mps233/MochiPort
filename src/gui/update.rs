@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     cell::RefCell,
     process::Command,
     rc::Rc,
@@ -151,7 +151,7 @@ fn fetch_github_latest_release(
 fn fetch_update_text(text: GuiText, client: &Client, url: &str) -> Result<String, String> {
     let response = client
         .get(url)
-        .header("User-Agent", "codex-remote")
+        .header("User-Agent", "codexhub")
         .header("Accept", "application/json")
         .send()
         .map_err(|err| {

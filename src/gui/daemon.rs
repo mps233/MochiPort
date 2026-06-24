@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     cell::RefCell,
     env,
     path::{Path, PathBuf},
@@ -269,7 +269,7 @@ pub(super) fn stop_daemon_by_port(api: &ApiClient) {
         if let Some(value) = line.strip_prefix('p') {
             pid = Some(value.to_string());
         } else if let Some(command) = line.strip_prefix('c')
-            && command.contains("codex-remote")
+            && command.contains("codexhub")
         {
             if let Some(pid) = pid.take() {
                 let _ = Command::new("kill").arg(pid).status();
@@ -312,7 +312,7 @@ pub(super) fn stop_daemon_by_port(api: &ApiClient) {
     }
 
     for pid in pids {
-        if windows_pid_is_codex_remote(&pid) {
+        if windows_pid_is_codexhub(&pid) {
             let mut command = Command::new("taskkill");
             command.args(["/PID", &pid, "/F", "/T"]);
             hide_command_window(&mut command);
@@ -329,7 +329,7 @@ pub(super) fn netstat_addr_has_port(addr: &str, port: u16) -> bool {
 }
 
 #[cfg(windows)]
-pub(super) fn windows_pid_is_codex_remote(pid: &str) -> bool {
+pub(super) fn windows_pid_is_codexhub(pid: &str) -> bool {
     let filter = format!("PID eq {pid}");
     let mut command = Command::new("tasklist");
     command.args(["/FI", &filter, "/FO", "CSV", "/NH"]);
@@ -339,7 +339,7 @@ pub(super) fn windows_pid_is_codex_remote(pid: &str) -> bool {
     };
     String::from_utf8_lossy(&output.stdout)
         .to_ascii_lowercase()
-        .contains("codex-remote")
+        .contains("codexhub")
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -372,13 +372,13 @@ pub(super) fn append_daemon_args(command: &mut Command) {
 }
 
 pub(super) fn daemon_config_path() -> Option<PathBuf> {
-    if env::var_os("CODEX_REMOTE_HOME").is_some() {
+    if env::var_os("CODEXHUB_HOME").is_some() {
         return Some(app_support_config_path());
     }
     if let Some(path) = adjacent_config_from_current_exe() {
         return Some(path);
     }
-    if env::var_os("CODEX_REMOTE_USE_REPO_CONFIG").is_some() {
+    if env::var_os("CODEXHUB_USE_REPO_CONFIG").is_some() {
         return std::env::current_dir()
             .ok()
             .map(|cwd| cwd.join("config.toml"))
@@ -393,7 +393,7 @@ pub(super) fn daemon_config_path() -> Option<PathBuf> {
 }
 
 pub(super) fn app_support_config_path() -> PathBuf {
-    if let Some(base) = env::var_os("CODEX_REMOTE_HOME").map(PathBuf::from) {
+    if let Some(base) = env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
         return base.join("config.toml");
     }
     platform_app_support_config_path()
@@ -403,7 +403,7 @@ pub(super) fn app_support_config_path() -> PathBuf {
 pub(super) fn platform_app_support_config_path() -> PathBuf {
     let legacy = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/Codex Remote/config.toml"));
+        .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
     if let Some(path) = legacy.filter(|path| path.exists()) {
         return path;
     }
@@ -412,14 +412,14 @@ pub(super) fn platform_app_support_config_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("Codex Remote").join("config.toml")
+    base.join("CodexHub").join("config.toml")
 }
 
 #[cfg(not(target_os = "windows"))]
 pub(super) fn platform_app_support_config_path() -> PathBuf {
     let base = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/Codex Remote"))
+        .map(|home| home.join("Library/Application Support/CodexHub"))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("config.toml")

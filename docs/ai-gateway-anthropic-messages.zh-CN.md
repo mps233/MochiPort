@@ -1,10 +1,10 @@
-# AI Gateway Anthropic Messages Adapter 设计
+﻿# AI Gateway Anthropic Messages Adapter 设计
 
 更新时间：2026-06-19
 
 状态：设计草案，可随实现和实测修订。
 
-本文档定义 `codex-remote` AI Gateway 对接 Anthropic Messages API 的独立 adapter 方案。Anthropic Messages 是一等 provider 协议，不作为 Chat Completions 的变体实现。
+本文档定义 `codexhub` AI Gateway 对接 Anthropic Messages API 的独立 adapter 方案。Anthropic Messages 是一等 provider 协议，不作为 Chat Completions 的变体实现。
 
 参考资料：
 

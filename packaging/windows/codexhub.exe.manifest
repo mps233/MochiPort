@@ -3,9 +3,9 @@
   <assemblyIdentity
     version="0.2.0.0"
     processorArchitecture="*"
-    name="codex-remote"
+    name="codexhub"
     type="win32" />
-  <description>Codex Remote</description>
+  <description>CodexHub</description>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity

@@ -1,4 +1,4 @@
-# AI Gateway 请求日志详情补丁说明
+﻿# AI Gateway 请求日志详情补丁说明
 
 更新时间：2026-06-18
 
@@ -243,17 +243,17 @@ vendor/wxdragon/rust/wxdragon/src/widgets/styledtextctrl.rs
 Windows release 构建命令：
 
 ```powershell
-cargo build --release --features gui --bin codex-remote
+cargo build --release --features gui --bin codexhub
 ```
 
 如果本地旧 exe 正在运行，Windows 会拒绝覆盖：
 
 ```text
-failed to remove file target\release\codex-remote.exe
+failed to remove file target\release\codexhub.exe
 拒绝访问。 (os error 5)
 ```
 
-测试阶段可以先结束 `codex-remote` 进程后重试。
+测试阶段可以先结束 `codexhub` 进程后重试。
 
 ## 验证记录
 
@@ -261,11 +261,11 @@ failed to remove file target\release\codex-remote.exe
 
 ```powershell
 cargo fmt --check
-cargo test --bin codex-remote
-cargo build --release --features gui --bin codex-remote
+cargo test --bin codexhub
+cargo build --release --features gui --bin codexhub
 ```
 
-其中 `cargo test --bin codex-remote` 通过 183 个测试。
+其中 `cargo test --bin codexhub` 通过 183 个测试。
 
 ## 后续维护规则
 

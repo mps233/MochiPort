@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     cell::RefCell,
     collections::BTreeMap,
     process::Child,
@@ -28,12 +28,12 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 #[cfg(not(target_os = "windows"))]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const CODEX_APP_GUI_UNSUPPORTED: bool = !(cfg!(target_os = "macos") || cfg!(target_os = "windows"));
-const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codex-remote";
+const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codexhub";
 const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codex-remote/releases/latest/download/latest.json";
+    "https://github.com/happy-loki/codexhub/releases/latest/download/latest.json";
 const UPDATE_RELEASE_API_URL: &str =
-    "https://api.github.com/repos/happy-loki/codex-remote/releases/latest";
-const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/happy-loki/codex-remote/releases/latest";
+    "https://api.github.com/repos/happy-loki/codexhub/releases/latest";
+const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/happy-loki/codexhub/releases/latest";
 const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 2500;
 const DASHBOARD_RESULT_POLL_MS: i32 = 100;
 const GUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
@@ -166,7 +166,7 @@ impl GuiTimers {
 
 pub fn run() {
     if let Err(err) = wxdragon::main(|_| build_ui()) {
-        eprintln!("failed to start Codex Remote GUI: {err:?}");
+        eprintln!("failed to start CodexHub GUI: {err:?}");
     }
 }
 
@@ -185,7 +185,7 @@ fn build_ui() {
     let gui_timers = GuiTimers::new();
 
     let frame = Frame::builder()
-        .with_title("Codex Remote")
+        .with_title("CodexHub")
         // Keep the first launch below a typical 1080p work area. The key controls
         // remain visible, while oversized lists use their own scrolling region.
         .with_size(Size::new(1280, 860))
@@ -1564,7 +1564,7 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
         )
         .append_item(ID_MENU_MINIMIZE, text.minimize(), text.minimize_help())
         .append_separator()
-        .append_item(ID_EXIT, text.quit(), "Quit Codex Remote")
+        .append_item(ID_EXIT, text.quit(), "Quit CodexHub")
         .build();
     let language_menu = Menu::builder()
         .append_radio_item(
@@ -1608,7 +1608,7 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
             text.check_updates_help(),
         )
         .append_separator()
-        .append_item(ID_ABOUT, text.about(), "About Codex Remote")
+        .append_item(ID_ABOUT, text.about(), "About CodexHub")
         .build();
     let menu_bar = MenuBar::builder()
         .append(file_menu, text.file_menu())
@@ -3839,7 +3839,7 @@ fn remote_active_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) 
 }
 
 fn show_about_dialog(parent: &Frame) {
-    let dialog = Dialog::builder(parent, "About Codex Remote")
+    let dialog = Dialog::builder(parent, "About CodexHub")
         .with_style(DialogStyle::DefaultDialogStyle)
         .with_size(520, 260)
         .build();
@@ -3851,7 +3851,7 @@ fn show_about_dialog(parent: &Frame) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
-        .with_label(&format!("Codex Remote {}", env!("CARGO_PKG_VERSION")))
+        .with_label(&format!("CodexHub {}", env!("CARGO_PKG_VERSION")))
         .build();
     title.set_foreground_color(theme::theme().ink_primary);
     title.set_font(&theme::font(theme::TextRole::Title));
@@ -3909,14 +3909,14 @@ fn show_about_dialog(parent: &Frame) {
 }
 
 fn show_info(parent: &dyn WxWidget, message: &str) {
-    MessageDialog::builder(parent, message, "Codex Remote")
+    MessageDialog::builder(parent, message, "CodexHub")
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
         .build()
         .show_modal();
 }
 
 fn show_error(parent: &dyn WxWidget, message: &str) {
-    MessageDialog::builder(parent, message, "Codex Remote")
+    MessageDialog::builder(parent, message, "CodexHub")
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
         .build()
         .show_modal();

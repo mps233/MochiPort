@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -36,7 +36,7 @@ pub(super) async fn local_chatgpt_auth_tokens_response(state: &SharedState) -> R
                 .ok()
                 .and_then(|remote| remote.account_id.clone())
         })
-        .unwrap_or_else(|| "acct_codex_remote_local".to_string());
+        .unwrap_or_else(|| "acct_codexhub_local".to_string());
     let plan_type = auth
         .pointer("/tokens/access_token")
         .and_then(|value| value.as_str())
@@ -100,17 +100,17 @@ fn local_chatgpt_jwt(account_id: &str, plan_type: &str) -> String {
         "iat": now,
         "nbf": now,
         "exp": exp,
-        "sub": "local|user_codex_remote_local",
-        "email": "codex-remote-local@example.local",
+        "sub": "local|user_codexhub_local",
+        "email": "codexhub-local@example.local",
         "email_verified": true,
         "https://api.openai.com/auth": {
             "chatgpt_account_id": account_id,
             "account_id": account_id,
-            "chatgpt_account_user_id": format!("user_codex_remote_local__{account_id}"),
-            "account_user_id": format!("user_codex_remote_local__{account_id}"),
+            "chatgpt_account_user_id": format!("user_codexhub_local__{account_id}"),
+            "account_user_id": format!("user_codexhub_local__{account_id}"),
             "chatgpt_plan_type": plan_type,
-            "chatgpt_user_id": "user_codex_remote_local",
-            "user_id": "user_codex_remote_local",
+            "chatgpt_user_id": "user_codexhub_local",
+            "user_id": "user_codexhub_local",
             "chatgpt_account_is_fedramp": false,
             "localhost": true,
             "groups": [],
@@ -118,7 +118,7 @@ fn local_chatgpt_jwt(account_id: &str, plan_type: &str) -> String {
                 "id": account_id,
                 "is_default": true,
                 "role": "owner",
-                "title": "Codex Remote Local"
+                "title": "CodexHub Local"
             }]
         },
         "scp": ["openid", "profile", "email", "offline_access"],

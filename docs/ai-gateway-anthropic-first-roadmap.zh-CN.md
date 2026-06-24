@@ -1,10 +1,10 @@
-# AI Gateway Anthropic Messages 优先路线
+﻿# AI Gateway Anthropic Messages 优先路线
 
 更新时间：2026-06-20
 
 状态：路线设计稿，用于指导后续实现。
 
-本文记录 `codex-remote` AI Gateway 后续演进方向：入口继续兼容 Codex 使用的 OpenAI Responses 协议，出站主线转向 Anthropic Messages 协议。Chat Completions 保留为历史兼容路径，不再作为新 provider 接入的主要抽象。
+本文记录 `codexhub` AI Gateway 后续演进方向：入口继续兼容 Codex 使用的 OpenAI Responses 协议，出站主线转向 Anthropic Messages 协议。Chat Completions 保留为历史兼容路径，不再作为新 provider 接入的主要抽象。
 
 相关文档：
 
@@ -28,7 +28,7 @@ Codex 侧当前稳定入口是 OpenAI Responses。这个事实短期不会变，
 
 ```text
 Codex / OpenAI Responses
-  -> codex-remote AI Gateway
+  -> codexhub AI Gateway
   -> Anthropic Messages-compatible providers
 ```
 

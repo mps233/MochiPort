@@ -1,4 +1,4 @@
-use axum::http::{HeaderMap, HeaderName};
+﻿use axum::http::{HeaderMap, HeaderName};
 
 /// 从 HTTP header 提取的请求上下文。
 /// 参考 AxonHub `codex/headers.go`。
@@ -92,7 +92,7 @@ impl GatewayContext {
             .or_else(|| session_id.clone())
             .or_else(|| thread_id.clone())
             .or_else(|| metadata_session_id.clone())
-            .unwrap_or_else(|| format!("codex-remote:{}", uuid::Uuid::new_v4()));
+            .unwrap_or_else(|| format!("codexhub:{}", uuid::Uuid::new_v4()));
 
         let upstream_headers = collect_upstream_headers(headers);
 
@@ -208,7 +208,7 @@ mod tests {
     fn test_fallback_generates_uuid() {
         let headers = HeaderMap::new();
         let ctx = GatewayContext::extract(&headers, None);
-        assert!(ctx.prompt_cache_key.starts_with("codex-remote:"));
+        assert!(ctx.prompt_cache_key.starts_with("codexhub:"));
     }
 
     #[test]

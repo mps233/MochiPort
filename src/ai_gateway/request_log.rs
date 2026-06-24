@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::BTreeMap,
     collections::VecDeque,
     fs,
@@ -271,7 +271,7 @@ fn legacy_database_path(config: &AppConfig) -> PathBuf {
 
 #[cfg(not(test))]
 fn app_data_dir() -> Option<PathBuf> {
-    if let Some(base) = std::env::var_os("CODEX_REMOTE_HOME").map(PathBuf::from) {
+    if let Some(base) = std::env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
         return Some(base);
     }
 
@@ -280,14 +280,14 @@ fn app_data_dir() -> Option<PathBuf> {
         std::env::var_os("LOCALAPPDATA")
             .or_else(|| std::env::var_os("APPDATA"))
             .map(PathBuf::from)
-            .map(|base| base.join("Codex Remote"))
+            .map(|base| base.join("CodexHub"))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
         std::env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|home| home.join("Library/Application Support/Codex Remote"))
+            .map(|home| home.join("Library/Application Support/CodexHub"))
     }
 }
 
@@ -789,7 +789,7 @@ impl<S> UpstreamSseCaptureStream<S> {
 
         let mut text = String::from_utf8_lossy(&self.captured).to_string();
         if self.truncated {
-            text.push_str("\n\n: [codex-remote] upstream SSE log truncated\n");
+            text.push_str("\n\n: [codexhub] upstream SSE log truncated\n");
         }
         let update = RequestLogUpdate {
             upstream_response_sse: Some(text),
@@ -1122,7 +1122,7 @@ mod tests {
 
     fn temp_db_path() -> PathBuf {
         std::env::temp_dir().join(format!(
-            "codex-remote-request-log-test-{}.sqlite",
+            "codexhub-request-log-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ))
     }
@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn database_path_follows_state_path_in_tests() {
         let config = AppConfig {
-            state_path: std::env::temp_dir().join("codex-remote-test-state.json"),
+            state_path: std::env::temp_dir().join("codexhub-test-state.json"),
             ..AppConfig::default()
         };
 
@@ -1275,7 +1275,7 @@ mod tests {
     #[test]
     fn sqlite_insert_update_and_list_roundtrip() {
         let db_path = std::env::temp_dir().join(format!(
-            "codex-remote-request-log-test-{}.sqlite",
+            "codexhub-request-log-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         let record = RequestLogRecord {
@@ -1454,7 +1454,7 @@ mod tests {
     #[test]
     fn sqlite_delete_older_than_keeps_recent_logs() {
         let db_path = std::env::temp_dir().join(format!(
-            "codex-remote-request-log-test-{}.sqlite",
+            "codexhub-request-log-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         let now = now_ms();
@@ -1494,7 +1494,7 @@ mod tests {
     #[test]
     fn sqlite_delete_all_removes_every_log() {
         let db_path = std::env::temp_dir().join(format!(
-            "codex-remote-request-log-test-{}.sqlite",
+            "codexhub-request-log-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         for request_id in ["req-1", "req-2"] {
@@ -1531,7 +1531,7 @@ mod tests {
     #[test]
     fn observe_sse_chunk_records_ttft_and_total_latency_separately() {
         let db_path = std::env::temp_dir().join(format!(
-            "codex-remote-request-log-test-{}.sqlite",
+            "codexhub-request-log-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         let record = RequestLogRecord {

@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf};
+﻿use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ impl Default for AppConfig {
             local_connection_mode: LocalConnectionMode::default(),
             language: None,
             theme: None,
-            state_path: PathBuf::from("codex-remote-state.json"),
+            state_path: PathBuf::from("codexhub-state.json"),
             logging: LoggingConfig::default(),
             feishu: FeishuConfig::default(),
             telegram: TelegramConfig::default(),

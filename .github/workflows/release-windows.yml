@@ -1,4 +1,4 @@
-name: release-windows
+﻿name: release-windows
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cargo build --release --features gui --bin codex-remote
+          cargo build --release --features gui --bin codexhub
 
       - name: Sign Binaries
         if: env.HAS_WINDOWS_CODESIGN == 'true'
@@ -57,7 +57,7 @@ jobs:
           }
 
           $files = @(
-            "target\release\codex-remote.exe"
+            "target\release\codexhub.exe"
           )
           foreach ($file in $files) {
             & $signtool.FullName sign `
@@ -74,12 +74,12 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $dist = "target\dist\Codex Remote Windows"
-          $zip = "target\dist\Codex Remote Windows.zip"
+          $dist = "target\dist\CodexHub Windows"
+          $zip = "target\dist\CodexHub Windows.zip"
           Remove-Item -Recurse -Force "target\dist" -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force $dist | Out-Null
 
-          Copy-Item "target\release\codex-remote.exe" (Join-Path $dist "Codex Remote.exe")
+          Copy-Item "target\release\codexhub.exe" (Join-Path $dist "CodexHub.exe")
           Copy-Item "README.md" $dist
           if (Test-Path "config.example.toml") {
             Copy-Item "config.example.toml" $dist
@@ -109,8 +109,8 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Codex-Remote-Windows
-          path: target/dist/Codex Remote Windows.zip
+          name: CodexHub-Windows
+          path: target/dist/CodexHub Windows.zip
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -121,5 +121,5 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/Codex Remote Windows.zip
+            target/dist/CodexHub Windows.zip
             target/dist/latest.json

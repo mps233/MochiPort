@@ -1,18 +1,18 @@
-use axum::{Json, http::StatusCode};
+﻿use axum::{Json, http::StatusCode};
 use serde_json::{Value, json};
 
 pub(super) async fn accounts_check() -> Json<Value> {
     Json(json!({
-        "account_ordering": ["acct_codex_remote_local"],
-        "current_account_id": "acct_codex_remote_local",
+        "account_ordering": ["acct_codexhub_local"],
+        "current_account_id": "acct_codexhub_local",
         "accounts": [{
-            "id": "acct_codex_remote_local",
-            "account_id": "acct_codex_remote_local",
-            "account_user_id": "user_codex_remote_local__acct_codex_remote_local",
-            "user_id": "user_codex_remote_local",
-            "name": "Codex Remote Local",
-            "title": "Codex Remote Local",
-            "email": "codex-remote-local@example.local",
+            "id": "acct_codexhub_local",
+            "account_id": "acct_codexhub_local",
+            "account_user_id": "user_codexhub_local__acct_codexhub_local",
+            "user_id": "user_codexhub_local",
+            "name": "CodexHub Local",
+            "title": "CodexHub Local",
+            "email": "codexhub-local@example.local",
             "plan_type": "pro",
             "structure": "personal",
             "role": "owner",
@@ -25,8 +25,8 @@ pub(super) async fn accounts_check() -> Json<Value> {
 
 pub(super) async fn onboarding_context() -> Json<Value> {
     Json(json!({
-        "account_id": "acct_codex_remote_local",
-        "account_user_id": "user_codex_remote_local__acct_codex_remote_local",
+        "account_id": "acct_codexhub_local",
+        "account_user_id": "user_codexhub_local__acct_codexhub_local",
         "completed": true,
         "requires_onboarding": false,
         "items": [],

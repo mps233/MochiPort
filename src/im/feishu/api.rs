@@ -1,4 +1,4 @@
-use std::time::{Duration, Instant};
+﻿use std::time::{Duration, Instant};
 use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};
@@ -971,7 +971,7 @@ fn log_feishu_api_response(
 
     if status.is_success() && code == 0 {
         info!(
-            target: "codex_remote::feishu",
+            target: "codexhub::feishu",
             event = "feishu_api_ok",
             operation,
             http_status = status.as_u16(),
@@ -983,7 +983,7 @@ fn log_feishu_api_response(
         );
     } else {
         warn!(
-            target: "codex_remote::feishu",
+            target: "codexhub::feishu",
             event = "feishu_api_failed",
             operation,
             http_status = status.as_u16(),

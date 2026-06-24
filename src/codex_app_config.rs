@@ -1,4 +1,4 @@
-#[cfg(target_os = "macos")]
+﻿#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::{
     collections::{HashMap, HashSet},
@@ -32,7 +32,7 @@ const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
-const CODEX_REMOTE_HOME_ENV: &str = "CODEX_REMOTE_HOME";
+const CODEXHUB_HOME_ENV: &str = "CODEXHUB_HOME";
 
 const LOCAL_AUTH_MODE: &str = "chatgptAuthTokens";
 const LEGACY_LOCAL_AUTH_MODE: &str = "chatgpt";
@@ -805,12 +805,12 @@ fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
         Ok(auth) => auth,
         Err(err) => return (false, Some(err.to_string())),
     };
-    if is_codex_remote_auth_json(&auth) {
+    if is_codexhub_auth_json(&auth) {
         (true, None)
     } else {
         (
             false,
-            Some("auth.json is not codex-remote local auth".to_string()),
+            Some("auth.json is not codexhub local auth".to_string()),
         )
     }
 }
@@ -1028,7 +1028,7 @@ fn normalize_config_toml_order(raw: &str) -> String {
 }
 
 fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)> {
-    cleanup_codex_remote_config(path, backend_url, true)
+    cleanup_codexhub_config(path, backend_url, true)
 }
 
 fn managed_provider_names_in_config(
@@ -1054,7 +1054,7 @@ fn managed_provider_names_in_config(
             .map(str::trim)
             .map(|value| backend_urls_equivalent(value, &ai_gateway_base_url))
             .unwrap_or(false);
-        if local_gateway_provider && provider_table_has_codex_remote_shape(provider, provider_name)
+        if local_gateway_provider && provider_table_has_codexhub_shape(provider, provider_name)
         {
             names.insert(provider_name.to_string());
         }
@@ -1123,7 +1123,7 @@ fn inspect_connection_mode(path: &Path, backend_url: &str) -> LocalConnectionMod
     }
 }
 
-fn provider_table_has_codex_remote_shape(provider: &toml_edit::Table, provider_name: &str) -> bool {
+fn provider_table_has_codexhub_shape(provider: &toml_edit::Table, provider_name: &str) -> bool {
     let name_matches = provider
         .get("name")
         .and_then(|item| item.as_str())
@@ -1211,7 +1211,7 @@ fn uninstall_auth_json(path: &Path) -> Result<bool> {
         .with_context(|| format!("failed to read {}", path.display()))?;
     let auth = serde_json::from_str::<serde_json::Value>(&raw)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    if !is_codex_remote_auth_json(&auth) {
+    if !is_codexhub_auth_json(&auth) {
         return Ok(false);
     }
 
@@ -1427,7 +1427,7 @@ fn derive_local_auth_identity(
     LocalAuthIdentity::from_options(options)
 }
 
-fn is_codex_remote_auth_json(auth: &serde_json::Value) -> bool {
+fn is_codexhub_auth_json(auth: &serde_json::Value) -> bool {
     let auth_mode = auth.get("auth_mode").and_then(|value| value.as_str());
     if !matches!(
         auth_mode,
@@ -1442,10 +1442,10 @@ fn is_codex_remote_auth_json(auth: &serde_json::Value) -> bool {
             auth.pointer("/tokens/id_token")
                 .and_then(|value| value.as_str())
         })
-        .is_some_and(is_codex_remote_local_jwt)
+        .is_some_and(is_codexhub_local_jwt)
 }
 
-fn is_codex_remote_local_jwt(token: &str) -> bool {
+fn is_codexhub_local_jwt(token: &str) -> bool {
     let Some(payload) = decode_jwt_payload_value(token) else {
         return false;
     };
@@ -1533,12 +1533,12 @@ fn uninstall_with_managed_state(
 ) -> Result<(bool, bool, bool)> {
     let manifest = read_managed_backup_manifest(&backup.manifest_path)?;
     let (removed_chatgpt_base_url, removed_model_provider) =
-        cleanup_codex_remote_config(config_path, backend_url, manifest.config_existed)?;
+        cleanup_codexhub_config(config_path, backend_url, manifest.config_existed)?;
     let removed_auth = restore_or_remove_managed_file(
         auth_path,
         &backup.auth_path,
         manifest.auth_existed,
-        Some(is_codex_remote_auth_file),
+        Some(is_codexhub_auth_file),
     )?;
     chain_log::write_line(format!(
         "[codex_app_config] event=managed_backup_restored path={}",
@@ -1558,7 +1558,7 @@ fn uninstall_with_managed_state(
     ))
 }
 
-fn cleanup_codex_remote_config(
+fn cleanup_codexhub_config(
     path: &Path,
     backend_url: &str,
     config_existed_before_first_write: bool,
@@ -1709,7 +1709,7 @@ fn read_managed_backup_manifest(path: &Path) -> Result<ManagedCodexAppBackupMani
 }
 
 fn managed_backup_paths(codex_home: &Path) -> ManagedBackupPaths {
-    let dir = codex_remote_app_support_dir()
+    let dir = codexhub_app_support_dir()
         .join("backups")
         .join("codex-app")
         .join(codex_home_backup_id(codex_home));
@@ -1729,43 +1729,43 @@ fn codex_home_backup_id(codex_home: &Path) -> String {
     hex::encode(&digest[..16])
 }
 
-fn codex_remote_app_support_dir() -> PathBuf {
-    if let Some(base) = std::env::var_os(CODEX_REMOTE_HOME_ENV).map(PathBuf::from) {
+fn codexhub_app_support_dir() -> PathBuf {
+    if let Some(base) = std::env::var_os(CODEXHUB_HOME_ENV).map(PathBuf::from) {
         return base;
     }
-    platform_codex_remote_app_support_dir()
+    platform_codexhub_app_support_dir()
 }
 
 #[cfg(test)]
-fn platform_codex_remote_app_support_dir() -> PathBuf {
-    std::env::temp_dir().join("codex-remote-managed-backups-tests")
+fn platform_codexhub_app_support_dir() -> PathBuf {
+    std::env::temp_dir().join("codexhub-managed-backups-tests")
 }
 
 #[cfg(all(target_os = "windows", not(test)))]
-fn platform_codex_remote_app_support_dir() -> PathBuf {
+fn platform_codexhub_app_support_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("APPDATA"))
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("Codex Remote")
+        .join("CodexHub")
 }
 
 #[cfg(all(not(target_os = "windows"), not(test)))]
-fn platform_codex_remote_app_support_dir() -> PathBuf {
+fn platform_codexhub_app_support_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/Codex Remote"))
+        .map(|home| home.join("Library/Application Support/CodexHub"))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn is_codex_remote_auth_file(path: &Path) -> Result<bool> {
+fn is_codexhub_auth_file(path: &Path) -> Result<bool> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let auth = serde_json::from_str::<serde_json::Value>(&raw)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(is_codex_remote_auth_json(&auth))
+    Ok(is_codexhub_auth_json(&auth))
 }
 
 fn backup_existing(path: &Path) -> Result<()> {
@@ -1818,7 +1818,7 @@ fn local_chatgpt_jwt(identity: &LocalAuthIdentity) -> Result<String> {
                 "id": identity.account_id,
                 "is_default": true,
                 "role": "owner",
-                "title": "Codex Remote Local",
+                "title": "CodexHub Local",
             }]
         },
         "scp": [
@@ -1893,7 +1893,7 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
 
 pub(crate) fn default_codex_home() -> PathBuf {
     // This helper configures the separately launched Codex App, not the
-    // CODEX_HOME of the process that happens to run codex-remote.
+    // CODEX_HOME of the process that happens to run codexhub.
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".codex"))
         .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".codex")))
@@ -2902,7 +2902,7 @@ base_url = "https://api.example.invalid"
             .expect("system time should be after UNIX epoch")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "codex-remote-test-{}-{}",
+            "codexhub-test-{}-{}",
             std::process::id(),
             nanos
         ));

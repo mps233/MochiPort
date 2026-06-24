@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 
 use anyhow::{Context, Result};
 use base64::Engine;
@@ -298,7 +298,7 @@ pub(in crate::remote_control_backend) fn build_client_message_envelopes(
                 message_summary(&message)
             ));
             warn!(
-                target: "codex_remote::remote_control",
+                target: "codexhub::remote_control",
                 event = "remote_control_client_segmented",
                 client_id,
                 stream_id,

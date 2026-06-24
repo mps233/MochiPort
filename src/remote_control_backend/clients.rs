@@ -1,4 +1,4 @@
-use axum::{
+﻿use axum::{
     Json,
     extract::{
         Path as AxumPath, State,
@@ -193,7 +193,7 @@ fn remote_control_client_item(client: &AuthorizedRemoteControlClient) -> Value {
 fn feishu_bridge_client_item(connected: bool) -> Value {
     remote_control_client_json(RemoteControlClientJson {
         client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
-        account_user_id: "user_codex_remote_local__acct_codex_remote_local".to_string(),
+        account_user_id: "user_codexhub_local__acct_codexhub_local".to_string(),
         display_name: "飞书 Bridge".to_string(),
         device_model: local_device_model(),
         device_type: local_device_type(),

@@ -1,10 +1,10 @@
-# AI Gateway 智谱 GLM Anthropic Messages 对接说明
+﻿# AI Gateway 智谱 GLM Anthropic Messages 对接说明
 
 更新时间：2026-06-20
 
 状态：已落地首版，用于指导后续 Anthropic-compatible 厂商接入。
 
-本文记录 `codex-remote` AI Gateway 如何通过 Anthropic Messages 协议接入智谱 GLM。它也是后续新增 Kimi、DeepSeek Anthropic Messages 等显式厂商 profile 时的参考模板。
+本文记录 `codexhub` AI Gateway 如何通过 Anthropic Messages 协议接入智谱 GLM。它也是后续新增 Kimi、DeepSeek Anthropic Messages 等显式厂商 profile 时的参考模板。
 
 相关文档：
 

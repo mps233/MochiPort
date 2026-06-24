@@ -1,10 +1,10 @@
-# AI Gateway Provider Adapter 完备转换设计
+﻿# AI Gateway Provider Adapter 完备转换设计
 
 更新时间：2026-06-19
 
 状态：设计草案，可修订。
 
-本文档记录 `codex-remote` AI Gateway 从“Responses 到 Chat Completions 的点对点转换”升级为“Codex Responses 入口协议 + Gateway IR + 多 Provider Adapter”的设计。它用于指导后续实现，但不是唯一真实来源；落地过程中如果发现 Codex、DeepSeek、Anthropic 或其它 provider 的协议细节与本文不一致，应优先修正实现并同步更新本文档。
+本文档记录 `codexhub` AI Gateway 从“Responses 到 Chat Completions 的点对点转换”升级为“Codex Responses 入口协议 + Gateway IR + 多 Provider Adapter”的设计。它用于指导后续实现，但不是唯一真实来源；落地过程中如果发现 Codex、DeepSeek、Anthropic 或其它 provider 的协议细节与本文不一致，应优先修正实现并同步更新本文档。
 
 相关文档：
 

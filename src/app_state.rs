@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
@@ -214,7 +214,7 @@ impl RemoteControlState {
                 pending_source_hints_by_installation: HashMap::new(),
                 connected: false,
                 initialized: false,
-                client_id: "codex-remote-feishu".to_string(),
+                client_id: "codexhub-feishu".to_string(),
                 stream_id: String::new(),
                 server_id: None,
                 environment_id: None,
@@ -357,19 +357,19 @@ impl AppState {
         ));
         match level {
             "error" => tracing::error!(
-                target: "codex_remote::event",
+                target: "codexhub::event",
                 event_kind = kind,
                 message = %message,
                 "app event"
             ),
             "warn" => tracing::warn!(
-                target: "codex_remote::event",
+                target: "codexhub::event",
                 event_kind = kind,
                 message = %message,
                 "app event"
             ),
             _ => tracing::info!(
-                target: "codex_remote::event",
+                target: "codexhub::event",
                 event_kind = kind,
                 message = %message,
                 "app event"
