@@ -201,13 +201,13 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
     );
 
     page.set_sizer(sizer, true);
-    page.set_scroll_rate(10, 10);
+    page.set_scroll_rate(0, 10);
     let best_size = page.get_best_size();
     page.set_scrollbars(ScrollBarConfig {
-        pixels_per_unit_x: 10,
+        pixels_per_unit_x: 0,
         pixels_per_unit_y: 10,
-        no_units_x: (best_size.width + 20).max(1) / 10,
-        no_units_y: (best_size.height + 80).max(1) / 10,
+        no_units_x: 0,
+        no_units_y: (best_size.height + 9).max(1) / 10,
         x_pos: 0,
         y_pos: 0,
         no_refresh: true,

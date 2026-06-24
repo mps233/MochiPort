@@ -515,13 +515,13 @@ fn build_ui() {
     );
     ai_gw_sizer.add_stretch_spacer(1);
     ai_gw_page.set_sizer(ai_gw_sizer, true);
-    ai_gw_page.set_scroll_rate(10, 10);
+    ai_gw_page.set_scroll_rate(0, 10);
     let ai_gw_best_size = ai_gw_page.get_best_size();
     ai_gw_page.set_scrollbars(ScrollBarConfig {
-        pixels_per_unit_x: 10,
+        pixels_per_unit_x: 0,
         pixels_per_unit_y: 10,
-        no_units_x: (ai_gw_best_size.width + 20).max(1) / 10,
-        no_units_y: (ai_gw_best_size.height + 80).max(1) / 10,
+        no_units_x: 0,
+        no_units_y: (ai_gw_best_size.height + 9).max(1) / 10,
         x_pos: 0,
         y_pos: 0,
         no_refresh: true,
@@ -712,12 +712,13 @@ fn build_ui() {
     );
     feishu_sizer.add_stretch_spacer(1);
     feishu_page.set_sizer(feishu_sizer, true);
+    feishu_page.set_scroll_rate(0, 10);
     let feishu_best_size = feishu_page.get_best_size();
     feishu_page.set_scrollbars(ScrollBarConfig {
-        pixels_per_unit_x: 10,
+        pixels_per_unit_x: 0,
         pixels_per_unit_y: 10,
-        no_units_x: (feishu_best_size.width + 20).max(1) / 10,
-        no_units_y: (feishu_best_size.height + 80).max(1) / 10,
+        no_units_x: 0,
+        no_units_y: (feishu_best_size.height + 9).max(1) / 10,
         x_pos: 0,
         y_pos: 0,
         no_refresh: true,
