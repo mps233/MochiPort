@@ -686,21 +686,21 @@ fn build_ui() {
     add_im_actions.add(&change_bot_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&save_telegram_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&connect_wechat_button, 0, SizerFlag::Right, 0);
+    add_im_box.add_sizer(
+        &add_im_actions,
+        0,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        12,
+    );
     let wechat_context_warning = StaticText::builder(&add_im_static_box)
         .with_label(text.wechat_context_token_warning())
         .build();
     wechat_context_warning.set_foreground_color(theme::theme().error);
-    wechat_context_warning.wrap(620);
-    add_im_actions.add(
+    wechat_context_warning.wrap(980);
+    add_im_box.add(
         &wechat_context_warning,
         0,
-        SizerFlag::Left | SizerFlag::AlignCenterVertical,
-        24,
-    );
-    add_im_box.add_sizer(
-        &add_im_actions,
-        0,
-        SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         12,
     );
     feishu_sizer.add(&add_im_static_box, 0, SizerFlag::Expand | SizerFlag::All, 8);

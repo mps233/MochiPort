@@ -62,6 +62,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_label(text.codex_local_config_help())
         .build();
     local_config_hint.set_foreground_color(theme::theme().ink_muted);
+    local_config_hint.wrap(760);
     let inject_button = Button::builder(&local_config_box)
         .with_label(text.inject_codex_access())
         .build();
@@ -72,22 +73,23 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .build();
     clear_button.set_tooltip(text.clear_codex_access_help());
     clear_button.enable(false);
-    let local_config_row = BoxSizer::builder(Orientation::Horizontal).build();
-    local_config_row.add(
+    local_config_section.add(
         &local_config_hint,
-        1,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        12,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
     );
-    local_config_row.add(
+    let local_config_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    local_config_actions.add_stretch_spacer(1);
+    local_config_actions.add(
         &inject_button,
         0,
         SizerFlag::AlignCenterVertical | SizerFlag::Right,
         8,
     );
-    local_config_row.add(&clear_button, 0, SizerFlag::AlignCenterVertical, 0);
+    local_config_actions.add(&clear_button, 0, SizerFlag::AlignCenterVertical, 0);
     local_config_section.add_sizer(
-        &local_config_row,
+        &local_config_actions,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
@@ -97,25 +99,27 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_label(text.codex_session_history_help())
         .build();
     session_hint.set_foreground_color(theme::theme().ink_muted);
+    session_hint.wrap(760);
     let session_history_button = Button::builder(&local_config_box)
         .with_label(text.open_codex_session_history())
         .build();
     session_history_button.enable(false);
-    let session_row = BoxSizer::builder(Orientation::Horizontal).build();
-    session_row.add(
+    local_config_section.add(
         &session_hint,
-        1,
-        SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        12,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
     );
-    session_row.add(
+    let session_actions = BoxSizer::builder(Orientation::Horizontal).build();
+    session_actions.add_stretch_spacer(1);
+    session_actions.add(
         &session_history_button,
         0,
         SizerFlag::AlignCenterVertical,
         0,
     );
     local_config_section.add_sizer(
-        &session_row,
+        &session_actions,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
         10,
@@ -133,6 +137,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_label(text.codex_visible_models_help())
         .build();
     models_hint.set_foreground_color(theme::theme().ink_muted);
+    models_hint.wrap(980);
     models_section.add(
         &models_hint,
         0,
@@ -143,6 +148,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .with_label(text.codex_visible_models_warning())
         .build();
     models_warning.set_foreground_color(theme::theme().warn);
+    models_warning.wrap(980);
     models_section.add(
         &models_warning,
         0,
