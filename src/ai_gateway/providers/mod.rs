@@ -2,7 +2,7 @@ pub mod anthropic_messages;
 pub mod deepseek_chat;
 pub mod openai_responses;
 
-use std::time::Duration;
+use std::{error::Error as _, time::Duration};
 
 use axum::http::StatusCode;
 use tracing::error;
@@ -42,9 +42,41 @@ pub(super) fn map_upstream_response(
             GatewayError::upstream_timeout()
         } else {
             error!(error = %err, "{error_log}");
-            GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("upstream error: {err}"))
+            GatewayError::upstream(
+                StatusCode::BAD_GATEWAY,
+                format!("upstream error: {}", reqwest_error_summary(&err)),
+            )
         }
     })
+}
+
+fn reqwest_error_summary(err: &reqwest::Error) -> String {
+    let mut parts = vec![err.to_string()];
+    if err.is_connect() {
+        parts.push("kind=connect".to_string());
+    }
+    if err.is_timeout() {
+        parts.push("kind=timeout".to_string());
+    }
+    if err.is_body() {
+        parts.push("kind=body".to_string());
+    }
+    if err.is_decode() {
+        parts.push("kind=decode".to_string());
+    }
+    if err.is_request() {
+        parts.push("kind=request".to_string());
+    }
+    if let Some(status) = err.status() {
+        parts.push(format!("status={}", status.as_u16()));
+    }
+
+    let mut source = err.source();
+    while let Some(err) = source {
+        parts.push(format!("caused by: {err}"));
+        source = err.source();
+    }
+    parts.join("; ")
 }
 
 pub(super) async fn ensure_success_response(

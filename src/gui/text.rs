@@ -469,9 +469,11 @@ impl GuiText {
 
     pub(super) fn codex_local_config_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "初始化 CodexHub 所需配置，可随时恢复原有配置。",
+            GuiLocale::ZhCn => {
+                "初始化 CodexHub 所需配置，可随时恢复到初始化前状态，包括 ChatGPT 登录状态。"
+            }
             GuiLocale::EnUs => {
-                "Set up CodexHub integration. You can restore the original config anytime."
+                "Set up CodexHub integration. You can restore the pre-setup state anytime, including ChatGPT sign-in."
             }
         }
     }
@@ -525,7 +527,7 @@ impl GuiText {
 
     pub(super) fn open_codex_session_history(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "会话历史管理",
+            GuiLocale::ZhCn => "会话历史修复管理",
             GuiLocale::EnUs => "Manage Session History",
         }
     }

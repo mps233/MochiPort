@@ -187,9 +187,9 @@ fn build_ui() {
 
     let frame = Frame::builder()
         .with_title("CodexHub")
-        // Keep the first launch below a typical 1080p work area. The key controls
-        // remain visible, while oversized lists use their own scrolling region.
-        .with_size(Size::new(1280, 860))
+        // Keep the first launch within smaller laptop work areas. The tab pages
+        // own their scrolling, so the frame itself should not exceed the screen.
+        .with_size(Size::new(1180, 760))
         .build();
     frame.set_icon(&app_icon_bitmap(48));
     install_system_menu(&frame, &gui_timers, text);
