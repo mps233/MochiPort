@@ -119,14 +119,39 @@ gh repo create happy-loki/codex-remote --public --description "Renamed to CodexH
 
 与功能和远程仓库名均无绑定关系，`git remote` 指向 URL 而非目录名，改不改都不影响 push / pull。若要让本地目录与新品牌一致：
 
+**前置条件**：关闭所有占用该目录的程序，包括：
+
+- 正在运行的 GUI 进程（`codex-remote.exe` / `codexhub.exe`）
+- IDE、编辑器、终端窗口（VS Code、Cursor、PowerShell 等）
+- `cargo` 或 `rustc` 后台进程（`cargo build` / `cargo test` 的残留锁）
+- 文件浏览器（在该目录或其子目录打开的窗口）
+
+可用以下命令检测占用：
+
+```powershell
+# 查看占用该目录的进程
+Get-Process | Where-Object { try { $_.Modules.FileName -like "*codex-remote*" } catch {} } | Select-Object Id,ProcessName
+
+# 若发现进程，记下 PID 后停掉（示例 PID 2444）
+Stop-Process -Id 2444 -Force
+```
+
+确认无占用后执行改名：
+
 ```powershell
 # 先关闭占用该目录的程序（IDE、终端、cargo / target 锁），再在上一级目录执行
 cd D:\rust_demo
 Rename-Item codex-remote codexhub
 cd D:\rust_demo\codexhub
+
+# 验证 git 状态与 remote 完好
+git status
+git remote -v
 ```
 
-改名后 `target/` 缓存路径变化会触发一次完整重新编译（数分钟）。git 历史、分支、remote 全部随目录一起迁移，不受影响。
+改名后 `target/` 缓存路径变化会触发一次完整重新编译（约数分钟，取决于是否启用 GUI feature）。git 历史、分支、remote、已提交的更名改动全部随目录一起迁移，不受影响。
+
+**遇到"文件被占用"错误时**：先用上述命令找出占用进程并关闭，或直接重启系统后再改名。
 
 ### 5. 仍需人工跟进（无法命令行覆盖）
 
