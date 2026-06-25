@@ -527,7 +527,7 @@ fn build_ui() {
         .with_label(text.im_access_hint())
         .build();
     im_access_hint.set_foreground_color(theme::theme().ink_secondary);
-    im_access_hint.wrap(1180);
+    im_access_hint.wrap(920);
     feishu_sizer.add(
         &im_access_hint,
         0,
@@ -686,7 +686,7 @@ fn build_ui() {
         .with_label(text.wechat_context_token_warning())
         .build();
     wechat_context_warning.set_foreground_color(theme::theme().error);
-    wechat_context_warning.wrap(980);
+    wechat_context_warning.wrap(920);
     add_im_box.add(
         &wechat_context_warning,
         0,
