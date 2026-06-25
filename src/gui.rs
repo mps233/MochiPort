@@ -14,7 +14,6 @@ use std::{
 use wxdragon::widgets::dataview::{
     CustomDataViewVirtualListModel, DataViewAlign, DataViewColumnFlags, DataViewCtrl, Variant,
 };
-use wxdragon::widgets::scrolled_window::ScrollBarConfig;
 use wxdragon::{prelude::*, timer::Timer};
 
 use crate::ai_gateway::config::{
@@ -516,16 +515,8 @@ fn build_ui() {
     ai_gw_sizer.add_stretch_spacer(1);
     ai_gw_page.set_sizer(ai_gw_sizer, true);
     ai_gw_page.set_scroll_rate(0, 10);
-    let ai_gw_best_size = ai_gw_page.get_best_size();
-    ai_gw_page.set_scrollbars(ScrollBarConfig {
-        pixels_per_unit_x: 0,
-        pixels_per_unit_y: 10,
-        no_units_x: 0,
-        no_units_y: (ai_gw_best_size.height + 9).max(1) / 10,
-        x_pos: 0,
-        y_pos: 0,
-        no_refresh: true,
-    });
+    ai_gw_page.layout();
+    ai_gw_page.fit_inside();
 
     let feishu_page = ScrolledWindow::builder(&notebook)
         .with_style(ScrolledWindowStyle::VScroll)
@@ -713,16 +704,8 @@ fn build_ui() {
     feishu_sizer.add_stretch_spacer(1);
     feishu_page.set_sizer(feishu_sizer, true);
     feishu_page.set_scroll_rate(0, 10);
-    let feishu_best_size = feishu_page.get_best_size();
-    feishu_page.set_scrollbars(ScrollBarConfig {
-        pixels_per_unit_x: 0,
-        pixels_per_unit_y: 10,
-        no_units_x: 0,
-        no_units_y: (feishu_best_size.height + 9).max(1) / 10,
-        x_pos: 0,
-        y_pos: 0,
-        no_refresh: true,
-    });
+    feishu_page.layout();
+    feishu_page.fit_inside();
 
     // --- Request Logs Tab ---
     let request_logs_page = Panel::builder(&notebook).build();

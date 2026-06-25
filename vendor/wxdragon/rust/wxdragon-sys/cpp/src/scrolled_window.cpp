@@ -29,6 +29,15 @@ wxd_ScrolledWindow_SetScrollRate(wxd_ScrolledWindow_t* self, int xstep, int yste
 }
 
 WXD_EXPORTED void
+wxd_ScrolledWindow_FitInside(wxd_ScrolledWindow_t* self)
+{
+    wxScrolledWindow* scrolledWin = (wxScrolledWindow*)self;
+    if (scrolledWin) {
+        scrolledWin->FitInside();
+    }
+}
+
+WXD_EXPORTED void
 wxd_ScrolledWindow_SetScrollbars(wxd_ScrolledWindow_t* self, int pixelsPerUnitX, int pixelsPerUnitY,
                                  int noUnitsX, int noUnitsY, int xPos, int yPos, bool noRefresh)
 {

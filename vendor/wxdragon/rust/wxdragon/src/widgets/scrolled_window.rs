@@ -106,6 +106,15 @@ impl ScrolledWindow {
         unsafe { ffi::wxd_ScrolledWindow_SetScrollRate(ptr, x_step, y_step) }
     }
 
+    /// Fits the virtual scrolling area to the current sizer-managed contents.
+    pub fn fit_inside(&self) {
+        let ptr = self.scrolled_window_ptr();
+        if ptr.is_null() {
+            return;
+        }
+        unsafe { ffi::wxd_ScrolledWindow_FitInside(ptr) }
+    }
+
     /// Sets up the scrollbars.
     pub fn set_scrollbars(&self, config: ScrollBarConfig) {
         let ptr = self.scrolled_window_ptr();
