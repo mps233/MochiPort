@@ -145,6 +145,28 @@ fn table_row_colour(row: usize) -> Colour {
     }
 }
 
+fn flat_bordered_panel<W: WxWidget>(parent: &W, background: Colour) -> Panel {
+    let panel = Panel::builder(parent)
+        .with_style(PanelStyle::BorderNone)
+        .build();
+    panel.set_background_color(background);
+
+    let panel_for_paint = panel;
+    panel.on_paint(move |_| {
+        let dc = PaintDC::new(&panel_for_paint);
+        let size = panel_for_paint.get_client_size();
+        let width = size.width.max(1);
+        let height = size.height.max(1);
+        dc.set_background(background);
+        dc.clear();
+        dc.set_pen(theme::theme().border, 1, PenStyle::Solid);
+        dc.set_brush(background, BrushStyle::Transparent);
+        dc.draw_rectangle(0, 0, width.saturating_sub(1), height.saturating_sub(1));
+    });
+
+    panel
+}
+
 /// Build a flat "card" section: a `bg_card` surface with a bold title header and
 /// a content sizer for the caller's children. Replaces the dated etched
 /// `StaticBox` group frames.
@@ -153,10 +175,7 @@ fn table_row_colour(row: usize) -> Colour {
 /// their layout to `content_sizer`; add `card_panel` itself to the page sizer.
 pub(super) fn card_section<W: WxWidget>(parent: &W, title: &str) -> (Panel, BoxSizer) {
     let t = theme::theme();
-    let card = Panel::builder(parent)
-        .with_style(PanelStyle::BorderSimple)
-        .build();
-    card.set_background_color(t.bg_card);
+    let card = flat_bordered_panel(parent, t.bg_card);
 
     let outer = BoxSizer::builder(Orientation::Vertical).build();
     let header = StaticText::builder(&card).with_label(title).build();
@@ -206,12 +225,7 @@ fn build_status_panel<W: WxWidget>(
     center_content: bool,
 ) -> StatusPanel {
     let t = theme::theme();
-    // Flat card: no native etched border; the white surface separates from the
-    // deeper app background via colour contrast.
-    let panel = Panel::builder(parent)
-        .with_style(PanelStyle::BorderSimple)
-        .build();
-    panel.set_background_color(t.bg_card);
+    let panel = flat_bordered_panel(parent, t.bg_card);
     // Height fits three lines (title + state + detail) with headroom; the cards
     // split the row evenly via proportion in the parent column.
     panel.set_min_size(Size::new(230, 66));
@@ -266,7 +280,9 @@ fn build_status_panel<W: WxWidget>(
     } else {
         row.add_spacer(18);
     }
-    panel.set_sizer(row, true);
+    let outer = BoxSizer::builder(Orientation::Vertical).build();
+    outer.add_sizer(&row, 1, SizerFlag::Expand | SizerFlag::All, 2);
+    panel.set_sizer(outer, true);
     StatusPanel {
         panel,
         icon,
@@ -290,16 +306,14 @@ pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatu
         &sizer,
         ImChannelKind::Feishu,
         text.feishu_label(),
-        8,
         text,
     );
-    let telegram = im_channel_row(&panel, &sizer, ImChannelKind::Telegram, "Telegram", 8, text);
+    let telegram = im_channel_row(&panel, &sizer, ImChannelKind::Telegram, "Telegram", text);
     let wechat = im_channel_row(
         &panel,
         &sizer,
         ImChannelKind::Wechat,
         text.wechat_label(),
-        0,
         text,
     );
 
@@ -317,14 +331,10 @@ pub(super) fn im_channel_row(
     parent_sizer: &BoxSizer,
     kind: ImChannelKind,
     name: &str,
-    bottom_margin: i32,
     text: GuiText,
 ) -> ImChannelRow {
     let t = theme::theme();
-    let row_panel = Panel::builder(parent)
-        .with_style(PanelStyle::BorderSimple)
-        .build();
-    row_panel.set_background_color(t.bg_card);
+    let row_panel = flat_bordered_panel(parent, t.bg_card);
     row_panel.set_min_size(Size::new(250, 58));
     let row = BoxSizer::builder(Orientation::Horizontal).build();
 
@@ -366,17 +376,10 @@ pub(super) fn im_channel_row(
 
     row.add_sizer(&text_col, 1, SizerFlag::Expand, 0);
     row.add_spacer(12);
-    row_panel.set_sizer(row, true);
-    parent_sizer.add(
-        &row_panel,
-        1,
-        if bottom_margin > 0 {
-            SizerFlag::Expand | SizerFlag::Bottom
-        } else {
-            SizerFlag::Expand
-        },
-        bottom_margin,
-    );
+    let outer = BoxSizer::builder(Orientation::Vertical).build();
+    outer.add_sizer(&row, 1, SizerFlag::Expand | SizerFlag::All, 3);
+    row_panel.set_sizer(outer, true);
+    parent_sizer.add(&row_panel, 1, SizerFlag::Expand, 0);
 
     ImChannelRow {
         icon,
