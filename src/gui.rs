@@ -512,7 +512,6 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
     );
-    ai_gw_sizer.add_stretch_spacer(1);
     ai_gw_page.set_sizer(ai_gw_sizer, true);
     ai_gw_page.set_scroll_rate(0, 10);
     ai_gw_page.layout();
@@ -701,7 +700,6 @@ fn build_ui() {
         SizerFlag::Expand | SizerFlag::All,
         8,
     );
-    feishu_sizer.add_stretch_spacer(1);
     feishu_page.set_sizer(feishu_sizer, true);
     feishu_page.set_scroll_rate(0, 10);
     feishu_page.layout();
