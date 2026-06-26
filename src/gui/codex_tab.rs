@@ -24,6 +24,7 @@ use super::{
 };
 
 type CodexModelSlugs = Rc<Vec<String>>;
+type CodexModelChecks = Rc<Vec<CheckBox>>;
 type CodexModelsInitialized = Rc<Cell<bool>>;
 type CodexConfigured = Rc<Cell<bool>>;
 type CodexHubReady = Rc<Cell<bool>>;
@@ -39,7 +40,7 @@ pub(super) struct CodexTab {
     clear_button: Button,
     session_history_button: Button,
     save_models_button: Button,
-    model_list: CheckListBox,
+    model_checks: CodexModelChecks,
     model_slugs: CodexModelSlugs,
     models_initialized: CodexModelsInitialized,
     configured: CodexConfigured,
@@ -162,25 +163,38 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
             .map(|model| model.slug.clone())
             .collect(),
     );
-    let model_labels = model_options
-        .iter()
-        .map(|model| {
-            if model.display_name == model.slug {
-                model.slug.clone()
-            } else {
-                format!("{} ({})", model.display_name, model.slug)
-            }
-        })
-        .collect();
-    let model_list = CheckListBox::builder(&models_box)
-        .with_choices(model_labels)
-        .with_style(CheckListBoxStyle::AlwaysSB)
+    let model_grid = FlexGridSizer::builder(0, 3)
+        .with_vgap(8)
+        .with_hgap(24)
         .build();
-    model_list.set_min_size(Size::new(360, 120));
-    model_list.enable(false);
-    models_section.add(
-        &model_list,
-        1,
+    for col in 0..3 {
+        model_grid.add_growable_col(col, 1);
+    }
+    let mut model_checks = Vec::new();
+    for model in &model_options {
+        let label = if model.display_name == model.slug {
+            model.slug.clone()
+        } else {
+            format!("{} ({})", model.display_name, model.slug)
+        };
+        let checkbox = CheckBox::builder(&models_box)
+            .with_label(&label)
+            .with_value(true)
+            .build();
+        checkbox.enable(false);
+        checkbox.set_foreground_color(theme::theme().ink_primary);
+        model_grid.add(
+            &checkbox,
+            0,
+            SizerFlag::Expand | SizerFlag::AlignCenterVertical,
+            0,
+        );
+        model_checks.push(checkbox);
+    }
+    let model_checks: CodexModelChecks = Rc::new(model_checks);
+    models_section.add_sizer(
+        &model_grid,
+        0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
     );
@@ -217,7 +231,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         clear_button,
         session_history_button,
         save_models_button,
-        model_list,
+        model_checks,
         model_slugs,
         models_initialized: Rc::new(Cell::new(false)),
         configured: Rc::new(Cell::new(false)),
@@ -244,7 +258,9 @@ pub(super) fn bind_actions(
 pub(super) fn set_actions_enabled(tab: &CodexTab, enabled: bool) {
     tab.service_enabled.set(enabled);
     tab.save_models_button.enable(enabled);
-    tab.model_list.enable(enabled);
+    for checkbox in tab.model_checks.iter() {
+        checkbox.enable(enabled);
+    }
     refresh_config_buttons(tab, enabled);
     tab.session_history_button
         .enable(enabled && tab.remote_ready.get());
@@ -269,14 +285,16 @@ pub(super) fn initialize_visible_model_checks(tab: &CodexTab, gateway_config: &A
     if tab.models_initialized.get() {
         return;
     }
+    let use_defaults = gateway_config.codex_visible_models.is_empty();
     let selected = gateway_config
         .codex_visible_models
         .iter()
         .map(|model| model.as_str())
         .collect::<std::collections::HashSet<_>>();
     for (index, slug) in tab.model_slugs.iter().enumerate() {
-        tab.model_list
-            .check(index as u32, selected.contains(slug.as_str()));
+        if let Some(checkbox) = tab.model_checks.get(index) {
+            checkbox.set_value(use_defaults || selected.contains(slug.as_str()));
+        }
     }
     tab.models_initialized.set(true);
 }
@@ -499,8 +517,9 @@ fn selected_visible_models(tab: &CodexTab) -> Vec<String> {
         .iter()
         .enumerate()
         .filter_map(|(index, slug)| {
-            tab.model_list
-                .is_checked(index as u32)
+            tab.model_checks
+                .get(index)
+                .is_some_and(CheckBox::is_checked)
                 .then(|| slug.clone())
         })
         .collect()

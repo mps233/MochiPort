@@ -13,7 +13,7 @@ use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::GatewayRequest;
 use crate::ai_gateway::request_log::{
-    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
+    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
 use crate::ai_gateway::tool_names::ToolNameMap;
 use crate::ai_gateway::transform::chat_to_responses::convert_chat_response_with_tool_names;
@@ -151,13 +151,15 @@ async fn handle_stream(
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     let model = model.to_string();
-    let byte_stream = resp.bytes_stream();
-
-    let sse_stream = ChatSseToResponsesSse::new_with_tool_names(byte_stream, model, tool_name_map);
-
+    let upstream_bytes = resp.bytes_stream();
     let body = if let Some(log_context) = log_context {
+        let captured_upstream = UpstreamSseCaptureStream::new(upstream_bytes, log_context.clone());
+        let sse_stream =
+            ChatSseToResponsesSse::new_with_tool_names(captured_upstream, model, tool_name_map);
         Body::from_stream(ResponsesSseLogStream::new(sse_stream, log_context))
     } else {
+        let sse_stream =
+            ChatSseToResponsesSse::new_with_tool_names(upstream_bytes, model, tool_name_map);
         Body::from_stream(sse_stream)
     };
     let mut response = Response::new(body);

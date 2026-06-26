@@ -713,7 +713,7 @@ fn build_ui() {
     let request_log_hint = StaticText::builder(&request_logs_page)
         .with_label(text.request_log_open_hint())
         .build();
-    request_log_hint.set_foreground_color(theme::theme().ink_secondary);
+    request_log_hint.set_foreground_color(theme::theme().warn);
 
     let request_log_disabled_hint = StaticText::builder(&request_logs_page)
         .with_label(text.request_logging_disabled_hint())

@@ -2193,35 +2193,37 @@ impl GuiText {
 
     pub(super) fn ai_gateway_tab(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "AI Gateway",
+            GuiLocale::ZhCn => "大模型接入",
             GuiLocale::EnUs => "AI Gateway",
         }
     }
 
     pub(super) fn ai_gateway_management(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "渠道管理",
+            GuiLocale::ZhCn => "模型厂商管理",
             GuiLocale::EnUs => "AI Gateway Management",
         }
     }
 
     pub(super) fn ai_gw_channel_list(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "渠道列表",
+            GuiLocale::ZhCn => "模型厂商列表",
             GuiLocale::EnUs => "Channels",
         }
     }
 
     pub(super) fn ai_gw_channel_editor(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "新增 / 编辑渠道",
+            GuiLocale::ZhCn => "新增 / 编辑模型厂商",
             GuiLocale::EnUs => "Add / Edit Channel",
         }
     }
 
     pub(super) fn ai_gw_channel_editor_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "选择 OpenAI、DeepSeek、Anthropic 或智谱 GLM，并填写渠道连接信息。",
+            GuiLocale::ZhCn => {
+                "选择 OpenAI、DeepSeek、Anthropic 或智谱 GLM，并填写模型厂商接入信息。"
+            }
             GuiLocale::EnUs => {
                 "Choose OpenAI, DeepSeek, Anthropic, or GLM and fill in the channel connection details."
             }
@@ -2230,42 +2232,42 @@ impl GuiText {
 
     pub(super) fn ai_gw_channel_settings(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "渠道配置",
+            GuiLocale::ZhCn => "模型厂商配置",
             GuiLocale::EnUs => "Channel Settings",
         }
     }
 
     pub(super) fn ai_gw_add_channel(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "新增渠道",
+            GuiLocale::ZhCn => "新增模型厂商",
             GuiLocale::EnUs => "Add Channel",
         }
     }
 
     pub(super) fn ai_gw_edit_channel(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "编辑渠道",
+            GuiLocale::ZhCn => "修改模型厂商",
             GuiLocale::EnUs => "Edit Channel",
         }
     }
 
     pub(super) fn ai_gw_delete_channel(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "删除渠道",
+            GuiLocale::ZhCn => "删除模型厂商",
             GuiLocale::EnUs => "Delete Channel",
         }
     }
 
     pub(super) fn ai_gw_save_channel(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "保存渠道",
+            GuiLocale::ZhCn => "保存模型厂商",
             GuiLocale::EnUs => "Save Channel",
         }
     }
 
     pub(super) fn ai_gw_create_channel(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "创建渠道",
+            GuiLocale::ZhCn => "创建模型厂商",
             GuiLocale::EnUs => "Create Channel",
         }
     }
@@ -2491,49 +2493,49 @@ impl GuiText {
 
     pub(super) fn ai_gw_saved(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "渠道已保存。",
+            GuiLocale::ZhCn => "模型厂商已保存。",
             GuiLocale::EnUs => "AI Gateway channel saved.",
         }
     }
 
     pub(super) fn ai_gw_deleted(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "渠道已删除。",
+            GuiLocale::ZhCn => "模型厂商已删除。",
             GuiLocale::EnUs => "AI Gateway channel deleted.",
         }
     }
 
     pub(super) fn ai_gw_save_failed(self, err: &str) -> String {
         match self.locale {
-            GuiLocale::ZhCn => format!("保存渠道配置失败：{err}"),
+            GuiLocale::ZhCn => format!("保存模型厂商配置失败：{err}"),
             GuiLocale::EnUs => format!("Failed to save AI Gateway config: {err}"),
         }
     }
 
     pub(super) fn ai_gw_provider_name_empty(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "请输入渠道名称。",
+            GuiLocale::ZhCn => "请输入模型厂商名称。",
             GuiLocale::EnUs => "Please enter a channel name.",
         }
     }
 
     pub(super) fn ai_gw_select_channel(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "请选择一个渠道。",
+            GuiLocale::ZhCn => "请选择一个模型厂商。",
             GuiLocale::EnUs => "Please select a channel.",
         }
     }
 
     pub(super) fn ai_gw_status_enabled(self, count: usize) -> String {
         match self.locale {
-            GuiLocale::ZhCn => format!("AI Gateway: 已启用 ({count} 个渠道)"),
+            GuiLocale::ZhCn => format!("大模型接入: 已启用 ({count} 个模型厂商)"),
             GuiLocale::EnUs => format!("AI Gateway: Enabled ({count} channels)"),
         }
     }
 
     pub(super) fn ai_gw_provider_name(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "渠道名称",
+            GuiLocale::ZhCn => "模型厂商名称",
             GuiLocale::EnUs => "Channel Name",
         }
     }
