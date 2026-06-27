@@ -67,12 +67,16 @@ timeoutSecs = 600
 
 请求头：
 
-- `x-api-key: <provider.api_key>`
-- `anthropic-version: <configured-or-default>`
+- `authorization: Bearer <provider.api_key>`
+- `anthropic-version: 2023-06-01`
+- `anthropic-beta: <Claude Code beta flags>`
+- `x-app: cli`
+- `user-agent: claude-cli/2.1.185 (external, cli)`
 - `content-type: application/json`
-- 可选 beta header 只在明确启用对应能力时发送。
+- `accept: application/json`
 
-默认 `anthropic-version` 建议先集中放在 adapter 常量或 provider 扩展配置里。不要散落在转换函数中。
+Anthropic / GLM Anthropic-compatible profile 的上游 header 由 adapter 托管，按 Claude Code
+参考请求生成，不透传 Codex 入站 header。
 
 ## 3. 请求映射
 
@@ -133,7 +137,8 @@ GatewayRequest.instructions
   -> Anthropic top-level system
 ```
 
-若未来需要 prompt caching，可把稳定 system 前缀拆成 `system` block 并附 `cache_control`。
+Anthropic provider 会在出站适配层模拟 Claude Code 的 block-level prompt caching：把非空 `system`
+文本转成 `system[]` text block，并在可缓存 block 上附 `cache_control`。
 
 ## 4. Tool 映射
 
@@ -145,8 +150,9 @@ Anthropic client tool 形态：
   "description": "...",
   "input_schema": {
     "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
     "properties": {},
-    "required": []
+    "additionalProperties": false
   }
 }
 ```
@@ -180,7 +186,12 @@ Responses function tool：
 {
   "name": "<encoded>",
   "description": "...",
-  "input_schema": {}
+  "input_schema": {
+    "type": "object",
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "properties": {},
+    "additionalProperties": false
+  }
 }
 ```
 
@@ -437,12 +448,12 @@ Anthropic extended thinking 不能简单映射成普通 text。
 OpenAI 的 `prompt_cache_key` 不能直接映射成 Anthropic cache；它只用于 OpenAI
 Responses 侧的缓存分桶。
 
-Anthropic Messages 使用 `cache_control` 开启 prompt caching。Gateway 策略：
+Anthropic Messages 使用 block-level `cache_control` 开启 prompt caching。Gateway 策略：
 
-- Anthropic provider 默认在请求顶层加入 `cache_control: {"type":"ephemeral"}`，由 Anthropic 侧自动管理缓存断点。
-- 默认不加 `ttl`，使用 Anthropic 默认短 TTL。
-- 若 provider 或请求配置了 `prompt_cache_retention = "1h"` / `promptCacheRetention = "1h"`，转为 `cache_control: {"type":"ephemeral","ttl":"1h"}`。
-- 不做 per-block cache_control 注入，避免把 system/tools/messages 打断点策略暴露给用户。
+- Codex / Responses 入站不需要、也不应携带 Anthropic 专属 `cache_control`。
+- Anthropic provider 在出站适配层模拟 Claude Code 请求形态：`system` 文本块附 `cache_control: {"type":"ephemeral"}`。
+- 多轮历史中只给最近的 assistant text block 附 `cache_control`；user block、tool 定义、tool_use/tool_result 不加。
+- 不生成顶层 `cache_control`，不生成 `ttl`，也不把 `prompt_cache_retention = "1h"` 映射为 Anthropic `ttl`。
 - request log 记录 Anthropic cache read/create token。
 
 ## 10. 实现计划
@@ -527,4 +538,4 @@ Anthropic Messages 使用 `cache_control` 开启 prompt caching。Gateway 策略
 - `tool_choice none`、`any`、`tool` 的细节需要按当前官方文档和实测确认。
 - fine-grained tool streaming 是否默认开启，还是只对 custom/freeform 工具开启。
 - thinking block 是否应该默认暴露给 Codex UI，还是只作为 reasoning raw 保留。
-- prompt caching 已使用 Anthropic 顶层 `cache_control` 自动策略；OpenAI `prompt_cache_key` 不映射到 Anthropic。
+- prompt caching 已按 Claude Code 样例使用 Anthropic block-level `cache_control`；OpenAI `prompt_cache_key` 不映射到 Anthropic。

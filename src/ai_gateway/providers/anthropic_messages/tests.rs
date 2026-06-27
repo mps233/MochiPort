@@ -1,14 +1,20 @@
-use super::options::AnthropicProviderProfile;
+use super::options::{AnthropicProviderOptions, AnthropicProviderProfile};
 use super::request::build_anthropic_request;
 use super::response::convert_anthropic_response;
 use super::stream::AnthropicSseToResponsesSse;
-use super::types::ANTHROPIC_WEB_SEARCH_TYPE;
+use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE_CODE_USER_AGENT};
+use super::{bearer_authorization, build_anthropic_upstream_request, merge_anthropic_betas};
+use crate::ai_gateway::config::{ProviderConfig, ProviderType};
+use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::model::{
     ContentPart, FunctionCallOutput, FunctionCallOutputContentItem, GatewayRequest, ItemContent,
     ItemType, Reasoning, ResponseItem,
 };
 use crate::ai_gateway::tool_names::ToolNameMap;
-use axum::body::Bytes;
+use axum::{
+    body::Bytes,
+    http::{HeaderMap, HeaderValue},
+};
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 
@@ -71,6 +77,17 @@ fn request(input: Vec<ResponseItem>) -> GatewayRequest {
     }
 }
 
+fn provider(api_key: &str, compatibility: Option<&str>) -> ProviderConfig {
+    ProviderConfig {
+        name: "claude".to_string(),
+        provider_type: ProviderType::AnthropicMessages,
+        compatibility: compatibility.map(ToOwned::to_owned),
+        base_url: "https://api.anthropic.com/v1".to_string(),
+        api_key: api_key.to_string(),
+        ..Default::default()
+    }
+}
+
 fn message(role: &str, text: &str) -> ResponseItem {
     ResponseItem {
         item_type: ItemType::Message,
@@ -126,6 +143,153 @@ fn parse_events_from_bytes(chunks: &[Bytes]) -> Vec<(String, Value)> {
 }
 
 #[test]
+fn bearer_authorization_normalizes_values() {
+    assert_eq!(
+        bearer_authorization("Bearer access-token"),
+        "Bearer access-token"
+    );
+    assert_eq!(
+        bearer_authorization("sk-ant-api03-example"),
+        "Bearer sk-ant-api03-example"
+    );
+    assert_eq!(bearer_authorization("proxy-key"), "Bearer proxy-key");
+}
+
+#[test]
+fn merge_anthropic_betas_preserves_required_and_extra_flags() {
+    let merged = merge_anthropic_betas(
+        "claude-code-20250219,interleaved-thinking-2025-05-14",
+        "extra-beta,claude-code-20250219",
+    );
+
+    assert_eq!(
+        merged,
+        "claude-code-20250219,interleaved-thinking-2025-05-14,extra-beta"
+    );
+}
+
+#[test]
+fn builds_claude_code_aligned_headers_for_anthropic_profile() {
+    let client = reqwest::Client::new();
+    let mut inbound_headers = HeaderMap::new();
+    inbound_headers.insert("session_id", HeaderValue::from_static("session-123"));
+    inbound_headers.insert("thread-id", HeaderValue::from_static("thread-123"));
+    inbound_headers.insert("origin", HeaderValue::from_static("https://codex.local"));
+    inbound_headers.insert("user-agent", HeaderValue::from_static("Codex/1.0"));
+    inbound_headers.insert("accept", HeaderValue::from_static("application/json"));
+    inbound_headers.insert(
+        "anthropic-beta",
+        HeaderValue::from_static("custom-beta,claude-code-20250219"),
+    );
+    let ctx = GatewayContext::extract(&inbound_headers, None);
+    let mut req = request(vec![message("user", "hello")]);
+    req.stream = true;
+    let body = json!({"model":"claude-opus-4-8","messages":[],"stream":true});
+    let provider = provider("Bearer oauth-token", Some("anthropic"));
+    let options = AnthropicProviderOptions::from_provider(&provider).unwrap();
+
+    let upstream =
+        build_anthropic_upstream_request(&client, &ctx, &req, &body, &provider, &options).unwrap();
+    let headers = upstream.headers();
+
+    assert_eq!(upstream.version(), reqwest::Version::HTTP_11);
+    assert_eq!(headers.get("authorization").unwrap(), "Bearer oauth-token");
+    assert!(headers.get("x-api-key").is_none());
+    assert_eq!(headers.get("content-type").unwrap(), "application/json");
+    assert_eq!(headers.get("anthropic-version").unwrap(), "2023-06-01");
+    assert_eq!(headers.get("x-app").unwrap(), "cli");
+    assert_eq!(headers.get("user-agent").unwrap(), CLAUDE_CODE_USER_AGENT);
+    assert_eq!(headers.get("accept").unwrap(), "application/json");
+    assert_eq!(
+        headers.get("accept-encoding").unwrap(),
+        "gzip, deflate, br, zstd"
+    );
+    assert_eq!(headers.get("connection").unwrap(), "keep-alive");
+    assert_eq!(headers.get("x-stainless-runtime").unwrap(), "node");
+    assert_eq!(headers.get("x-stainless-lang").unwrap(), "js");
+    assert_eq!(headers.get("x-stainless-timeout").unwrap(), "600");
+    assert_eq!(headers.get("x-stainless-retry-count").unwrap(), "0");
+    assert_eq!(
+        headers.get("x-claude-code-session-id").unwrap(),
+        "session-123"
+    );
+    assert_eq!(
+        headers
+            .get("anthropic-dangerous-direct-browser-access")
+            .unwrap(),
+        "true"
+    );
+    let beta = headers.get("anthropic-beta").unwrap().to_str().unwrap();
+    assert_eq!(beta, ANTHROPIC_CLAUDE_CODE_BETA);
+    assert_eq!(
+        headers.get_all("user-agent").iter().count(),
+        1,
+        "managed Claude Code headers must replace passthrough values instead of appending"
+    );
+    assert!(headers.get("session-id").is_none());
+    assert!(headers.get("thread-id").is_none());
+    assert!(headers.get("origin").is_none());
+    assert!(headers.get("x-client-request-id").is_none());
+}
+
+#[test]
+fn anthropic_profile_uses_claude_code_headers_for_regular_api_keys() {
+    let client = reqwest::Client::new();
+    let ctx = GatewayContext::extract(&HeaderMap::new(), Some("cache-key"));
+    let req = request(vec![message("user", "hello")]);
+    let body = json!({"model":"claude-opus-4-8","messages":[]});
+    let provider = provider("sk-ant-api03-example", Some("anthropic"));
+    let options = AnthropicProviderOptions::from_provider(&provider).unwrap();
+
+    let upstream =
+        build_anthropic_upstream_request(&client, &ctx, &req, &body, &provider, &options).unwrap();
+    let headers = upstream.headers();
+
+    assert_eq!(
+        headers.get("authorization").unwrap(),
+        "Bearer sk-ant-api03-example"
+    );
+    assert!(headers.get("x-api-key").is_none());
+    assert_eq!(
+        headers.get("anthropic-beta").unwrap(),
+        ANTHROPIC_CLAUDE_CODE_BETA
+    );
+    assert_eq!(headers.get("x-app").unwrap(), "cli");
+    assert_eq!(headers.get("x-stainless-runtime").unwrap(), "node");
+    assert_eq!(
+        headers.get("x-claude-code-session-id").unwrap(),
+        "cache-key"
+    );
+}
+
+#[test]
+fn glm_profile_also_uses_claude_code_headers() {
+    let client = reqwest::Client::new();
+    let mut inbound_headers = HeaderMap::new();
+    inbound_headers.insert("user-agent", HeaderValue::from_static("Codex/1.0"));
+    let ctx = GatewayContext::extract(&inbound_headers, None);
+    let req = request(vec![message("user", "hello")]);
+    let body = json!({"model":"glm-5.2","messages":[]});
+    let provider = provider("glm-key", Some("glm_anthropic"));
+    let options = AnthropicProviderOptions::from_provider(&provider).unwrap();
+
+    let upstream =
+        build_anthropic_upstream_request(&client, &ctx, &req, &body, &provider, &options).unwrap();
+    let headers = upstream.headers();
+
+    assert_eq!(headers.get("authorization").unwrap(), "Bearer glm-key");
+    assert!(headers.get("x-api-key").is_none());
+    assert_eq!(headers.get("user-agent").unwrap(), CLAUDE_CODE_USER_AGENT);
+    assert_eq!(
+        headers.get("anthropic-beta").unwrap(),
+        ANTHROPIC_CLAUDE_CODE_BETA
+    );
+    assert_eq!(headers.get("x-app").unwrap(), "cli");
+    assert!(headers.get("session-id").is_none());
+    assert!(headers.get("thread-id").is_none());
+}
+
+#[test]
 fn builds_anthropic_text_request() {
     let (body, _) = build_anthropic_request(
         &request(vec![
@@ -134,33 +298,118 @@ fn builds_anthropic_text_request() {
             message("user", "continue"),
         ]),
         AnthropicProviderProfile::Anthropic,
-        None,
     )
     .unwrap();
 
     assert_eq!(body["model"], "claude-sonnet-4-6");
     assert_eq!(body["max_tokens"], 1234);
-    assert_eq!(body["system"], "Be precise.");
+    assert_eq!(body["system"][0]["type"], "text");
+    assert_eq!(body["system"][0]["text"], "Be precise.");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(body["temperature"], 0.2);
     assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][0]["content"][0]["text"], "hello");
     assert_eq!(body["messages"][1]["role"], "assistant");
     assert_eq!(body["messages"][1]["content"][0]["text"], "hi");
-    assert_eq!(body["cache_control"]["type"], "ephemeral");
-    assert!(body["cache_control"].get("ttl").is_none());
+    assert_eq!(
+        body["messages"][1]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert!(
+        body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(
+        body["messages"][2]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(body.get("cache_control").is_none());
 }
 
 #[test]
-fn builds_anthropic_request_with_one_hour_prompt_cache_ttl() {
-    let (body, _) = build_anthropic_request(
-        &request(vec![message("user", "hello")]),
-        AnthropicProviderProfile::Anthropic,
-        Some("1h"),
-    )
-    .unwrap();
+fn builds_anthropic_request_with_claude_code_block_level_ephemeral_cache() {
+    let mut req = request(vec![message("user", "hello")]);
+    req.prompt_cache_retention = Some("1h".to_string());
+    req.tools = vec![json!({
+        "type": "function",
+        "name": "read_file",
+        "description": "Read a file",
+        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"]
+        }
+    })];
 
-    assert_eq!(body["cache_control"]["type"], "ephemeral");
-    assert_eq!(body["cache_control"]["ttl"], "1h");
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
+
+    assert!(body.get("cache_control").is_none());
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert!(body["tools"][0].get("cache_control").is_none());
+    assert!(
+        body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(body["system"][0]["cache_control"].get("ttl").is_none());
+}
+
+#[test]
+fn caches_only_latest_assistant_text_block() {
+    let mut req = request(vec![
+        message("user", "start"),
+        message("assistant", "old answer"),
+        message("user", "continue"),
+        message("assistant", "latest answer"),
+        message("user", "next"),
+    ]);
+    req.instructions = None;
+
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
+
+    assert!(body.get("system").is_none());
+    assert!(body.get("cache_control").is_none());
+    assert!(
+        body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert_eq!(
+        body["messages"][3]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert!(
+        body["messages"][4]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+}
+
+#[test]
+fn does_not_cache_assistant_tool_use_blocks() {
+    let mut tool_call = message("assistant", "ignored");
+    tool_call.item_type = ItemType::FunctionCall;
+    tool_call.content = None;
+    tool_call.name = Some("read_file".to_string());
+    tool_call.call_id = Some("toolu_123".to_string());
+    tool_call.arguments = Some(crate::ai_gateway::model::JsonString::Value(json!({
+        "path": "README.md"
+    })));
+    let mut req = request(vec![message("user", "run"), tool_call]);
+    req.instructions = None;
+
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
+
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+    assert!(
+        body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
 }
 
 #[test]
@@ -182,7 +431,6 @@ fn builds_anthropic_tool_result_message() {
     let (body, _) = build_anthropic_request(
         &request(vec![message("user", "run"), output]),
         AnthropicProviderProfile::Anthropic,
-        None,
     )
     .unwrap();
     assert_eq!(body["messages"][1]["role"], "user");
@@ -202,7 +450,6 @@ fn builds_anthropic_tool_result_with_image_content_blocks() {
     let (body, _) = build_anthropic_request(
         &request(vec![message("user", "run"), output]),
         AnthropicProviderProfile::Anthropic,
-        None,
     )
     .unwrap();
 
@@ -217,7 +464,6 @@ fn builds_glm_tool_result_with_image_content_blocks() {
     let (body, _) = build_anthropic_request(
         &request(vec![message("user", "run"), output]),
         AnthropicProviderProfile::GlmAnthropic,
-        None,
     )
     .unwrap();
 
@@ -313,7 +559,6 @@ fn builds_anthropic_tool_search_result_message_and_loaded_tools() {
             output,
         ]),
         AnthropicProviderProfile::Anthropic,
-        None,
     )
     .unwrap();
 
@@ -370,17 +615,85 @@ fn builds_anthropic_tools_and_tool_choice() {
         "name": "open page"
     }));
 
-    let (body, map) =
-        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    let (body, map) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["tools"][0]["name"], "browser__codexns__open_page");
     assert_eq!(body["tools"][0]["description"], "Open a URL");
+    assert_eq!(
+        body["tools"][0]["input_schema"]["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
     assert_eq!(body["tools"][0]["input_schema"]["required"][0], "url");
+    assert_eq!(
+        body["tools"][0]["input_schema"]["additionalProperties"],
+        false
+    );
     assert_eq!(body["tool_choice"]["type"], "tool");
     assert_eq!(body["tool_choice"]["name"], "browser__codexns__open_page");
 
     let target = map.decode("browser__codexns__open_page");
     assert_eq!(target.namespace.as_deref(), Some("browser"));
     assert_eq!(target.name, "open page");
+}
+
+#[test]
+fn preserves_native_anthropic_client_tool_shape() {
+    let mut req = request(vec![message("user", "search docs")]);
+    req.tools = vec![json!({
+        "name": "WebSearch",
+        "description": "Search the web.",
+        "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        "input_schema": {
+            "type": "object",
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "minLength": 2}
+            },
+            "additionalProperties": false
+        }
+    })];
+    req.tool_choice = Some(json!({
+        "type": "tool",
+        "name": "WebSearch"
+    }));
+
+    let (body, map) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
+    assert_eq!(body["tools"][0]["name"], "WebSearch");
+    assert!(body["tools"][0].get("cache_control").is_none());
+    assert_eq!(
+        body["tools"][0]["input_schema"]["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(body["tool_choice"]["type"], "tool");
+    assert_eq!(body["tool_choice"]["name"], "WebSearch");
+
+    let target = map.decode("WebSearch");
+    assert_eq!(target.namespace, None);
+    assert_eq!(target.name, "WebSearch");
+}
+
+#[test]
+fn builds_claude_code_style_input_schema_for_tools_without_parameters() {
+    let mut req = request(vec![message("user", "list cron jobs")]);
+    req.tools = vec![json!({
+        "type": "function",
+        "name": "cron_list",
+        "description": "List all cron jobs."
+    })];
+
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
+    let schema = &body["tools"][0]["input_schema"];
+
+    assert_eq!(body["tools"][0]["name"], "cron_list");
+    assert_eq!(schema["type"], "object");
+    assert_eq!(
+        schema["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(schema["properties"], json!({}));
+    assert_eq!(schema["additionalProperties"], false);
+    assert!(schema.get("required").is_none());
 }
 
 #[test]
@@ -401,9 +714,16 @@ fn builds_anthropic_apply_patch_custom_tool() {
         "name": "apply_patch"
     }));
 
-    let (body, map) =
-        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    let (body, map) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["tools"][0]["name"], "apply_patch");
+    assert_eq!(
+        body["tools"][0]["input_schema"]["$schema"],
+        "https://json-schema.org/draft/2020-12/schema"
+    );
+    assert_eq!(
+        body["tools"][0]["input_schema"]["additionalProperties"],
+        false
+    );
     assert_eq!(body["tools"][0]["input_schema"]["required"][0], "input");
     assert_eq!(
         body["tools"][0]["input_schema"]["properties"]["input"]["description"],
@@ -448,8 +768,7 @@ fn builds_anthropic_web_search_server_tool() {
         }
     })];
 
-    let (body, _) =
-        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
     assert_eq!(body["tools"][0]["name"], "web_search");
     assert_eq!(body["tools"][0]["max_uses"], 3);
@@ -466,8 +785,7 @@ fn preserves_native_anthropic_web_search_server_tool() {
         "allowed_domains": ["www.rust-lang.org"]
     })];
 
-    let (body, _) =
-        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
     assert_eq!(body["tools"][0]["name"], "web_search");
     assert_eq!(body["tools"][0]["max_uses"], 3);
@@ -486,8 +804,7 @@ fn maps_responses_web_search_filters_to_anthropic_allowed_domains() {
         }
     })];
 
-    let (body, _) =
-        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
     assert_eq!(body["tools"][0]["name"], "web_search");
     assert_eq!(body["tools"][0]["allowed_domains"][0], "www.rust-lang.org");
@@ -504,8 +821,7 @@ fn builds_anthropic_adaptive_thinking_from_reasoning_effort() {
         generate_summary: None,
     });
 
-    let (body, _) =
-        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["thinking"]["type"], "adaptive");
     assert_eq!(body["output_config"]["effort"], "max");
     assert!(body.get("reasoning_effort").is_none());
@@ -520,8 +836,7 @@ fn builds_anthropic_budget_thinking_from_explicit_budget() {
         generate_summary: None,
     });
 
-    let (body, _) =
-        build_anthropic_request(&req, AnthropicProviderProfile::Anthropic, None).unwrap();
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 2_048);
     assert!(body.get("output_config").is_none());
@@ -536,8 +851,7 @@ fn builds_glm_reasoning_effort_from_reasoning() {
         generate_summary: None,
     });
 
-    let (body, _) =
-        build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic, None).unwrap();
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["reasoning_effort"], "max");
     assert!(body.get("output_config").is_none());
@@ -552,8 +866,7 @@ fn maps_glm_medium_reasoning_to_high() {
         generate_summary: None,
     });
 
-    let (body, _) =
-        build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic, None).unwrap();
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic).unwrap();
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["reasoning_effort"], "high");
 }
@@ -567,8 +880,7 @@ fn maps_glm_none_reasoning_to_disabled_thinking() {
         generate_summary: None,
     });
 
-    let (body, _) =
-        build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic, None).unwrap();
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::GlmAnthropic).unwrap();
     assert_eq!(body["thinking"]["type"], "disabled");
     assert!(body.get("reasoning_effort").is_none());
 }

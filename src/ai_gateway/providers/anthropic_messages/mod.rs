@@ -9,7 +9,7 @@ use serde_json::Value;
 use tracing::{debug, error};
 
 use crate::ai_gateway::config::ProviderConfig;
-use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
+use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::GatewayRequest;
 use crate::ai_gateway::request_log::{
@@ -45,11 +45,16 @@ mod types;
 mod tests;
 
 use options::{
-    AnthropicAuthStyle, AnthropicProviderOptions, AnthropicProviderProfile, AnthropicVersionHeader,
+    AnthropicAuthStyle, AnthropicHeaderStyle, AnthropicProviderOptions, AnthropicProviderProfile,
+    AnthropicVersionHeader,
 };
 use request::build_anthropic_request;
 use response::convert_anthropic_response;
 use stream::AnthropicSseToResponsesSse;
+use types::{
+    ANTHROPIC_CLAUDE_CODE_BETA, CLAUDE_CODE_STAINLESS_PACKAGE_VERSION,
+    CLAUDE_CODE_STAINLESS_RUNTIME_VERSION, CLAUDE_CODE_USER_AGENT,
+};
 
 pub async fn handle(
     client: &reqwest::Client,
@@ -60,33 +65,18 @@ pub async fn handle(
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     let options = AnthropicProviderOptions::from_provider(provider)?;
-    let prompt_cache_retention = request
-        .prompt_cache_retention
-        .as_deref()
-        .or(provider.prompt_cache_retention.as_deref());
-    let (anthropic_body, tool_name_map) =
-        build_anthropic_request(request, options.profile, prompt_cache_retention)?;
+    let (anthropic_body, tool_name_map) = build_anthropic_request(request, options.profile)?;
     let url = options.messages_url(provider);
     debug!(url = %url, stream = false, "proxying to anthropic messages");
 
-    let req_builder = client
-        .post(&url)
-        .header("content-type", "application/json")
-        .json(&anthropic_body);
-    let req_builder = apply_anthropic_auth(req_builder, provider, &options);
-    let req_builder = apply_anthropic_version_header(req_builder, &options);
-    let upstream_req = apply_upstream_headers(
-        apply_total_request_timeout(req_builder, provider.timeout_secs, request.stream),
-        &ctx.upstream_headers,
-    )
-    .build()
-    .map_err(|e| {
-        error!(error = %e, "build anthropic upstream request failed");
-        GatewayError::upstream(
-            StatusCode::BAD_GATEWAY,
-            format!("build upstream request: {e}"),
-        )
-    })?;
+    let upstream_req = build_anthropic_upstream_request(
+        client,
+        ctx,
+        request,
+        &anthropic_body,
+        provider,
+        &options,
+    )?;
 
     if let Some(log_context) = &log_context {
         let update = RequestLogUpdate {
@@ -164,22 +154,212 @@ pub async fn handle(
     Ok(response)
 }
 
-fn apply_anthropic_auth(
-    request: reqwest::RequestBuilder,
+fn build_anthropic_upstream_request(
+    client: &reqwest::Client,
+    ctx: &GatewayContext,
+    request: &GatewayRequest,
+    anthropic_body: &Value,
     provider: &ProviderConfig,
     options: &AnthropicProviderOptions,
-) -> reqwest::RequestBuilder {
+) -> Result<reqwest::Request, GatewayError> {
+    let req_builder = client
+        .post(options.messages_url(provider))
+        .json(anthropic_body);
+    let req_builder =
+        apply_total_request_timeout(req_builder, provider.timeout_secs, request.stream);
+    let mut upstream_req = req_builder.build().map_err(|e| {
+        error!(error = %e, "build anthropic upstream request failed");
+        GatewayError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("build upstream request: {e}"),
+        )
+    })?;
+
+    *upstream_req.version_mut() = reqwest::Version::HTTP_11;
+    apply_anthropic_managed_headers(upstream_req.headers_mut(), ctx, provider, options)?;
+    Ok(upstream_req)
+}
+
+fn apply_anthropic_managed_headers(
+    headers: &mut HeaderMap,
+    ctx: &GatewayContext,
+    provider: &ProviderConfig,
+    options: &AnthropicProviderOptions,
+) -> Result<(), GatewayError> {
+    headers.clear();
+    insert_static_header(headers, "content-type", "application/json");
+    apply_anthropic_auth(headers, provider, options)?;
+    apply_anthropic_version_header(headers, options);
+    apply_anthropic_client_headers(headers, ctx, provider, options)?;
+    Ok(())
+}
+
+fn apply_anthropic_auth(
+    headers: &mut HeaderMap,
+    provider: &ProviderConfig,
+    options: &AnthropicProviderOptions,
+) -> Result<(), GatewayError> {
     match options.auth {
-        AnthropicAuthStyle::XApiKey => request.header("x-api-key", provider.api_key.clone()),
+        AnthropicAuthStyle::XApiKey => {
+            insert_dynamic_header(headers, "x-api-key", provider.api_key.trim())?;
+        }
+        AnthropicAuthStyle::Bearer => {
+            insert_dynamic_header(
+                headers,
+                "authorization",
+                bearer_authorization(&provider.api_key),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn apply_anthropic_version_header(headers: &mut HeaderMap, options: &AnthropicProviderOptions) {
+    match options.version_header {
+        AnthropicVersionHeader::Required(version) => {
+            insert_static_header(headers, "anthropic-version", version);
+        }
     }
 }
 
-fn apply_anthropic_version_header(
-    request: reqwest::RequestBuilder,
+fn apply_anthropic_client_headers(
+    headers: &mut HeaderMap,
+    ctx: &GatewayContext,
+    provider: &ProviderConfig,
     options: &AnthropicProviderOptions,
-) -> reqwest::RequestBuilder {
-    match options.version_header {
-        AnthropicVersionHeader::Required(version) => request.header("anthropic-version", version),
+) -> Result<(), GatewayError> {
+    match options.headers {
+        AnthropicHeaderStyle::Plain => {}
+        AnthropicHeaderStyle::ClaudeCode => {
+            let existing_beta = headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            let merged_beta = merge_anthropic_betas(ANTHROPIC_CLAUDE_CODE_BETA, existing_beta);
+            insert_dynamic_header(headers, "anthropic-beta", &merged_beta)?;
+            insert_static_header(headers, "anthropic-dangerous-direct-browser-access", "true");
+            insert_static_header(headers, "x-app", "cli");
+            insert_static_header(headers, "accept", "application/json");
+            insert_static_header(headers, "accept-encoding", "gzip, deflate, br, zstd");
+            insert_static_header(headers, "connection", "keep-alive");
+            insert_static_header(headers, "user-agent", CLAUDE_CODE_USER_AGENT);
+            insert_dynamic_header(
+                headers,
+                "x-stainless-timeout",
+                provider.timeout_secs.to_string(),
+            )?;
+            insert_static_header(headers, "x-stainless-retry-count", "0");
+            insert_static_header(headers, "x-stainless-runtime", "node");
+            insert_static_header(headers, "x-stainless-lang", "js");
+            insert_static_header(headers, "x-stainless-arch", stainless_arch());
+            insert_static_header(headers, "x-stainless-os", stainless_os());
+            insert_static_header(
+                headers,
+                "x-stainless-package-version",
+                CLAUDE_CODE_STAINLESS_PACKAGE_VERSION,
+            );
+            insert_static_header(
+                headers,
+                "x-stainless-runtime-version",
+                CLAUDE_CODE_STAINLESS_RUNTIME_VERSION,
+            );
+            let session_id = ctx.session_id.as_deref().unwrap_or(&ctx.prompt_cache_key);
+            insert_dynamic_header(headers, "x-claude-code-session-id", session_id)?;
+        }
+    }
+    Ok(())
+}
+
+fn insert_static_header(headers: &mut HeaderMap, name: &'static str, value: &'static str) {
+    headers.insert(
+        HeaderName::from_static(name),
+        HeaderValue::from_static(value),
+    );
+}
+
+fn insert_dynamic_header(
+    headers: &mut HeaderMap,
+    name: &'static str,
+    value: impl AsRef<str>,
+) -> Result<(), GatewayError> {
+    let value = HeaderValue::from_str(value.as_ref()).map_err(|e| {
+        GatewayError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("invalid Anthropic header '{name}': {e}"),
+        )
+    })?;
+    headers.insert(HeaderName::from_static(name), value);
+    Ok(())
+}
+
+fn bearer_authorization(api_key: &str) -> String {
+    let api_key = api_key.trim();
+    if let Some(token) = strip_bearer_prefix(api_key) {
+        format!("Bearer {}", token.trim())
+    } else {
+        format!("Bearer {api_key}")
+    }
+}
+
+fn strip_bearer_prefix(value: &str) -> Option<&str> {
+    let prefix_len = "bearer ".len();
+    if value
+        .get(..prefix_len)
+        .map(|prefix| prefix.eq_ignore_ascii_case("bearer "))
+        .unwrap_or(false)
+    {
+        Some(&value[prefix_len..])
+    } else {
+        None
+    }
+}
+
+fn merge_anthropic_betas(required: &str, inbound: &str) -> String {
+    let mut merged = Vec::new();
+    for beta in required.split(',').chain(inbound.split(',')) {
+        let beta = beta.trim();
+        if !beta.is_empty() && !merged.contains(&beta) {
+            merged.push(beta);
+        }
+    }
+    merged.join(",")
+}
+
+fn stainless_arch() -> &'static str {
+    #[cfg(target_arch = "x86_64")]
+    {
+        "x64"
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        "arm64"
+    }
+    #[cfg(all(not(target_arch = "x86_64"), not(target_arch = "aarch64")))]
+    {
+        std::env::consts::ARCH
+    }
+}
+
+fn stainless_os() -> &'static str {
+    #[cfg(target_os = "windows")]
+    {
+        "Windows"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "MacOS"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "Linux"
+    }
+    #[cfg(all(
+        not(target_os = "windows"),
+        not(target_os = "macos"),
+        not(target_os = "linux")
+    ))]
+    {
+        std::env::consts::OS
     }
 }
 

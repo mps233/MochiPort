@@ -177,7 +177,8 @@ pub enum AnthropicAuthStyle {
 
 默认：
 
-- `anthropic`：`x-api-key`
+- `anthropic`：`Authorization: Bearer`，并按 Claude Code 参考请求发送托管 header
+- `glm_anthropic`：`Authorization: Bearer`，与 Anthropic profile 保持 Claude Code header 形态
 - `openrouter_anthropic`：通常 `Authorization: Bearer`
 - 其它 vendor profile 按实测配置
 

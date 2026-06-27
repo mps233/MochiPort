@@ -13,7 +13,6 @@ use super::types::DEFAULT_MAX_TOKENS;
 pub(super) fn build_anthropic_request(
     request: &GatewayRequest,
     profile: AnthropicProviderProfile,
-    prompt_cache_retention: Option<&str>,
 ) -> Result<(Value, ToolNameMap), GatewayError> {
     let mut tool_name_map = ToolNameMap::default();
     let mut body = Map::new();
@@ -55,33 +54,91 @@ pub(super) fn build_anthropic_request(
             convert_tool_choice_to_anthropic(tool_choice, &mut tool_name_map),
         );
     }
-    insert_prompt_cache_control(&mut body, prompt_cache_retention);
+    insert_prompt_cache_control(&mut body);
     Ok((Value::Object(body), tool_name_map))
 }
 
-fn insert_prompt_cache_control(
-    body: &mut Map<String, Value>,
-    prompt_cache_retention: Option<&str>,
-) {
-    if body.contains_key("cache_control") {
-        return;
+fn insert_prompt_cache_control(body: &mut Map<String, Value>) {
+    let cache_control = anthropic_cache_control();
+
+    if let Some(system) = body.get_mut("system") {
+        insert_system_cache_control(system, &cache_control);
     }
 
-    let mut cache_control = Map::new();
-    cache_control.insert("type".to_string(), json!("ephemeral"));
-    if matches!(
-        normalized_anthropic_cache_ttl(prompt_cache_retention),
-        Some("1h")
-    ) {
-        cache_control.insert("ttl".to_string(), json!("1h"));
+    if let Some(Value::Array(messages)) = body.get_mut("messages") {
+        insert_message_cache_control(messages, &cache_control);
     }
-    body.insert("cache_control".to_string(), Value::Object(cache_control));
 }
 
-fn normalized_anthropic_cache_ttl(prompt_cache_retention: Option<&str>) -> Option<&'static str> {
-    let value = prompt_cache_retention?.trim().to_ascii_lowercase();
-    match value.as_str() {
-        "1h" => Some("1h"),
-        _ => None,
+fn insert_system_cache_control(system: &mut Value, cache_control: &Map<String, Value>) {
+    match system {
+        Value::String(text) if !text.is_empty() => {
+            let text = text.clone();
+            *system = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": cache_control,
+            }]);
+        }
+        Value::Array(parts) => {
+            for part in parts {
+                if let Value::Object(part) = part
+                    && is_cacheable_anthropic_text_block(part)
+                {
+                    part.entry("cache_control".to_string())
+                        .or_insert_with(|| Value::Object(cache_control.clone()));
+                }
+            }
+        }
+        _ => {}
     }
+}
+
+fn insert_message_cache_control(messages: &mut [Value], cache_control: &Map<String, Value>) {
+    for message in messages.iter_mut().rev() {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = message.get_mut("content") else {
+            continue;
+        };
+        match content {
+            Value::String(text) if !text.is_empty() => {
+                let text = text.clone();
+                *content = json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": cache_control,
+                }]);
+                return;
+            }
+            Value::Array(parts) => {
+                if let Some(Value::Object(part)) = parts.iter_mut().rev().find(|part| {
+                    part.as_object()
+                        .map(is_cacheable_anthropic_text_block)
+                        .unwrap_or(false)
+                }) {
+                    part.entry("cache_control".to_string())
+                        .or_insert_with(|| Value::Object(cache_control.clone()));
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn is_cacheable_anthropic_text_block(block: &Map<String, Value>) -> bool {
+    block.get("type").and_then(Value::as_str) == Some("text")
+        && block
+            .get("text")
+            .and_then(Value::as_str)
+            .map(|text| !text.is_empty())
+            .unwrap_or(false)
+}
+
+fn anthropic_cache_control() -> Map<String, Value> {
+    let mut cache_control = Map::new();
+    cache_control.insert("type".to_string(), json!("ephemeral"));
+    cache_control
 }

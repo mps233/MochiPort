@@ -32,6 +32,13 @@ impl AnthropicProviderProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AnthropicAuthStyle {
     XApiKey,
+    Bearer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AnthropicHeaderStyle {
+    Plain,
+    ClaudeCode,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +101,7 @@ pub(super) struct AnthropicQuirks {
 pub(super) struct AnthropicProviderOptions {
     pub profile: AnthropicProviderProfile,
     pub auth: AnthropicAuthStyle,
+    pub headers: AnthropicHeaderStyle,
     pub version_header: AnthropicVersionHeader,
     pub endpoint: AnthropicEndpointStyle,
     pub capabilities: AnthropicCapabilities,
@@ -119,17 +127,24 @@ impl AnthropicProviderOptions {
     }
 
     pub(super) fn anthropic() -> Self {
-        Self::base(AnthropicProviderProfile::Anthropic)
+        let mut options = Self::base(AnthropicProviderProfile::Anthropic);
+        options.auth = AnthropicAuthStyle::Bearer;
+        options.headers = AnthropicHeaderStyle::ClaudeCode;
+        options
     }
 
     pub(super) fn glm_anthropic() -> Self {
-        Self::base(AnthropicProviderProfile::GlmAnthropic)
+        let mut options = Self::base(AnthropicProviderProfile::GlmAnthropic);
+        options.auth = AnthropicAuthStyle::Bearer;
+        options.headers = AnthropicHeaderStyle::ClaudeCode;
+        options
     }
 
     fn base(profile: AnthropicProviderProfile) -> Self {
         Self {
             profile,
             auth: AnthropicAuthStyle::XApiKey,
+            headers: AnthropicHeaderStyle::Plain,
             version_header: AnthropicVersionHeader::Required(ANTHROPIC_VERSION),
             endpoint: AnthropicEndpointStyle::V1Messages,
             capabilities: AnthropicCapabilities {
@@ -177,7 +192,8 @@ mod tests {
     fn default_profile_is_anthropic() {
         let options = AnthropicProviderOptions::from_provider(&provider(None)).unwrap();
         assert_eq!(options.profile, AnthropicProviderProfile::Anthropic);
-        assert_eq!(options.auth, AnthropicAuthStyle::XApiKey);
+        assert_eq!(options.auth, AnthropicAuthStyle::Bearer);
+        assert_eq!(options.headers, AnthropicHeaderStyle::ClaudeCode);
         assert_eq!(
             options.version_header,
             AnthropicVersionHeader::Required(ANTHROPIC_VERSION)
@@ -208,7 +224,8 @@ mod tests {
         let options = AnthropicProviderOptions::from_provider(&provider(Some("glm_anthropic")))
             .expect("profile should parse");
         assert_eq!(options.profile, AnthropicProviderProfile::GlmAnthropic);
-        assert_eq!(options.auth, AnthropicAuthStyle::XApiKey);
+        assert_eq!(options.auth, AnthropicAuthStyle::Bearer);
+        assert_eq!(options.headers, AnthropicHeaderStyle::ClaudeCode);
         assert_eq!(
             options.version_header,
             AnthropicVersionHeader::Required(ANTHROPIC_VERSION)
