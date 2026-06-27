@@ -548,7 +548,7 @@ impl GuiText {
 
     pub(super) fn ai_gateway_sessions(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "大模型接入会话",
+            GuiLocale::ZhCn => "AI Gateway 会话",
             GuiLocale::EnUs => "AI Gateway Sessions",
         }
     }
@@ -562,14 +562,14 @@ impl GuiText {
 
     pub(super) fn move_to_ai_gateway(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "归到大模型接入",
+            GuiLocale::ZhCn => "归到 AI Gateway",
             GuiLocale::EnUs => "Move to AI Gateway",
         }
     }
 
     pub(super) fn move_to_ai_gateway_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "把选中的会话移动到大模型接入",
+            GuiLocale::ZhCn => "把选中的会话移动到 AI Gateway",
             GuiLocale::EnUs => "Move selected sessions to AI Gateway",
         }
     }
