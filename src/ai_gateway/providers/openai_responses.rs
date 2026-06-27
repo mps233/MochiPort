@@ -11,7 +11,7 @@ use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
 use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::request_log::{
-    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream,
+    self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
 
 use super::{
@@ -126,8 +126,9 @@ pub async fn passthrough(
             })
         });
         let body = if let Some(log_context) = log_context {
+            let captured_upstream = UpstreamSseCaptureStream::new(byte_stream, log_context.clone());
             Body::from_stream(ResponsesSseLogStream::new(
-                Box::pin(byte_stream),
+                Box::pin(captured_upstream),
                 log_context,
             ))
         } else {
