@@ -1901,6 +1901,15 @@ fn show_ai_gw_channel_dialog(
     let name_input = text_field_row(&form_panel, &grid, text.ai_gw_provider_name(), "");
     let base_url_input = text_field_row(&form_panel, &grid, text.ai_gw_col_base_url(), "");
     let models_url_input = text_field_row(&form_panel, &grid, text.ai_gw_models_url(), "");
+    models_url_input.set_tooltip(text.ai_gw_models_url_help());
+    let models_url_help_spacer = StaticText::builder(&form_panel).with_label("").build();
+    grid.add(&models_url_help_spacer, 0, SizerFlag::Right, 0);
+    let models_url_help = StaticText::builder(&form_panel)
+        .with_label(text.ai_gw_models_url_help())
+        .build();
+    models_url_help.set_foreground_color(theme::theme().ink_muted);
+    models_url_help.wrap(540);
+    grid.add(&models_url_help, 0, SizerFlag::Expand, 0);
     let key_input = text_field_row(&form_panel, &grid, text.ai_gw_col_api_key(), "");
     let weight_input = text_field_row(&form_panel, &grid, text.ai_gw_weight(), "100");
 
@@ -2038,7 +2047,7 @@ fn show_ai_gw_channel_dialog(
         &model_mapping_model,
         &weight_input,
     );
-    let current_ai_gw_provider_template = Rc::new(RefCell::new(provider_with_default_models_url(
+    let current_ai_gw_provider_template = Rc::new(RefCell::new(normalize_provider_models_url(
         initial
             .cloned()
             .unwrap_or_else(|| default_ai_gw_service_provider(ProviderType::OpenAiResponses)),
@@ -2311,8 +2320,8 @@ fn show_ai_gw_channel_dialog(
             let mut template = current_ai_gw_provider_template.borrow().clone();
             template.base_url = base_url.clone();
             let models_url_value = strip_nul(&models_url_input.get_value());
-            let models_url = normalize_optional_url(Some(&models_url_value))
-                .or_else(|| default_models_url_for_provider(&template));
+            let models_url = normalize_optional_url(Some(&models_url_value));
+            let fallback_models_url = known_models_url_for_provider(&template);
             let fetch_models_result = fetch_models_result.clone();
             let fetch_models_in_flight = fetch_models_in_flight.clone();
             let fetch_models_closed = fetch_models_closed.clone();
@@ -2320,6 +2329,7 @@ fn show_ai_gw_channel_dialog(
                 let outcome = fetch_remote_models(
                     &base_url,
                     models_url.as_deref(),
+                    fallback_models_url.as_deref(),
                     &api_key,
                     GUI_MODEL_LIST_FETCH_TIMEOUT_SECS,
                 );
@@ -2418,8 +2428,7 @@ fn show_ai_gw_channel_dialog(
             template.compatibility = compatibility.clone();
             template.base_url = strip_nul(&base_url_input.get_value()).trim().to_string();
             let models_url_value = strip_nul(&models_url_input.get_value());
-            let models_url = normalize_optional_url(Some(&models_url_value))
-                .or_else(|| default_models_url_for_provider(&template));
+            let models_url = normalize_optional_url(Some(&models_url_value));
             let weight = strip_nul(&weight_input.get_value())
                 .trim()
                 .parse::<u32>()
@@ -2469,7 +2478,7 @@ fn apply_ai_gw_dialog_template(
     model_mapping_model: &ModelMappingModel,
     weight_input: &TextCtrl,
 ) {
-    let provider = provider_with_default_models_url(
+    let provider = normalize_provider_models_url(
         provider
             .cloned()
             .unwrap_or_else(|| default_ai_gw_service_provider(ProviderType::OpenAiResponses)),
@@ -2641,14 +2650,12 @@ fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig
             name: "openai".to_string(),
             provider_type: ProviderType::OpenAiResponses,
             base_url: "https://api.openai.com/v1".to_string(),
-            models_url: Some("https://api.openai.com/v1/models".to_string()),
             ..Default::default()
         },
         ProviderType::ChatCompletions => ProviderConfig {
             name: "deepseek".to_string(),
             provider_type: ProviderType::ChatCompletions,
             base_url: "https://api.deepseek.com/v1".to_string(),
-            models_url: Some("https://api.deepseek.com/v1/models".to_string()),
             ..Default::default()
         },
         ProviderType::AnthropicMessages => ProviderConfig {
@@ -2656,7 +2663,6 @@ fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig
             provider_type: ProviderType::AnthropicMessages,
             compatibility: Some("anthropic".to_string()),
             base_url: "https://api.anthropic.com/v1".to_string(),
-            models_url: Some("https://api.anthropic.com/v1/models".to_string()),
             ..Default::default()
         },
     }
@@ -2668,55 +2674,42 @@ fn default_ai_gw_glm_service_provider() -> ProviderConfig {
         provider_type: ProviderType::AnthropicMessages,
         compatibility: Some("glm_anthropic".to_string()),
         base_url: "https://open.bigmodel.cn/api/anthropic".to_string(),
-        models_url: Some("https://open.bigmodel.cn/api/paas/v4/models".to_string()),
         ..Default::default()
     }
 }
 
-fn provider_with_default_models_url(mut provider: ProviderConfig) -> ProviderConfig {
+fn normalize_provider_models_url(mut provider: ProviderConfig) -> ProviderConfig {
     provider.models_url = normalize_optional_url(provider.models_url.as_deref())
-        .or_else(|| default_models_url_for_provider(&provider));
+        .filter(|models_url| !is_default_models_url_for_base(&provider.base_url, models_url))
+        .filter(|models_url| {
+            known_models_url_for_provider(&provider)
+                .as_deref()
+                .is_none_or(|known_url| known_url.trim_end_matches('/') != models_url.as_str())
+        });
     provider
 }
 
-fn default_models_url_for_provider(provider: &ProviderConfig) -> Option<String> {
+fn is_default_models_url_for_base(base_url: &str, models_url: &str) -> bool {
+    let normalized = models_url.trim().trim_end_matches('/');
+    let raw = base_url.trim().trim_end_matches('/');
+    let root = provider_api_root(raw);
+    normalized == format!("{raw}/models") || normalized == format!("{root}/v1/models")
+}
+
+fn known_models_url_for_provider(provider: &ProviderConfig) -> Option<String> {
     let provider_name = provider.name.trim();
-    if matches!(
+    let base_url = provider.base_url.trim().to_ascii_lowercase();
+    if (matches!(
         provider.compatibility.as_deref(),
         Some("glm_anthropic" | "zhipu_anthropic")
     ) || provider_name.eq_ignore_ascii_case("glm")
-        || provider_name.eq_ignore_ascii_case("zhipu")
+        || provider_name.eq_ignore_ascii_case("zhipu"))
+        && base_url.contains("open.bigmodel.cn")
     {
         return Some("https://open.bigmodel.cn/api/paas/v4/models".to_string());
     }
 
-    if provider_name.eq_ignore_ascii_case("openai") {
-        return Some("https://api.openai.com/v1/models".to_string());
-    }
-    if provider_name.eq_ignore_ascii_case("deepseek") {
-        return Some("https://api.deepseek.com/v1/models".to_string());
-    }
-    if provider_name.eq_ignore_ascii_case("anthropic")
-        || provider
-            .compatibility
-            .as_deref()
-            .is_some_and(|value| value.eq_ignore_ascii_case("anthropic"))
-    {
-        return Some("https://api.anthropic.com/v1/models".to_string());
-    }
-
-    let base = provider_display_base_url(&provider.base_url);
-    if base.is_empty() {
-        match provider.provider_type {
-            ProviderType::OpenAiResponses => Some("https://api.openai.com/v1/models".to_string()),
-            ProviderType::ChatCompletions => Some("https://api.deepseek.com/v1/models".to_string()),
-            ProviderType::AnthropicMessages => {
-                Some("https://api.anthropic.com/v1/models".to_string())
-            }
-        }
-    } else {
-        Some(format!("{}/models", base.trim_end_matches('/')))
-    }
+    None
 }
 
 fn normalize_optional_url(value: Option<&str>) -> Option<String> {
@@ -3046,6 +3039,7 @@ fn canonical_model_alias_key(model: &str) -> String {
 fn fetch_remote_models(
     base_url: &str,
     models_url: Option<&str>,
+    fallback_models_url: Option<&str>,
     api_key: &str,
     timeout_secs: u64,
 ) -> Result<(Vec<String>, String), String> {
@@ -3056,7 +3050,7 @@ fn fetch_remote_models(
         .build()
         .map_err(|err| err.to_string())?;
     let mut errors = Vec::new();
-    for candidate in model_list_candidates(base_url, models_url) {
+    for candidate in model_list_candidates(base_url, models_url, fallback_models_url) {
         let mut request = client.get(&candidate.url);
         if !api_key.trim().is_empty() {
             request = request.header("authorization", format!("Bearer {}", api_key.trim()));
@@ -3103,7 +3097,11 @@ struct ModelListCandidate {
     normalized_base_url: String,
 }
 
-fn model_list_candidates(base_url: &str, models_url: Option<&str>) -> Vec<ModelListCandidate> {
+fn model_list_candidates(
+    base_url: &str,
+    models_url: Option<&str>,
+    fallback_models_url: Option<&str>,
+) -> Vec<ModelListCandidate> {
     let raw = base_url.trim().trim_end_matches('/');
     if raw.is_empty() {
         return Vec::new();
@@ -3121,6 +3119,16 @@ fn model_list_candidates(base_url: &str, models_url: Option<&str>) -> Vec<ModelL
         format!("{root}/v1/models"),
         provider_display_base_url(&root),
     );
+    if models_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none()
+        && let Some(fallback_models_url) = fallback_models_url
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    {
+        push_configured_model_list_candidates(&mut candidates, fallback_models_url, raw);
+    }
     candidates
 }
 

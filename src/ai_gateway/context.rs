@@ -1,4 +1,4 @@
-﻿use axum::http::{HeaderMap, HeaderName};
+use axum::http::{HeaderMap, HeaderName};
 
 /// 从 HTTP header 提取的请求上下文。
 /// 参考 AxonHub `codex/headers.go`。
@@ -123,10 +123,41 @@ fn collect_upstream_headers(headers: &HeaderMap) -> HeaderMap {
     let mut upstream_headers = HeaderMap::new();
     for (name, value) in headers.iter() {
         if should_forward_header(name) {
-            upstream_headers.append(name.clone(), value.clone());
+            if name.as_str().eq_ignore_ascii_case("user-agent") {
+                if let Some(value) = forwarded_user_agent(value) {
+                    upstream_headers.append(name.clone(), value);
+                }
+            } else {
+                upstream_headers.append(name.clone(), value.clone());
+            }
         }
     }
     upstream_headers
+}
+
+fn forwarded_user_agent(value: &axum::http::HeaderValue) -> Option<axum::http::HeaderValue> {
+    let value = value.to_str().ok()?;
+    axum::http::HeaderValue::from_str(&strip_codexhub_user_agent_suffix(value)).ok()
+}
+
+fn strip_codexhub_user_agent_suffix(value: &str) -> String {
+    let value = value.trim();
+    let Some(prefix_end) = value.rfind(" (") else {
+        return value.to_string();
+    };
+    if !value.ends_with(')') {
+        return value.to_string();
+    }
+
+    let suffix = &value[prefix_end + 2..value.len() - 1];
+    let Some((name, version)) = suffix.split_once(';') else {
+        return value.to_string();
+    };
+    if name.trim().eq_ignore_ascii_case("codexhub") && !version.trim().is_empty() {
+        value[..prefix_end].trim_end().to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn should_forward_header(name: &HeaderName) -> bool {
@@ -309,6 +340,33 @@ mod tests {
         );
         assert_eq!(request_headers.get("user-agent").unwrap(), "Codex/1.0");
         assert_eq!(request_headers.get("accept").unwrap(), "application/json");
+    }
+
+    #[test]
+    fn test_codexhub_user_agent_suffix_removed_for_upstream() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "user-agent",
+            HeaderValue::from_static(
+                "Codex Desktop/0.142.3 (Windows 10.0.26200; x86_64) unknown (codexhub; 0.3.3)",
+            ),
+        );
+
+        let ctx = GatewayContext::extract(&headers, Some("key"));
+
+        assert_eq!(
+            ctx.upstream_headers.get("user-agent").unwrap(),
+            "Codex Desktop/0.142.3 (Windows 10.0.26200; x86_64) unknown"
+        );
+    }
+
+    #[test]
+    fn test_user_agent_without_codexhub_suffix_is_kept() {
+        assert_eq!(strip_codexhub_user_agent_suffix("Codex/1.0"), "Codex/1.0");
+        assert_eq!(
+            strip_codexhub_user_agent_suffix("Codex/1.0 (other; 1.2.3)"),
+            "Codex/1.0 (other; 1.2.3)"
+        );
     }
 
     #[test]
