@@ -1,4 +1,4 @@
-﻿use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -453,11 +453,11 @@ pub(super) async fn repair_codex_app_gui_environment(
             );
         }
     };
-    let gui_api_base = codex_app_config::configure_gui_environment(&backend_url);
+    let gui_api_base = codex_app_config::cleanup_gui_environment(&backend_url);
     state
         .push_event(
             "info",
-            "codex_app_gui_environment_repaired",
+            "codex_app_gui_environment_cleaned",
             format!(
                 "gui_api_base={} login_issuer={} remote_control_switch={}",
                 gui_api_base.value.as_deref().unwrap_or_default(),

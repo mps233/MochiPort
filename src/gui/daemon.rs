@@ -154,7 +154,7 @@ pub(super) fn start_daemon_for_gui_async(
                     if let Some(child) = take_pending_startup_daemon(&dashboard_refresh) {
                         replace_managed_daemon(&daemon_child, child);
                     }
-                    repair_codex_app_gui_environment_async(&api, &dashboard_refresh);
+                    cleanup_codex_app_gui_environment_async(&api, &dashboard_refresh);
                     true
                 }
                 Err(err) => {
@@ -173,7 +173,7 @@ pub(super) fn start_daemon_for_gui_async(
     gui_timers.track(&startup_timer_store);
 }
 
-pub(super) fn repair_codex_app_gui_environment_async(
+pub(super) fn cleanup_codex_app_gui_environment_async(
     api: &ApiClient,
     dashboard_refresh: &DashboardRefresh,
 ) {

@@ -221,11 +221,11 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     ));
 
     #[cfg(not(test))]
-    chain_log::write_line("[codex_app_config] event=gui_environment_start");
+    chain_log::write_line("[codex_app_config] event=gui_environment_cleanup_start");
     #[cfg(not(test))]
-    let _ = configure_gui_environment(&options.backend_url);
+    let _ = cleanup_gui_environment(&options.backend_url);
     #[cfg(not(test))]
-    chain_log::write_line("[codex_app_config] event=gui_environment_done");
+    chain_log::write_line("[codex_app_config] event=gui_environment_cleanup_done");
 
     Ok(ConfigureCodexAppReport {
         codex_home,
@@ -258,6 +258,9 @@ pub fn uninstall_codex_app(
                 removed_auth,
             )
         };
+    #[cfg(not(test))]
+    let gui_api_base = cleanup_gui_environment(backend_url);
+    #[cfg(test)]
     let gui_api_base = inspect_gui_api_base_url(backend_url);
 
     Ok(UninstallCodexAppReport {
@@ -541,7 +544,8 @@ fn read_remote_control_switch_db(path: &Path) -> Result<(Option<bool>, Option<i6
 }
 
 pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    let login_issuer_expected = oauth_issuer_url(backend_url);
+    let _ = backend_url;
+    let login_issuer_expected = String::new();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let api_base = match gui_getenv(CODEX_API_BASE_URL_ENV) {
@@ -550,7 +554,7 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
                 return CodexAppGuiApiBaseStatus {
                     supported: true,
                     configured: false,
-                    expected: backend_url.to_string(),
+                    expected: String::new(),
                     value: None,
                     login_issuer_configured: false,
                     login_issuer_expected,
@@ -565,7 +569,7 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
                 return CodexAppGuiApiBaseStatus {
                     supported: true,
                     configured: false,
-                    expected: backend_url.to_string(),
+                    expected: String::new(),
                     value: api_base,
                     login_issuer_configured: false,
                     login_issuer_expected,
@@ -576,16 +580,10 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
         };
         CodexAppGuiApiBaseStatus {
             supported: true,
-            configured: api_base
-                .as_deref()
-                .map(|value| backend_urls_equivalent(value, backend_url))
-                .unwrap_or(false),
-            expected: backend_url.to_string(),
+            configured: api_base.is_none(),
+            expected: String::new(),
             value: api_base,
-            login_issuer_configured: login_issuer
-                .as_deref()
-                .map(|value| backend_urls_equivalent(value, &login_issuer_expected))
-                .unwrap_or(false),
+            login_issuer_configured: login_issuer.is_none(),
             login_issuer_expected,
             login_issuer_value: login_issuer,
             error: None,
@@ -596,38 +594,32 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
     {
         CodexAppGuiApiBaseStatus {
             supported: false,
-            configured: false,
-            expected: backend_url.to_string(),
+            configured: true,
+            expected: String::new(),
             value: None,
-            login_issuer_configured: false,
+            login_issuer_configured: true,
             login_issuer_expected,
             login_issuer_value: None,
-            error: Some(
-                "CODEX_API_BASE_URL one-click setup is only implemented for macOS and Windows"
-                    .to_string(),
-            ),
+            error: None,
         }
     }
 }
 
-pub fn configure_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
+pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
+    let _ = backend_url;
     #[cfg(target_os = "windows")]
     {
-        let login_issuer = oauth_issuer_url(backend_url);
-        let env_result = gui_setenv_many(&[
-            (CODEX_API_BASE_URL_ENV, backend_url),
-            (CODEX_APP_SERVER_LOGIN_ISSUER_ENV, &login_issuer),
-        ]);
+        let cleanup_result =
+            gui_unsetenv_many(&[CODEX_API_BASE_URL_ENV, CODEX_APP_SERVER_LOGIN_ISSUER_ENV]);
         let mut status = inspect_gui_api_base_url(backend_url);
-        status.error = env_result.err();
+        status.error = cleanup_result.err();
         status
     }
 
     #[cfg(target_os = "macos")]
     {
-        let login_issuer = oauth_issuer_url(backend_url);
-        let api_result = gui_setenv(CODEX_API_BASE_URL_ENV, backend_url);
-        let issuer_result = gui_setenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV, &login_issuer);
+        let api_result = gui_unsetenv(CODEX_API_BASE_URL_ENV);
+        let issuer_result = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
         let mut status = inspect_gui_api_base_url(backend_url);
         status.error = api_result.err().or_else(|| issuer_result.err());
         status
@@ -645,8 +637,8 @@ fn gui_getenv(name: &str) -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
-    launchctl_setenv(name, value)
+fn gui_unsetenv(name: &str) -> Result<(), String> {
+    launchctl_unsetenv(name)
 }
 
 #[cfg(target_os = "windows")]
@@ -665,13 +657,17 @@ fn gui_getenv(name: &str) -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "windows")]
-fn gui_setenv_many(values: &[(&str, &str)]) -> Result<(), String> {
+fn gui_unsetenv_many(names: &[&str]) -> Result<(), String> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (env, _) = hkcu
         .create_subkey("Environment")
         .map_err(|err| err.to_string())?;
-    for (name, value) in values {
-        env.set_value(name, value).map_err(|err| err.to_string())?;
+    for name in names {
+        match env.delete_value(name) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.to_string()),
+        }
     }
     broadcast_windows_environment_change();
     Ok(())
@@ -718,11 +714,10 @@ fn launchctl_getenv(name: &str) -> Result<Option<String>, String> {
 }
 
 #[cfg(target_os = "macos")]
-fn launchctl_setenv(name: &str, value: &str) -> Result<(), String> {
+fn launchctl_unsetenv(name: &str) -> Result<(), String> {
     match Command::new("/bin/launchctl")
-        .arg("setenv")
+        .arg("unsetenv")
         .arg(name)
-        .arg(value)
         .output()
     {
         Ok(output) if output.status.success() => Ok(()),
@@ -736,14 +731,6 @@ fn launchctl_setenv(name: &str, value: &str) -> Result<(), String> {
         }
         Err(err) => Err(err.to_string()),
     }
-}
-
-pub fn oauth_issuer_url(backend_url: &str) -> String {
-    backend_url
-        .trim_end_matches('/')
-        .strip_suffix("/backend-api")
-        .unwrap_or_else(|| backend_url.trim_end_matches('/'))
-        .to_string()
 }
 
 fn inspect_config_toml(path: &Path, backend_url: &str) -> (bool, Option<String>) {
