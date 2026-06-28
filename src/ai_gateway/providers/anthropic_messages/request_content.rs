@@ -12,7 +12,7 @@ pub(super) fn build_anthropic_messages(
     tool_name_map: &mut ToolNameMap,
 ) -> Result<Vec<Value>, GatewayError> {
     let mut messages = Vec::new();
-    for item in input {
+    for (item_index, item) in input.iter().enumerate() {
         match item.item_type {
             ItemType::Message
             | ItemType::InputText
@@ -33,6 +33,7 @@ pub(super) fn build_anthropic_messages(
                         "anthropic_messages requires tool output call_id",
                     ));
                 }
+                validate_tool_use_id(call_id)?;
                 let content = match item.item_type {
                     ItemType::ToolSearchOutput => {
                         Value::String(tool_search_output_to_anthropic_content(item))
@@ -51,7 +52,7 @@ pub(super) fn build_anthropic_messages(
                 );
             }
             ItemType::FunctionCall | ItemType::ToolSearchCall | ItemType::CustomToolCall => {
-                if let Some(block) = response_tool_call_to_anthropic(item, tool_name_map) {
+                if let Some(block) = response_tool_call_to_anthropic(item, tool_name_map)? {
                     push_anthropic_message(
                         &mut messages,
                         "assistant",
@@ -60,14 +61,21 @@ pub(super) fn build_anthropic_messages(
                     );
                 }
             }
+            // Responses web_search_call is a completed built-in/server tool event.
+            // Replay it in Claude Code's client-tool shape, but always include
+            // the matching tool_result immediately so Anthropic history stays
+            // well-formed.
             ItemType::WebSearchCall => {
-                if let Some(block) = web_search_call_to_anthropic(item) {
+                if let Some((assistant_content, tool_results)) =
+                    web_search_call_history_to_anthropic(item, item_index)
+                {
                     push_anthropic_message(
                         &mut messages,
                         "assistant",
-                        vec![block],
-                        MergeMode::ToolUse,
+                        assistant_content,
+                        MergeMode::AssistantContent,
                     );
+                    push_anthropic_message(&mut messages, "user", tool_results, MergeMode::None);
                 }
             }
             _ => {}
@@ -85,6 +93,7 @@ pub(super) fn build_anthropic_messages(
 #[derive(Clone, Copy)]
 enum MergeMode {
     None,
+    AssistantContent,
     ToolUse,
     ToolResult,
 }
@@ -125,6 +134,7 @@ fn should_merge_with_last_message(messages: &[Value], role: &str, merge_mode: Me
     };
     match merge_mode {
         MergeMode::None => false,
+        MergeMode::AssistantContent => role == "assistant",
         MergeMode::ToolUse => content
             .iter()
             .all(|block| block.get("type").and_then(Value::as_str) == Some("tool_use")),
@@ -217,22 +227,111 @@ fn combine_tool_result_content(current: Value, next: Value) -> Value {
     }
 }
 
-fn web_search_call_to_anthropic(item: &ResponseItem) -> Option<Value> {
-    let query = item
-        .action
-        .as_ref()
-        .and_then(|action| action.get("query").or_else(|| action.get("search_query")))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if query.trim().is_empty() {
+fn web_search_call_history_to_anthropic(
+    item: &ResponseItem,
+    item_index: usize,
+) -> Option<(Vec<Value>, Vec<Value>)> {
+    let queries = web_search_history_queries(item);
+    if queries.is_empty() {
         return None;
     }
-    Some(json!({
-        "type": "tool_use",
-        "id": item.call_id.as_deref().or(item.id.as_deref()).unwrap_or(""),
-        "name": "WebSearch",
-        "input": {"query": query},
-    }))
+
+    let mut assistant_content = Vec::new();
+    let mut tool_results = Vec::new();
+    for (index, query) in queries.iter().enumerate() {
+        let tool_use_id = web_search_history_tool_use_id(item, query, item_index, index);
+        assistant_content.push(json!({
+            "type": "tool_use",
+            "id": tool_use_id,
+            "name": "WebSearch",
+            "input": { "query": query },
+        }));
+        tool_results.push(tool_result_block(
+            &tool_use_id,
+            Value::String(web_search_history_tool_result_content(item, query)),
+        ));
+    }
+
+    Some((assistant_content, tool_results))
+}
+
+fn web_search_history_queries(item: &ResponseItem) -> Vec<String> {
+    let Some(action) = item.action.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut queries = Vec::new();
+    for key in ["query", "search_query"] {
+        if let Some(query) = action.get(key).and_then(Value::as_str) {
+            push_unique_non_empty(&mut queries, query);
+        }
+    }
+    if let Some(values) = action.get("queries").and_then(Value::as_array) {
+        for value in values {
+            if let Some(query) = value.as_str() {
+                push_unique_non_empty(&mut queries, query);
+            }
+        }
+    }
+    queries
+}
+
+fn web_search_history_tool_use_id(
+    item: &ResponseItem,
+    query: &str,
+    item_index: usize,
+    query_index: usize,
+) -> String {
+    let base = item.call_id.as_deref().or(item.id.as_deref()).unwrap_or("");
+    if base.starts_with("tooluse_") && is_valid_tool_use_id(base) {
+        return if query_index == 0 {
+            base.to_string()
+        } else {
+            format!("{base}_{query_index}")
+        };
+    }
+
+    format!(
+        "tooluse_ws_{item_index}_{query_index}_{:016x}",
+        stable_web_search_history_hash(query)
+    )
+}
+
+fn stable_web_search_history_hash(input: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn web_search_history_tool_result_content(item: &ResponseItem, query: &str) -> String {
+    let status = item.status.as_deref().unwrap_or("completed");
+    let mut lines = vec![
+        format!("Web search history item status: {status}."),
+        format!("Query: {query}"),
+    ];
+    if let Some(result) = item.action.as_ref().and_then(|action| action.get("result")) {
+        lines.push(format!(
+            "Result: {}",
+            serde_json::to_string(result).unwrap_or_else(|_| result.to_string())
+        ));
+    } else {
+        lines.push(
+            "Detailed search result blocks were not included in the Responses web_search_call item."
+                .to_string(),
+        );
+    }
+    lines.join("\n")
+}
+
+fn push_unique_non_empty(values: &mut Vec<String>, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || values.iter().any(|existing| existing == value) {
+        return;
+    }
+    values.push(value.to_string());
 }
 
 fn tool_search_output_to_anthropic_content(item: &ResponseItem) -> String {
@@ -284,7 +383,7 @@ fn tool_output_content_item_to_anthropic(item: &FunctionCallOutputContentItem) -
 fn response_tool_call_to_anthropic(
     item: &ResponseItem,
     tool_name_map: &mut ToolNameMap,
-) -> Option<Value> {
+) -> Result<Option<Value>, GatewayError> {
     let (name, input) = match item.item_type {
         ItemType::FunctionCall => {
             let name = tool_name_map.encode_function(
@@ -312,17 +411,40 @@ fn response_tool_call_to_anthropic(
             let input = json!({ "input": item.input.clone().unwrap_or_default() });
             (name, input)
         }
-        _ => return None,
+        _ => return Ok(None),
     };
     if name.trim().is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(json!({
+    let id = item.call_id.as_deref().or(item.id.as_deref()).unwrap_or("");
+    if id.is_empty() {
+        return Err(GatewayError::bad_request(
+            "anthropic_messages requires tool call_id",
+        ));
+    }
+    validate_tool_use_id(id)?;
+    Ok(Some(json!({
         "type": "tool_use",
-        "id": item.call_id.as_deref().or(item.id.as_deref()).unwrap_or(""),
+        "id": id,
         "name": name,
         "input": input,
-    }))
+    })))
+}
+
+fn validate_tool_use_id(id: &str) -> Result<(), GatewayError> {
+    if is_valid_tool_use_id(id) {
+        return Ok(());
+    }
+    Err(GatewayError::bad_request(
+        "anthropic_messages tool_use id must match ^[a-zA-Z0-9_-]+$",
+    ))
+}
+
+fn is_valid_tool_use_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn anthropic_role(role: Option<&str>, item_type: &ItemType) -> &'static str {

@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use axum::body::Bytes;
 use serde_json::{Value, json};
 
+use super::response::incomplete_details_for_stop_reason;
 use super::stream_events::{convert_anthropic_stream_usage, emit_sse, merge_i64_field};
 use super::stream_state::AnthropicStreamState;
 
@@ -109,9 +110,15 @@ impl AnthropicStreamState {
             "created_at": self.created_at,
             "status": status,
             "output": self.completed_output,
+            "incomplete_details": null,
         });
         if let Some(usage) = &self.usage {
             response["usage"] = usage.clone();
+        }
+        if status == "incomplete"
+            && let Some(details) = incomplete_details_for_stop_reason(self.stop_reason.as_deref())
+        {
+            response["incomplete_details"] = details;
         }
         response
     }
@@ -135,6 +142,7 @@ impl AnthropicStreamState {
 
         merge_input_detail(existing, &usage, "cached_tokens");
         merge_input_detail(existing, &usage, "cache_creation_tokens");
+        merge_output_detail(existing, &usage, "reasoning_tokens");
     }
 }
 
@@ -152,5 +160,22 @@ fn merge_input_detail(existing: &mut Value, usage: &Value, field: &str) {
         .and_then(Value::as_i64);
     if value != 0 || current.is_none() {
         existing["input_tokens_details"][field] = json!(value);
+    }
+}
+
+fn merge_output_detail(existing: &mut Value, usage: &Value, field: &str) {
+    let Some(value) = usage
+        .get("output_tokens_details")
+        .and_then(|details| details.get(field))
+        .and_then(Value::as_i64)
+    else {
+        return;
+    };
+    let current = existing
+        .get("output_tokens_details")
+        .and_then(|details| details.get(field))
+        .and_then(Value::as_i64);
+    if value != 0 || current.is_none() {
+        existing["output_tokens_details"][field] = json!(value);
     }
 }

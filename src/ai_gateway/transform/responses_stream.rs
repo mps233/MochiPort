@@ -218,9 +218,13 @@ impl ResponsesStreamState {
             "created_at": self.created_at,
             "status": status,
             "output": self.completed_output.clone(),
+            "incomplete_details": null,
         });
         if let Some(usage) = &self.usage {
             resp["usage"] = usage.clone();
+        }
+        if status == "incomplete" && matches!(self.finish_reason.as_deref(), Some("length")) {
+            resp["incomplete_details"] = json!({ "reason": "max_output_tokens" });
         }
         resp
     }
@@ -1724,6 +1728,10 @@ mod tests {
             .collect();
         assert_eq!(incomplete.len(), 1);
         assert_eq!(incomplete[0]["response"]["status"], "incomplete");
+        assert_eq!(
+            incomplete[0]["response"]["incomplete_details"]["reason"],
+            "max_output_tokens"
+        );
     }
 
     // ─── 空流 ──────────────────────────────────────────────────

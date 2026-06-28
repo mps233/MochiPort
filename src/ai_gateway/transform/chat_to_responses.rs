@@ -178,6 +178,10 @@ pub fn convert_chat_response_with_tool_names(
         "length" => "incomplete",
         _ => "completed",
     };
+    let incomplete_details = match finish_reason {
+        "length" => Some(json!({ "reason": "max_output_tokens" })),
+        _ => None,
+    };
 
     Ok(ResponseObject {
         id: resp_id,
@@ -196,6 +200,7 @@ pub fn convert_chat_response_with_tool_names(
         output,
         usage,
         error: None,
+        incomplete_details,
     })
 }
 
@@ -497,6 +502,10 @@ mod tests {
 
         let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
         assert_eq!(resp.status, "incomplete");
+        assert_eq!(
+            resp.incomplete_details,
+            Some(json!({ "reason": "max_output_tokens" }))
+        );
     }
 
     #[test]

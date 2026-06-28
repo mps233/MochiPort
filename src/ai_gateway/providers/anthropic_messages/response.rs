@@ -21,10 +21,12 @@ pub(super) fn convert_anthropic_response(
         .map(|items| convert_anthropic_content(items, tool_name_map, profile))
         .unwrap_or_default();
     let usage = response.get("usage").map(convert_usage_value);
-    let status = match response.get("stop_reason").and_then(Value::as_str) {
+    let stop_reason = response.get("stop_reason").and_then(Value::as_str);
+    let status = match stop_reason {
         Some("max_tokens") => "incomplete",
         _ => "completed",
     };
+    let incomplete_details = incomplete_details_for_stop_reason(stop_reason);
 
     ResponseObject {
         id: response
@@ -43,6 +45,19 @@ pub(super) fn convert_anthropic_response(
         output,
         usage,
         error: None,
+        incomplete_details,
+    }
+}
+
+/// Map an Anthropic `stop_reason` to a Responses `incomplete_details` object.
+///
+/// Codex reads `incomplete_details.reason` from `response.incomplete`; when it is
+/// missing it falls back to `unknown`. Only `max_tokens` maps to an incomplete
+/// response today, which Codex expects as `max_output_tokens`.
+pub(super) fn incomplete_details_for_stop_reason(stop_reason: Option<&str>) -> Option<Value> {
+    match stop_reason {
+        Some("max_tokens") => Some(json!({ "reason": "max_output_tokens" })),
+        _ => None,
     }
 }
 
@@ -385,6 +400,11 @@ fn convert_usage_value(usage: &Value) -> Usage {
         .and_then(Value::as_i64)
         .unwrap_or(0);
     let cache_creation = anthropic_cache_creation_input_tokens(usage);
+    let reasoning_tokens = usage
+        .get("output_tokens_details")
+        .and_then(|details| details.get("thinking_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let input = uncached_input + cached + cache_creation;
     Usage {
         input_tokens: input,
@@ -394,9 +414,7 @@ fn convert_usage_value(usage: &Value) -> Usage {
             cached_tokens: cached,
             cache_creation_tokens: cache_creation,
         }),
-        output_tokens_details: Some(OutputTokensDetails {
-            reasoning_tokens: 0,
-        }),
+        output_tokens_details: Some(OutputTokensDetails { reasoning_tokens }),
     }
 }
 

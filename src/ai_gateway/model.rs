@@ -401,6 +401,8 @@ pub struct ResponseObject {
     pub usage: Option<Usage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_details: Option<Value>,
 }
 
 impl ResponseObject {
@@ -415,6 +417,7 @@ impl ResponseObject {
             output: Vec::new(),
             usage: None,
             error: None,
+            incomplete_details: None,
         }
     }
 }

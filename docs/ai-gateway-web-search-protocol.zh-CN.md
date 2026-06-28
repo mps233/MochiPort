@@ -101,6 +101,66 @@ Gateway 对 Codex Responses `web_search` 使用两段式映射，这一点和直
 
 Gateway 不把这个 `WebSearch` 交给 Codex 客户端执行，而是在 provider 内部截留它。
 
+### 3.1 Responses `web_search_call` 历史回放
+
+Codex 在下一轮请求中会把已经发生过的搜索作为历史 item 放回 `input`：
+
+```json
+{
+  "type": "web_search_call",
+  "status": "completed",
+  "action": {
+    "type": "search",
+    "query": "韩国队 2026世界杯 淘汰赛 晋级 小组赛",
+    "queries": ["韩国队 2026世界杯 淘汰赛 晋级 小组赛"]
+  }
+}
+```
+
+这个 item 表示“上一次 assistant turn 已经执行过搜索动作”。转 Anthropic Messages 时不能丢弃，否则模型会失去历史搜索动作；也不能只生成半截 `tool_use`，因为 Anthropic 要求每个 `tool_use.id` 都必须有且只有一个对应 `tool_result.tool_use_id`。
+
+Gateway 将历史 `web_search_call.action.query/queries` 回放成 Claude Code 风格的完整工具链：
+
+```json
+{
+  "role": "assistant",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "tooluse_ws_3_0_e3fa0d467bed6a97",
+      "name": "WebSearch",
+      "input": {"query": "韩国队 2026世界杯 淘汰赛 晋级 小组赛"}
+    }
+  ]
+}
+```
+
+紧跟：
+
+```json
+{
+  "role": "user",
+  "content": [
+    {
+      "type": "tool_result",
+      "tool_use_id": "tooluse_ws_3_0_e3fa0d467bed6a97",
+      "content": "Web search history item status: completed.\nQuery: 韩国队 2026世界杯 淘汰赛 晋级 小组赛\nDetailed search result blocks were not included in the Responses web_search_call item."
+    }
+  ]
+}
+```
+
+如果历史 `web_search_call` 前一条已经是 assistant 文本，Gateway 会把 `WebSearch tool_use` 追加到同一个 assistant message 中，形成 Claude Code 常见的 `assistant(text + tool_use)` 形态。`queries` 中有多个搜索词时，拆成多个并行 `WebSearch tool_use`，并在紧随其后的 user message 中放入同数量的 `tool_result`；每个 `tool_use.id` 只对应一个 `tool_result`。
+
+`tool_use.id` 生成规则：
+
+- 如果历史 item 自带合法且以 `tooluse_` 开头的 `call_id` / `id`，优先复用。
+- 否则 Gateway 生成确定性 synthetic id：`tooluse_ws_<item_index>_<query_index>_<query_hash>`。
+- id 只包含 `[a-zA-Z0-9_-]`，满足 Anthropic `tool_use.id` 校验。
+- synthetic id 的目标是在同一次 Anthropic 请求中稳定配对 `tool_use` 与 `tool_result`，不需要和 Claude Code 的随机串完全一致。
+
+注意：Codex 历史 `web_search_call` 标准形态通常只带 `action.query/queries`，不带真实搜索结果列表。因此 Gateway 只能在 `tool_result.content` 中保留搜索动作与 query。如果历史 item 未来带有 `action.result`，Gateway 会把该结果序列化进 `tool_result.content`。
+
 第二段是内部短上下文搜索。Gateway 用 Claude Code 参考请求形态向同一个 Anthropic-compatible 上游发起 server tool 请求：
 
 ```json
@@ -125,7 +185,7 @@ Gateway 不把这个 `WebSearch` 交给 Codex 客户端执行，而是在 provid
 
 内部搜索完成后，Gateway 将搜索结果整理成 Anthropic `tool_result`，追加回原主对话 messages，再继续请求模型生成最终答案。主对话可能一次返回多个 `WebSearch` tool_use，Gateway 会为同一 assistant turn 的每个 tool_use 都执行内部搜索，并一次性追加全部 tool_result。
 
-### 3.1 为什么内部搜索使用 `web_search_20250305`
+### 3.2 为什么内部搜索使用 `web_search_20250305`
 
 Anthropic 官方和多家 Anthropic-compatible 上游都支持 `web_search_20250305`。`web_search_20260209` / `web_search_20260318` 属于更高版本能力，一些上游会直接报错：
 
@@ -135,7 +195,7 @@ Input tag 'web_search_20260209' found using 'type' does not match any of the exp
 
 因此内部短上下文搜索默认使用 `web_search_20250305`。后续如果需要启用更高版本 web search，应通过 provider capability/profile 显式开启，而不是全局切换。
 
-### 3.2 字段映射
+### 3.3 字段映射
 
 | Codex Responses | 主对话 Anthropic client tool | 内部搜索 Anthropic server tool | 当前策略 |
 | --- | --- | --- | --- |
@@ -343,6 +403,7 @@ Gateway 在 `GlmAnthropic` profile 中：
 | --- | --- |
 | `providers/anthropic_messages/types.rs` | 定义默认 `ANTHROPIC_WEB_SEARCH_TYPE = "web_search_20250305"`。 |
 | `providers/anthropic_messages/request_tools.rs` | Responses `web_search` -> Anthropic `WebSearch` client tool；原生 `web_search_20250305` 仍作为 server tool 保留。 |
+| `providers/anthropic_messages/request_content.rs` | Responses 历史 `web_search_call` -> Claude Code 风格 `assistant(WebSearch tool_use) + user(tool_result)`；生成 synthetic `tooluse_ws_...` id 并保证一一配对。 |
 | `providers/anthropic_messages/response.rs` | 非流式 Anthropic content -> Responses output。 |
 | `providers/anthropic_messages/mod.rs` | 截留 `tool_use(name=WebSearch)`，执行内部短上下文搜索，合成 Responses websearch SSE 过程事件。 |
 | `providers/anthropic_messages/stream_state.rs` | Anthropic SSE 事件分发。 |
@@ -363,6 +424,7 @@ cargo build --release --features gui --bin codexhub
 重点测试点：
 
 - Responses `web_search` 构造成 Anthropic `WebSearch` client tool。
+- Responses 历史 `web_search_call.action.query/queries` 回放成 Anthropic `WebSearch tool_use + tool_result`，且每个 `tool_use.id` 只有一个匹配结果。
 - Responses `filters.allowed_domains` 映射到 Anthropic `allowed_domains`。
 - Anthropic `tool_use(name=WebSearch)` 被 Gateway 截留并触发内部短上下文 `web_search_20250305` 请求。
 - Anthropic `server_tool_use` / `web_search_tool_result` 转成 `web_search_call` 和 `response.web_search_call.in_progress/searching/completed`。

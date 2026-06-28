@@ -674,31 +674,84 @@ fn builds_anthropic_tool_search_result_message_and_loaded_tools() {
 }
 
 #[test]
-fn builds_anthropic_web_search_call_history_as_websearch_tool_use() {
+fn replays_responses_web_search_call_history_as_websearch_tool_use() {
+    let assistant = message("assistant", "我来搜索一下。");
     let mut search = message("assistant", "ignored");
     search.item_type = ItemType::WebSearchCall;
     search.content = None;
-    search.id = Some("ws_1".to_string());
-    search.call_id = Some("tooluse_web_1".to_string());
+    search.status = Some("completed".to_string());
     search.action = Some(json!({
         "type": "search",
-        "query": "latest rust news"
+        "query": "latest rust news",
+        "queries": ["latest rust news", "rust 2026"]
     }));
 
     let (body, _) = build_anthropic_request(
-        &request(vec![message("user", "search rust"), search]),
+        &request(vec![message("user", "search rust"), assistant, search]),
         AnthropicProviderProfile::Anthropic,
     )
     .unwrap();
 
+    assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(body["messages"][0]["role"], "user");
     assert_eq!(body["messages"][1]["role"], "assistant");
-    assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
-    assert_eq!(body["messages"][1]["content"][0]["id"], "tooluse_web_1");
-    assert_eq!(body["messages"][1]["content"][0]["name"], "WebSearch");
+    assert_eq!(body["messages"][1]["content"][0]["type"], "text");
+    assert_eq!(body["messages"][1]["content"][0]["text"], "我来搜索一下。");
+    assert_eq!(body["messages"][1]["content"][1]["type"], "tool_use");
+    assert_eq!(body["messages"][1]["content"][1]["name"], "WebSearch");
     assert_eq!(
-        body["messages"][1]["content"][0]["input"]["query"],
+        body["messages"][1]["content"][1]["input"]["query"],
         "latest rust news"
     );
+    assert_eq!(body["messages"][1]["content"][2]["type"], "tool_use");
+    assert_eq!(body["messages"][1]["content"][2]["name"], "WebSearch");
+    assert_eq!(
+        body["messages"][1]["content"][2]["input"]["query"],
+        "rust 2026"
+    );
+
+    let first_id = body["messages"][1]["content"][1]["id"].as_str().unwrap();
+    let second_id = body["messages"][1]["content"][2]["id"].as_str().unwrap();
+    assert!(first_id.starts_with("tooluse_ws_2_0_"));
+    assert!(second_id.starts_with("tooluse_ws_2_1_"));
+    assert_ne!(first_id, second_id);
+
+    assert_eq!(body["messages"][2]["role"], "user");
+    assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+    assert_eq!(body["messages"][2]["content"][0]["tool_use_id"], first_id);
+    assert!(
+        body["messages"][2]["content"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("latest rust news")
+    );
+    assert_eq!(body["messages"][2]["content"][1]["type"], "tool_result");
+    assert_eq!(body["messages"][2]["content"][1]["tool_use_id"], second_id);
+    assert!(
+        body["messages"][2]["content"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("rust 2026")
+    );
+}
+
+#[test]
+fn rejects_invalid_anthropic_tool_use_ids_before_upstream() {
+    let mut tool_call = message("assistant", "ignored");
+    tool_call.item_type = ItemType::FunctionCall;
+    tool_call.content = None;
+    tool_call.name = Some("exec_command".to_string());
+    tool_call.call_id = Some("bad id".to_string());
+    tool_call.arguments = Some(crate::ai_gateway::model::JsonString::Value(json!({
+        "cmd": "echo hi"
+    })));
+
+    let err = build_anthropic_request(
+        &request(vec![message("user", "run"), tool_call]),
+        AnthropicProviderProfile::Anthropic,
+    )
+    .unwrap_err();
+    assert!(err.message.contains("tool_use id"));
 }
 
 #[test]
@@ -947,6 +1000,7 @@ fn builds_anthropic_adaptive_thinking_from_reasoning_effort() {
 #[test]
 fn builds_anthropic_budget_thinking_from_explicit_budget() {
     let mut req = request(vec![message("user", "think carefully")]);
+    req.max_output_tokens = Some(4_096);
     req.reasoning = Some(Reasoning {
         effort: Some("high".to_string()),
         budget_tokens: Some(2_048),
@@ -957,6 +1011,20 @@ fn builds_anthropic_budget_thinking_from_explicit_budget() {
     assert_eq!(body["thinking"]["type"], "enabled");
     assert_eq!(body["thinking"]["budget_tokens"], 2_048);
     assert!(body.get("output_config").is_none());
+}
+
+#[test]
+fn rejects_anthropic_thinking_budget_that_reaches_max_tokens() {
+    let mut req = request(vec![message("user", "think carefully")]);
+    req.max_output_tokens = Some(2_048);
+    req.reasoning = Some(Reasoning {
+        effort: Some("high".to_string()),
+        budget_tokens: Some(2_048),
+        generate_summary: None,
+    });
+
+    let err = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap_err();
+    assert!(err.message.contains("thinking.budget_tokens"));
 }
 
 #[test]
@@ -1499,6 +1567,7 @@ async fn internal_web_search_stream_emits_responses_web_search_progress() {
         output: vec![message("assistant", "Search answer.")],
         usage: None,
         error: None,
+        incomplete_details: None,
     };
     state.emit_final_response(&tx, response_obj).await.unwrap();
     drop(tx);
@@ -2280,5 +2349,100 @@ async fn streams_glm_private_web_search_text_is_filtered() {
             .any(|(event, data)| event == "response.output_item.done"
                 && data["item"]["type"] == "web_search_call"
                 && data["item"]["action"].get("result").is_none())
+    );
+}
+
+#[test]
+fn request_defaults_max_tokens_when_codex_omits_it() {
+    let mut req = request(vec![message("user", "Hello")]);
+    req.max_output_tokens = None;
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
+    assert_eq!(body["max_tokens"], json!(super::types::DEFAULT_MAX_TOKENS));
+    assert_eq!(super::types::DEFAULT_MAX_TOKENS, 64000);
+}
+
+#[test]
+fn non_streaming_max_tokens_stop_sets_incomplete_details() {
+    let response = json!({
+        "id": "msg_incomplete",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "stop_reason": "max_tokens",
+        "content": [{"type": "text", "text": "partial"}],
+        "usage": {"input_tokens": 10, "output_tokens": 4096}
+    });
+    let converted = convert_response(&response);
+    assert_eq!(converted.status, "incomplete");
+    assert_eq!(
+        converted.incomplete_details,
+        Some(json!({ "reason": "max_output_tokens" }))
+    );
+}
+
+#[test]
+fn non_streaming_end_turn_has_no_incomplete_details() {
+    let response = json!({
+        "id": "msg_done",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-8",
+        "stop_reason": "end_turn",
+        "content": [{"type": "text", "text": "done"}],
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+    let converted = convert_response(&response);
+    assert_eq!(converted.status, "completed");
+    assert_eq!(converted.incomplete_details, None);
+}
+
+#[tokio::test]
+async fn streams_max_tokens_stop_as_response_incomplete_with_reason() {
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-8\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":4096,\"output_tokens_details\":{\"thinking_tokens\":3338}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+
+    let incomplete = events
+        .iter()
+        .find(|(event, _)| event == "response.incomplete")
+        .expect("expected response.incomplete event");
+    assert_eq!(incomplete.1["response"]["status"], "incomplete");
+    assert_eq!(
+        incomplete.1["response"]["incomplete_details"]["reason"],
+        "max_output_tokens"
+    );
+    assert_eq!(
+        incomplete.1["response"]["usage"]["output_tokens_details"]["reasoning_tokens"],
+        3338
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|(event, _)| event == "response.completed")
     );
 }

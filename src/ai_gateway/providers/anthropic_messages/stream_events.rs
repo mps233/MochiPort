@@ -24,6 +24,11 @@ pub(super) fn convert_anthropic_stream_usage(usage: &Value) -> Option<Value> {
         .and_then(Value::as_i64)
         .unwrap_or(0);
     let cache_creation = anthropic_cache_creation_input_tokens(usage);
+    let reasoning_tokens = usage
+        .get("output_tokens_details")
+        .and_then(|details| details.get("thinking_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     let input = uncached_input + cached + cache_creation;
     Some(json!({
         "input_tokens": input,
@@ -33,7 +38,7 @@ pub(super) fn convert_anthropic_stream_usage(usage: &Value) -> Option<Value> {
             "cached_tokens": cached,
             "cache_creation_tokens": cache_creation,
         },
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
     }))
 }
 

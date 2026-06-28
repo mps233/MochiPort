@@ -40,6 +40,7 @@ pub(super) fn build_anthropic_request(
         body.insert("stream".to_string(), json!(true));
     }
     insert_reasoning_options(&mut body, profile, request.reasoning.as_ref());
+    validate_thinking_budget(&body)?;
 
     let messages = build_anthropic_messages(&request.input, &mut tool_name_map)?;
     body.insert("messages".to_string(), Value::Array(messages));
@@ -56,6 +57,26 @@ pub(super) fn build_anthropic_request(
     }
     insert_prompt_cache_control(&mut body);
     Ok((Value::Object(body), tool_name_map))
+}
+
+fn validate_thinking_budget(body: &Map<String, Value>) -> Result<(), GatewayError> {
+    let Some(budget_tokens) = body
+        .get("thinking")
+        .and_then(|thinking| thinking.get("budget_tokens"))
+        .and_then(Value::as_i64)
+    else {
+        return Ok(());
+    };
+    let max_tokens = body
+        .get("max_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(DEFAULT_MAX_TOKENS);
+    if budget_tokens >= max_tokens {
+        return Err(GatewayError::bad_request(format!(
+            "anthropic_messages thinking.budget_tokens ({budget_tokens}) must be less than max_tokens ({max_tokens})"
+        )));
+    }
+    Ok(())
 }
 
 fn insert_prompt_cache_control(body: &mut Map<String, Value>) {
