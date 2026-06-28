@@ -6,6 +6,8 @@ use crate::ai_gateway::tool_names::{ToolCallTarget, ToolNameMap};
 use super::custom_tools::{custom_tool_description, custom_tool_input_description};
 use super::types::ANTHROPIC_WEB_SEARCH_TYPE;
 
+const WEB_SEARCH_DESCRIPTION: &str = "Search the web. Returns result blocks with titles and URLs. US-only.\n\n- The current month is June 2026 -- use this when searching for recent information.\n- `allowed_domains` / `blocked_domains` filter results.\n- After answering from results, end with a \"Sources:\" list of the URLs you used as markdown links.";
+
 const JSON_SCHEMA_DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 
 pub(super) fn build_anthropic_tools(
@@ -56,7 +58,7 @@ pub(super) fn build_anthropic_tools(
                     .map(|tool| vec![tool])
                     .unwrap_or_default(),
                 Some("web_search") | Some("web_search_preview") => {
-                    build_anthropic_web_search_tool(obj)
+                    build_anthropic_web_search_client_tool(obj)
                         .map(|tool| vec![tool])
                         .unwrap_or_default()
                 }
@@ -71,6 +73,54 @@ pub(super) fn build_anthropic_tools(
             }
         })
         .collect()
+}
+
+fn build_anthropic_web_search_client_tool(tool: &Map<String, Value>) -> Option<Value> {
+    let mut properties = Map::new();
+    properties.insert(
+        "query".to_string(),
+        json!({
+            "type": "string",
+            "minLength": 2,
+            "description": "The search query to use"
+        }),
+    );
+    properties.insert(
+        "allowed_domains".to_string(),
+        json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Only include search results from these domains"
+        }),
+    );
+    properties.insert(
+        "blocked_domains".to_string(),
+        json!({
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Never include search results from these domains"
+        }),
+    );
+
+    let mut result = Map::new();
+    result.insert("name".to_string(), json!("WebSearch"));
+    result.insert(
+        "description".to_string(),
+        tool.get("description")
+            .cloned()
+            .unwrap_or_else(|| json!(WEB_SEARCH_DESCRIPTION)),
+    );
+    result.insert(
+        "input_schema".to_string(),
+        json!({
+            "type": "object",
+            "$schema": JSON_SCHEMA_DRAFT_2020_12,
+            "required": ["query"],
+            "properties": properties,
+            "additionalProperties": false
+        }),
+    );
+    Some(Value::Object(result))
 }
 
 fn build_anthropic_function_tool(
@@ -197,6 +247,9 @@ fn build_anthropic_web_search_tool(tool: &Map<String, Value>) -> Option<Value> {
             "user_location",
         ],
     );
+    result
+        .entry("max_uses".to_string())
+        .or_insert_with(|| json!(8));
     if !result.contains_key("allowed_domains")
         && let Some(allowed_domains) = config
             .get("filters")
@@ -316,7 +369,7 @@ pub(super) fn convert_tool_choice_to_anthropic(
         Some("web_search") | Some("web_search_preview") => {
             json!({
                 "type": "tool",
-                "name": "web_search",
+                "name": "WebSearch",
             })
         }
         Some(tool_type) if tool_type == ANTHROPIC_WEB_SEARCH_TYPE => {

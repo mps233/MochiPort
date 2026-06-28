@@ -593,6 +593,34 @@ fn builds_anthropic_tool_search_result_message_and_loaded_tools() {
 }
 
 #[test]
+fn builds_anthropic_web_search_call_history_as_websearch_tool_use() {
+    let mut search = message("assistant", "ignored");
+    search.item_type = ItemType::WebSearchCall;
+    search.content = None;
+    search.id = Some("ws_1".to_string());
+    search.call_id = Some("tooluse_web_1".to_string());
+    search.action = Some(json!({
+        "type": "search",
+        "query": "latest rust news"
+    }));
+
+    let (body, _) = build_anthropic_request(
+        &request(vec![message("user", "search rust"), search]),
+        AnthropicProviderProfile::Anthropic,
+    )
+    .unwrap();
+
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(body["messages"][1]["content"][0]["id"], "tooluse_web_1");
+    assert_eq!(body["messages"][1]["content"][0]["name"], "WebSearch");
+    assert_eq!(
+        body["messages"][1]["content"][0]["input"]["query"],
+        "latest rust news"
+    );
+}
+
+#[test]
 fn builds_anthropic_tools_and_tool_choice() {
     let mut req = request(vec![message("user", "search docs")]);
     req.tools = vec![json!({
@@ -758,7 +786,7 @@ fn builds_anthropic_apply_patch_custom_tool() {
 }
 
 #[test]
-fn builds_anthropic_web_search_server_tool() {
+fn builds_anthropic_web_search_client_tool_for_responses_web_search() {
     let mut req = request(vec![message("user", "latest rust news")]);
     req.tools = vec![json!({
         "type": "web_search_preview",
@@ -769,10 +797,13 @@ fn builds_anthropic_web_search_server_tool() {
     })];
 
     let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
-    assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
-    assert_eq!(body["tools"][0]["name"], "web_search");
-    assert_eq!(body["tools"][0]["max_uses"], 3);
-    assert_eq!(body["tools"][0]["allowed_domains"][0], "www.rust-lang.org");
+    assert_eq!(body["tools"][0]["name"], "WebSearch");
+    assert!(body["tools"][0].get("type").is_none());
+    assert_eq!(body["tools"][0]["input_schema"]["required"][0], "query");
+    assert_eq!(
+        body["tools"][0]["input_schema"]["properties"]["allowed_domains"]["items"]["type"],
+        "string"
+    );
 }
 
 #[test]
@@ -805,9 +836,14 @@ fn maps_responses_web_search_filters_to_anthropic_allowed_domains() {
     })];
 
     let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
-    assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
-    assert_eq!(body["tools"][0]["name"], "web_search");
-    assert_eq!(body["tools"][0]["allowed_domains"][0], "www.rust-lang.org");
+    assert_eq!(body["tools"][0]["name"], "WebSearch");
+    assert!(body["tools"][0].get("type").is_none());
+    assert_eq!(body["tools"][0]["input_schema"]["required"][0], "query");
+    assert_eq!(
+        body["tools"][0]["input_schema"]["properties"]["allowed_domains"]["items"]["type"],
+        "string"
+    );
+    assert!(body["tools"][0].get("allowed_domains").is_none());
     assert!(body["tools"][0].get("external_web_access").is_none());
     assert!(body["tools"][0].get("search_content_types").is_none());
 }

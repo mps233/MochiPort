@@ -63,6 +63,14 @@ pub(super) fn build_anthropic_messages(
                     }));
                 }
             }
+            ItemType::WebSearchCall => {
+                if let Some(block) = web_search_call_to_anthropic(item) {
+                    messages.push(json!({
+                        "role": "assistant",
+                        "content": [block],
+                    }));
+                }
+            }
             _ => {}
         }
     }
@@ -73,6 +81,24 @@ pub(super) fn build_anthropic_messages(
         ));
     }
     Ok(messages)
+}
+
+fn web_search_call_to_anthropic(item: &ResponseItem) -> Option<Value> {
+    let query = item
+        .action
+        .as_ref()
+        .and_then(|action| action.get("query").or_else(|| action.get("search_query")))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if query.trim().is_empty() {
+        return None;
+    }
+    Some(json!({
+        "type": "tool_use",
+        "id": item.call_id.as_deref().or(item.id.as_deref()).unwrap_or(""),
+        "name": "WebSearch",
+        "input": {"query": query},
+    }))
 }
 
 fn tool_search_output_to_anthropic_content(item: &ResponseItem) -> String {

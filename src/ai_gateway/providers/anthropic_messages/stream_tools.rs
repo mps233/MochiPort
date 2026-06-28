@@ -83,7 +83,8 @@ impl AnthropicStreamState {
 
     pub(super) fn is_unmapped_web_search_tool_use(&self, block: &Value) -> bool {
         let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-        self.profile.is_web_search_server_tool(name) && !self.tool_name_map.has_encoded(name)
+        name == "WebSearch"
+            || self.profile.is_web_search_server_tool(name) && !self.tool_name_map.has_encoded(name)
     }
 
     pub(super) fn handle_tool_delta(
@@ -178,7 +179,7 @@ impl AnthropicStreamState {
             return;
         }
         let name = block.get("name").and_then(Value::as_str).unwrap_or("");
-        if !self.profile.is_web_search_server_tool(name) {
+        if name != "WebSearch" && !self.profile.is_web_search_server_tool(name) {
             return;
         }
         let is_tool_use_web_search = block.get("type").and_then(Value::as_str) == Some("tool_use");

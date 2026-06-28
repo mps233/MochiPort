@@ -179,6 +179,9 @@ fn anthropic_content_to_response_item(
         }),
         "tool_use" => {
             let raw_name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            if raw_name == "WebSearch" {
+                return Some(web_search_response_item(item));
+            }
             if is_unmapped_web_search_tool_use(raw_name, tool_name_map, profile) {
                 return Some(web_search_response_item(item));
             }
