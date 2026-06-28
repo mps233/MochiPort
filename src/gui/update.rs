@@ -77,6 +77,14 @@ struct GitHubRelease {
     tag_name: String,
     html_url: String,
     body: Option<String>,
+    #[serde(default)]
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -218,7 +226,7 @@ fn fetch_github_latest_release(
     Ok(LatestReleaseInfo {
         version: release.tag_name,
         release_url: release.html_url,
-        download: None,
+        download: platform_download_from_github_assets(&release.assets),
         notes: release.body,
     })
 }
@@ -362,6 +370,53 @@ fn platform_download(manifest: &UpdateManifest) -> Option<UpdateDownload> {
         .get(platform_manifest_asset_key())
         .or_else(|| manifest.assets.get(platform_manifest_fallback_asset_key()))
         .and_then(UpdateDownload::from_asset)
+}
+
+fn platform_download_from_github_assets(assets: &[GitHubReleaseAsset]) -> Option<UpdateDownload> {
+    assets.iter().find_map(|asset| {
+        if platform_github_asset_matches(&asset.name) {
+            Some(UpdateDownload {
+                url: asset.browser_download_url.clone(),
+                sha256: None,
+                asset_type: Some(platform_installer_asset_type().to_string()),
+            })
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn platform_github_asset_matches(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".msi") && name.contains("windows") && name.contains("x64")
+}
+
+#[cfg(target_os = "macos")]
+fn platform_github_asset_matches(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".dmg") && name.contains("macos")
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn platform_github_asset_matches(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".appimage") || name.ends_with(".tar.gz")
+}
+
+#[cfg(target_os = "windows")]
+fn platform_installer_asset_type() -> &'static str {
+    "msi"
+}
+
+#[cfg(target_os = "macos")]
+fn platform_installer_asset_type() -> &'static str {
+    "dmg"
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn platform_installer_asset_type() -> &'static str {
+    "appimage"
 }
 
 #[cfg(target_os = "windows")]

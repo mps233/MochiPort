@@ -1757,13 +1757,15 @@ impl GuiText {
     ) -> String {
         let action = if can_download_installer {
             match self.locale {
-                GuiLocale::ZhCn => "是否下载并启动安装器？",
+                GuiLocale::ZhCn => "是否自动下载更新包并启动安装器？",
                 GuiLocale::EnUs => "Download and start the installer?",
             }
         } else {
             match self.locale {
-                GuiLocale::ZhCn => "是否打开下载地址？",
-                GuiLocale::EnUs => "Open the download URL?",
+                GuiLocale::ZhCn => "暂时没有找到可自动安装的更新包，是否打开发布页手动下载？",
+                GuiLocale::EnUs => {
+                    "No auto-installable update package was found yet. Open the release page?"
+                }
             }
         };
         match self.locale {

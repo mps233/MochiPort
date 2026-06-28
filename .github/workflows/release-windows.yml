@@ -203,10 +203,6 @@ jobs:
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           $ErrorActionPreference = "Stop"
-          $notes = ""
-          if (Test-Path "RELEASE_NOTES.md") {
-            $notes = Get-Content "RELEASE_NOTES.md" -Raw
-          }
           $releaseUrl = "https://github.com/$env:RELEASE_REPOSITORY/releases/tag/$env:RELEASE_TAG"
           $downloadBaseUrl = "https://github.com/$env:RELEASE_REPOSITORY/releases/download/$env:RELEASE_TAG"
           $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
@@ -221,7 +217,7 @@ jobs:
           $manifest = [ordered]@{
             version = $env:RELEASE_TAG
             releaseUrl = $releaseUrl
-            notes = $notes
+            notes = ""
             assets = [ordered]@{
               "windows-x86_64" = [ordered]@{
                 type = "msi"
@@ -283,7 +279,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          body_path: RELEASE_NOTES.md
           overwrite_files: true
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}

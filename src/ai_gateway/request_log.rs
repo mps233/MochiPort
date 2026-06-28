@@ -570,10 +570,12 @@ pub fn delete_older_than(db_path: &Path, cutoff_ms: i64) -> rusqlite::Result<usi
 }
 
 fn delete_older_than_with_conn(conn: &Connection, cutoff_ms: i64) -> rusqlite::Result<usize> {
-    conn.execute(
+    let deleted = conn.execute(
         "DELETE FROM ai_gateway_request_logs WHERE created_at_ms < ?1",
         params![cutoff_ms],
-    )
+    )?;
+    compact_after_delete(conn, deleted)?;
+    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -583,7 +585,22 @@ pub fn delete_all(db_path: &Path) -> rusqlite::Result<usize> {
 }
 
 fn delete_all_with_conn(conn: &Connection) -> rusqlite::Result<usize> {
-    conn.execute("DELETE FROM ai_gateway_request_logs", [])
+    let deleted = conn.execute("DELETE FROM ai_gateway_request_logs", [])?;
+    compact_after_delete(conn, deleted)?;
+    Ok(deleted)
+}
+
+fn compact_after_delete(conn: &Connection, deleted: usize) -> rusqlite::Result<()> {
+    if deleted == 0 {
+        return Ok(());
+    }
+    conn.execute_batch(
+        r#"
+        PRAGMA wal_checkpoint(TRUNCATE);
+        VACUUM;
+        PRAGMA wal_checkpoint(TRUNCATE);
+        "#,
+    )
 }
 
 #[cfg(test)]
