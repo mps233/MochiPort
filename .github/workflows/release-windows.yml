@@ -160,6 +160,7 @@ jobs:
           $sourceDir = (Resolve-Path "target\msi-source").Path
           $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
           & $wix build "packaging\windows\CodexHub.wxs" `
+            -acceptEula wix7 `
             -arch x64 `
             -d "ProductVersion=$env:PRODUCT_VERSION" `
             -d "SourceDir=$sourceDir" `
