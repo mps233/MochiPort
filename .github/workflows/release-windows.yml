@@ -245,27 +245,27 @@ jobs:
           $xmlShortVersion = [Security.SecurityElement]::Escape($env:RELEASE_TAG)
           $pubDate = (Get-Date).ToUniversalTime().ToString("R")
           $appcast = @"
-<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
-  <channel>
-    <title>CodexHub Windows Updates</title>
-    <link>$xmlReleaseUrl</link>
-    <description>CodexHub Windows update feed</description>
-    <item>
-      <title>CodexHub $xmlShortVersion</title>
-      <link>$xmlReleaseUrl</link>
-      <pubDate>$pubDate</pubDate>
-      <sparkle:releaseNotesLink>$xmlReleaseUrl</sparkle:releaseNotesLink>
-      <enclosure
-        url="$xmlMsiUrl"
-        sparkle:version="$xmlVersion"
-        sparkle:shortVersionString="$xmlShortVersion"
-        length="$msiSize"
-        type="application/x-msi" />
-    </item>
-  </channel>
-</rss>
-"@
+          <?xml version="1.0" encoding="utf-8"?>
+          <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+            <channel>
+              <title>CodexHub Windows Updates</title>
+              <link>$xmlReleaseUrl</link>
+              <description>CodexHub Windows update feed</description>
+              <item>
+                <title>CodexHub $xmlShortVersion</title>
+                <link>$xmlReleaseUrl</link>
+                <pubDate>$pubDate</pubDate>
+                <sparkle:releaseNotesLink>$xmlReleaseUrl</sparkle:releaseNotesLink>
+                <enclosure
+                  url="$xmlMsiUrl"
+                  sparkle:version="$xmlVersion"
+                  sparkle:shortVersionString="$xmlShortVersion"
+                  length="$msiSize"
+                  type="application/x-msi" />
+              </item>
+            </channel>
+          </rss>
+          "@
           [IO.File]::WriteAllText("target\dist\appcast-windows.xml", $appcast, [Text.UTF8Encoding]::new($false))
 
       - name: Upload Artifact
