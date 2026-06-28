@@ -21,10 +21,7 @@ pub(super) fn build_anthropic_messages(
                 let role = anthropic_role(item.role.as_deref(), &item.item_type);
                 let content = anthropic_content_blocks(item);
                 if !content.is_empty() {
-                    messages.push(json!({
-                        "role": role,
-                        "content": content,
-                    }));
+                    push_anthropic_message(&mut messages, role, content, MergeMode::None);
                 }
             }
             ItemType::FunctionCallOutput
@@ -46,29 +43,31 @@ pub(super) fn build_anthropic_messages(
                         .map(function_call_output_to_anthropic_content)
                         .unwrap_or_else(|| Value::String(String::new())),
                 };
-                messages.push(json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": call_id,
-                        "content": content,
-                    }],
-                }));
+                push_anthropic_message(
+                    &mut messages,
+                    "user",
+                    vec![tool_result_block(call_id, content)],
+                    MergeMode::ToolResult,
+                );
             }
             ItemType::FunctionCall | ItemType::ToolSearchCall | ItemType::CustomToolCall => {
                 if let Some(block) = response_tool_call_to_anthropic(item, tool_name_map) {
-                    messages.push(json!({
-                        "role": "assistant",
-                        "content": [block],
-                    }));
+                    push_anthropic_message(
+                        &mut messages,
+                        "assistant",
+                        vec![block],
+                        MergeMode::ToolUse,
+                    );
                 }
             }
             ItemType::WebSearchCall => {
                 if let Some(block) = web_search_call_to_anthropic(item) {
-                    messages.push(json!({
-                        "role": "assistant",
-                        "content": [block],
-                    }));
+                    push_anthropic_message(
+                        &mut messages,
+                        "assistant",
+                        vec![block],
+                        MergeMode::ToolUse,
+                    );
                 }
             }
             _ => {}
@@ -81,6 +80,141 @@ pub(super) fn build_anthropic_messages(
         ));
     }
     Ok(messages)
+}
+
+#[derive(Clone, Copy)]
+enum MergeMode {
+    None,
+    ToolUse,
+    ToolResult,
+}
+
+fn push_anthropic_message(
+    messages: &mut Vec<Value>,
+    role: &str,
+    content: Vec<Value>,
+    merge_mode: MergeMode,
+) {
+    if content.is_empty() {
+        return;
+    }
+    if should_merge_with_last_message(messages, role, merge_mode)
+        && let Some(last_content) = messages
+            .last_mut()
+            .and_then(|message| message.get_mut("content"))
+            .and_then(Value::as_array_mut)
+    {
+        append_content_blocks(last_content, content, merge_mode);
+        return;
+    }
+    messages.push(json!({
+        "role": role,
+        "content": content,
+    }));
+}
+
+fn should_merge_with_last_message(messages: &[Value], role: &str, merge_mode: MergeMode) -> bool {
+    let Some(last) = messages.last() else {
+        return false;
+    };
+    if last.get("role").and_then(Value::as_str) != Some(role) {
+        return false;
+    }
+    let Some(content) = last.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    match merge_mode {
+        MergeMode::None => false,
+        MergeMode::ToolUse => content
+            .iter()
+            .all(|block| block.get("type").and_then(Value::as_str) == Some("tool_use")),
+        MergeMode::ToolResult => content
+            .iter()
+            .all(|block| block.get("type").and_then(Value::as_str) == Some("tool_result")),
+    }
+}
+
+fn append_content_blocks(target: &mut Vec<Value>, content: Vec<Value>, merge_mode: MergeMode) {
+    match merge_mode {
+        MergeMode::ToolResult => {
+            for block in content {
+                append_tool_result_block(target, block);
+            }
+        }
+        _ => target.extend(content),
+    }
+}
+
+fn append_tool_result_block(target: &mut Vec<Value>, mut block: Value) {
+    let Some(tool_use_id) = block
+        .get("tool_use_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        target.push(block);
+        return;
+    };
+    let Some(existing) = target.iter_mut().find(|existing| {
+        existing.get("type").and_then(Value::as_str) == Some("tool_result")
+            && existing.get("tool_use_id").and_then(Value::as_str) == Some(tool_use_id.as_str())
+    }) else {
+        target.push(block);
+        return;
+    };
+    let next_content = block.get_mut("content").map(Value::take);
+    if let Some(next_content) = next_content {
+        merge_tool_result_content(existing, next_content);
+    }
+}
+
+fn tool_result_block(tool_use_id: &str, content: Value) -> Value {
+    json!({
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": content,
+    })
+}
+
+fn merge_tool_result_content(existing: &mut Value, next: Value) {
+    let current = existing.get_mut("content").map(Value::take);
+    existing["content"] = match current {
+        Some(current) => combine_tool_result_content(current, next),
+        None => next,
+    };
+}
+
+fn combine_tool_result_content(current: Value, next: Value) -> Value {
+    match (current, next) {
+        (Value::String(current), Value::String(next)) => {
+            if current.is_empty() {
+                Value::String(next)
+            } else if next.is_empty() {
+                Value::String(current)
+            } else {
+                Value::String(format!("{current}\n\n{next}"))
+            }
+        }
+        (Value::Array(mut current), Value::Array(next)) => {
+            current.extend(next);
+            Value::Array(current)
+        }
+        (Value::Array(mut current), Value::String(next)) => {
+            if !next.is_empty() {
+                current.push(json!({"type": "text", "text": next}));
+            }
+            Value::Array(current)
+        }
+        (Value::String(current), Value::Array(mut next)) => {
+            if current.is_empty() {
+                Value::Array(next)
+            } else {
+                let mut content = vec![json!({"type": "text", "text": current})];
+                content.append(&mut next);
+                Value::Array(content)
+            }
+        }
+        (current, next) => Value::String(format!("{current}\n\n{next}")),
+    }
 }
 
 fn web_search_call_to_anthropic(item: &ResponseItem) -> Option<Value> {

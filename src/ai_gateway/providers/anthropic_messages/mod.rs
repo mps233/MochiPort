@@ -1,6 +1,6 @@
 //! Anthropic Messages 出站 provider。
 
-use std::io;
+use std::{collections::HashSet, io};
 
 use axum::{
     body::{Body, Bytes},
@@ -911,27 +911,39 @@ struct WebSearchToolUse {
 }
 
 fn find_web_search_tool_uses(response: &Value) -> Vec<WebSearchToolUse> {
-    response
-        .get("content")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|block| {
-            if block.get("type").and_then(Value::as_str) != Some("tool_use")
-                || block.get("name").and_then(Value::as_str) != Some(WEB_SEARCH_TOOL_NAME)
-            {
-                return None;
-            }
-            let id = block.get("id").and_then(Value::as_str)?.to_string();
-            let query = block
-                .get("input")
-                .and_then(|input| input.get("query").or_else(|| input.get("search_query")))
-                .and_then(Value::as_str)?
-                .trim()
-                .to_string();
-            (!query.is_empty()).then_some(WebSearchToolUse { id, query })
-        })
-        .collect()
+    let mut seen_ids = HashSet::new();
+    let mut tool_uses = Vec::new();
+    let Some(content) = response.get("content").and_then(Value::as_array) else {
+        return tool_uses;
+    };
+    for block in content {
+        if block.get("type").and_then(Value::as_str) != Some("tool_use")
+            || block.get("name").and_then(Value::as_str) != Some(WEB_SEARCH_TOOL_NAME)
+        {
+            continue;
+        }
+        let Some(id) = block.get("id").and_then(Value::as_str) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let query = block
+            .get("input")
+            .and_then(|input| input.get("query").or_else(|| input.get("search_query")))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if query.is_empty() || !seen_ids.insert(id.to_string()) {
+            continue;
+        }
+        tool_uses.push(WebSearchToolUse {
+            id: id.to_string(),
+            query,
+        });
+    }
+    tool_uses
 }
 
 fn append_tool_results(
@@ -948,26 +960,51 @@ fn append_tool_results(
     else {
         return;
     };
+    let content = grouped_tool_result_blocks(tool_results);
+    if content.is_empty() {
+        return;
+    }
     if let Some(content) = assistant_response.get("content").cloned() {
         messages.push(json!({
             "role": "assistant",
             "content": content
         }));
     }
-    let content = tool_results
-        .into_iter()
-        .map(|(tool_use_id, search_text)| {
-            json!({
-                "type": "tool_result",
-                "tool_use_id": tool_use_id,
-                "content": search_text
-            })
-        })
-        .collect::<Vec<_>>();
     messages.push(json!({
         "role": "user",
         "content": content
     }));
+}
+
+fn grouped_tool_result_blocks(tool_results: Vec<(String, String)>) -> Vec<Value> {
+    let mut content: Vec<Value> = Vec::new();
+    for (tool_use_id, search_text) in tool_results {
+        if tool_use_id.is_empty() {
+            continue;
+        }
+        if let Some(existing) = content.iter_mut().find(|block| {
+            block.get("tool_use_id").and_then(Value::as_str) == Some(tool_use_id.as_str())
+        }) {
+            if !search_text.is_empty() {
+                let current = existing
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                existing["content"] = if current.is_empty() {
+                    json!(search_text)
+                } else {
+                    json!(format!("{current}\n\n{search_text}"))
+                };
+            }
+            continue;
+        }
+        content.push(json!({
+            "type": "tool_result",
+            "tool_use_id": tool_use_id,
+            "content": search_text
+        }));
+    }
+    content
 }
 
 fn search_results_to_tool_text(query: &str, raw_sse: &str) -> String {

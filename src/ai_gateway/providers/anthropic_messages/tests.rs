@@ -447,6 +447,83 @@ fn builds_anthropic_tool_result_message() {
 }
 
 #[test]
+fn groups_parallel_tool_uses_and_results_in_single_messages() {
+    let mut first_call = message("assistant", "ignored");
+    first_call.item_type = ItemType::FunctionCall;
+    first_call.content = None;
+    first_call.name = Some("exec_command".to_string());
+    first_call.call_id = Some("toolu_first".to_string());
+    first_call.arguments = Some(crate::ai_gateway::model::JsonString::Value(json!({
+        "cmd": "ls"
+    })));
+
+    let mut second_call = message("assistant", "ignored");
+    second_call.item_type = ItemType::FunctionCall;
+    second_call.content = None;
+    second_call.name = Some("exec_command".to_string());
+    second_call.call_id = Some("toolu_second".to_string());
+    second_call.arguments = Some(crate::ai_gateway::model::JsonString::Value(json!({
+        "cmd": "git status -s"
+    })));
+
+    let mut first_output = message("user", "ignored");
+    first_output.item_type = ItemType::FunctionCallOutput;
+    first_output.content = None;
+    first_output.call_id = Some("toolu_first".to_string());
+    first_output.output = Some(FunctionCallOutput::Text("first done".to_string()));
+
+    let mut second_output = message("user", "ignored");
+    second_output.item_type = ItemType::FunctionCallOutput;
+    second_output.content = None;
+    second_output.call_id = Some("toolu_second".to_string());
+    second_output.output = Some(FunctionCallOutput::Text("second done".to_string()));
+
+    let mut duplicate_second_output = message("user", "ignored");
+    duplicate_second_output.item_type = ItemType::FunctionCallOutput;
+    duplicate_second_output.content = None;
+    duplicate_second_output.call_id = Some("toolu_second".to_string());
+    duplicate_second_output.output = Some(FunctionCallOutput::Text("second follow-up".to_string()));
+
+    let (body, _) = build_anthropic_request(
+        &request(vec![
+            message("user", "run tools"),
+            first_call,
+            second_call,
+            first_output,
+            second_output,
+            duplicate_second_output,
+        ]),
+        AnthropicProviderProfile::Anthropic,
+    )
+    .unwrap();
+
+    assert_eq!(body["messages"].as_array().unwrap().len(), 3);
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["content"].as_array().unwrap().len(), 2);
+    assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(body["messages"][1]["content"][0]["id"], "toolu_first");
+    assert_eq!(body["messages"][1]["content"][1]["type"], "tool_use");
+    assert_eq!(body["messages"][1]["content"][1]["id"], "toolu_second");
+
+    assert_eq!(body["messages"][2]["role"], "user");
+    assert_eq!(body["messages"][2]["content"].as_array().unwrap().len(), 2);
+    assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+    assert_eq!(
+        body["messages"][2]["content"][0]["tool_use_id"],
+        "toolu_first"
+    );
+    assert_eq!(body["messages"][2]["content"][1]["type"], "tool_result");
+    assert_eq!(
+        body["messages"][2]["content"][1]["tool_use_id"],
+        "toolu_second"
+    );
+    assert_eq!(
+        body["messages"][2]["content"][1]["content"],
+        "second done\n\nsecond follow-up"
+    );
+}
+
+#[test]
 fn builds_anthropic_tool_result_with_image_content_blocks() {
     let image_url = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD";
     let output = image_tool_result("toolu_image", image_url);
@@ -1270,6 +1347,41 @@ fn reconstructs_multiple_web_search_tool_uses_from_stream() {
 }
 
 #[test]
+fn ignores_duplicate_web_search_tool_use_ids_from_stream() {
+    let response = json!({
+        "role": "assistant",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "WebSearch",
+                "input": {"query": "World Cup results"}
+            },
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "WebSearch",
+                "input": {"query": "World Cup duplicate"}
+            },
+            {
+                "type": "tool_use",
+                "id": "call_2",
+                "name": "WebSearch",
+                "input": {"query": "World Cup schedule"}
+            }
+        ]
+    });
+
+    let tool_uses = find_web_search_tool_uses(&response);
+
+    assert_eq!(tool_uses.len(), 2);
+    assert_eq!(tool_uses[0].id, "call_1");
+    assert_eq!(tool_uses[0].query, "World Cup results");
+    assert_eq!(tool_uses[1].id, "call_2");
+    assert_eq!(tool_uses[1].query, "World Cup schedule");
+}
+
+#[test]
 fn appends_all_parallel_web_search_tool_results() {
     let mut body = json!({
         "model": "glm-5.2",
@@ -1302,6 +1414,7 @@ fn appends_all_parallel_web_search_tool_results() {
         vec![
             ("call_1".to_string(), "result one".to_string()),
             ("call_2".to_string(), "result two".to_string()),
+            ("call_2".to_string(), "result two extra".to_string()),
         ],
     );
 
@@ -1312,7 +1425,10 @@ fn appends_all_parallel_web_search_tool_results() {
     assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_1");
     assert_eq!(messages[2]["content"][0]["content"], "result one");
     assert_eq!(messages[2]["content"][1]["tool_use_id"], "call_2");
-    assert_eq!(messages[2]["content"][1]["content"], "result two");
+    assert_eq!(
+        messages[2]["content"][1]["content"],
+        "result two\n\nresult two extra"
+    );
 }
 
 #[test]
