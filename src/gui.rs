@@ -244,12 +244,12 @@ pub fn run() {
         return;
     }
 
-    if let Err(err) = wxdragon::main(|_| build_ui(single_instance_guard)) {
+    if let Err(err) = wxdragon::main(|app| build_ui(app, single_instance_guard)) {
         eprintln!("failed to start CodexHub GUI: {err:?}");
     }
 }
 
-fn build_ui(single_instance_guard: GuiSingleInstanceGuard) {
+fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     // Apply the saved appearance and install the matching design tokens *before*
     // any window is built: `set_appearance` returns `CannotChange` once a window
     // exists, so this ordering is required.
@@ -269,6 +269,7 @@ fn build_ui(single_instance_guard: GuiSingleInstanceGuard) {
         // own their scrolling, so the frame itself should not exceed the screen.
         .with_size(Size::new(1180, 760))
         .build();
+    app.set_top_window(&frame);
     frame.set_icon(&app_icon_bitmap(48));
     let update_check_in_flight = Arc::new(AtomicBool::new(false));
     let quitting = Rc::new(AtomicBool::new(false));
@@ -1610,6 +1611,7 @@ fn build_ui(single_instance_guard: GuiSingleInstanceGuard) {
         let dashboard_refresh = dashboard_refresh.clone();
         let gui_timers = gui_timers.clone();
         let frame = frame;
+        let app = app;
         let tray_controller = Rc::new(tray_controller);
         let quitting = quitting.clone();
         frame.on_close(move |event| {
@@ -1629,6 +1631,7 @@ fn build_ui(single_instance_guard: GuiSingleInstanceGuard) {
             stop_pending_startup_daemon(&dashboard_refresh);
             stop_daemon_on_exit(&api, &daemon_child);
             frame.destroy();
+            app.exit_main_loop();
         });
     }
 
