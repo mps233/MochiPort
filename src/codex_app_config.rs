@@ -892,7 +892,6 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
 
     let codex_backend_url = options.codex_backend_url();
     doc["chatgpt_base_url"] = toml_edit::value(&codex_backend_url);
-    disable_codex_apps_feature_if_unset(&mut doc);
 
     let explicit_provider_name = non_empty(options.provider_name.as_deref());
     let explicit_provider_base_url = options.provider_base_url.as_deref().and_then(config_value);
@@ -947,24 +946,9 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         }
     }
 
-    write_bundled_plugin_marketplace(&mut doc);
-
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
     std::fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
-}
-
-fn disable_codex_apps_feature_if_unset(doc: &mut toml_edit::DocumentMut) {
-    if !doc.contains_key("features") {
-        doc["features"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-
-    let Some(features) = doc["features"].as_table_mut() else {
-        return;
-    };
-    if features.get("apps").is_none() && features.get("connectors").is_none() {
-        features["apps"] = toml_edit::value(false);
-    }
 }
 
 fn normalize_config_toml_order(raw: &str) -> String {
@@ -1303,52 +1287,6 @@ fn provider_table_mut<'a>(
         .expect("provider table should exist")
         .as_table_mut()
         .expect("provider should be a table")
-}
-
-fn write_bundled_plugin_marketplace(doc: &mut toml_edit::DocumentMut) {
-    let Some(root) = find_openai_bundled_marketplace_root() else {
-        return;
-    };
-
-    if !doc.contains_key("marketplaces") {
-        doc["marketplaces"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let Some(marketplaces) = doc["marketplaces"].as_table_mut() else {
-        return;
-    };
-
-    let mut marketplace = toml_edit::Table::new();
-    marketplace["source_type"] = toml_edit::value("local");
-    marketplace["source"] = toml_edit::value(root.to_string_lossy().to_string());
-    marketplaces["openai-bundled"] = toml_edit::Item::Table(marketplace);
-}
-
-fn find_openai_bundled_marketplace_root() -> Option<PathBuf> {
-    let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from)?;
-    let windows_apps = program_files.join("WindowsApps");
-    let entries = std::fs::read_dir(windows_apps).ok()?;
-    let mut roots = entries
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !name.starts_with("OpenAI.Codex_") {
-                return None;
-            }
-            let root = entry
-                .path()
-                .join("app")
-                .join("resources")
-                .join("plugins")
-                .join("openai-bundled");
-            root.join(".agents")
-                .join("plugins")
-                .join("marketplace.json")
-                .is_file()
-                .then_some(root)
-        })
-        .collect::<Vec<_>>();
-    roots.sort();
-    roots.pop()
 }
 
 fn provider_name(value: Option<&str>) -> Result<String> {
@@ -1931,8 +1869,8 @@ mod tests {
         assert!(!config.contains("disable_response_storage"));
         assert!(!config.contains("network_access"));
         assert!(!config.contains("windows_wsl_setup_acknowledged"));
-        assert!(config.contains("[features]"));
-        assert!(config.contains("apps = false"));
+        assert!(!config.contains("[features]"));
+        assert!(!config.contains("apps = false"));
         assert!(!config.contains("image_generation = false"));
         assert!(config.contains("[model_providers.ai-codex]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));

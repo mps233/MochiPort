@@ -1,4 +1,3 @@
-use anyhow::Context;
 use axum::{
     Json,
     extract::{Path as AxumPath, Query},
@@ -148,7 +147,6 @@ struct LocalPluginCatalogEntry {
     name: String,
     marketplace: String,
     version: Option<String>,
-    root: PathBuf,
     description: Option<String>,
     keywords: Vec<String>,
     interface: serde_json::Value,
@@ -298,7 +296,6 @@ fn local_plugin_entry_from_root(
             .get("version")
             .and_then(|value| value.as_str())
             .map(str::to_string),
-        root,
         description: manifest
             .get("description")
             .and_then(|value| value.as_str())
@@ -424,23 +421,8 @@ fn find_local_plugin_by_remote_id(remote_id: &str) -> Option<LocalPluginCatalogE
 }
 
 fn install_local_plugin(plugin_id: &str) -> anyhow::Result<()> {
-    let plugin = find_local_plugin_by_remote_id(plugin_id)
+    find_local_plugin_by_remote_id(plugin_id)
         .ok_or_else(|| anyhow::anyhow!("local plugin not found"))?;
-    let codex_home = default_codex_home_for_web();
-    let target = codex_home
-        .join("plugins")
-        .join("cache")
-        .join(&plugin.marketplace)
-        .join(&plugin.name)
-        .join(plugin.version.as_deref().unwrap_or("local"));
-    if plugin.root != target {
-        if target.exists() {
-            fs::remove_dir_all(&target)
-                .with_context(|| format!("failed to replace plugin cache {}", target.display()))?;
-        }
-        copy_dir_all(&plugin.root, &target)?;
-    }
-    write_enabled_plugin_config(&codex_home.join("config.toml"), &plugin.config_id())?;
     Ok(())
 }
 
@@ -467,30 +449,6 @@ fn installed_plugin_ids() -> BTreeSet<String> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-fn write_enabled_plugin_config(config_path: &Path, plugin_id: &str) -> anyhow::Result<()> {
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut doc = if config_path.is_file() {
-        fs::read_to_string(config_path)?
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap_or_else(|_| toml_edit::DocumentMut::new())
-    } else {
-        toml_edit::DocumentMut::new()
-    };
-    if !doc.contains_key("plugins") {
-        doc["plugins"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    let plugins = doc["plugins"]
-        .as_table_mut()
-        .ok_or_else(|| anyhow::anyhow!("config plugins entry is not a table"))?;
-    let mut plugin_table = toml_edit::Table::new();
-    plugin_table["enabled"] = toml_edit::value(true);
-    plugins[plugin_id] = toml_edit::Item::Table(plugin_table);
-    fs::write(config_path, doc.to_string())?;
-    Ok(())
 }
 
 fn plugin_cache_roots() -> Vec<PathBuf> {
@@ -548,19 +506,4 @@ fn find_openai_bundled_plugins_root() -> Option<PathBuf> {
         .collect::<Vec<_>>();
     roots.sort();
     roots.pop()
-}
-
-fn copy_dir_all(source: &Path, destination: &Path) -> anyhow::Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let target = destination.join(entry.file_name());
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
 }
