@@ -208,7 +208,8 @@ async fn handle_with_internal_web_search(
             &log_context,
         )
         .await?;
-        let Some(tool_use) = find_web_search_tool_use(&step_resp) else {
+        let tool_uses = find_web_search_tool_uses(&step_resp);
+        if tool_uses.is_empty() {
             let response_obj = convert_anthropic_response(
                 &step_resp,
                 response_model,
@@ -221,20 +222,24 @@ async fn handle_with_internal_web_search(
                 &log_context,
                 &internal_web_search_items,
             )?));
-        };
-        internal_web_search_items.push(web_search_response_item(&tool_use));
+        }
 
-        let search_text = execute_internal_web_search(
-            client,
-            ctx,
-            request,
-            provider,
-            options,
-            tool_use.query.as_str(),
-            &log_context,
-        )
-        .await?;
-        append_tool_result(&mut anthropic_body, &step_resp, &tool_use.id, search_text);
+        let mut tool_results = Vec::new();
+        for tool_use in tool_uses {
+            internal_web_search_items.push(web_search_response_item(&tool_use));
+            let search_text = execute_internal_web_search(
+                client,
+                ctx,
+                request,
+                provider,
+                options,
+                tool_use.query.as_str(),
+                &log_context,
+            )
+            .await?;
+            tool_results.push((tool_use.id, search_text));
+        }
+        append_tool_results(&mut anthropic_body, &step_resp, tool_results);
     }
 
     Err(GatewayError::upstream(
@@ -485,12 +490,13 @@ struct WebSearchToolUse {
     query: String,
 }
 
-fn find_web_search_tool_use(response: &Value) -> Option<WebSearchToolUse> {
+fn find_web_search_tool_uses(response: &Value) -> Vec<WebSearchToolUse> {
     response
         .get("content")
-        .and_then(Value::as_array)?
-        .iter()
-        .find_map(|block| {
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|block| {
             if block.get("type").and_then(Value::as_str) != Some("tool_use")
                 || block.get("name").and_then(Value::as_str) != Some(WEB_SEARCH_TOOL_NAME)
             {
@@ -505,14 +511,17 @@ fn find_web_search_tool_use(response: &Value) -> Option<WebSearchToolUse> {
                 .to_string();
             (!query.is_empty()).then_some(WebSearchToolUse { id, query })
         })
+        .collect()
 }
 
-fn append_tool_result(
+fn append_tool_results(
     anthropic_body: &mut Value,
     assistant_response: &Value,
-    tool_use_id: &str,
-    search_text: String,
+    tool_results: Vec<(String, String)>,
 ) {
+    if tool_results.is_empty() {
+        return;
+    }
     let Some(messages) = anthropic_body
         .get_mut("messages")
         .and_then(Value::as_array_mut)
@@ -525,13 +534,19 @@ fn append_tool_result(
             "content": content
         }));
     }
+    let content = tool_results
+        .into_iter()
+        .map(|(tool_use_id, search_text)| {
+            json!({
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": search_text
+            })
+        })
+        .collect::<Vec<_>>();
     messages.push(json!({
         "role": "user",
-        "content": [{
-            "type": "tool_result",
-            "tool_use_id": tool_use_id,
-            "content": search_text
-        }]
+        "content": content
     }));
 }
 

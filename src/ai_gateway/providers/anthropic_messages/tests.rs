@@ -3,7 +3,10 @@ use super::request::build_anthropic_request;
 use super::response::convert_anthropic_response;
 use super::stream::AnthropicSseToResponsesSse;
 use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE_CODE_USER_AGENT};
-use super::{bearer_authorization, build_anthropic_upstream_request, merge_anthropic_betas};
+use super::{
+    anthropic_message_from_sse, append_tool_results, bearer_authorization,
+    build_anthropic_upstream_request, find_web_search_tool_uses, merge_anthropic_betas,
+};
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::model::{
@@ -1234,6 +1237,81 @@ fn converts_anthropic_tool_use_web_search_response() {
         converted.output[0].action.as_ref().unwrap()["query"],
         "Portugal Uzbekistan World Cup 2026 result Ronaldo goal"
     );
+}
+
+#[test]
+fn reconstructs_multiple_web_search_tool_uses_from_stream() {
+    let raw_sse = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.2\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"WebSearch\",\"input\":{}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"World Cup results\\\"}\"}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_2\",\"name\":\"WebSearch\",\"input\":{}}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"World Cup schedule\\\"}\"}}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":8}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
+
+    let message = anthropic_message_from_sse(raw_sse).unwrap();
+    let tool_uses = find_web_search_tool_uses(&message);
+
+    assert_eq!(tool_uses.len(), 2);
+    assert_eq!(tool_uses[0].id, "call_1");
+    assert_eq!(tool_uses[0].query, "World Cup results");
+    assert_eq!(tool_uses[1].id, "call_2");
+    assert_eq!(tool_uses[1].query, "World Cup schedule");
+}
+
+#[test]
+fn appends_all_parallel_web_search_tool_results() {
+    let mut body = json!({
+        "model": "glm-5.2",
+        "messages": [{
+            "role": "user",
+            "content": [{"type": "text", "text": "search"}]
+        }]
+    });
+    let assistant_response = json!({
+        "role": "assistant",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "WebSearch",
+                "input": {"query": "World Cup results"}
+            },
+            {
+                "type": "tool_use",
+                "id": "call_2",
+                "name": "WebSearch",
+                "input": {"query": "World Cup schedule"}
+            }
+        ]
+    });
+
+    append_tool_results(
+        &mut body,
+        &assistant_response,
+        vec![
+            ("call_1".to_string(), "result one".to_string()),
+            ("call_2".to_string(), "result two".to_string()),
+        ],
+    );
+
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 3);
+    assert_eq!(messages[1]["role"], "assistant");
+    assert_eq!(messages[2]["role"], "user");
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], "call_1");
+    assert_eq!(messages[2]["content"][0]["content"], "result one");
+    assert_eq!(messages[2]["content"][1]["tool_use_id"], "call_2");
+    assert_eq!(messages[2]["content"][1]["content"], "result two");
 }
 
 #[test]
