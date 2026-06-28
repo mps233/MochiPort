@@ -59,9 +59,27 @@ jobs:
 
           PATH="/opt/homebrew/bin:$PATH" cargo build --release --features gui --bin codexhub
 
+          CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "Could not read package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            APP_VERSION="$GITHUB_REF_NAME"
+          else
+            APP_VERSION="v$CARGO_VERSION"
+          fi
+          {
+            echo "APP_VERSION=$APP_VERSION"
+            echo "MACOS_DMG_NAME=CodexHub-$APP_VERSION-macos-universal.dmg"
+            echo "MACOS_APP_ZIP_NAME=CodexHub-$APP_VERSION-macos-universal.app.zip"
+          } >> "$GITHUB_ENV"
+
           rm -rf "$APP"
           mkdir -p "$MACOS" "$RESOURCES/brand"
           cp "packaging/macos/Info.plist" "$CONTENTS/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${CARGO_VERSION%%[-+]*}" "$CONTENTS/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER:-1}" "$CONTENTS/Info.plist"
           cp "packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
           cp packaging/brand/*.png "$RESOURCES/brand/"
           cp "target/release/codexhub" "$MACOS/$APP_NAME"
@@ -82,7 +100,8 @@ jobs:
           APP="target/dist/CodexHub.app"
           DMG="target/dist/CodexHub.dmg"
           DMG_STAGING="target/dist/dmg"
-          ZIP="target/dist/CodexHub.zip"
+          ZIP="target/dist/${MACOS_APP_ZIP_NAME}"
+          NOTARY_ZIP="target/dist/CodexHub-notary.zip"
           ENTITLEMENTS="packaging/macos/entitlements.plist"
 
           if [ -n "${APPLE_API_KEY_P8:-}" ]; then
@@ -117,9 +136,11 @@ jobs:
             "$APP"
 
           codesign --verify --deep --strict --verbose=2 "$APP"
-          ditto -c -k --keepParent "$APP" "$ZIP"
-          notary_submit "$ZIP"
+          ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
+          notary_submit "$NOTARY_ZIP"
           xcrun stapler staple "$APP"
+          rm -f "$NOTARY_ZIP"
+          ditto -c -k --keepParent "$APP" "$ZIP"
 
           rm -rf "$DMG_STAGING"
           mkdir -p "$DMG_STAGING"
@@ -130,13 +151,15 @@ jobs:
           codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$DMG"
           notary_submit "$DMG"
           xcrun stapler staple "$DMG"
+          mv "$DMG" "target/dist/${MACOS_DMG_NAME}"
+          DMG="target/dist/${MACOS_DMG_NAME}"
 
           xcrun stapler validate "$APP"
           xcrun stapler validate "$DMG"
           spctl --assess --type execute --verbose=4 "$APP"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
 
-      - name: Write Update Manifest
+      - name: Write macOS Update Metadata
         if: startsWith(github.ref, 'refs/tags/')
         env:
           RELEASE_TAG: ${{ github.ref_name }}
@@ -146,15 +169,51 @@ jobs:
           python3 - <<'PY'
           import json
           import os
+          import hashlib
           from pathlib import Path
 
           notes_path = Path("RELEASE_NOTES.md")
+          dist = Path("target/dist")
+          dmg_name = os.environ["MACOS_DMG_NAME"]
+          app_zip_name = os.environ["MACOS_APP_ZIP_NAME"]
+          dmg_path = dist / dmg_name
+          app_zip_path = dist / app_zip_name
+          release_tag = os.environ["RELEASE_TAG"]
+          repository = os.environ["RELEASE_REPOSITORY"]
+          release_url = f"https://github.com/{repository}/releases/tag/{release_tag}"
+          download_base_url = f"https://github.com/{repository}/releases/download/{release_tag}"
+
+          def sha256(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
           manifest = {
-              "version": os.environ["RELEASE_TAG"],
-              "releaseUrl": f"https://github.com/{os.environ['RELEASE_REPOSITORY']}/releases/tag/{os.environ['RELEASE_TAG']}",
+              "version": release_tag,
+              "releaseUrl": release_url,
               "notes": notes_path.read_text(encoding="utf-8") if notes_path.exists() else "",
+              "assets": {
+                  "macos-universal": {
+                      "type": "dmg",
+                      "url": f"{download_base_url}/{dmg_name}",
+                      "sha256": sha256(dmg_path),
+                      "size": dmg_path.stat().st_size,
+                      "signed": True,
+                      "notarized": True,
+                  },
+                  "macos-sparkle-universal": {
+                      "type": "app-zip",
+                      "url": f"{download_base_url}/{app_zip_name}",
+                      "sha256": sha256(app_zip_path),
+                      "size": app_zip_path.stat().st_size,
+                      "signed": True,
+                      "notarized": True,
+                  },
+              },
           }
-          Path("target/dist/latest.json").write_text(
+          Path("target/dist/latest-macos.json").write_text(
               json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
               encoding="utf-8",
           )
@@ -164,7 +223,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: CodexHub-macOS
-          path: target/dist/CodexHub.dmg
+          path: |
+            target/dist/CodexHub-*-macos-universal.dmg
+            target/dist/CodexHub-*-macos-universal.app.zip
+            target/dist/latest-macos.json
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -175,5 +237,6 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub.dmg
-            target/dist/latest.json
+            target/dist/CodexHub-*-macos-universal.dmg
+            target/dist/CodexHub-*-macos-universal.app.zip
+            target/dist/latest-macos.json

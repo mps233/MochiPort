@@ -1,5 +1,9 @@
-﻿use std::{
+use std::{
     cell::RefCell,
+    collections::BTreeMap,
+    fs,
+    io::{Read, Write},
+    path::PathBuf,
     process::Command,
     rc::Rc,
     sync::{
@@ -11,13 +15,15 @@
 
 use reqwest::blocking::Client;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use url::Url;
 use wxdragon::{prelude::*, timer::Timer};
 
 use super::daemon::hide_command_window;
 use super::text::GuiText;
 use super::{
-    FrameTimerStore, GuiTimers, UPDATE_CHECK_TIMEOUT, UPDATE_MANIFEST_URL, UPDATE_RELEASE_API_URL,
-    UPDATE_RELEASE_PAGE_URL,
+    FrameTimerStore, GuiTimers, LEGACY_UPDATE_MANIFEST_URL, UPDATE_CHECK_TIMEOUT,
+    UPDATE_MANIFEST_URL, UPDATE_RELEASE_API_URL, UPDATE_RELEASE_PAGE_URL,
 };
 use super::{confirm_open_update_release, show_error, show_info};
 
@@ -25,6 +31,7 @@ use super::{confirm_open_update_release, show_error, show_info};
 struct LatestReleaseInfo {
     version: String,
     release_url: String,
+    download: Option<UpdateDownload>,
     notes: Option<String>,
 }
 
@@ -34,6 +41,7 @@ enum UpdateCheckOutcome {
         current_version: String,
         latest_version: String,
         release_url: String,
+        download: Option<UpdateDownload>,
         notes: Option<String>,
     },
     Current {
@@ -50,6 +58,18 @@ struct UpdateManifest {
     release_url: Option<String>,
     #[serde(default)]
     notes: Option<String>,
+    #[serde(default)]
+    assets: BTreeMap<String, UpdateAsset>,
+}
+
+#[derive(Deserialize)]
+struct UpdateAsset {
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default, rename = "type")]
+    asset_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -59,14 +79,48 @@ struct GitHubRelease {
     body: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct UpdateDownload {
+    url: String,
+    sha256: Option<String>,
+    asset_type: Option<String>,
+}
+
+#[derive(Debug)]
+struct DownloadedUpdate {
+    path: PathBuf,
+    url: String,
+}
+
 pub(super) fn check_for_updates_async(
     frame: &Frame,
     gui_timers: &GuiTimers,
     text: GuiText,
     in_flight: &Arc<AtomicBool>,
 ) {
+    check_for_updates_async_impl(frame, gui_timers, text, in_flight, false);
+}
+
+pub(super) fn check_for_updates_silent_async(
+    frame: &Frame,
+    gui_timers: &GuiTimers,
+    text: GuiText,
+    in_flight: &Arc<AtomicBool>,
+) {
+    check_for_updates_async_impl(frame, gui_timers, text, in_flight, true);
+}
+
+fn check_for_updates_async_impl(
+    frame: &Frame,
+    gui_timers: &GuiTimers,
+    text: GuiText,
+    in_flight: &Arc<AtomicBool>,
+    silent_if_not_newer: bool,
+) {
     if in_flight.swap(true, Ordering::SeqCst) {
-        show_info(frame, text.checking_updates_busy());
+        if !silent_if_not_newer {
+            show_info(frame, text.checking_updates_busy());
+        }
         return;
     }
 
@@ -85,6 +139,7 @@ pub(super) fn check_for_updates_async(
     let update_timer = Timer::new(frame);
     {
         let frame = *frame;
+        let gui_timers = gui_timers.clone();
         let in_flight = in_flight.clone();
         let update_timer_store = update_timer_store.clone();
         update_timer.on_tick(move |_| {
@@ -97,7 +152,7 @@ pub(super) fn check_for_updates_async(
                 timer.stop();
             }
             in_flight.store(false, Ordering::SeqCst);
-            show_update_check_result(&frame, text, update);
+            show_update_check_result(&frame, &gui_timers, text, update, silent_if_not_newer);
         });
     }
     update_timer.start(100, false);
@@ -112,24 +167,43 @@ fn check_for_updates(text: GuiText) -> Result<UpdateCheckOutcome, String> {
         .build()
         .map_err(|err| text.update_client_failed(&err.to_string()))?;
 
-    let release = fetch_update_manifest(text, &client).or_else(|manifest_err| {
-        fetch_github_latest_release(text, &client)
-            .map_err(|api_err| text.update_sources_failed(&api_err, &manifest_err))
-    })?;
+    let release = fetch_update_manifest(text, &client, UPDATE_MANIFEST_URL).or_else(
+        |platform_manifest_err| {
+            fetch_update_manifest(text, &client, LEGACY_UPDATE_MANIFEST_URL).or_else(
+                |legacy_manifest_err| {
+                    fetch_github_latest_release(text, &client).map_err(|api_err| {
+                        text.update_sources_failed(
+                            &api_err,
+                            &platform_manifest_err,
+                            &legacy_manifest_err,
+                        )
+                    })
+                },
+            )
+        },
+    )?;
     build_update_check_outcome(text, release)
 }
 
-fn fetch_update_manifest(text: GuiText, client: &Client) -> Result<LatestReleaseInfo, String> {
-    let body = fetch_update_text(text, client, UPDATE_MANIFEST_URL)?;
+fn fetch_update_manifest(
+    text: GuiText,
+    client: &Client,
+    url: &str,
+) -> Result<LatestReleaseInfo, String> {
+    let body = fetch_update_text(text, client, url)?;
     let manifest: UpdateManifest = serde_json::from_str(&body)
-        .map_err(|err| text.update_manifest_parse_failed(&err.to_string()))?;
+        .map_err(|err| text.update_manifest_parse_failed(&format!("{url}: {}", err)))?;
     let release_url = manifest
         .release_url
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| UPDATE_RELEASE_PAGE_URL.to_string());
+        .unwrap_or(UPDATE_RELEASE_PAGE_URL)
+        .to_string();
+    let download = platform_download(&manifest);
     Ok(LatestReleaseInfo {
         version: manifest.version,
         release_url,
+        download,
         notes: manifest.notes,
     })
 }
@@ -144,6 +218,7 @@ fn fetch_github_latest_release(
     Ok(LatestReleaseInfo {
         version: release.tag_name,
         release_url: release.html_url,
+        download: None,
         notes: release.body,
     })
 }
@@ -189,6 +264,7 @@ fn build_update_check_outcome(
             current_version,
             latest_version,
             release_url: release.release_url,
+            download: release.download,
             notes: release.notes,
         })
     } else {
@@ -201,35 +277,49 @@ fn build_update_check_outcome(
 
 fn show_update_check_result(
     parent: &Frame,
+    gui_timers: &GuiTimers,
     text: GuiText,
     result: Result<UpdateCheckOutcome, String>,
+    silent_if_not_newer: bool,
 ) {
     match result {
         Ok(UpdateCheckOutcome::Current {
             current_version,
             latest_version,
         }) => {
-            show_info(
-                parent,
-                &text.already_latest_version(&current_version, &latest_version),
-            );
+            if !silent_if_not_newer {
+                show_info(
+                    parent,
+                    &text.already_latest_version(&current_version, &latest_version),
+                );
+            }
         }
         Ok(UpdateCheckOutcome::Newer {
             current_version,
             latest_version,
             release_url,
+            download,
             notes,
         }) => {
             let notes = update_notes_for_dialog(text, notes.as_deref());
-            let message = text.new_version_message(&current_version, &latest_version, &notes);
+            let message = text.new_version_message(
+                &current_version,
+                &latest_version,
+                &notes,
+                download.is_some(),
+            );
             if confirm_open_update_release(parent, text, &message) {
-                if let Err(err) = open_url_in_browser(text, &release_url) {
+                if let Some(download) = download {
+                    download_and_install_update_async(parent, gui_timers, text, download);
+                } else if let Err(err) = open_url_in_browser(text, &release_url) {
                     show_error(parent, &err);
                 }
             }
         }
         Err(err) => {
-            show_error(parent, &text.update_failed(&err));
+            if !silent_if_not_newer {
+                show_error(parent, &text.update_failed(&err));
+            }
         }
     }
 }
@@ -240,6 +330,250 @@ fn update_notes_for_dialog(text: GuiText, notes: Option<&str>) -> String {
         return text.release_notes_default().to_string();
     }
     text.release_notes(&truncate_for_dialog(notes, 700))
+}
+
+impl UpdateDownload {
+    fn from_asset(asset: &UpdateAsset) -> Option<Self> {
+        let url = asset.url.as_deref()?.trim();
+        if url.is_empty() {
+            return None;
+        }
+        Some(Self {
+            url: url.to_string(),
+            sha256: asset
+                .sha256
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_ascii_lowercase()),
+            asset_type: asset
+                .asset_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        })
+    }
+}
+
+fn platform_download(manifest: &UpdateManifest) -> Option<UpdateDownload> {
+    manifest
+        .assets
+        .get(platform_manifest_asset_key())
+        .or_else(|| manifest.assets.get(platform_manifest_fallback_asset_key()))
+        .and_then(UpdateDownload::from_asset)
+}
+
+#[cfg(target_os = "windows")]
+fn platform_manifest_asset_key() -> &'static str {
+    "windows-x86_64"
+}
+
+#[cfg(target_os = "macos")]
+fn platform_manifest_asset_key() -> &'static str {
+    "macos-universal"
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn platform_manifest_asset_key() -> &'static str {
+    "linux-x86_64"
+}
+
+#[cfg(target_os = "windows")]
+fn platform_manifest_fallback_asset_key() -> &'static str {
+    "windows-portable-x86_64"
+}
+
+#[cfg(target_os = "macos")]
+fn platform_manifest_fallback_asset_key() -> &'static str {
+    "macos-sparkle-universal"
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn platform_manifest_fallback_asset_key() -> &'static str {
+    "linux-appimage-x86_64"
+}
+
+fn download_and_install_update_async(
+    parent: &Frame,
+    gui_timers: &GuiTimers,
+    text: GuiText,
+    download: UpdateDownload,
+) {
+    show_info(parent, text.update_download_started());
+
+    let result: Arc<Mutex<Option<Result<DownloadedUpdate, String>>>> = Arc::new(Mutex::new(None));
+    {
+        let result = result.clone();
+        thread::spawn(move || {
+            let update = download_update(text, &download).and_then(|update| {
+                launch_downloaded_update(text, &update)?;
+                Ok(update)
+            });
+            if let Ok(mut slot) = result.lock() {
+                slot.replace(update);
+            }
+        });
+    }
+
+    let timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
+    let timer = Timer::new(parent);
+    {
+        let parent = *parent;
+        let timer_store = timer_store.clone();
+        timer.on_tick(move |_| {
+            let update = result.lock().ok().and_then(|mut slot| slot.take());
+            let Some(update) = update else {
+                return;
+            };
+
+            if let Some(timer) = timer_store.borrow().as_ref() {
+                timer.stop();
+            }
+            match update {
+                Ok(update) => show_info(
+                    &parent,
+                    &text.update_installer_started(&update.path.display().to_string()),
+                ),
+                Err(err) => show_error(&parent, &text.update_failed(&err)),
+            }
+        });
+    }
+    timer.start(250, false);
+    timer_store.borrow_mut().replace(timer);
+    gui_timers.track(&timer_store);
+}
+
+fn download_update(text: GuiText, download: &UpdateDownload) -> Result<DownloadedUpdate, String> {
+    let url = download.url.trim();
+    if url.is_empty() {
+        return Err(text.empty_download_url().to_string());
+    }
+
+    let client = Client::builder()
+        .connect_timeout(UPDATE_CHECK_TIMEOUT)
+        .timeout(None)
+        .build()
+        .map_err(|err| text.update_client_failed(&err.to_string()))?;
+    let mut response = client
+        .get(url)
+        .header("User-Agent", "codexhub")
+        .send()
+        .map_err(|err| text.update_download_failed(url, &err.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(text.update_download_http_failed(url, &status.to_string()));
+    }
+
+    let target_path = update_download_path(url, download.asset_type.as_deref())?;
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            text.update_download_failed(&parent.display().to_string(), &err.to_string())
+        })?;
+    }
+
+    let mut file = fs::File::create(&target_path).map_err(|err| {
+        text.update_download_failed(&target_path.display().to_string(), &err.to_string())
+    })?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut buffer)
+            .map_err(|err| text.update_download_failed(url, &err.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        file.write_all(&buffer[..read]).map_err(|err| {
+            text.update_download_failed(&target_path.display().to_string(), &err.to_string())
+        })?;
+        hasher.update(&buffer[..read]);
+    }
+
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+    if let Some(expected_sha256) = &download.sha256
+        && !actual_sha256.eq_ignore_ascii_case(expected_sha256)
+    {
+        return Err(text.update_checksum_mismatch(expected_sha256, &actual_sha256));
+    }
+
+    Ok(DownloadedUpdate {
+        path: target_path,
+        url: url.to_string(),
+    })
+}
+
+fn update_download_path(url: &str, asset_type: Option<&str>) -> Result<PathBuf, String> {
+    let filename = Url::parse(url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(|mut segments| segments.next_back().map(ToOwned::to_owned))
+        })
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or_else(|| default_update_filename(asset_type).to_string());
+    let safe_filename = filename
+        .chars()
+        .map(|ch| match ch {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            _ => ch,
+        })
+        .collect::<String>();
+    Ok(std::env::temp_dir()
+        .join("CodexHubUpdates")
+        .join(safe_filename))
+}
+
+fn default_update_filename(asset_type: Option<&str>) -> &'static str {
+    match asset_type.unwrap_or_default().to_ascii_lowercase().as_str() {
+        "msi" => "CodexHub-update.msi",
+        "dmg" => "CodexHub-update.dmg",
+        "app-zip" => "CodexHub-update.app.zip",
+        "zip" => "CodexHub-update.zip",
+        _ => default_platform_update_filename(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn default_platform_update_filename() -> &'static str {
+    "CodexHub-update.msi"
+}
+
+#[cfg(target_os = "macos")]
+fn default_platform_update_filename() -> &'static str {
+    "CodexHub-update.dmg"
+}
+
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+fn default_platform_update_filename() -> &'static str {
+    "CodexHub-update"
+}
+
+fn launch_downloaded_update(text: GuiText, update: &DownloadedUpdate) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("msiexec.exe");
+        command.arg("/i").arg(&update.path);
+        hide_command_window(&mut command);
+        command
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&update.path);
+        command
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&update.path);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| text.update_installer_launch_failed(&update.url, &err.to_string()))
 }
 
 fn truncate_for_dialog(value: &str, max_chars: usize) -> String {

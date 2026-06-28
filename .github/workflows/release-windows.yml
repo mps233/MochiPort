@@ -1,4 +1,4 @@
-﻿name: release-windows
+name: release-windows
 
 on:
   workflow_dispatch:
@@ -21,8 +21,47 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
+
+      - name: Prepare Release Metadata
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cargoToml = Get-Content "Cargo.toml" -Raw
+          if ($cargoToml -match '(?m)^version\s*=\s*"([^"]+)"') {
+            $cargoVersion = $Matches[1]
+          } else {
+            throw "Could not read package version from Cargo.toml"
+          }
+
+          $refType = "${{ github.ref_type }}"
+          $refName = "${{ github.ref_name }}"
+          if ($refType -eq "tag") {
+            $appVersion = $refName
+          } else {
+            $appVersion = "v$cargoVersion"
+          }
+
+          $productVersion = ($cargoVersion -split '[-+]')[0]
+          $segments = @($productVersion.Split(".") | ForEach-Object { $_.Trim() })
+          if ($segments.Count -lt 3) {
+            throw "MSI ProductVersion must have at least three numeric segments: $productVersion"
+          }
+          $productVersion = "$($segments[0]).$($segments[1]).$($segments[2])"
+          if ($productVersion -notmatch '^\d+\.\d+\.\d+$') {
+            throw "MSI ProductVersion must be numeric: $productVersion"
+          }
+
+          "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PRODUCT_VERSION=$productVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_ZIP_NAME=CodexHub-$appVersion-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_MSI_NAME=CodexHub-$appVersion-windows-x64.msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Reset wxWidgets CMake Cache
         shell: pwsh
@@ -70,24 +109,92 @@ jobs:
             & $signtool.FullName verify /pa /v $file
           }
 
-      - name: Package Zip
+      - name: Stage Distribution Files
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $dist = "target\dist\CodexHub Windows"
-          $zip = "target\dist\CodexHub Windows.zip"
-          Remove-Item -Recurse -Force "target\dist" -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force $dist | Out-Null
+          $distRoot = "target\dist"
+          $zipDist = Join-Path $distRoot "CodexHub Windows x64"
+          $msiSource = "target\msi-source"
+          Remove-Item -Recurse -Force $distRoot -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force $msiSource -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $zipDist | Out-Null
+          New-Item -ItemType Directory -Force $msiSource | Out-Null
 
-          Copy-Item "target\release\codexhub.exe" (Join-Path $dist "CodexHub.exe")
-          Copy-Item "README.md" $dist
+          Copy-Item "target\release\codexhub.exe" (Join-Path $zipDist "CodexHub.exe")
+          Copy-Item "README.md" $zipDist
+          Copy-Item "README.en.md" $zipDist
           if (Test-Path "config.example.toml") {
-            Copy-Item "config.example.toml" $dist
+            Copy-Item "config.example.toml" $zipDist
           }
 
-          Compress-Archive -Path "$dist\*" -DestinationPath $zip -Force
+          Copy-Item "target\release\codexhub.exe" (Join-Path $msiSource "CodexHub.exe")
+          Copy-Item "README.md" $msiSource
+          Copy-Item "README.en.md" $msiSource
+          Copy-Item "config.example.toml" $msiSource
+          Copy-Item "packaging\icons\AppIcon.ico" $msiSource
 
-      - name: Write Update Manifest
+          $zip = Join-Path $distRoot $env:WINDOWS_ZIP_NAME
+          Compress-Archive -Path "$zipDist\*" -DestinationPath $zip -Force
+
+      - name: Install WiX Toolset
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          dotnet tool install --global wix --version 7.0.0
+          $wix = Join-Path $env:USERPROFILE ".dotnet\tools\wix.exe"
+          if (Test-Path $wix) {
+            & $wix --version
+          } else {
+            wix --version
+          }
+
+      - name: Build MSI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $wix = Join-Path $env:USERPROFILE ".dotnet\tools\wix.exe"
+          if (-not (Test-Path $wix)) {
+            $wix = "wix"
+          }
+          $sourceDir = (Resolve-Path "target\msi-source").Path
+          $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
+          & $wix build "packaging\windows\CodexHub.wxs" `
+            -arch x64 `
+            -d "ProductVersion=$env:PRODUCT_VERSION" `
+            -d "SourceDir=$sourceDir" `
+            -out $msiPath
+
+      - name: Sign MSI
+        if: env.HAS_WINDOWS_CODESIGN == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $certPath = Join-Path $env:RUNNER_TEMP "windows-codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
+
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
+            Where-Object { $_.FullName -match "\\x64\\signtool.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $signtool) {
+            throw "signtool.exe not found in Windows SDK"
+          }
+
+          $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
+          & $signtool.FullName sign `
+            /fd SHA256 `
+            /td SHA256 `
+            /tr "http://timestamp.digicert.com" `
+            /f $certPath `
+            /p $env:WINDOWS_CODESIGN_PFX_PASSWORD `
+            $msiPath
+          & $signtool.FullName verify /pa /v $msiPath
+
+      - name: Write Windows Update Metadata
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
@@ -99,18 +206,77 @@ jobs:
           if (Test-Path "RELEASE_NOTES.md") {
             $notes = Get-Content "RELEASE_NOTES.md" -Raw
           }
+          $releaseUrl = "https://github.com/$env:RELEASE_REPOSITORY/releases/tag/$env:RELEASE_TAG"
+          $downloadBaseUrl = "https://github.com/$env:RELEASE_REPOSITORY/releases/download/$env:RELEASE_TAG"
+          $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
+          $zipPath = Join-Path "target\dist" $env:WINDOWS_ZIP_NAME
+          $msiHash = (Get-FileHash $msiPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipHash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $msiSize = (Get-Item $msiPath).Length
+          $zipSize = (Get-Item $zipPath).Length
+          $msiUrl = "$downloadBaseUrl/$env:WINDOWS_MSI_NAME"
+          $zipUrl = "$downloadBaseUrl/$env:WINDOWS_ZIP_NAME"
+
           $manifest = [ordered]@{
             version = $env:RELEASE_TAG
-            releaseUrl = "https://github.com/$env:RELEASE_REPOSITORY/releases/tag/$env:RELEASE_TAG"
+            releaseUrl = $releaseUrl
             notes = $notes
+            assets = [ordered]@{
+              "windows-x86_64" = [ordered]@{
+                type = "msi"
+                url = $msiUrl
+                sha256 = $msiHash
+                size = $msiSize
+                signed = $env:HAS_WINDOWS_CODESIGN -eq "true"
+              }
+              "windows-portable-x86_64" = [ordered]@{
+                type = "zip"
+                url = $zipUrl
+                sha256 = $zipHash
+                size = $zipSize
+              }
+            }
           }
-          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Path "target\dist\latest.json" -Encoding utf8
+          $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "target\dist\latest-windows.json" -Encoding utf8
+
+          $xmlReleaseUrl = [Security.SecurityElement]::Escape($releaseUrl)
+          $xmlMsiUrl = [Security.SecurityElement]::Escape($msiUrl)
+          $xmlVersion = [Security.SecurityElement]::Escape($env:PRODUCT_VERSION)
+          $xmlShortVersion = [Security.SecurityElement]::Escape($env:RELEASE_TAG)
+          $pubDate = (Get-Date).ToUniversalTime().ToString("R")
+          $appcast = @"
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>CodexHub Windows Updates</title>
+    <link>$xmlReleaseUrl</link>
+    <description>CodexHub Windows update feed</description>
+    <item>
+      <title>CodexHub $xmlShortVersion</title>
+      <link>$xmlReleaseUrl</link>
+      <pubDate>$pubDate</pubDate>
+      <sparkle:releaseNotesLink>$xmlReleaseUrl</sparkle:releaseNotesLink>
+      <enclosure
+        url="$xmlMsiUrl"
+        sparkle:version="$xmlVersion"
+        sparkle:shortVersionString="$xmlShortVersion"
+        length="$msiSize"
+        type="application/x-msi" />
+    </item>
+  </channel>
+</rss>
+"@
+          [IO.File]::WriteAllText("target\dist\appcast-windows.xml", $appcast, [Text.UTF8Encoding]::new($false))
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: CodexHub-Windows
-          path: target/dist/CodexHub Windows.zip
+          path: |
+            target/dist/CodexHub-*-windows-x64.zip
+            target/dist/CodexHub-*-windows-x64.msi
+            target/dist/latest-windows.json
+            target/dist/appcast-windows.xml
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -121,5 +287,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub Windows.zip
-            target/dist/latest.json
+            target/dist/CodexHub-*-windows-x64.zip
+            target/dist/CodexHub-*-windows-x64.msi
+            target/dist/latest-windows.json
+            target/dist/appcast-windows.xml

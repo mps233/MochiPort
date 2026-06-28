@@ -62,8 +62,8 @@ impl GuiText {
 
     pub(super) fn close_window_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "关闭这个窗口",
-            GuiLocale::EnUs => "Close this window",
+            GuiLocale::ZhCn => "隐藏窗口，CodexHub 会继续在托盘运行",
+            GuiLocale::EnUs => "Hide this window and keep CodexHub running in the tray",
         }
     }
 
@@ -85,6 +85,38 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "退出 CodexHub\tCtrl+Q",
             GuiLocale::EnUs => "&Quit CodexHub\tCtrl+Q",
+        }
+    }
+
+    pub(super) fn quit_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "退出 CodexHub 并停止本地服务",
+            GuiLocale::EnUs => "Quit CodexHub and stop the local service",
+        }
+    }
+
+    pub(super) fn tray_open(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "打开 CodexHub",
+            GuiLocale::EnUs => "Open CodexHub",
+        }
+    }
+
+    pub(super) fn tray_open_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "显示主窗口",
+            GuiLocale::EnUs => "Show the main window",
+        }
+    }
+
+    pub(super) fn tray_still_running_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "CodexHub 已隐藏到托盘，本地服务会继续运行。需要退出时请使用托盘菜单里的“退出 CodexHub”。"
+            }
+            GuiLocale::EnUs => {
+                "CodexHub is hidden in the tray and the local service keeps running. Use Quit CodexHub from the tray menu to exit."
+            }
         }
     }
 
@@ -1643,16 +1675,21 @@ impl GuiText {
         }
     }
 
-    pub(super) fn update_sources_failed(self, api_err: &str, manifest_err: &str) -> String {
+    pub(super) fn update_sources_failed(
+        self,
+        api_err: &str,
+        platform_manifest_err: &str,
+        legacy_manifest_err: &str,
+    ) -> String {
         match self.locale {
             GuiLocale::ZhCn => {
                 format!(
-                    "无法读取 GitHub Release 更新信息：{api_err}\nlatest.json 检查结果：{manifest_err}"
+                    "无法读取 GitHub Release 更新信息：{api_err}\n平台更新清单检查结果：{platform_manifest_err}\n旧版 latest.json 检查结果：{legacy_manifest_err}"
                 )
             }
             GuiLocale::EnUs => {
                 format!(
-                    "Failed to read GitHub Release update info: {api_err}\nlatest.json result: {manifest_err}"
+                    "Failed to read GitHub Release update info: {api_err}\nPlatform manifest result: {platform_manifest_err}\nLegacy latest.json result: {legacy_manifest_err}"
                 )
             }
         }
@@ -1711,16 +1748,33 @@ impl GuiText {
         }
     }
 
-    pub(super) fn new_version_message(self, current: &str, latest: &str, notes: &str) -> String {
+    pub(super) fn new_version_message(
+        self,
+        current: &str,
+        latest: &str,
+        notes: &str,
+        can_download_installer: bool,
+    ) -> String {
+        let action = if can_download_installer {
+            match self.locale {
+                GuiLocale::ZhCn => "是否下载并启动安装器？",
+                GuiLocale::EnUs => "Download and start the installer?",
+            }
+        } else {
+            match self.locale {
+                GuiLocale::ZhCn => "是否打开下载地址？",
+                GuiLocale::EnUs => "Open the download URL?",
+            }
+        };
         match self.locale {
             GuiLocale::ZhCn => {
                 format!(
-                    "发现新版本。\n当前版本：{current}\n最新版本：{latest}\n\n{notes}\n\n是否打开 GitHub Releases 下载？"
+                    "发现新版本。\n当前版本：{current}\n最新版本：{latest}\n\n{notes}\n\n{action}"
                 )
             }
             GuiLocale::EnUs => {
                 format!(
-                    "A new version is available.\nCurrent version: {current}\nLatest version: {latest}\n\n{notes}\n\nOpen GitHub Releases to download it?"
+                    "A new version is available.\nCurrent version: {current}\nLatest version: {latest}\n\n{notes}\n\n{action}"
                 )
             }
         }
@@ -1758,6 +1812,58 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "下载地址为空。",
             GuiLocale::EnUs => "The download URL is empty.",
+        }
+    }
+
+    pub(super) fn update_download_started(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在下载更新包，下载完成后会启动安装器。",
+            GuiLocale::EnUs => {
+                "Downloading the update. The installer will start when the download finishes."
+            }
+        }
+    }
+
+    pub(super) fn update_download_failed(self, url: &str, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("下载更新包失败：{err}\n地址：{url}"),
+            GuiLocale::EnUs => format!("Failed to download the update: {err}\nURL: {url}"),
+        }
+    }
+
+    pub(super) fn update_download_http_failed(self, url: &str, status: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("下载更新包失败：HTTP {status}\n地址：{url}"),
+            GuiLocale::EnUs => format!("Failed to download the update: HTTP {status}\nURL: {url}"),
+        }
+    }
+
+    pub(super) fn update_checksum_mismatch(self, expected: &str, actual: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                format!("更新包校验失败。\n期望 SHA256：{expected}\n实际 SHA256：{actual}")
+            }
+            GuiLocale::EnUs => format!(
+                "Update checksum verification failed.\nExpected SHA256: {expected}\nActual SHA256: {actual}"
+            ),
+        }
+    }
+
+    pub(super) fn update_installer_started(self, path: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("更新包已下载并启动安装器。\n路径：{path}"),
+            GuiLocale::EnUs => {
+                format!("The update was downloaded and the installer was started.\nPath: {path}")
+            }
+        }
+    }
+
+    pub(super) fn update_installer_launch_failed(self, url: &str, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("启动更新安装器失败：{err}\n下载地址：{url}"),
+            GuiLocale::EnUs => {
+                format!("Failed to start the update installer: {err}\nDownload URL: {url}")
+            }
         }
     }
 

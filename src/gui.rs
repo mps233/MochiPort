@@ -16,6 +16,12 @@ use wxdragon::widgets::dataview::{
 };
 use wxdragon::{prelude::*, timer::Timer};
 
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE},
+    System::Threading::CreateMutexW,
+};
+
 use crate::ai_gateway::config::{
     DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderConfig, ProviderType, provider_api_root,
     provider_display_base_url,
@@ -28,7 +34,16 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const CODEX_APP_GUI_UNSUPPORTED: bool = !(cfg!(target_os = "macos") || cfg!(target_os = "windows"));
 const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codexhub";
+#[cfg(target_os = "windows")]
 const UPDATE_MANIFEST_URL: &str =
+    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-windows.json";
+#[cfg(target_os = "macos")]
+const UPDATE_MANIFEST_URL: &str =
+    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-macos.json";
+#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+const UPDATE_MANIFEST_URL: &str =
+    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-linux.json";
+const LEGACY_UPDATE_MANIFEST_URL: &str =
     "https://github.com/happy-loki/codexhub/releases/latest/download/latest.json";
 const UPDATE_RELEASE_API_URL: &str =
     "https://api.github.com/repos/happy-loki/codexhub/releases/latest";
@@ -53,6 +68,7 @@ const ID_MENU_THEME_SYSTEM: i32 = 10_006;
 const ID_MENU_THEME_LIGHT: i32 = 10_007;
 const ID_MENU_THEME_DARK: i32 = 10_008;
 const ID_SERVICE_CONNECTION_SWITCH: i32 = 10_009;
+const ID_MENU_QUIT: i32 = 10_010;
 
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
@@ -95,6 +111,7 @@ mod request_logs;
 mod session_history;
 mod text;
 mod theme;
+mod tray;
 mod update;
 mod widgets;
 
@@ -164,13 +181,75 @@ impl GuiTimers {
     }
 }
 
+#[cfg(target_os = "windows")]
+struct GuiSingleInstanceGuard {
+    handle: HANDLE,
+    another_running: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl GuiSingleInstanceGuard {
+    fn acquire() -> Option<Self> {
+        let name: Vec<u16> = "Local\\CodexHubGuiSingleInstance"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+        if handle.is_null() {
+            return None;
+        }
+        let another_running = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        Some(Self {
+            handle,
+            another_running,
+        })
+    }
+
+    fn is_another_running(&self) -> bool {
+        self.another_running
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for GuiSingleInstanceGuard {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+struct GuiSingleInstanceGuard {
+    checker: SingleInstanceChecker,
+}
+
+#[cfg(not(target_os = "windows"))]
+impl GuiSingleInstanceGuard {
+    fn acquire() -> Option<Self> {
+        SingleInstanceChecker::new("com.codexhub.gui", None).map(|checker| Self { checker })
+    }
+
+    fn is_another_running(&self) -> bool {
+        self.checker.is_another_running()
+    }
+}
+
 pub fn run() {
-    if let Err(err) = wxdragon::main(|_| build_ui()) {
+    let Some(single_instance_guard) = GuiSingleInstanceGuard::acquire() else {
+        eprintln!("failed to create CodexHub GUI single instance checker");
+        return;
+    };
+    if single_instance_guard.is_another_running() {
+        return;
+    }
+
+    if let Err(err) = wxdragon::main(|_| build_ui(single_instance_guard)) {
         eprintln!("failed to start CodexHub GUI: {err:?}");
     }
 }
 
-fn build_ui() {
+fn build_ui(single_instance_guard: GuiSingleInstanceGuard) {
     // Apply the saved appearance and install the matching design tokens *before*
     // any window is built: `set_appearance` returns `CannotChange` once a window
     // exists, so this ordering is required.
@@ -191,7 +270,22 @@ fn build_ui() {
         .with_size(Size::new(1180, 760))
         .build();
     frame.set_icon(&app_icon_bitmap(48));
-    install_system_menu(&frame, &gui_timers, text);
+    let update_check_in_flight = Arc::new(AtomicBool::new(false));
+    let quitting = Rc::new(AtomicBool::new(false));
+    install_system_menu(
+        &frame,
+        &gui_timers,
+        text,
+        update_check_in_flight.clone(),
+        quitting.clone(),
+    );
+    let tray_controller = tray::install(
+        &frame,
+        &gui_timers,
+        text,
+        update_check_in_flight.clone(),
+        quitting.clone(),
+    );
     frame.set_background_color(app_theme.bg_app);
     let _status_bar = StatusBar::builder(&frame)
         .with_fields_count(1)
@@ -1516,9 +1610,22 @@ fn build_ui() {
         let dashboard_refresh = dashboard_refresh.clone();
         let gui_timers = gui_timers.clone();
         let frame = frame;
-        frame.on_close(move |_| {
+        let tray_controller = Rc::new(tray_controller);
+        let quitting = quitting.clone();
+        frame.on_close(move |event| {
+            let _single_instance_guard = &single_instance_guard;
+            if !quitting.load(Ordering::SeqCst) {
+                if let WindowEventData::General(raw_event) = &event
+                    && raw_event.can_veto()
+                {
+                    raw_event.veto();
+                }
+                tray::hide_main_window(&frame, handles.text);
+                return;
+            }
             dashboard_refresh.closing.store(true, Ordering::SeqCst);
             gui_timers.stop_all();
+            tray_controller.remove_icon();
             stop_pending_startup_daemon(&dashboard_refresh);
             stop_daemon_on_exit(&api, &daemon_child);
             frame.destroy();
@@ -1527,6 +1634,7 @@ fn build_ui() {
 
     frame.centre();
     frame.show(true);
+    update::check_for_updates_silent_async(&frame, &gui_timers, text, &update_check_in_flight);
 }
 
 fn create_main_tab_icons(notebook: &Notebook) -> [Option<i32>; 4] {
@@ -1610,7 +1718,13 @@ fn save_gui_theme(mode: ThemeMode) -> Result<(), String> {
     config.save(&path).map_err(|err| err.to_string())
 }
 
-fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
+fn install_system_menu(
+    frame: &Frame,
+    gui_timers: &GuiTimers,
+    text: GuiText,
+    update_check_in_flight: Arc<AtomicBool>,
+    quitting: Rc<AtomicBool>,
+) {
     let file_menu = Menu::builder()
         .append_item(
             ID_MENU_CLOSE_WINDOW,
@@ -1619,7 +1733,7 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
         )
         .append_item(ID_MENU_MINIMIZE, text.minimize(), text.minimize_help())
         .append_separator()
-        .append_item(ID_EXIT, text.quit(), "Quit CodexHub")
+        .append_item(ID_MENU_QUIT, text.quit(), text.quit_help())
         .build();
     let language_menu = Menu::builder()
         .append_radio_item(
@@ -1675,9 +1789,9 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
 
     let frame = *frame;
     let gui_timers = gui_timers.clone();
-    let update_check_in_flight = Arc::new(AtomicBool::new(false));
     frame.on_menu_selected(move |event| match event.get_id() {
-        ID_EXIT | ID_MENU_CLOSE_WINDOW => frame.close(true),
+        ID_MENU_CLOSE_WINDOW => tray::hide_main_window(&frame, text),
+        ID_MENU_QUIT | ID_EXIT => tray::request_app_quit(&frame, &quitting),
         ID_MENU_MINIMIZE => frame.iconize(true),
         ID_MENU_CHECK_UPDATE => {
             update::check_for_updates_async(&frame, &gui_timers, text, &update_check_in_flight);
