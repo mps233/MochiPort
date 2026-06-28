@@ -129,17 +129,20 @@ pub(super) fn web_search_item(item_id: &str, call_id: &str, status: &str, input:
         .or_else(|| input.get("search_query"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let action = json!({
-        "type": "search",
-        "query": query,
-    });
-    json!({
+    let mut item = json!({
         "type": "web_search_call",
         "id": item_id,
         "call_id": call_id,
         "status": status,
-        "action": action,
-    })
+    });
+    if status != "in_progress" {
+        item["action"] = json!({
+            "type": "search",
+            "query": query,
+            "queries": [query],
+        });
+    }
+    item
 }
 
 fn partial_custom_tool_input(arguments: &str) -> Option<String> {

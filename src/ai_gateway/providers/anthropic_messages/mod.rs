@@ -1,18 +1,22 @@
 //! Anthropic Messages 出站 provider。
 
+use std::io;
+
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::Response,
 };
-use futures_util::StreamExt;
+use futures_util::{StreamExt, stream as futures_stream};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
 use tracing::{debug, error};
 
 use crate::ai_gateway::config::ProviderConfig;
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::error::GatewayError;
-use crate::ai_gateway::model::GatewayRequest;
+use crate::ai_gateway::model::{GatewayRequest, ResponseObject, generate_response_id};
 use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
@@ -58,7 +62,6 @@ use types::{
 };
 
 const WEB_SEARCH_TOOL_NAME: &str = "WebSearch";
-const MAX_INTERNAL_WEB_SEARCH_ROUNDS: usize = 3;
 
 pub async fn handle(
     client: &reqwest::Client,
@@ -195,8 +198,22 @@ async fn handle_with_internal_web_search(
     mut anthropic_body: Value,
     tool_name_map: ToolNameMap,
 ) -> Result<Option<Response<Body>>, GatewayError> {
+    if request.stream {
+        return Ok(Some(stream_internal_web_search_response(
+            client,
+            ctx,
+            request,
+            response_model,
+            provider,
+            options,
+            log_context,
+            anthropic_body,
+            tool_name_map,
+        )));
+    }
+
     let mut internal_web_search_items = Vec::new();
-    for _ in 0..MAX_INTERNAL_WEB_SEARCH_ROUNDS {
+    loop {
         let step_body = force_anthropic_stream(anthropic_body.clone(), true);
         let step_resp = execute_anthropic_stream_message(
             client,
@@ -241,11 +258,391 @@ async fn handle_with_internal_web_search(
         }
         append_tool_results(&mut anthropic_body, &step_resp, tool_results);
     }
+}
 
-    Err(GatewayError::upstream(
-        StatusCode::BAD_GATEWAY,
-        "anthropic internal web search exceeded maximum rounds",
-    ))
+#[allow(clippy::too_many_arguments)]
+fn stream_internal_web_search_response(
+    client: &reqwest::Client,
+    ctx: &GatewayContext,
+    request: &GatewayRequest,
+    response_model: &str,
+    provider: &ProviderConfig,
+    options: &AnthropicProviderOptions,
+    log_context: Option<RequestLogContext>,
+    anthropic_body: Value,
+    tool_name_map: ToolNameMap,
+) -> Response<Body> {
+    let (tx, rx) = mpsc::channel::<Result<Bytes, io::Error>>(32);
+    let task_log_context = log_context.clone();
+    let client = client.clone();
+    let ctx = ctx.clone();
+    let request = request.clone();
+    let response_model = response_model.to_string();
+    let provider = provider.clone();
+    let options = options.clone();
+
+    tokio::spawn(async move {
+        if let Err(err) = run_internal_web_search_stream(
+            client,
+            ctx,
+            request,
+            response_model,
+            provider,
+            options,
+            task_log_context,
+            anthropic_body,
+            tool_name_map,
+            tx.clone(),
+        )
+        .await
+        {
+            let _ = tx
+                .send(Err(io::Error::new(io::ErrorKind::Other, err.message)))
+                .await;
+        }
+    });
+
+    let sse_stream = futures_stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    });
+    let body = if let Some(log_context) = log_context {
+        Body::from_stream(ResponsesSseLogStream::new(
+            Box::pin(sse_stream),
+            log_context,
+        ))
+    } else {
+        Body::from_stream(sse_stream)
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        HeaderName::from_static("content-type"),
+        HeaderValue::from_static("text/event-stream"),
+    );
+    headers.insert(
+        HeaderName::from_static("cache-control"),
+        HeaderValue::from_static("no-cache"),
+    );
+    headers.insert(
+        HeaderName::from_static("connection"),
+        HeaderValue::from_static("keep-alive"),
+    );
+
+    let mut response = Response::new(body);
+    *response.status_mut() = StatusCode::OK;
+    *response.headers_mut() = headers;
+    response
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_internal_web_search_stream(
+    client: reqwest::Client,
+    ctx: GatewayContext,
+    request: GatewayRequest,
+    response_model: String,
+    provider: ProviderConfig,
+    options: AnthropicProviderOptions,
+    log_context: Option<RequestLogContext>,
+    mut anthropic_body: Value,
+    tool_name_map: ToolNameMap,
+    tx: mpsc::Sender<Result<Bytes, io::Error>>,
+) -> Result<(), GatewayError> {
+    let mut state = InternalWebSearchSseState::new(response_model.clone());
+    state.emit_started(&tx).await?;
+
+    loop {
+        let step_body = force_anthropic_stream(anthropic_body.clone(), true);
+        let step_resp = execute_anthropic_stream_message(
+            &client,
+            &ctx,
+            &request,
+            &provider,
+            &options,
+            &step_body,
+            &log_context,
+        )
+        .await?;
+        let tool_uses = find_web_search_tool_uses(&step_resp);
+        if tool_uses.is_empty() {
+            let response_obj = convert_anthropic_response(
+                &step_resp,
+                &response_model,
+                &tool_name_map,
+                options.profile,
+            );
+            state.emit_final_response(&tx, response_obj).await?;
+            return Ok(());
+        }
+
+        let mut tool_results = Vec::new();
+        for tool_use in tool_uses {
+            let search_item = state.emit_web_search_started(&tx, &tool_use).await?;
+            let search_text = execute_internal_web_search(
+                &client,
+                &ctx,
+                &request,
+                &provider,
+                &options,
+                tool_use.query.as_str(),
+                &log_context,
+            )
+            .await?;
+            state
+                .emit_web_search_completed(&tx, &search_item, &tool_use)
+                .await?;
+            tool_results.push((tool_use.id, search_text));
+        }
+        append_tool_results(&mut anthropic_body, &step_resp, tool_results);
+    }
+}
+
+struct InternalWebSearchSseState {
+    response_id: String,
+    model: String,
+    created_at: i64,
+    sequence_number: usize,
+    output_index: usize,
+}
+
+struct InternalWebSearchSseItem {
+    item_id: String,
+    output_index: usize,
+}
+
+impl InternalWebSearchSseState {
+    fn new(model: String) -> Self {
+        Self {
+            response_id: generate_response_id(),
+            model,
+            created_at: stream_events::unix_timestamp(),
+            sequence_number: 0,
+            output_index: 0,
+        }
+    }
+
+    async fn emit_started(
+        &mut self,
+        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    ) -> Result<(), GatewayError> {
+        let created_seq = self.next_seq();
+        let created_response = self.response_value("in_progress", Vec::new());
+        self.emit_event(
+            tx,
+            "response.created",
+            json!({
+                "type": "response.created",
+                "sequence_number": created_seq,
+                "response": created_response,
+            }),
+        )
+        .await?;
+        let in_progress_seq = self.next_seq();
+        let in_progress_response = self.response_value("in_progress", Vec::new());
+        self.emit_event(
+            tx,
+            "response.in_progress",
+            json!({
+                "type": "response.in_progress",
+                "sequence_number": in_progress_seq,
+                "response": in_progress_response,
+            }),
+        )
+        .await
+    }
+
+    async fn emit_web_search_started(
+        &mut self,
+        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+        _tool_use: &WebSearchToolUse,
+    ) -> Result<InternalWebSearchSseItem, GatewayError> {
+        let item_id = generate_web_search_item_id();
+        let output_index = self.output_index;
+        self.output_index += 1;
+        let added_seq = self.next_seq();
+        self.emit_event(
+            tx,
+            "response.output_item.added",
+            json!({
+                "type": "response.output_item.added",
+                "sequence_number": added_seq,
+                "output_index": output_index,
+                "item": {
+                    "type": "web_search_call",
+                    "id": item_id.clone(),
+                    "status": "in_progress",
+                },
+            }),
+        )
+        .await?;
+        let in_progress_seq = self.next_seq();
+        self.emit_event(
+            tx,
+            "response.web_search_call.in_progress",
+            json!({
+                "type": "response.web_search_call.in_progress",
+                "sequence_number": in_progress_seq,
+                "item_id": item_id.clone(),
+                "output_index": output_index,
+            }),
+        )
+        .await?;
+        let searching_seq = self.next_seq();
+        self.emit_event(
+            tx,
+            "response.web_search_call.searching",
+            json!({
+                "type": "response.web_search_call.searching",
+                "sequence_number": searching_seq,
+                "item_id": item_id.clone(),
+                "output_index": output_index,
+            }),
+        )
+        .await?;
+        Ok(InternalWebSearchSseItem {
+            item_id,
+            output_index,
+        })
+    }
+
+    async fn emit_web_search_completed(
+        &mut self,
+        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+        search_item: &InternalWebSearchSseItem,
+        tool_use: &WebSearchToolUse,
+    ) -> Result<(), GatewayError> {
+        let completed_seq = self.next_seq();
+        self.emit_event(
+            tx,
+            "response.web_search_call.completed",
+            json!({
+                "type": "response.web_search_call.completed",
+                "sequence_number": completed_seq,
+                "item_id": search_item.item_id.clone(),
+                "output_index": search_item.output_index,
+            }),
+        )
+        .await?;
+        let done_seq = self.next_seq();
+        self.emit_event(
+            tx,
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": done_seq,
+                "output_index": search_item.output_index,
+                "item": {
+                    "type": "web_search_call",
+                    "id": search_item.item_id.clone(),
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": tool_use.query.clone(),
+                        "queries": [tool_use.query.clone()],
+                    },
+                },
+            }),
+        )
+        .await
+    }
+
+    async fn emit_final_response(
+        &mut self,
+        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+        mut response_obj: ResponseObject,
+    ) -> Result<(), GatewayError> {
+        response_obj.id = self.response_id.clone();
+        response_obj.model = self.model.clone();
+        response_obj.created_at = self.created_at;
+        let mut output = Vec::new();
+        for item in &response_obj.output {
+            let item = serde_json::to_value(item).unwrap_or_default();
+            let output_index = self.output_index;
+            self.output_index += 1;
+            let added_seq = self.next_seq();
+            self.emit_event(
+                tx,
+                "response.output_item.added",
+                json!({
+                    "type": "response.output_item.added",
+                    "sequence_number": added_seq,
+                    "output_index": output_index,
+                    "item": item,
+                }),
+            )
+            .await?;
+            let done_seq = self.next_seq();
+            self.emit_event(
+                tx,
+                "response.output_item.done",
+                json!({
+                    "type": "response.output_item.done",
+                    "sequence_number": done_seq,
+                    "output_index": output_index,
+                    "item": item,
+                }),
+            )
+            .await?;
+            output.push(item);
+        }
+        let status = response_obj.status.clone();
+        let event_type = if status == "incomplete" {
+            "response.incomplete"
+        } else {
+            "response.completed"
+        };
+        let mut response_value = serde_json::to_value(response_obj).unwrap_or_default();
+        response_value["output"] = Value::Array(output);
+        let final_seq = self.next_seq();
+        self.emit_event(
+            tx,
+            event_type,
+            json!({
+                "type": event_type,
+                "sequence_number": final_seq,
+                "response": response_value,
+            }),
+        )
+        .await
+    }
+
+    fn response_value(&self, status: &str, output: Vec<Value>) -> Value {
+        json!({
+            "id": self.response_id.clone(),
+            "object": "response",
+            "model": self.model.clone(),
+            "created_at": self.created_at,
+            "status": status,
+            "output": output,
+        })
+    }
+
+    async fn emit_event(
+        &mut self,
+        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+        event_type: &str,
+        data: Value,
+    ) -> Result<(), GatewayError> {
+        tx.send(Ok(Bytes::from(format!(
+            "event: {event_type}\ndata: {data}\n\n"
+        ))))
+        .await
+        .map_err(|_| {
+            GatewayError::upstream(
+                StatusCode::BAD_GATEWAY,
+                "client disconnected during anthropic internal web search stream",
+            )
+        })
+    }
+
+    fn next_seq(&mut self) -> usize {
+        let seq = self.sequence_number;
+        self.sequence_number += 1;
+        seq
+    }
+}
+
+fn generate_web_search_item_id() -> String {
+    format!("ws_{}", uuid::Uuid::new_v4().as_simple())
 }
 
 async fn execute_anthropic_stream_message(
@@ -289,8 +686,26 @@ async fn execute_internal_web_search(
     query: &str,
     log_context: &Option<RequestLogContext>,
 ) -> Result<String, GatewayError> {
-    let body = json!({
-        "model": request.model,
+    let body = internal_web_search_body(ctx, &request.model, query);
+    let mut search_request = request.clone();
+    search_request.stream = true;
+    let upstream_req =
+        build_anthropic_upstream_request(client, ctx, &search_request, &body, provider, options)?;
+    let upstream_resp = execute_stream_start(
+        client,
+        upstream_req,
+        provider.timeout_secs,
+        "anthropic internal web search request failed",
+    )
+    .await?;
+    let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
+    let raw = read_sse_to_string(upstream_resp, log_context).await?;
+    Ok(search_results_to_tool_text(query, &raw))
+}
+
+fn internal_web_search_body(ctx: &GatewayContext, model: &str, query: &str) -> Value {
+    json!({
+        "model": model,
         "tools": [{
             "name": "web_search",
             "type": ANTHROPIC_WEB_SEARCH_TYPE,
@@ -314,6 +729,9 @@ async fn execute_internal_web_search(
                 "type": "text"
             }]
         }],
+        "metadata": {
+            "user_id": claude_code_metadata_user_id(ctx)
+        },
         "thinking": {"type": "disabled"},
         "max_tokens": 64000,
         "tool_choice": {
@@ -321,21 +739,22 @@ async fn execute_internal_web_search(
             "type": "tool"
         },
         "output_config": {"effort": "high"}
-    });
-    let mut search_request = request.clone();
-    search_request.stream = true;
-    let upstream_req =
-        build_anthropic_upstream_request(client, ctx, &search_request, &body, provider, options)?;
-    let upstream_resp = execute_stream_start(
-        client,
-        upstream_req,
-        provider.timeout_secs,
-        "anthropic internal web search request failed",
-    )
-    .await?;
-    let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
-    let raw = read_sse_to_string(upstream_resp, log_context).await?;
-    Ok(search_results_to_tool_text(query, &raw))
+    })
+}
+
+fn claude_code_metadata_user_id(ctx: &GatewayContext) -> String {
+    let session_id = ctx.session_id.as_deref().unwrap_or(&ctx.prompt_cache_key);
+    json!({
+        "device_id": claude_code_device_id(session_id),
+        "account_uuid": "",
+        "session_id": session_id
+    })
+    .to_string()
+}
+
+fn claude_code_device_id(session_id: &str) -> String {
+    let digest = Sha256::digest(format!("codexhub-claude-code-device:{session_id}").as_bytes());
+    hex::encode(digest)
 }
 
 async fn read_sse_to_string(
@@ -479,7 +898,8 @@ fn web_search_response_item(tool_use: &WebSearchToolUse) -> Value {
         "status": "completed",
         "action": {
             "type": "search",
-            "query": tool_use.query,
+            "query": tool_use.query.clone(),
+            "queries": [tool_use.query.clone()],
         },
     })
 }

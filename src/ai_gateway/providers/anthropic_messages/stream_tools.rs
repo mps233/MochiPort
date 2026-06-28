@@ -324,6 +324,18 @@ impl AnthropicStreamState {
             if failed { "failed" } else { "completed" },
             input,
         );
+        if !failed {
+            emit_sse(
+                queue,
+                "response.web_search_call.completed",
+                json!({
+                    "type": "response.web_search_call.completed",
+                    "sequence_number": self.next_seq(),
+                    "item_id": state.item_id,
+                    "output_index": output_index,
+                }),
+            );
+        }
         emit_sse(
             queue,
             "response.output_item.done",
@@ -373,6 +385,26 @@ impl AnthropicStreamState {
                 "sequence_number": self.next_seq(),
                 "output_index": output_index,
                 "item": added_item,
+            }),
+        );
+        emit_sse(
+            queue,
+            "response.web_search_call.in_progress",
+            json!({
+                "type": "response.web_search_call.in_progress",
+                "sequence_number": self.next_seq(),
+                "item_id": item_id,
+                "output_index": output_index,
+            }),
+        );
+        emit_sse(
+            queue,
+            "response.web_search_call.searching",
+            json!({
+                "type": "response.web_search_call.searching",
+                "sequence_number": self.next_seq(),
+                "item_id": item_id,
+                "output_index": output_index,
             }),
         );
         Some(output_index)

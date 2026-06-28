@@ -4,14 +4,15 @@ use super::response::convert_anthropic_response;
 use super::stream::AnthropicSseToResponsesSse;
 use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE_CODE_USER_AGENT};
 use super::{
-    anthropic_message_from_sse, append_tool_results, bearer_authorization,
-    build_anthropic_upstream_request, find_web_search_tool_uses, merge_anthropic_betas,
+    InternalWebSearchSseState, WebSearchToolUse, anthropic_message_from_sse, append_tool_results,
+    bearer_authorization, build_anthropic_upstream_request, find_web_search_tool_uses,
+    internal_web_search_body, merge_anthropic_betas,
 };
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::model::{
     ContentPart, FunctionCallOutput, FunctionCallOutputContentItem, GatewayRequest, ItemContent,
-    ItemType, Reasoning, ResponseItem,
+    ItemType, Reasoning, ResponseItem, ResponseObject,
 };
 use crate::ai_gateway::tool_names::ToolNameMap;
 use axum::{
@@ -1315,6 +1316,124 @@ fn appends_all_parallel_web_search_tool_results() {
 }
 
 #[test]
+fn builds_internal_web_search_body_like_claude_code() {
+    let mut headers = HeaderMap::new();
+    headers.insert("session_id", HeaderValue::from_static("session-123"));
+    let ctx = GatewayContext::extract(&headers, None);
+
+    let body = internal_web_search_body(&ctx, "claude-opus-4-8", "世界杯 2026 6月27日 比赛结果");
+
+    assert_eq!(body["model"], "claude-opus-4-8");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["tools"][0]["name"], "web_search");
+    assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
+    assert_eq!(body["tools"][0]["max_uses"], 8);
+    assert_eq!(
+        body["system"][0]["text"],
+        "You are Claude Code, Anthropic's official CLI for Claude."
+    );
+    assert_eq!(
+        body["system"][1]["text"],
+        "You are an assistant for performing a web search tool use"
+    );
+    assert_eq!(
+        body["messages"][0]["content"][0]["text"],
+        "Perform a web search for the query: 世界杯 2026 6月27日 比赛结果"
+    );
+    assert_eq!(body["thinking"]["type"], "disabled");
+    assert_eq!(body["max_tokens"], 64000);
+    assert_eq!(body["tool_choice"]["type"], "tool");
+    assert_eq!(body["tool_choice"]["name"], "web_search");
+    assert_eq!(body["output_config"]["effort"], "high");
+
+    let metadata_user = body["metadata"]["user_id"].as_str().unwrap();
+    let metadata: Value = serde_json::from_str(metadata_user).unwrap();
+    assert_eq!(metadata["account_uuid"], "");
+    assert_eq!(metadata["session_id"], "session-123");
+    assert_eq!(
+        metadata["device_id"]
+            .as_str()
+            .map(|value| value.len())
+            .unwrap_or_default(),
+        64
+    );
+}
+
+#[tokio::test]
+async fn internal_web_search_stream_emits_responses_web_search_progress() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+    let mut state = InternalWebSearchSseState::new("claude-opus-4-8".to_string());
+    let tool_use = WebSearchToolUse {
+        id: "toolu_search_1".to_string(),
+        query: "World Cup 2026 results".to_string(),
+    };
+
+    state.emit_started(&tx).await.unwrap();
+    let search_item = state.emit_web_search_started(&tx, &tool_use).await.unwrap();
+    state
+        .emit_web_search_completed(&tx, &search_item, &tool_use)
+        .await
+        .unwrap();
+    let response_obj = ResponseObject {
+        id: "unused".to_string(),
+        object_type: "response".to_string(),
+        model: "unused".to_string(),
+        created_at: 0,
+        status: "completed".to_string(),
+        output: vec![message("assistant", "Search answer.")],
+        usage: None,
+        error: None,
+    };
+    state.emit_final_response(&tx, response_obj).await.unwrap();
+    drop(tx);
+
+    let mut chunks = Vec::new();
+    while let Some(item) = rx.recv().await {
+        chunks.push(item.unwrap());
+    }
+    let events = parse_events_from_bytes(&chunks);
+    let event_names = events
+        .iter()
+        .map(|(event, _)| event.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(event_names.contains(&"response.created"));
+    assert!(event_names.contains(&"response.in_progress"));
+    assert!(event_names.contains(&"response.web_search_call.in_progress"));
+    assert!(event_names.contains(&"response.web_search_call.searching"));
+    assert!(event_names.contains(&"response.web_search_call.completed"));
+    let added = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.added" && data["item"]["type"] == "web_search_call"
+        })
+        .unwrap();
+    assert_eq!(added.1["item"]["status"], "in_progress");
+    assert!(added.1["item"].get("action").is_none());
+
+    let done = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "web_search_call"
+        })
+        .unwrap();
+    assert_eq!(done.1["item"]["status"], "completed");
+    assert_eq!(done.1["item"]["action"]["query"], "World Cup 2026 results");
+    assert_eq!(
+        done.1["item"]["action"]["queries"][0],
+        "World Cup 2026 results"
+    );
+
+    let completed = events
+        .iter()
+        .find(|(event, _)| event == "response.completed")
+        .unwrap();
+    let output = completed.1["response"]["output"].as_array().unwrap();
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0]["type"], "message");
+}
+
+#[test]
 fn skips_empty_anthropic_internal_web_search_response() {
     let response = json!({
         "id": "msg_123",
@@ -1753,8 +1872,18 @@ async fn streams_anthropic_web_search_as_responses_sse() {
             .iter()
             .any(|(event, data)| event == "response.output_item.added"
                 && data["item"]["type"] == "web_search_call"
-                && data["item"]["status"] == "in_progress")
+                && data["item"]["status"] == "in_progress"
+                && data["item"].get("action").is_none())
     );
+    assert!(events.iter().any(|(event, data)| {
+        event == "response.web_search_call.in_progress" && data["output_index"].as_u64().is_some()
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event == "response.web_search_call.searching" && data["output_index"].as_u64().is_some()
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event == "response.web_search_call.completed" && data["output_index"].as_u64().is_some()
+    }));
     let done = events
         .iter()
         .find(|(event, data)| {
@@ -1764,6 +1893,7 @@ async fn streams_anthropic_web_search_as_responses_sse() {
     assert_eq!(done.1["item"]["call_id"], "srvtoolu_1");
     assert_eq!(done.1["item"]["action"]["type"], "search");
     assert_eq!(done.1["item"]["action"]["query"], "rust 2026");
+    assert_eq!(done.1["item"]["action"]["queries"][0], "rust 2026");
     assert!(done.1["item"]["action"].get("result").is_none());
 }
 
@@ -1952,8 +2082,18 @@ async fn streams_glm_web_search_prime_as_responses_sse() {
             .iter()
             .any(|(event, data)| event == "response.output_item.added"
                 && data["item"]["type"] == "web_search_call"
-                && data["item"]["action"]["query"] == "OpenAI June 2026")
+                && data["item"]["status"] == "in_progress"
+                && data["item"].get("action").is_none())
     );
+    assert!(events.iter().any(|(event, data)| {
+        event == "response.web_search_call.in_progress" && data["output_index"].as_u64().is_some()
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event == "response.web_search_call.searching" && data["output_index"].as_u64().is_some()
+    }));
+    assert!(events.iter().any(|(event, data)| {
+        event == "response.web_search_call.completed" && data["output_index"].as_u64().is_some()
+    }));
     let done = events
         .iter()
         .find(|(event, data)| {
@@ -1962,6 +2102,7 @@ async fn streams_glm_web_search_prime_as_responses_sse() {
         .unwrap();
     assert_eq!(done.1["item"]["call_id"], "call_search_1");
     assert_eq!(done.1["item"]["action"]["query"], "OpenAI June 2026");
+    assert_eq!(done.1["item"]["action"]["queries"][0], "OpenAI June 2026");
     assert!(done.1["item"]["action"].get("result").is_none());
 }
 

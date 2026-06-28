@@ -342,9 +342,11 @@ fn attach_web_search_result(
 }
 
 fn server_tool_action(item: &Value) -> Value {
+    let query = web_search_query(item);
     json!({
         "type": "search",
-        "query": web_search_query(item),
+        "query": query,
+        "queries": [query],
     })
 }
 
