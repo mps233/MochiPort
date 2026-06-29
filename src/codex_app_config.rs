@@ -33,9 +33,26 @@ const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
 const CODEXHUB_HOME_ENV: &str = "CODEXHUB_HOME";
+const OPENAI_BUNDLED_MARKETPLACE_NAME: &str = "openai-bundled";
+const OPENAI_CURATED_MARKETPLACE_NAME: &str = "openai-curated";
+const CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
+const REMOTE_PLUGIN_INSTALL_METADATA_FILE: &str = ".codex-remote-plugin-install.json";
+const PLUGIN_BLOCKING_FEATURE_FLAGS: &[&str] = &[
+    "apps",
+    "plugins",
+    "computer_use",
+    "browser_use",
+    "in_app_browser",
+];
+const REQUIRED_OPENAI_BUNDLED_PLUGIN_IDS: &[&str] = &[
+    "browser@openai-bundled",
+    "chrome@openai-bundled",
+    "computer-use@openai-bundled",
+];
 
 const LOCAL_AUTH_MODE: &str = "chatgptAuthTokens";
 const LEGACY_LOCAL_AUTH_MODE: &str = "chatgpt";
+const LEGACY_BAD_LOCAL_AUTH_API_KEY: &str = "codexhub-dummy-key";
 
 const MANAGED_BACKUP_VERSION: u32 = 1;
 const MANAGED_BACKUP_MANIFEST: &str = "manifest.json";
@@ -211,6 +228,14 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     let removed_models_cache = clear_codex_models_cache(Some(codex_home.clone()))?;
     chain_log::write_line(format!(
         "[codex_app_config] event=clear_models_cache_done removed={removed_models_cache}"
+    ));
+
+    chain_log::write_line("[codex_app_config] event=clear_legacy_bundled_plugin_state_start");
+    let legacy_plugin_cleanup = clear_legacy_codexhub_bundled_plugin_state(&codex_home)?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=clear_legacy_bundled_plugin_state_done removed_identity_files={} removed_catalog_files={}",
+        legacy_plugin_cleanup.removed_remote_identity_files,
+        legacy_plugin_cleanup.removed_remote_catalog_files
     ));
 
     chain_log::write_line("[codex_app_config] event=remote_control_switch_start");
@@ -889,6 +914,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     } else {
         toml_edit::DocumentMut::new()
     };
+    let codex_home = path.parent().unwrap_or_else(|| Path::new("."));
 
     let codex_backend_url = options.codex_backend_url();
     doc["chatgpt_base_url"] = toml_edit::value(&codex_backend_url);
@@ -946,9 +972,157 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         }
     }
 
+    remove_disabled_plugin_feature_flags(&mut doc);
+    remove_legacy_openai_bundled_marketplace(&mut doc);
+    upsert_enabled_plugins(&mut doc, REQUIRED_OPENAI_BUNDLED_PLUGIN_IDS);
+    if let Some(openai_curated) = find_openai_curated_marketplace_root(&codex_home) {
+        upsert_local_marketplace(&mut doc, OPENAI_CURATED_MARKETPLACE_NAME, &openai_curated);
+    }
+
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
     std::fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
+}
+
+fn remove_disabled_plugin_feature_flags(doc: &mut toml_edit::DocumentMut) {
+    let remove_features =
+        if let Some(features) = doc.get_mut("features").and_then(|item| item.as_table_mut()) {
+            for key in PLUGIN_BLOCKING_FEATURE_FLAGS {
+                if features
+                    .get(key)
+                    .and_then(|item| item.as_bool())
+                    .is_some_and(|enabled| !enabled)
+                {
+                    features.remove(key);
+                }
+            }
+            features.is_empty()
+        } else {
+            false
+        };
+    if remove_features {
+        doc.remove("features");
+    }
+}
+
+fn remove_legacy_openai_bundled_marketplace(doc: &mut toml_edit::DocumentMut) {
+    let marketplaces_empty = if let Some(marketplaces) = doc
+        .get_mut("marketplaces")
+        .and_then(|item| item.as_table_mut())
+    {
+        marketplaces.remove(OPENAI_BUNDLED_MARKETPLACE_NAME);
+        marketplaces.is_empty()
+    } else {
+        false
+    };
+    if marketplaces_empty {
+        doc.remove("marketplaces");
+    }
+}
+
+fn is_codexhub_local_marketplace(
+    marketplace: Option<&toml_edit::Table>,
+    source_marker: &str,
+) -> bool {
+    marketplace.is_some_and(|marketplace| {
+        marketplace
+            .get("source_type")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            == Some("local")
+            && marketplace
+                .get("source")
+                .and_then(|item| item.as_str())
+                .map(normalize_config_path)
+                .is_some_and(|source| source.contains(source_marker))
+    })
+}
+
+fn normalize_config_path(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
+fn upsert_local_marketplace(
+    doc: &mut toml_edit::DocumentMut,
+    marketplace_name: &str,
+    marketplace_root: &Path,
+) {
+    let marketplaces = ensure_config_table(doc, "marketplaces");
+    let marketplace = ensure_config_table_item(&mut marketplaces[marketplace_name]);
+    marketplace.clear();
+    marketplace["source_type"] = toml_edit::value("local");
+    marketplace["source"] = toml_edit::value(marketplace_root.to_string_lossy().to_string());
+    marketplace["last_updated"] = toml_edit::value(rfc3339_now());
+}
+
+fn upsert_enabled_plugins(doc: &mut toml_edit::DocumentMut, plugin_ids: &[&str]) {
+    let plugins = ensure_config_table(doc, "plugins");
+    for plugin_id in plugin_ids {
+        let plugin = ensure_config_table_item(&mut plugins[*plugin_id]);
+        plugin["enabled"] = toml_edit::value(true);
+    }
+}
+
+fn ensure_config_table<'a>(
+    doc: &'a mut toml_edit::DocumentMut,
+    key: &str,
+) -> &'a mut toml_edit::Table {
+    let root = doc.as_table_mut();
+    if !root.contains_key(key) || !root.get(key).is_some_and(|item| item.is_table()) {
+        let mut table = toml_edit::Table::new();
+        table.set_implicit(true);
+        root.insert(key, toml_edit::Item::Table(table));
+    }
+    root.get_mut(key)
+        .and_then(|item| item.as_table_mut())
+        .expect("config table should exist")
+}
+
+fn ensure_config_table_item(item: &mut toml_edit::Item) -> &mut toml_edit::Table {
+    match item {
+        toml_edit::Item::Table(_) => {}
+        toml_edit::Item::Value(value) => {
+            let table = value.as_inline_table().map_or_else(
+                || {
+                    let mut table = toml_edit::Table::new();
+                    table.set_implicit(true);
+                    table
+                },
+                |inline| {
+                    let mut table = toml_edit::Table::new();
+                    table.set_implicit(true);
+                    for (key, value) in inline.iter() {
+                        table.insert(key, toml_edit::Item::Value(value.clone()));
+                    }
+                    table
+                },
+            );
+            *item = toml_edit::Item::Table(table);
+        }
+        toml_edit::Item::None => {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(true);
+            *item = toml_edit::Item::Table(table);
+        }
+        _ => {
+            let mut table = toml_edit::Table::new();
+            table.set_implicit(true);
+            *item = toml_edit::Item::Table(table);
+        }
+    }
+    item.as_table_mut().expect("config item should be a table")
+}
+
+fn find_openai_curated_marketplace_root(codex_home: &Path) -> Option<PathBuf> {
+    let curated = codex_home.join(".tmp").join("plugins");
+    openai_curated_marketplace_exists(&curated).then_some(curated)
+}
+
+fn openai_curated_marketplace_exists(path: &Path) -> bool {
+    path.join(".agents")
+        .join("plugins")
+        .join("marketplace.json")
+        .is_file()
 }
 
 fn normalize_config_toml_order(raw: &str) -> String {
@@ -1353,6 +1527,11 @@ fn derive_local_auth_identity(
 
 fn is_codexhub_auth_json(auth: &serde_json::Value) -> bool {
     let auth_mode = auth.get("auth_mode").and_then(|value| value.as_str());
+    let api_key = auth.get("OPENAI_API_KEY").and_then(|value| value.as_str());
+    if auth_mode.is_none() && api_key == Some(LEGACY_BAD_LOCAL_AUTH_API_KEY) {
+        return true;
+    }
+
     if !matches!(
         auth_mode,
         Some(LOCAL_AUTH_MODE) | Some(LEGACY_LOCAL_AUTH_MODE)
@@ -1516,7 +1695,8 @@ fn cleanup_codexhub_config(
     }
     if !config_existed_before_first_write {
         remove_created_feature_defaults(&mut doc);
-        remove_created_openai_bundled_marketplace(&mut doc);
+        remove_created_plugin_defaults(&mut doc);
+        remove_created_local_marketplaces(&mut doc);
     }
 
     if doc.iter().next().is_none() {
@@ -1551,28 +1731,49 @@ fn remove_created_feature_defaults(doc: &mut toml_edit::DocumentMut) {
     }
 }
 
-fn remove_created_openai_bundled_marketplace(doc: &mut toml_edit::DocumentMut) {
+fn remove_created_plugin_defaults(doc: &mut toml_edit::DocumentMut) {
+    let plugins_empty =
+        if let Some(plugins) = doc.get_mut("plugins").and_then(|item| item.as_table_mut()) {
+            for plugin_id in REQUIRED_OPENAI_BUNDLED_PLUGIN_IDS {
+                let remove_plugin = plugins
+                    .get(*plugin_id)
+                    .and_then(|item| item.as_table())
+                    .is_some_and(is_created_plugin_default);
+                if remove_plugin {
+                    plugins.remove(*plugin_id);
+                }
+            }
+            plugins.is_empty()
+        } else {
+            false
+        };
+    if plugins_empty {
+        doc.remove("plugins");
+    }
+}
+
+fn is_created_plugin_default(plugin: &toml_edit::Table) -> bool {
+    plugin.len() == 1 && plugin.get("enabled").and_then(|item| item.as_bool()) == Some(true)
+}
+
+fn remove_created_local_marketplaces(doc: &mut toml_edit::DocumentMut) {
     let marketplaces_empty = if let Some(marketplaces) = doc
         .get_mut("marketplaces")
         .and_then(|item| item.as_table_mut())
     {
-        let remove_openai_bundled = marketplaces
-            .get("openai-bundled")
-            .and_then(|item| item.as_table())
-            .is_some_and(|marketplace| {
-                marketplace
-                    .get("source_type")
-                    .and_then(|item| item.as_str())
-                    .map(str::trim)
-                    == Some("local")
-                    && marketplace
-                        .get("source")
-                        .and_then(|item| item.as_str())
-                        .map(|source| source.replace('\\', "/").contains("openai-bundled"))
-                        .unwrap_or(false)
-            });
-        if remove_openai_bundled {
-            marketplaces.remove("openai-bundled");
+        for (name, source_marker) in [
+            (OPENAI_BUNDLED_MARKETPLACE_NAME, "openai-bundled"),
+            (OPENAI_CURATED_MARKETPLACE_NAME, ".tmp/plugins"),
+        ] {
+            let remove_marketplace = marketplaces
+                .get(name)
+                .and_then(|item| item.as_table())
+                .is_some_and(|marketplace| {
+                    is_codexhub_local_marketplace(Some(marketplace), source_marker)
+                });
+            if remove_marketplace {
+                marketplaces.remove(name);
+            }
         }
         marketplaces.is_empty()
     } else {
@@ -1835,9 +2036,85 @@ pub(crate) fn clear_codex_models_cache(codex_home: Option<PathBuf>) -> Result<bo
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct LegacyBundledPluginStateCleanup {
+    removed_remote_identity_files: usize,
+    removed_remote_catalog_files: usize,
+}
+
+fn clear_legacy_codexhub_bundled_plugin_state(
+    codex_home: &Path,
+) -> Result<LegacyBundledPluginStateCleanup> {
+    Ok(LegacyBundledPluginStateCleanup {
+        removed_remote_identity_files: clear_legacy_codexhub_bundled_remote_identity_files(
+            codex_home,
+        )?,
+        removed_remote_catalog_files: clear_legacy_codexhub_bundled_remote_catalog_files(
+            codex_home,
+        )?,
+    })
+}
+
+fn clear_legacy_codexhub_bundled_remote_identity_files(codex_home: &Path) -> Result<usize> {
+    let bundled_cache_root = codex_home
+        .join("plugins")
+        .join("cache")
+        .join(OPENAI_BUNDLED_MARKETPLACE_NAME);
+    let Ok(plugin_dirs) = std::fs::read_dir(&bundled_cache_root) else {
+        return Ok(0);
+    };
+
+    let mut removed = 0;
+    for plugin_dir in plugin_dirs.flatten() {
+        let plugin_path = plugin_dir.path();
+        if !plugin_path.is_dir() {
+            continue;
+        }
+        let metadata_path = plugin_path.join(REMOTE_PLUGIN_INSTALL_METADATA_FILE);
+        let Ok(contents) = std::fs::read_to_string(&metadata_path) else {
+            continue;
+        };
+        if !contents.contains(CODEXHUB_BUNDLED_REMOTE_ID_PREFIX) {
+            continue;
+        }
+        std::fs::remove_file(&metadata_path)
+            .with_context(|| format!("failed to remove {}", metadata_path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+fn clear_legacy_codexhub_bundled_remote_catalog_files(codex_home: &Path) -> Result<usize> {
+    let catalog_cache_root = codex_home.join("cache").join("remote_plugin_catalog");
+    let Ok(entries) = std::fs::read_dir(&catalog_cache_root) else {
+        return Ok(0);
+    };
+
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !contents.contains(CODEXHUB_BUNDLED_REMOTE_ID_PREFIX) {
+            continue;
+        }
+        std::fs::remove_file(&path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn configure_codex_app_writes_provider_and_local_auth() {
@@ -1881,6 +2158,7 @@ mod tests {
 
         let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
         assert!(auth.contains(&format!("\"auth_mode\": \"{LOCAL_AUTH_MODE}\"")));
+        assert!(auth.contains("\"OPENAI_API_KEY\": null"));
         assert!(auth.contains("\"account_id\": \"acct_test\""));
         assert!(report.remote_control_switch.configured);
 
@@ -1994,7 +2272,7 @@ experimental_bearer_token = "dummy-token"
     }
 
     #[test]
-    fn configure_codex_app_keeps_local_auth_identity_when_chatgpt_auth_exists() {
+    fn configure_codex_app_replaces_existing_chatgpt_auth_with_local_tokens() {
         let codex_home = unique_temp_dir();
         let auth_path = codex_home.join("auth.json");
         std::fs::write(
@@ -2013,6 +2291,14 @@ experimental_bearer_token = "dummy-token"
             configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
         let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
         let auth = serde_json::from_str::<serde_json::Value>(&auth).expect("parse auth");
+        assert_eq!(
+            auth.get("auth_mode").and_then(|value| value.as_str()),
+            Some(LOCAL_AUTH_MODE)
+        );
+        assert!(
+            auth.get("OPENAI_API_KEY")
+                .is_some_and(serde_json::Value::is_null)
+        );
         assert_eq!(
             auth.pointer("/tokens/account_id")
                 .and_then(|value| value.as_str()),
@@ -2060,7 +2346,7 @@ experimental_bearer_token = "dummy-token"
     }
 
     #[test]
-    fn configure_codex_app_ignores_existing_api_key_auth_identity() {
+    fn configure_codex_app_replaces_existing_api_key_auth_with_local_tokens() {
         let codex_home = unique_temp_dir();
         let auth_path = codex_home.join("auth.json");
         std::fs::write(
@@ -2077,6 +2363,14 @@ experimental_bearer_token = "dummy-token"
             configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
         let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
         let auth = serde_json::from_str::<serde_json::Value>(&auth).expect("parse auth");
+        assert_eq!(
+            auth.get("auth_mode").and_then(|value| value.as_str()),
+            Some(LOCAL_AUTH_MODE)
+        );
+        assert!(
+            auth.get("OPENAI_API_KEY")
+                .is_some_and(serde_json::Value::is_null)
+        );
         assert_eq!(
             auth.pointer("/tokens/account_id")
                 .and_then(|value| value.as_str()),
@@ -2232,6 +2526,139 @@ name = "old-provider"
         assert!(config.contains("image_generation = true"));
         assert!(!config.contains("apps = false"));
         assert!(!config.contains("image_generation = false"));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_removes_plugin_blocking_feature_flags() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[features]
+apps = false
+plugins = false
+computer_use = false
+browser_use = false
+in_app_browser = false
+image_generation = true
+keep_me = false
+"#,
+        )
+        .expect("write config");
+
+        configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
+
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        assert!(!config.contains("apps = false"));
+        assert!(!config.contains("plugins = false"));
+        assert!(!config.contains("computer_use = false"));
+        assert!(!config.contains("browser_use = false"));
+        assert!(!config.contains("in_app_browser = false"));
+        assert!(config.contains("image_generation = true"));
+        assert!(config.contains("keep_me = false"));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_registers_local_curated_marketplace_and_removes_legacy_bundled() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let curated_marketplace_root = codex_home.join(".tmp").join("plugins");
+        std::fs::create_dir_all(curated_marketplace_root.join(".agents").join("plugins"))
+            .expect("create curated marketplace");
+        std::fs::write(
+            curated_marketplace_root
+                .join(".agents")
+                .join("plugins")
+                .join("marketplace.json"),
+            r#"{"name":"openai-curated","plugins":[]}"#,
+        )
+        .expect("write curated marketplace");
+        std::fs::write(
+            &config_path,
+            r#"[marketplaces.openai-bundled]
+source_type = "local"
+source = 'C:\Users\test\.codex\.tmp\bundled-marketplaces\openai-bundled'
+"#,
+        )
+        .expect("write config");
+
+        configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
+
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        let doc = config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse config");
+        let marketplaces = doc
+            .get("marketplaces")
+            .and_then(|item| item.as_table())
+            .expect("marketplaces");
+        assert!(marketplaces.get(OPENAI_BUNDLED_MARKETPLACE_NAME).is_none());
+        let curated_marketplace = marketplaces
+            .get(OPENAI_CURATED_MARKETPLACE_NAME)
+            .and_then(|item| item.as_table())
+            .expect("openai-curated marketplace");
+        assert_eq!(
+            curated_marketplace
+                .get("source_type")
+                .and_then(|item| item.as_str()),
+            Some("local")
+        );
+        assert_eq!(
+            curated_marketplace
+                .get("source")
+                .and_then(|item| item.as_str()),
+            Some(curated_marketplace_root.to_string_lossy().as_ref())
+        );
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_enables_required_bundled_plugins() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[plugins."computer-use@openai-bundled"]
+enabled = false
+
+[plugins."latex@openai-bundled"]
+enabled = false
+"#,
+        )
+        .expect("write config");
+
+        configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
+
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        let doc = config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse config");
+        for plugin_id in REQUIRED_OPENAI_BUNDLED_PLUGIN_IDS {
+            assert_eq!(
+                doc.get("plugins")
+                    .and_then(|item| item.as_table())
+                    .and_then(|plugins| plugins.get(*plugin_id))
+                    .and_then(|item| item.as_table())
+                    .and_then(|plugin| plugin.get("enabled"))
+                    .and_then(|item| item.as_bool()),
+                Some(true),
+                "{plugin_id} should be enabled"
+            );
+        }
+        assert_eq!(
+            doc.get("plugins")
+                .and_then(|item| item.as_table())
+                .and_then(|plugins| plugins.get("latex@openai-bundled"))
+                .and_then(|item| item.as_table())
+                .and_then(|plugin| plugin.get("enabled"))
+                .and_then(|item| item.as_bool()),
+            Some(false)
+        );
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -2825,8 +3252,13 @@ base_url = "https://api.example.invalid"
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after UNIX epoch")
             .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("codexhub-test-{}-{}", std::process::id(), nanos));
+        let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-test-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            sequence
+        ));
         std::fs::create_dir_all(&dir).expect("create temp dir");
         dir
     }
@@ -2922,6 +3354,80 @@ base_url = "https://api.example.invalid"
         let removed = clear_codex_models_cache(Some(codex_home.clone())).expect("clear cache");
 
         assert!(!removed);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn clear_legacy_codexhub_bundled_plugin_state_removes_only_old_remote_identity() {
+        let codex_home = unique_temp_dir();
+        let computer_use_root = codex_home
+            .join("plugins")
+            .join("cache")
+            .join(OPENAI_BUNDLED_MARKETPLACE_NAME)
+            .join("computer-use");
+        let browser_root = codex_home
+            .join("plugins")
+            .join("cache")
+            .join(OPENAI_BUNDLED_MARKETPLACE_NAME)
+            .join("browser");
+        std::fs::create_dir_all(computer_use_root.join("26.623.42026"))
+            .expect("create computer-use cache");
+        std::fs::create_dir_all(browser_root.join("26.623.42026")).expect("create browser cache");
+        std::fs::write(
+            computer_use_root.join(REMOTE_PLUGIN_INSTALL_METADATA_FILE),
+            r#"{"schema_version":1,"remote_plugin_id":"plugins~codexhub-bundled-computer-use"}"#,
+        )
+        .expect("write legacy identity");
+        std::fs::write(
+            browser_root.join(REMOTE_PLUGIN_INSTALL_METADATA_FILE),
+            r#"{"schema_version":1,"remote_plugin_id":"plugins~Plugin_browser"}"#,
+        )
+        .expect("write non-codexhub identity");
+
+        let result =
+            clear_legacy_codexhub_bundled_plugin_state(&codex_home).expect("clear legacy state");
+
+        assert_eq!(result.removed_remote_identity_files, 1);
+        assert!(
+            !computer_use_root
+                .join(REMOTE_PLUGIN_INSTALL_METADATA_FILE)
+                .exists()
+        );
+        assert!(computer_use_root.join("26.623.42026").is_dir());
+        assert!(
+            browser_root
+                .join(REMOTE_PLUGIN_INSTALL_METADATA_FILE)
+                .is_file()
+        );
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn clear_legacy_codexhub_bundled_plugin_state_removes_old_catalog_cache_only() {
+        let codex_home = unique_temp_dir();
+        let catalog_root = codex_home.join("cache").join("remote_plugin_catalog");
+        std::fs::create_dir_all(&catalog_root).expect("create catalog cache");
+        let legacy_catalog = catalog_root.join("legacy.json");
+        let curated_catalog = catalog_root.join("curated.json");
+        std::fs::write(
+            &legacy_catalog,
+            r#"{"plugins":[{"id":"plugins~codexhub-bundled-browser"}]}"#,
+        )
+        .expect("write legacy catalog");
+        std::fs::write(
+            &curated_catalog,
+            r#"{"plugins":[{"id":"plugins~codexhub-local-github"}]}"#,
+        )
+        .expect("write curated catalog");
+
+        let result =
+            clear_legacy_codexhub_bundled_plugin_state(&codex_home).expect("clear legacy state");
+
+        assert_eq!(result.removed_remote_catalog_files, 1);
+        assert!(!legacy_catalog.exists());
+        assert!(curated_catalog.is_file());
+
         let _ = std::fs::remove_dir_all(codex_home);
     }
 }

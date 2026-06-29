@@ -235,11 +235,11 @@ experimental_bearer_token = "your-third-party-key"
 
 Remote-control requires ChatGPT-compatible auth. API-key-only auth is rejected before the websocket connects.
 
-For this local backend, use `chatgpt` in Codex App's `auth.json`:
+For this local backend, use `chatgptAuthTokens` in Codex App's `auth.json`:
 
 ```json
 {
-  "auth_mode": "chatgpt",
+  "auth_mode": "chatgptAuthTokens",
   "OPENAI_API_KEY": null,
   "tokens": {
     "id_token": "<local ChatGPT-shaped JWT>",

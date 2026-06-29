@@ -1,32 +1,10 @@
-﻿# Auth Notes
+# Auth Notes
 
-This document describes the local auth boundary for the Codex App remote-control path.
+This document records the current Codex App auth boundary for CodexHub.
 
-## Decision
+## Current Decision
 
-`codexhub` uses a local `chatgptAuthTokens` auth shape for Codex App remote-control identity.
-
-That means:
-
-- Codex App still owns app-server startup and reads its normal Codex home.
-- `chatgpt_base_url` points Codex App at the local `codexhub` backend.
-- Codex App `auth.json` uses `auth_mode = "chatgptAuthTokens"`.
-- The third-party model key stays in Codex model provider config.
-- `codexhub` bridges remote-control protocol traffic to Feishu after the app-server connects.
-
-## Why Not API Key Auth
-
-Official Codex remote-control startup rejects API-key-only auth before it connects to the backend:
-
-```text
-remote control requires ChatGPT authentication; API key auth is not supported
-```
-
-So the model provider key cannot be used as the remote-control identity. It is only for model requests.
-
-## Local `chatgptAuthTokens`
-
-The local auth record is intentionally ChatGPT-shaped because that is what Codex's remote-control gate accepts:
+CodexHub writes Codex App `auth.json` in a local ChatGPT-shaped token mode:
 
 ```json
 {
@@ -38,56 +16,31 @@ The local auth record is intentionally ChatGPT-shaped because that is what Codex
     "refresh_token": "",
     "account_id": "acct_codexhub_local"
   },
-  "last_refresh": "2026-05-26T00:00:00Z"
+  "last_refresh": "2026-06-29T00:00:00Z"
 }
 ```
 
-The JWT is local material. Codex reads its claims to find account/user metadata. `codexhub` does not use it to call OpenAI.
+Do not switch normal initialization to API-key-only auth. Pure API key mode can show plugins in newer Codex App builds, but upstream remote-control rejects it before CodexHub can bridge the session.
 
-## Helper Command
+## Config Injection
 
-Use:
+`codexhub configure-codex-app` writes:
 
-```powershell
-codexhub --config config.toml configure-codex-app
-```
+- `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"` for local backend fallback endpoints.
+- A default `ai-gateway` provider at `http://127.0.0.1:3847/ai-gateway/v1`.
+- `experimental_bearer_token = "dummy-token"` so model requests still authenticate to CodexHub through the provider.
+- A local `openai-curated` marketplace entry when the cached curated catalog exists.
+- Cleanup for old plugin-blocking flags such as `apps = false`, `plugins = false`, `computer_use = false`.
+- Cleanup for old CodexHub-generated bundled remote plugin state.
 
-This explicitly writes:
+CodexHub does not publish `openai-bundled` plugins through remote `list` or `installed` fallback. Bundled plugins, including `computer-use`, must come from Codex App's own local `openai-bundled` marketplace.
 
-- Codex App `config.toml` with `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`
-- Codex App `auth.json` with local `chatgptAuthTokens` auth
+## Legacy Compatibility
 
-Optional provider fields can also be written:
+One in-progress CodexHub build briefly wrote `OPENAI_API_KEY = "codexhub-dummy-key"` without `auth_mode`. Current code treats that as legacy CodexHub-managed auth only so uninstall/cleanup can remove it safely. It is not the target auth shape.
 
-```powershell
-codexhub --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
-```
+The local `/backend-api/ps/plugins/*` fallback remains narrow:
 
-If provider fields are supplied without `--provider-name`, the helper uses `llmx`.
-
-The command is explicit. The daemon does not modify Codex App config or auth state during startup.
-
-## Runtime Boundary
-
-`codexhub` reads:
-
-- `config.toml`
-- local bridge state
-- Feishu credentials and bridge settings
-
-Codex App reads:
-
-- Codex App `config.toml`
-- Codex App `auth.json`
-- model provider settings and keys
-
-After Codex App starts remote-control, `codexhub` only cares about:
-
-- app-server connecting to `/backend-api/wham/remote/control/server`
-- remote-control `initialize` / `initialized`
-- thread and turn notifications
-- approval requests and responses
-
-## Reference Artifacts
-
-The repository may keep local reference artifacts from protocol and auth-shape investigation. They are ignored by git and are not part of daemon startup.
+- It serves cached `openai-curated` remote catalog/detail data.
+- It provides read-only detail/skill fallback for old bundled remote IDs already stuck in UI/cache.
+- It must not reintroduce bundled plugins into remote list/installed responses.

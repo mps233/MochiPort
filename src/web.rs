@@ -109,39 +109,8 @@ pub fn router(state: SharedState) -> Router {
             post(onboarding::wechat_onboard_poll),
         )
         .route("/api/wechat/bot", get(im_api::wechat_bot_status))
-        .route(
-            "/backend-api/plugins/list",
-            get(plugins::plugin_legacy_list),
-        )
-        .route(
-            "/backend-api/plugins/featured",
-            get(plugins::plugin_legacy_featured),
-        )
-        .route(
-            "/backend-api/plugins/{plugin_id}/enable",
-            post(plugins::plugin_legacy_enable),
-        )
-        .route(
-            "/backend-api/ps/plugins/list",
-            get(plugins::plugin_catalog_page),
-        )
-        .route(
-            "/backend-api/ps/plugins/workspace/shared",
-            get(plugins::plugin_empty_page),
-        )
-        .route(
-            "/backend-api/ps/plugins/installed",
-            get(plugins::plugin_installed_page),
-        )
-        .route(
-            "/backend-api/ps/plugins/{plugin_id}",
-            get(plugins::plugin_detail),
-        )
-        .route(
-            "/backend-api/ps/plugins/{plugin_id}/install",
-            post(plugins::plugin_install),
-        )
         .route("/api/events", get(events))
+        .merge(plugins::router())
         .merge(remote_control_backend::router())
         .nest("/ai-gateway", crate::ai_gateway::router())
         .layer(middleware::from_fn(access_log))

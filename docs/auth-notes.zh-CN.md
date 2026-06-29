@@ -1,32 +1,10 @@
-﻿# 认证说明
+# 认证说明
 
-这份文档说明 Codex App remote-control 路径里的本地 auth 边界。
+这份文档记录 CodexHub 当前和 Codex App 的 auth 边界。
 
 ## 当前决策
 
-`codexhub` 使用本地 `chatgptAuthTokens` auth 形态作为 Codex App remote-control 身份。
-
-含义是：
-
-- Codex App 仍然负责 app-server 启动，并读取它正常的 Codex home
-- `chatgpt_base_url` 指向本地 `codexhub` backend
-- Codex App 的 `auth.json` 使用 `auth_mode = "chatgptAuthTokens"`
-- 第三方模型 key 仍然放在 Codex model provider 配置里
-- app-server 连上 remote-control 后，`codexhub` 再把协议流量桥到飞书
-
-## 为什么不能只用 API Key
-
-官方 Codex remote-control 启动时会在连接 backend 之前拒绝纯 API key auth：
-
-```text
-remote control requires ChatGPT authentication; API key auth is not supported
-```
-
-所以模型 provider key 不能当 remote-control 身份。它只负责后续模型请求。
-
-## 本地 `chatgptAuthTokens`
-
-本地 auth 记录刻意做成 ChatGPT-shaped，因为这是 Codex remote-control 检查接受的形态：
+CodexHub 把 Codex App `auth.json` 写成本地 ChatGPT-shaped token 形态：
 
 ```json
 {
@@ -38,56 +16,31 @@ remote control requires ChatGPT authentication; API key auth is not supported
     "refresh_token": "",
     "account_id": "acct_codexhub_local"
   },
-  "last_refresh": "2026-05-26T00:00:00Z"
+  "last_refresh": "2026-06-29T00:00:00Z"
 }
 ```
 
-这个 JWT 是本地材料。Codex 读取它的 claims 来拿 account/user 元数据。`codexhub` 不会用它去请求 OpenAI。
+正常初始化不要切到纯 API key auth。新版本 Codex App 在纯 API key 模式下可以显示插件，但上游 remote-control 会在连接 CodexHub 之前拒绝 API key auth。
 
-## 辅助命令
+## 配置注入
 
-使用：
+`codexhub configure-codex-app` 会写入：
 
-```powershell
-codexhub --config config.toml configure-codex-app
-```
+- `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`，用于本地 backend fallback 接口。
+- 默认 `ai-gateway` provider，地址是 `http://127.0.0.1:3847/ai-gateway/v1`。
+- `experimental_bearer_token = "dummy-token"`，所以模型请求仍然通过 provider 走 CodexHub。
+- 如果本地存在 cached curated catalog，则写入本地 `openai-curated` marketplace。
+- 清理历史插件阻断项，例如 `apps = false`、`plugins = false`、`computer_use = false`。
+- 清理旧版 CodexHub 生成的 bundled remote plugin 状态。
 
-它会显式写入：
+CodexHub 不通过 remote `list` 或 `installed` fallback 发布 `openai-bundled` 插件。包括 `computer-use` 在内的 bundled 插件必须来自 Codex App 自己的本地 `openai-bundled` marketplace。
 
-- Codex App `config.toml`：`chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`
-- Codex App `auth.json`：本地 `chatgptAuthTokens` auth
+## 历史兼容
 
-也可以顺手写第三方 provider 配置：
+某个未发布的中间版本曾经写过不带 `auth_mode` 的 `OPENAI_API_KEY = "codexhub-dummy-key"`。当前代码只把这种形态作为卸载/清理时的旧 CodexHub-managed auth 识别对象；它不是目标 auth 形态。
 
-```powershell
-codexhub --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
-```
+本地 `/backend-api/ps/plugins/*` fallback 继续保持窄范围：
 
-如果写 provider 字段但不传 `--provider-name`，helper 默认使用 `llmx`。
-
-这个命令只在直接调用时执行。daemon 启动不会偷偷修改 Codex App 配置或 auth 状态。
-
-## 运行边界
-
-`codexhub` 读取：
-
-- `config.toml`
-- 本地 bridge 状态
-- 飞书凭证和 bridge 配置
-
-Codex App 读取：
-
-- Codex App `config.toml`
-- Codex App `auth.json`
-- model provider 配置和 key
-
-当 Codex App 启动 remote-control 之后，`codexhub` 真正关心的是：
-
-- app-server 是否连到了 `/backend-api/wham/remote/control/server`
-- remote-control 的 `initialize` / `initialized`
-- thread / turn 通知
-- approval 请求与响应
-
-## 参考材料
-
-仓库里可能会保留一些协议和 auth 结构研究时留下的本地参考材料。它们被 git 忽略，不参与 daemon 启动。
+- 服务 cached `openai-curated` remote catalog/detail。
+- 对已经卡在 UI/cache 里的旧 bundled remote ID 提供只读 detail/skill fallback。
+- 不允许把 bundled 插件重新放回 remote list/installed 响应。

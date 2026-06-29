@@ -89,11 +89,11 @@ Protocol notes:
 
 Remote-control startup is gated by Codex auth, before the websocket reaches `codexhub`. API-key-only auth is rejected by official Codex app-server.
 
-For this project, the local identity shape is `chatgpt`:
+For this project, the local identity shape is `chatgptAuthTokens`:
 
 ```json
 {
-  "auth_mode": "chatgpt",
+  "auth_mode": "chatgptAuthTokens",
   "OPENAI_API_KEY": null,
   "tokens": {
     "id_token": "<local ChatGPT-shaped JWT>",
