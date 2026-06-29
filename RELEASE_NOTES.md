@@ -1,19 +1,21 @@
-# CodexHub v0.3.4
+# CodexHub v0.3.9
 
 ## 改进内容
 
-- 对齐 Anthropic / GLM Anthropic-compatible 出站请求到 Claude Code 请求形态：托管 `Authorization: Bearer`、Claude Code beta、Stainless、`x-app`、`user-agent` 等 header，并固定 Anthropic 上游请求为 HTTP/1.1。
-- 修正 Anthropic Messages 请求体映射：工具 `input_schema` 补齐 JSON Schema draft、`properties` 和 `additionalProperties`，web search 保持 Anthropic server tool 形态。
-- 将 Anthropic prompt caching 改为适配层生成的 block-level `cache_control`，只标记 `system` text block 和最近的 assistant text block；不再生成顶层 cache、不生成 `ttl`，也不要求 Codex 入参携带 Anthropic 专属参数。
-- 改进 AI Gateway provider UI 与 header 处理，减少无关入站 header 对上游请求的影响。
-- 停止在配置 Codex App GUI 时写入额外 API 环境变量，避免污染 Codex 客户端运行环境。
-- 改进上游 Responses / SSE 请求日志捕获，方便排查第三方渠道问题。
-- 统一部分中文界面文案，保留 `AI Gateway` 命名以降低和“大模型接入”表述混用带来的歧义。
+- 适配新版 Codex App 的 bundled 插件策略：不再写入会与 Codex App 自带 `openai-bundled` marketplace 冲突的 `[marketplaces.openai-bundled]`，初始化时确保 `browser`、`chrome`、`computer-use` 等 bundled 插件为 enabled，并清理旧版 CodexHub 写入的 bundled remote 残留状态。
+- 收敛 Codex App 插件接入链路：保留基于本地 `openai-curated` 缓存的最小 remote catalog fallback，对旧 bundled remote ID 提供只读详情兼容，避免插件列表出现重复项。
+- 优化 Codex App 本地 auth 写入，保持 `chatgptAuthTokens` 形态以满足 remote-control 鉴权，同时把本地 dummy token 仅用于本机入口。
+- 自动更新增加下载进度对话框：用可取消的进度条替代原来的静态提示，下载更新包时实时显示字节进度。
+- 对齐 Anthropic web search 历史映射，修正多轮会话里 web search 工具调用与结果的回放一致性。
+- 修正更新说明展示并压缩请求日志存储，减小 AI Gateway 请求日志体积。
+
+## 已知问题
+
+- 在 CodexHub 模式下，Codex App 插件页点击 `computer-use` 进入详情页可能显示「未找到插件」。这是 Codex App 前端对 bundled 本地插件详情的展示行为，`computer-use` 功能本身可正常使用，不影响实际调用。
 
 ## 验证
 
 - `cargo fmt`
-- `cargo test --features gui --bin codexhub anthropic`
 - `cargo build --release --features gui --bin codexhub`
 
 ---

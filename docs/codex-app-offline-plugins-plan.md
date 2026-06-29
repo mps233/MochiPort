@@ -759,3 +759,24 @@ cargo test --features gui
 ## 历史记录
 
 2026-06-28 曾实现过完整本地 `/backend-api/ps/plugins/*` mock，并通过单元测试和 smoke test。该方案现已废弃，原因是新版本 Codex App 自身的 bundled plugin 路径已经可用，继续 mock 远端插件目录会增加复杂度并带来重复插件风险。2026-06-29 保留的只是基于 `openai-curated` 缓存的最小 remote catalog fallback。
+
+## 2026-06-29 最终结论（computer-use 收敛）
+
+经过完整的日志和源码交叉验证，`computer-use` 问题正式收敛。结论如下，后续不再当作未决问题反复排查。
+
+1. `computer-use` 功能本身一直正常。Codex App 日志里 `computer-use native pipe startup ready` 每次都成功，重启后实际调用（让模型操作电脑）可用。
+2. 唯一遗留是插件页点进 `computer-use` 详情时显示「未找到插件 / 无法从插件市场详情页加载此插件」。这是 Codex App 前端在 ChatGPT-backend auth + `chatgpt_base_url` 指向 CodexHub 模式下，对 bundled 本地插件详情的展示行为问题，不影响功能使用。
+3. CodexHub 侧已无可补接口。实测当前运行进程对 detail 和 skill 两个接口都返回 200：
+
+   ```text
+   GET /backend-api/ps/plugins/local~openai-bundled~computer-use -> 200 (release.skills count=1)
+   GET /backend-api/ps/plugins/local~openai-bundled~computer-use/skills/computer-use -> 200 (skill_md ~40KB)
+   ```
+
+   重启后用户点击详情时，app-server 甚至没有再向 CodexHub 发出 detail 请求（chain log 无 `/ps/plugins/{id}`），说明失败发生在前端，CodexHub 层面已无可改。
+
+4. 关键机制：CodexHub 为支持 remote-control 必须写入 ChatGPT-backend 形态 auth（`uses_codex_backend = true`）。上游 `plugin/list` 在该模式下走 remote global catalog（见 `references/codex-main/codex-rs/app-server/src/request_processors/plugins.rs` 的 `use_remote_global_catalog`），bundled 本地插件在前端详情归属判定上被错当远端插件，于是详情页失败。
+5. `features.remote_plugin = false` 已验证不可取：它确实关闭了远端 catalog（chain log 不再出现 `/ps/plugins`），但会让「由 OpenAI 提供」标签页空转卡在「正在加载插件…」，且不修复 detail 展示。保持 `remote_plugin` 默认开启时，列表刷新快、computer-use 功能正常，仅详情页无法展示。因此**不把 `remote_plugin = false` 写入 `configure-codex-app`**。
+6. 持续出现的 `sa_server_request_failed net::ERR_CONNECTION_CLOSED`/401（`/wham/tasks/list`、`/wham/usage`、`/wham/accounts/check`）是 App 直连 `chatgpt.com` 后端的固有噪音，不经过 CodexHub，与插件详情无关。
+
+最终状态：保持当前配置（`chatgptAuthTokens` auth、`remote_plugin` 默认开启、bundled 走 Codex App 本地 marketplace、CodexHub 仅保留 `openai-curated` 最小 fallback 与 bundled 旧 ID 只读 detail 兼容）。`computer-use` 详情页展示问题归类为 Codex App 前端行为，接受现状，不再继续改 CodexHub 接口。
