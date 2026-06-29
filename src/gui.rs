@@ -37,7 +37,10 @@ const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codexhub";
 #[cfg(target_os = "windows")]
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/happy-loki/codexhub/releases/latest/download/latest-windows.json";
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+const UPDATE_MANIFEST_URL: &str =
+    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-macos-x86_64.json";
+#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/happy-loki/codexhub/releases/latest/download/latest-macos.json";
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]

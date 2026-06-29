@@ -419,10 +419,16 @@ fn platform_github_asset_matches(name: &str) -> bool {
     name.ends_with(".msi") && name.contains("windows") && name.contains("x64")
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 fn platform_github_asset_matches(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    name.ends_with(".dmg") && name.contains("macos")
+    name.ends_with(".dmg") && name.contains("macos") && name.contains("x86_64")
+}
+
+#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
+fn platform_github_asset_matches(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".dmg") && name.contains("macos") && !name.contains("x86_64")
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
@@ -451,7 +457,12 @@ fn platform_manifest_asset_key() -> &'static str {
     "windows-x86_64"
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn platform_manifest_asset_key() -> &'static str {
+    "macos-x86_64"
+}
+
+#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
 fn platform_manifest_asset_key() -> &'static str {
     "macos-universal"
 }
@@ -466,7 +477,12 @@ fn platform_manifest_fallback_asset_key() -> &'static str {
     "windows-portable-x86_64"
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+fn platform_manifest_fallback_asset_key() -> &'static str {
+    "macos-sparkle-x86_64"
+}
+
+#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
 fn platform_manifest_fallback_asset_key() -> &'static str {
     "macos-sparkle-universal"
 }

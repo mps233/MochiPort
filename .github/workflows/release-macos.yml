@@ -11,7 +11,20 @@ permissions:
 
 jobs:
   build-sign-notarize:
-    runs-on: macos-15
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch_slug: universal
+            manifest_name: latest-macos.json
+          - runner: macos-13
+            arch_slug: x86_64
+            manifest_name: latest-macos-x86_64.json
+    env:
+      MACOS_ARCH_SLUG: ${{ matrix.arch_slug }}
+      MACOS_MANIFEST_NAME: ${{ matrix.manifest_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -57,7 +70,7 @@ jobs:
           MACOS="$CONTENTS/MacOS"
           RESOURCES="$CONTENTS/Resources"
 
-          PATH="/opt/homebrew/bin:$PATH" cargo build --release --features gui --bin codexhub
+          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codexhub
 
           CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           if [ -z "$CARGO_VERSION" ]; then
@@ -71,8 +84,8 @@ jobs:
           fi
           {
             echo "APP_VERSION=$APP_VERSION"
-            echo "MACOS_DMG_NAME=CodexHub-$APP_VERSION-macos-universal.dmg"
-            echo "MACOS_APP_ZIP_NAME=CodexHub-$APP_VERSION-macos-universal.app.zip"
+            echo "MACOS_DMG_NAME=CodexHub-$APP_VERSION-macos-$MACOS_ARCH_SLUG.dmg"
+            echo "MACOS_APP_ZIP_NAME=CodexHub-$APP_VERSION-macos-$MACOS_ARCH_SLUG.app.zip"
           } >> "$GITHUB_ENV"
 
           rm -rf "$APP"
@@ -175,6 +188,8 @@ jobs:
           dist = Path("target/dist")
           dmg_name = os.environ["MACOS_DMG_NAME"]
           app_zip_name = os.environ["MACOS_APP_ZIP_NAME"]
+          arch_slug = os.environ["MACOS_ARCH_SLUG"]
+          manifest_name = os.environ["MACOS_MANIFEST_NAME"]
           dmg_path = dist / dmg_name
           app_zip_path = dist / app_zip_name
           release_tag = os.environ["RELEASE_TAG"]
@@ -194,7 +209,7 @@ jobs:
               "releaseUrl": release_url,
               "notes": "",
               "assets": {
-                  "macos-universal": {
+                  f"macos-{arch_slug}": {
                       "type": "dmg",
                       "url": f"{download_base_url}/{dmg_name}",
                       "sha256": sha256(dmg_path),
@@ -202,7 +217,7 @@ jobs:
                       "signed": True,
                       "notarized": True,
                   },
-                  "macos-sparkle-universal": {
+                  f"macos-sparkle-{arch_slug}": {
                       "type": "app-zip",
                       "url": f"{download_base_url}/{app_zip_name}",
                       "sha256": sha256(app_zip_path),
@@ -212,7 +227,7 @@ jobs:
                   },
               },
           }
-          Path("target/dist/latest-macos.json").write_text(
+          Path(f"target/dist/{manifest_name}").write_text(
               json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
               encoding="utf-8",
           )
@@ -221,11 +236,11 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexHub-macOS
+          name: CodexHub-macOS-${{ matrix.arch_slug }}
           path: |
-            target/dist/CodexHub-*-macos-universal.dmg
-            target/dist/CodexHub-*-macos-universal.app.zip
-            target/dist/latest-macos.json
+            target/dist/CodexHub-*-macos-${{ matrix.arch_slug }}.dmg
+            target/dist/CodexHub-*-macos-${{ matrix.arch_slug }}.app.zip
+            target/dist/${{ matrix.manifest_name }}
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -235,6 +250,6 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub-*-macos-universal.dmg
-            target/dist/CodexHub-*-macos-universal.app.zip
-            target/dist/latest-macos.json
+            target/dist/CodexHub-*-macos-${{ matrix.arch_slug }}.dmg
+            target/dist/CodexHub-*-macos-${{ matrix.arch_slug }}.app.zip
+            target/dist/${{ matrix.manifest_name }}
