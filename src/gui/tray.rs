@@ -70,7 +70,13 @@ pub(super) fn install(
             ID_TRAY_SHOW_WINDOW => show_main_window(&frame),
             ID_MENU_CHECK_UPDATE => {
                 show_main_window(&frame);
-                update::check_for_updates_async(&frame, &gui_timers, text, &update_check_in_flight);
+                update::check_for_updates_async(
+                    &frame,
+                    &gui_timers,
+                    text,
+                    &update_check_in_flight,
+                    &quitting,
+                );
             }
             ID_MENU_QUIT => request_app_quit(&frame, &quitting),
             _ => event.skip(true),

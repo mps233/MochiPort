@@ -132,8 +132,9 @@ pub(super) fn check_for_updates_async(
     gui_timers: &GuiTimers,
     text: GuiText,
     in_flight: &Arc<AtomicBool>,
+    quitting: &Rc<AtomicBool>,
 ) {
-    check_for_updates_async_impl(frame, gui_timers, text, in_flight, false);
+    check_for_updates_async_impl(frame, gui_timers, text, in_flight, quitting, false);
 }
 
 pub(super) fn check_for_updates_silent_async(
@@ -141,8 +142,9 @@ pub(super) fn check_for_updates_silent_async(
     gui_timers: &GuiTimers,
     text: GuiText,
     in_flight: &Arc<AtomicBool>,
+    quitting: &Rc<AtomicBool>,
 ) {
-    check_for_updates_async_impl(frame, gui_timers, text, in_flight, true);
+    check_for_updates_async_impl(frame, gui_timers, text, in_flight, quitting, true);
 }
 
 fn check_for_updates_async_impl(
@@ -150,6 +152,7 @@ fn check_for_updates_async_impl(
     gui_timers: &GuiTimers,
     text: GuiText,
     in_flight: &Arc<AtomicBool>,
+    quitting: &Rc<AtomicBool>,
     silent_if_not_newer: bool,
 ) {
     if in_flight.swap(true, Ordering::SeqCst) {
@@ -176,6 +179,7 @@ fn check_for_updates_async_impl(
         let frame = *frame;
         let gui_timers = gui_timers.clone();
         let in_flight = in_flight.clone();
+        let quitting = quitting.clone();
         let update_timer_store = update_timer_store.clone();
         update_timer.on_tick(move |_| {
             let update = result.lock().ok().and_then(|mut slot| slot.take());
@@ -187,7 +191,14 @@ fn check_for_updates_async_impl(
                 timer.stop();
             }
             in_flight.store(false, Ordering::SeqCst);
-            show_update_check_result(&frame, &gui_timers, text, update, silent_if_not_newer);
+            show_update_check_result(
+                &frame,
+                &gui_timers,
+                text,
+                update,
+                &quitting,
+                silent_if_not_newer,
+            );
         });
     }
     update_timer.start(100, false);
@@ -315,6 +326,7 @@ fn show_update_check_result(
     gui_timers: &GuiTimers,
     text: GuiText,
     result: Result<UpdateCheckOutcome, String>,
+    quitting: &Rc<AtomicBool>,
     silent_if_not_newer: bool,
 ) {
     match result {
@@ -345,7 +357,7 @@ fn show_update_check_result(
             );
             if confirm_open_update_release(parent, text, &message) {
                 if let Some(download) = download {
-                    download_and_install_update_async(parent, gui_timers, text, download);
+                    download_and_install_update_async(parent, gui_timers, text, download, quitting);
                 } else if let Err(err) = open_url_in_browser(text, &release_url) {
                     show_error(parent, &err);
                 }
@@ -497,6 +509,7 @@ fn download_and_install_update_async(
     gui_timers: &GuiTimers,
     text: GuiText,
     download: UpdateDownload,
+    quitting: &Rc<AtomicBool>,
 ) {
     let progress = Arc::new(DownloadProgress::default());
     {
@@ -529,6 +542,7 @@ fn download_and_install_update_async(
     let timer = Timer::new(parent);
     {
         let parent = *parent;
+        let quitting = quitting.clone();
         let timer_store = timer_store.clone();
         timer.on_tick(move |_| {
             // User pressed Cancel on the progress dialog: tell the worker to stop.
@@ -542,10 +556,19 @@ fn download_and_install_update_async(
                 }
                 dialog.update(DOWNLOAD_PROGRESS_RESOLUTION, None);
                 match result {
-                    Ok(update) => show_info(
-                        &parent,
-                        &text.update_installer_started(&update.path.display().to_string()),
-                    ),
+                    Ok(update) => {
+                        show_info(
+                            &parent,
+                            &text.update_installer_started(&update.path.display().to_string()),
+                        );
+                        // The installer needs to replace the running executable.
+                        // Quit CodexHub (and its backend daemon) so the MSI no
+                        // longer sees the app holding files open, which would
+                        // otherwise trigger Windows "close the running app"
+                        // prompts (once per running process).
+                        quitting.store(true, Ordering::SeqCst);
+                        parent.close(true);
+                    }
                     Err(err) => {
                         if progress.is_cancelled() {
                             show_info(&parent, text.update_download_cancelled());

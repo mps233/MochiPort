@@ -1640,7 +1640,13 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
 
     frame.centre();
     frame.show(true);
-    update::check_for_updates_silent_async(&frame, &gui_timers, text, &update_check_in_flight);
+    update::check_for_updates_silent_async(
+        &frame,
+        &gui_timers,
+        text,
+        &update_check_in_flight,
+        &quitting,
+    );
 }
 
 fn create_main_tab_icons(notebook: &Notebook) -> [Option<i32>; 4] {
@@ -1800,7 +1806,13 @@ fn install_system_menu(
         ID_MENU_QUIT | ID_EXIT => tray::request_app_quit(&frame, &quitting),
         ID_MENU_MINIMIZE => frame.iconize(true),
         ID_MENU_CHECK_UPDATE => {
-            update::check_for_updates_async(&frame, &gui_timers, text, &update_check_in_flight);
+            update::check_for_updates_async(
+                &frame,
+                &gui_timers,
+                text,
+                &update_check_in_flight,
+                &quitting,
+            );
         }
         ID_MENU_LANGUAGE_ZH_CN => {
             handle_language_selected(&frame, text, GuiLocale::ZhCn);

@@ -375,22 +375,22 @@ impl ImText {
 
     pub(crate) fn create_choice_wechat(self) -> &'static str {
         self.choose(
-            "当前微信会话还没有接入 Codex 会话。\n\n1. 新建会话\n2. 恢复历史会话\n\n回复 1 或 2。",
-            "This WeChat chat is not attached to a Codex session yet.\n\n1. Create new session\n2. Restore history session\n\nReply 1 or 2.",
+            "当前微信会话还没有接入 Codex 会话。\n\n1. 新建会话\n2. 恢复历史会话或接入当前 Codex 活跃会话\n\n回复 1 或 2。",
+            "This WeChat chat is not attached to a Codex session yet.\n\n1. Create new session\n2. Restore a history session or attach to the current active Codex session\n\nReply 1 or 2.",
         )
     }
 
     pub(crate) fn create_choice_telegram(self) -> &'static str {
         self.choose(
-            "当前 Telegram 会话还没有接入 Codex thread。\n请选择创建新会话，或恢复一个历史会话。",
-            "This Telegram chat is not attached to a Codex thread yet.\nCreate a new session or restore a history session.",
+            "当前 Telegram 会话还没有接入 Codex thread。\n请选择创建新会话，或恢复历史会话或接入当前 Codex 活跃会话。",
+            "This Telegram chat is not attached to a Codex thread yet.\nCreate a new session, or restore a history session or attach to the current active Codex session.",
         )
     }
 
     pub(crate) fn invalid_route_choice_wechat(self) -> &'static str {
         self.choose(
-            "请回复 1 新建会话，或回复 2 恢复历史会话。",
-            "Reply 1 to create a session, or 2 to restore a history session.",
+            "请回复 1 新建会话，或回复 2 恢复历史会话或接入当前 Codex 活跃会话。",
+            "Reply 1 to create a session, or 2 to restore a history session or attach to the current active Codex session.",
         )
     }
 
@@ -651,8 +651,8 @@ impl ImText {
 
     pub(crate) fn create_choice_body_feishu(self) -> &'static str {
         self.choose(
-            "当前飞书会话没有可直接使用的活跃 Codex thread。请选择新建会话，或显式恢复一个历史会话。",
-            "This Feishu chat has no active Codex thread to use. Create a new session or restore a history session.",
+            "当前飞书会话还没有接入 Codex thread。请选择新建会话，或恢复历史会话或接入当前 Codex 活跃会话。",
+            "This Feishu chat is not attached to a Codex thread yet. Create a new session, or restore a history session or attach to the current active Codex session.",
         )
     }
 
