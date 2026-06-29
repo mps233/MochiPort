@@ -17,13 +17,19 @@ jobs:
       matrix:
         include:
           - runner: macos-15
-            arch_slug: universal
+            file_slug: apple-silicon
+            asset_key: macos-universal
+            sparkle_key: macos-sparkle-universal
             manifest_name: latest-macos.json
           - runner: macos-13
-            arch_slug: x86_64
-            manifest_name: latest-macos-x86_64.json
+            file_slug: intel
+            asset_key: macos-intel
+            sparkle_key: macos-sparkle-intel
+            manifest_name: latest-macos-intel.json
     env:
-      MACOS_ARCH_SLUG: ${{ matrix.arch_slug }}
+      MACOS_FILE_SLUG: ${{ matrix.file_slug }}
+      MACOS_ASSET_KEY: ${{ matrix.asset_key }}
+      MACOS_SPARKLE_KEY: ${{ matrix.sparkle_key }}
       MACOS_MANIFEST_NAME: ${{ matrix.manifest_name }}
     steps:
       - name: Checkout
@@ -84,8 +90,8 @@ jobs:
           fi
           {
             echo "APP_VERSION=$APP_VERSION"
-            echo "MACOS_DMG_NAME=CodexHub-$APP_VERSION-macos-$MACOS_ARCH_SLUG.dmg"
-            echo "MACOS_APP_ZIP_NAME=CodexHub-$APP_VERSION-macos-$MACOS_ARCH_SLUG.app.zip"
+            echo "MACOS_DMG_NAME=CodexHub-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
+            echo "MACOS_APP_ZIP_NAME=CodexHub-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
           } >> "$GITHUB_ENV"
 
           rm -rf "$APP"
@@ -188,7 +194,8 @@ jobs:
           dist = Path("target/dist")
           dmg_name = os.environ["MACOS_DMG_NAME"]
           app_zip_name = os.environ["MACOS_APP_ZIP_NAME"]
-          arch_slug = os.environ["MACOS_ARCH_SLUG"]
+          asset_key = os.environ["MACOS_ASSET_KEY"]
+          sparkle_key = os.environ["MACOS_SPARKLE_KEY"]
           manifest_name = os.environ["MACOS_MANIFEST_NAME"]
           dmg_path = dist / dmg_name
           app_zip_path = dist / app_zip_name
@@ -209,7 +216,7 @@ jobs:
               "releaseUrl": release_url,
               "notes": "",
               "assets": {
-                  f"macos-{arch_slug}": {
+                  asset_key: {
                       "type": "dmg",
                       "url": f"{download_base_url}/{dmg_name}",
                       "sha256": sha256(dmg_path),
@@ -217,7 +224,7 @@ jobs:
                       "signed": True,
                       "notarized": True,
                   },
-                  f"macos-sparkle-{arch_slug}": {
+                  sparkle_key: {
                       "type": "app-zip",
                       "url": f"{download_base_url}/{app_zip_name}",
                       "sha256": sha256(app_zip_path),
@@ -236,10 +243,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexHub-macOS-${{ matrix.arch_slug }}
+          name: CodexHub-macOS-${{ matrix.file_slug }}
           path: |
-            target/dist/CodexHub-*-macos-${{ matrix.arch_slug }}.dmg
-            target/dist/CodexHub-*-macos-${{ matrix.arch_slug }}.app.zip
+            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
+            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
 
       - name: Publish GitHub Release
@@ -250,6 +257,6 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub-*-macos-${{ matrix.arch_slug }}.dmg
-            target/dist/CodexHub-*-macos-${{ matrix.arch_slug }}.app.zip
+            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
+            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}

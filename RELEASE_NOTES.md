@@ -1,17 +1,20 @@
-# CodexHub v0.3.9
+# CodexHub v0.3.10
 
 ## 改进内容
 
-- 适配新版 Codex App 的 bundled 插件策略：不再写入会与 Codex App 自带 `openai-bundled` marketplace 冲突的 `[marketplaces.openai-bundled]`，初始化时确保 `browser`、`chrome`、`computer-use` 等 bundled 插件为 enabled，并清理旧版 CodexHub 写入的 bundled remote 残留状态。
-- 收敛 Codex App 插件接入链路：保留基于本地 `openai-curated` 缓存的最小 remote catalog fallback，对旧 bundled remote ID 提供只读详情兼容，避免插件列表出现重复项。
-- 优化 Codex App 本地 auth 写入，保持 `chatgptAuthTokens` 形态以满足 remote-control 鉴权，同时把本地 dummy token 仅用于本机入口。
-- 自动更新增加下载进度对话框：用可取消的进度条替代原来的静态提示，下载更新包时实时显示字节进度。
-- 对齐 Anthropic web search 历史映射，修正多轮会话里 web search 工具调用与结果的回放一致性。
-- 修正更新说明展示并压缩请求日志存储，减小 AI Gateway 请求日志体积。
+- 新增 Intel 架构的 macOS 原生构建：release CI 通过 job 矩阵在 `macos-15` (Apple Silicon) 与 `macos-13` (Intel) 上分别原生编译，两者各自签名、公证并发布独立的 dmg、app.zip 和自动更新清单（`latest-macos.json` 与 `latest-macos-intel.json`）。
+- macOS 安装包按架构显式命名，便于区分：Apple Silicon 包为 `…-macos-apple-silicon.dmg`，Intel 包为 `…-macos-intel.dmg`。
+- 自动更新按 CPU 架构区分清单与下载资产，避免 Intel 设备误更新成 Apple Silicon 包。
+
+## 下载说明
+
+- Apple Silicon (M 系列) 选 `CodexHub-vX.Y.Z-macos-apple-silicon.dmg`。
+- Intel Mac 选 `CodexHub-vX.Y.Z-macos-intel.dmg`。
 
 ## 已知问题
 
 - 在 CodexHub 模式下，Codex App 插件页点击 `computer-use` 进入详情页可能显示「未找到插件」。这是 Codex App 前端对 bundled 本地插件详情的展示行为，`computer-use` 功能本身可正常使用，不影响实际调用。
+- macOS Intel 构建依赖 GitHub `macos-13` runner，高峰期该 runner 排队较久，Intel 产物可能晚于 universal 包出现在 release 页。
 
 ## 验证
 
