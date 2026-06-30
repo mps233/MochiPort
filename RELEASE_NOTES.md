@@ -1,10 +1,8 @@
-# CodexHub v0.3.11
+# CodexHub v0.3.12
 
 ## 改进内容
 
-- 修复安装在受保护目录（如 `C:\Program Files\CodexHub`）时保存配置报 `failed to write config` / HTTP 500 的问题：当 exe 同目录不可写时，配置自动回退到用户目录 `%LOCALAPPDATA%\CodexHub\config.toml`，不再要求管理员权限即可保存大模型厂商等配置。
-- 检查更新安装时自动退出 CodexHub（含本地 backend）：启动安装器后主动让出可执行文件占用，避免 Windows 反复弹出「关闭正在运行的程序」提示。
-- 统一三个 IM 平台（微信、Telegram、飞书）未接入会话时的引导文案，明确选项 2 为「恢复历史会话或接入当前 Codex 活跃会话」，中英文同步。
+- 彻底修复安装在受保护目录（如 `C:\Program Files\CodexHub`）时保存配置报 `failed to write config` / HTTP 500 的问题。v0.3.11 只修复了 CLI 启动路径，GUI 仍走独立的配置定位逻辑而未生效；本版补齐 GUI（`daemon` 子进程）路径：exe 同目录不可写时，配置自动回退到用户目录 `%LOCALAPPDATA%\CodexHub\config.toml`，无需管理员权限即可保存。
 
 ## 已知问题
 
@@ -13,7 +11,8 @@
 ## 验证
 
 - `cargo fmt`
-- `cargo check --features gui --bin codexhub`
+- `cargo build --release --features gui --bin codexhub`
+- 端到端：在只读目录放置 exe + `config.toml`，启动后确认配置实际回退到 `%LOCALAPPDATA%\CodexHub\config.toml`。
 
 ---
 

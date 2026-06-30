@@ -441,6 +441,34 @@ pub(super) fn adjacent_config_from_current_exe() -> Option<PathBuf> {
         .ok()
         .and_then(|path| path.parent().map(|parent| parent.join("config.toml")))
         .filter(|path| path.exists())
+        .filter(|path| {
+            // Only use the exe-adjacent config when its directory is writable.
+            // Installed builds under protected locations such as
+            // `C:\\Program Files\\CodexHub` ship a default `config.toml` next to
+            // the exe, but the directory is read-only for normal-privilege
+            // processes, so saving config there fails with HTTP 500. In that
+            // case fall through to the per-user app-support path instead.
+            path.parent()
+                .map(config_directory_is_writable)
+                .unwrap_or(false)
+        })
+}
+
+/// Returns true when a config file can be created/replaced inside `dir`.
+fn config_directory_is_writable(dir: &Path) -> bool {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let probe = dir.join(format!(".codexhub-write-probe-{nanos}"));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 pub(super) fn has_manifest(path: &Path) -> bool {
