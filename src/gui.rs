@@ -1433,6 +1433,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                     slot.replace(outcome);
                 }
                 request_log_clear_in_flight.store(false, Ordering::SeqCst);
+                wxdragon::wake_up_idle();
             });
         });
     }
@@ -1463,6 +1464,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                     slot.replace(outcome);
                 }
                 request_log_clear_in_flight.store(false, Ordering::SeqCst);
+                wxdragon::wake_up_idle();
             });
         });
     }
@@ -1525,6 +1527,12 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let im_action_in_flight = im_action_in_flight.clone();
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
         let mut gui_rx = gui_rx;
+        let request_log_result = request_log_result.clone();
+        let request_log_detail_result = request_log_detail_result.clone();
+        let request_log_in_flight = request_log_in_flight.clone();
+        let request_log_clear_result = request_log_clear_result.clone();
+        let request_log_clear_old_button = request_log_clear_old_button;
+        let request_log_clear_all_button = request_log_clear_all_button;
         frame.on_idle(move |event| {
             // Kick off any toggles queued from the data views.
             process_pending_im_toggle(
@@ -1543,6 +1551,23 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 &gui_tx,
                 &ai_gw_action_in_flight,
             );
+
+            // Render request-log list/detail results as soon as their background
+            // loads finish. These stores are filled by worker threads that call
+            // `wake_up_idle()` on completion, so applying them here restores the
+            // instant open behavior instead of waiting for the 1.5s fallback
+            // timer. Both applies cheaply no-op when their slot is empty.
+            apply_pending_request_logs(&handles, &request_log_result);
+            apply_pending_request_log_detail(&frame, &handles, &request_log_detail_result);
+            if apply_pending_request_log_clear(
+                &frame,
+                handles.text,
+                &request_log_clear_old_button,
+                &request_log_clear_all_button,
+                &request_log_clear_result,
+            ) {
+                force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
+            }
 
             // Drain a bounded batch of background results to keep the GUI snappy.
             let mut processed = 0;
@@ -4066,6 +4091,7 @@ fn force_request_log_refresh(
             slot.replace(outcome);
         }
         in_flight.store(false, Ordering::SeqCst);
+        wxdragon::wake_up_idle();
     });
 }
 
@@ -4105,6 +4131,7 @@ fn start_request_log_detail_load(
             slot.replace((id, outcome));
         }
         in_flight.store(false, Ordering::SeqCst);
+        wxdragon::wake_up_idle();
     });
 }
 

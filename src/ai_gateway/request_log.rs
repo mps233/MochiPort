@@ -1018,6 +1018,22 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             ON ai_gateway_request_logs(channel);
         CREATE INDEX IF NOT EXISTS idx_ai_gateway_request_logs_status
             ON ai_gateway_request_logs(status);
+        -- Covering index for the request-log list query. The list view reads
+        -- only small metadata columns, but rows also store request/response
+        -- JSON blobs that frequently exceed 600 KB each. Without a covering
+        -- index SQLite must walk every row's overflow-page chain to reach
+        -- `upstream_request_body_bytes` (stored after the blobs), which made the
+        -- 200-row list query cost ~170 ms and spin the daemon at ~12% CPU while
+        -- the dashboard polled it every 1.5 s. Carrying all listed columns here
+        -- keeps the scan inside the index and drops the query to well under 1 ms.
+        CREATE INDEX IF NOT EXISTS idx_ai_gateway_request_logs_list_cover
+            ON ai_gateway_request_logs(
+                created_at_ms DESC, id DESC,
+                request_id, model_id, stream, channel, provider_type, status,
+                input_tokens, output_tokens, total_tokens, read_cache_tokens,
+                read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
+                ttft_ms, error_message, upstream_request_body_bytes
+            );
         "#,
     )
 }
