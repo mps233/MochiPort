@@ -61,9 +61,13 @@ impl AnthropicStreamState {
             return;
         }
         if matches!(self.profile, AnthropicProviderProfile::GlmAnthropic) {
-            self.glm_pending_text
-                .get_or_insert_with(String::new)
-                .push_str(text);
+            let buf = self.glm_pending_text.get_or_insert_with(String::new);
+            buf.push_str(text);
+            let (emit, keep) = glm_compat::split_streamable(buf);
+            *buf = keep;
+            if !emit.is_empty() {
+                self.emit_message_text(&emit, queue);
+            }
             return;
         }
         self.emit_message_text(text, queue);
@@ -73,10 +77,9 @@ impl AnthropicStreamState {
         let Some(text) = self.glm_pending_text.take() else {
             return;
         };
-        let Some(cleaned) = glm_compat::clean_private_web_search_text(&text) else {
-            return;
-        };
-        self.emit_message_text(&cleaned, queue);
+        if let Some(cleaned) = glm_compat::clean_private_web_search_text(&text) {
+            self.emit_message_text(&cleaned, queue);
+        }
         self.close_message_item(queue);
     }
 
