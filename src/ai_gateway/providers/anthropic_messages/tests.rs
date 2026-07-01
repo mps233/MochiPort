@@ -1647,7 +1647,7 @@ fn raw_sse_first_content_token_ignores_message_start_and_ping() {
 }
 
 #[tokio::test]
-async fn internal_web_search_stream_emits_responses_web_search_progress() {
+async fn internal_web_search_stream_emits_web_search_call_added_and_done_only() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let mut envelope =
         InternalSseEnvelope::new("resp_test".to_string(), "claude-opus-4-8".to_string(), 0);
@@ -1697,9 +1697,11 @@ async fn internal_web_search_stream_emits_responses_web_search_progress() {
 
     assert!(event_names.contains(&"response.created"));
     assert!(event_names.contains(&"response.in_progress"));
-    assert!(event_names.contains(&"response.web_search_call.in_progress"));
-    assert!(event_names.contains(&"response.web_search_call.searching"));
-    assert!(event_names.contains(&"response.web_search_call.completed"));
+    // A web-search call is a single non-streamed item: only added + done. The
+    // intermediate progress events the Codex client ignores are not emitted.
+    assert!(!event_names.contains(&"response.web_search_call.in_progress"));
+    assert!(!event_names.contains(&"response.web_search_call.searching"));
+    assert!(!event_names.contains(&"response.web_search_call.completed"));
     let added = events
         .iter()
         .find(|(event, data)| {

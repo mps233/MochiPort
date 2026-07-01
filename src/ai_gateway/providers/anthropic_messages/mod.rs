@@ -491,9 +491,13 @@ async fn stream_anthropic_round(
     Ok(raw_sse)
 }
 
-/// Emits the injected web-search progress item (added → in_progress → searching
-/// → completed → done) that represents the gateway performing the search on the
-/// model's behalf, renumbered into the shared envelope's global sequence.
+/// Emits the injected web-search call that represents the gateway running the
+/// search on the model's behalf. Unlike answer text, a web-search call has no
+/// incremental content, so it ships as a single `output_item.added` +
+/// `output_item.done` pair rather than streamed progress. The Codex client only
+/// consumes these two `output_item` events for `web_search_call`; the
+/// intermediate `response.web_search_call.*` progress events are not read, so we
+/// omit them.
 async fn emit_injected_web_search_call(
     envelope: &mut InternalSseEnvelope,
     tx: &mpsc::Sender<Result<Bytes, io::Error>>,
@@ -513,39 +517,6 @@ async fn emit_injected_web_search_call(
                     "id": item_id,
                     "status": "in_progress",
                 },
-            }),
-        )
-        .await?;
-    envelope
-        .emit_owned(
-            tx,
-            "response.web_search_call.in_progress",
-            json!({
-                "type": "response.web_search_call.in_progress",
-                "item_id": item_id,
-                "output_index": output_index,
-            }),
-        )
-        .await?;
-    envelope
-        .emit_owned(
-            tx,
-            "response.web_search_call.searching",
-            json!({
-                "type": "response.web_search_call.searching",
-                "item_id": item_id,
-                "output_index": output_index,
-            }),
-        )
-        .await?;
-    envelope
-        .emit_owned(
-            tx,
-            "response.web_search_call.completed",
-            json!({
-                "type": "response.web_search_call.completed",
-                "item_id": item_id,
-                "output_index": output_index,
             }),
         )
         .await?;
