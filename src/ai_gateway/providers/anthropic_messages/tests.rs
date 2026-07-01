@@ -4,15 +4,16 @@ use super::response::convert_anthropic_response;
 use super::stream::AnthropicSseToResponsesSse;
 use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE_CODE_USER_AGENT};
 use super::{
-    InternalWebSearchSseState, WebSearchToolUse, anthropic_message_from_sse, append_tool_results,
-    bearer_authorization, build_anthropic_upstream_request, find_web_search_tool_uses,
+    WebSearchToolUse, anthropic_message_from_sse, append_tool_results, bearer_authorization,
+    build_anthropic_upstream_request, emit_injected_web_search_call, find_web_search_tool_uses,
     internal_web_search_body, merge_anthropic_betas, raw_sse_has_first_content_token,
 };
+use super::stream_internal::InternalSseEnvelope;
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::model::{
     ContentPart, FunctionCallOutput, FunctionCallOutputContentItem, GatewayRequest, ItemContent,
-    ItemType, Reasoning, ResponseItem, ResponseObject,
+    ItemType, Reasoning, ResponseItem,
 };
 use crate::ai_gateway::tool_names::ToolNameMap;
 use axum::{
@@ -1648,30 +1649,40 @@ fn raw_sse_first_content_token_ignores_message_start_and_ping() {
 #[tokio::test]
 async fn internal_web_search_stream_emits_responses_web_search_progress() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    let mut state = InternalWebSearchSseState::new("claude-opus-4-8".to_string());
+    let mut envelope =
+        InternalSseEnvelope::new("resp_test".to_string(), "claude-opus-4-8".to_string(), 0);
     let tool_use = WebSearchToolUse {
         id: "toolu_search_1".to_string(),
         query: "World Cup 2026 results".to_string(),
     };
 
-    state.emit_started(&tx).await.unwrap();
-    let search_item = state.emit_web_search_started(&tx, &tool_use).await.unwrap();
-    state
-        .emit_web_search_completed(&tx, &search_item, &tool_use)
+    envelope.ensure_started(&tx).await.unwrap();
+    emit_injected_web_search_call(&mut envelope, &tx, &tool_use)
         .await
         .unwrap();
-    let response_obj = ResponseObject {
-        id: "unused".to_string(),
-        object_type: "response".to_string(),
-        model: "unused".to_string(),
-        created_at: 0,
-        status: "completed".to_string(),
-        output: vec![message("assistant", "Search answer.")],
-        usage: None,
-        error: None,
-        incomplete_details: None,
-    };
-    state.emit_final_response(&tx, response_obj).await.unwrap();
+    // Simulate a following answer round: forward a converted message item, then
+    // finish the envelope.
+    envelope.begin_round();
+    envelope
+        .forward_converted(
+            &tx,
+            "response.output_item.done",
+            json!({
+                "type": "response.output_item.done",
+                "sequence_number": 0,
+                "output_index": 0,
+                "item": {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "Search answer.", "annotations": []}],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    envelope.finish(&tx).await.unwrap();
     drop(tx);
 
     let mut chunks = Vec::new();
@@ -1716,8 +1727,110 @@ async fn internal_web_search_stream_emits_responses_web_search_progress() {
         .find(|(event, _)| event == "response.completed")
         .unwrap();
     let output = completed.1["response"]["output"].as_array().unwrap();
+    // Terminal response should carry both the injected web-search call and the
+    // streamed message, in order.
+    assert_eq!(output.len(), 2);
+    assert_eq!(output[0]["type"], "web_search_call");
+    assert_eq!(output[1]["type"], "message");
+
+    // A single envelope: exactly one created/in_progress/completed.
+    assert_eq!(
+        event_names.iter().filter(|e| **e == "response.created").count(),
+        1
+    );
+    assert_eq!(
+        event_names.iter().filter(|e| **e == "response.completed").count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn internal_envelope_streams_deltas_and_renumbers_across_rounds() {
+    use super::parse_converted_frames;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+    let mut envelope =
+        InternalSseEnvelope::new("resp_x".to_string(), "claude-opus-4-8".to_string(), 0);
+
+    // Round 1: the model streams text (converter emits real output_text.delta
+    // frames from content_block_delta). This is what restores the typewriter
+    // effect through the internal web-search path.
+    let round1 = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-8\",\"content\":[],\"usage\":{\"input_tokens\":3,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    envelope.ensure_started(&tx).await.unwrap();
+    envelope.begin_round();
+    let mut converted = response_stream(round1, "claude-opus-4-8", ToolNameMap::default());
+    while let Some(frame) = converted.next().await {
+        let frame = frame.unwrap();
+        for (event, data) in parse_converted_frames(&frame) {
+            envelope.forward_converted(&tx, &event, data).await.unwrap();
+        }
+    }
+    envelope.finish(&tx).await.unwrap();
+    drop(tx);
+
+    let mut chunks = Vec::new();
+    while let Some(item) = rx.recv().await {
+        chunks.push(item.unwrap());
+    }
+    let events = parse_events_from_bytes(&chunks);
+    let names: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
+
+    // Typewriter effect preserved: real output_text.delta events reach the client.
+    let deltas: Vec<&str> = events
+        .iter()
+        .filter(|(e, _)| e == "response.output_text.delta")
+        .filter_map(|(_, d)| d["delta"].as_str())
+        .collect();
+    assert_eq!(deltas, vec!["Hel", "lo"]);
+
+    // Exactly one envelope even though the converter emitted its own.
+    assert_eq!(names.iter().filter(|e| **e == "response.created").count(), 1);
+    assert_eq!(
+        names.iter().filter(|e| **e == "response.completed").count(),
+        1
+    );
+    // No stray per-round envelope leaked through.
+    assert!(!names[1..names.len() - 1].contains(&"response.created"));
+
+    // Sequence numbers are strictly increasing across the whole stream.
+    let seqs: Vec<i64> = events
+        .iter()
+        .filter_map(|(_, d)| d["sequence_number"].as_i64())
+        .collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "sequence must be monotonic: {seqs:?}");
+
+    // Terminal response carries the streamed message and merged usage.
+    let completed = events
+        .iter()
+        .find(|(e, _)| e == "response.completed")
+        .unwrap();
+    let output = completed.1["response"]["output"].as_array().unwrap();
     assert_eq!(output.len(), 1);
     assert_eq!(output[0]["type"], "message");
+    assert_eq!(completed.1["response"]["usage"]["output_tokens"], 2);
 }
 
 #[test]

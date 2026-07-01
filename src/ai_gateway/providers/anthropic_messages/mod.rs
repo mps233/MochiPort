@@ -16,7 +16,7 @@ use tracing::{debug, error};
 use crate::ai_gateway::config::ProviderConfig;
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::error::GatewayError;
-use crate::ai_gateway::model::{GatewayRequest, ResponseObject, generate_response_id};
+use crate::ai_gateway::model::{GatewayRequest, generate_response_id};
 use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
@@ -38,6 +38,7 @@ mod request_tools;
 mod response;
 mod stream;
 mod stream_events;
+mod stream_internal;
 mod stream_items;
 mod stream_message;
 mod stream_reasoning;
@@ -56,6 +57,8 @@ use options::{
 use request::build_anthropic_request;
 use response::convert_anthropic_response;
 use stream::AnthropicSseToResponsesSse;
+use stream_events::unix_timestamp;
+use stream_internal::InternalSseEnvelope;
 use types::{
     ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE_CODE_STAINLESS_PACKAGE_VERSION,
     CLAUDE_CODE_STAINLESS_RUNTIME_VERSION, CLAUDE_CODE_USER_AGENT,
@@ -347,12 +350,18 @@ async fn run_internal_web_search_stream(
     tool_name_map: ToolNameMap,
     tx: mpsc::Sender<Result<Bytes, io::Error>>,
 ) -> Result<(), GatewayError> {
-    let mut state = InternalWebSearchSseState::new(response_model.clone());
-    state.emit_started(&tx).await?;
+    let mut envelope =
+        InternalSseEnvelope::new(generate_response_id(), response_model.clone(), unix_timestamp());
+    // TTFT is captured from the first content token of the first round so the
+    // request log reflects the true time-to-first-token.
+    let mut ttft_recorded = false;
 
     loop {
         let step_body = force_anthropic_stream(anthropic_body.clone(), true);
-        let step_resp = execute_anthropic_stream_message(
+        // Stream this round through the converter so text/reasoning deltas reach
+        // the client token-by-token, while capturing the raw Anthropic SSE to
+        // detect whether the model asked for a web search.
+        let raw_sse = stream_anthropic_round(
             &client,
             &ctx,
             &request,
@@ -360,23 +369,22 @@ async fn run_internal_web_search_stream(
             &options,
             &step_body,
             &log_context,
+            &tool_name_map,
+            &mut envelope,
+            &tx,
+            &mut ttft_recorded,
         )
         .await?;
+        let step_resp = anthropic_message_from_sse(&raw_sse)?;
         let tool_uses = find_web_search_tool_uses(&step_resp);
         if tool_uses.is_empty() {
-            let response_obj = convert_anthropic_response(
-                &step_resp,
-                &response_model,
-                &tool_name_map,
-                options.profile,
-            );
-            state.emit_final_response(&tx, response_obj).await?;
+            envelope.finish(&tx).await?;
             return Ok(());
         }
 
         let mut tool_results = Vec::new();
         for tool_use in tool_uses {
-            let search_item = state.emit_web_search_started(&tx, &tool_use).await?;
+            emit_injected_web_search_call(&mut envelope, &tx, &tool_use).await?;
             let search_text = execute_internal_web_search(
                 &client,
                 &ctx,
@@ -387,258 +395,221 @@ async fn run_internal_web_search_stream(
                 &log_context,
             )
             .await?;
-            state
-                .emit_web_search_completed(&tx, &search_item, &tool_use)
-                .await?;
             tool_results.push((tool_use.id, search_text));
         }
         append_tool_results(&mut anthropic_body, &step_resp, tool_results);
     }
 }
 
-struct InternalWebSearchSseState {
-    response_id: String,
-    model: String,
-    created_at: i64,
-    sequence_number: usize,
-    output_index: usize,
-}
+/// Streams one upstream Anthropic round through the Responses converter and the
+/// shared envelope, forwarding converted content events to the client while
+/// accumulating the raw Anthropic SSE. Returns the raw SSE so the caller can
+/// detect web-search tool uses and, if needed, run another round.
+#[allow(clippy::too_many_arguments)]
+async fn stream_anthropic_round(
+    client: &reqwest::Client,
+    ctx: &GatewayContext,
+    request: &GatewayRequest,
+    provider: &ProviderConfig,
+    options: &AnthropicProviderOptions,
+    anthropic_body: &Value,
+    log_context: &Option<RequestLogContext>,
+    tool_name_map: &ToolNameMap,
+    envelope: &mut InternalSseEnvelope,
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    ttft_recorded: &mut bool,
+) -> Result<String, GatewayError> {
+    let mut step_request = request.clone();
+    step_request.stream = true;
+    let upstream_req = build_anthropic_upstream_request(
+        client,
+        ctx,
+        &step_request,
+        anthropic_body,
+        provider,
+        options,
+    )?;
+    update_upstream_log(log_context, upstream_req.headers(), anthropic_body);
+    let upstream_resp = execute_stream_start(
+        client,
+        upstream_req,
+        provider.timeout_secs,
+        "anthropic upstream request failed",
+    )
+    .await?;
+    let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
 
-struct InternalWebSearchSseItem {
-    item_id: String,
-    output_index: usize,
-}
+    envelope.ensure_started(tx).await?;
+    envelope.begin_round();
 
-impl InternalWebSearchSseState {
-    fn new(model: String) -> Self {
-        Self {
-            response_id: generate_response_id(),
-            model,
-            created_at: stream_events::unix_timestamp(),
-            sequence_number: 0,
-            output_index: 0,
+    // Accumulate the raw Anthropic SSE for post-round inspection.
+    let raw = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let raw_for_stream = raw.clone();
+    let byte_stream = upstream_resp.bytes_stream().map(move |result| {
+        match result {
+            Ok(chunk) => {
+                if let Ok(mut guard) = raw_for_stream.lock() {
+                    guard.push_str(&String::from_utf8_lossy(&chunk));
+                }
+                Ok(chunk)
+            }
+            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        }
+    });
+
+    let mut converted = AnthropicSseToResponsesSse::new(
+        byte_stream,
+        request.model.clone(),
+        tool_name_map.clone(),
+        options.profile,
+    );
+
+    while let Some(frame) = converted.next().await {
+        let frame = frame.map_err(|e| {
+            GatewayError::upstream(
+                StatusCode::BAD_GATEWAY,
+                format!("anthropic stream conversion failed: {e}"),
+            )
+        })?;
+        for (event_type, data) in parse_converted_frames(&frame) {
+            if !*ttft_recorded && is_first_token_event(&event_type) {
+                if let Some(log_context) = log_context {
+                    let ttft_ms = request_log::elapsed_ms(log_context.started_at);
+                    if let Err(err) = log_context.store.record_ttft_once(log_context.log_id, ttft_ms)
+                    {
+                        request_log::log_update_error(err);
+                    }
+                }
+                *ttft_recorded = true;
+            }
+            envelope.forward_converted(tx, &event_type, data).await?;
         }
     }
 
-    async fn emit_started(
-        &mut self,
-        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-    ) -> Result<(), GatewayError> {
-        let created_seq = self.next_seq();
-        let created_response = self.response_value("in_progress", Vec::new());
-        self.emit_event(
-            tx,
-            "response.created",
-            json!({
-                "type": "response.created",
-                "sequence_number": created_seq,
-                "response": created_response,
-            }),
-        )
-        .await?;
-        let in_progress_seq = self.next_seq();
-        let in_progress_response = self.response_value("in_progress", Vec::new());
-        self.emit_event(
-            tx,
-            "response.in_progress",
-            json!({
-                "type": "response.in_progress",
-                "sequence_number": in_progress_seq,
-                "response": in_progress_response,
-            }),
-        )
-        .await
-    }
+    save_internal_upstream_sse(log_context, &raw.lock().map(|g| g.clone()).unwrap_or_default());
+    let raw_sse = raw.lock().map(|g| g.clone()).unwrap_or_default();
+    Ok(raw_sse)
+}
 
-    async fn emit_web_search_started(
-        &mut self,
-        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-        _tool_use: &WebSearchToolUse,
-    ) -> Result<InternalWebSearchSseItem, GatewayError> {
-        let item_id = generate_web_search_item_id();
-        let output_index = self.output_index;
-        self.output_index += 1;
-        let added_seq = self.next_seq();
-        self.emit_event(
+/// Emits the injected web-search progress item (added → in_progress → searching
+/// → completed → done) that represents the gateway performing the search on the
+/// model's behalf, renumbered into the shared envelope's global sequence.
+async fn emit_injected_web_search_call(
+    envelope: &mut InternalSseEnvelope,
+    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
+    tool_use: &WebSearchToolUse,
+) -> Result<(), GatewayError> {
+    let item_id = generate_web_search_item_id();
+    let output_index = envelope.reserve_output_index();
+    envelope
+        .emit_owned(
             tx,
             "response.output_item.added",
             json!({
                 "type": "response.output_item.added",
-                "sequence_number": added_seq,
                 "output_index": output_index,
                 "item": {
                     "type": "web_search_call",
-                    "id": item_id.clone(),
+                    "id": item_id,
                     "status": "in_progress",
                 },
             }),
         )
         .await?;
-        let in_progress_seq = self.next_seq();
-        self.emit_event(
+    envelope
+        .emit_owned(
             tx,
             "response.web_search_call.in_progress",
             json!({
                 "type": "response.web_search_call.in_progress",
-                "sequence_number": in_progress_seq,
-                "item_id": item_id.clone(),
+                "item_id": item_id,
                 "output_index": output_index,
             }),
         )
         .await?;
-        let searching_seq = self.next_seq();
-        self.emit_event(
+    envelope
+        .emit_owned(
             tx,
             "response.web_search_call.searching",
             json!({
                 "type": "response.web_search_call.searching",
-                "sequence_number": searching_seq,
-                "item_id": item_id.clone(),
+                "item_id": item_id,
                 "output_index": output_index,
             }),
         )
         .await?;
-        Ok(InternalWebSearchSseItem {
-            item_id,
-            output_index,
-        })
-    }
-
-    async fn emit_web_search_completed(
-        &mut self,
-        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-        search_item: &InternalWebSearchSseItem,
-        tool_use: &WebSearchToolUse,
-    ) -> Result<(), GatewayError> {
-        let completed_seq = self.next_seq();
-        self.emit_event(
+    envelope
+        .emit_owned(
             tx,
             "response.web_search_call.completed",
             json!({
                 "type": "response.web_search_call.completed",
-                "sequence_number": completed_seq,
-                "item_id": search_item.item_id.clone(),
-                "output_index": search_item.output_index,
+                "item_id": item_id,
+                "output_index": output_index,
             }),
         )
         .await?;
-        let done_seq = self.next_seq();
-        self.emit_event(
+    let done_item = json!({
+        "type": "web_search_call",
+        "id": item_id,
+        "status": "completed",
+        "action": {
+            "type": "search",
+            "query": tool_use.query.clone(),
+            "queries": [tool_use.query.clone()],
+        },
+    });
+    envelope.push_completed_output(done_item.clone());
+    envelope
+        .emit_owned(
             tx,
             "response.output_item.done",
             json!({
                 "type": "response.output_item.done",
-                "sequence_number": done_seq,
-                "output_index": search_item.output_index,
-                "item": {
-                    "type": "web_search_call",
-                    "id": search_item.item_id.clone(),
-                    "status": "completed",
-                    "action": {
-                        "type": "search",
-                        "query": tool_use.query.clone(),
-                        "queries": [tool_use.query.clone()],
-                    },
-                },
+                "output_index": output_index,
+                "item": done_item,
             }),
         )
         .await
-    }
+}
 
-    async fn emit_final_response(
-        &mut self,
-        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-        mut response_obj: ResponseObject,
-    ) -> Result<(), GatewayError> {
-        response_obj.id = self.response_id.clone();
-        response_obj.model = self.model.clone();
-        response_obj.created_at = self.created_at;
-        let mut output = Vec::new();
-        for item in &response_obj.output {
-            let item = serde_json::to_value(item).unwrap_or_default();
-            let output_index = self.output_index;
-            self.output_index += 1;
-            let added_seq = self.next_seq();
-            self.emit_event(
-                tx,
-                "response.output_item.added",
-                json!({
-                    "type": "response.output_item.added",
-                    "sequence_number": added_seq,
-                    "output_index": output_index,
-                    "item": item,
-                }),
-            )
-            .await?;
-            let done_seq = self.next_seq();
-            self.emit_event(
-                tx,
-                "response.output_item.done",
-                json!({
-                    "type": "response.output_item.done",
-                    "sequence_number": done_seq,
-                    "output_index": output_index,
-                    "item": item,
-                }),
-            )
-            .await?;
-            output.push(item);
+/// Splits a converter output chunk (which may batch several `event:`/`data:`
+/// frames) into `(event_type, data)` pairs.
+fn parse_converted_frames(frame: &Bytes) -> Vec<(String, Value)> {
+    let text = String::from_utf8_lossy(frame);
+    let mut out = Vec::new();
+    let mut event_type: Option<String> = None;
+    let mut data_lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            if let (Some(event), false) = (event_type.as_ref(), data_lines.is_empty()) {
+                let data = data_lines.join("\n");
+                if let Ok(value) = serde_json::from_str::<Value>(&data) {
+                    out.push((event.clone(), value));
+                }
+            }
+            event_type = None;
+            data_lines.clear();
+            continue;
         }
-        let status = response_obj.status.clone();
-        let event_type = if status == "incomplete" {
-            "response.incomplete"
-        } else {
-            "response.completed"
-        };
-        let mut response_value = serde_json::to_value(response_obj).unwrap_or_default();
-        response_value["output"] = Value::Array(output);
-        let final_seq = self.next_seq();
-        self.emit_event(
-            tx,
-            event_type,
-            json!({
-                "type": event_type,
-                "sequence_number": final_seq,
-                "response": response_value,
-            }),
-        )
-        .await
+        if let Some(rest) = line.strip_prefix("event:") {
+            event_type = Some(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+        } else if let Some(rest) = line.strip_prefix("data:") {
+            data_lines.push(rest.strip_prefix(' ').unwrap_or(rest).to_string());
+        }
     }
+    if let (Some(event), false) = (event_type.as_ref(), data_lines.is_empty()) {
+        let data = data_lines.join("\n");
+        if let Ok(value) = serde_json::from_str::<Value>(&data) {
+            out.push((event.clone(), value));
+        }
+    }
+    out
+}
 
-    fn response_value(&self, status: &str, output: Vec<Value>) -> Value {
-        json!({
-            "id": self.response_id.clone(),
-            "object": "response",
-            "model": self.model.clone(),
-            "created_at": self.created_at,
-            "status": status,
-            "output": output,
-        })
-    }
-
-    async fn emit_event(
-        &mut self,
-        tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-        event_type: &str,
-        data: Value,
-    ) -> Result<(), GatewayError> {
-        tx.send(Ok(Bytes::from(format!(
-            "event: {event_type}\ndata: {data}\n\n"
-        ))))
-        .await
-        .map_err(|_| {
-            GatewayError::upstream(
-                StatusCode::BAD_GATEWAY,
-                "client disconnected during anthropic internal web search stream",
-            )
-        })
-    }
-
-    fn next_seq(&mut self) -> usize {
-        let seq = self.sequence_number;
-        self.sequence_number += 1;
-        seq
-    }
+fn is_first_token_event(event_type: &str) -> bool {
+    event_type.starts_with("response.") && event_type.ends_with(".delta")
 }
 
 fn generate_web_search_item_id() -> String {
