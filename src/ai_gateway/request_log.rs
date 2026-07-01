@@ -29,6 +29,10 @@ pub struct LogUsage {
     pub read_cache_tokens: Option<i64>,
     pub read_cache_hit_rate: Option<f64>,
     pub write_cache_tokens: Option<i64>,
+    /// Anthropic splits cache writes into two TTL tiers. These are populated
+    /// only when the upstream reports `cache_creation.ephemeral_{5m,1h}_input_tokens`.
+    pub write_cache_5m_tokens: Option<i64>,
+    pub write_cache_1h_tokens: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +89,10 @@ pub struct RequestLogEntry {
     pub read_cache_tokens: Option<i64>,
     pub read_cache_hit_rate: Option<f64>,
     pub write_cache_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_cache_5m_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_cache_1h_tokens: Option<i64>,
     pub cost_usd: Option<f64>,
     pub latency_ms: Option<i64>,
     pub ttft_ms: Option<i64>,
@@ -156,6 +164,21 @@ impl RequestLogStore {
 
     pub fn update_record(&self, id: i64, update: &RequestLogUpdate) -> rusqlite::Result<()> {
         self.with_conn(|conn| update_record_with_conn(conn, id, update))
+    }
+
+    /// Records time-to-first-token only if it has not been set yet. Some
+    /// provider paths (e.g. the Anthropic internal web-search loop) issue
+    /// several upstream round-trips per request; without this guard a later
+    /// round would overwrite the genuine first-token timestamp.
+    pub fn record_ttft_once(&self, id: i64, ttft_ms: i64) -> rusqlite::Result<()> {
+        self.with_conn(|conn| {
+            conn.execute(
+                "UPDATE ai_gateway_request_logs SET ttft_ms = ?1 \
+                 WHERE id = ?2 AND ttft_ms IS NULL",
+                params![ttft_ms, id],
+            )?;
+            Ok(())
+        })
     }
 
     pub fn list_recent(&self, limit: usize) -> rusqlite::Result<Vec<RequestLogEntry>> {
@@ -379,8 +402,9 @@ fn insert_record_with_conn(conn: &Connection, record: &RequestLogRecord) -> rusq
             read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
             ttft_ms, created_at_ms, error_message, request_headers_json, request_json,
             upstream_request_body_bytes, upstream_request_headers_json, upstream_request_json,
-            upstream_response_sse, response_json
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+            upstream_response_sse, response_json,
+            write_cache_5m_tokens, write_cache_1h_tokens
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         params![
             &record.request_id,
             &record.model_id,
@@ -406,6 +430,8 @@ fn insert_record_with_conn(conn: &Connection, record: &RequestLogRecord) -> rusq
             &record.upstream_request_json,
             &record.upstream_response_sse,
             &record.response_json,
+            record.usage.write_cache_5m_tokens,
+            record.usage.write_cache_1h_tokens,
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -429,7 +455,7 @@ fn update_record_with_conn(
                 read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
                 ttft_ms, error_message, upstream_request_body_bytes,
                 upstream_request_headers_json, upstream_request_json, upstream_response_sse,
-                response_json
+                response_json, write_cache_5m_tokens, write_cache_1h_tokens
              FROM ai_gateway_request_logs WHERE id = ?1",
             params![id],
             |row| {
@@ -450,6 +476,8 @@ fn update_record_with_conn(
                     row.get::<_, Option<String>>(13)?,
                     row.get::<_, Option<String>>(14)?,
                     row.get::<_, Option<String>>(15)?,
+                    row.get::<_, Option<i64>>(16)?,
+                    row.get::<_, Option<i64>>(17)?,
                 ))
             },
         )
@@ -465,6 +493,8 @@ fn update_record_with_conn(
         read_cache_tokens: existing.4,
         read_cache_hit_rate: existing.5,
         write_cache_tokens: existing.6,
+        write_cache_5m_tokens: existing.16,
+        write_cache_1h_tokens: existing.17,
     });
 
     conn.execute(
@@ -484,7 +514,9 @@ fn update_record_with_conn(
             upstream_request_headers_json = ?13,
             upstream_request_json = ?14,
             upstream_response_sse = ?15,
-            response_json = ?16
+            response_json = ?16,
+            write_cache_5m_tokens = ?18,
+            write_cache_1h_tokens = ?19
          WHERE id = ?17",
         params![
             update.status.as_deref().unwrap_or(&existing.0),
@@ -504,6 +536,8 @@ fn update_record_with_conn(
             update.upstream_response_sse.clone().or(existing.14),
             update.response_json.clone().or(existing.15),
             id,
+            usage.write_cache_5m_tokens,
+            usage.write_cache_1h_tokens,
         ],
     )?;
     Ok(())
@@ -526,7 +560,8 @@ fn list_recent_with_conn(
             read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
             ttft_ms, created_at_ms,
             datetime(created_at_ms / 1000, 'unixepoch', 'localtime') AS created_at,
-            error_message, upstream_request_body_bytes
+            error_message, upstream_request_body_bytes,
+            write_cache_5m_tokens, write_cache_1h_tokens
          FROM ai_gateway_request_logs
          ORDER BY created_at_ms DESC, id DESC
          LIMIT ?1",
@@ -553,6 +588,8 @@ fn list_recent_with_conn(
             created_at: row.get(17)?,
             error_message: row.get(18)?,
             upstream_request_body_bytes: row.get(19)?,
+            write_cache_5m_tokens: row.get(20)?,
+            write_cache_1h_tokens: row.get(21)?,
         })
     })?;
 
@@ -619,7 +656,8 @@ fn get_detail_with_conn(conn: &Connection, id: i64) -> rusqlite::Result<Option<R
             datetime(created_at_ms / 1000, 'unixepoch', 'localtime') AS created_at,
             error_message, request_headers_json, request_json,
             upstream_request_body_bytes, upstream_request_headers_json, upstream_request_json,
-            upstream_response_sse, response_json
+            upstream_response_sse, response_json,
+            write_cache_5m_tokens, write_cache_1h_tokens
          FROM ai_gateway_request_logs
          WHERE id = ?1",
         params![id],
@@ -646,6 +684,8 @@ fn get_detail_with_conn(conn: &Connection, id: i64) -> rusqlite::Result<Option<R
                     created_at: row.get(17)?,
                     error_message: row.get(18)?,
                     upstream_request_body_bytes: row.get(21)?,
+                    write_cache_5m_tokens: row.get(26)?,
+                    write_cache_1h_tokens: row.get(27)?,
                 },
                 request_headers_json: row.get(19)?,
                 request_json: row.get(20)?,
@@ -727,6 +767,7 @@ pub fn usage_from_response_value(response: &Value) -> LogUsage {
         (Some(cached), Some(input)) if input > 0 => Some(cached as f64 / input as f64),
         _ => None,
     };
+    let (write_cache_5m_tokens, write_cache_1h_tokens) = anthropic_cache_creation_split(usage);
 
     LogUsage {
         input_tokens,
@@ -735,7 +776,43 @@ pub fn usage_from_response_value(response: &Value) -> LogUsage {
         read_cache_tokens,
         read_cache_hit_rate,
         write_cache_tokens,
+        write_cache_5m_tokens,
+        write_cache_1h_tokens,
     }
+}
+
+/// Anthropic reports two cache-write TTL tiers under `usage.cache_creation`.
+/// Returns `(5m, 1h)` token counts when the breakdown is present. Requests that
+/// only report a flat `cache_creation_input_tokens` leave both as `None`.
+fn anthropic_cache_creation_split(usage: &Value) -> (Option<i64>, Option<i64>) {
+    // Raw Anthropic usage nests the split under `cache_creation`; the gateway's
+    // converters preserve it under `input_tokens_details` so it survives the
+    // Responses-shaped payloads that both the streaming and internal
+    // web-search paths persist. Check both spots.
+    let from = |value: &Value| {
+        let five = value
+            .get("ephemeral_5m_input_tokens")
+            .or_else(|| value.get("cache_creation_5m_tokens"))
+            .and_then(Value::as_i64);
+        let one = value
+            .get("ephemeral_1h_input_tokens")
+            .or_else(|| value.get("cache_creation_1h_tokens"))
+            .and_then(Value::as_i64);
+        (five, one)
+    };
+    if let Some(cache_creation) = usage.get("cache_creation") {
+        let split = from(cache_creation);
+        if split.0.is_some() || split.1.is_some() {
+            return split;
+        }
+    }
+    if let Some(details) = usage.get("input_tokens_details") {
+        let split = from(details);
+        if split.0.is_some() || split.1.is_some() {
+            return split;
+        }
+    }
+    (None, None)
 }
 
 pub fn status_from_response_value(response: &Value) -> String {
@@ -986,6 +1063,8 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             read_cache_tokens INTEGER,
             read_cache_hit_rate REAL,
             write_cache_tokens INTEGER,
+            write_cache_5m_tokens INTEGER,
+            write_cache_1h_tokens INTEGER,
             cost_usd REAL,
             latency_ms INTEGER,
             ttft_ms INTEGER,
@@ -1007,6 +1086,8 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     add_text_column_if_missing(conn, "upstream_request_headers_json")?;
     add_text_column_if_missing(conn, "upstream_request_json")?;
     add_text_column_if_missing(conn, "upstream_response_sse")?;
+    add_integer_column_if_missing(conn, "write_cache_5m_tokens")?;
+    add_integer_column_if_missing(conn, "write_cache_1h_tokens")?;
 
     conn.execute_batch(
         r#"
@@ -1026,12 +1107,18 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         -- 200-row list query cost ~170 ms and spin the daemon at ~12% CPU while
         -- the dashboard polled it every 1.5 s. Carrying all listed columns here
         -- keeps the scan inside the index and drops the query to well under 1 ms.
-        CREATE INDEX IF NOT EXISTS idx_ai_gateway_request_logs_list_cover
+        -- The v2 suffix forces a fresh covering index after the write-cache
+        -- 5m/1h columns were added; the old index is dropped just below so the
+        -- list query stays covered without carrying a stale duplicate.
+        DROP INDEX IF EXISTS idx_ai_gateway_request_logs_list_cover;
+        CREATE INDEX IF NOT EXISTS idx_ai_gateway_request_logs_list_cover_v2
             ON ai_gateway_request_logs(
                 created_at_ms DESC, id DESC,
                 request_id, model_id, stream, channel, provider_type, status,
                 input_tokens, output_tokens, total_tokens, read_cache_tokens,
-                read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
+                read_cache_hit_rate, write_cache_tokens,
+                write_cache_5m_tokens, write_cache_1h_tokens,
+                cost_usd, latency_ms,
                 ttft_ms, error_message, upstream_request_body_bytes
             );
         "#,
@@ -1219,6 +1306,57 @@ mod tests {
     }
 
     #[test]
+    fn usage_from_value_extracts_anthropic_cache_creation_split() {
+        // Converted Responses payloads carry the TTL split under
+        // input_tokens_details; raw Anthropic usage carries it under
+        // cache_creation. Both must be recognized.
+        let converted = json!({
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "input_tokens_details": {
+                    "cached_tokens": 40,
+                    "cache_creation_tokens": 60,
+                    "cache_creation_5m_tokens": 20,
+                    "cache_creation_1h_tokens": 40
+                }
+            }
+        });
+        let usage = usage_from_response_value(&converted);
+        assert_eq!(usage.write_cache_5m_tokens, Some(20));
+        assert_eq!(usage.write_cache_1h_tokens, Some(40));
+
+        let raw = json!({
+            "usage": {
+                "input_tokens": 30,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 60,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 15,
+                    "ephemeral_1h_input_tokens": 45
+                }
+            }
+        });
+        let usage = usage_from_response_value(&raw);
+        assert_eq!(usage.write_cache_5m_tokens, Some(15));
+        assert_eq!(usage.write_cache_1h_tokens, Some(45));
+
+        // A flat cache_creation_input_tokens with no breakdown leaves both None.
+        let flat = json!({
+            "usage": {
+                "input_tokens": 30,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 60
+            }
+        });
+        let usage = usage_from_response_value(&flat);
+        assert_eq!(usage.write_cache_tokens, Some(60));
+        assert_eq!(usage.write_cache_5m_tokens, None);
+        assert_eq!(usage.write_cache_1h_tokens, None);
+    }
+
+    #[test]
     fn usage_from_chat_value_extracts_deepseek_cache() {
         let value = json!({
             "usage": {
@@ -1260,6 +1398,20 @@ mod tests {
             database_path(&config),
             config.state_path.parent().unwrap().join(DB_FILE_NAME)
         );
+    }
+
+    #[test]
+    fn record_ttft_once_does_not_overwrite_first_token() {
+        let db_path = temp_db_path();
+        let context = insert_running_test_log(&db_path, "req-ttft-once");
+
+        context.store.record_ttft_once(context.log_id, 111).unwrap();
+        // A later upstream round-trip must not clobber the first measurement.
+        context.store.record_ttft_once(context.log_id, 999).unwrap();
+
+        let detail = context.store.get_detail(context.log_id).unwrap().unwrap();
+        assert_eq!(detail.summary.ttft_ms, Some(111));
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]
@@ -1348,6 +1500,8 @@ mod tests {
                     read_cache_tokens: Some(8),
                     read_cache_hit_rate: Some(0.8),
                     write_cache_tokens: None,
+                    write_cache_5m_tokens: None,
+                    write_cache_1h_tokens: None,
                 }),
                 latency_ms: Some(1234),
                 upstream_request_headers_json: Some(
@@ -1481,6 +1635,37 @@ mod tests {
         let captured = detail.upstream_response_sse.unwrap();
         assert!(captured.contains("event: message_start"));
         assert!(captured.contains("event: content_block_delta"));
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn responses_log_stream_records_ttft_for_anthropic_style_events() {
+        // Mirrors the exact SSE framing that AnthropicSseToResponsesSse emits:
+        // an `event:` line plus a `data:` line whose JSON carries the `type`.
+        let db_path = temp_db_path();
+        let context = insert_running_test_log(&db_path, "req-anthropic-ttft");
+        let inner = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"th\"}\n\n",
+            )),
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
+            )),
+            Ok::<_, std::io::Error>(Bytes::from_static(
+                b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+            )),
+        ]);
+        let mut wrapped = ResponsesSseLogStream::new(inner, context);
+        while let Some(item) = wrapped.next().await {
+            assert!(item.is_ok());
+        }
+        drop(wrapped);
+
+        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        assert!(
+            detail.summary.ttft_ms.is_some(),
+            "ttft should be recorded from the first response.*.delta event"
+        );
         let _ = std::fs::remove_file(db_path);
     }
 

@@ -673,7 +673,10 @@ async fn execute_anthropic_stream_message(
     )
     .await?;
     let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
-    let raw_sse = read_sse_to_string(upstream_resp, log_context).await?;
+    // This buffered path serves the main answer stream, so the first upstream
+    // content token here is what TTFT should measure. The internal web-search
+    // sub-requests reuse read_sse_to_string but must not clobber TTFT.
+    let raw_sse = read_sse_to_string(upstream_resp, log_context, true).await?;
     anthropic_message_from_sse(&raw_sse)
 }
 
@@ -699,7 +702,7 @@ async fn execute_internal_web_search(
     )
     .await?;
     let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
-    let raw = read_sse_to_string(upstream_resp, log_context).await?;
+    let raw = read_sse_to_string(upstream_resp, log_context, false).await?;
     Ok(search_results_to_tool_text(query, &raw))
 }
 
@@ -760,9 +763,11 @@ fn claude_code_device_id(session_id: &str) -> String {
 async fn read_sse_to_string(
     response: reqwest::Response,
     log_context: &Option<RequestLogContext>,
+    record_ttft: bool,
 ) -> Result<String, GatewayError> {
     let mut stream = response.bytes_stream();
     let mut raw = String::new();
+    let mut ttft_recorded = false;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
             GatewayError::upstream(
@@ -771,9 +776,31 @@ async fn read_sse_to_string(
             )
         })?;
         raw.push_str(&String::from_utf8_lossy(&chunk));
+        // The gateway buffers this internal Anthropic stream before replaying a
+        // synthetic Responses SSE, so ResponsesSseLogStream never sees a real
+        // delta event and cannot compute TTFT. Capture it here from the first
+        // upstream content token instead.
+        if record_ttft && !ttft_recorded && raw_sse_has_first_content_token(&raw) {
+            if let Some(log_context) = log_context {
+                let ttft_ms = request_log::elapsed_ms(log_context.started_at);
+                if let Err(err) = log_context.store.record_ttft_once(log_context.log_id, ttft_ms) {
+                    request_log::log_update_error(err);
+                }
+            }
+            ttft_recorded = true;
+        }
     }
     save_internal_upstream_sse(log_context, &raw);
     Ok(raw)
+}
+
+/// Returns true once the accumulated raw Anthropic SSE contains the first token
+/// of model output. Anthropic streams `message_start` and `ping` frames before
+/// any real content, so those do not count. The first `content_block_delta`
+/// (text, thinking, or tool input) marks time-to-first-token.
+fn raw_sse_has_first_content_token(raw: &str) -> bool {
+    raw.contains("\"type\":\"content_block_delta\"")
+        || raw.contains("\"type\": \"content_block_delta\"")
 }
 
 fn response_from_response_object(

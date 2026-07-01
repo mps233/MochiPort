@@ -250,6 +250,8 @@ fn convert_usage(usage_val: Option<&Value>) -> Option<Usage> {
         input_tokens_details: Some(InputTokensDetails {
             cached_tokens: cached,
             cache_creation_tokens: 0,
+            cache_creation_5m_tokens: 0,
+            cache_creation_1h_tokens: 0,
         }),
         output_tokens_details: Some(OutputTokensDetails {
             reasoning_tokens: reasoning,

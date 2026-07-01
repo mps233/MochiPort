@@ -6,7 +6,7 @@ use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE
 use super::{
     InternalWebSearchSseState, WebSearchToolUse, anthropic_message_from_sse, append_tool_results,
     bearer_authorization, build_anthropic_upstream_request, find_web_search_tool_uses,
-    internal_web_search_body, merge_anthropic_betas,
+    internal_web_search_body, merge_anthropic_betas, raw_sse_has_first_content_token,
 };
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
@@ -21,6 +21,11 @@ use axum::{
 };
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
+use std::time::Instant;
+
+use crate::ai_gateway::request_log::{
+    LogUsage, RequestLogContext, RequestLogRecord, RequestLogStore, ResponsesSseLogStream,
+};
 
 fn convert_response(response: &Value) -> crate::ai_gateway::model::ResponseObject {
     convert_anthropic_response(
@@ -1238,6 +1243,8 @@ fn converts_anthropic_cache_creation_breakdown_usage() {
     let details = usage.input_tokens_details.unwrap();
     assert_eq!(details.cached_tokens, 5699);
     assert_eq!(details.cache_creation_tokens, 125);
+    assert_eq!(details.cache_creation_5m_tokens, 100);
+    assert_eq!(details.cache_creation_1h_tokens, 25);
 }
 
 #[test]
@@ -1609,6 +1616,32 @@ fn builds_internal_web_search_body_like_claude_code() {
             .map(|value| value.len())
             .unwrap_or_default(),
         64
+    );
+}
+
+#[test]
+fn raw_sse_first_content_token_ignores_message_start_and_ping() {
+    // Anthropic emits message_start + ping frames before any real output.
+    // TTFT must not fire on those.
+    let prelude = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n",
+        "event: ping\n",
+        "data: {\"type\": \"ping\"}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    );
+    assert!(
+        !raw_sse_has_first_content_token(prelude),
+        "prelude frames must not count as first token"
+    );
+
+    let with_delta = format!(
+        "{prelude}event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"hi\"}}}}\n\n"
+    );
+    assert!(
+        raw_sse_has_first_content_token(&with_delta),
+        "first content_block_delta marks time-to-first-token"
     );
 }
 
@@ -2514,4 +2547,138 @@ async fn streams_max_tokens_stop_as_response_incomplete_with_reason() {
             .iter()
             .any(|(event, _)| event == "response.completed")
     );
+}
+
+#[tokio::test]
+async fn anthropic_stream_records_ttft_end_to_end() {
+    // Reproduces the real gateway path: raw Anthropic SSE flows through the
+    // AnthropicSseToResponsesSse converter and then the ResponsesSseLogStream
+    // that is responsible for recording TTFT. This is the pipeline that runs in
+    // production, unlike unit tests that feed already-converted events directly
+    // to the log stream.
+    let db_path = std::env::temp_dir().join(format!(
+        "codexhub-anthropic-ttft-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = RequestLogStore::new(db_path.clone());
+    let record = RequestLogRecord {
+        request_id: "req-anthropic-e2e".to_string(),
+        model_id: "claude-opus-4-8".to_string(),
+        stream: true,
+        channel: "anthropic".to_string(),
+        provider_type: "anthropic_messages".to_string(),
+        status: "running".to_string(),
+        usage: LogUsage::default(),
+        cost_usd: None,
+        latency_ms: None,
+        ttft_ms: None,
+        created_at_ms: 0,
+        error_message: None,
+        request_headers_json: None,
+        request_json: None,
+        upstream_request_body_bytes: None,
+        upstream_request_headers_json: None,
+        upstream_request_json: None,
+        upstream_response_sse: None,
+        response_json: None,
+    };
+    let log_id = store.insert_record(&record).unwrap();
+    let context = RequestLogContext {
+        store: store.clone(),
+        log_id,
+        started_at: Instant::now(),
+    };
+
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-4-8\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    let converted = response_stream(input, "fallback-model", ToolNameMap::default());
+    let mut logged = ResponsesSseLogStream::new(converted, context);
+    while let Some(item) = logged.next().await {
+        assert!(item.is_ok());
+    }
+    drop(logged);
+
+    let detail = store.get_detail(log_id).unwrap().unwrap();
+    assert!(
+        detail.summary.ttft_ms.is_some(),
+        "ttft should be recorded from the first converted response.*.delta event"
+    );
+    let _ = std::fs::remove_file(db_path);
+}
+#[tokio::test]
+async fn anthropic_real_fixture_records_ttft_bytewise() {
+    // Feed a captured real Anthropic SSE transcript one byte at a time so we
+    // exercise the worst-case network chunking against the exact converter +
+    // log-stream pipeline the gateway uses in production.
+    let raw = include_bytes!("testdata/real_anthropic_ttft.sse");
+    let db_path = std::env::temp_dir().join(format!(
+        "codexhub-anthropic-fixture-ttft-{}.sqlite",
+        uuid::Uuid::new_v4()
+    ));
+    let store = RequestLogStore::new(db_path.clone());
+    let record = RequestLogRecord {
+        request_id: "req-anthropic-fixture".to_string(),
+        model_id: "claude-opus-4-8".to_string(),
+        stream: true,
+        channel: "anthropic".to_string(),
+        provider_type: "anthropic_messages".to_string(),
+        status: "running".to_string(),
+        usage: LogUsage::default(),
+        cost_usd: None,
+        latency_ms: None,
+        ttft_ms: None,
+        created_at_ms: 0,
+        error_message: None,
+        request_headers_json: None,
+        request_json: None,
+        upstream_request_body_bytes: None,
+        upstream_request_headers_json: None,
+        upstream_request_json: None,
+        upstream_response_sse: None,
+        response_json: None,
+    };
+    let log_id = store.insert_record(&record).unwrap();
+    let context = RequestLogContext {
+        store: store.clone(),
+        log_id,
+        started_at: Instant::now(),
+    };
+
+    let chunks: Vec<Result<Bytes, std::io::Error>> = raw
+        .iter()
+        .map(|b| Ok(Bytes::copy_from_slice(&[*b])))
+        .collect();
+    let input = stream::iter(chunks);
+    let converted = response_stream(input, "fallback-model", ToolNameMap::default());
+    let mut logged = ResponsesSseLogStream::new(converted, context);
+    while let Some(item) = logged.next().await {
+        assert!(item.is_ok());
+    }
+    drop(logged);
+
+    let detail = store.get_detail(log_id).unwrap().unwrap();
+    assert!(
+        detail.summary.ttft_ms.is_some(),
+        "ttft should be recorded for a real Anthropic transcript"
+    );
+    let _ = std::fs::remove_file(db_path);
 }

@@ -26,12 +26,12 @@ pub struct AiGatewayConfig {
     /// 是否过滤 Codex 请求中的 image_generation tool。
     pub filter_image_generation_tool: bool,
     /// 是否启用请求日志记录。
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub request_logging_enabled: bool,
 }
 
-fn default_true() -> bool {
-    true
+fn default_false() -> bool {
+    false
 }
 
 impl Default for AiGatewayConfig {
@@ -43,7 +43,7 @@ impl Default for AiGatewayConfig {
             providers: Vec::new(),
             codex_visible_models: Vec::new(),
             filter_image_generation_tool: false,
-            request_logging_enabled: true,
+            request_logging_enabled: false,
         }
     }
 }

@@ -31,11 +31,7 @@ pub(super) fn request_log_cell(rows: &RequestLogRows, row: usize, col: usize) ->
         5 => format_tokens(log).into(),
         6 => format_optional_bytes(log.upstream_request_body_bytes).into(),
         7 => format_read_cache(log).into(),
-        8 => log
-            .write_cache_tokens
-            .map(format_int)
-            .unwrap_or_else(|| "-".to_string())
-            .into(),
+        8 => format_write_cache(log).into(),
         9 => log
             .cost_usd
             .map(|cost| format!("${cost:.6}"))
@@ -109,6 +105,28 @@ fn format_read_cache(log: &RequestLogItem) -> String {
         Some(rate) => format!("{} ({:.1}%)", format_int(tokens), rate * 100.0),
         None => format_int(tokens),
     }
+}
+
+fn format_write_cache(log: &RequestLogItem) -> String {
+    let Some(tokens) = log.write_cache_tokens else {
+        return "-".to_string();
+    };
+    // Show the share of the input that was written to cache this turn, mirroring
+    // the read-cache column. Percentage is relative to total input tokens.
+    let mut label = match log.input_tokens {
+        Some(input) if input > 0 => {
+            format!("{} ({:.1}%)", format_int(tokens), tokens as f64 / input as f64 * 100.0)
+        }
+        _ => format_int(tokens),
+    };
+    // Anthropic can split cache writes into 5-minute and 1-hour TTL tiers. Only
+    // annotate when the upstream actually reported the breakdown.
+    let five = log.write_cache_5m_tokens.unwrap_or(0);
+    let one = log.write_cache_1h_tokens.unwrap_or(0);
+    if five > 0 || one > 0 {
+        label.push_str(&format!(" [5m {}, 1h {}]", format_int(five), format_int(one)));
+    }
+    label
 }
 
 fn format_optional_duration(ms: Option<i64>) -> String {

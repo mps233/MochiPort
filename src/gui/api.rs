@@ -494,6 +494,10 @@ pub(super) struct RequestLogItem {
     pub(super) read_cache_tokens: Option<i64>,
     pub(super) read_cache_hit_rate: Option<f64>,
     pub(super) write_cache_tokens: Option<i64>,
+    #[serde(default)]
+    pub(super) write_cache_5m_tokens: Option<i64>,
+    #[serde(default)]
+    pub(super) write_cache_1h_tokens: Option<i64>,
     pub(super) cost_usd: Option<f64>,
     pub(super) latency_ms: Option<i64>,
     pub(super) ttft_ms: Option<i64>,

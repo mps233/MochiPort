@@ -449,6 +449,10 @@ pub struct InputTokensDetails {
     pub cached_tokens: i64,
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub cache_creation_tokens: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub cache_creation_5m_tokens: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub cache_creation_1h_tokens: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
