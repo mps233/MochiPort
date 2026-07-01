@@ -978,6 +978,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     if let Some(openai_curated) = find_openai_curated_marketplace_root(&codex_home) {
         upsert_local_marketplace(&mut doc, OPENAI_CURATED_MARKETPLACE_NAME, &openai_curated);
     }
+    disable_default_otel_exporter(&mut doc);
 
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
@@ -1061,6 +1062,21 @@ fn upsert_enabled_plugins(doc: &mut toml_edit::DocumentMut, plugin_ids: &[&str])
         let plugin = ensure_config_table_item(&mut plugins[*plugin_id]);
         plugin["enabled"] = toml_edit::value(true);
     }
+}
+
+// The Codex app-server ships an OpenTelemetry exporter that, by default, pushes
+// metrics/logs to `https://ab.chatgpt.com/otlp/v1/metrics`. In networks that
+// cannot reach that host (e.g. mainland China without a VPN), each export
+// attempt blocks on a ~10s connect timeout and retries, which makes Codex
+// startup and restart feel extremely slow. codexhub runs the app fully against
+// a local backend, so this telemetry is never useful here; disable the exporter
+// unless the user has explicitly configured one of their own.
+fn disable_default_otel_exporter(doc: &mut toml_edit::DocumentMut) {
+    let otel = ensure_config_table(doc, "otel");
+    if otel.contains_key("exporter") {
+        return;
+    }
+    otel["exporter"] = toml_edit::value("none");
 }
 
 fn ensure_config_table<'a>(
@@ -2658,6 +2674,66 @@ enabled = false
                 .and_then(|plugin| plugin.get("enabled"))
                 .and_then(|item| item.as_bool()),
             Some(false)
+        );
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_disables_default_otel_exporter() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+
+        configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
+
+        let config = std::fs::read_to_string(&config_path).expect("read config");
+        let doc = config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse config");
+        assert_eq!(
+            doc.get("otel")
+                .and_then(|item| item.as_table())
+                .and_then(|otel| otel.get("exporter"))
+                .and_then(|item| item.as_str()),
+            Some("none"),
+            "otel exporter should default to none to avoid blocking on ab.chatgpt.com"
+        );
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_preserves_explicit_otel_exporter() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"[otel]
+exporter = "otlp-http"
+environment = "prod"
+"#,
+        )
+        .expect("write config");
+
+        configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
+
+        let config = std::fs::read_to_string(&config_path).expect("read config");
+        let doc = config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse config");
+        let otel = doc
+            .get("otel")
+            .and_then(|item| item.as_table())
+            .expect("otel table present");
+        assert_eq!(
+            otel.get("exporter").and_then(|item| item.as_str()),
+            Some("otlp-http"),
+            "an explicit user exporter must be preserved"
+        );
+        assert_eq!(
+            otel.get("environment").and_then(|item| item.as_str()),
+            Some("prod"),
+            "other user otel settings must be preserved"
         );
 
         let _ = std::fs::remove_dir_all(codex_home);
