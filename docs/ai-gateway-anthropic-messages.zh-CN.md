@@ -342,6 +342,9 @@ Responses response：
 
 Anthropic streaming 是 SSE，但 event 不是 Responses 事件。必须由 Anthropic stream parser 转成 GatewayEvent，再由 ResponsesSseEncoder 生成 Responses SSE。
 
+> GLM profile 的私有网搜文本过滤与逐 token 流式（`split_streamable` 增量切割）详见
+> [`ai-gateway-anthropic-streaming-glm-buffering.zh-CN.md`](ai-gateway-anthropic-streaming-glm-buffering.zh-CN.md)。
+
 Anthropic 事件序列：
 
 ```text
