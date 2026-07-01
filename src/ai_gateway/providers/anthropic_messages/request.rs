@@ -120,13 +120,25 @@ fn insert_system_cache_control(system: &mut Value, cache_control: &Map<String, V
 }
 
 fn insert_message_cache_control(messages: &mut [Value], cache_control: &Map<String, Value>) {
-    // Claude Code marks the last content block of the last message (any role,
-    // any block type incl. tool_result), so the entire conversation prefix up to
-    // that point is cached. Tool-use blocks are never last: quirks require a
-    // tool_result to follow every tool_use, so real requests don't end on one.
-    let Some(message) = messages.last_mut() else {
-        return;
-    };
+    // Cline-style dual rolling breakpoints: mark the last two user messages so
+    // the previous turn's write point (2nd-last user) stays a valid read anchor
+    // while the newest user turn establishes the next write point. Anthropic
+    // filters cache_control out of the prefix hash, so the rolling markers do
+    // not perturb the cached prefix. tool_result messages are role=user, so the
+    // agent-loop tail (…tool_result) is covered naturally.
+    let user_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|(index, _)| index)
+        .collect();
+
+    for &index in user_indices.iter().rev().take(2) {
+        mark_last_block_cache_control(&mut messages[index], cache_control);
+    }
+}
+
+fn mark_last_block_cache_control(message: &mut Value, cache_control: &Map<String, Value>) {
     let Some(content) = message.get_mut("content") else {
         return;
     };

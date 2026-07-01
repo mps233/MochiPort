@@ -319,10 +319,10 @@ fn builds_anthropic_text_request() {
         body["messages"][2]["content"][0]["cache_control"]["type"],
         "ephemeral"
     );
-    assert!(
-        body["messages"][0]["content"][0]
-            .get("cache_control")
-            .is_none()
+    // Dual rolling breakpoints: the 2nd-last user message (msg[0]) is also marked.
+    assert_eq!(
+        body["messages"][0]["content"][0]["cache_control"]["type"],
+        "ephemeral"
     );
     assert!(
         body["messages"][1]["content"][0]
@@ -361,7 +361,7 @@ fn builds_anthropic_request_with_claude_code_block_level_ephemeral_cache() {
 }
 
 #[test]
-fn caches_only_last_message_block() {
+fn caches_last_two_user_messages() {
     let mut req = request(vec![
         message("user", "start"),
         message("assistant", "old answer"),
@@ -375,15 +375,74 @@ fn caches_only_last_message_block() {
 
     assert!(body.get("system").is_none());
     assert!(body.get("cache_control").is_none());
+    // Dual rolling breakpoints land on the last two user messages (idx 2 and 4).
+    assert_eq!(
+        body["messages"][4]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    assert_eq!(
+        body["messages"][2]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    // The earlier user message and the assistant messages stay unmarked.
+    assert!(
+        body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert!(
+        body["messages"][1]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
     assert!(
         body["messages"][3]["content"][0]
             .get("cache_control")
             .is_none()
     );
+}
+
+#[test]
+fn marks_only_last_two_user_messages_as_rolling_breakpoints() {
+    let mut req = request(vec![
+        message("user", "first"),
+        message("assistant", "a1"),
+        message("user", "second"),
+        message("assistant", "a2"),
+        message("user", "third"),
+    ]);
+    req.instructions = None;
+
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
+
+    // Exactly the last two user messages (idx 2 and 4) carry breakpoints; the
+    // rolling window is capped at 2, so the first user message (idx 0) does not.
+    assert!(
+        body["messages"][0]["content"][0]
+            .get("cache_control")
+            .is_none()
+    );
+    assert_eq!(
+        body["messages"][2]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
     assert_eq!(
         body["messages"][4]["content"][0]["cache_control"]["type"],
         "ephemeral"
     );
+
+    let marked = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| {
+            message["content"]
+                .as_array()
+                .and_then(|parts| parts.iter().find(|part| part.get("cache_control").is_some()))
+                .is_some()
+        })
+        .count();
+    assert_eq!(marked, 2);
 }
 
 #[test]
@@ -416,6 +475,12 @@ fn does_not_cache_assistant_tool_use_blocks() {
     // The breakpoint lands on the last message instead.
     assert_eq!(
         body["messages"][2]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
+    // Dual rolling: the 2nd-last user message (msg[0]) is also marked; the
+    // assistant tool_use in between still is not.
+    assert_eq!(
+        body["messages"][0]["content"][0]["cache_control"]["type"],
         "ephemeral"
     );
 }

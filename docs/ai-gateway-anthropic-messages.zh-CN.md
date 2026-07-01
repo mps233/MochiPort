@@ -454,7 +454,7 @@ Anthropic Messages 使用 block-level `cache_control` 开启 prompt caching。Ga
 
 - Codex / Responses 入站不需要、也不应携带 Anthropic 专属 `cache_control`。
 - Anthropic provider 在出站适配层模拟 Claude Code 请求形态：`system` 段**最后一个** text block 附 `cache_control: {"type":"ephemeral"}`（只标最后一条，靠前缀回溯覆盖其余 system block，规避 4 断点上限）。
-- 多轮历史中只给**最后一条消息的最后一个 block** 附 `cache_control`，role 与 block 类型均不限（text/tool_result 皆可）；tool 定义不加。
+- 多轮历史中给**最后两条 `role==user` 消息**的最后一个 block 各附一个 `cache_control`（双滚动断点，含 tool_result；倒二 user 作读取锚、末条 user 作写入点，抹平命中率锯齿）；assistant/tool_use 与 tool 定义不加。
 - 不生成顶层 `cache_control`，不生成 `ttl`，也不把 `prompt_cache_retention = "1h"` 映射为 Anthropic `ttl`。
 - request log 记录 Anthropic cache read/create token。
 
