@@ -316,7 +316,7 @@ fn builds_anthropic_text_request() {
     assert_eq!(body["messages"][1]["role"], "assistant");
     assert_eq!(body["messages"][1]["content"][0]["text"], "hi");
     assert_eq!(
-        body["messages"][1]["content"][0]["cache_control"]["type"],
+        body["messages"][2]["content"][0]["cache_control"]["type"],
         "ephemeral"
     );
     assert!(
@@ -325,7 +325,7 @@ fn builds_anthropic_text_request() {
             .is_none()
     );
     assert!(
-        body["messages"][2]["content"][0]
+        body["messages"][1]["content"][0]
             .get("cache_control")
             .is_none()
     );
@@ -353,16 +353,15 @@ fn builds_anthropic_request_with_claude_code_block_level_ephemeral_cache() {
     assert!(body.get("cache_control").is_none());
     assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
     assert!(body["tools"][0].get("cache_control").is_none());
-    assert!(
-        body["messages"][0]["content"][0]
-            .get("cache_control")
-            .is_none()
+    assert_eq!(
+        body["messages"][0]["content"][0]["cache_control"]["type"],
+        "ephemeral"
     );
     assert!(body["system"][0]["cache_control"].get("ttl").is_none());
 }
 
 #[test]
-fn caches_only_latest_assistant_text_block() {
+fn caches_only_last_message_block() {
     let mut req = request(vec![
         message("user", "start"),
         message("assistant", "old answer"),
@@ -377,18 +376,13 @@ fn caches_only_latest_assistant_text_block() {
     assert!(body.get("system").is_none());
     assert!(body.get("cache_control").is_none());
     assert!(
-        body["messages"][1]["content"][0]
+        body["messages"][3]["content"][0]
             .get("cache_control")
             .is_none()
     );
     assert_eq!(
-        body["messages"][3]["content"][0]["cache_control"]["type"],
+        body["messages"][4]["content"][0]["cache_control"]["type"],
         "ephemeral"
-    );
-    assert!(
-        body["messages"][4]["content"][0]
-            .get("cache_control")
-            .is_none()
     );
 }
 
@@ -402,17 +396,27 @@ fn does_not_cache_assistant_tool_use_blocks() {
     tool_call.arguments = Some(crate::ai_gateway::model::JsonString::Value(json!({
         "path": "README.md"
     })));
-    let mut req = request(vec![message("user", "run"), tool_call]);
+    let mut req = request(vec![
+        message("user", "run"),
+        tool_call,
+        message("user", "next"),
+    ]);
     req.instructions = None;
 
     let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
 
+    // The tool_use block is no longer the last message, so it must not be marked.
     assert_eq!(body["messages"][1]["role"], "assistant");
     assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
     assert!(
         body["messages"][1]["content"][0]
             .get("cache_control")
             .is_none()
+    );
+    // The breakpoint lands on the last message instead.
+    assert_eq!(
+        body["messages"][2]["content"][0]["cache_control"]["type"],
+        "ephemeral"
     );
 }
 

@@ -102,13 +102,17 @@ fn insert_system_cache_control(system: &mut Value, cache_control: &Map<String, V
             }]);
         }
         Value::Array(parts) => {
-            for part in parts {
-                if let Value::Object(part) = part
-                    && is_cacheable_anthropic_text_block(part)
-                {
-                    part.entry("cache_control".to_string())
-                        .or_insert_with(|| Value::Object(cache_control.clone()));
-                }
+            // Only mark the last cacheable text block: Anthropic caches the whole
+            // prefix up to a breakpoint, so a single breakpoint at the end of the
+            // system section covers every earlier block while staying within the
+            // 4-breakpoint per-request limit (Codex may emit many system blocks).
+            if let Some(Value::Object(part)) = parts.iter_mut().rev().find(|part| {
+                part.as_object()
+                    .map(is_cacheable_anthropic_text_block)
+                    .unwrap_or(false)
+            }) {
+                part.entry("cache_control".to_string())
+                    .or_insert_with(|| Value::Object(cache_control.clone()));
             }
         }
         _ => {}
@@ -116,36 +120,32 @@ fn insert_system_cache_control(system: &mut Value, cache_control: &Map<String, V
 }
 
 fn insert_message_cache_control(messages: &mut [Value], cache_control: &Map<String, Value>) {
-    for message in messages.iter_mut().rev() {
-        if message.get("role").and_then(Value::as_str) != Some("assistant") {
-            continue;
+    // Claude Code marks the last content block of the last message (any role,
+    // any block type incl. tool_result), so the entire conversation prefix up to
+    // that point is cached. Tool-use blocks are never last: quirks require a
+    // tool_result to follow every tool_use, so real requests don't end on one.
+    let Some(message) = messages.last_mut() else {
+        return;
+    };
+    let Some(content) = message.get_mut("content") else {
+        return;
+    };
+    match content {
+        Value::String(text) if !text.is_empty() => {
+            let text = text.clone();
+            *content = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": cache_control,
+            }]);
         }
-        let Some(content) = message.get_mut("content") else {
-            continue;
-        };
-        match content {
-            Value::String(text) if !text.is_empty() => {
-                let text = text.clone();
-                *content = json!([{
-                    "type": "text",
-                    "text": text,
-                    "cache_control": cache_control,
-                }]);
-                return;
+        Value::Array(parts) => {
+            if let Some(Value::Object(part)) = parts.last_mut() {
+                part.entry("cache_control".to_string())
+                    .or_insert_with(|| Value::Object(cache_control.clone()));
             }
-            Value::Array(parts) => {
-                if let Some(Value::Object(part)) = parts.iter_mut().rev().find(|part| {
-                    part.as_object()
-                        .map(is_cacheable_anthropic_text_block)
-                        .unwrap_or(false)
-                }) {
-                    part.entry("cache_control".to_string())
-                        .or_insert_with(|| Value::Object(cache_control.clone()));
-                    return;
-                }
-            }
-            _ => {}
         }
+        _ => {}
     }
 }
 

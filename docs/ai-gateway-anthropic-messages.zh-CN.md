@@ -138,7 +138,8 @@ GatewayRequest.instructions
 ```
 
 Anthropic provider 会在出站适配层模拟 Claude Code 的 block-level prompt caching：把非空 `system`
-文本转成 `system[]` text block，并在可缓存 block 上附 `cache_control`。
+文本转成 `system[]` text block，并在 system 段最后一个 text block 上附 `cache_control`。断点读写机制
+详见 [`ai-gateway-anthropic-cache-control.zh-CN.md`](ai-gateway-anthropic-cache-control.zh-CN.md)。
 
 ## 4. Tool 映射
 
@@ -448,11 +449,12 @@ Anthropic extended thinking 不能简单映射成普通 text。
 OpenAI 的 `prompt_cache_key` 不能直接映射成 Anthropic cache；它只用于 OpenAI
 Responses 侧的缓存分桶。
 
-Anthropic Messages 使用 block-level `cache_control` 开启 prompt caching。Gateway 策略：
+Anthropic Messages 使用 block-level `cache_control` 开启 prompt caching。Gateway 策略（读写机制与实证见
+[`ai-gateway-anthropic-cache-control.zh-CN.md`](ai-gateway-anthropic-cache-control.zh-CN.md)）：
 
 - Codex / Responses 入站不需要、也不应携带 Anthropic 专属 `cache_control`。
-- Anthropic provider 在出站适配层模拟 Claude Code 请求形态：`system` 文本块附 `cache_control: {"type":"ephemeral"}`。
-- 多轮历史中只给最近的 assistant text block 附 `cache_control`；user block、tool 定义、tool_use/tool_result 不加。
+- Anthropic provider 在出站适配层模拟 Claude Code 请求形态：`system` 段**最后一个** text block 附 `cache_control: {"type":"ephemeral"}`（只标最后一条，靠前缀回溯覆盖其余 system block，规避 4 断点上限）。
+- 多轮历史中只给**最后一条消息的最后一个 block** 附 `cache_control`，role 与 block 类型均不限（text/tool_result 皆可）；tool 定义不加。
 - 不生成顶层 `cache_control`，不生成 `ttl`，也不把 `prompt_cache_retention = "1h"` 映射为 Anthropic `ttl`。
 - request log 记录 Anthropic cache read/create token。
 
