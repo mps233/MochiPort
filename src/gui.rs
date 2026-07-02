@@ -1388,16 +1388,21 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     let request_log_clear_result: RequestLogClearResultStore = Arc::new(Mutex::new(None));
     let request_log_clear_in_flight = Arc::new(AtomicBool::new(false));
     let request_logs_active = Rc::new(Cell::new(notebook.selection() == REQUEST_LOG_TAB_INDEX));
+    let request_log_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     {
         let api = api.clone();
         let request_log_result = request_log_result.clone();
         let request_log_in_flight = request_log_in_flight.clone();
         let request_logs_active = request_logs_active.clone();
+        let request_log_timer_store = request_log_timer_store.clone();
         notebook.on_page_changed(move |event| {
             let active = event.get_selection().unwrap_or(-1) == REQUEST_LOG_TAB_INDEX;
             request_logs_active.set(active);
             if active {
                 force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
+                start_request_log_timer(&request_log_timer_store);
+            } else {
+                stop_request_log_timer(&request_log_timer_store);
             }
         });
     }
@@ -1485,7 +1490,6 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
     }
 
-    let request_log_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let request_log_timer = Timer::new(&frame);
     {
         let api = api.clone();
@@ -1518,6 +1522,9 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         .borrow_mut()
         .replace(request_log_timer);
     gui_timers.track(&request_log_timer_store);
+    if request_logs_active.get() {
+        start_request_log_timer(&request_log_timer_store);
+    }
 
     let timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let timer = Timer::new(&frame);
@@ -4178,6 +4185,24 @@ fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.delete_im_account_button.enable(enabled);
     codex_tab::set_actions_enabled(&handles.codex_tab, enabled);
     set_ai_gw_actions_enabled(handles, enabled);
+}
+
+fn start_request_log_timer(timer_store: &FrameTimerStore) {
+    let store = timer_store.borrow();
+    if let Some(timer) = store.as_ref()
+        && !timer.is_running()
+    {
+        timer.start(REQUEST_LOG_REFRESH_INTERVAL_MS, false);
+    }
+}
+
+fn stop_request_log_timer(timer_store: &FrameTimerStore) {
+    let store = timer_store.borrow();
+    if let Some(timer) = store.as_ref()
+        && timer.is_running()
+    {
+        timer.stop();
+    }
 }
 
 fn force_request_log_refresh(
