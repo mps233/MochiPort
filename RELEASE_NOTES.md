@@ -1,27 +1,28 @@
-# CodexHub v0.3.14
+# CodexHub v0.3.15
 
 ## 改进内容
 
-- 恢复 GLM 的逐字（打字机）输出。GLM 走 Anthropic 兼容协议，上游本来就是逐 token 推送文本的，但此前为了过滤 GLM 私有网搜片段（`web_search_prime` 工具块与结果摘要），适配层会把整段文本缓冲到结束才一次性下发，导致前端「瞬间出一大片」。本版改为默认流式、按需缓冲：普通回答逐 token 实时下发，只有真正出现私有网搜标记时才保留那一小段做清洗，私有片段仍然不会透传给 Codex。
-- Anthropic 内部网搜链路改为逐 token 流式。启用 web search 的对话此前要等整轮上游流跑完才转发，现在每一轮上游流经转换器实时转发，配合统一的事件序号管理，网搜过程中的正文也能边生成边显示。
-- 修复 Anthropic 首 token 延迟（TTFT）在请求日志里一直为空的问题。几乎所有 Codex 请求都带 web search 工具、走内部网搜缓冲路径而没有 delta 事件，导致日志流看不到首 token。本版改为从首个内容 token 记录 TTFT，Anthropic/GLM 请求现在能正确显示 TTFT。
-- 请求日志默认关闭。日志功能默认不再开启，需要排查时在设置里手动打开即可，避免默认写入大量请求/响应 JSON。
-- 写缓存（write cache）显示细分与命中占比。请求日志详情新增 5 分钟 / 1 小时写缓存 token 的细分展示，并以百分比呈现，便于观察缓存效果。
-- 无 VPN 环境下 Codex 启动更快。默认关闭 Codex 的 OTLP 遥测导出器（日志与指标两路都关），此前在无法访问遥测端点时启动会长时间卡顿，现在不再因等待遥测连接而拖慢重启。
-- 优化多轮对话的 Anthropic prompt cache 命中率。对齐 Claude Code 的做法，采用双滚动 `cache_control` 断点标注消息历史，抹平多轮命中率的锯齿波动。
-- 仪表盘状态布局更紧凑，信息密度更高、更利于快速扫读。
+- 降低 GUI 空闲 CPU 占用。减少主窗口、Codex 页面、请求日志页面的固定轮询频率，后台或未激活页面不再持续高频刷新。
+- 仪表盘状态改为单接口聚合读取。GUI 现在通过 `/api/gui/dashboard` 一次拿到配置、运行状态、会话和请求统计，替代此前多个接口反复 fan-out 的轮询方式，减少 daemon 和 GUI 两侧的压力。
+- 请求日志页面在未打开时停止刷新。只有日志页可见时才周期性拉取列表，切到其它页面后立即停表，打开详情时的卡顿也随之减少。
+- 同步 wxDragon 0.9.17，并保留 CodexHub 所需的本地 vendor 覆盖。该版本包含 WebView 自定义 scheme handler、VirtualList 文本回调、macOS 可访问性辅助、`wxWakeUpIdle` 等更新，为后续事件驱动改造打基础。
+- Codex App 快速启动兼容性继续收敛。快速启动现在明确作为可选能力启用，启用时才占用 `localhost:8000` 作为启动阶段辅助入口，关闭后不再设置对应环境变量。
+- 补齐 Codex App fast startup 所需的关键 Statsig feature gates，避免加速网关让远程控制入口、手机图标等功能被前端误判为关闭。
+- 新增 Codex App 快速启动与 Statsig 构造文档，记录当前实现原理、需要保留的 feature gate、以及后续 Codex App 升级时的核对方法。
+- 新增 wxDragon 同步与资源占用优化计划文档，明确后续 CPU/内存治理路径。
 
 ## 修复
 
-- 修复历史几个版本 GitHub Release 页没有发布说明的问题。三个平台的发布流程此前未把 `RELEASE_NOTES.md` 作为 release 正文，导致 Release 页只显示一个空标题；本版起统一读取 `RELEASE_NOTES.md` 生成正文。
-
-## 已知问题
-
-- 在 CodexHub 模式下，Codex App 插件页点击 `computer-use` 进入详情页可能显示「未找到插件」。这是 Codex App 前端对 bundled 本地插件详情的展示行为，`computer-use` 功能本身可正常使用，不影响实际调用。
+- 修复快速启动后 Codex App 底部远控手机图标消失的问题。
+- 修复快速启动设置勾选后没有立即生效的问题。
+- 修复部分 GUI 页面在窗口缩放和频繁刷新时更容易出现卡顿的问题。
 
 ## 验证
 
-- `cargo test --bin codexhub ai_gateway::`（243 项通过）
+- `cargo fmt`
+- `cargo test`（354 项通过）
+- `cargo build --release --features gui --target-dir target\gui-verify`
+- 本地重启后采样：GUI 30 秒 CPU 增量为 0，daemon 30 秒 CPU 增量约 0.047 秒；GUI 工作集约 46.8 MB，daemon 工作集约 32.0 MB。
 
 ---
 
