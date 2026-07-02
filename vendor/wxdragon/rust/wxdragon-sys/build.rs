@@ -143,6 +143,51 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync + 'static>> {
     Ok(())
 }
 
+fn detect_visual_studio_generator() -> Option<String> {
+    if std::env::consts::OS != "windows" {
+        return None;
+    }
+
+    let vswhere_candidates = [
+        "vswhere",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe",
+    ];
+
+    for vswhere in vswhere_candidates {
+        let output = std::process::Command::new(vswhere)
+            .args([
+                "-latest",
+                "-products",
+                "*",
+                "-requires",
+                "Microsoft.Component.MSBuild",
+                "-property",
+                "installationVersion",
+            ])
+            .output();
+
+        let Ok(output) = output else {
+            continue;
+        };
+
+        if !output.status.success() {
+            continue;
+        }
+
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let major = version.split('.').next()?.parse::<u32>().ok()?;
+
+        return match major {
+            16 => Some("Visual Studio 16 2019".to_string()),
+            17 => Some("Visual Studio 17 2022".to_string()),
+            18 => Some("Visual Studio 18 2026".to_string()),
+            _ => None,
+        };
+    }
+
+    None
+}
+
 fn build_wxdragon_wrapper(
     dest_bin_dir: &std::path::Path,
     target: &str,
@@ -339,14 +384,22 @@ fn build_wxdragon_wrapper(
         }
 
         if target == "i686-pc-windows-msvc" {
+            let generator = detect_visual_studio_generator().unwrap_or_else(|| {
+                println!("cargo::warning=vswhere did not report an installed Visual Studio version; falling back to Visual Studio 17 2022");
+                "Visual Studio 17 2022".to_string()
+            });
             cmake_config
-                .generator("Visual Studio 17 2022")
+                .generator(&generator)
                 .define("CMAKE_GENERATOR_PLATFORM", "Win32")
                 .define("--config", &profile)
                 .cxxflag("/EHsc");
         } else if target == "aarch64-pc-windows-msvc" {
+            let generator = detect_visual_studio_generator().unwrap_or_else(|| {
+                println!("cargo::warning=vswhere did not report an installed Visual Studio version; falling back to Visual Studio 17 2022");
+                "Visual Studio 17 2022".to_string()
+            });
             cmake_config
-                .generator("Visual Studio 17 2022")
+                .generator(&generator)
                 .define("CMAKE_GENERATOR_PLATFORM", "ARM64")
                 .define("--config", &profile)
                 .cxxflag("/EHsc");
@@ -629,6 +682,23 @@ fn build_wxdragon_wrapper(
         println!("cargo:rustc-link-lib=static={}", resolve_wx_lib("wxregexu-3.3"));
         println!("cargo:rustc-link-lib=expat");
         println!("cargo:rustc-link-lib=z");
+        // If cmake found iconv in a non-standard location (e.g. MacPorts /opt/local,
+        // Homebrew /opt/homebrew), add that directory to the linker search path so
+        // -liconv resolves to the same library cmake compiled against.
+        let cmake_cache_path = wxdragon_sys_build_dir.join("build/CMakeCache.txt");
+        if let Ok(cache) = std::fs::read_to_string(&cmake_cache_path) {
+            for line in cache.lines() {
+                if let Some(iconv_lib) = line.strip_prefix("ICONV_LIBRARIES:FILEPATH=") {
+                    let iconv_path = std::path::Path::new(iconv_lib.trim());
+                    if let Some(dir) = iconv_path.parent()
+                        && dir.exists()
+                    {
+                        println!("cargo:rustc-link-search=native={}", dir.display());
+                    }
+                    break;
+                }
+            }
+        }
         println!("cargo:rustc-link-lib=iconv");
         println!("cargo:rustc-link-lib=c++");
 
@@ -842,7 +912,13 @@ fn build_wxdragon_wrapper(
         println!("cargo:rustc-link-lib=jpeg");
         println!("cargo:rustc-link-lib=expat");
         println!("cargo:rustc-link-lib=tiff");
-        println!("cargo:rustc-link-lib=static=wx_gtk3u_propgrid-3.3");
+        if lib_dirs.iter().any(|dir| dir.join("libwx_gtk3u_propgrid-3.3.a").exists()) {
+            println!("cargo:rustc-link-lib=static=wx_gtk3u_propgrid-3.3");
+        } else {
+            println!(
+                "cargo::warning=Skipping wx_gtk3u_propgrid-3.3 because the archive was not found in the wxWidgets output directories"
+            );
+        }
         println!("cargo:rustc-link-lib=static=wx_gtk3u_gl-3.3");
         println!("cargo:rustc-link-lib=static=wx_gtk3u_adv-3.3");
         println!("cargo:rustc-link-lib=static=wx_gtk3u_core-3.3");
@@ -854,19 +930,20 @@ fn build_wxdragon_wrapper(
             println!("cargo:rustc-link-lib=static=wx_gtk3u_aui-3.3");
         }
         if cfg!(feature = "webview") {
-            println!("cargo:rustc-link-lib=static=wx_gtk3u_webview-3.3");
-
-            // Link WebKitGTK for Linux WebView support
-            // Try webkit2gtk-4.1 first (newer), fall back to webkit2gtk-4.0 if not available
+            // Link WebView support only when WebKitGTK is actually present.
+            // wxWidgets can be configured with wxUSE_WEBVIEW on, but without a
+            // backend it will not ship the webview archive for linking.
             if let Ok(webkit) = pkg_config::Config::new().probe("webkit2gtk-4.1") {
                 for lib in webkit.libs {
                     println!("cargo:rustc-link-lib={lib}");
                 }
+                println!("cargo:rustc-link-lib=static=wx_gtk3u_webview-3.3");
                 println!("info: Using webkit2gtk-4.1 for WebView support");
             } else if let Ok(webkit) = pkg_config::Config::new().probe("webkit2gtk-4.0") {
                 for lib in webkit.libs {
                     println!("cargo:rustc-link-lib={lib}");
                 }
+                println!("cargo:rustc-link-lib=static=wx_gtk3u_webview-3.3");
                 println!("info: Using webkit2gtk-4.0 for WebView support");
             } else {
                 println!("cargo:warning=WebKitGTK not found. WebView feature may not work on Linux.");

@@ -123,8 +123,7 @@ wxd_StyledTextCtrl_IndicatorSetForeground(wxd_StyledTextCtrl_t* self, int indica
 WXD_EXPORTED void
 wxd_StyledTextCtrl_IndicatorSetAlpha(wxd_StyledTextCtrl_t* self, int indicator, int alpha);
 WXD_EXPORTED void
-wxd_StyledTextCtrl_IndicatorSetOutlineAlpha(wxd_StyledTextCtrl_t* self, int indicator,
-                                            int alpha);
+wxd_StyledTextCtrl_IndicatorSetOutlineAlpha(wxd_StyledTextCtrl_t* self, int indicator, int alpha);
 WXD_EXPORTED void
 wxd_StyledTextCtrl_SetIndicatorCurrent(wxd_StyledTextCtrl_t* self, int indicator);
 WXD_EXPORTED void

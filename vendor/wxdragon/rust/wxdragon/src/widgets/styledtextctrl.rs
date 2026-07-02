@@ -1335,16 +1335,8 @@ impl StyledTextCtrl {
             return None;
         }
 
-        let result = unsafe {
-            ffi::wxd_StyledTextCtrl_FindAndSelect(
-                ptr,
-                start_pos,
-                c_text.as_ptr(),
-                flags.bits_i32(),
-                backwards,
-                wrap,
-            )
-        };
+        let result =
+            unsafe { ffi::wxd_StyledTextCtrl_FindAndSelect(ptr, start_pos, c_text.as_ptr(), flags.bits_i32(), backwards, wrap) };
         if result >= 0 { Some(result) } else { None }
     }
 

@@ -164,9 +164,8 @@ pub use staticbox::{StaticBox, StaticBoxBuilder};
 pub use statusbar::{StatusBar, StatusBarBuilder};
 #[cfg(feature = "stc")]
 pub use styledtextctrl::{
-    EolMode, FindFlags, IndicatorStyle, IndentationGuide, Lexer, MarginType, MarkerSymbol,
-    SelectionMode, StyledTextCtrl, StyledTextCtrlBuilder, StyledTextCtrlEvent,
-    StyledTextCtrlEventData, StyledTextCtrlStyle, WhiteSpaceView, WrapMode,
+    EolMode, FindFlags, IndicatorStyle, IndentationGuide, Lexer, MarginType, MarkerSymbol, SelectionMode, StyledTextCtrl,
+    StyledTextCtrlBuilder, StyledTextCtrlEvent, StyledTextCtrlEventData, StyledTextCtrlStyle, WhiteSpaceView, WrapMode,
 };
 pub use taskbar_icon::{TaskBarIcon, TaskBarIconBuilder, TaskBarIconStyle, TaskBarIconType};
 pub use textctrl::{TextCtrl, TextCtrlBuilder};
@@ -183,8 +182,8 @@ pub use virtual_list::{VirtualList, VirtualListDataSource, VirtualListItemRender
 // Re-export ImageList
 #[cfg(feature = "webview")]
 pub use webview::{
-    WebView, WebViewBackend, WebViewBrowsingDataTypes, WebViewBuilder, WebViewFindFlags, WebViewNavigationError,
-    WebViewReloadFlags, WebViewUserScriptInjectionTime, WebViewZoom, WebViewZoomType,
+    WebView, WebViewBackend, WebViewBrowsingDataTypes, WebViewBuilder, WebViewFindFlags, WebViewHandlerResponse,
+    WebViewNavigationError, WebViewReloadFlags, WebViewUserScriptInjectionTime, WebViewZoom, WebViewZoomType,
 };
 
 pub use imagelist::ImageList;
