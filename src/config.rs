@@ -15,6 +15,8 @@ pub struct AppConfig {
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    #[serde(default)]
+    pub codex_app_fast_startup: bool,
     pub state_path: PathBuf,
     pub logging: LoggingConfig,
     pub feishu: FeishuConfig,
@@ -98,6 +100,7 @@ impl Default for AppConfig {
             local_connection_mode: LocalConnectionMode::default(),
             language: None,
             theme: None,
+            codex_app_fast_startup: false,
             state_path: PathBuf::from("codexhub-state.json"),
             logging: LoggingConfig::default(),
             feishu: FeishuConfig::default(),

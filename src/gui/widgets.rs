@@ -921,9 +921,10 @@ pub(super) fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail
     let muted = theme::theme().ink_muted;
     panel.panel.set_background_color(theme::theme().bg_muted);
     if panel.title.get_foreground_color() != muted {
-        panel
-            .icon
-            .set_bitmap(&disabled_status_icon_bitmap(panel.icon_kind, panel.icon_size));
+        panel.icon.set_bitmap(&disabled_status_icon_bitmap(
+            panel.icon_kind,
+            panel.icon_size,
+        ));
     }
     panel.title.set_foreground_color(muted);
     panel.marker.set_foreground_color(muted);

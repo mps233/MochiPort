@@ -59,6 +59,10 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/codex-app/status", get(codex_app::codex_app_status))
         .route(
+            "/api/codex-app/fast-startup",
+            post(codex_app::set_codex_app_fast_startup),
+        )
+        .route(
             "/api/codex-app/models/refresh",
             post(codex_app::refresh_codex_app_models),
         )
@@ -157,6 +161,7 @@ struct StatusResponse {
     running: bool,
     bind: String,
     local_connection_mode: crate::config::LocalConnectionMode,
+    codex_app_fast_startup: bool,
     state_path: String,
     feishu_ws: FeishuWsState,
     telegram: TelegramState,
@@ -187,6 +192,7 @@ async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
         running,
         bind: config.bind.clone(),
         local_connection_mode: config.local_connection_mode,
+        codex_app_fast_startup: config.codex_app_fast_startup,
         state_path: config.state_path.to_string_lossy().to_string(),
         feishu_ws,
         telegram,

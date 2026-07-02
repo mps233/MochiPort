@@ -116,8 +116,145 @@ pub(crate) enum OutboundWsMessage {
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route(
+            "/api/wham/accounts/check",
+            get(compatibility::accounts_check),
+        )
+        .route(
+            "/api/wham/statsig/bootstrap",
+            post(compatibility::statsig_bootstrap),
+        )
+        .route("/api/accounts/check", get(compatibility::accounts_check))
+        .route("/api/wham/usage", get(compatibility::usage))
+        .route("/api/usage", get(compatibility::usage))
+        .route("/api/wham/tasks/list", get(compatibility::tasks_list))
+        .route(
+            "/api/wham/environments",
+            get(compatibility::wham_environments),
+        )
+        .route("/api/wham/apps", post(compatibility::wham_apps))
+        .route(
+            "/api/connectors/directory/list",
+            get(compatibility::connectors_directory_list),
+        )
+        .route(
+            "/api/connectors/directory/list_workspace",
+            get(compatibility::connectors_directory_list),
+        )
+        .route(
+            "/api/codex/analytics-events/events",
+            post(compatibility::analytics_events),
+        )
+        .route("/api/beacons/home", get(compatibility::beacons_home))
+        .route("/api/beacons/event", post(compatibility::beacons_event))
+        .route(
+            "/api/wham/onboarding/context",
+            get(compatibility::onboarding_context),
+        )
+        .route(
+            "/api/onboarding/context",
+            get(compatibility::onboarding_context),
+        )
+        .route(
+            "/api/accounts/mfa_info",
+            get(compatibility::accounts_mfa_info),
+        )
+        .route(
+            "/api/wham/accounts/mfa_info",
+            get(compatibility::accounts_mfa_info),
+        )
+        .route(
+            "/api/wham/remote/control/mfa_requirement",
+            get(compatibility::remote_control_mfa_requirement),
+        )
+        .route(
+            "/api/remote/control/mfa_requirement",
+            get(compatibility::remote_control_mfa_requirement),
+        )
+        .route(
+            "/api/codex/remote/control/mfa_requirement",
+            get(compatibility::remote_control_mfa_requirement),
+        )
+        .route(
+            "/api/wham/remote/control/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/api/codex/remote/control/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/api/remote/control/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/api/wham/remote/control/environments/{env_id}/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/api/codex/remote/control/environments/{env_id}/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/api/remote/control/environments/{env_id}/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/api/wham/remote/control/clients/{client_id}",
+            axum::routing::delete(clients::delete_remote_control_client),
+        )
+        .route(
+            "/api/codex/remote/control/clients/{client_id}",
+            axum::routing::delete(clients::delete_remote_control_client),
+        )
+        .route(
+            "/api/remote/control/clients/{client_id}",
+            axum::routing::delete(clients::delete_remote_control_client),
+        )
+        .route(
+            "/api/codex/remote/control/environments",
+            get(clients::remote_control_environments),
+        )
+        .route(
+            "/api/remote/control/environments",
+            get(clients::remote_control_environments),
+        )
+        .route(
+            "/api/codex/remote/control/environments/{env_id}",
+            axum::routing::patch(clients::rename_remote_control_environment)
+                .delete(clients::delete_remote_control_environment),
+        )
+        .route(
+            "/api/remote/control/environments/{env_id}",
+            axum::routing::patch(clients::rename_remote_control_environment)
+                .delete(clients::delete_remote_control_environment),
+        )
+        .route(
+            "/api/codex/remote/control/client/enroll/start",
+            post(enrollment::remote_control_client_enroll_start),
+        )
+        .route(
+            "/api/codex/remote/control/client/enroll/finish",
+            post(enrollment::remote_control_client_enroll_finish),
+        )
+        .route(
+            "/api/codex/remote/control/client/refresh/start",
+            post(enrollment::remote_control_client_refresh_start),
+        )
+        .route(
+            "/api/codex/remote/control/client/refresh/finish",
+            post(enrollment::remote_control_client_refresh_finish),
+        )
+        .route(
+            "/api/codex/remote/control/client",
+            get(clients::client_websocket),
+        )
+        .route(
             "/backend-api/wham/accounts/check",
             get(compatibility::accounts_check),
+        )
+        .route(
+            "/backend-api/wham/statsig/bootstrap",
+            post(compatibility::statsig_bootstrap),
         )
         .route(
             "/backend-api/accounts/check",
@@ -200,6 +337,18 @@ pub fn router() -> Router<SharedState> {
         )
         .route(
             "/backend-api/remote/control/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/backend-api/wham/remote/control/environments/{env_id}/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/backend-api/codex/remote/control/environments/{env_id}/clients",
+            get(clients::remote_control_clients),
+        )
+        .route(
+            "/backend-api/remote/control/environments/{env_id}/clients",
             get(clients::remote_control_clients),
         )
         .route(

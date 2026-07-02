@@ -1736,14 +1736,8 @@ fn screen_work_area_size() -> Option<(i32, i32)> {
     };
     // SAFETY: `SystemParametersInfoW` fills the RECT we own; we only read it
     // after checking the call succeeded.
-    let ok = unsafe {
-        SystemParametersInfoW(
-            SPI_GETWORKAREA,
-            0,
-            (&mut rect as *mut RECT).cast(),
-            0,
-        )
-    };
+    let ok =
+        unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, (&mut rect as *mut RECT).cast(), 0) };
     if ok == 0 {
         return None;
     }
@@ -4033,6 +4027,9 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         codex_tab::refresh_configured(&handles.codex_tab, false);
     }
     codex_tab::refresh_local_connection_mode(&handles.codex_tab, snapshot.local_connection_mode);
+    if let Some(status) = &snapshot.status {
+        codex_tab::refresh_fast_startup(&handles.codex_tab, status.codex_app_fast_startup);
+    }
     if let Some(gw) = &snapshot.ai_gateway {
         refresh_ai_gw_filter_image_generation(handles, gw.filter_image_generation_tool);
         refresh_ai_gw_enable_logging(handles, gw.request_logging_enabled);
@@ -4065,11 +4062,14 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     let remote_status = snapshot.remote.as_ref();
     let codex_app_remote_ready = remote_connection_ready(remote_status, "codex_app")
         || remote_active_ready(remote_status, "codex_app");
-    codex_tab::refresh_remote_ready(&handles.codex_tab, codex_app_remote_ready);
     let vscode_remote_ready = remote_connection_ready(remote_status, "vscode")
         || remote_active_ready(remote_status, "vscode");
     let cli_remote_ready =
         remote_connection_ready(remote_status, "cli") || remote_active_ready(remote_status, "cli");
+    codex_tab::refresh_remote_ready(
+        &handles.codex_tab,
+        codex_app_remote_ready || vscode_remote_ready || cli_remote_ready,
+    );
     let remote_initializing = remote_connected && !remote_initialized;
     let codex_configured = snapshot
         .codex_app

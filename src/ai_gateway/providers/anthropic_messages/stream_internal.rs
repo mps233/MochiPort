@@ -264,8 +264,14 @@ impl InternalSseEnvelope {
         };
         add_i64(existing, usage, "input_tokens");
         add_i64(existing, usage, "output_tokens");
-        let input = existing.get("input_tokens").and_then(Value::as_i64).unwrap_or(0);
-        let output = existing.get("output_tokens").and_then(Value::as_i64).unwrap_or(0);
+        let input = existing
+            .get("input_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let output = existing
+            .get("output_tokens")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         existing["total_tokens"] = json!(input + output);
         add_input_detail(existing, usage, "cached_tokens");
         add_input_detail(existing, usage, "cache_creation_tokens");

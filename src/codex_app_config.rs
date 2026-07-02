@@ -24,6 +24,7 @@ use crate::{chain_log, config::LocalConnectionMode};
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
+const CODEX_API_ENDPOINT_ENV: &str = "CODEX_API_ENDPOINT";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
 const CODEX_APP_SQLITE_DIR: &str = "sqlite";
 const CODEX_APP_PRIMARY_DB: &str = "codex.db";
@@ -74,6 +75,7 @@ pub struct ConfigureCodexAppOptions {
     #[allow(dead_code)]
     pub image_generation_enabled: Option<bool>,
     pub provider_supports_websockets: Option<bool>,
+    pub fast_startup_enabled: bool,
 }
 
 impl ConfigureCodexAppOptions {
@@ -246,11 +248,11 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     ));
 
     #[cfg(not(test))]
-    chain_log::write_line("[codex_app_config] event=gui_environment_cleanup_start");
+    chain_log::write_line("[codex_app_config] event=gui_environment_configure_start");
     #[cfg(not(test))]
-    let _ = cleanup_gui_environment(&options.backend_url);
+    let _ = configure_gui_environment(&options.backend_url, options.fast_startup_enabled);
     #[cfg(not(test))]
-    chain_log::write_line("[codex_app_config] event=gui_environment_cleanup_done");
+    chain_log::write_line("[codex_app_config] event=gui_environment_configure_done");
 
     Ok(ConfigureCodexAppReport {
         codex_home,
@@ -303,6 +305,14 @@ pub fn inspect_codex_app_config(
     codex_home: Option<PathBuf>,
     backend_url: &str,
 ) -> CodexAppConfigStatus {
+    inspect_codex_app_config_for_mode(codex_home, backend_url, false)
+}
+
+pub fn inspect_codex_app_config_for_mode(
+    codex_home: Option<PathBuf>,
+    backend_url: &str,
+    fast_startup_enabled: bool,
+) -> CodexAppConfigStatus {
     let codex_home = codex_home.unwrap_or_else(default_codex_home);
     let config_path = codex_home.join("config.toml");
     let auth_path = codex_home.join("auth.json");
@@ -313,7 +323,7 @@ pub fn inspect_codex_app_config(
     let provider_ok = inspect_managed_ai_gateway_provider(&config_path, backend_url);
     let connection_mode = inspect_connection_mode(&config_path, backend_url);
 
-    let gui_api_base = inspect_gui_api_base_url(backend_url);
+    let gui_api_base = inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled);
     let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
     let remote_control_switch = inspect_remote_control_switch_in_home(&codex_home);
     let remote_control_ok = remote_control_switch.configured;
@@ -569,7 +579,18 @@ fn read_remote_control_switch_db(path: &Path) -> Result<(Option<bool>, Option<i6
 }
 
 pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    let _ = backend_url;
+    inspect_gui_api_base_url_for_mode(backend_url, false)
+}
+
+pub fn inspect_gui_api_base_url_for_mode(
+    _backend_url: &str,
+    fast_startup_enabled: bool,
+) -> CodexAppGuiApiBaseStatus {
+    let expected = if fast_startup_enabled {
+        "localhost".to_string()
+    } else {
+        String::new()
+    };
     let login_issuer_expected = String::new();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -581,6 +602,21 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
                     configured: false,
                     expected: String::new(),
                     value: None,
+                    login_issuer_configured: false,
+                    login_issuer_expected,
+                    login_issuer_value: None,
+                    error: Some(err),
+                };
+            }
+        };
+        let api_endpoint = match gui_getenv(CODEX_API_ENDPOINT_ENV) {
+            Ok(value) => value,
+            Err(err) => {
+                return CodexAppGuiApiBaseStatus {
+                    supported: true,
+                    configured: false,
+                    expected,
+                    value: api_base,
                     login_issuer_configured: false,
                     login_issuer_expected,
                     login_issuer_value: None,
@@ -603,11 +639,27 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
                 };
             }
         };
+        let value = api_endpoint
+            .as_ref()
+            .map(|value| format!("{CODEX_API_ENDPOINT_ENV}={value}"))
+            .or_else(|| {
+                api_base
+                    .as_ref()
+                    .map(|value| format!("{CODEX_API_BASE_URL_ENV}={value}"))
+            });
         CodexAppGuiApiBaseStatus {
             supported: true,
-            configured: api_base.is_none(),
-            expected: String::new(),
-            value: api_base,
+            configured: if fast_startup_enabled {
+                api_base.is_none()
+                    && api_endpoint
+                        .as_deref()
+                        .map(|value| value.eq_ignore_ascii_case(&expected))
+                        .unwrap_or(false)
+            } else {
+                api_base.is_none() && api_endpoint.is_none()
+            },
+            expected,
+            value,
             login_issuer_configured: login_issuer.is_none(),
             login_issuer_expected,
             login_issuer_value: login_issuer,
@@ -620,7 +672,7 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
         CodexAppGuiApiBaseStatus {
             supported: false,
             configured: true,
-            expected: String::new(),
+            expected,
             value: None,
             login_issuer_configured: true,
             login_issuer_expected,
@@ -630,12 +682,56 @@ pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
     }
 }
 
-pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    let _ = backend_url;
+pub fn configure_gui_environment(
+    backend_url: &str,
+    fast_startup_enabled: bool,
+) -> CodexAppGuiApiBaseStatus {
     #[cfg(target_os = "windows")]
     {
-        let cleanup_result =
-            gui_unsetenv_many(&[CODEX_API_BASE_URL_ENV, CODEX_APP_SERVER_LOGIN_ISSUER_ENV]);
+        let configure_result = if fast_startup_enabled {
+            gui_unsetenv_many(&[CODEX_API_BASE_URL_ENV])
+                .and_then(|_| gui_setenv(CODEX_API_ENDPOINT_ENV, "localhost"))
+                .and_then(|_| gui_unsetenv_many(&[CODEX_APP_SERVER_LOGIN_ISSUER_ENV]))
+        } else {
+            gui_unsetenv_many(&[
+                CODEX_API_BASE_URL_ENV,
+                CODEX_API_ENDPOINT_ENV,
+                CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
+            ])
+        };
+        let mut status = inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled);
+        status.error = configure_result.err();
+        status
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let api_result = if fast_startup_enabled {
+            gui_unsetenv(CODEX_API_BASE_URL_ENV)
+                .and_then(|_| gui_setenv(CODEX_API_ENDPOINT_ENV, "localhost"))
+        } else {
+            gui_unsetenv(CODEX_API_BASE_URL_ENV).and_then(|_| gui_unsetenv(CODEX_API_ENDPOINT_ENV))
+        };
+        let issuer_result = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
+        let mut status = inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled);
+        status.error = api_result.err().or_else(|| issuer_result.err());
+        status
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled)
+    }
+}
+
+pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
+    #[cfg(target_os = "windows")]
+    {
+        let cleanup_result = gui_unsetenv_many(&[
+            CODEX_API_BASE_URL_ENV,
+            CODEX_API_ENDPOINT_ENV,
+            CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
+        ]);
         let mut status = inspect_gui_api_base_url(backend_url);
         status.error = cleanup_result.err();
         status
@@ -643,7 +739,8 @@ pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
 
     #[cfg(target_os = "macos")]
     {
-        let api_result = gui_unsetenv(CODEX_API_BASE_URL_ENV);
+        let api_result =
+            gui_unsetenv(CODEX_API_BASE_URL_ENV).and_then(|_| gui_unsetenv(CODEX_API_ENDPOINT_ENV));
         let issuer_result = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
         let mut status = inspect_gui_api_base_url(backend_url);
         status.error = api_result.err().or_else(|| issuer_result.err());
@@ -666,6 +763,11 @@ fn gui_unsetenv(name: &str) -> Result<(), String> {
     launchctl_unsetenv(name)
 }
 
+#[cfg(target_os = "macos")]
+fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
+    launchctl_setenv(name, value)
+}
+
 #[cfg(target_os = "windows")]
 fn gui_getenv(name: &str) -> Result<Option<String>, String> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
@@ -679,6 +781,17 @@ fn gui_getenv(name: &str) -> Result<Option<String>, String> {
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err.to_string()),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (env, _) = hkcu
+        .create_subkey("Environment")
+        .map_err(|err| err.to_string())?;
+    env.set_value(name, &value).map_err(|err| err.to_string())?;
+    broadcast_windows_environment_change();
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -743,6 +856,27 @@ fn launchctl_unsetenv(name: &str) -> Result<(), String> {
     match Command::new("/bin/launchctl")
         .arg("unsetenv")
         .arg(name)
+        .output()
+    {
+        Ok(output) if output.status.success() => Ok(()),
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            Err(if stderr.is_empty() {
+                output.status.to_string()
+            } else {
+                stderr
+            })
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_setenv(name: &str, value: &str) -> Result<(), String> {
+    match Command::new("/bin/launchctl")
+        .arg("setenv")
+        .arg(name)
+        .arg(value)
         .output()
     {
         Ok(output) if output.status.success() => Ok(()),
@@ -1722,6 +1856,7 @@ fn cleanup_codexhub_config(
     }
     if !config_existed_before_first_write {
         remove_created_feature_defaults(&mut doc);
+        remove_created_telemetry_defaults(&mut doc);
         remove_created_plugin_defaults(&mut doc);
         remove_created_local_marketplaces(&mut doc);
     }
@@ -1755,6 +1890,45 @@ fn remove_created_feature_defaults(doc: &mut toml_edit::DocumentMut) {
         };
     if features_empty {
         doc.remove("features");
+    }
+}
+
+fn remove_created_telemetry_defaults(doc: &mut toml_edit::DocumentMut) {
+    let analytics_empty = if let Some(analytics) = doc
+        .get_mut("analytics")
+        .and_then(|item| item.as_table_mut())
+    {
+        if analytics
+            .get("enabled")
+            .and_then(|item| item.as_bool())
+            .is_some_and(|enabled| !enabled)
+        {
+            analytics.remove("enabled");
+        }
+        analytics.is_empty()
+    } else {
+        false
+    };
+    if analytics_empty {
+        doc.remove("analytics");
+    }
+
+    let otel_empty = if let Some(otel) = doc.get_mut("otel").and_then(|item| item.as_table_mut()) {
+        for key in ["exporter", "trace_exporter", "metrics_exporter"] {
+            if otel
+                .get(key)
+                .and_then(|item| item.as_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("none"))
+            {
+                otel.remove(key);
+            }
+        }
+        otel.is_empty()
+    } else {
+        false
+    };
+    if otel_empty {
+        doc.remove("otel");
     }
 }
 
@@ -2160,6 +2334,7 @@ mod tests {
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: Some(true),
+            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -2209,6 +2384,7 @@ mod tests {
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
+            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -2282,6 +2458,7 @@ experimental_bearer_token = "dummy-token"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: Some(false),
+            fast_startup_enabled: true,
         })
         .expect("configure");
 
@@ -2453,6 +2630,7 @@ command = "print-token"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
+            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -2500,6 +2678,7 @@ env_key = "AI_GATEWAY_API_KEY"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
+            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -2544,6 +2723,7 @@ name = "old-provider"
             activate_provider: true,
             image_generation_enabled: Some(true),
             provider_supports_websockets: None,
+            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -2832,6 +3012,7 @@ experimental_bearer_token = "existing-qwen-key"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
+            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -2879,6 +3060,7 @@ base_url = "https://old.example.invalid"
             activate_provider: false,
             image_generation_enabled: None,
             provider_supports_websockets: Some(false),
+            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -2999,6 +3181,7 @@ requires_openai_auth = true
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
+            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -3350,6 +3533,7 @@ base_url = "https://api.example.invalid"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
+            fast_startup_enabled: true,
         }
     }
 

@@ -350,8 +350,11 @@ async fn run_internal_web_search_stream(
     tool_name_map: ToolNameMap,
     tx: mpsc::Sender<Result<Bytes, io::Error>>,
 ) -> Result<(), GatewayError> {
-    let mut envelope =
-        InternalSseEnvelope::new(generate_response_id(), response_model.clone(), unix_timestamp());
+    let mut envelope = InternalSseEnvelope::new(
+        generate_response_id(),
+        response_model.clone(),
+        unix_timestamp(),
+    );
     // TTFT is captured from the first content token of the first round so the
     // request log reflects the true time-to-first-token.
     let mut ttft_recorded = false;
@@ -445,17 +448,20 @@ async fn stream_anthropic_round(
     // Accumulate the raw Anthropic SSE for post-round inspection.
     let raw = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let raw_for_stream = raw.clone();
-    let byte_stream = upstream_resp.bytes_stream().map(move |result| {
-        match result {
+    let byte_stream = upstream_resp
+        .bytes_stream()
+        .map(move |result| match result {
             Ok(chunk) => {
                 if let Ok(mut guard) = raw_for_stream.lock() {
                     guard.push_str(&String::from_utf8_lossy(&chunk));
                 }
                 Ok(chunk)
             }
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
-        }
-    });
+            Err(e) => Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            )),
+        });
 
     let mut converted = AnthropicSseToResponsesSse::new(
         byte_stream,
@@ -475,7 +481,9 @@ async fn stream_anthropic_round(
             if !*ttft_recorded && is_first_token_event(&event_type) {
                 if let Some(log_context) = log_context {
                     let ttft_ms = request_log::elapsed_ms(log_context.started_at);
-                    if let Err(err) = log_context.store.record_ttft_once(log_context.log_id, ttft_ms)
+                    if let Err(err) = log_context
+                        .store
+                        .record_ttft_once(log_context.log_id, ttft_ms)
                     {
                         request_log::log_update_error(err);
                     }
@@ -486,7 +494,10 @@ async fn stream_anthropic_round(
         }
     }
 
-    save_internal_upstream_sse(log_context, &raw.lock().map(|g| g.clone()).unwrap_or_default());
+    save_internal_upstream_sse(
+        log_context,
+        &raw.lock().map(|g| g.clone()).unwrap_or_default(),
+    );
     let raw_sse = raw.lock().map(|g| g.clone()).unwrap_or_default();
     Ok(raw_sse)
 }
@@ -725,7 +736,10 @@ async fn read_sse_to_string(
         if record_ttft && !ttft_recorded && raw_sse_has_first_content_token(&raw) {
             if let Some(log_context) = log_context {
                 let ttft_ms = request_log::elapsed_ms(log_context.started_at);
-                if let Err(err) = log_context.store.record_ttft_once(log_context.log_id, ttft_ms) {
+                if let Err(err) = log_context
+                    .store
+                    .record_ttft_once(log_context.log_id, ttft_ms)
+                {
                     request_log::log_update_error(err);
                 }
             }

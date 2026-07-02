@@ -115,7 +115,11 @@ fn format_write_cache(log: &RequestLogItem) -> String {
     // the read-cache column. Percentage is relative to total input tokens.
     let mut label = match log.input_tokens {
         Some(input) if input > 0 => {
-            format!("{} ({:.1}%)", format_int(tokens), tokens as f64 / input as f64 * 100.0)
+            format!(
+                "{} ({:.1}%)",
+                format_int(tokens),
+                tokens as f64 / input as f64 * 100.0
+            )
         }
         _ => format_int(tokens),
     };
@@ -124,7 +128,11 @@ fn format_write_cache(log: &RequestLogItem) -> String {
     let five = log.write_cache_5m_tokens.unwrap_or(0);
     let one = log.write_cache_1h_tokens.unwrap_or(0);
     if five > 0 || one > 0 {
-        label.push_str(&format!(" [5m {}, 1h {}]", format_int(five), format_int(one)));
+        label.push_str(&format!(
+            " [5m {}, 1h {}]",
+            format_int(five),
+            format_int(one)
+        ));
     }
     label
 }

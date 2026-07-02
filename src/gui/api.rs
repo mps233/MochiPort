@@ -241,6 +241,13 @@ impl ApiClient {
         self.post_empty_with_timeout("/api/codex-app/repair-gui-environment", GUI_CONFIG_TIMEOUT)
     }
 
+    pub(super) fn set_codex_app_fast_startup(
+        &self,
+        request: &SetCodexAppFastStartupRequest,
+    ) -> Result<serde_json::Value, String> {
+        self.post_json_with_timeout("/api/codex-app/fast-startup", request, GUI_CONFIG_TIMEOUT)
+    }
+
     pub(super) fn refresh_codex_app_models(&self) -> Result<serde_json::Value, String> {
         self.post_empty_with_timeout("/api/codex-app/models/refresh", GUI_CONFIG_TIMEOUT)
     }
@@ -360,6 +367,8 @@ pub(super) struct ServerStatus {
     pub(super) bind: String,
     #[serde(default)]
     pub(super) local_connection_mode: LocalConnectionMode,
+    #[serde(default)]
+    pub(super) codex_app_fast_startup: bool,
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -461,6 +470,12 @@ pub(super) struct MoveCodexAppSessionProviderRequest {
     pub(super) target_provider: String,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetCodexAppFastStartupRequest {
+    pub(super) enabled: bool,
+}
+
 fn default_true() -> bool {
     true
 }
@@ -536,6 +551,7 @@ pub(super) struct ConfigureRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) image_generation_enabled: Option<bool>,
     pub(super) supports_websockets: bool,
+    pub(super) fast_startup: bool,
 }
 
 #[derive(Serialize)]

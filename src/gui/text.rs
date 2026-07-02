@@ -549,10 +549,10 @@ impl GuiText {
     pub(super) fn codex_session_history_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "把以前的 Codex 会话归到当前入口，之后在 Codex App 左侧可以继续看到并打开。"
+                "把以前的 Codex 会话归到当前入口，之后可以在 Codex App、VS Code 插件或 CLI 里继续打开。"
             }
             GuiLocale::EnUs => {
-                "Move existing Codex sessions into the current entry so they appear in the Codex App sidebar."
+                "Move existing Codex sessions into the current entry so they can be opened from Codex App, VS Code, or CLI."
             }
         }
     }
@@ -788,6 +788,42 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "让 Codex 使用本地服务",
             GuiLocale::EnUs => "Use the local service from Codex",
+        }
+    }
+
+    pub(super) fn codex_fast_startup(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "快速启动",
+            GuiLocale::EnUs => "Fast startup",
+        }
+    }
+
+    pub(super) fn codex_fast_startup_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "启用后 CodexHub 会监听 localhost:8000，加快无 VPN 环境下 Codex App 启动。"
+            }
+            GuiLocale::EnUs => {
+                "When enabled, CodexHub listens on localhost:8000 to speed up Codex App startup without a VPN."
+            }
+        }
+    }
+
+    pub(super) fn codex_fast_startup_confirm_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "快速启动会占用 8000 端口",
+            GuiLocale::EnUs => "Fast Startup Uses Port 8000",
+        }
+    }
+
+    pub(super) fn codex_fast_startup_confirm_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "启用后 CodexHub 会立即尝试占用 localhost:8000，用于加快无 VPN 环境下 Codex App 启动。\n\n如果你正在用 localhost:8000 运行开发服务，请不要启用。取消勾选后会立即停止这个辅助监听，不影响主服务。"
+            }
+            GuiLocale::EnUs => {
+                "CodexHub will immediately try to use localhost:8000 to speed up Codex App startup without a VPN.\n\nDo not enable this if you use localhost:8000 for development. Unchecking it stops this helper listener immediately without affecting the main service."
+            }
         }
     }
 

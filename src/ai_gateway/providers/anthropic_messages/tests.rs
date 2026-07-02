@@ -2,13 +2,13 @@ use super::options::{AnthropicProviderOptions, AnthropicProviderProfile};
 use super::request::build_anthropic_request;
 use super::response::convert_anthropic_response;
 use super::stream::AnthropicSseToResponsesSse;
+use super::stream_internal::InternalSseEnvelope;
 use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE_CODE_USER_AGENT};
 use super::{
     WebSearchToolUse, anthropic_message_from_sse, append_tool_results, bearer_authorization,
     build_anthropic_upstream_request, emit_injected_web_search_call, find_web_search_tool_uses,
     internal_web_search_body, merge_anthropic_betas, raw_sse_has_first_content_token,
 };
-use super::stream_internal::InternalSseEnvelope;
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
 use crate::ai_gateway::model::{
@@ -444,7 +444,11 @@ fn marks_only_last_two_user_messages_as_rolling_breakpoints() {
         .filter(|message| {
             message["content"]
                 .as_array()
-                .and_then(|parts| parts.iter().find(|part| part.get("cache_control").is_some()))
+                .and_then(|parts| {
+                    parts
+                        .iter()
+                        .find(|part| part.get("cache_control").is_some())
+                })
                 .is_some()
         })
         .count();
@@ -1737,11 +1741,17 @@ async fn internal_web_search_stream_emits_web_search_call_added_and_done_only() 
 
     // A single envelope: exactly one created/in_progress/completed.
     assert_eq!(
-        event_names.iter().filter(|e| **e == "response.created").count(),
+        event_names
+            .iter()
+            .filter(|e| **e == "response.created")
+            .count(),
         1
     );
     assert_eq!(
-        event_names.iter().filter(|e| **e == "response.completed").count(),
+        event_names
+            .iter()
+            .filter(|e| **e == "response.completed")
+            .count(),
         1
     );
 }
@@ -1809,7 +1819,10 @@ async fn internal_envelope_streams_deltas_and_renumbers_across_rounds() {
     assert_eq!(deltas, vec!["Hel", "lo"]);
 
     // Exactly one envelope even though the converter emitted its own.
-    assert_eq!(names.iter().filter(|e| **e == "response.created").count(), 1);
+    assert_eq!(
+        names.iter().filter(|e| **e == "response.created").count(),
+        1
+    );
     assert_eq!(
         names.iter().filter(|e| **e == "response.completed").count(),
         1
@@ -1822,7 +1835,10 @@ async fn internal_envelope_streams_deltas_and_renumbers_across_rounds() {
         .iter()
         .filter_map(|(_, d)| d["sequence_number"].as_i64())
         .collect();
-    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "sequence must be monotonic: {seqs:?}");
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "sequence must be monotonic: {seqs:?}"
+    );
 
     // Terminal response carries the streamed message and merged usage.
     let completed = events
