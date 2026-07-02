@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     Json, Router,
     body::Body,
     extract::State,
@@ -15,7 +15,7 @@ use serde_json::json;
 
 use crate::{
     app_state::{FeishuWsState, ImAccountRuntimeState, SharedState, TelegramState, WechatState},
-    chain_log,
+    chain_log, codex_app_config,
     config::AppConfig,
     remote_control_backend,
 };
@@ -35,6 +35,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/oauth/authorize", get(oauth::oauth_authorize))
         .route("/oauth/token", post(oauth::oauth_token))
         .route("/api/status", get(status))
+        .route("/api/gui/dashboard", get(gui_dashboard))
         .route("/api/shutdown", post(shutdown))
         .route("/api/config", get(get_config).post(save_config))
         .route(
@@ -170,6 +171,10 @@ struct StatusResponse {
 }
 
 async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
+    Json(status_snapshot(&state).await)
+}
+
+async fn status_snapshot(state: &SharedState) -> StatusResponse {
     let running = state
         .bridge_task
         .lock()
@@ -188,7 +193,7 @@ async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
         .values()
         .cloned()
         .collect::<Vec<_>>();
-    Json(StatusResponse {
+    StatusResponse {
         running,
         bind: config.bind.clone(),
         local_connection_mode: config.local_connection_mode,
@@ -198,6 +203,31 @@ async fn status(State(state): State<SharedState>) -> Json<StatusResponse> {
         telegram,
         wechat,
         im_accounts,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuiDashboardResponse {
+    status: StatusResponse,
+    remote: remote_control_backend::RemoteControlStatusResponse,
+    codex_app: codex_app_config::CodexAppConfigStatus,
+    im_accounts: im_api::ImAccountsResponse,
+    ai_gateway: crate::ai_gateway::config::AiGatewayConfig,
+}
+
+async fn gui_dashboard(State(state): State<SharedState>) -> Json<GuiDashboardResponse> {
+    let status = status_snapshot(&state).await;
+    let remote = remote_control_backend::status_snapshot(&state).await;
+    let codex_app = codex_app::codex_app_status_snapshot(&state).await;
+    let im_accounts = im_api::im_accounts_snapshot(&state).await;
+    let ai_gateway = state.config.lock().await.ai_gateway.clone();
+    Json(GuiDashboardResponse {
+        status,
+        remote,
+        codex_app,
+        im_accounts,
+        ai_gateway,
     })
 }
 

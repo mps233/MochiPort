@@ -1,4 +1,4 @@
-use std::{thread, time::Duration};
+use std::time::Duration;
 
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -137,8 +137,8 @@ impl ApiClient {
             local_connection_mode: self.connection_mode(),
             ..DashboardSnapshot::default()
         };
-        let status = match self.get_quick::<ServerStatus>("/api/status") {
-            Ok(status) => status,
+        let dashboard = match self.get_quick::<GuiDashboardResponse>("/api/gui/dashboard") {
+            Ok(dashboard) => dashboard,
             Err(_err) => {
                 if self.connection_mode() == LocalConnectionMode::Standard {
                     return DashboardSnapshot {
@@ -150,29 +150,17 @@ impl ApiClient {
                 return offline_snapshot;
             }
         };
-
-        let remote =
-            self.get_quick_optional_async::<RemoteControlStatus>("/api/remote-control/status");
-        let codex_app = self.get_quick_optional_async::<CodexAppStatus>("/api/codex-app/status");
-        let im_accounts = self.get_quick_optional_async::<ImAccountsResponse>("/api/im/accounts");
-        let ai_gateway_config = {
-            let api = self.clone();
-            thread::spawn(move || {
-                api.get_quick::<AppConfig>("/api/config")
-                    .ok()
-                    .map(|c| c.ai_gateway)
-            })
-        };
+        let local_connection_mode = dashboard.status.local_connection_mode;
 
         DashboardSnapshot {
             service_online: true,
-            local_connection_mode: status.local_connection_mode,
+            local_connection_mode,
             compatible_connection_available: false,
-            remote: join_optional(remote),
-            codex_app: join_optional(codex_app),
-            im_accounts: join_optional(im_accounts),
-            status: Some(status),
-            ai_gateway: join_optional(ai_gateway_config),
+            remote: Some(dashboard.remote),
+            codex_app: Some(dashboard.codex_app),
+            im_accounts: Some(dashboard.im_accounts),
+            status: Some(dashboard.status),
+            ai_gateway: Some(dashboard.ai_gateway),
         }
     }
 
@@ -194,17 +182,6 @@ impl ApiClient {
             return false;
         };
         response.status().is_success()
-    }
-
-    pub(super) fn get_quick_optional_async<T>(
-        &self,
-        path: &'static str,
-    ) -> thread::JoinHandle<Option<T>>
-    where
-        T: DeserializeOwned + Send + 'static,
-    {
-        let api = self.clone();
-        thread::spawn(move || api.get_quick::<T>(path).ok())
     }
 
     pub(super) fn configure_codex_app(
@@ -345,10 +322,6 @@ impl ApiClient {
     }
 }
 
-fn join_optional<T>(handle: thread::JoinHandle<Option<T>>) -> Option<T> {
-    handle.join().ok().flatten()
-}
-
 #[derive(Clone, Default)]
 pub(super) struct DashboardSnapshot {
     pub(super) service_online: bool,
@@ -359,6 +332,16 @@ pub(super) struct DashboardSnapshot {
     pub(super) codex_app: Option<CodexAppStatus>,
     pub(super) im_accounts: Option<ImAccountsResponse>,
     pub(super) ai_gateway: Option<AiGatewayConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GuiDashboardResponse {
+    status: ServerStatus,
+    remote: RemoteControlStatus,
+    codex_app: CodexAppStatus,
+    im_accounts: ImAccountsResponse,
+    ai_gateway: AiGatewayConfig,
 }
 
 #[derive(Clone, Deserialize)]

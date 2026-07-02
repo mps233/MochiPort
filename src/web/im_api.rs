@@ -167,11 +167,15 @@ pub(super) struct ImAccountsResponse {
 }
 
 pub(super) async fn im_accounts(State(state): State<SharedState>) -> Json<ImAccountsResponse> {
+    Json(im_accounts_snapshot(&state).await)
+}
+
+pub(super) async fn im_accounts_snapshot(state: &SharedState) -> ImAccountsResponse {
     let config = state.config.lock().await.clone();
     let runtime = state.im_accounts.lock().await.clone();
-    Json(ImAccountsResponse {
+    ImAccountsResponse {
         accounts: im_account_items(&config, &runtime),
-    })
+    }
 }
 
 #[derive(Deserialize)]

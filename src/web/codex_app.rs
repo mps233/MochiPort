@@ -599,10 +599,16 @@ pub(super) async fn repair_codex_app_gui_environment(
 pub(super) async fn codex_app_status(
     State(state): State<SharedState>,
 ) -> Json<codex_app_config::CodexAppConfigStatus> {
+    Json(codex_app_status_snapshot(&state).await)
+}
+
+pub(super) async fn codex_app_status_snapshot(
+    state: &SharedState,
+) -> codex_app_config::CodexAppConfigStatus {
     let config = state.config.lock().await.clone();
-    Json(codex_app_config::inspect_codex_app_config_for_mode(
+    codex_app_config::inspect_codex_app_config_for_mode(
         None,
         &config.remote_control_base_url(),
         config.codex_app_fast_startup,
-    ))
+    )
 }
