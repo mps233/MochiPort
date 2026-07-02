@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::BTreeMap,
     process::Child,
     rc::Rc,
@@ -52,7 +52,9 @@ const LEGACY_UPDATE_MANIFEST_URL: &str =
 const UPDATE_RELEASE_API_URL: &str =
     "https://api.github.com/repos/happy-loki/codexhub/releases/latest";
 const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/happy-loki/codexhub/releases/latest";
-const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 2500;
+const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 10_000;
+const REQUEST_LOG_REFRESH_INTERVAL_MS: i32 = 5_000;
+const REQUEST_LOG_TAB_INDEX: i32 = 3;
 /// Poll interval for the short-lived "fetch models" dialog timer. This timer
 /// only runs while that modal dialog is open, so it does not affect idle CPU.
 const DIALOG_RESULT_POLL_MS: i32 = 150;
@@ -1385,6 +1387,20 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     let request_log_detail_in_flight = Arc::new(AtomicBool::new(false));
     let request_log_clear_result: RequestLogClearResultStore = Arc::new(Mutex::new(None));
     let request_log_clear_in_flight = Arc::new(AtomicBool::new(false));
+    let request_logs_active = Rc::new(Cell::new(notebook.selection() == REQUEST_LOG_TAB_INDEX));
+    {
+        let api = api.clone();
+        let request_log_result = request_log_result.clone();
+        let request_log_in_flight = request_log_in_flight.clone();
+        let request_logs_active = request_logs_active.clone();
+        notebook.on_page_changed(move |event| {
+            let active = event.get_selection().unwrap_or(-1) == REQUEST_LOG_TAB_INDEX;
+            request_logs_active.set(active);
+            if active {
+                force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
+            }
+        });
+    }
     {
         let api = api.clone();
         let handles = handles.clone();
@@ -1465,7 +1481,9 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             });
         });
     }
-    force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
+    if request_logs_active.get() {
+        force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
+    }
 
     let request_log_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let request_log_timer = Timer::new(&frame);
@@ -1476,6 +1494,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let request_log_in_flight = request_log_in_flight.clone();
         let request_log_detail_result = request_log_detail_result.clone();
         let request_log_clear_result = request_log_clear_result.clone();
+        let request_logs_active = request_logs_active.clone();
         request_log_timer.on_tick(move |_| {
             apply_pending_request_logs(&handles, &request_log_result);
             apply_pending_request_log_detail(&frame, &handles, &request_log_detail_result);
@@ -1485,13 +1504,16 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 &request_log_clear_old_button,
                 &request_log_clear_all_button,
                 &request_log_clear_result,
-            ) {
+            ) && request_logs_active.get()
+            {
                 force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
             }
-            schedule_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
+            if request_logs_active.get() {
+                schedule_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
+            }
         });
     }
-    request_log_timer.start(1500, false);
+    request_log_timer.start(REQUEST_LOG_REFRESH_INTERVAL_MS, false);
     request_log_timer_store
         .borrow_mut()
         .replace(request_log_timer);
@@ -1528,6 +1550,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let request_log_detail_result = request_log_detail_result.clone();
         let request_log_in_flight = request_log_in_flight.clone();
         let request_log_clear_result = request_log_clear_result.clone();
+        let request_logs_active = request_logs_active.clone();
         let request_log_clear_old_button = request_log_clear_old_button;
         let request_log_clear_all_button = request_log_clear_all_button;
         frame.on_idle(move |event| {
@@ -1562,7 +1585,8 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 &request_log_clear_old_button,
                 &request_log_clear_all_button,
                 &request_log_clear_result,
-            ) {
+            ) && request_logs_active.get()
+            {
                 force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
             }
 
