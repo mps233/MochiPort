@@ -79,21 +79,101 @@ fn validate_thinking_budget(body: &Map<String, Value>) -> Result<(), GatewayErro
     Ok(())
 }
 
-fn insert_prompt_cache_control(body: &mut Map<String, Value>) {
-    let cache_control = anthropic_cache_control();
+/// Anthropic accepts at most 4 explicit `cache_control` breakpoints per request.
+const ANTHROPIC_BREAKPOINT_CAP: u8 = 4;
 
-    if let Some(system) = body.get_mut("system") {
-        insert_system_cache_control(system, &cache_control);
+/// Shared breakpoint budget, mirroring OpenCode's `Cache.Breakpoints`. The 4
+/// slots are allocated in cache-invalidation order (`tools` -> `system` ->
+/// `messages`); tools sit highest in the prefix hierarchy, so when a request
+/// would over-mark we keep the tool/system anchors and shed the message-tail
+/// one first.
+struct Breakpoints {
+    remaining: u8,
+    dropped: u8,
+}
+
+impl Breakpoints {
+    fn new() -> Self {
+        Self {
+            remaining: ANTHROPIC_BREAKPOINT_CAP,
+            dropped: 0,
+        }
     }
 
-    if let Some(Value::Array(messages)) = body.get_mut("messages") {
-        insert_message_cache_control(messages, &cache_control);
+    /// Reserves one slot. Returns false (and records a drop) once the cap is hit
+    /// so callers can skip marking instead of tripping a 400 from the API.
+    fn take(&mut self) -> bool {
+        if self.remaining == 0 {
+            self.dropped += 1;
+            return false;
+        }
+        self.remaining -= 1;
+        true
     }
 }
 
-fn insert_system_cache_control(system: &mut Value, cache_control: &Map<String, Value>) {
+fn insert_prompt_cache_control(body: &mut Map<String, Value>) {
+    // Auto cache policy aligned with OpenCode's default: one breakpoint on the
+    // last tool definition, one on the last system block, and one on the latest
+    // user message. These positions stay put while a single turn explodes into
+    // many assistant/tool round-trips, so the growing prefix keeps hitting the
+    // cache. Crucially the marker never lands on assistant/tool_use tails, whose
+    // position shifts every turn -- moving a breakpoint forces the previous
+    // turn's marked block to lose its cache_control, which empirically breaks
+    // the prefix hash and re-writes the whole history.
+    let cache_control = anthropic_cache_control();
+    let mut budget = Breakpoints::new();
+
+    if let Some(Value::Array(tools)) = body.get_mut("tools") {
+        insert_tools_cache_control(tools, &cache_control, &mut budget);
+    }
+    if let Some(system) = body.get_mut("system") {
+        insert_system_cache_control(system, &cache_control, &mut budget);
+    }
+    if let Some(Value::Array(messages)) = body.get_mut("messages") {
+        insert_message_cache_control(messages, &cache_control, &mut budget);
+    }
+
+    if budget.dropped > 0 {
+        tracing::warn!(
+            dropped = budget.dropped,
+            cap = ANTHROPIC_BREAKPOINT_CAP,
+            "anthropic_messages dropped cache breakpoints exceeding per-request cap"
+        );
+    }
+}
+
+fn insert_tools_cache_control(
+    tools: &mut [Value],
+    cache_control: &Map<String, Value>,
+    budget: &mut Breakpoints,
+) {
+    // Tools live at the front of the prefix; a breakpoint on the last tool caches
+    // the entire tool-definition block as a stable, independently reusable prefix.
+    let Some(Value::Object(last)) = tools.last_mut() else {
+        return;
+    };
+    if last.contains_key("cache_control") {
+        return;
+    }
+    if budget.take() {
+        last.insert(
+            "cache_control".to_string(),
+            Value::Object(cache_control.clone()),
+        );
+    }
+}
+
+fn insert_system_cache_control(
+    system: &mut Value,
+    cache_control: &Map<String, Value>,
+    budget: &mut Breakpoints,
+) {
     match system {
         Value::String(text) if !text.is_empty() => {
+            if !budget.take() {
+                return;
+            }
             let text = text.clone();
             *system = json!([{
                 "type": "text",
@@ -106,57 +186,63 @@ fn insert_system_cache_control(system: &mut Value, cache_control: &Map<String, V
             // prefix up to a breakpoint, so a single breakpoint at the end of the
             // system section covers every earlier block while staying within the
             // 4-breakpoint per-request limit (Codex may emit many system blocks).
-            if let Some(Value::Object(part)) = parts.iter_mut().rev().find(|part| {
+            let Some(Value::Object(part)) = parts.iter_mut().rev().find(|part| {
                 part.as_object()
                     .map(is_cacheable_anthropic_text_block)
                     .unwrap_or(false)
-            }) {
-                part.entry("cache_control".to_string())
-                    .or_insert_with(|| Value::Object(cache_control.clone()));
+            }) else {
+                return;
+            };
+            if part.contains_key("cache_control") {
+                return;
+            }
+            if budget.take() {
+                part.insert(
+                    "cache_control".to_string(),
+                    Value::Object(cache_control.clone()),
+                );
             }
         }
         _ => {}
     }
 }
 
-fn insert_message_cache_control(messages: &mut [Value], cache_control: &Map<String, Value>) {
-    // Single rolling breakpoint on the conversation tail, matching Claude Code.
-    // Anthropic's read path walks back up to 20 blocks from the breakpoint to
-    // find a prior write, and an agent loop only appends a handful of blocks per
-    // turn (assistant text -> assistant tool_use -> user tool_result), well
-    // inside that window. A single breakpoint therefore recovers the previous
-    // turn's cached prefix on its own; a second, earlier anchor adds no hit rate
-    // on this workload while costing an extra cache write (1.25x) and perturbing
-    // the prefix more often as the marker moves each turn. Mid-conversation
-    // system messages are dynamic hints, so skip them as cache anchors.
-    if let Some(index) = messages
+fn insert_message_cache_control(
+    messages: &mut [Value],
+    cache_control: &Map<String, Value>,
+    budget: &mut Breakpoints,
+) {
+    // Single breakpoint on the latest `role=="user"` message, matching OpenCode's
+    // "latest-user-message" strategy. tool_result messages are role=user, so the
+    // agent-loop tail (...tool_result) is covered. Assistant/tool_use tails are
+    // deliberately never marked: their index moves every turn, and re-marking a
+    // shifting position strips cache_control off the block the previous turn
+    // wrote, breaking the prefix hash.
+    let Some(index) = messages
         .iter()
-        .rposition(message_tail_can_carry_cache_control)
-    {
-        mark_last_block_cache_control(&mut messages[index], cache_control);
-    }
+        .rposition(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+    else {
+        return;
+    };
+    mark_message_breakpoint(&mut messages[index], cache_control, budget);
 }
 
-fn message_tail_can_carry_cache_control(message: &Value) -> bool {
-    if !matches!(
-        message.get("role").and_then(Value::as_str),
-        Some("user" | "assistant")
-    ) {
-        return false;
-    }
-    match message.get("content") {
-        Some(Value::String(text)) => !text.is_empty(),
-        Some(Value::Array(parts)) => parts.last().and_then(Value::as_object).is_some(),
-        _ => false,
-    }
-}
-
-fn mark_last_block_cache_control(message: &mut Value, cache_control: &Map<String, Value>) {
+/// Marks the breakpoint block of a message: the last `type=="text"` block when
+/// one exists, otherwise the last content block (covers tool_result-only user
+/// messages). Idempotent — an existing cache_control is left untouched.
+fn mark_message_breakpoint(
+    message: &mut Value,
+    cache_control: &Map<String, Value>,
+    budget: &mut Breakpoints,
+) {
     let Some(content) = message.get_mut("content") else {
         return;
     };
     match content {
         Value::String(text) if !text.is_empty() => {
+            if !budget.take() {
+                return;
+            }
             let text = text.clone();
             *content = json!([{
                 "type": "text",
@@ -164,10 +250,22 @@ fn mark_last_block_cache_control(message: &mut Value, cache_control: &Map<String
                 "cache_control": cache_control,
             }]);
         }
-        Value::Array(parts) => {
-            if let Some(Value::Object(part)) = parts.last_mut() {
-                part.entry("cache_control".to_string())
-                    .or_insert_with(|| Value::Object(cache_control.clone()));
+        Value::Array(parts) if !parts.is_empty() => {
+            let last_text = parts
+                .iter()
+                .rposition(|part| part.get("type").and_then(Value::as_str) == Some("text"));
+            let index = last_text.unwrap_or(parts.len() - 1);
+            let Some(Value::Object(part)) = parts.get_mut(index) else {
+                return;
+            };
+            if part.contains_key("cache_control") {
+                return;
+            }
+            if budget.take() {
+                part.insert(
+                    "cache_control".to_string(),
+                    Value::Object(cache_control.clone()),
+                );
             }
         }
         _ => {}

@@ -93,44 +93,46 @@ system[0] 上那个断点其实是**冗余的廉价保险**：它太短（远不
 
 Claude Code 敢「system 每条都加」，前提是它的 system block 数量固定且少。而 Gateway 是 Responses → Messages 转译，**Codex 可能塞进来多条 system block**。若照搬「每条都加」，光 system 就可能吃掉 5~8 个断点，**直接撞穿 4 个上限，整个请求被拒**。
 
-因此 Gateway 的正确姿势不是模仿表象，而是抓住承重断点：
+因此 Gateway 不再模仿 Claude Code 客户端在 messages 段的打点表象，而是对齐业界干净 API 客户端（OpenCode / LangChain 缓存中间件）的默认 **AUTO** 策略——tools/system/messages 各一个断点 + 4-断点预算守卫：
 
 | 维度 | Gateway 策略 | 理由 |
 |------|--------------|------|
-| `tools` | 不加（剥离上游携带的 `cache_control`） | 靠前缀机制自动覆盖，省名额，与 CC 一致 |
-| `system` | **只在最后一条 text block 加 1 个断点** | 等价于 CC 的承重断点；靠自动回溯覆盖前面所有 system block；规避 4 上限 |
-| `messages` | 只在**会话尾部一条**（最后一条 `role==user`/`assistant` 消息）的最后一个 block 上加 1 个断点（单滚动，含 `tool_result`/`tool_use`；跳过 mid-conversation `system`） | 与 CC 原生一致；agent 循环每轮只增长几个 block，远小于 20-block 回溯窗口，单断点已足够回溯命中上一轮写入。详见第 6 节 |
+| `tools` | **在最后一个 tool 定义上加 1 个断点** | tools 在前缀最前，一个断点把整段工具定义缓存成独立可复用前缀 |
+| `system` | **只在最后一条 text block 加 1 个断点** | 承重断点；靠自动回溯覆盖前面所有 system block；规避 4 上限 |
+| `messages` | 只在**最后一条 `role==user` 消息**加 1 个断点，落点优先该消息最后一个 `text` block，无 text 则最后一个 content block（覆盖 tool_result-only） | 位置随会话尾部稳定推进，不落在每轮移动的 assistant/tool_use 尾块上。详见第 6 节 |
 | 顶层 `cache_control` | 不生成 | 非法字段 |
 | `ttl` | 默认 5m；长会话可选映射 `1h` | 与 `prompt_cache_retention` 对接（可选） |
 
-断点预算：system 末尾 1 个 + messages 尾部 1 个，共 ≤2，稳稳控制在 4 以内，与 CC 原生一致。
+断点预算：按 **tools → system → messages** 顺序从共享的 4 个名额里扣减（tools 在前缀最前、最该保住；超额从 messages 尾先丢并 `warn!` 告警）。典型请求 = tools 1 + system 1 + user 1 = 3，稳在 4 以内。
 
-## 6. 单滚动断点（messages 段）
+> 参考实现：`references/opencode-dev/packages/llm/src/cache-policy.ts`（AUTO 策略）、`.../protocols/utils/cache.ts`（4-断点预算）、`.../protocols/anthropic-messages.ts`（按 tools→system→messages 顺序分配、超额丢弃告警）。
 
-### 6.1 为什么单个尾部断点就够
+## 6. messages 段：只标最后一条 user
 
-Anthropic 的读机制是从断点**向前回溯，窗口约 20 个 block**，寻找此前已写过的缓存。而 Codex agent 循环每轮尾部只追加几条消息（典型：assistant text → assistant tool_use → user tool_result），也就是**几个 block**，远小于 20。
+### 6.1 为什么落在「最后一条 user」而不是「会话尾巴」
 
-于是只在「会话尾部一条」打单个断点时，第 N+1 轮从新断点回溯，几个 block 内就能落到第 N 轮的写入点上，命中上一轮写入的整段前缀。**回溯窗口天然覆盖了每轮的小步增长，不需要额外的读取锚。**
+Anthropic 的读机制是从断点**向前回溯，窗口约 20 个 block**，寻找此前已写过的缓存。Codex agent 循环每轮尾部只追加几条消息（典型：assistant text → assistant tool_use → user tool_result），远小于 20，单断点足以回溯命中上一轮写入。
 
-Claude Code 自己就是单断点（见第 4 节抓包），长会话缓存命中一直稳定——这是单断点够用的最强实证。
+关键在**断点落在哪条消息**。agent 循环里 `role==user` 消息 = tool_result / 用户输入，位置随会话**只增不改**；而 assistant/tool_use 尾块的相对位置每轮都在动。如果把断点落在「最后一条消息（含 assistant）」，那么：
 
-### 6.2 为什么放弃双滚动
+- 第 N 轮断点落在某条 assistant/tool_use 上、写入缓存；
+- 第 N+1 轮断点移到新的尾巴，**上一轮那条 assistant 的 `cache_control` 被摘除**；
+- 实测（第 9 节 3741→3742）表明：摘除历史 `cache_control` 会破坏前缀哈希，导致上一轮写入的整段缓存读不回来（read 从 ~90k 崩到 ~13k）。
 
-早期曾尝试「最后两条各打一个」的双滚动，想多铺一个较早的读取锚来抹平命中率锯齿。生产验证（见第 9 节）表明，在本链路的负载下它并不划算：
+**只标最后一条 `user`** 能把「被摘除 `cache_control` 的历史块」降到最少：user 断点稳定贴着 append-only 的 user 序列走，且 tools/system 断点位置固定，历史前缀的 `cache_control` 分布逐轮更稳定。
 
-- **无额外收益**：每轮只增长几个 block，单断点的 20-block 回溯窗口已完全覆盖，第二个锚点用不上。
-- **多花成本**：每轮多写一份缓存（cache write 计费 1.25x）。
-- **更易扰动前缀**：多标一个 marker，历史消息的 `cache_control` 随断点移动被增删的面更大；虽然 Anthropic 理论上剔除 `cache_control` 后再算前缀哈希，但实测偶有 miss（见第 9 节），减少 marker 变动面是更稳妥的选择。
+### 6.2 为什么不认 assistant、不用双滚动
 
-因此回归**与 Claude Code 对齐的单断点**。
+- **不认 assistant**：assistant/tool_use 尾块位置每轮移动，标它等于每轮制造一次「历史 `cache_control` 摘除」，正是 miss 诱因。
+- **不用双滚动**：早期试过「最后两条各打一个」，多一个随轮移动的 marker，扰动面更大、每轮多写一份缓存（1.25x），且在本链路负载下第二个锚点用不上（回溯窗口已覆盖）。
 
 ### 6.3 落点规则
 
-- 认 `role=="user"` 与 `role=="assistant"` 的消息；跳过 mid-conversation `system`（动态提示，不适合作缓存锚）。tool_result 是 role=user、tool_use 是 role=assistant，agent 循环尾部天然覆盖。
-- 断点落在**最后一条合格消息**的**最后一个 block**，不限 block 类型（`text`/`tool_result`/`tool_use` 均可）。
-- `rposition`：从尾部找第一条合格消息；无合格消息时不打断点。
-- 与 system 断点合计 ≤2，安全在 4 上限内。
+- 只认 `role=="user"` 消息（tool_result 是 role=user，agent 循环尾部天然覆盖）；assistant/tool_use 永不标记。
+- 用 `rposition` 从尾部找最后一条 user 消息；无 user 消息时不打断点。
+- 落点优先该消息**最后一个 `type=="text"` 的 block**；无 text 则**最后一个 content block**（覆盖 tool_result-only 消息）。
+- 幂等：目标 block 已有 `cache_control` 则不重复写。
+- 走共享的 4-断点预算（第 5 节）。
 
 ## 7. 响应侧用量统计
 
@@ -149,10 +151,14 @@ cache_read_input_tokens       → cached_tokens（本次命中缓存）
 
 已落地（`request.rs`，与本文对齐）：
 
+- `Breakpoints`：cap=4 的共享预算，`take()` 逐个扣减，`dropped>0` 时 `warn!` 告警。
+- `insert_prompt_cache_control`：按 tools → system → messages 顺序分配预算。
+- `insert_tools_cache_control`：在**最后一个 tool** 上加断点（幂等）。
 - `insert_system_cache_control`：数组分支只在**最后一条** text block 加断点，规避多 system block 撞 4 上限。
-- `insert_message_cache_control`：用 `message_tail_can_carry_cache_control` 从尾部 `rposition` 找出最后一条 `role` 为 `user`/`assistant` 且尾块可承载的消息（跳过 mid-conversation `system`），在其最后一个 block 上打**单个**断点（单滚动，见第 6 节），复用 `mark_last_block_cache_control`。不限 block 类型（text/tool_result/tool_use 均可）。
-- `tools`：不加 `cache_control`（剥离上游携带的），维持现状。
-- 测试：`builds_anthropic_text_request`、`caches_last_message_tail`、`marks_only_last_message_tail_as_rolling_breakpoint`、`caches_assistant_tool_use_when_it_is_the_tail`、`builds_anthropic_request_with_claude_code_block_level_ephemeral_cache` 覆盖单断点落点与预算上限。
+- `insert_message_cache_control`：`rposition` 找最后一条 `role=="user"` 消息；`mark_message_breakpoint` 落在其最后一个 text block（无 text 则最后一个 content block），幂等。assistant/tool_use 永不标记。
+- 测试：`builds_anthropic_text_request`、`caches_latest_user_message_only`、`does_not_cache_trailing_assistant_message`、`marks_last_text_block_of_latest_user_message`、`caches_last_tool_definition`、`respects_four_breakpoint_budget` 覆盖 AUTO 落点与预算上限。
+
+> 注：请求 **headers / anthropic-beta / auth 仍保留 Claude Code 指纹**（user-agent、x-app、x-stainless-*、x-claude-code-session-id、Bearer、beta 列表含 `context-1m-2025-08-07` 等）。这是获取 1M 上下文等能力的前提，本次不动；仅 body 层的缓存断点对齐干净 API 客户端。内部 web-search 独立请求（`internal_web_search_body`）整体仍模拟 Claude Code（含 `metadata.user_id`），未改动。
 
 未做（本次范围外）：`prompt_cache_retention = "1h"` → `cache_control.ttl` 透传，仍固定 `{"type":"ephemeral"}`（5m）。
 
