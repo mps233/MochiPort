@@ -1,15 +1,16 @@
-# CodexHub v0.3.17
+# CodexHub v0.3.18
 
-## 修复
+## 改进内容
 
-- 修复 Anthropic / GLM 流式请求上报的 token 用量被放大约 3 倍的严重问题。内层转换器会在 `response.created`、`response.in_progress`、`response.completed` 三个 envelope 事件里各带一份相同的完整 usage 快照，而外层多轮合并逻辑对每个 envelope 都累加一次，导致单轮请求的 `input_tokens` / `cached_tokens` / `cache_creation_tokens` 被乘以 envelope 事件数量（通常 3 倍）。现在只从每轮的终结事件（`response.completed` / `response.incomplete` / `response.failed`）吸收 usage，单轮计一次，多轮 tool_use 仍按轮正确累加。
-  - 直接后果：回传给 Codex 的上下文用量虚高（例如真实 ~82k 被报成 ~247k），叠加为回复预留的 `max_tokens` 后提前撞上模型上下文窗口，触发**过早的上下文压缩（CONTEXT CHECKPOINT COMPACTION）**。修复后压缩时机恢复正常。
-  - 请求日志中的 token 统计与成本计算此前同样被放大，现已恢复准确。
+- Anthropic / GLM 渠道的 messages 缓存断点从「双滚动」回退为「单滚动」，与 Claude Code 原生行为对齐：只在会话尾部最后一条 `user`/`assistant` 消息的尾块上打一个断点（跳过 mid-conversation `system`）。
+  - 依据：Anthropic 读缓存时从断点向前回溯约 20 个 block，而 Codex agent 循环每轮尾部只增长几个 block，远小于回溯窗口，单断点即可稳定命中上一轮写入的前缀。第二个较早的读取锚在本链路负载下不提供额外命中，却每轮多写一份缓存（cache write 计费 1.25x），并因多标一个随轮移动的 marker 而扩大历史消息 `cache_control` 的增删面。
+  - 断点预算由 ≤3 降至 ≤2（system 末尾 1 + messages 尾部 1），更稳地控制在 4 上限内。
+  - 更新了缓存文档第 5/6/8 节与相关测试。
 
 ## 验证
 
 - `cargo fmt`
-- `cargo test`（354 项通过，含新增的单轮 usage 去重回归断言）
+- `cargo test`（354 项通过）
 
 ---
 

@@ -120,19 +120,19 @@ fn insert_system_cache_control(system: &mut Value, cache_control: &Map<String, V
 }
 
 fn insert_message_cache_control(messages: &mut [Value], cache_control: &Map<String, Value>) {
-    // Dual rolling breakpoints: mark the last two user/assistant messages.
-    // Claude Code places the message breakpoint on the conversation tail, not
-    // only on user/tool-result turns. Including assistant turns keeps the read
-    // anchor closer to the actual append-only tail. Mid-conversation system
-    // messages are dynamic hints, so skip them as cache anchors.
-    let message_indices: Vec<usize> = messages
+    // Single rolling breakpoint on the conversation tail, matching Claude Code.
+    // Anthropic's read path walks back up to 20 blocks from the breakpoint to
+    // find a prior write, and an agent loop only appends a handful of blocks per
+    // turn (assistant text -> assistant tool_use -> user tool_result), well
+    // inside that window. A single breakpoint therefore recovers the previous
+    // turn's cached prefix on its own; a second, earlier anchor adds no hit rate
+    // on this workload while costing an extra cache write (1.25x) and perturbing
+    // the prefix more often as the marker moves each turn. Mid-conversation
+    // system messages are dynamic hints, so skip them as cache anchors.
+    if let Some(index) = messages
         .iter()
-        .enumerate()
-        .filter(|(_, message)| message_tail_can_carry_cache_control(message))
-        .map(|(index, _)| index)
-        .collect();
-
-    for &index in message_indices.iter().rev().take(2) {
+        .rposition(message_tail_can_carry_cache_control)
+    {
         mark_last_block_cache_control(&mut messages[index], cache_control);
     }
 }
