@@ -7,7 +7,8 @@ use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE
 use super::{
     WebSearchToolUse, anthropic_message_from_sse, append_tool_results, bearer_authorization,
     build_anthropic_upstream_request, emit_injected_web_search_call, find_web_search_tool_uses,
-    internal_web_search_body, merge_anthropic_betas, raw_sse_has_first_content_token,
+    insert_metadata_user_id, internal_web_search_body, merge_anthropic_betas,
+    raw_sse_has_first_content_token,
 };
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
@@ -359,10 +360,8 @@ fn builds_anthropic_request_with_claude_code_block_level_ephemeral_cache() {
 
     assert!(body.get("cache_control").is_none());
     assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-    // The caller's upstream ttl:1h marker is stripped when tools are rebuilt;
-    // our AUTO policy then re-marks the last tool with a plain 5m ephemeral.
-    assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
-    assert!(body["tools"][0]["cache_control"].get("ttl").is_none());
+    // tools do not carry a breakpoint (upstream cache_control is stripped).
+    assert!(body["tools"][0].get("cache_control").is_none());
     assert_eq!(
         body["messages"][0]["content"][0]["cache_control"]["type"],
         "ephemeral"
@@ -371,7 +370,7 @@ fn builds_anthropic_request_with_claude_code_block_level_ephemeral_cache() {
 }
 
 #[test]
-fn caches_latest_user_message_only() {
+fn caches_conversation_tail_only() {
     let mut req = request(vec![
         message("user", "start"),
         message("assistant", "old answer"),
@@ -385,10 +384,8 @@ fn caches_latest_user_message_only() {
 
     assert!(body.get("system").is_none());
     assert!(body.get("cache_control").is_none());
-    // OpenCode AUTO: the single message breakpoint lands on the latest user
-    // message (idx 4). The assistant tail at idx 3 is deliberately not marked --
-    // its index shifts every turn, and re-marking a moving position strips the
-    // previous turn's cache_control and breaks the prefix.
+    // Single rolling breakpoint on the conversation tail (idx 4), matching
+    // Claude Code. Earlier messages stay unmarked.
     assert_eq!(
         body["messages"][4]["content"][0]["cache_control"]["type"],
         "ephemeral"
@@ -404,31 +401,30 @@ fn caches_latest_user_message_only() {
 }
 
 #[test]
-fn does_not_cache_trailing_assistant_message() {
-    // When the conversation tail is an assistant turn, the breakpoint walks back
-    // to the latest user message rather than marking the assistant.
+fn caches_trailing_assistant_message() {
+    // The breakpoint follows the tail, so an assistant tail (e.g. a final text
+    // answer) carries it, mirroring Claude Code.
     let mut req = request(vec![message("user", "run"), message("assistant", "answer")]);
     req.instructions = None;
 
     let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
 
-    assert_eq!(body["messages"][0]["role"], "user");
+    assert_eq!(body["messages"][1]["role"], "assistant");
     assert_eq!(
-        body["messages"][0]["content"][0]["cache_control"]["type"],
+        body["messages"][1]["content"][0]["cache_control"]["type"],
         "ephemeral"
     );
-    assert_eq!(body["messages"][1]["role"], "assistant");
     assert!(
-        body["messages"][1]["content"][0]
+        body["messages"][0]["content"][0]
             .get("cache_control")
             .is_none()
     );
 }
 
 #[test]
-fn marks_last_text_block_of_latest_user_message() {
+fn marks_last_text_block_of_tail_message() {
     // A user message may carry an image/media block after its text; the
-    // breakpoint prefers the last text block, matching OpenCode's markMessageAt.
+    // breakpoint prefers the last text block, matching Claude Code's placement.
     let mut multi = message("user", "ignored");
     multi.content = Some(crate::ai_gateway::model::ItemContent::Parts(vec![
         crate::ai_gateway::model::ContentPart {
@@ -465,73 +461,56 @@ fn marks_last_text_block_of_latest_user_message() {
 }
 
 #[test]
-fn caches_last_tool_definition() {
-    let mut req = request(vec![message("user", "hi")]);
+fn marks_last_block_when_tail_has_no_text() {
+    // A tool_use-only assistant tail (no text block) falls back to the last
+    // content block.
+    let mut tool_call = message("assistant", "ignored");
+    tool_call.item_type = ItemType::FunctionCall;
+    tool_call.content = None;
+    tool_call.name = Some("read_file".to_string());
+    tool_call.call_id = Some("toolu_123".to_string());
+    tool_call.arguments = Some(crate::ai_gateway::model::JsonString::Value(json!({
+        "path": "README.md"
+    })));
+    let mut req = request(vec![message("user", "run"), tool_call]);
     req.instructions = None;
-    req.tools = vec![
-        json!({
-            "type": "function",
-            "name": "read_file",
-            "description": "Read a file",
-            "parameters": {"type": "object", "properties": {}}
-        }),
-        json!({
-            "type": "function",
-            "name": "write_file",
-            "description": "Write a file",
-            "parameters": {"type": "object", "properties": {}}
-        }),
-    ];
 
     let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
 
-    // OpenCode AUTO marks the last tool definition so the whole tools prefix is
-    // cached as one stable, independently reusable segment.
-    let tools = body["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 2);
-    assert!(tools[0].get("cache_control").is_none());
-    assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(
+        body["messages"][1]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
 }
 
 #[test]
-fn respects_four_breakpoint_budget() {
-    // Many system blocks + tools + a user message. The budget is spent in
-    // tools -> system -> messages order and never exceeds the cap of 4.
-    let mut req = request(vec![message("user", "go")]);
+fn marks_exactly_one_message_breakpoint() {
+    let mut req = request(vec![
+        message("user", "first"),
+        message("assistant", "a1"),
+        message("user", "second"),
+    ]);
     req.instructions = None;
-    req.tools = vec![json!({
-        "type": "function",
-        "name": "t",
-        "description": "d",
-        "parameters": {"type": "object", "properties": {}}
-    })];
 
     let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
 
-    let mut breakpoints = 0;
-    if let Some(tools) = body["tools"].as_array() {
-        breakpoints += tools
-            .iter()
-            .filter(|t| t.get("cache_control").is_some())
-            .count();
-    }
-    if let Some(system) = body["system"].as_array() {
-        breakpoints += system
-            .iter()
-            .filter(|s| s.get("cache_control").is_some())
-            .count();
-    }
-    for message in body["messages"].as_array().unwrap() {
-        if let Some(parts) = message["content"].as_array() {
-            breakpoints += parts
-                .iter()
-                .filter(|p| p.get("cache_control").is_some())
-                .count();
-        }
-    }
-    assert!(breakpoints <= 4, "breakpoints {breakpoints} exceed cap");
-    // tools + latest user = 2 (this request has no system array).
-    assert_eq!(breakpoints, 2);
+    let marked = body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|message| {
+            message["content"]
+                .as_array()
+                .and_then(|parts| {
+                    parts
+                        .iter()
+                        .find(|part| part.get("cache_control").is_some())
+                })
+                .is_some()
+        })
+        .count();
+    assert_eq!(marked, 1);
 }
 
 #[test]
@@ -940,9 +919,7 @@ fn preserves_native_anthropic_client_tool_shape() {
 
     let (body, map) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["tools"][0]["name"], "WebSearch");
-    // The caller's upstream ttl:1h marker is stripped when the tool is rebuilt;
-    // AUTO re-marks the last tool with a plain 5m ephemeral breakpoint.
-    assert!(body["tools"][0]["cache_control"].get("ttl").is_none());
+    assert!(body["tools"][0].get("cache_control").is_none());
     assert_eq!(
         body["tools"][0]["input_schema"]["$schema"],
         "https://json-schema.org/draft/2020-12/schema"
@@ -1663,6 +1640,36 @@ fn builds_internal_web_search_body_like_claude_code() {
             .unwrap_or_default(),
         64
     );
+}
+
+#[test]
+fn injects_stable_metadata_user_id_into_main_request() {
+    let mut headers = HeaderMap::new();
+    headers.insert("session_id", HeaderValue::from_static("session-123"));
+    let ctx = GatewayContext::extract(&headers, None);
+
+    let mut body = json!({"model": "claude-opus-4-8", "messages": []});
+    insert_metadata_user_id(&mut body, &ctx);
+
+    let metadata_user = body["metadata"]["user_id"].as_str().unwrap();
+    let metadata: Value = serde_json::from_str(metadata_user).unwrap();
+    assert_eq!(metadata["session_id"], "session-123");
+    assert_eq!(metadata["account_uuid"], "");
+    assert_eq!(metadata["device_id"].as_str().unwrap().len(), 64);
+}
+
+#[test]
+fn preserves_existing_metadata_user_id() {
+    let ctx = GatewayContext::extract(&HeaderMap::new(), Some("cache-key"));
+    let mut body = json!({
+        "model": "claude-opus-4-8",
+        "messages": [],
+        "metadata": {"user_id": "caller-supplied"}
+    });
+
+    insert_metadata_user_id(&mut body, &ctx);
+
+    assert_eq!(body["metadata"]["user_id"], "caller-supplied");
 }
 
 #[test]
