@@ -120,21 +120,34 @@ fn insert_system_cache_control(system: &mut Value, cache_control: &Map<String, V
 }
 
 fn insert_message_cache_control(messages: &mut [Value], cache_control: &Map<String, Value>) {
-    // Cline-style dual rolling breakpoints: mark the last two user messages so
-    // the previous turn's write point (2nd-last user) stays a valid read anchor
-    // while the newest user turn establishes the next write point. Anthropic
-    // filters cache_control out of the prefix hash, so the rolling markers do
-    // not perturb the cached prefix. tool_result messages are role=user, so the
-    // agent-loop tail (…tool_result) is covered naturally.
-    let user_indices: Vec<usize> = messages
+    // Dual rolling breakpoints: mark the last two user/assistant messages.
+    // Claude Code places the message breakpoint on the conversation tail, not
+    // only on user/tool-result turns. Including assistant turns keeps the read
+    // anchor closer to the actual append-only tail. Mid-conversation system
+    // messages are dynamic hints, so skip them as cache anchors.
+    let message_indices: Vec<usize> = messages
         .iter()
         .enumerate()
-        .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
+        .filter(|(_, message)| message_tail_can_carry_cache_control(message))
         .map(|(index, _)| index)
         .collect();
 
-    for &index in user_indices.iter().rev().take(2) {
+    for &index in message_indices.iter().rev().take(2) {
         mark_last_block_cache_control(&mut messages[index], cache_control);
+    }
+}
+
+fn message_tail_can_carry_cache_control(message: &Value) -> bool {
+    if !matches!(
+        message.get("role").and_then(Value::as_str),
+        Some("user" | "assistant")
+    ) {
+        return false;
+    }
+    match message.get("content") {
+        Some(Value::String(text)) => !text.is_empty(),
+        Some(Value::Array(parts)) => parts.last().and_then(Value::as_object).is_some(),
+        _ => false,
     }
 }
 
