@@ -238,8 +238,16 @@ impl InternalSseEnvelope {
         let Some(response) = data.get("response") else {
             return;
         };
-        if let Some(usage) = response.get("usage") {
-            self.merge_usage(usage);
+        // Each inner round emits response.created, response.in_progress and a
+        // terminal response.completed/incomplete/failed, all carrying the same
+        // usage snapshot. Only absorb usage from the terminal event so a single
+        // round is counted once; absorbing every envelope would multiply the
+        // round's usage by the number of envelope events (e.g. 3x), inflating
+        // the reported input token count and tripping premature compaction.
+        if is_round_terminal_envelope(event_type) {
+            if let Some(usage) = response.get("usage") {
+                self.merge_usage(usage);
+            }
         }
         match event_type {
             "response.incomplete" => {
@@ -305,6 +313,13 @@ impl InternalSseEnvelope {
         )
         .await
     }
+}
+
+fn is_round_terminal_envelope(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.completed" | "response.incomplete" | "response.failed"
+    )
 }
 
 fn add_i64(existing: &mut Value, usage: &Value, field: &str) {

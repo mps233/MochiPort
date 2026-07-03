@@ -1852,6 +1852,12 @@ async fn internal_envelope_streams_deltas_and_renumbers_across_rounds() {
     assert_eq!(output.len(), 1);
     assert_eq!(output[0]["type"], "message");
     assert_eq!(completed.1["response"]["usage"]["output_tokens"], 2);
+    // Usage is absorbed once per round from the terminal envelope only. The
+    // inner converter emits response.created + response.in_progress +
+    // response.completed, all carrying the same usage snapshot; absorbing every
+    // envelope would triple the round's input_tokens (3 -> 9) and inflate the
+    // reported context size, tripping premature compaction.
+    assert_eq!(completed.1["response"]["usage"]["input_tokens"], 3);
 }
 
 #[test]

@@ -1,14 +1,15 @@
-# CodexHub v0.3.16
+# CodexHub v0.3.17
 
-## 改进内容
+## 修复
 
-- Anthropic Messages 渠道的消息缓存断点放宽到 `user` + `assistant` 双滚动。此前只在最后两条 `role==user` 消息上打断点，现在改为在最后两条 `user`/`assistant` 消息的尾块上各打一个（跳过 mid-conversation `system`）。抓包实证表明 Claude Code 本身就会把消息断点打在 assistant 尾块（含 `tool_use`）上，放宽后两个断点稳定贴着 append-only 的会话尾巴走，读侧回溯更容易命中上一轮写入的前缀。
-- 补齐 Anthropic prompt caching 生产验证文档。基于真实请求日志（SQLite `ai-gateway-request-logs`）逐轮对比 system/tools 哈希、断点落点与 `cache_read`/`cache_write` 曲线，确认双滚动在前缀稳定时命中率可达 92-94%；并定位到偶发 `cache_read=0` 属于 Anthropic API 服务端分片最终一致性延迟，miss 后下一轮自动恢复，非 Gateway 逻辑问题。
+- 修复 Anthropic / GLM 流式请求上报的 token 用量被放大约 3 倍的严重问题。内层转换器会在 `response.created`、`response.in_progress`、`response.completed` 三个 envelope 事件里各带一份相同的完整 usage 快照，而外层多轮合并逻辑对每个 envelope 都累加一次，导致单轮请求的 `input_tokens` / `cached_tokens` / `cache_creation_tokens` 被乘以 envelope 事件数量（通常 3 倍）。现在只从每轮的终结事件（`response.completed` / `response.incomplete` / `response.failed`）吸收 usage，单轮计一次，多轮 tool_use 仍按轮正确累加。
+  - 直接后果：回传给 Codex 的上下文用量虚高（例如真实 ~82k 被报成 ~247k），叠加为回复预留的 `max_tokens` 后提前撞上模型上下文窗口，触发**过早的上下文压缩（CONTEXT CHECKPOINT COMPACTION）**。修复后压缩时机恢复正常。
+  - 请求日志中的 token 统计与成本计算此前同样被放大，现已恢复准确。
 
 ## 验证
 
 - `cargo fmt`
-- `cargo test`（anthropic_messages 模块 80 项通过）
+- `cargo test`（354 项通过，含新增的单轮 usage 去重回归断言）
 
 ---
 
