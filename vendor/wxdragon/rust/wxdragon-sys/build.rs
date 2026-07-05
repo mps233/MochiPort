@@ -238,23 +238,30 @@ fn build_wxdragon_wrapper(
     // use the correct architecture.  Otherwise it will default to the host
     // CPU and produce arm64 libs that cannot satisfy an x86_64 Rust target.
     if target_os == "macos" {
-        let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-        if !target_arch.is_empty() {
-            // CMake expects "arm64" on macOS, but Rust uses "aarch64" for the
-            // same architecture.  Convert accordingly to avoid passing an invalid
-            // `-arch` argument (see CI failure log).
-            let cmake_arch = match target_arch.as_str() {
-                "aarch64" => "arm64",
-                other => other,
-            };
-
-            cmake_config.define("CMAKE_OSX_ARCHITECTURES", cmake_arch);
-            // propagate via environment as well for nested wxWidgets
-            cmake_config.env("CMAKE_OSX_ARCHITECTURES", cmake_arch);
+        // Prefer WX_OSX_ARCHITECTURES when set (e.g. "arm64;x86_64" for universal
+        // builds in CI); otherwise fall back to single-arch detection from the Rust
+        // target triple.  CMake expects "arm64" on macOS, but Rust uses "aarch64".
+        let osx_arch = if let Ok(arch) = std::env::var("WX_OSX_ARCHITECTURES") {
+            arch
+        } else {
+            let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+            if target_arch.is_empty() {
+                String::new()
+            } else {
+                match target_arch.as_str() {
+                    "aarch64" => "arm64".to_string(),
+                    other => other.to_string(),
+                }
+            }
+        };
+        if !osx_arch.is_empty() {
+            cmake_config.define("CMAKE_OSX_ARCHITECTURES", &osx_arch);
+            cmake_config.env("CMAKE_OSX_ARCHITECTURES", &osx_arch);
             let host_arch = std::env::consts::ARCH;
+            let label = if osx_arch.contains(';') { "universal" } else { &osx_arch };
             println!(
-                "info: macOS build (host={}, target={}), forcing CMAKE_OSX_ARCHITECTURES={}",
-                host_arch, target_arch, cmake_arch
+                "info: macOS build (host={}, arch={}), forcing CMAKE_OSX_ARCHITECTURES={}",
+                host_arch, label, osx_arch
             );
         }
     }

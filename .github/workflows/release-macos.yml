@@ -17,15 +17,10 @@ jobs:
       matrix:
         include:
           - runner: macos-15
-            file_slug: apple-silicon
+            file_slug: universal
             asset_key: macos-universal
             sparkle_key: macos-sparkle-universal
             manifest_name: latest-macos.json
-          - runner: macos-13
-            file_slug: intel
-            asset_key: macos-intel
-            sparkle_key: macos-sparkle-intel
-            manifest_name: latest-macos-intel.json
     env:
       MACOS_FILE_SLUG: ${{ matrix.file_slug }}
       MACOS_ASSET_KEY: ${{ matrix.asset_key }}
@@ -76,7 +71,22 @@ jobs:
           MACOS="$CONTENTS/MacOS"
           RESOURCES="$CONTENTS/Resources"
 
-          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codexhub
+          # Install cross-compilation targets for universal binary
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+          # Build wxWidgets as universal (arm64 + x86_64) and compile for native arch
+          export WX_OSX_ARCHITECTURES="arm64;x86_64"
+          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codexhub --target aarch64-apple-darwin
+
+          # Compile for Intel (wxWidgets libs are already fat, no rebuild needed)
+          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codexhub --target x86_64-apple-darwin
+
+          # Create universal binary
+          mkdir -p target/release
+          lipo -create \
+            target/aarch64-apple-darwin/release/codexhub \
+            target/x86_64-apple-darwin/release/codexhub \
+            -output target/release/codexhub
 
           CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           if [ -z "$CARGO_VERSION" ]; then
