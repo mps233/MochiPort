@@ -48,4 +48,23 @@ Move and update a file:\n\
 Delete a file:\n\
 *** Begin Patch\n\
 *** Delete File: old.txt\n\
+*** End Patch\n\n\
+Update multiple files in one patch:\n\
+*** Begin Patch\n\
+*** Update File: src/lib.rs\n\
+@@\n\
+-pub mod old;\n\
++pub mod new;\n\
+*** Update File: README.md\n\
+@@\n\
+-Old heading\n\
++New heading\n\
+*** End Patch\n\n\
+Insert at end of file:\n\
+*** Begin Patch\n\
+*** Update File: notes.md\n\
+@@\n\
+ existing final line\n\
+*** End of File\n\
++appended line\n\
 *** End Patch";

@@ -355,6 +355,7 @@ fn convert_input_to_messages(
     tool_name_map: &mut ToolNameMap,
 ) -> Result<(), String> {
     let mut removed_tool_call_ids = std::collections::HashSet::new();
+    let mut seen_tool_call_ids = std::collections::HashSet::new();
     let mut i = 0;
     while i < items.len() {
         let item = &items[i];
@@ -407,6 +408,7 @@ fn convert_input_to_messages(
                     i,
                     messages,
                     &mut removed_tool_call_ids,
+                    &mut seen_tool_call_ids,
                     tool_name_map,
                 );
             }
@@ -421,6 +423,7 @@ fn convert_input_to_messages(
                     i,
                     messages,
                     &mut removed_tool_call_ids,
+                    &mut seen_tool_call_ids,
                     tool_name_map,
                 );
             }
@@ -441,6 +444,11 @@ fn convert_input_to_messages(
                         .map(|output| output.to_chat_tool_content())
                         .ok_or_else(|| "function_call_output missing output".to_string())?,
                 };
+                if call_id.is_empty() || !seen_tool_call_ids.contains(call_id) {
+                    messages.push(orphan_tool_output_message(call_id, &output));
+                    i += 1;
+                    continue;
+                }
                 messages.push(json!({
                     "role": "tool",
                     "tool_call_id": call_id,
@@ -464,6 +472,7 @@ fn convert_reasoning_with_following(
     start: usize,
     messages: &mut Vec<Value>,
     removed_tool_call_ids: &mut std::collections::HashSet<String>,
+    seen_tool_call_ids: &mut std::collections::HashSet<String>,
     tool_name_map: &mut ToolNameMap,
 ) -> usize {
     let reasoning_item = &items[start];
@@ -478,6 +487,7 @@ fn convert_reasoning_with_following(
             if let Some(tool_call) =
                 build_function_tool_call(&items[i], tool_calls.len(), tool_name_map)
             {
+                remember_seen_tool_call(&items[i], seen_tool_call_ids);
                 tool_calls.push(tool_call);
             } else {
                 remember_removed_tool_call(&items[i], removed_tool_call_ids);
@@ -531,6 +541,7 @@ fn convert_function_calls(
     start: usize,
     messages: &mut Vec<Value>,
     removed_tool_call_ids: &mut std::collections::HashSet<String>,
+    seen_tool_call_ids: &mut std::collections::HashSet<String>,
     tool_name_map: &mut ToolNameMap,
 ) -> usize {
     let mut tool_calls = Vec::new();
@@ -539,6 +550,7 @@ fn convert_function_calls(
         if let Some(tool_call) =
             build_function_tool_call(&items[i], tool_calls.len(), tool_name_map)
         {
+            remember_seen_tool_call(&items[i], seen_tool_call_ids);
             tool_calls.push(tool_call);
         } else {
             remember_removed_tool_call(&items[i], removed_tool_call_ids);
@@ -624,6 +636,27 @@ fn remember_removed_tool_call(
     if let Some(id) = item.id.as_deref().filter(|s| !s.is_empty()) {
         removed_tool_call_ids.insert(id.to_string());
     }
+}
+
+fn remember_seen_tool_call(
+    item: &ResponseItem,
+    seen_tool_call_ids: &mut std::collections::HashSet<String>,
+) {
+    if let Some(call_id) = item.call_id.as_deref().filter(|s| !s.is_empty()) {
+        seen_tool_call_ids.insert(call_id.to_string());
+    }
+}
+
+fn orphan_tool_output_message(call_id: &str, output: &str) -> Value {
+    let call_id = if call_id.is_empty() {
+        "<missing>"
+    } else {
+        call_id
+    };
+    json!({
+        "role": "user",
+        "content": format!("Function call output ({call_id}): {output}"),
+    })
 }
 
 fn should_drop_message_after_tool_filtering(msg: &Value) -> bool {
@@ -1128,6 +1161,27 @@ mod tests {
 
     #[test]
     fn test_function_call_output_to_tool_message() {
+        let mut fc = make_item(ItemType::FunctionCall);
+        fc.call_id = Some("call_1".into());
+        fc.name = Some("get_weather".into());
+        fc.arguments = Some(r#"{"city":"NYC"}"#.into());
+
+        let mut fco = make_item(ItemType::FunctionCallOutput);
+        fco.call_id = Some("call_1".into());
+        fco.output = Some("sunny".into());
+
+        let req = make_request(vec![fc, fco]);
+        let body = build_chat_request(&req, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_1");
+        assert_eq!(msgs[1]["content"], "sunny");
+    }
+
+    #[test]
+    fn test_orphan_function_call_output_downgrades_to_user_message() {
         let mut fco = make_item(ItemType::FunctionCallOutput);
         fco.call_id = Some("call_1".into());
         fco.output = Some("sunny".into());
@@ -1136,9 +1190,9 @@ mod tests {
         let body = build_chat_request(&req, false).unwrap();
         let msgs = body["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0]["role"], "tool");
-        assert_eq!(msgs[0]["tool_call_id"], "call_1");
-        assert_eq!(msgs[0]["content"], "sunny");
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "Function call output (call_1): sunny");
+        assert!(msgs[0].get("tool_call_id").is_none());
     }
 
     #[test]
@@ -1146,25 +1200,34 @@ mod tests {
         let raw = r#"{
             "model": "test",
             "stream": false,
-            "input": [{
-                "type": "function_call_output",
-                "call_id": "call_1",
-                "output": [
-                    {"type": "input_text", "text": "line one"},
-                    {"type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "high"},
-                    {"type": "input_text", "text": "line two"}
-                ]
-            }]
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "read_file",
+                    "arguments": {"path":"README.md"}
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": [
+                        {"type": "input_text", "text": "line one"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "high"},
+                        {"type": "input_text", "text": "line two"}
+                    ]
+                }
+            ]
         }"#;
 
         let req: GatewayRequest = serde_json::from_str(raw).unwrap();
         let body = build_chat_request(&req, true).unwrap();
         let msgs = body["messages"].as_array().unwrap();
 
-        assert_eq!(msgs.len(), 1);
-        assert_eq!(msgs[0]["role"], "tool");
-        assert_eq!(msgs[0]["tool_call_id"], "call_1");
-        assert_eq!(msgs[0]["content"], "line one\nline two");
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_1");
+        assert_eq!(msgs[1]["content"], "line one\nline two");
     }
 
     #[test]
@@ -2125,6 +2188,14 @@ mod tests {
 
     #[test]
     fn test_tool_search_output_exposes_loaded_tools_to_chat() {
+        let mut search = make_item(ItemType::ToolSearchCall);
+        search.call_id = Some("search_1".into());
+        search.execution = Some("client".into());
+        search.arguments = Some(JsonString::Value(json!({
+            "query": "codex app",
+            "limit": 1
+        })));
+
         let mut output = make_item(ItemType::ToolSearchOutput);
         output.call_id = Some("search_1".into());
         output.status = Some("completed".into());
@@ -2141,10 +2212,10 @@ mod tests {
             }]
         })]);
 
-        let req = make_request(vec![output]);
+        let req = make_request(vec![search, output]);
         let (body, tool_name_map) = build_chat_request_with_tool_names(&req, false).unwrap();
-        assert_eq!(body["messages"][0]["role"], "tool");
-        assert_eq!(body["messages"][0]["tool_call_id"], "search_1");
+        assert_eq!(body["messages"][1]["role"], "tool");
+        assert_eq!(body["messages"][1]["tool_call_id"], "search_1");
         assert_eq!(
             body["tools"][0]["function"]["name"],
             "codex_app__codexns__read_thread_terminal"
