@@ -1,3 +1,16 @@
+CodexHub v0.3.23
+
+本次为聚焦修复版本，解决插件目录里出现"能看见但装不了"的插件问题，让 API 登录环境下的插件列表回归可用状态。
+
+## 插件 — 移除重复且无法安装的远程目录
+
+- **停止提供重复的 curated-remote 目录**：Codex 桌面端会合并两个独立的插件来源——本地磁盘的 `openai-curated` marketplace（显示为"Codex official"），以及 codexhub 通过 HTTP 暴露的"远程"目录 `/backend-api/ps/plugins/*`。此前 codexhub 把同一批 curated 插件又用远程目录暴露了一遍，导致桌面端多出一个"OpenAI Curated Remote"标签页，而该标签页里的插件安装会走远程分支、因缺少 HTTPS `bundle_download_url` 而报 `MissingBundleDownloadUrl`（即"插件安装失败"）。现在 `ps/plugins/list` 返回空目录，去掉这个装不了的重复标签页，本地"Codex official"标签页原样保留、安装照常成功。
+- **精选插件指向本地目录**：featured 插件 id 改为指向本地 `openai-curated` marketplace，让高亮命中真正存在、可安装的条目。
+- **过滤依赖远程后端的插件**：配置初始化时，从磁盘 marketplace 清单中过滤掉需要远程 OpenAI 后端的插件（`.app.json` 连接器，以及 HTTP/SSE 传输的 `.mcp.json`），只保留本地可用的技能类与本地 stdio MCP 插件。
+- **强制关闭 host 托管的 codex_apps 并清理连接器缓存**：将 `features.apps` 固定为 `false`，并在配置流程中清除过期的连接器目录缓存，避免 Gmail / Google Drive / GitHub 等远程连接器泄漏进插件目录。
+
+---
+
 CodexHub v0.3.22
 
 这是一个大版本累积更新，涵盖了 AI Gateway 路由与流式、GUI 性能与桌面体验、macOS 构建体系、Anthropic/Claude Code 对齐等多个方向的改进。
