@@ -14,6 +14,7 @@ use serde_json::Value;
 
 use crate::{
     ai_gateway::request_log::RequestLogStore,
+    ai_gateway::routing_state::GatewayRoutingState,
     chain_log,
     codex::CodexNotification,
     config::AppConfig,
@@ -29,6 +30,7 @@ pub struct AppState {
     pub config: Mutex<AppConfig>,
     pub ai_gateway_http_client: reqwest::Client,
     pub ai_gateway_request_logs: RequestLogStore,
+    pub ai_gateway_routing: Mutex<GatewayRoutingState>,
     pub persisted: Mutex<PersistedState>,
     pub runtime: Mutex<RuntimeState>,
     pub remote_control: RemoteControlState,
@@ -336,6 +338,7 @@ impl AppState {
             config: Mutex::new(config),
             ai_gateway_http_client: reqwest::Client::new(),
             ai_gateway_request_logs,
+            ai_gateway_routing: Mutex::new(GatewayRoutingState::default()),
             persisted: Mutex::new(persisted),
             runtime: Mutex::new(runtime),
             remote_control: RemoteControlState::new(),

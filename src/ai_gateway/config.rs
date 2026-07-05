@@ -1,4 +1,5 @@
-﻿use std::collections::BTreeMap;
+use std::cmp::Ordering;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -54,52 +55,55 @@ impl AiGatewayConfig {
         self.select_provider_for_session(model, None)
     }
 
-    /// 按 model 名和 session_id 选择已启用的 provider。
+    /// 按 model 名和 session_id 选择已启用的 provider（无路由状态版本）。
     ///
-    /// 同一个 model 可以配置到多个 provider；有 session_id 时使用 Rendezvous/HRW
-    /// Hash 在候选 provider 中稳定选择一个。没有 session_id 时保持旧行为：
-    /// 返回配置顺序中的第一个匹配 provider。
+    /// 权重语义是**优先级**：权重最高的 provider 优先命中；权重相同的一组内用
+    /// Rendezvous/HRW Hash 按 session 稳定分流（无 session 时用 route_id 稳定排序）。
+    /// 该版本不感知熔断/粘性，仅用于不需要状态的调用点。
     pub fn select_provider_for_session(
         &self,
         model: &str,
         session_id: Option<&str>,
     ) -> Option<&ProviderConfig> {
-        let candidates = self
+        let candidates: Vec<&ProviderConfig> = self
             .providers
             .iter()
-            .filter(|provider| provider.enabled && provider.matches_model(model));
-        let Some(session_id) = session_id.map(str::trim).filter(|value| !value.is_empty()) else {
-            return candidates
-                .into_iter()
-                .max_by_key(|provider| provider.effective_weight());
-        };
-
-        candidates.into_iter().max_by(|left, right| {
-            compare_weighted_hrw_provider(session_id, left, right)
-                .then_with(|| provider_route_id(left).cmp(&provider_route_id(right)))
-        })
+            .filter(|provider| provider.enabled && provider.matches_model(model))
+            .collect();
+        select_by_priority(&candidates, session_id)
     }
 }
 
-fn compare_weighted_hrw_provider(
-    session_id: &str,
-    left: &ProviderConfig,
-    right: &ProviderConfig,
-) -> std::cmp::Ordering {
-    let left_score = weighted_hrw_score(session_id, left);
-    let right_score = weighted_hrw_score(session_id, right);
-    left_score.total_cmp(&right_score)
+/// 在候选 provider 中按「优先级（权重降序）+ 同权重组内 HRW 分流」选择一个。
+///
+/// 这是路由的核心排序：先比 `effective_weight`（高者胜），权重相同再比 HRW 分数
+/// （有 session 时按 session 稳定散列，无 session 时退化为 route_id 字典序）。
+pub(crate) fn select_by_priority<'a>(
+    candidates: &[&'a ProviderConfig],
+    session_id: Option<&str>,
+) -> Option<&'a ProviderConfig> {
+    let session_id = session_id.map(str::trim).filter(|value| !value.is_empty());
+    candidates.iter().copied().max_by(|left, right| {
+        left.effective_weight()
+            .cmp(&right.effective_weight())
+            .then_with(|| match session_id {
+                Some(sid) => hrw_score(sid, left).total_cmp(&hrw_score(sid, right)),
+                None => Ordering::Equal,
+            })
+            .then_with(|| provider_route_id(left).cmp(&provider_route_id(right)))
+    })
 }
 
-fn weighted_hrw_score(session_id: &str, provider: &ProviderConfig) -> f64 {
+/// 同权重组内的稳定分流分数（越大越优先）。仅用于打散权重相同的候选，不再跨权重
+/// 做按比例分流。
+fn hrw_score(session_id: &str, provider: &ProviderConfig) -> f64 {
     let hash = hrw_hash_u64(session_id, provider);
-    let normalized = ((hash as f64) + 1.0) / ((u64::MAX as f64) + 1.0);
-    normalized.ln() / provider.effective_weight() as f64
+    ((hash as f64) + 1.0) / ((u64::MAX as f64) + 1.0)
 }
 
 fn hrw_hash_u64(session_id: &str, provider: &ProviderConfig) -> u64 {
     let mut hasher = Sha256::new();
-    hasher.update(b"codexhub-ai-gateway-weighted-hrw-v1\0");
+    hasher.update(b"codexhub-ai-gateway-hrw-v2\0");
     hasher.update(session_id.as_bytes());
     hasher.update(b"\0");
     hasher.update(provider_route_id(provider).as_bytes());
@@ -107,7 +111,7 @@ fn hrw_hash_u64(session_id: &str, provider: &ProviderConfig) -> u64 {
     u64::from_be_bytes(digest[..8].try_into().expect("sha256 digest has 32 bytes"))
 }
 
-fn provider_route_id(provider: &ProviderConfig) -> String {
+pub(crate) fn provider_route_id(provider: &ProviderConfig) -> String {
     let name = provider.name.trim();
     let base_url = provider.base_url.trim();
     format!(
@@ -430,6 +434,70 @@ mod tests {
             .count();
 
         assert!(high_count > 180, "high provider selected {high_count}/200");
+    }
+
+    #[test]
+    fn weight_is_priority_not_proportional() {
+        // 复现用户报的 bug：100 vs 99 应始终选权重高的（优先级语义），
+        // 而不是按比例 ~50/50 分流。
+        let mut openai = make_provider(
+            "openai",
+            ProviderType::OpenAiResponses,
+            vec!["gpt-5.4-mini"],
+        );
+        openai.weight = 100;
+        let mut deepseek = make_provider(
+            "deepseek",
+            ProviderType::ChatCompletions,
+            vec!["deepseek-v4-flash"],
+        );
+        deepseek.weight = 99;
+        deepseek
+            .model_aliases
+            .insert("gpt-5.4-mini".into(), "deepseek-v4-flash".into());
+        let config = make_config(vec![openai, deepseek]);
+
+        for idx in 0..200 {
+            let picked = config
+                .select_provider_for_session("gpt-5.4-mini", Some(&format!("s-{idx}")))
+                .unwrap();
+            assert_eq!(picked.name, "openai", "session s-{idx} should hit openai");
+        }
+    }
+
+    #[test]
+    fn equal_weight_distributes_by_session() {
+        // 权重相同的一组内按 session 稳定分流，两个都应拿到一部分流量。
+        let mut a = make_provider("a", ProviderType::OpenAiResponses, vec!["gpt-5.5"]);
+        a.weight = 50;
+        let mut b = make_provider("b", ProviderType::OpenAiResponses, vec!["gpt-5.5"]);
+        b.weight = 50;
+        let config = make_config(vec![a, b]);
+
+        let a_count = (0..200)
+            .filter(|idx| {
+                config
+                    .select_provider_for_session("gpt-5.5", Some(&format!("s-{idx}")))
+                    .is_some_and(|p| p.name == "a")
+            })
+            .count();
+        assert!(
+            (40..=160).contains(&a_count),
+            "equal weights should split, a got {a_count}/200"
+        );
+
+        // 同一 session 始终稳定映射到同一个 provider（确定性）。
+        let first = config
+            .select_provider_for_session("gpt-5.5", Some("stable"))
+            .unwrap()
+            .name
+            .clone();
+        for _ in 0..10 {
+            let again = config
+                .select_provider_for_session("gpt-5.5", Some("stable"))
+                .unwrap();
+            assert_eq!(again.name, first);
+        }
     }
 
     #[test]

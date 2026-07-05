@@ -22,7 +22,7 @@ use super::providers::{anthropic_messages, deepseek_chat, openai_responses};
 use super::request_log::{
     self, RequestLogContext, RequestLogRecord, RequestLogStore, RequestLogUpdate,
 };
-use super::router::resolve_provider;
+use super::router::resolve_provider_with_state;
 
 /// POST /ai-gateway/v1/responses
 pub async fn handle_responses(
@@ -59,28 +59,41 @@ pub async fn handle_responses(
     let body_cache_key = envelope.prompt_cache_key.as_deref();
     let ctx = GatewayContext::extract(&headers, body_cache_key);
 
-    // 3. 路由到 provider
-    let provider = match resolve_provider(&envelope.model, ctx.session_id.as_deref(), &gw_config) {
-        Ok(p) => p,
-        Err(e) => {
-            let log_context = request_logging_enabled
-                .then(|| {
-                    insert_initial_log(
-                        &state.ai_gateway_request_logs,
-                        &ctx,
-                        &headers,
-                        &envelope,
-                        None,
-                        &raw_body,
-                        started_at,
-                        created_at_ms,
-                    )
-                })
-                .flatten();
-            update_failed_log(&log_context, &e.message);
-            return e.into_response();
+    // 3. 路由到 provider（状态感知：熔断健康 + 会话粘性 + 权重优先级）
+    let routing_now = Instant::now();
+    let (provider, route_id) = {
+        let mut routing = state.ai_gateway_routing.lock().await;
+        routing.evict_stale(routing_now);
+        match resolve_provider_with_state(
+            &envelope.model,
+            ctx.session_id.as_deref(),
+            &gw_config,
+            &mut routing,
+            routing_now,
+        ) {
+            Ok((provider, route_id)) => (provider, route_id),
+            Err(e) => {
+                drop(routing);
+                let log_context = request_logging_enabled
+                    .then(|| {
+                        insert_initial_log(
+                            &state.ai_gateway_request_logs,
+                            &ctx,
+                            &headers,
+                            &envelope,
+                            None,
+                            &raw_body,
+                            started_at,
+                            created_at_ms,
+                        )
+                    })
+                    .flatten();
+                update_failed_log(&log_context, &e.message);
+                return e.into_response();
+            }
         }
     };
+
     let log_context = request_logging_enabled
         .then(|| {
             insert_initial_log(
@@ -113,7 +126,7 @@ pub async fn handle_responses(
         .to_string();
     match provider.provider_type {
         ProviderType::OpenAiResponses => {
-            match openai_responses::passthrough(
+            let result = openai_responses::passthrough(
                 &state.ai_gateway_http_client,
                 &ctx,
                 raw_body,
@@ -121,8 +134,10 @@ pub async fn handle_responses(
                 provider,
                 log_context.clone(),
             )
-            .await
-            {
+            .await;
+            let outcome = classify_outcome(&result);
+            record_routing_outcome(&state, &route_id, outcome).await;
+            match result {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
                     resp.into_response()
@@ -144,7 +159,7 @@ pub async fn handle_responses(
             };
             let mut upstream_request = request.clone();
             upstream_request.model = upstream_model;
-            match deepseek_chat::handle(
+            let result = deepseek_chat::handle(
                 &state.ai_gateway_http_client,
                 &ctx,
                 &upstream_request,
@@ -152,8 +167,10 @@ pub async fn handle_responses(
                 provider,
                 log_context.clone(),
             )
-            .await
-            {
+            .await;
+            let outcome = classify_outcome(&result);
+            record_routing_outcome(&state, &route_id, outcome).await;
+            match result {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
                     resp.into_response()
@@ -175,7 +192,7 @@ pub async fn handle_responses(
             };
             let mut upstream_request = request.clone();
             upstream_request.model = upstream_model;
-            match anthropic_messages::handle(
+            let result = anthropic_messages::handle(
                 &state.ai_gateway_http_client,
                 &ctx,
                 &upstream_request,
@@ -183,8 +200,10 @@ pub async fn handle_responses(
                 provider,
                 log_context.clone(),
             )
-            .await
-            {
+            .await;
+            let outcome = classify_outcome(&result);
+            record_routing_outcome(&state, &route_id, outcome).await;
+            match result {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
                     resp.into_response()
@@ -196,6 +215,43 @@ pub async fn handle_responses(
             }
         }
     }
+}
+
+/// 上游调用结果对熔断的分类。从 `Result<Response, _>` 提炼成只含 Send 信息的值，
+/// 避免把 `!Sync` 的 axum Response body 跨 await 持有。
+#[derive(Clone, Copy)]
+enum RoutingOutcome {
+    /// 成功：清零失败计数、解除拉黑。
+    Success,
+    /// 上游故障（5xx / 429 / 408 / 504）：计入熔断。
+    UpstreamFailure,
+    /// 客户端错误等：不影响熔断健康。
+    Ignore,
+}
+
+fn classify_outcome<T>(result: &Result<T, GatewayError>) -> RoutingOutcome {
+    match result {
+        Ok(_) => RoutingOutcome::Success,
+        Err(e) if is_circuit_breaker_failure(e.status) => RoutingOutcome::UpstreamFailure,
+        Err(_) => RoutingOutcome::Ignore,
+    }
+}
+
+/// 根据上游调用结果更新渠道熔断健康：成功清零、可熔断失败累加。
+async fn record_routing_outcome(state: &SharedState, route_id: &str, outcome: RoutingOutcome) {
+    let mut routing = state.ai_gateway_routing.lock().await;
+    match outcome {
+        RoutingOutcome::Success => routing.record_success(route_id),
+        RoutingOutcome::UpstreamFailure => routing.record_failure(route_id, Instant::now()),
+        RoutingOutcome::Ignore => {}
+    }
+}
+
+/// 该 HTTP 状态是否属于「上游渠道故障」，应计入熔断。
+fn is_circuit_breaker_failure(status: axum::http::StatusCode) -> bool {
+    status.is_server_error()
+        || status == axum::http::StatusCode::TOO_MANY_REQUESTS
+        || status == axum::http::StatusCode::REQUEST_TIMEOUT
 }
 
 fn deserialize_gateway_request(raw_body: serde_json::Value) -> Result<GatewayRequest, String> {
