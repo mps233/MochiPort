@@ -1,6 +1,6 @@
 [package]
 name = "codexhub"
-version = "0.3.25"
+version = "0.3.26"
 edition = "2024"
 license = "Apache-2.0"
 build = "build.rs"
@@ -39,6 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
 wxdragon = { version = "0.9.17", optional = true }
+zip = { version = "2", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"] }

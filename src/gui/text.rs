@@ -209,6 +209,24 @@ impl GuiText {
         }
     }
 
+    pub(super) fn export_connection_diagnostics(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "导出连接诊断包",
+            GuiLocale::EnUs => "Export Connection Diagnostics",
+        }
+    }
+
+    pub(super) fn export_connection_diagnostics_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "导出 Codex / VSCode / CLI 连接状态和最近日志，不包含 AI Gateway 请求日志"
+            }
+            GuiLocale::EnUs => {
+                "Export Codex / VS Code / CLI connection state and recent logs without AI Gateway request logs"
+            }
+        }
+    }
+
     pub(super) fn about(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "关于 CodexHub",
@@ -1673,6 +1691,27 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "本地 remote-control backend + 聊天工具桥接。",
             GuiLocale::EnUs => "Local remote-control backend with chat integration bridges.",
+        }
+    }
+
+    pub(super) fn diagnostics_export_save_dialog_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存连接诊断包",
+            GuiLocale::EnUs => "Save Connection Diagnostics",
+        }
+    }
+
+    pub(super) fn diagnostics_export_zip_wildcard(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "ZIP 压缩包 (*.zip)|*.zip",
+            GuiLocale::EnUs => "ZIP archives (*.zip)|*.zip",
+        }
+    }
+
+    pub(super) fn diagnostics_export_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("导出连接诊断包失败：{err}"),
+            GuiLocale::EnUs => format!("Failed to export connection diagnostics: {err}"),
         }
     }
 

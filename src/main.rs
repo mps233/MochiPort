@@ -9,6 +9,7 @@ mod codex;
 mod codex_app_config;
 mod codex_session_history;
 mod config;
+mod diagnostics_export;
 #[cfg(feature = "gui")]
 mod gui;
 mod im;

@@ -1,6 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     collections::BTreeMap,
+    path::{Path, PathBuf},
     process::Child,
     rc::Rc,
     sync::{
@@ -28,6 +29,9 @@ use crate::ai_gateway::config::{
     provider_display_base_url,
 };
 use crate::config::{AppConfig, LocalConnectionMode};
+use crate::diagnostics_export::{
+    ConnectionDiagnosticsInput, connection_status_snapshot, export_connection_diagnostics_to_path,
+};
 
 #[cfg(target_os = "windows")]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
@@ -75,6 +79,7 @@ const ID_MENU_THEME_LIGHT: i32 = 10_007;
 const ID_MENU_THEME_DARK: i32 = 10_008;
 const ID_SERVICE_CONNECTION_SWITCH: i32 = 10_009;
 const ID_MENU_QUIT: i32 = 10_010;
+const ID_MENU_EXPORT_CONNECTION_DIAGNOSTICS: i32 = 10_011;
 
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
@@ -88,6 +93,7 @@ type RequestLogDetailResultStore =
     Arc<Mutex<Option<(i64, Result<self::api::RequestLogDetail, String>)>>>;
 type RequestLogClearResultStore = Arc<Mutex<Option<Result<usize, String>>>>;
 type FetchModelsResultStore = Arc<Mutex<Option<Result<(Vec<String>, String), String>>>>;
+type DiagnosticsExportResultStore = Arc<Mutex<Option<Result<PathBuf, String>>>>;
 
 /// Messages sent from background threads to the GUI thread via idle events
 enum GuiMessage {
@@ -95,6 +101,7 @@ enum GuiMessage {
     ImAction(ImActionResult),
     AiGwAction(AiGwActionResult),
     DashboardUpdate,
+    DiagnosticsExport,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -298,12 +305,15 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     frame.set_icon(&app_icon_bitmap(48));
     let update_check_in_flight = Arc::new(AtomicBool::new(false));
     let quitting = Rc::new(AtomicBool::new(false));
+    let diagnostics_export_result: DiagnosticsExportResultStore = Arc::new(Mutex::new(None));
     install_system_menu(
         &frame,
         &gui_timers,
         text,
         update_check_in_flight.clone(),
         quitting.clone(),
+        gui_tx.clone(),
+        diagnostics_export_result.clone(),
     );
     let tray_controller = tray::install(
         &frame,
@@ -1555,6 +1565,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let request_log_detail_result = request_log_detail_result.clone();
         let request_log_in_flight = request_log_in_flight.clone();
         let request_log_clear_result = request_log_clear_result.clone();
+        let diagnostics_export_result = diagnostics_export_result.clone();
         let request_logs_active = request_logs_active.clone();
         let request_log_clear_old_button = request_log_clear_old_button;
         let request_log_clear_all_button = request_log_clear_all_button;
@@ -1594,6 +1605,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             {
                 force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
             }
+            apply_pending_diagnostics_export(&frame, handles.text, &diagnostics_export_result);
 
             // Drain a bounded batch of background results to keep the GUI snappy.
             let mut processed = 0;
@@ -1630,6 +1642,13 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                             }
                             GuiMessage::DashboardUpdate => {
                                 apply_pending_dashboard(&handles, &dashboard_refresh, &api, &frame);
+                            }
+                            GuiMessage::DiagnosticsExport => {
+                                apply_pending_diagnostics_export(
+                                    &frame,
+                                    handles.text,
+                                    &diagnostics_export_result,
+                                );
                             }
                         }
                     }
@@ -1861,12 +1880,124 @@ fn save_gui_theme(mode: ThemeMode) -> Result<(), String> {
     config.save(&path).map_err(|err| err.to_string())
 }
 
+fn export_connection_diagnostics_async(
+    text: GuiText,
+    gui_tx: tokio_mpsc::UnboundedSender<GuiMessage>,
+    result_store: DiagnosticsExportResultStore,
+    output_path: PathBuf,
+) {
+    thread::spawn(move || {
+        let outcome = export_connection_diagnostics_now(text, &output_path);
+        if let Ok(mut slot) = result_store.lock() {
+            slot.replace(outcome);
+        }
+        let _ = gui_tx.send(GuiMessage::DiagnosticsExport);
+        wxdragon::wake_up_idle();
+    });
+}
+
+fn export_connection_diagnostics_now(text: GuiText, output_path: &Path) -> Result<PathBuf, String> {
+    let config_path = daemon_config_path().unwrap_or_else(app_support_config_path);
+    let mut config = AppConfig::load_or_default(&config_path).map_err(|err| err.to_string())?;
+    normalize_gui_config_paths(&mut config, &config_path);
+    let api = ApiClient::new(local_service_base_url(config.local_connection_mode), text);
+    let input = ConnectionDiagnosticsInput {
+        app_version: text.version().to_string(),
+        base_url: api.base_url.clone(),
+        config_path: config_path.clone(),
+        state_path: config.state_path.clone(),
+        remote_status: Some(connection_status_snapshot(
+            "/api/remote-control/status",
+            api.get_quick_json("/api/remote-control/status"),
+        )),
+        codex_app_status: Some(connection_status_snapshot(
+            "/api/codex-app/status",
+            api.get_quick_json("/api/codex-app/status"),
+        )),
+        service_status: Some(connection_status_snapshot(
+            "/api/status",
+            api.get_quick_json("/api/status"),
+        )),
+        dashboard: None,
+    };
+    export_connection_diagnostics_to_path(&input, output_path)
+        .map(|export| export.path)
+        .map_err(|err| err.to_string())
+}
+
+fn default_diagnostics_export_path() -> PathBuf {
+    default_user_export_dir().join(format!(
+        "codexhub-connection-diagnostics-{}.zip",
+        timestamp_ms()
+    ))
+}
+
+fn prompt_diagnostics_export_path(parent: &dyn WxWidget, text: GuiText) -> Option<PathBuf> {
+    let default_path = default_diagnostics_export_path();
+    let default_dir = default_path
+        .parent()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let default_file = default_path
+        .file_name()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "codexhub-connection-diagnostics.zip".to_string());
+    let dialog = FileDialog::builder(parent)
+        .with_message(text.diagnostics_export_save_dialog_title())
+        .with_default_dir(&default_dir)
+        .with_default_file(&default_file)
+        .with_wildcard(text.diagnostics_export_zip_wildcard())
+        .with_style(FileDialogStyle::Save | FileDialogStyle::OverwritePrompt)
+        .build();
+    if dialog.show_modal() != ID_OK {
+        return None;
+    }
+    dialog.get_path().map(PathBuf::from)
+}
+
+fn default_user_export_dir() -> PathBuf {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from);
+    home.as_ref()
+        .map(|home| home.join("Desktop"))
+        .filter(|path| path.is_dir())
+        .or_else(|| {
+            home.as_ref()
+                .map(|home| home.join("Downloads"))
+                .filter(|path| path.is_dir())
+        })
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn timestamp_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn normalize_gui_config_paths(config: &mut AppConfig, config_path: &Path) {
+    let base = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    if config.state_path.is_relative() {
+        config.state_path = base.join(&config.state_path);
+    }
+}
+
 fn install_system_menu(
     frame: &Frame,
     gui_timers: &GuiTimers,
     text: GuiText,
     update_check_in_flight: Arc<AtomicBool>,
     quitting: Rc<AtomicBool>,
+    gui_tx: tokio_mpsc::UnboundedSender<GuiMessage>,
+    diagnostics_export_result: DiagnosticsExportResultStore,
 ) {
     let file_menu = Menu::builder()
         .append_item(
@@ -1919,6 +2050,11 @@ fn install_system_menu(
             text.check_updates(),
             text.check_updates_help(),
         )
+        .append_item(
+            ID_MENU_EXPORT_CONNECTION_DIAGNOSTICS,
+            text.export_connection_diagnostics(),
+            text.export_connection_diagnostics_help(),
+        )
         .append_separator()
         .append_item(ID_ABOUT, text.about(), "About CodexHub")
         .build();
@@ -1944,6 +2080,16 @@ fn install_system_menu(
                 &update_check_in_flight,
                 &quitting,
             );
+        }
+        ID_MENU_EXPORT_CONNECTION_DIAGNOSTICS => {
+            if let Some(output_path) = prompt_diagnostics_export_path(&frame, text) {
+                export_connection_diagnostics_async(
+                    text,
+                    gui_tx.clone(),
+                    diagnostics_export_result.clone(),
+                    output_path,
+                );
+            }
         }
         ID_MENU_LANGUAGE_ZH_CN => {
             handle_language_selected(&frame, text, GuiLocale::ZhCn);
@@ -4460,6 +4606,21 @@ fn apply_pending_request_log_clear(
             show_error(frame, &text.request_log_clear_failed(&err));
             false
         }
+    }
+}
+
+fn apply_pending_diagnostics_export(
+    frame: &Frame,
+    text: GuiText,
+    result_store: &DiagnosticsExportResultStore,
+) {
+    let result = result_store.lock().ok().and_then(|mut slot| slot.take());
+    let Some(result) = result else {
+        return;
+    };
+    match result {
+        Ok(_path) => {}
+        Err(err) => show_error(frame, &text.diagnostics_export_failed(&err)),
     }
 }
 

@@ -54,6 +54,10 @@ impl ApiClient {
         self.get_quick::<serde_json::Value>("/api/status").is_ok()
     }
 
+    pub(super) fn get_quick_json(&self, path: &str) -> Result<Value, String> {
+        self.get_quick(path)
+    }
+
     pub(super) fn post_empty<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
         self.post_empty_with_timeout(path, GUI_ACTION_TIMEOUT)
     }
