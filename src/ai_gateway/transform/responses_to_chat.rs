@@ -100,17 +100,23 @@ pub fn build_chat_request_with_tool_names(
         // 10a. developer → system
         normalize_developer_messages(&mut body);
 
-        // 10b. 丢弃仅含 reasoning 无 content/tool_calls 的 assistant message
+        // 10b. DeepSeek follows Chat Completions strictly: every assistant
+        // tool_calls turn must be followed immediately by matching tool
+        // messages. Responses history can be looser, so repair partial or
+        // interleaved tool rounds before sending upstream.
+        repair_tool_call_turns(&mut body);
+
+        // 10c. 丢弃仅含 reasoning 无 content/tool_calls 的 assistant message
         drop_invalid_assistant_messages(&mut body);
 
         if thinking_enabled {
-            // 10c. 补空 reasoning_content
+            // 10d. 补空 reasoning_content
             pad_reasoning_content(&mut body);
 
-            // 10d. tool_calls 轮次回填 reasoning_content
+            // 10e. tool_calls 轮次回填 reasoning_content
             ensure_thinking_tool_call_reasoning_content(&mut body);
 
-            // 10e. thinking 启用时移除无效参数
+            // 10f. thinking 启用时移除无效参数
             body.as_object_mut().map(|m| {
                 m.remove("temperature");
                 m.remove("top_p");
@@ -1014,6 +1020,142 @@ fn normalize_developer_messages(body: &mut Value) {
     }
 }
 
+/// DeepSeek/OpenAI Chat require every assistant `tool_calls` turn to be
+/// followed immediately by tool messages for the same IDs. Codex/Responses
+/// history can contain incomplete or interleaved tool rounds, so keep only
+/// completed tool calls and move their tool outputs next to the assistant turn.
+fn repair_tool_call_turns(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+
+    let original = std::mem::take(messages);
+    let mut consumed = vec![false; original.len()];
+    let mut repaired = Vec::with_capacity(original.len());
+
+    for index in 0..original.len() {
+        if consumed[index] {
+            continue;
+        }
+
+        let msg = &original[index];
+        let tool_call_ids = assistant_tool_call_ids(msg);
+        if tool_call_ids.is_empty() {
+            if msg.get("role").and_then(Value::as_str) == Some("tool") {
+                repaired.push(orphan_chat_tool_message(msg));
+            } else {
+                repaired.push(msg.clone());
+            }
+            continue;
+        }
+
+        let mut matched_ids = std::collections::HashSet::new();
+        let mut matched_tool_messages = Vec::new();
+        for tool_call_id in &tool_call_ids {
+            if let Some(tool_index) =
+                find_following_tool_message(&original, &consumed, index + 1, tool_call_id)
+            {
+                consumed[tool_index] = true;
+                matched_ids.insert(tool_call_id.clone());
+                matched_tool_messages.push(original[tool_index].clone());
+            }
+        }
+
+        let mut assistant = msg.clone();
+        filter_assistant_tool_calls(&mut assistant, &matched_ids);
+        repaired.push(assistant);
+        repaired.extend(matched_tool_messages);
+    }
+
+    *messages = repaired;
+}
+
+fn assistant_tool_call_ids(message: &Value) -> Vec<String> {
+    if message.get("role").and_then(Value::as_str) != Some("assistant") {
+        return Vec::new();
+    }
+    message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map(|tool_calls| {
+            tool_calls
+                .iter()
+                .filter_map(|tool_call| {
+                    tool_call
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn find_following_tool_message(
+    messages: &[Value],
+    consumed: &[bool],
+    start: usize,
+    tool_call_id: &str,
+) -> Option<usize> {
+    messages
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(index, message)| {
+            if consumed[index] || !chat_tool_message_matches(message, tool_call_id) {
+                return None;
+            }
+            Some(index)
+        })
+}
+
+fn chat_tool_message_matches(message: &Value, tool_call_id: &str) -> bool {
+    message.get("role").and_then(Value::as_str) == Some("tool")
+        && message.get("tool_call_id").and_then(Value::as_str) == Some(tool_call_id)
+}
+
+fn filter_assistant_tool_calls(
+    assistant: &mut Value,
+    matched_ids: &std::collections::HashSet<String>,
+) {
+    let Some(obj) = assistant.as_object_mut() else {
+        return;
+    };
+    let Some(tool_calls) = obj.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+        return;
+    };
+    tool_calls.retain(|tool_call| {
+        tool_call
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| matched_ids.contains(id))
+    });
+    if tool_calls.is_empty() {
+        obj.remove("tool_calls");
+    }
+}
+
+fn orphan_chat_tool_message(message: &Value) -> Value {
+    let call_id = message
+        .get("tool_call_id")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let output = message
+        .get("content")
+        .map(chat_message_content_to_string)
+        .unwrap_or_default();
+    orphan_tool_output_message(call_id, &output)
+}
+
+fn chat_message_content_to_string(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
 /// DeepSeek: 丢弃仅含 reasoning 但无 content 且无 tool_calls 的 assistant message。
 /// 这种消息会导致 DeepSeek API 报错。
 /// 参考 axonhub fork `shouldDropInvalidAssistantMessage`。
@@ -1440,6 +1582,11 @@ mod tests {
                     "call_id": "call_function",
                     "name": "get_weather",
                     "arguments": "{\"city\":\"Shanghai\"}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_function",
+                    "output": "{\"temperature\":22}"
                 }
             ]
         }"#;
@@ -1448,10 +1595,12 @@ mod tests {
         let body = build_chat_request(&req, true).unwrap();
         let msgs = body["messages"].as_array().unwrap();
 
-        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs.len(), 2);
         let tool_calls = msgs[0]["tool_calls"].as_array().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0]["id"], "call_function");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_function");
     }
 
     #[test]
@@ -1771,6 +1920,62 @@ mod tests {
         assert_eq!(msgs[3]["tool_call_id"], "call_2");
         assert_eq!(msgs[4]["role"], "assistant");
         assert_eq!(msgs[4]["content"], "NYC is 72°F, SF is 65°F.");
+    }
+
+    #[test]
+    fn test_deepseek_filters_unanswered_parallel_tool_calls() {
+        let mut fc1 = make_item(ItemType::FunctionCall);
+        fc1.call_id = Some("call_1".into());
+        fc1.name = Some("get_weather".into());
+        fc1.arguments = Some(r#"{"city":"NYC"}"#.into());
+
+        let mut fc2 = make_item(ItemType::FunctionCall);
+        fc2.call_id = Some("call_2".into());
+        fc2.name = Some("get_weather".into());
+        fc2.arguments = Some(r#"{"city":"SF"}"#.into());
+
+        let mut fco1 = make_item(ItemType::FunctionCallOutput);
+        fco1.call_id = Some("call_1".into());
+        fco1.output = Some("72°F sunny".into());
+
+        let req = make_request(vec![fc1, fc2, fco1]);
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs.len(), 2);
+        let tool_calls = msgs[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call_1");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_1");
+    }
+
+    #[test]
+    fn test_deepseek_moves_interleaved_tool_output_next_to_tool_call() {
+        let mut fc = make_item(ItemType::FunctionCall);
+        fc.call_id = Some("call_1".into());
+        fc.name = Some("get_weather".into());
+        fc.arguments = Some(r#"{"city":"NYC"}"#.into());
+
+        let mut asst = make_item(ItemType::Message);
+        asst.role = Some("assistant".into());
+        asst.content = Some(ItemContent::Text("Checking that now.".into()));
+
+        let mut fco = make_item(ItemType::FunctionCallOutput);
+        fco.call_id = Some("call_1".into());
+        fco.output = Some("72°F sunny".into());
+
+        let req = make_request(vec![fc, asst, fco]);
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_1");
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "Checking that now.");
     }
 
     // ─── reasoning + 多工具调用 + 结果 + 继续回答 ──────────────
