@@ -555,20 +555,23 @@ pub(super) async fn repair_codex_app_gui_environment(
         );
     }
 
-    let remote_control_switch = match codex_app_config::enable_codex_app_remote_control_switch(None)
-    {
-        Ok(status) => status,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "ok": false,
-                    "error": err.to_string(),
-                    "status": status,
-                })),
-            );
-        }
-    };
+    let remote_control_switch =
+        match codex_app_config::enable_codex_app_remote_control_switch_for_backend(
+            None,
+            &backend_url,
+        ) {
+            Ok(status) => status,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "ok": false,
+                        "error": err.to_string(),
+                        "status": status,
+                    })),
+                );
+            }
+        };
     let gui_api_base =
         codex_app_config::configure_gui_environment(&backend_url, config.codex_app_fast_startup);
     state

@@ -52,6 +52,17 @@ pub(super) struct RefreshRequest {
     installation_id: Option<String>,
 }
 
+#[cfg(test)]
+pub(super) fn refresh_request_for_test(
+    server_id: Option<String>,
+    installation_id: Option<String>,
+) -> RefreshRequest {
+    RefreshRequest {
+        server_id,
+        installation_id,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub(super) struct RemoteControlClientFinishRequest {
     client_id: String,
@@ -464,7 +475,7 @@ pub(super) async fn refresh(
         .unwrap_or(expected_server_id.clone());
     if server_id != expected_server_id {
         return (
-            StatusCode::BAD_REQUEST,
+            StatusCode::NOT_FOUND,
             Json(json!({
                 "error": format!(
                     "remote control server refresh returned mismatched enrollment: expected server_id={expected_server_id}; got server_id={server_id}"

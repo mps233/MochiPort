@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use axum::{Json, extract::State, response::IntoResponse};
 use base64::Engine;
 use serde_json::{Value, json};
 
@@ -325,6 +326,23 @@ fn virtual_remote_clients_share_enrolled_client_id_and_use_distinct_streams() {
             .as_deref(),
         Some("wechat:bot:user-1")
     );
+}
+
+#[tokio::test]
+async fn server_refresh_returns_not_found_for_stale_persisted_enrollment() {
+    let state = test_state();
+    let response = enrollment::refresh(
+        State(state),
+        axum::http::HeaderMap::new(),
+        Json(enrollment::refresh_request_for_test(
+            Some("srv_stale_from_previous_config".to_string()),
+            Some("11111111-1111-4111-8111-111111111111".to_string()),
+        )),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
 }
 
 #[test]
