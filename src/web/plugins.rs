@@ -992,10 +992,7 @@ mod tests {
             .expect("read body");
         let value: Value = serde_json::from_slice(&bytes).expect("json body");
         assert_eq!(
-            value
-                .get("plugins")
-                .and_then(Value::as_array)
-                .map(Vec::len),
+            value.get("plugins").and_then(Value::as_array).map(Vec::len),
             Some(0)
         );
         assert!(value.get("pagination").is_some());
