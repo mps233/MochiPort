@@ -30,6 +30,7 @@ packaging/brand/providers/
 - Codex CLI：`packaging/brand/codex-cli.svg`，来自 Lucide `terminal`
 - 本地服务：`packaging/brand/service-server.svg`，来自 Lucide `server`
 - OpenAI：`packaging/brand/providers/openai.svg`
+- Grok：`packaging/brand/providers/grok.svg`
 - DeepSeek：`packaging/brand/providers/deepseek.svg`
 - Anthropic：`packaging/brand/providers/anthropic.svg`
 - 智谱：`packaging/brand/providers/zhipu.svg`

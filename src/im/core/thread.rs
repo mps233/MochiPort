@@ -943,7 +943,16 @@ fn thread_model_choices(
     {
         push_model_choice(&mut models, entry.label.clone(), entry.model.clone());
     }
-    for model in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"] {
+    for model in [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "grok-4.5",
+        "gpt-5.3-codex",
+    ] {
         push_model_choice(&mut models, model.to_string(), model.to_string());
     }
     models
@@ -1145,7 +1154,7 @@ fn push_path_once(paths: &mut Vec<PathBuf>, path: PathBuf) {
 mod tests {
     use serde_json::json;
 
-    use super::build_thread_entries;
+    use super::{build_thread_entries, thread_model_choices};
     use crate::im::core::i18n::ImText;
 
     #[test]
@@ -1169,5 +1178,22 @@ mod tests {
         assert_eq!(ids, vec!["thread-z", "thread-a", "thread-m"]);
         assert!(entries[1].state.contains("已加载"));
         assert!(entries[2].state.contains("当前会话"));
+    }
+
+    #[test]
+    fn thread_model_choices_include_current_openai_and_grok_fallbacks() {
+        let choices = thread_model_choices(None, &[]);
+        let values = choices
+            .iter()
+            .map(|choice| choice.value.as_str())
+            .collect::<Vec<_>>();
+
+        for expected in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "grok-4.5"] {
+            assert!(
+                values.contains(&expected),
+                "missing model choice {expected}"
+            );
+        }
+        assert!(!values.contains(&"gpt-5.2"));
     }
 }

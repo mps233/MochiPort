@@ -125,7 +125,7 @@ pub async fn handle_responses(
         .unwrap_or(envelope.model.as_str())
         .to_string();
     match provider.provider_type {
-        ProviderType::OpenAiResponses => {
+        ProviderType::OpenAiResponses | ProviderType::GrokResponses => {
             let result = openai_responses::passthrough(
                 &state.ai_gateway_http_client,
                 &ctx,
@@ -443,6 +443,7 @@ fn update_failed_log(log_context: &Option<RequestLogContext>, message: &str) {
 fn provider_type_key(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::OpenAiResponses => "responses",
+        ProviderType::GrokResponses => "grok_responses",
         ProviderType::ChatCompletions => "chat_completions",
         ProviderType::AnthropicMessages => "anthropic_messages",
     }

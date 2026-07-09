@@ -55,6 +55,7 @@ pub(super) enum StatusIconKind {
 #[derive(Clone, Copy)]
 pub(super) enum ProviderLogoKind {
     OpenAi,
+    Grok,
     DeepSeek,
     Anthropic,
     Zhipu,
@@ -616,6 +617,10 @@ pub(super) fn provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap 
         ProviderLogoKind::OpenAi => (
             "openai.svg",
             include_bytes!("../../packaging/brand/providers/openai.svg").as_slice(),
+        ),
+        ProviderLogoKind::Grok => (
+            "grok.svg",
+            include_bytes!("../../packaging/brand/providers/grok.svg").as_slice(),
         ),
         ProviderLogoKind::DeepSeek => (
             "deepseek.svg",

@@ -4,6 +4,7 @@ Brand SVGs are copied from `@lobehub/icons` version `5.8.0` when the package con
 
 - Codex: `references/lobehub-icons/es/Codex/components/Color.js` -> `packaging/brand/codex.svg`
 - OpenAI: `references/lobehub-icons/es/OpenAI/components/Mono.js`
+- Grok: `references/lobehub-icons/es/Grok/components/Mono.js`
 - OpenAI badge: `packaging/brand/openai-badge.svg`; based on the OpenAI icon above, with a light badge background so status icons remain visible in dark theme.
 - DeepSeek: `references/lobehub-icons/es/DeepSeek/components/Color.js`
 - Anthropic: `references/lobehub-icons/es/Anthropic/components/Mono.js`

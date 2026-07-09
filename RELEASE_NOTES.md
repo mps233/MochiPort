@@ -1,8 +1,9 @@
-CodexHub v0.3.28
+CodexHub v0.3.29
 
-本次版本重点修复 AI Gateway 与远程控制诊断链路：
+本次版本重点更新 AI Gateway 的 Grok/xAI 接入和 Codex 模型目录：
 
-- 修复 DeepSeek Chat Completions 出站时的工具调用回合处理，避免 Codex 工具调用上下文被错误分类。
-- 修复 AI Gateway 模型映射编辑器会把所有上游模型自动生成小写 Codex 映射的问题；现在只保留明确支持的 Claude 友好别名，第三方模型不会再被自动映射。
-- 增强 remote-control 超时诊断：超时日志会记录绑定 client 的初始化、恢复、pong 和 pending 状态，方便判断端点沉默还是恢复中。
-- 连接诊断导出现在会保留 remote-control 协议诊断行，同时脱敏 IM client_key，便于用户上传日志排查飞书/微信/Telegram 远控问题且不暴露会话身份。
+- 新增 Grok/xAI Responses provider 类型，可在 AI Gateway GUI 中直接选择 Grok 渠道，默认使用 `https://api.x.ai/v1`。
+- 修复 Grok Responses 连续对话时的 reasoning replay 兼容问题，避免无效 `encrypted_content` 触发上游解码错误。
+- 更新 Codex 可见模型目录，新增 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` 和 `grok-4.5`，不再加入 `gpt-5.2`。
+- 同步 IM 侧模型 fallback 列表，确保微信、飞书、Telegram 等入口也能看到新的 5.6 与 Grok 模型选项。
+- 新增 Grok provider 图标与来源文档，保持 GUI 渠道选择页和品牌资源一致。

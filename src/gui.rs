@@ -2252,6 +2252,13 @@ fn show_ai_gw_channel_dialog(
         Some(ProviderLogoKind::OpenAi),
         true,
     );
+    let radio_grok = ai_gw_service_option(
+        &service_panel,
+        &service_sizer,
+        text.ai_gw_service_grok(),
+        Some(ProviderLogoKind::Grok),
+        false,
+    );
     let radio_deepseek = ai_gw_service_option(
         &service_panel,
         &service_sizer,
@@ -2443,6 +2450,7 @@ fn show_ai_gw_channel_dialog(
         text,
         initial,
         &radio_openai,
+        &radio_grok,
         &radio_deepseek,
         &radio_anthropic,
         &radio_glm,
@@ -2471,6 +2479,7 @@ fn show_ai_gw_channel_dialog(
             provider.provider_type.clone(),
             provider.compatibility.as_deref().map(ToOwned::to_owned),
             &radio_openai,
+            &radio_grok,
             &radio_deepseek,
             &radio_anthropic,
             &radio_glm,
@@ -2497,6 +2506,45 @@ fn show_ai_gw_channel_dialog(
                     text,
                     provider.clone(),
                     &radio_openai,
+                    &radio_grok,
+                    &radio_deepseek,
+                    &radio_anthropic,
+                    &radio_glm,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &models_url_input,
+                    &key_input,
+                    &models_list,
+                    &model_mapping_rows,
+                    &model_mapping_model,
+                    &weight_input,
+                    &service_template_applying,
+                );
+                *current_ai_gw_provider_template.borrow_mut() = provider;
+            }
+        });
+    }
+    if initial.is_none() {
+        let type_input = type_input;
+        let name_input = name_input;
+        let base_url_input = base_url_input;
+        let models_url_input = models_url_input;
+        let key_input = key_input;
+        let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
+        let weight_input = weight_input;
+        let service_template_applying = service_template_applying.clone();
+        let current_ai_gw_provider_template = current_ai_gw_provider_template.clone();
+        radio_grok.on_selected(move |_| {
+            if radio_grok.get_value() && !*service_template_applying.borrow() {
+                let provider = default_ai_gw_service_provider(ProviderType::GrokResponses);
+                apply_ai_gw_service_template(
+                    text,
+                    provider.clone(),
+                    &radio_openai,
+                    &radio_grok,
                     &radio_deepseek,
                     &radio_anthropic,
                     &radio_glm,
@@ -2534,6 +2582,7 @@ fn show_ai_gw_channel_dialog(
                     text,
                     provider.clone(),
                     &radio_openai,
+                    &radio_grok,
                     &radio_deepseek,
                     &radio_anthropic,
                     &radio_glm,
@@ -2571,6 +2620,7 @@ fn show_ai_gw_channel_dialog(
                     text,
                     provider.clone(),
                     &radio_openai,
+                    &radio_grok,
                     &radio_deepseek,
                     &radio_anthropic,
                     &radio_glm,
@@ -2608,6 +2658,7 @@ fn show_ai_gw_channel_dialog(
                     text,
                     provider.clone(),
                     &radio_openai,
+                    &radio_grok,
                     &radio_deepseek,
                     &radio_anthropic,
                     &radio_glm,
@@ -2820,6 +2871,7 @@ fn show_ai_gw_channel_dialog(
                 .map(|provider| provider.provider_type.clone())
                 .unwrap_or_else(|| {
                     selected_ai_gw_dialog_provider_type(
+                        &radio_grok,
                         &radio_deepseek,
                         &radio_anthropic,
                         &radio_glm,
@@ -2874,6 +2926,7 @@ fn apply_ai_gw_dialog_template(
     text: GuiText,
     provider: Option<&ProviderConfig>,
     radio_openai: &RadioButton,
+    radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
@@ -2897,6 +2950,7 @@ fn apply_ai_gw_dialog_template(
         provider.provider_type.clone(),
         provider.compatibility.as_deref(),
         radio_openai,
+        radio_grok,
         radio_deepseek,
         radio_anthropic,
         radio_glm,
@@ -2919,6 +2973,7 @@ fn apply_ai_gw_service_template(
     text: GuiText,
     provider: ProviderConfig,
     radio_openai: &RadioButton,
+    radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
@@ -2938,6 +2993,7 @@ fn apply_ai_gw_service_template(
         text,
         Some(&provider),
         radio_openai,
+        radio_grok,
         radio_deepseek,
         radio_anthropic,
         radio_glm,
@@ -2959,6 +3015,7 @@ fn bind_locked_ai_gw_service_selection(
     provider_type: ProviderType,
     compatibility: Option<String>,
     radio_openai: &RadioButton,
+    radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
@@ -2971,6 +3028,20 @@ fn bind_locked_ai_gw_service_selection(
         compatibility.clone(),
         radio_openai,
         radio_openai,
+        radio_grok,
+        radio_deepseek,
+        radio_anthropic,
+        radio_glm,
+        type_input,
+        service_template_applying.clone(),
+    );
+    bind_locked_ai_gw_service_radio(
+        text,
+        provider_type.clone(),
+        compatibility.clone(),
+        radio_grok,
+        radio_openai,
+        radio_grok,
         radio_deepseek,
         radio_anthropic,
         radio_glm,
@@ -2983,6 +3054,7 @@ fn bind_locked_ai_gw_service_selection(
         compatibility.clone(),
         radio_deepseek,
         radio_openai,
+        radio_grok,
         radio_deepseek,
         radio_anthropic,
         radio_glm,
@@ -2995,6 +3067,7 @@ fn bind_locked_ai_gw_service_selection(
         compatibility.clone(),
         radio_anthropic,
         radio_openai,
+        radio_grok,
         radio_deepseek,
         radio_anthropic,
         radio_glm,
@@ -3007,6 +3080,7 @@ fn bind_locked_ai_gw_service_selection(
         compatibility,
         radio_glm,
         radio_openai,
+        radio_grok,
         radio_deepseek,
         radio_anthropic,
         radio_glm,
@@ -3021,6 +3095,7 @@ fn bind_locked_ai_gw_service_radio(
     compatibility: Option<String>,
     radio: &RadioButton,
     radio_openai: &RadioButton,
+    radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
@@ -3029,6 +3104,7 @@ fn bind_locked_ai_gw_service_radio(
 ) {
     let radio = *radio;
     let radio_openai = *radio_openai;
+    let radio_grok = *radio_grok;
     let radio_deepseek = *radio_deepseek;
     let radio_anthropic = *radio_anthropic;
     let radio_glm = *radio_glm;
@@ -3043,6 +3119,7 @@ fn bind_locked_ai_gw_service_radio(
             provider_type.clone(),
             compatibility.as_deref(),
             &radio_openai,
+            &radio_grok,
             &radio_deepseek,
             &radio_anthropic,
             &radio_glm,
@@ -3058,6 +3135,12 @@ fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig
             name: "openai".to_string(),
             provider_type: ProviderType::OpenAiResponses,
             base_url: "https://api.openai.com/v1".to_string(),
+            ..Default::default()
+        },
+        ProviderType::GrokResponses => ProviderConfig {
+            name: "grok".to_string(),
+            provider_type: ProviderType::GrokResponses,
+            base_url: "https://api.x.ai/v1".to_string(),
             ..Default::default()
         },
         ProviderType::ChatCompletions => ProviderConfig {
@@ -3132,12 +3215,14 @@ fn set_ai_gw_dialog_provider_type(
     provider_type: ProviderType,
     compatibility: Option<&str>,
     radio_openai: &RadioButton,
+    radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
 ) {
     radio_openai.set_value(false);
+    radio_grok.set_value(false);
     radio_deepseek.set_value(false);
     radio_anthropic.set_value(false);
     radio_glm.set_value(false);
@@ -3149,6 +3234,10 @@ fn set_ai_gw_dialog_provider_type(
         ProviderType::OpenAiResponses => {
             radio_openai.set_value(true);
             type_input.change_value(text.provider_type_openai_responses());
+        }
+        ProviderType::GrokResponses => {
+            radio_grok.set_value(true);
+            type_input.change_value(text.provider_type_grok_responses());
         }
         ProviderType::AnthropicMessages => {
             if matches!(compatibility, Some("glm_anthropic" | "zhipu_anthropic")) {
@@ -3176,12 +3265,15 @@ fn selected_ai_gw_dialog_compatibility(
 }
 
 fn selected_ai_gw_dialog_provider_type(
+    radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
 ) -> ProviderType {
     if radio_anthropic.get_value() || radio_glm.get_value() {
         ProviderType::AnthropicMessages
+    } else if radio_grok.get_value() {
+        ProviderType::GrokResponses
     } else if radio_deepseek.get_value() {
         ProviderType::ChatCompletions
     } else {

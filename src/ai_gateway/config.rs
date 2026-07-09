@@ -126,6 +126,7 @@ impl ProviderType {
     fn route_key(&self) -> &'static str {
         match self {
             Self::OpenAiResponses => "openai_responses",
+            Self::GrokResponses => "grok_responses",
             Self::ChatCompletions => "chat_completions",
             Self::AnthropicMessages => "anthropic_messages",
         }
@@ -165,7 +166,7 @@ pub struct ProviderConfig {
     pub name: String,
     /// 是否启用该 provider。
     pub enabled: bool,
-    /// provider 类型：`"openai_responses"`、`"chat_completions"` 或 `"anthropic_messages"`。
+    /// provider 类型：`"openai_responses"`、`"grok_responses"`、`"chat_completions"` 或 `"anthropic_messages"`。
     pub provider_type: ProviderType,
     /// provider 兼容 profile。Anthropic Messages 兼容厂商优先使用该字段表达差异。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -252,6 +253,8 @@ impl ProviderConfig {
 pub enum ProviderType {
     /// OpenAI Responses API 透传。
     OpenAiResponses,
+    /// Grok/xAI Responses API 透传，带 Grok 专用兼容处理。
+    GrokResponses,
     /// Chat Completions API（DeepSeek 等）。
     ChatCompletions,
     /// Anthropic Messages API（Claude）。
@@ -654,10 +657,17 @@ mod tests {
             apiKey = "sk-glm"
             models = ["glm-4.6"]
             modelAliases = { "glm-5.2" = "GLM-5.2" }
+
+            [[providers]]
+            name = "grok"
+            providerType = "grok_responses"
+            baseUrl = "https://api.x.ai/v1"
+            apiKey = "xai-xxx"
+            models = ["grok-4.5"]
         "#;
         let config: AiGatewayConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);
-        assert_eq!(config.providers.len(), 4);
+        assert_eq!(config.providers.len(), 5);
         assert_eq!(
             config.providers[0].provider_type,
             ProviderType::OpenAiResponses
@@ -673,6 +683,10 @@ mod tests {
         assert_eq!(
             config.providers[3].provider_type,
             ProviderType::AnthropicMessages
+        );
+        assert_eq!(
+            config.providers[4].provider_type,
+            ProviderType::GrokResponses
         );
         assert_eq!(config.providers[0].timeout_secs, 120);
         assert_eq!(

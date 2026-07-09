@@ -158,6 +158,10 @@ mod tests {
     #[test]
     fn configured_models_response_uses_codex_visible_models() {
         let config = config(&[
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "grok-4.5",
             "gpt-5.5",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
@@ -175,16 +179,25 @@ mod tests {
 
         assert_eq!(
             slugs,
-            vec!["gpt-5.5", "deepseek-v4-pro", "deepseek-v4-flash"]
+            vec![
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "grok-4.5",
+                "gpt-5.5",
+                "deepseek-v4-pro",
+                "deepseek-v4-flash"
+            ]
         );
-        assert_eq!(response["models"][1]["display_name"], "deepseek-v4-pro");
-        assert_eq!(response["models"][1]["apply_patch_tool_type"], "freeform");
-        assert_eq!(response["models"][1]["supports_search_tool"], false);
+        assert_eq!(response["models"][3]["display_name"], "Grok-4.5");
+        assert_eq!(response["models"][5]["display_name"], "deepseek-v4-pro");
+        assert_eq!(response["models"][5]["apply_patch_tool_type"], "freeform");
+        assert_eq!(response["models"][5]["supports_search_tool"], false);
         assert_eq!(
-            response["models"][1]["supports_image_detail_original"],
+            response["models"][5]["supports_image_detail_original"],
             false
         );
-        assert_eq!(response["models"][1]["input_modalities"], json!(["text"]));
+        assert_eq!(response["models"][5]["input_modalities"], json!(["text"]));
     }
 
     #[test]
@@ -267,7 +280,23 @@ mod tests {
     #[test]
     fn visible_catalog_model_options_returns_listable_api_models() {
         let options = visible_catalog_model_options();
-        assert!(options.iter().any(|model| model.slug == "gpt-5.5"));
+        let slugs = options
+            .iter()
+            .map(|model| model.slug.as_str())
+            .collect::<Vec<_>>();
+        for expected in [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "grok-4.5",
+            "gpt-5.5",
+        ] {
+            assert!(
+                slugs.contains(&expected),
+                "missing visible model {expected}"
+            );
+        }
+        assert!(!slugs.contains(&"gpt-5.2"));
         assert!(
             options
                 .iter()
