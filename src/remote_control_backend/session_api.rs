@@ -262,16 +262,18 @@ async fn request_once_with_timeout_for_client_inner(
                     sync_default_client_legacy_locked(&mut remote);
                 }
             }
+            let health = remote_control_request_timeout_health(state, &client_key).await;
             state
                 .push_event(
                     "warn",
                     "remote_control_request_timeout",
                     format!(
-                        "client_key={} method={} id={} timeout_secs={}",
+                        "client_key={} method={} id={} timeout_secs={} {}",
                         client_key,
                         method_name,
                         id,
-                        timeout.as_secs()
+                        timeout.as_secs(),
+                        health
                     ),
                 )
                 .await;
@@ -284,6 +286,39 @@ async fn request_once_with_timeout_for_client_inner(
             ))
         }
     }
+}
+
+/// Snapshot of the bound client's liveness at the moment a request timed out.
+///
+/// This is diagnostics-only: it does not change control flow. It lets an uploaded
+/// log distinguish "app-server went silent" from "recovery was mid-flight" without
+/// exposing any conversation content.
+async fn remote_control_request_timeout_health(state: &SharedState, client_key: &str) -> String {
+    let client_key = normalize_remote_client_key(client_key);
+    let remote = state.remote_control.inner.lock().await;
+    let now = now_ms();
+    let elapsed = |value: Option<u128>| {
+        value
+            .map(|at_ms| now.saturating_sub(at_ms).to_string())
+            .unwrap_or_else(|| "none".to_string())
+    };
+    let client = remote.clients.get(&client_key);
+    format!(
+        "ws_connected={} client_initialized={} client_recovering={} last_app_pong_status={} app_ping_age_ms={} app_pong_age_ms={} pending={} ws_ping_age_ms={} ws_pong_age_ms={}",
+        remote.connected,
+        client.map(|client| client.initialized).unwrap_or(false),
+        client
+            .map(|client| client.recovery_started_at_ms.is_some())
+            .unwrap_or(false),
+        client
+            .and_then(|client| client.last_app_pong_status.clone())
+            .unwrap_or_else(|| "none".to_string()),
+        elapsed(client.and_then(|client| client.last_app_ping_at_ms)),
+        elapsed(client.and_then(|client| client.last_app_pong_at_ms)),
+        client.map(|client| client.pending.len()).unwrap_or(0),
+        elapsed(remote.last_ws_ping_at_ms),
+        elapsed(remote.last_ws_pong_at_ms),
+    )
 }
 
 pub(super) async fn wait_for_remote_control_initialized(

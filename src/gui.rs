@@ -3444,19 +3444,21 @@ fn with_inferred_model_aliases(
 fn inferred_model_aliases(models: &[String]) -> BTreeMap<String, String> {
     let mut aliases = BTreeMap::new();
     for model in models {
-        let canonical = canonical_model_alias_key(model);
-        if canonical != model.as_str() && models.iter().all(|item| item != &canonical) {
+        let Some(canonical) = inferred_model_alias_key(model) else {
+            continue;
+        };
+        if models.iter().all(|item| item != &canonical) {
             aliases.insert(canonical, model.clone());
         }
     }
     aliases
 }
 
-fn canonical_model_alias_key(model: &str) -> String {
+fn inferred_model_alias_key(model: &str) -> Option<String> {
     match model.trim().to_ascii_lowercase().as_str() {
-        "claude-opus-4-8" => "opus-4.8".to_string(),
-        "claude-sonnet-4-6" => "sonnet-4.6".to_string(),
-        model => model.to_string(),
+        "claude-opus-4-8" => Some("opus-4.8".to_string()),
+        "claude-sonnet-4-6" => Some("sonnet-4.6".to_string()),
+        _ => None,
     }
 }
 
@@ -3495,6 +3497,26 @@ mod model_mapping_tests {
         assert_eq!(rows[0].codex_models, vec!["opus-4.8"]);
         assert_eq!(rows[1].upstream_model, "claude-sonnet-4-6");
         assert_eq!(rows[1].codex_models, vec!["sonnet-4.6"]);
+    }
+
+    #[test]
+    fn does_not_infer_generic_lowercase_model_aliases() {
+        let models = vec![
+            "zai-org/GLM-5.2".to_string(),
+            "moonshotai/Kimi-K2.7-Code".to_string(),
+            "deepseek-ai/DeepSeek-V4-Pro".to_string(),
+        ];
+
+        assert!(inferred_model_aliases(&models).is_empty());
+
+        let rows = model_mapping_rows_from_config(&models, &BTreeMap::new());
+        assert_eq!(rows[0].upstream_model, "zai-org/GLM-5.2");
+        assert!(rows[0].codex_models.is_empty());
+        assert!(rows[1].codex_models.is_empty());
+        assert!(rows[2].codex_models.is_empty());
+
+        let saved_aliases = build_model_aliases_for_save(&models, BTreeMap::new());
+        assert!(saved_aliases.is_empty());
     }
 
     #[test]

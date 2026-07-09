@@ -346,7 +346,16 @@ fn sanitize_log_text(value: &str) -> String {
         .filter(|line| should_include_diagnostics_log_line(line))
         .map(|line| {
             let redacted = redact_log_identifiers(line);
-            if line_contains_sensitive_key(&redacted) {
+            // Remote-control diagnostic lines legitimately carry `client_key=`, whose
+            // `key=` fragment trips the coarse full-line redactor. For those lines we
+            // check for genuine secret material only, so structured metadata survives
+            // while real credentials are still scrubbed.
+            let sensitive = if is_remote_control_diagnostic_line(&redacted) {
+                line_contains_secret_material(&redacted)
+            } else {
+                line_contains_sensitive_key(&redacted)
+            };
+            if sensitive {
                 redact_sensitive_line(&redacted)
             } else {
                 redacted
@@ -357,7 +366,21 @@ fn sanitize_log_text(value: &str) -> String {
 }
 
 fn should_include_diagnostics_log_line(line: &str) -> bool {
+    // Remote-control diagnostic lines only carry protocol metadata (method, id,
+    // thread, timers, health). They never carry conversation text, which lives on
+    // `[im_trace]` lines that stay filtered below. Keep them even when they mention
+    // an IM platform via a `client_key`, since that identity is redacted separately.
+    if is_remote_control_diagnostic_line(line) {
+        return true;
+    }
     !is_im_diagnostics_log_line(line)
+}
+
+fn is_remote_control_diagnostic_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("[remote_control]")
+        || lower.contains("kind=remote_control")
+        || lower.contains("event=remote_control")
 }
 
 fn is_im_diagnostics_log_line(line: &str) -> bool {
@@ -409,6 +432,27 @@ fn line_contains_sensitive_key(line: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
+/// Genuine secret material, excluding the bare `key:`/`key=` fragments that also
+/// match harmless identifiers such as `client_key=`. Used for remote-control
+/// diagnostic lines so their metadata is not truncated by the coarse redactor.
+fn line_contains_secret_material(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    [
+        "api_key",
+        "apikey",
+        "authorization",
+        "auth_token",
+        "bot_token",
+        "client_secret",
+        "password",
+        "secret",
+        "session_key",
+        "token",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
 fn redact_sensitive_line(line: &str) -> String {
     let prefix = line
         .find(['=', ':'])
@@ -430,9 +474,34 @@ fn redact_log_identifiers(line: &str) -> String {
     ]
     .iter()
     .fold(
-        line.replace("codexhub-feishu", "<redacted>"),
+        redact_im_client_keys(&line.replace("codexhub-feishu", "<redacted>")),
         |line, field| redact_key_value_field(&line, field),
     )
+}
+
+fn redact_im_client_keys(line: &str) -> String {
+    // IM `client_key`s look like `im:feishu:<hash>`. The hash is derived from the
+    // account and chat, so it identifies a conversation. Keep the platform for
+    // diagnostics, but strip the identifying suffix.
+    ["feishu", "telegram", "wechat"]
+        .iter()
+        .fold(line.to_string(), |line, platform| {
+            let needle = format!("im:{platform}:");
+            let mut result = String::new();
+            let mut rest = line.as_str();
+            while let Some(index) = rest.find(&needle) {
+                let value_start = index + needle.len();
+                result.push_str(&rest[..value_start]);
+                result.push_str("<redacted>");
+                let value_end = rest[value_start..]
+                    .find(|ch: char| !ch.is_ascii_alphanumeric())
+                    .map(|offset| value_start + offset)
+                    .unwrap_or(rest.len());
+                rest = &rest[value_end..];
+            }
+            result.push_str(rest);
+            result
+        })
 }
 
 fn redact_key_value_field(line: &str, field: &str) -> String {
@@ -633,6 +702,8 @@ mod tests {
             logs.join("codexhub-chain.log"),
             [
                 "[remote_control] event=ws_open client_id=codexhub-feishu stream_id=stream-secret installation_id=install-secret source_kind=codex_app",
+                "[remote_control] event=request_send client_key=im:feishu:bf166bbba9dc50bf method=turn/start thread=thread-abc123",
+                "[event] level=warn kind=remote_control_request_timeout message=client_key=im:feishu:bf166bbba9dc50bf method=turn/start id=200069 timeout_secs=45",
                 "[wechat_api] event=request url=https://ilinkai.weixin.qq.com/ilink/bot/getupdates account=wechat-account",
                 "[event] level=info kind=bridge_running message=bridge running feishu=0 telegram=0 wechat=1",
                 "[im_route] event=bind platform=wechat account=wechat-account chat=chat-secret conversation=wechat:secret",
@@ -711,6 +782,15 @@ mod tests {
         assert!(log.contains("client_id=<redacted>"));
         assert!(log.contains("stream_id=<redacted>"));
         assert!(log.contains("installation_id=<redacted>"));
+        // Remote-control diagnostic lines survive IM filtering so timeouts can be
+        // triaged from an upload, but the conversation-identifying client_key hash
+        // is redacted while the platform stays visible.
+        assert!(log.contains("[remote_control] event=request_send"));
+        assert!(log.contains("kind=remote_control_request_timeout"));
+        assert!(log.contains("method=turn/start"));
+        assert!(log.contains("timeout_secs=45"));
+        assert!(log.contains("im:feishu:<redacted>"));
+        assert!(!log.contains("bf166bbba9dc50bf"));
         assert!(!combined.contains("wechat-account"));
         assert!(!combined.contains("@im.bot"));
         assert!(!combined.contains("ilinkai.weixin"));
