@@ -949,6 +949,65 @@ fn initialized_connection_is_preferred_over_uninitialized_higher_priority_connec
     );
 }
 
+#[tokio::test]
+async fn initialized_notification_marks_connection_initialized() {
+    let state = test_state();
+    let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (client_id, stream_id, connection_epoch) = {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.connected = true;
+        remote.connection_epoch = 7;
+        remote.outbound_tx = Some(outbound_tx.clone());
+        remote.stream_id = "stream-root".to_string();
+        let connection_epoch = remote.connection_epoch;
+        let client_key =
+            source_default_client_key(crate::app_state::RemoteControlSourceKind::CodexApp);
+        let client = ensure_client_state_locked(&mut remote, &client_key);
+        let client_id = client.client_id.clone();
+        let stream_id = client.stream_id.clone();
+        remote.connections.insert(
+            "conn-codex".to_string(),
+            test_connection(
+                "conn-codex",
+                connection_epoch,
+                true,
+                false,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(outbound_tx),
+            ),
+        );
+        sync_legacy_from_active_connection_locked(&mut remote);
+        (client_id, stream_id, connection_epoch)
+    };
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &stream_id,
+        &json!({
+            "method": "initialized"
+        }),
+    )
+    .await;
+
+    let snapshot = status_snapshot(&state).await;
+    assert_eq!(
+        snapshot.active_source_kind,
+        Some(crate::app_state::RemoteControlSourceKind::CodexApp)
+    );
+    assert!(snapshot.initialized);
+    let connection = snapshot
+        .connections
+        .iter()
+        .find(|connection| {
+            connection.source_kind == crate::app_state::RemoteControlSourceKind::CodexApp
+        })
+        .expect("codex app connection");
+    assert!(connection.initialized);
+    assert!(connection.healthy);
+}
+
 #[test]
 fn inactive_remote_connections_are_not_retained_in_memory() {
     let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();

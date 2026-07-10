@@ -1398,13 +1398,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn initializing(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "初始化中",
-            GuiLocale::EnUs => "Initializing",
-        }
-    }
-
     pub(super) fn uninitialized_config(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "未初始化配置",

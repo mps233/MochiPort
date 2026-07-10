@@ -145,7 +145,7 @@ use self::ai_gateway::{
 };
 use self::api::{
     ApiClient, ConfigureTelegramBotRequest, DashboardSnapshot, DeleteImAccountRequest,
-    RemoteControlConnectionStatus, RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
+    RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
 };
 use self::codex_tab::{CodexActionResult, CodexTab};
 use self::daemon::{
@@ -3589,6 +3589,7 @@ fn inferred_model_alias_key(model: &str) -> Option<String> {
 
 #[cfg(test)]
 mod model_mapping_tests {
+    use super::api::RemoteControlConnectionStatus;
     use super::*;
 
     #[test]
@@ -3743,7 +3744,41 @@ mod model_mapping_tests {
     }
 
     #[test]
-    fn endpoint_status_initializing_is_source_specific() {
+    fn endpoint_status_keeps_codex_app_vscode_and_cli_independent() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: true,
+            active_source_kind: Some("vscode".to_string()),
+            connections: vec![
+                RemoteControlConnectionStatus {
+                    connected: true,
+                    initialized: false,
+                    source_kind: "codex_app".to_string(),
+                },
+                RemoteControlConnectionStatus {
+                    connected: true,
+                    initialized: true,
+                    source_kind: "vscode".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "codex_app", true),
+            EndpointStatusState::NotConnected
+        );
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "vscode", true),
+            EndpointStatusState::Connected
+        );
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "cli", true),
+            EndpointStatusState::NotConnected
+        );
+    }
+
+    #[test]
+    fn endpoint_status_uninitialized_source_is_not_connected() {
         let remote = RemoteControlStatus {
             connected: true,
             initialized: false,
@@ -3757,7 +3792,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "vscode", true),
-            EndpointStatusState::Initializing
+            EndpointStatusState::NotConnected
         );
         assert_eq!(
             endpoint_status_state(Some(&remote), "cli", true),
@@ -3793,10 +3828,6 @@ mod model_mapping_tests {
             "未连接"
         );
         assert_eq!(
-            endpoint_status_label(text, EndpointStatusState::Initializing),
-            "初始化中"
-        );
-        assert_eq!(
             endpoint_status_label(text, EndpointStatusState::Connected),
             "已连接"
         );
@@ -3807,7 +3838,7 @@ mod model_mapping_tests {
     }
 
     #[test]
-    fn codex_app_status_initializes_only_for_codex_app_connection() {
+    fn codex_app_status_is_not_connected_for_uninitialized_connection() {
         let remote = RemoteControlStatus {
             connected: true,
             initialized: false,
@@ -3821,7 +3852,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "codex_app", true),
-            EndpointStatusState::Initializing
+            EndpointStatusState::NotConnected
         );
     }
 
@@ -4795,18 +4826,6 @@ fn remote_active_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) 
         == Some(source_kind)
 }
 
-fn remote_source_initializing(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
-    remote
-        .map(|remote| {
-            remote.connections.iter().any(|connection| {
-                connection.source_kind == source_kind
-                    && connection.connected
-                    && !connection.initialized
-            })
-        })
-        .unwrap_or(false)
-}
-
 fn endpoint_status_state(
     remote: Option<&RemoteControlStatus>,
     source_kind: &str,
@@ -4818,12 +4837,10 @@ fn endpoint_status_state(
         || remote_active_ready(remote, source_kind)
     {
         EndpointStatusState::Connected
-    } else if remote_source_initializing(remote, source_kind) {
-        EndpointStatusState::Initializing
-    } else if configured {
-        EndpointStatusState::NotConnected
-    } else {
+    } else if !configured {
         EndpointStatusState::UninitializedConfig
+    } else {
+        EndpointStatusState::NotConnected
     }
 }
 
@@ -4837,7 +4854,6 @@ fn endpoint_status_label(text: GuiText, state: EndpointStatusState) -> &'static 
     match state {
         EndpointStatusState::Connected => text.connected(),
         EndpointStatusState::Loading => text.reading(),
-        EndpointStatusState::Initializing => text.initializing(),
         EndpointStatusState::NotConnected => text.not_connected(),
         EndpointStatusState::UninitializedConfig => text.uninitialized_config(),
     }
@@ -4847,9 +4863,9 @@ fn endpoint_status_tone(state: EndpointStatusState) -> StateTone {
     match state {
         EndpointStatusState::Connected => StateTone::Ok,
         EndpointStatusState::Loading => StateTone::Muted,
-        EndpointStatusState::Initializing
-        | EndpointStatusState::NotConnected
-        | EndpointStatusState::UninitializedConfig => StateTone::Warn,
+        EndpointStatusState::NotConnected | EndpointStatusState::UninitializedConfig => {
+            StateTone::Warn
+        }
     }
 }
 
@@ -4857,7 +4873,6 @@ fn endpoint_status_tone(state: EndpointStatusState) -> StateTone {
 enum EndpointStatusState {
     Connected,
     Loading,
-    Initializing,
     NotConnected,
     UninitializedConfig,
 }

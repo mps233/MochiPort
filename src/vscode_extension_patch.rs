@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     env, fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -8,8 +8,11 @@ use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const ORIGINAL_ARGS: &str = r#"["--analytics-default-enabled"]"#;
-const PATCHED_ARGS: &str = r#"["--analytics-default-enabled","--remote-control"]"#;
+const APP_SERVER_SPAWN_MARKER: &str = "Spawning codex app-server";
+const APP_SERVER_SUBCOMMAND: &str = "app-server";
+const ANALYTICS_FLAG: &str = "--analytics-default-enabled";
+const REMOTE_CONTROL_FLAG: &str = "--remote-control";
+const APP_SERVER_LAUNCH_SCAN_BYTES: usize = 2048;
 const BACKUP_SUFFIX: &str = ".bak-codexhub";
 const STATE_SUFFIX: &str = ".codexhub-state.json";
 
@@ -41,6 +44,87 @@ struct ExtensionInstall {
     modified: SystemTime,
 }
 
+fn patch_remote_control_source(source: &str) -> Result<Option<String>> {
+    let Some((array_end, args)) = find_app_server_launch_args(source) else {
+        return Ok(None);
+    };
+    if args.iter().any(|arg| arg == REMOTE_CONTROL_FLAG) {
+        return Ok(Some(source.to_string()));
+    }
+
+    let mut patched = String::with_capacity(source.len() + REMOTE_CONTROL_FLAG.len() + 3);
+    patched.push_str(&source[..array_end]);
+    patched.push_str(",\"--remote-control\"");
+    patched.push_str(&source[array_end..]);
+    Ok(Some(patched))
+}
+
+fn find_app_server_launch_args(source: &str) -> Option<(usize, Vec<String>)> {
+    for (marker_start, _) in source.match_indices(APP_SERVER_SPAWN_MARKER) {
+        let marker_end = marker_start + APP_SERVER_SPAWN_MARKER.len();
+        let mut scan_end = marker_end
+            .saturating_add(APP_SERVER_LAUNCH_SCAN_BYTES)
+            .min(source.len());
+        while scan_end > marker_end && !source.is_char_boundary(scan_end) {
+            scan_end -= 1;
+        }
+        let search_area = &source[marker_end..scan_end];
+        for (relative_start, _) in search_area.match_indices('[') {
+            let array_start = marker_end + relative_start;
+            let Some(array_end) = find_array_end(source, array_start, scan_end) else {
+                continue;
+            };
+            let Ok(args) = serde_json::from_str::<Vec<String>>(&source[array_start..=array_end])
+            else {
+                continue;
+            };
+            if !args.iter().any(|arg| arg == ANALYTICS_FLAG) {
+                continue;
+            }
+            let context = &source[marker_end..array_start];
+            if args.iter().any(|arg| arg == APP_SERVER_SUBCOMMAND)
+                || context.contains("\"app-server\"")
+            {
+                return Some((array_end, args));
+            }
+        }
+    }
+    None
+}
+
+fn find_array_end(source: &str, array_start: usize, scan_end: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, byte) in bytes.iter().enumerate().take(scan_end).skip(array_start) {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if *byte == b'\\' {
+                escaped = true;
+            } else if *byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match *byte {
+            b'"' => in_string = true,
+            b'[' => depth = depth.saturating_add(1),
+            b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 pub fn enable_remote_control() -> Result<VsCodeExtensionPatchReport> {
     let Some(install) = find_latest_codex_extension()? else {
         return Ok(VsCodeExtensionPatchReport {
@@ -58,32 +142,32 @@ pub fn enable_remote_control() -> Result<VsCodeExtensionPatchReport> {
     let source = fs::read_to_string(&extension_js)
         .with_context(|| format!("failed to read {}", extension_js.display()))?;
 
-    if source.contains(PATCHED_ARGS) {
-        ensure_state_for_existing_patch(&extension_js, &backup_path, &state_path, &source)?;
-        return Ok(VsCodeExtensionPatchReport {
-            extension_dir: Some(install.dir),
-            extension_js: Some(extension_js),
-            backup_path: Some(backup_path),
-            action: "already_patched".to_string(),
-            message: "VS Code Codex 插件已经带有 --remote-control。".to_string(),
-        });
-    }
-
-    if source.contains("--remote-control") {
-        return Ok(VsCodeExtensionPatchReport {
-            extension_dir: Some(install.dir),
-            extension_js: Some(extension_js),
-            backup_path: None,
-            action: "already_supported".to_string(),
-            message: "VS Code Codex 插件已包含 --remote-control，未创建还原备份。".to_string(),
-        });
-    }
-
-    if !source.contains(ORIGINAL_ARGS) {
+    let Some(patched) = patch_remote_control_source(&source)? else {
         return Err(anyhow!(
             "无法识别 VS Code Codex 插件启动参数位置: {}",
             extension_js.display()
         ));
+    };
+    if patched == source {
+        let managed_patch = backup_path.exists();
+        if managed_patch {
+            ensure_state_for_existing_patch(&extension_js, &backup_path, &state_path, &source)?;
+        }
+        return Ok(VsCodeExtensionPatchReport {
+            extension_dir: Some(install.dir),
+            extension_js: Some(extension_js),
+            backup_path: managed_patch.then_some(backup_path),
+            action: if managed_patch {
+                "already_patched".to_string()
+            } else {
+                "already_supported".to_string()
+            },
+            message: if managed_patch {
+                "VS Code Codex 插件已经带有 --remote-control。".to_string()
+            } else {
+                "VS Code Codex 插件已包含 --remote-control，未创建还原备份。".to_string()
+            },
+        });
     }
 
     if !backup_path.exists() {
@@ -96,7 +180,6 @@ pub fn enable_remote_control() -> Result<VsCodeExtensionPatchReport> {
         })?;
     }
 
-    let patched = source.replacen(ORIGINAL_ARGS, PATCHED_ARGS, 1);
     fs::write(&extension_js, &patched)
         .with_context(|| format!("failed to write {}", extension_js.display()))?;
     write_patch_state(&extension_js, &backup_path, &source, &patched, &state_path)?;
@@ -149,7 +232,9 @@ pub fn restore_remote_control() -> Result<VsCodeExtensionPatchReport> {
         });
     }
 
-    if state.is_none() && !current.contains(PATCHED_ARGS) {
+    let current_has_remote_control =
+        patch_remote_control_source(&current)?.is_some_and(|transformed| transformed == current);
+    if state.is_none() && !current_has_remote_control {
         return Ok(VsCodeExtensionPatchReport {
             extension_dir: Some(install.dir),
             extension_js: Some(extension_js),
@@ -329,4 +414,93 @@ fn read_patch_state(path: &Path) -> io::Result<PatchState> {
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{REMOTE_CONTROL_FLAG, patch_remote_control_source};
+
+    #[test]
+    fn patches_current_26_707_launch_arguments() {
+        let source = r#"this.logger.info("Spawning codex app-server"),e=Cde(this.extensionUri,["-c","features.code_mode_host=true","app-server","--analytics-default-enabled"])"#;
+
+        let patched = patch_remote_control_source(source)
+            .expect("source transformation should succeed")
+            .expect("supported launch site");
+
+        assert!(patched.contains(
+            r#"["-c","features.code_mode_host=true","app-server","--analytics-default-enabled","--remote-control"]"#
+        ));
+    }
+
+    #[test]
+    fn patches_legacy_launch_arguments() {
+        let source = r#"this.logger.info("Spawning codex app-server"),e=Xle(this.extensionUri,"app-server",["--analytics-default-enabled"])"#;
+
+        let patched = patch_remote_control_source(source)
+            .expect("source transformation should succeed")
+            .expect("supported launch site");
+
+        assert!(patched.contains(r#"["--analytics-default-enabled","--remote-control"]"#));
+    }
+
+    #[test]
+    fn patches_launch_arguments_with_extra_and_reordered_flags() {
+        let source = r#"this.logger.info("Spawning codex app-server"),e=Cde(this.extensionUri,["--analytics-default-enabled","-c","feature.future=true","app-server","--listen","stdio://"])"#;
+
+        let patched = patch_remote_control_source(source)
+            .expect("source transformation should succeed")
+            .expect("supported launch site");
+
+        assert_eq!(patched.matches(REMOTE_CONTROL_FLAG).count(), 1);
+        assert!(patched.contains(
+            r#"["--analytics-default-enabled","-c","feature.future=true","app-server","--listen","stdio://","--remote-control"]"#
+        ));
+    }
+
+    #[test]
+    fn leaves_already_supported_launch_arguments_unchanged() {
+        let source = r#"this.logger.info("Spawning codex app-server"),e=Cde(this.extensionUri,["app-server","--analytics-default-enabled","--remote-control"])"#;
+
+        let transformed = patch_remote_control_source(source)
+            .expect("source transformation should succeed")
+            .expect("supported launch site");
+
+        assert_eq!(transformed, source);
+    }
+
+    #[test]
+    fn skips_unrelated_arrays_before_the_launch_arguments() {
+        let source = r#"this.logger.info("Spawning codex app-server"),x=["unrelated"],e=Cde(this.extensionUri,["app-server","--analytics-default-enabled"])"#;
+
+        let patched = patch_remote_control_source(source)
+            .expect("source transformation should succeed")
+            .expect("supported launch site");
+
+        assert!(
+            patched.contains(r#"["app-server","--analytics-default-enabled","--remote-control"]"#)
+        );
+        assert!(patched.contains(r#"x=["unrelated"]"#));
+    }
+
+    #[test]
+    fn rejects_analytics_array_without_app_server_context() {
+        let source =
+            r#"this.logger.info("Spawning codex app-server"),x=["--analytics-default-enabled"]"#;
+
+        let transformed =
+            patch_remote_control_source(source).expect("source transformation should succeed");
+
+        assert!(transformed.is_none());
+    }
+
+    #[test]
+    fn rejects_source_without_app_server_spawn_marker() {
+        let source = r#"e=Cde(this.extensionUri,["app-server","--analytics-default-enabled"])"#;
+
+        let transformed =
+            patch_remote_control_source(source).expect("source transformation should succeed");
+
+        assert!(transformed.is_none());
+    }
 }
