@@ -21,8 +21,8 @@ use crate::{
 
 use super::client_state::{
     connection_exists_locked, default_client_key_for_connection_locked, ensure_client_state_locked,
-    prune_inactive_remote_connections_locked, source_default_client_key,
-    source_kind_from_user_agent, sync_default_client_legacy_locked,
+    prune_inactive_remote_connections_locked, remove_pending_initialize_for_connection_locked,
+    source_default_client_key, source_kind_from_user_agent, sync_default_client_legacy_locked,
     sync_legacy_from_active_connection_locked,
 };
 use super::diagnostics::{
@@ -150,6 +150,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
             RemoteControlServerConnection {
                 connection_id: connection_id.clone(),
                 connection_epoch,
+                default_client_key,
                 connected: true,
                 initialized: false,
                 source_kind,
@@ -357,6 +358,14 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     {
         let mut remote = state.remote_control.inner.lock().await;
         let last_error = connection_result.as_ref().err().map(|err| err.to_string());
+        let removed_initialize_count =
+            remove_pending_initialize_for_connection_locked(&mut remote, connection_epoch);
+        if removed_initialize_count > 0 {
+            chain_log::write_line(format!(
+                "[remote_control] event=stale_initialize_cleanup connection_epoch={} removed_count={}",
+                connection_epoch, removed_initialize_count
+            ));
+        }
         remote.connections.remove(&connection_id);
         remote.last_error = last_error;
         prune_inactive_remote_connections_locked(&mut remote);

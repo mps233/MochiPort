@@ -10,18 +10,19 @@ use crate::{
 };
 
 use super::client_state::{
-    active_default_client_key_locked, connection_epoch_for_client_key_locked,
-    connection_exists_locked, ensure_client_state_locked, is_legacy_default_client_key,
-    normalize_remote_client_key, sync_default_client_legacy_locked,
+    connection_epoch_for_client_key_locked, connection_exists_locked, ensure_client_state_locked,
+    is_legacy_default_client_key, normalize_remote_client_key,
+    resolve_remote_client_key_for_connection_locked, resolve_remote_client_key_locked,
+    sync_default_client_legacy_locked,
 };
 use super::log_format::log_text_preview;
 use super::protocol::build_client_message_envelopes;
 use super::{
-    DEFAULT_REMOTE_CLIENT_KEY, REMOTE_CONTROL_CLIENT_REINITIALIZED_ERROR,
-    REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT, REMOTE_DISCOVERY_REQUEST_TIMEOUT,
-    REMOTE_REQUEST_TIMEOUT, build_pending_message, ensure_remote_control_client_initialized,
-    ensure_remote_control_client_ready, next_remote_subscribe_cursor, next_request_id,
-    remote_control_stale_reason_locked, send_envelopes_on_connection,
+    REMOTE_CONTROL_CLIENT_REINITIALIZED_ERROR, REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT,
+    REMOTE_DISCOVERY_REQUEST_TIMEOUT, REMOTE_REQUEST_TIMEOUT, build_pending_message,
+    ensure_remote_control_client_initialized, ensure_remote_control_client_ready,
+    next_remote_subscribe_cursor, next_request_id, remote_control_stale_reason_locked,
+    send_envelopes_on_connection,
 };
 
 pub async fn request_for_client(
@@ -148,11 +149,17 @@ async fn request_once_with_timeout_for_client_inner(
     timeout: Duration,
 ) -> Result<Value> {
     let requested_client_key = normalize_remote_client_key(client_key);
-    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
+    let client_key = {
         let mut remote = state.remote_control.inner.lock().await;
-        active_default_client_key_locked(&mut remote)
-    } else {
-        requested_client_key
+        if let Some(connection_epoch) = target_connection_epoch {
+            resolve_remote_client_key_for_connection_locked(
+                &remote,
+                connection_epoch,
+                &requested_client_key,
+            )
+        } else {
+            resolve_remote_client_key_locked(&mut remote, &requested_client_key)
+        }
     };
     if wait_for_recovery {
         wait_for_recovery_if_needed(state, &client_key).await?;
@@ -642,11 +649,7 @@ pub async fn interrupt_turn_for_client(
 pub async fn current_thread_for_client(state: &SharedState, client_key: &str) -> Option<String> {
     let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
-    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
-        active_default_client_key_locked(&mut remote)
-    } else {
-        requested_client_key
-    };
+    let client_key = resolve_remote_client_key_locked(&mut remote, &requested_client_key);
     remote
         .clients
         .get(&client_key)
@@ -656,11 +659,7 @@ pub async fn current_thread_for_client(state: &SharedState, client_key: &str) ->
 pub async fn clear_turn_for_client(state: &SharedState, client_key: &str, turn_id: Option<&str>) {
     let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
-    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
-        active_default_client_key_locked(&mut remote)
-    } else {
-        requested_client_key
-    };
+    let client_key = resolve_remote_client_key_locked(&mut remote, &requested_client_key);
     if let Some(client) = remote.clients.get_mut(&client_key) {
         if turn_id.is_none() || client.current_turn_id.as_deref() == turn_id {
             client.current_turn_id = None;
@@ -678,11 +677,7 @@ pub async fn clear_thread_for_client(
 ) {
     let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
-    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
-        active_default_client_key_locked(&mut remote)
-    } else {
-        requested_client_key
-    };
+    let client_key = resolve_remote_client_key_locked(&mut remote, &requested_client_key);
     if let Some(client) = remote.clients.get_mut(&client_key) {
         if thread_id.is_none() || client.current_thread_id.as_deref() == thread_id {
             client.current_thread_id = None;

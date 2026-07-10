@@ -7,8 +7,7 @@ use crate::{
 
 use super::{
     DEFAULT_REMOTE_CLIENT_KEY, prune_inactive_remote_connections_locked,
-    remote_control_stale_reason_locked, source_default_client_key,
-    sync_legacy_from_active_connection_locked,
+    remote_control_stale_reason_locked, sync_legacy_from_active_connection_locked,
 };
 
 #[derive(Debug, Serialize)]
@@ -110,7 +109,7 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
         })
         .collect::<Vec<_>>();
     let active_client_key = active_connection
-        .map(|connection| source_default_client_key(connection.source_kind))
+        .map(|connection| connection.default_client_key.clone())
         .unwrap_or_else(|| DEFAULT_REMOTE_CLIENT_KEY.to_string());
     let default_client = remote.clients.get(&active_client_key);
     let initialized = default_client

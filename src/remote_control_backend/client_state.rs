@@ -85,12 +85,13 @@ pub(in crate::remote_control_backend) fn default_client_key_for_connection_locke
         .connections
         .values()
         .find(|connection| connection.connection_epoch == connection_epoch)
-        .map(|connection| source_default_client_key(connection.source_kind))
+        .map(|connection| connection.default_client_key.clone())
         .unwrap_or_else(|| DEFAULT_REMOTE_CLIENT_KEY.to_string())
 }
 
 pub(in crate::remote_control_backend) fn migrate_source_default_client_key_locked(
     remote: &mut RemoteControlInner,
+    connection_epoch: u64,
     old_client_key: &str,
     new_source_kind: RemoteControlSourceKind,
     client_id: &str,
@@ -108,6 +109,31 @@ pub(in crate::remote_control_backend) fn migrate_source_default_client_key_locke
         return old_client_key;
     }
 
+    let owner_count = remote
+        .connections
+        .values()
+        .filter(|connection| connection.default_client_key == old_client_key)
+        .count();
+    let owned_by_connection = remote.connections.values().any(|connection| {
+        connection.connection_epoch == connection_epoch
+            && connection.default_client_key == old_client_key
+    });
+    if !owned_by_connection || owner_count != 1 {
+        chain_log::write_line(format!(
+            "[remote_control] event=source_default_client_key_migration_deferred connection_epoch={} old_client_key={} new_client_key={} source_kind={:?} owner_count={}",
+            connection_epoch, old_client_key, new_client_key, new_source_kind, owner_count
+        ));
+        return old_client_key;
+    }
+
+    if remote.clients.contains_key(&new_client_key) {
+        chain_log::write_line(format!(
+            "[remote_control] event=source_default_client_key_migration_skipped connection_epoch={} old_client_key={} new_client_key={} source_kind={:?} reason=target_exists",
+            connection_epoch, old_client_key, new_client_key, new_source_kind
+        ));
+        return old_client_key;
+    }
+
     let old_matches_stream = remote
         .clients
         .get(&old_client_key)
@@ -119,13 +145,17 @@ pub(in crate::remote_control_backend) fn migrate_source_default_client_key_locke
     let Some(old_client) = remote.clients.remove(&old_client_key) else {
         return old_client_key;
     };
-    let replaced_existing = remote
-        .clients
-        .insert(new_client_key.clone(), old_client)
-        .is_some();
+    remote.clients.insert(new_client_key.clone(), old_client);
+    if let Some(connection) = remote
+        .connections
+        .values_mut()
+        .find(|connection| connection.connection_epoch == connection_epoch)
+    {
+        connection.default_client_key = new_client_key.clone();
+    }
     chain_log::write_line(format!(
-        "[remote_control] event=source_default_client_key_migrated old_client_key={} new_client_key={} source_kind={:?} client_id={} stream_id={} replaced_existing={}",
-        old_client_key, new_client_key, new_source_kind, client_id, stream_id, replaced_existing
+        "[remote_control] event=source_default_client_key_migrated connection_epoch={} old_client_key={} new_client_key={} source_kind={:?} client_id={} stream_id={}",
+        connection_epoch, old_client_key, new_client_key, new_source_kind, client_id, stream_id
     ));
     new_client_key
 }
@@ -139,7 +169,7 @@ pub(in crate::remote_control_backend) fn active_default_client_key_locked(
     select_active_connection_id_locked(remote)
         .as_ref()
         .and_then(|connection_id| remote.connections.get(connection_id))
-        .map(|connection| source_default_client_key(connection.source_kind))
+        .map(|connection| connection.default_client_key.clone())
         .unwrap_or_else(|| DEFAULT_REMOTE_CLIENT_KEY.to_string())
 }
 
@@ -150,9 +180,10 @@ pub(in crate::remote_control_backend) fn connection_epoch_for_client_key_locked(
     if client_key == DEFAULT_REMOTE_CLIENT_KEY {
         return active_connection_epoch_locked(remote);
     }
-    let Some(source_kind) = source_kind_from_default_client_key(client_key) else {
+    if !is_legacy_default_client_key(client_key) {
         return active_connection_epoch_locked(remote);
-    };
+    }
+    let source_kind = source_kind_from_default_client_key(client_key);
     remote
         .connections
         .values()
@@ -160,7 +191,8 @@ pub(in crate::remote_control_backend) fn connection_epoch_for_client_key_locked(
             connection.connected
                 && connection.initialized
                 && connection.outbound_tx.is_some()
-                && connection.source_kind == source_kind
+                && (connection.default_client_key == client_key
+                    || source_kind.is_some_and(|source_kind| connection.source_kind == source_kind))
         })
         .max_by_key(|connection| {
             (
@@ -172,6 +204,38 @@ pub(in crate::remote_control_backend) fn connection_epoch_for_client_key_locked(
             )
         })
         .map(|connection| connection.connection_epoch)
+}
+
+pub(in crate::remote_control_backend) fn resolve_remote_client_key_for_connection_locked(
+    remote: &RemoteControlInner,
+    connection_epoch: u64,
+    client_key: &str,
+) -> String {
+    let client_key = normalize_remote_client_key(client_key);
+    if client_key == DEFAULT_REMOTE_CLIENT_KEY
+        || source_kind_from_default_client_key(&client_key).is_some()
+    {
+        default_client_key_for_connection_locked(remote, connection_epoch)
+    } else {
+        client_key
+    }
+}
+
+pub(in crate::remote_control_backend) fn resolve_remote_client_key_locked(
+    remote: &mut RemoteControlInner,
+    client_key: &str,
+) -> String {
+    let client_key = normalize_remote_client_key(client_key);
+    if client_key == DEFAULT_REMOTE_CLIENT_KEY {
+        return active_default_client_key_locked(remote);
+    }
+    if !is_legacy_default_client_key(&client_key) {
+        return client_key;
+    }
+    let Some(connection_epoch) = connection_epoch_for_client_key_locked(remote, &client_key) else {
+        return client_key;
+    };
+    resolve_remote_client_key_for_connection_locked(remote, connection_epoch, &client_key)
 }
 
 pub(in crate::remote_control_backend) fn normalize_remote_client_key(client_key: &str) -> String {
@@ -401,6 +465,21 @@ pub(in crate::remote_control_backend) fn connection_exists_locked(
         .connections
         .values()
         .any(|connection| connection.connection_epoch == connection_epoch && connection.connected)
+}
+
+pub(in crate::remote_control_backend) fn remove_pending_initialize_for_connection_locked(
+    remote: &mut RemoteControlInner,
+    connection_epoch: u64,
+) -> usize {
+    let mut removed = 0;
+    for client in remote.clients.values_mut() {
+        let before = client.pending.len();
+        client.pending.retain(|_, pending| {
+            pending.method != "initialize" || pending.connection_epoch != connection_epoch
+        });
+        removed += before.saturating_sub(client.pending.len());
+    }
+    removed
 }
 
 #[allow(dead_code)]

@@ -207,6 +207,7 @@ pub(super) async fn observe_app_server_message(
                     if let Some(client_key) = client_key.as_deref() {
                         let migrated_client_key = migrate_source_default_client_key_locked(
                             &mut remote,
+                            connection_epoch,
                             client_key,
                             connection_source_kind,
                             client_id,

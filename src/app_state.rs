@@ -97,6 +97,7 @@ pub struct RemoteControlSourceHint {
 pub struct RemoteControlServerConnection {
     pub connection_id: String,
     pub connection_epoch: u64,
+    pub default_client_key: String,
     pub connected: bool,
     pub initialized: bool,
     pub source_kind: RemoteControlSourceKind,

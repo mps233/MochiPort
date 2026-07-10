@@ -9,8 +9,8 @@ use crate::{
 };
 
 use super::client_state::{
-    active_connection_epoch_locked, active_default_client_key_locked,
-    outbound_tx_for_connection_epoch_locked, remote_client_key_for_stream_locked,
+    active_connection_epoch_locked, outbound_tx_for_connection_epoch_locked,
+    remote_client_key_for_stream_locked, resolve_remote_client_key_locked,
 };
 use super::client_state::{
     ensure_client_state_locked, is_legacy_default_client_key, normalize_remote_client_key,
@@ -19,9 +19,8 @@ use super::client_state::{
 use super::log_format::{client_envelope_recent_kind, message_summary};
 use super::protocol::{build_client_ack_envelope, build_client_message_envelopes};
 use super::{
-    DEFAULT_REMOTE_CLIENT_KEY, OutboundWsMessage, ensure_remote_control_client_ready,
-    next_remote_subscribe_cursor, next_request_id, record_remote_recent_event,
-    try_record_remote_recent_event,
+    OutboundWsMessage, ensure_remote_control_client_ready, next_remote_subscribe_cursor,
+    next_request_id, record_remote_recent_event, try_record_remote_recent_event,
 };
 
 pub async fn send_response_for_client(
@@ -405,11 +404,7 @@ async fn next_client_envelope_parts(
     if !remote.connected {
         return Err(anyhow!("remote-control websocket is not connected"));
     }
-    let client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
-        active_default_client_key_locked(&mut remote)
-    } else {
-        requested_client_key
-    };
+    let client_key = resolve_remote_client_key_locked(&mut remote, &requested_client_key);
     let client = ensure_client_state_locked(&mut remote, &client_key);
     let seq_id = client.next_seq_id;
     client.next_seq_id = client.next_seq_id.saturating_add(1);

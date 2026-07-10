@@ -558,11 +558,11 @@ async fn ensure_remote_control_client_initialized(
     let requested_client_key = normalize_remote_client_key(client_key);
     let client_key = {
         let remote = state.remote_control.inner.lock().await;
-        if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
-            default_client_key_for_connection_locked(&remote, connection_epoch)
-        } else {
-            requested_client_key
-        }
+        resolve_remote_client_key_for_connection_locked(
+            &remote,
+            connection_epoch,
+            &requested_client_key,
+        )
     };
     let should_initialize = {
         let mut remote = state.remote_control.inner.lock().await;
@@ -626,11 +626,11 @@ async fn ensure_remote_control_client_ready(state: &SharedState, client_key: &st
                 "remote-control websocket is not connected for client_key={requested_client_key}"
             )
         })?;
-        let resolved_client_key = if requested_client_key == DEFAULT_REMOTE_CLIENT_KEY {
-            default_client_key_for_connection_locked(&remote, connection_epoch)
-        } else {
-            requested_client_key
-        };
+        let resolved_client_key = resolve_remote_client_key_for_connection_locked(
+            &remote,
+            connection_epoch,
+            &requested_client_key,
+        );
         (connection_epoch, resolved_client_key)
     };
     ensure_remote_control_client_initialized(state, connection_epoch, &resolved_client_key).await?;
