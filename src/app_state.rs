@@ -136,6 +136,7 @@ impl Default for RemoteControlSourceKind {
 }
 
 pub struct PendingRemoteRequest {
+    pub connection_epoch: u64,
     pub method: String,
     pub thread_id: Option<String>,
     pub track_thread_active: bool,

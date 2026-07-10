@@ -134,6 +134,7 @@ pub(super) async fn send_initialize_for_client_on_connection(
         client.pending.insert(
             request_key.clone(),
             PendingRemoteRequest {
+                connection_epoch,
                 method: "initialize".to_string(),
                 thread_id: None,
                 track_thread_active: false,

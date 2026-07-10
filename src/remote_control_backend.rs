@@ -582,10 +582,9 @@ async fn ensure_remote_control_client_initialized(
                         .is_some_and(|connection| connection.initialized)
                 });
             let client = ensure_client_state_locked(&mut remote, &client_key);
-            let client_initializing = client
-                .pending
-                .values()
-                .any(|pending| pending.method == "initialize");
+            let client_initializing = client.pending.values().any(|pending| {
+                pending.method == "initialize" && pending.connection_epoch == connection_epoch
+            });
             let should_skip_initialize = client_initializing
                 || if !has_connection_map {
                     client.initialized

@@ -407,6 +407,7 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
     client.pending.insert(
         "1".to_string(),
         PendingRemoteRequest {
+            connection_epoch: 0,
             method: "initialize".to_string(),
             thread_id: None,
             track_thread_active: false,
@@ -419,6 +420,7 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
     client.pending.insert(
         "2".to_string(),
         PendingRemoteRequest {
+            connection_epoch: 0,
             method: "thread/list".to_string(),
             thread_id: None,
             track_thread_active: true,
@@ -891,6 +893,63 @@ async fn initialize_remote_clients_for_connection_sends_connection_default_clien
         .collect::<std::collections::HashSet<_>>();
     let expected_streams = std::collections::HashSet::from(["stream-root".to_string()]);
     assert_eq!(initialize_streams, expected_streams);
+}
+
+#[tokio::test]
+async fn initialize_remote_clients_for_connection_does_not_share_pending_initialize_across_epochs()
+{
+    let state = test_state();
+    let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.connected = true;
+        remote.stream_id = "stream-root".to_string();
+        remote.connections.insert(
+            "first".to_string(),
+            test_connection(
+                "first",
+                11,
+                true,
+                false,
+                crate::app_state::RemoteControlSourceKind::Unknown,
+                Some(first_tx),
+            ),
+        );
+        remote.connections.insert(
+            "second".to_string(),
+            test_connection(
+                "second",
+                12,
+                true,
+                false,
+                crate::app_state::RemoteControlSourceKind::Unknown,
+                Some(second_tx),
+            ),
+        );
+    }
+
+    initialize_remote_clients_for_connection(&state, 11)
+        .await
+        .expect("initialize first unknown connection");
+    assert_eq!(
+        take_text_envelopes(&mut first_rx)
+            .iter()
+            .filter(|envelope| envelope_message_method(envelope) == Some("initialize"))
+            .count(),
+        1
+    );
+
+    initialize_remote_clients_for_connection(&state, 12)
+        .await
+        .expect("initialize second unknown connection");
+    assert_eq!(
+        take_text_envelopes(&mut second_rx)
+            .iter()
+            .filter(|envelope| envelope_message_method(envelope) == Some("initialize"))
+            .count(),
+        1
+    );
 }
 
 #[test]

@@ -216,6 +216,7 @@ async fn request_once_with_timeout_for_client_inner(
         client.pending.insert(
             request_key.clone(),
             PendingRemoteRequest {
+                connection_epoch,
                 method: method.to_string(),
                 thread_id: thread_id.clone(),
                 track_thread_active,
