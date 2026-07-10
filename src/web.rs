@@ -162,6 +162,7 @@ struct StatusResponse {
     running: bool,
     bind: String,
     local_connection_mode: crate::config::LocalConnectionMode,
+    outbound_proxy_mode: crate::config::OutboundProxyMode,
     codex_app_fast_startup: bool,
     state_path: String,
     feishu_ws: FeishuWsState,
@@ -197,6 +198,7 @@ async fn status_snapshot(state: &SharedState) -> StatusResponse {
         running,
         bind: config.bind.clone(),
         local_connection_mode: config.local_connection_mode,
+        outbound_proxy_mode: config.outbound_proxy.mode,
         codex_app_fast_startup: config.codex_app_fast_startup,
         state_path: config.state_path.to_string_lossy().to_string(),
         feishu_ws,
@@ -251,7 +253,23 @@ async fn save_config(
     State(state): State<SharedState>,
     Json(config): Json<AppConfig>,
 ) -> impl IntoResponse {
+    if let Err(err) = crate::outbound_http::validate_for_local_port(
+        &config.outbound_proxy,
+        config.local_listen_port(),
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": err.to_string() })),
+        );
+    }
     if let Err(err) = config.save(&state.config_path) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        );
+    }
+    if let Err(err) = crate::outbound_http::init(&config.outbound_proxy, config.local_listen_port())
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": err.to_string() })),

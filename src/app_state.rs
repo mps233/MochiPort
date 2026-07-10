@@ -28,7 +28,6 @@ pub type SharedState = Arc<AppState>;
 pub struct AppState {
     pub config_path: PathBuf,
     pub config: Mutex<AppConfig>,
-    pub ai_gateway_http_client: reqwest::Client,
     pub ai_gateway_request_logs: RequestLogStore,
     pub ai_gateway_routing: Mutex<GatewayRoutingState>,
     pub persisted: Mutex<PersistedState>,
@@ -336,7 +335,6 @@ impl AppState {
         Arc::new(Self {
             config_path,
             config: Mutex::new(config),
-            ai_gateway_http_client: reqwest::Client::new(),
             ai_gateway_request_logs,
             ai_gateway_routing: Mutex::new(GatewayRoutingState::default()),
             persisted: Mutex::new(persisted),

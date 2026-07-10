@@ -14,6 +14,7 @@ mod diagnostics_export;
 mod gui;
 mod im;
 mod im_runtime;
+mod outbound_http;
 mod remote_control_backend;
 mod store;
 mod types;
@@ -148,6 +149,7 @@ fn run_gui_command() -> anyhow::Result<()> {
 
 async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<()> {
     let bind = config.bind.clone();
+    outbound_http::init(&config.outbound_proxy, config.local_listen_port())?;
     let chain_log_path = chain_log_path(&config);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);

@@ -28,7 +28,7 @@ use crate::ai_gateway::config::{
     DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderConfig, ProviderType, provider_api_root,
     provider_display_base_url,
 };
-use crate::config::{AppConfig, LocalConnectionMode};
+use crate::config::{AppConfig, LocalConnectionMode, OutboundProxyConfig, OutboundProxyMode};
 use crate::diagnostics_export::{
     ConnectionDiagnosticsInput, connection_status_snapshot, export_connection_diagnostics_to_path,
 };
@@ -80,6 +80,9 @@ const ID_MENU_THEME_DARK: i32 = 10_008;
 const ID_SERVICE_CONNECTION_SWITCH: i32 = 10_009;
 const ID_MENU_QUIT: i32 = 10_010;
 const ID_MENU_EXPORT_CONNECTION_DIAGNOSTICS: i32 = 10_011;
+const ID_MENU_PROXY_SYSTEM: i32 = 10_012;
+const ID_MENU_PROXY_DIRECT: i32 = 10_013;
+const ID_MENU_PROXY_CUSTOM: i32 = 10_014;
 
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
@@ -310,6 +313,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         &frame,
         &gui_timers,
         text,
+        api.clone(),
         update_check_in_flight.clone(),
         quitting.clone(),
         gui_tx.clone(),
@@ -1913,6 +1917,47 @@ fn save_gui_theme(mode: ThemeMode) -> Result<(), String> {
     config.save(&path).map_err(|err| err.to_string())
 }
 
+fn load_outbound_proxy_config() -> OutboundProxyConfig {
+    daemon_config_path()
+        .and_then(|path| AppConfig::load_or_default(&path).ok())
+        .map(|config| config.outbound_proxy)
+        .unwrap_or_default()
+}
+
+fn save_outbound_proxy_config(
+    api: &ApiClient,
+    outbound_proxy: OutboundProxyConfig,
+) -> Result<bool, String> {
+    if let Ok(mut config) = api.get_app_config() {
+        crate::outbound_http::validate_for_local_port(&outbound_proxy, config.local_listen_port())
+            .map_err(|err| err.to_string())?;
+        config.outbound_proxy = outbound_proxy;
+        api.save_app_config(&config)?;
+        return Ok(true);
+    }
+
+    let path = daemon_config_path().unwrap_or_else(app_support_config_path);
+    let mut config = AppConfig::load_or_default(&path).map_err(|err| err.to_string())?;
+    crate::outbound_http::validate_for_local_port(&outbound_proxy, config.local_listen_port())
+        .map_err(|err| err.to_string())?;
+    config.outbound_proxy = outbound_proxy;
+    config.save(&path).map_err(|err| err.to_string())?;
+    Ok(false)
+}
+
+fn apply_outbound_blocking_proxy(
+    builder: reqwest::blocking::ClientBuilder,
+) -> Result<reqwest::blocking::ClientBuilder, String> {
+    let path = daemon_config_path().unwrap_or_else(app_support_config_path);
+    let config = AppConfig::load_or_default(&path).map_err(|err| err.to_string())?;
+    crate::outbound_http::apply_blocking_proxy(
+        builder,
+        &config.outbound_proxy,
+        config.local_listen_port(),
+    )
+    .map_err(|err| err.to_string())
+}
+
 fn export_connection_diagnostics_async(
     text: GuiText,
     gui_tx: tokio_mpsc::UnboundedSender<GuiMessage>,
@@ -2027,6 +2072,7 @@ fn install_system_menu(
     frame: &Frame,
     gui_timers: &GuiTimers,
     text: GuiText,
+    api: ApiClient,
     update_check_in_flight: Arc<AtomicBool>,
     quitting: Rc<AtomicBool>,
     gui_tx: tokio_mpsc::UnboundedSender<GuiMessage>,
@@ -2077,6 +2123,36 @@ fn install_system_menu(
     theme_menu.check_item(ID_MENU_THEME_SYSTEM, theme_mode == ThemeMode::System);
     theme_menu.check_item(ID_MENU_THEME_LIGHT, theme_mode == ThemeMode::Light);
     theme_menu.check_item(ID_MENU_THEME_DARK, theme_mode == ThemeMode::Dark);
+    let outbound_proxy = load_outbound_proxy_config();
+    let network_menu = Menu::builder()
+        .append_radio_item(
+            ID_MENU_PROXY_SYSTEM,
+            text.outbound_proxy_system(),
+            text.outbound_proxy_system_help(),
+        )
+        .append_radio_item(
+            ID_MENU_PROXY_DIRECT,
+            text.outbound_proxy_direct(),
+            text.outbound_proxy_direct_help(),
+        )
+        .append_radio_item(
+            ID_MENU_PROXY_CUSTOM,
+            text.outbound_proxy_custom(),
+            text.outbound_proxy_custom_help(),
+        )
+        .build();
+    network_menu.check_item(
+        ID_MENU_PROXY_SYSTEM,
+        outbound_proxy.mode == OutboundProxyMode::System,
+    );
+    network_menu.check_item(
+        ID_MENU_PROXY_DIRECT,
+        outbound_proxy.mode == OutboundProxyMode::Direct,
+    );
+    network_menu.check_item(
+        ID_MENU_PROXY_CUSTOM,
+        outbound_proxy.mode == OutboundProxyMode::Custom,
+    );
     let help_menu = Menu::builder()
         .append_item(
             ID_MENU_CHECK_UPDATE,
@@ -2095,6 +2171,7 @@ fn install_system_menu(
         .append(file_menu, text.file_menu())
         .append(language_menu, text.language_menu())
         .append(theme_menu, text.theme_menu())
+        .append(network_menu, text.network_menu())
         .append(help_menu, text.help_menu())
         .build();
     frame.set_menu_bar(menu_bar);
@@ -2133,6 +2210,15 @@ fn install_system_menu(
         ID_MENU_THEME_SYSTEM => handle_theme_selected(&frame, text, ThemeMode::System),
         ID_MENU_THEME_LIGHT => handle_theme_selected(&frame, text, ThemeMode::Light),
         ID_MENU_THEME_DARK => handle_theme_selected(&frame, text, ThemeMode::Dark),
+        ID_MENU_PROXY_SYSTEM => {
+            handle_outbound_proxy_selected(&frame, text, &api, OutboundProxyMode::System)
+        }
+        ID_MENU_PROXY_DIRECT => {
+            handle_outbound_proxy_selected(&frame, text, &api, OutboundProxyMode::Direct)
+        }
+        ID_MENU_PROXY_CUSTOM => {
+            handle_outbound_proxy_selected(&frame, text, &api, OutboundProxyMode::Custom)
+        }
         ID_ABOUT => show_about_dialog(&frame),
         _ => event.skip(true),
     });
@@ -3884,11 +3970,13 @@ fn fetch_remote_models(
     timeout_secs: u64,
 ) -> Result<(Vec<String>, String), String> {
     let timeout = Duration::from_secs(timeout_secs.max(1));
-    let client = reqwest::blocking::Client::builder()
-        .timeout(timeout)
-        .connect_timeout(Duration::from_secs(5))
-        .build()
-        .map_err(|err| err.to_string())?;
+    let client = apply_outbound_blocking_proxy(
+        reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(Duration::from_secs(5)),
+    )?
+    .build()
+    .map_err(|err| err.to_string())?;
     let mut errors = Vec::new();
     for candidate in model_list_candidates(base_url, models_url, fallback_models_url) {
         let mut request = client.get(&candidate.url);
@@ -4065,6 +4153,67 @@ fn handle_theme_selected(frame: &Frame, text: GuiText, mode: ThemeMode) {
     match save_gui_theme(mode) {
         Ok(()) => show_info(frame, text.theme_restart_message()),
         Err(err) => show_error(frame, &format!("{}: {err}", text.theme_save_failed())),
+    }
+}
+
+fn handle_outbound_proxy_selected(
+    frame: &Frame,
+    text: GuiText,
+    api: &ApiClient,
+    mode: OutboundProxyMode,
+) {
+    let mut config = load_outbound_proxy_config();
+    let previous_mode = config.mode;
+    if mode == OutboundProxyMode::Custom {
+        let input = TextEntryDialog::builder(
+            frame,
+            text.outbound_proxy_prompt(),
+            text.outbound_proxy_custom(),
+        )
+        .with_default_value(&config.url)
+        .with_style(
+            TextEntryDialogStyle::Ok | TextEntryDialogStyle::Cancel | TextEntryDialogStyle::Centre,
+        )
+        .build();
+        if input.show_modal() != ID_OK {
+            sync_outbound_proxy_menu(frame, previous_mode);
+            return;
+        }
+        let Some(value) = input.get_value() else {
+            sync_outbound_proxy_menu(frame, previous_mode);
+            return;
+        };
+        config.url = value.trim().to_string();
+    }
+    config.mode = mode;
+
+    match save_outbound_proxy_config(api, config) {
+        Ok(applied_live) => {
+            sync_outbound_proxy_menu(frame, mode);
+            show_info(
+                frame,
+                if applied_live {
+                    text.outbound_proxy_applied_message()
+                } else {
+                    text.outbound_proxy_restart_message()
+                },
+            );
+        }
+        Err(err) => {
+            sync_outbound_proxy_menu(frame, previous_mode);
+            show_error(
+                frame,
+                &format!("{}: {err}", text.outbound_proxy_save_failed()),
+            );
+        }
+    }
+}
+
+fn sync_outbound_proxy_menu(frame: &Frame, mode: OutboundProxyMode) {
+    if let Some(menu_bar) = frame.get_menu_bar() {
+        menu_bar.check_item(ID_MENU_PROXY_SYSTEM, mode == OutboundProxyMode::System);
+        menu_bar.check_item(ID_MENU_PROXY_DIRECT, mode == OutboundProxyMode::Direct);
+        menu_bar.check_item(ID_MENU_PROXY_CUSTOM, mode == OutboundProxyMode::Custom);
     }
 }
 

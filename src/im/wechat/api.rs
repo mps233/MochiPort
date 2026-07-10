@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, header::CONTENT_TYPE};
 use base64::{Engine as _, engine::general_purpose};
 use cipher::{BlockEncryptMut, KeyInit, block_padding::Pkcs7};
 use ecb::Encryptor as Aes128EcbEnc;
-use reqwest::{Client, Url};
+use reqwest::Url;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -39,15 +39,11 @@ static WECHAT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 #[derive(Debug, Clone)]
 pub struct WechatApi {
     settings: WechatSettings,
-    client: Client,
 }
 
 impl WechatApi {
     pub fn new(settings: WechatSettings) -> Self {
-        Self {
-            settings,
-            client: Client::new(),
-        }
+        Self { settings }
     }
 
     pub fn settings(&self) -> &WechatSettings {
@@ -359,8 +355,7 @@ impl WechatApi {
             redact_url(url.as_str()),
             body_text.len()
         ));
-        let response = self
-            .client
+        let response = crate::outbound_http::get()
             .post(url)
             .headers(build_headers(token)?)
             .body(body_text)
@@ -387,8 +382,7 @@ impl WechatApi {
             label,
             redact_url(url.as_str())
         ));
-        let response = self
-            .client
+        let response = crate::outbound_http::get()
             .get(url)
             .headers(build_common_headers()?)
             .timeout(timeout)
@@ -472,10 +466,9 @@ async fn upload_encrypted_media_to_cdn(
     ciphertext: Vec<u8>,
 ) -> Result<String> {
     let url = build_cdn_upload_url(upload_param, filekey);
-    let response = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?
+    let response = crate::outbound_http::get()
         .post(url)
+        .timeout(Duration::from_secs(30))
         .header(CONTENT_TYPE, "application/octet-stream")
         .body(ciphertext)
         .send()

@@ -27,6 +27,9 @@ const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
 const CODEX_API_ENDPOINT_ENV: &str = "CODEX_API_ENDPOINT";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
+const NO_PROXY_ENV: &str = "NO_PROXY";
+#[cfg(target_os = "macos")]
+const LOWERCASE_NO_PROXY_ENV: &str = "no_proxy";
 const CODEX_APP_SQLITE_DIR: &str = "sqlite";
 const CODEX_APP_PRIMARY_DB: &str = "codex.db";
 const CODEX_APP_DEV_DB: &str = "codex-dev.db";
@@ -60,6 +63,8 @@ const LEGACY_BAD_LOCAL_AUTH_API_KEY: &str = "codexhub-dummy-key";
 const MANAGED_BACKUP_VERSION: u32 = 1;
 const MANAGED_BACKUP_MANIFEST: &str = "manifest.json";
 const MANAGED_BACKUP_AUTH: &str = "auth.json";
+const PROXY_ENVIRONMENT_BACKUP_VERSION: u32 = 1;
+const PROXY_ENVIRONMENT_BACKUP_FILE: &str = "proxy-environment.json";
 
 #[derive(Debug, Clone)]
 pub struct ConfigureCodexAppOptions {
@@ -186,6 +191,16 @@ struct ManagedCodexAppBackupManifest {
     codex_home: PathBuf,
     config_existed: bool,
     auth_existed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedProxyEnvironmentBackup {
+    version: u32,
+    original_no_proxy: Option<String>,
+    original_lowercase_no_proxy: Option<String>,
+    managed_no_proxy: String,
+    managed_lowercase_no_proxy: Option<String>,
 }
 
 pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<ConfigureCodexAppReport> {
@@ -948,6 +963,7 @@ pub fn configure_gui_environment(
 ) -> CodexAppGuiApiBaseStatus {
     #[cfg(target_os = "windows")]
     {
+        let legacy_proxy_cleanup_result = cleanup_legacy_global_proxy_bypass();
         let configure_result = if fast_startup_enabled {
             gui_unsetenv_many(&[CODEX_API_BASE_URL_ENV])
                 .and_then(|_| gui_setenv(CODEX_API_ENDPOINT_ENV, "localhost"))
@@ -960,12 +976,15 @@ pub fn configure_gui_environment(
             ])
         };
         let mut status = inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled);
-        status.error = configure_result.err();
+        status.error = configure_result
+            .err()
+            .or_else(|| legacy_proxy_cleanup_result.err());
         status
     }
 
     #[cfg(target_os = "macos")]
     {
+        let legacy_proxy_cleanup_result = cleanup_legacy_global_proxy_bypass();
         let api_result = if fast_startup_enabled {
             gui_unsetenv(CODEX_API_BASE_URL_ENV)
                 .and_then(|_| gui_setenv(CODEX_API_ENDPOINT_ENV, "localhost"))
@@ -974,7 +993,10 @@ pub fn configure_gui_environment(
         };
         let issuer_result = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
         let mut status = inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled);
-        status.error = api_result.err().or_else(|| issuer_result.err());
+        status.error = api_result
+            .err()
+            .or_else(|| issuer_result.err())
+            .or_else(|| legacy_proxy_cleanup_result.err());
         status
     }
 
@@ -987,23 +1009,30 @@ pub fn configure_gui_environment(
 pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
     #[cfg(target_os = "windows")]
     {
+        let legacy_proxy_cleanup_result = cleanup_legacy_global_proxy_bypass();
         let cleanup_result = gui_unsetenv_many(&[
             CODEX_API_BASE_URL_ENV,
             CODEX_API_ENDPOINT_ENV,
             CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
         ]);
         let mut status = inspect_gui_api_base_url(backend_url);
-        status.error = cleanup_result.err();
+        status.error = cleanup_result
+            .err()
+            .or_else(|| legacy_proxy_cleanup_result.err());
         status
     }
 
     #[cfg(target_os = "macos")]
     {
+        let legacy_proxy_cleanup_result = cleanup_legacy_global_proxy_bypass();
         let api_result =
             gui_unsetenv(CODEX_API_BASE_URL_ENV).and_then(|_| gui_unsetenv(CODEX_API_ENDPOINT_ENV));
         let issuer_result = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
         let mut status = inspect_gui_api_base_url(backend_url);
-        status.error = api_result.err().or_else(|| issuer_result.err());
+        status.error = api_result
+            .err()
+            .or_else(|| issuer_result.err())
+            .or_else(|| legacy_proxy_cleanup_result.err());
         status
     }
 
@@ -1011,6 +1040,110 @@ pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
     {
         inspect_gui_api_base_url(backend_url)
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn cleanup_legacy_global_proxy_bypass() -> Result<(), String> {
+    let backup_path = managed_proxy_environment_backup_path();
+    let Some(backup) = read_proxy_environment_backup(&backup_path)? else {
+        return Ok(());
+    };
+
+    let restored_no_proxy = restore_managed_no_proxy_value(
+        gui_getenv(NO_PROXY_ENV)?.as_deref(),
+        backup.original_no_proxy.as_deref(),
+        &backup.managed_no_proxy,
+    );
+    gui_set_or_unsetenv(NO_PROXY_ENV, restored_no_proxy.as_deref())?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(managed_lowercase_no_proxy) = backup.managed_lowercase_no_proxy.as_deref() {
+        let restored_lowercase_no_proxy = restore_managed_no_proxy_value(
+            gui_getenv(LOWERCASE_NO_PROXY_ENV)?.as_deref(),
+            backup.original_lowercase_no_proxy.as_deref(),
+            managed_lowercase_no_proxy,
+        );
+        gui_set_or_unsetenv(
+            LOWERCASE_NO_PROXY_ENV,
+            restored_lowercase_no_proxy.as_deref(),
+        )?;
+    }
+
+    match std::fs::remove_file(&backup_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.to_string()),
+    }
+    chain_log::write_line("[codex_app_config] event=legacy_global_proxy_bypass_restored");
+    Ok(())
+}
+
+fn restore_managed_no_proxy_value(
+    current: Option<&str>,
+    original: Option<&str>,
+    managed: &str,
+) -> Option<String> {
+    if current == Some(managed) {
+        return original.map(str::to_string);
+    }
+
+    let original_entries = no_proxy_entry_set(original);
+    let managed_additions = no_proxy_entry_set(Some(managed))
+        .difference(&original_entries)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let retained = current
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .filter(|entry| !managed_additions.contains(&entry.to_ascii_lowercase()))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!retained.is_empty()).then(|| retained.join(","))
+}
+
+fn no_proxy_entry_set(value: Option<&str>) -> HashSet<String> {
+    value
+        .into_iter()
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn gui_set_or_unsetenv(name: &str, value: Option<&str>) -> Result<(), String> {
+    match value {
+        Some(value) => gui_setenv(name, value),
+        None => gui_unsetenv(name),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn gui_unsetenv(name: &str) -> Result<(), String> {
+    gui_unsetenv_many(&[name])
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn read_proxy_environment_backup(
+    path: &Path,
+) -> Result<Option<ManagedProxyEnvironmentBackup>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    let backup = serde_json::from_str::<ManagedProxyEnvironmentBackup>(&raw)
+        .map_err(|err| err.to_string())?;
+    if backup.version != PROXY_ENVIRONMENT_BACKUP_VERSION {
+        return Err(format!(
+            "unsupported proxy environment backup version {}",
+            backup.version
+        ));
+    }
+    Ok(Some(backup))
 }
 
 #[cfg(target_os = "macos")]
@@ -2444,6 +2577,12 @@ fn managed_backup_paths(codex_home: &Path) -> ManagedBackupPaths {
     }
 }
 
+fn managed_proxy_environment_backup_path() -> PathBuf {
+    codexhub_app_support_dir()
+        .join("backups")
+        .join(PROXY_ENVIRONMENT_BACKUP_FILE)
+}
+
 fn codex_home_backup_id(codex_home: &Path) -> String {
     let normalized = codex_home
         .to_string_lossy()
@@ -2758,6 +2897,42 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn restore_managed_no_proxy_value_restores_unchanged_original() {
+        assert_eq!(
+            restore_managed_no_proxy_value(
+                Some("example.internal,localhost,127.0.0.1,::1"),
+                Some("example.internal"),
+                "example.internal,localhost,127.0.0.1,::1",
+            ),
+            Some("example.internal".to_string())
+        );
+    }
+
+    #[test]
+    fn restore_managed_no_proxy_value_keeps_later_user_entries() {
+        assert_eq!(
+            restore_managed_no_proxy_value(
+                Some("example.internal,localhost,127.0.0.1,::1,later.internal"),
+                Some("example.internal"),
+                "example.internal,localhost,127.0.0.1,::1",
+            ),
+            Some("example.internal,later.internal".to_string())
+        );
+    }
+
+    #[test]
+    fn restore_managed_no_proxy_value_keeps_preexisting_loopback_entry() {
+        assert_eq!(
+            restore_managed_no_proxy_value(
+                Some("localhost,127.0.0.1,::1"),
+                Some("localhost"),
+                "localhost,127.0.0.1,::1",
+            ),
+            Some("localhost".to_string())
+        );
+    }
 
     #[test]
     fn configure_codex_app_writes_provider_and_local_auth() {

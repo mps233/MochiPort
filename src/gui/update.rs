@@ -24,6 +24,7 @@ use super::text::GuiText;
 use super::{
     FrameTimerStore, GuiTimers, LEGACY_UPDATE_MANIFEST_URL, UPDATE_CHECK_TIMEOUT,
     UPDATE_MANIFEST_URL, UPDATE_RELEASE_API_URL, UPDATE_RELEASE_PAGE_URL,
+    apply_outbound_blocking_proxy,
 };
 use super::{confirm_open_update_release, show_error, show_info};
 
@@ -214,11 +215,13 @@ fn check_for_updates_async_impl(
 }
 
 fn check_for_updates(text: GuiText) -> Result<UpdateCheckOutcome, String> {
-    let client = Client::builder()
-        .connect_timeout(UPDATE_CHECK_TIMEOUT)
-        .timeout(UPDATE_CHECK_TIMEOUT)
-        .build()
-        .map_err(|err| text.update_client_failed(&err.to_string()))?;
+    let client = apply_outbound_blocking_proxy(
+        Client::builder()
+            .connect_timeout(UPDATE_CHECK_TIMEOUT)
+            .timeout(UPDATE_CHECK_TIMEOUT),
+    )?
+    .build()
+    .map_err(|err| text.update_client_failed(&err.to_string()))?;
 
     let release = fetch_update_manifest(text, &client, UPDATE_MANIFEST_URL).or_else(
         |platform_manifest_err| {
@@ -602,11 +605,13 @@ fn download_update(
         return Err(text.empty_download_url().to_string());
     }
 
-    let client = Client::builder()
-        .connect_timeout(UPDATE_CHECK_TIMEOUT)
-        .timeout(None)
-        .build()
-        .map_err(|err| text.update_client_failed(&err.to_string()))?;
+    let client = apply_outbound_blocking_proxy(
+        Client::builder()
+            .connect_timeout(UPDATE_CHECK_TIMEOUT)
+            .timeout(None),
+    )?
+    .build()
+    .map_err(|err| text.update_client_failed(&err.to_string()))?;
     let mut response = client
         .get(url)
         .header("User-Agent", "codexhub")

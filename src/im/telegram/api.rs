@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
-use reqwest::{Client, StatusCode, multipart};
+use reqwest::{StatusCode, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::chain_log;
@@ -13,7 +13,6 @@ const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 #[derive(Debug, Clone)]
 pub struct TelegramApi {
     settings: TelegramSettings,
-    client: Client,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,10 +104,7 @@ impl TelegramApiError {
 
 impl TelegramApi {
     pub fn new(settings: TelegramSettings) -> Self {
-        Self {
-            settings,
-            client: Client::new(),
-        }
+        Self { settings }
     }
 
     pub fn is_configured(&self) -> bool {
@@ -270,8 +266,7 @@ impl TelegramApi {
             self.settings.bot_token.trim(),
             method
         );
-        let response = self
-            .client
+        let response = crate::outbound_http::get()
             .post(url)
             .json(body)
             .send()
@@ -357,8 +352,7 @@ impl TelegramApi {
             self.settings.bot_token.trim(),
             method
         );
-        let response = self
-            .client
+        let response = crate::outbound_http::get()
             .post(url)
             .multipart(form)
             .send()

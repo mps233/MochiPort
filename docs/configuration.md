@@ -21,6 +21,10 @@ Example:
 bind = "127.0.0.1:3847"
 statePath = "codexhub-state.json"
 
+[outboundProxy]
+mode = "system"
+url = ""
+
 [feishu]
 appId = ""
 appSecret = ""
@@ -59,6 +63,34 @@ bind = "127.0.0.1:3847"
 ```
 
 Keep this on localhost. Do not expose it directly to a network.
+
+### `outboundProxy`
+
+Controls only requests that CodexHub sends to external services such as model providers,
+WeChat, Telegram, Feishu HTTP APIs, and update endpoints. It does not change the operating
+system proxy or the environment of other applications.
+
+```toml
+[outboundProxy]
+mode = "system" # system | direct | custom
+url = ""
+```
+
+- `system` follows the operating system proxy and proxy environment variables.
+- `direct` disables proxy discovery for CodexHub HTTP requests.
+- `custom` uses `url` as an explicit HTTP, HTTPS, SOCKS5, or SOCKS5H proxy.
+
+Example for a local Clash mixed port:
+
+```toml
+[outboundProxy]
+mode = "custom"
+url = "http://127.0.0.1:7890"
+```
+
+The desktop GUI exposes the same setting under `Network` and applies it immediately while the
+daemon is running. Local GUI-to-daemon requests always bypass proxies. A VPN implemented as a TUN or Network Extension may still route traffic below
+the HTTP proxy layer; configure loopback exclusions in that VPN when necessary.
 
 ### `statePath`
 

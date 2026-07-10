@@ -1,4 +1,4 @@
-﻿use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,7 @@ const LEGACY_DEFAULT_BIND: &str = "127.0.0.1:8000";
 pub struct AppConfig {
     pub bind: String,
     pub local_connection_mode: LocalConnectionMode,
+    pub outbound_proxy: OutboundProxyConfig,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,6 +36,22 @@ pub enum LocalConnectionMode {
     #[default]
     Standard,
     VpnCompatible,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OutboundProxyMode {
+    #[default]
+    System,
+    Direct,
+    Custom,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct OutboundProxyConfig {
+    pub mode: OutboundProxyMode,
+    pub url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +115,7 @@ impl Default for AppConfig {
         Self {
             bind: DEFAULT_BIND.to_string(),
             local_connection_mode: LocalConnectionMode::default(),
+            outbound_proxy: OutboundProxyConfig::default(),
             language: None,
             theme: None,
             codex_app_fast_startup: false,
@@ -195,6 +213,13 @@ impl AppConfig {
 
     pub fn remote_control_base_url(&self) -> String {
         self.remote_control_base_url_for_mode(self.local_connection_mode)
+    }
+
+    pub fn local_listen_port(&self) -> Option<u16> {
+        self.bind
+            .parse::<SocketAddr>()
+            .ok()
+            .map(|address| address.port())
     }
 
     pub fn remote_control_base_url_for_mode(&self, mode: LocalConnectionMode) -> String {
@@ -573,7 +598,14 @@ fn non_empty(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, TelegramChatAllowResult, TelegramConfig};
+    use super::{AppConfig, OutboundProxyMode, TelegramChatAllowResult, TelegramConfig};
+
+    #[test]
+    fn missing_outbound_proxy_config_defaults_to_system() {
+        let config: AppConfig = toml::from_str("bind = '127.0.0.1:3847'").unwrap();
+        assert_eq!(config.outbound_proxy.mode, OutboundProxyMode::System);
+        assert!(config.outbound_proxy.url.is_empty());
+    }
 
     #[test]
     fn telegram_empty_allowlist_binds_first_private_chat() {

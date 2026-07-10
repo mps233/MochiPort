@@ -139,10 +139,11 @@ pub async fn handle_responses(
         .resolve_upstream_model(&envelope.model)
         .unwrap_or(envelope.model.as_str())
         .to_string();
+    let http_client = crate::outbound_http::get();
     match provider.provider_type {
         ProviderType::OpenAiResponses | ProviderType::GrokResponses => {
             let result = openai_responses::passthrough(
-                &state.ai_gateway_http_client,
+                &http_client,
                 &ctx,
                 raw_body,
                 &upstream_model,
@@ -175,7 +176,7 @@ pub async fn handle_responses(
             let mut upstream_request = request.clone();
             upstream_request.model = upstream_model;
             let result = deepseek_chat::handle(
-                &state.ai_gateway_http_client,
+                &http_client,
                 &ctx,
                 &upstream_request,
                 &request.model,
@@ -208,7 +209,7 @@ pub async fn handle_responses(
             let mut upstream_request = request.clone();
             upstream_request.model = upstream_model;
             let result = anthropic_messages::handle(
-                &state.ai_gateway_http_client,
+                &http_client,
                 &ctx,
                 &upstream_request,
                 &request.model,

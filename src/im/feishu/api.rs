@@ -19,14 +19,6 @@ const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
 const FEISHU_WS_BASE: &str = "https://open.feishu.cn";
 const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(7200);
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(120);
-static FEISHU_HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
-    reqwest::Client::builder()
-        .pool_max_idle_per_host(8)
-        .tcp_keepalive(Duration::from_secs(60))
-        .build()
-        .expect("failed to build feishu http client")
-});
-
 // Process-wide tenant token cache to avoid fetching a token for every message send.
 // Keyed by (app_id, app_secret) since both define the credential pair.
 static TENANT_TOKEN_CACHE: Lazy<RwLock<HashMap<String, CachedTenantToken>>> =
@@ -87,8 +79,8 @@ impl FeishuApi {
         Self { settings }
     }
 
-    fn http_client(&self) -> &reqwest::Client {
-        &FEISHU_HTTP_CLIENT
+    fn http_client(&self) -> reqwest::Client {
+        crate::outbound_http::get()
     }
 
     pub(super) fn tenant_access_token_url(&self) -> String {
