@@ -455,6 +455,7 @@ fn port_owners(port: u16) -> Option<Vec<PortOwner>> {
     )
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn parse_netstat_listener_pids(output: &str, port: u16) -> Vec<u32> {
     let mut pids = Vec::new();
     for line in output.lines() {
@@ -478,7 +479,6 @@ fn parse_netstat_listener_pids(output: &str, port: u16) -> Vec<u32> {
     pids
 }
 
-#[cfg(windows)]
 pub(super) fn netstat_addr_has_port(addr: &str, port: u16) -> bool {
     addr.rsplit_once(':')
         .and_then(|(_, value)| value.parse::<u16>().ok())
