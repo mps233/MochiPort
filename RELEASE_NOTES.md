@@ -1,6 +1,6 @@
-CodexHub v0.3.34
+CodexHub v0.3.35
 
-本版本集中修复本地连接、代理环境和 daemon 生命周期问题：
+本版本修复 v0.3.34 中 macOS/Linux 发布构建失败的问题，并包含以下本地连接、代理环境和 daemon 生命周期改进：
 
 - 新增系统代理、直连和自定义 HTTP/SOCKS5 出站代理模式。本地 GUI、Codex App、VS Code 与 CodexHub 之间的回环通信始终绕过代理，改善 VPN 和全局代理环境下的连接稳定性。
 - 重构 remote-control 多连接状态管理，分别识别 Codex App、VS Code、CLI 和 IM 虚拟客户端，修复功能正常但面板显示未连接、重连后旧连接状态污染等问题。
