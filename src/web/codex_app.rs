@@ -443,38 +443,23 @@ pub(super) async fn refresh_codex_app_models(
 pub(super) async fn codex_app_sessions(State(state): State<SharedState>) -> impl IntoResponse {
     const PAGE_LIMIT: u32 = 100;
     const MAX_PAGES: usize = 20;
-    let mut cursor: Option<String> = None;
-    let mut threads = Vec::<serde_json::Value>::new();
-
-    for _ in 0..MAX_PAGES {
-        let response = match remote_control_backend::thread_list_all_providers_for_client(
-            &state,
-            remote_control_backend::default_remote_client_key(),
-            cursor.as_deref(),
-            Some(PAGE_LIMIT),
-            false,
-        )
-        .await
-        {
-            Ok(value) => value,
-            Err(err) => {
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({ "ok": false, "error": err.to_string() })),
-                );
-            }
-        };
-        if let Some(items) = response.get("data").and_then(|value| value.as_array()) {
-            threads.extend(items.iter().cloned());
+    let threads = match remote_control_backend::session_history_threads(
+        &state,
+        remote_control_backend::default_remote_client_key(),
+        PAGE_LIMIT,
+        MAX_PAGES,
+        false,
+    )
+    .await
+    {
+        Ok(threads) => threads,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            );
         }
-        cursor = response
-            .get("nextCursor")
-            .and_then(|value| value.as_str())
-            .map(str::to_string);
-        if cursor.is_none() {
-            break;
-        }
-    }
+    };
 
     let mut providers = threads
         .iter()

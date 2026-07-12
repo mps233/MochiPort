@@ -1378,6 +1378,98 @@ async fn status_snapshot_excludes_inactive_connections() {
 }
 
 #[tokio::test]
+async fn session_history_falls_back_to_another_connection_and_uses_fast_root_sources() {
+    let state = test_state();
+    let (failed_tx, failed_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(failed_rx);
+    let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.stream_id = "stream-root".to_string();
+        for client_key in ["default:codex_app", "default:vscode"] {
+            ensure_client_state_locked(&mut remote, client_key).initialized = true;
+        }
+        remote.connections.insert(
+            "conn-codex-failed".to_string(),
+            test_connection(
+                "conn-codex-failed",
+                20,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(failed_tx),
+            ),
+        );
+        remote.connections.insert(
+            "conn-vscode-ready".to_string(),
+            test_connection(
+                "conn-vscode-ready",
+                10,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::Vscode,
+                Some(ready_tx),
+            ),
+        );
+        sync_legacy_from_active_connection_locked(&mut remote);
+    }
+
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        session_history_threads(&request_state, DEFAULT_REMOTE_CLIENT_KEY, 100, 20, false).await
+    });
+    let envelope = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(OutboundWsMessage::Text(envelope)) = ready_rx.recv().await
+                && envelope_message_method(&envelope) == Some("thread/list")
+            {
+                return envelope;
+            }
+        }
+    })
+    .await
+    .expect("thread/list should fall back to the ready connection");
+
+    assert_eq!(
+        envelope["message"]["params"]["sourceKinds"],
+        json!(["cli", "vscode"])
+    );
+    assert_eq!(envelope["message"]["params"]["useStateDbOnly"], true);
+    assert_eq!(envelope["message"]["params"]["modelProviders"], json!([]));
+    assert_eq!(envelope["message"]["params"]["limit"], 100);
+
+    let client_id = envelope["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_string();
+    let stream_id = envelope["stream_id"]
+        .as_str()
+        .expect("stream id")
+        .to_string();
+    let request_id = envelope["message"]["id"].clone();
+    observe_app_server_message(
+        &state,
+        10,
+        &client_id,
+        &stream_id,
+        &json!({
+            "id": request_id,
+            "result": {
+                "data": [{"id": "thread-1"}],
+                "nextCursor": null
+            }
+        }),
+    )
+    .await;
+
+    let threads = request
+        .await
+        .expect("session history task")
+        .expect("session history response");
+    assert_eq!(threads, vec![json!({"id": "thread-1"})]);
+}
+
+#[tokio::test]
 async fn server_flood_fast_ack_does_not_wait_for_work_queue_drain() {
     let state = test_state();
     let (outbound_tx, mut outbound_rx, client_id, stream_id, connection_epoch) =
