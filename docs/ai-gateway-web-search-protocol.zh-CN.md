@@ -4,6 +4,7 @@
 
 相关文档：
 
+- [`ai-gateway-responses-lite-web-search.zh-CN.md`](ai-gateway-responses-lite-web-search.zh-CN.md)：Responses Lite、`additional_tools`、`web.run` 与 `/alpha/search` 的协议边界和当前兼容方案。
 - [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md)
 - [`ai-gateway-glm-anthropic-integration.zh-CN.md`](ai-gateway-glm-anthropic-integration.zh-CN.md)
 - OpenAI Responses API Reference: <https://developers.openai.com/api/reference/resources/responses>

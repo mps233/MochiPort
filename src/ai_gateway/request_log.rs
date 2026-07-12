@@ -369,13 +369,28 @@ pub fn elapsed_ms(started_at: Instant) -> i64 {
 }
 
 pub fn headers_to_json(headers: &HeaderMap) -> Option<String> {
+    headers_to_json_with(headers, |_, value| value)
+}
+
+pub fn headers_to_redacted_json(headers: &HeaderMap) -> Option<String> {
+    headers_to_json_with(headers, |name, value| {
+        if is_sensitive_header(name) {
+            "<redacted>".to_string()
+        } else {
+            value
+        }
+    })
+}
+
+fn headers_to_json_with(
+    headers: &HeaderMap,
+    sanitize: impl Fn(&str, String) -> String,
+) -> Option<String> {
     let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, value) in headers.iter() {
-        let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
-        grouped
-            .entry(name.as_str().to_string())
-            .or_default()
-            .push(value);
+        let name = name.as_str();
+        let value = sanitize(name, String::from_utf8_lossy(value.as_bytes()).into_owned());
+        grouped.entry(name.to_string()).or_default().push(value);
     }
 
     let mut object = serde_json::Map::new();
@@ -390,6 +405,20 @@ pub fn headers_to_json(headers: &HeaderMap) -> Option<String> {
         }
     }
     serde_json::to_string(&Value::Object(object)).ok()
+}
+
+fn is_sensitive_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "proxy-authorization"
+            | "cookie"
+            | "set-cookie"
+            | "api-key"
+            | "x-api-key"
+            | "x-api-secret"
+            | "x-api-token"
+    )
 }
 
 pub fn json_body_size_bytes(value: &Value) -> Option<i64> {
@@ -1411,6 +1440,20 @@ mod tests {
         let value: Value = serde_json::from_str(&headers_to_json(&headers).unwrap()).unwrap();
         assert_eq!(value["authorization"], "Bearer local-key");
         assert_eq!(value["x-debug"], json!(["one", "two"]));
+    }
+
+    #[test]
+    fn headers_to_redacted_json_hides_credentials() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer provider-key".parse().unwrap());
+        headers.insert("x-api-key", "secret-key".parse().unwrap());
+        headers.insert("x-debug", "visible".parse().unwrap());
+
+        let value: Value =
+            serde_json::from_str(&headers_to_redacted_json(&headers).unwrap()).unwrap();
+        assert_eq!(value["authorization"], "<redacted>");
+        assert_eq!(value["x-api-key"], "<redacted>");
+        assert_eq!(value["x-debug"], "visible");
     }
 
     #[test]

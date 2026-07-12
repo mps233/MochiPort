@@ -8,7 +8,7 @@ use axum::{
     body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, header::ETAG},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, de::IntoDeserializer};
 use serde_json::json;
@@ -21,13 +21,152 @@ use super::config::{ProviderConfig, ProviderType};
 use super::context::GatewayContext;
 use super::error::GatewayError;
 use super::model::GatewayRequest;
-use super::providers::{anthropic_messages, deepseek_chat, openai_responses};
+use super::providers::{anthropic_messages, deepseek_chat, openai_images, openai_responses};
 use super::request_log::{
     self, RequestLogContext, RequestLogRecord, RequestLogStore, RequestLogUpdate,
 };
 use super::router::resolve_provider_with_state;
 
 static AI_GATEWAY_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+/// POST /ai-gateway/v1/images/generations
+pub async fn handle_image_generations(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    handle_image_request(
+        state,
+        headers,
+        body,
+        openai_images::ImageEndpoint::Generations,
+    )
+    .await
+}
+
+/// POST /ai-gateway/v1/images/edits
+pub async fn handle_image_edits(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    handle_image_request(state, headers, body, openai_images::ImageEndpoint::Edits).await
+}
+
+async fn handle_image_request(
+    state: SharedState,
+    headers: HeaderMap,
+    body: Bytes,
+    endpoint: openai_images::ImageEndpoint,
+) -> Response {
+    let started_at = Instant::now();
+    let created_at_ms = request_log::now_ms();
+    let config = state.config.lock().await;
+    let gateway_config = config.ai_gateway.clone();
+    let request_logging_enabled = gateway_config.request_logging_enabled;
+    let request_log_details_enabled = gateway_config.request_log_details_enabled;
+    drop(config);
+
+    let inspection = match openai_images::inspect_request(&body, endpoint) {
+        Ok(inspection) => inspection,
+        Err(error) => return error.into_response(),
+    };
+    let request_model = inspection.model.clone();
+
+    let context = GatewayContext::extract(&headers, None);
+    let routing_now = Instant::now();
+    let (provider, route_id) = {
+        let mut routing = state.ai_gateway_routing.lock().await;
+        routing.evict_stale(routing_now);
+        match resolve_provider_with_state(
+            &request_model,
+            context.session_id.as_deref(),
+            &gateway_config,
+            &mut routing,
+            routing_now,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(routing);
+                let log_context = request_logging_enabled
+                    .then(|| {
+                        insert_initial_image_log(
+                            &state.ai_gateway_request_logs,
+                            &context,
+                            &headers,
+                            &request_model,
+                            None,
+                            endpoint,
+                            &inspection.sanitized_log,
+                            started_at,
+                            created_at_ms,
+                            request_log_details_enabled,
+                        )
+                    })
+                    .flatten();
+                update_failed_log(&log_context, &error.message);
+                return error.into_response();
+            }
+        }
+    };
+    let upstream_model = provider
+        .resolve_upstream_model(&request_model)
+        .unwrap_or(request_model.as_str())
+        .to_string();
+
+    info!(
+        model = %request_model,
+        upstream_model = %upstream_model,
+        provider = %provider.name,
+        endpoint = endpoint.path(),
+        "ai-gateway image request routed"
+    );
+
+    let log_context = request_logging_enabled
+        .then(|| {
+            insert_initial_image_log(
+                &state.ai_gateway_request_logs,
+                &context,
+                &headers,
+                &request_model,
+                Some(provider),
+                endpoint,
+                &inspection.sanitized_log,
+                started_at,
+                created_at_ms,
+                request_log_details_enabled,
+            )
+        })
+        .flatten();
+    let upstream_request_log = request_log_details_enabled.then(|| {
+        let mut value = inspection.sanitized_log.clone();
+        value["model"] = json!(upstream_model);
+        value
+    });
+
+    let client = crate::outbound_http::get();
+    let result = openai_images::passthrough(
+        &client,
+        &context,
+        body,
+        &request_model,
+        &upstream_model,
+        provider,
+        endpoint,
+        log_context.clone(),
+        upstream_request_log,
+    )
+    .await;
+    let outcome = classify_outcome(&result);
+    record_routing_outcome(&state, &route_id, outcome).await;
+    match result {
+        Ok(response) => response,
+        Err(error) => {
+            update_failed_log(&log_context, &error.message);
+            error.into_response()
+        }
+    }
+}
 
 /// POST /ai-gateway/v1/responses
 pub async fn handle_responses(
@@ -54,7 +193,6 @@ pub async fn handle_responses(
             return GatewayError::bad_request(format!("invalid JSON: {e}")).into_response();
         }
     };
-    filter_image_generation_tools(&mut raw_body, filter_image_generation_tool);
     let envelope: GatewayRequestEnvelope = match serde_json::from_value(raw_body.clone()) {
         Ok(envelope) => envelope,
         Err(e) => {
@@ -121,6 +259,9 @@ pub async fn handle_responses(
         })
         .flatten();
 
+    // Preserve request_json as the Codex input; mutations below belong in upstream_request_json.
+    filter_image_generation_tools(&mut raw_body, filter_image_generation_tool);
+
     info!(
         model = %envelope.model,
         provider = %provider.name,
@@ -139,6 +280,17 @@ pub async fn handle_responses(
         .resolve_upstream_model(&envelope.model)
         .unwrap_or(envelope.model.as_str())
         .to_string();
+    if inject_hosted_web_search_into_lite_request_tools(
+        &mut raw_body,
+        &envelope.model,
+        &provider.provider_type,
+    ) {
+        info!(
+            model = %envelope.model,
+            provider = %provider.name,
+            "injected hosted web_search into top-level tools for Responses Lite request"
+        );
+    }
     let http_client = crate::outbound_http::get();
     match provider.provider_type {
         ProviderType::OpenAiResponses | ProviderType::GrokResponses => {
@@ -288,19 +440,195 @@ fn filter_image_generation_tools(raw_body: &mut serde_json::Value, filter_enable
         return;
     }
 
-    let Some(tools) = raw_body
+    if let Some(tools) = raw_body
         .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        filter_image_generation_tool_array(tools);
+    }
+
+    let Some(input) = raw_body
+        .get_mut("input")
         .and_then(serde_json::Value::as_array_mut)
     else {
         return;
     };
+
+    for item in input {
+        if item.get("type").and_then(serde_json::Value::as_str) != Some("additional_tools") {
+            continue;
+        }
+        if let Some(tools) = item
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            filter_image_generation_tool_array(tools);
+        }
+    }
+}
+
+fn filter_image_generation_tool_array(tools: &mut Vec<serde_json::Value>) {
+    for tool in tools.iter_mut() {
+        strip_image_generation_from_code_mode_exec(tool);
+    }
     tools.retain(|tool| !is_image_generation_tool(tool));
 }
 
 fn is_image_generation_tool(tool: &serde_json::Value) -> bool {
-    tool.get("type")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|tool_type| tool_type == "image_generation")
+    let tool_type = tool.get("type").and_then(serde_json::Value::as_str);
+    let name = tool.get("name").and_then(serde_json::Value::as_str);
+    let namespace = tool.get("namespace").and_then(serde_json::Value::as_str);
+
+    tool_type == Some("image_generation")
+        || (tool_type == Some("namespace") && name == Some("image_gen"))
+        || matches!(name, Some("image_gen__imagegen" | "image_gen.imagegen"))
+        || (namespace == Some("image_gen") && name == Some("imagegen"))
+}
+
+fn strip_image_generation_from_code_mode_exec(tool: &mut serde_json::Value) {
+    if tool.get("type").and_then(serde_json::Value::as_str) != Some("custom")
+        || tool.get("name").and_then(serde_json::Value::as_str) != Some("exec")
+    {
+        return;
+    }
+
+    let Some(description) = tool.get_mut("description") else {
+        return;
+    };
+    let Some(filtered) = description
+        .as_str()
+        .and_then(|description| remove_markdown_h2_section(description, "image_gen"))
+    else {
+        return;
+    };
+    *description = serde_json::Value::String(filtered);
+}
+
+fn remove_markdown_h2_section(text: &str, heading: &str) -> Option<String> {
+    let target = format!("## {heading}");
+    let mut section_start = None;
+    let mut offset = 0;
+
+    for segment in text.split_inclusive('\n') {
+        let line_start = offset;
+        offset += segment.len();
+        let line = segment.trim_end_matches(&['\r', '\n'][..]);
+
+        if let Some(start) = section_start {
+            if line.starts_with("## ") {
+                let mut filtered = String::with_capacity(text.len() - (line_start - start));
+                filtered.push_str(&text[..start]);
+                filtered.push_str(&text[line_start..]);
+                return Some(filtered);
+            }
+        } else if line == target {
+            section_start = Some(line_start);
+        }
+    }
+
+    section_start.map(|start| {
+        let prefix = &text[..start];
+        let start = if prefix.ends_with("\r\n\r\n") {
+            start - 4
+        } else if prefix.ends_with("\n\n") {
+            start - 2
+        } else {
+            start
+        };
+        text[..start].to_string()
+    })
+}
+
+fn inject_hosted_web_search_into_lite_request_tools(
+    raw_body: &mut serde_json::Value,
+    model: &str,
+    provider_type: &ProviderType,
+) -> bool {
+    if provider_type != &ProviderType::OpenAiResponses || !is_gpt_5_6_family(model) {
+        return false;
+    }
+
+    // Lite keeps client-executed schemas in additional_tools, while the upstream
+    // still discovers hosted tools such as web_search from the top-level tools array.
+    let is_lite_request = raw_body
+        .get("input")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|input| {
+            input.iter().any(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("additional_tools")
+                    && item.get("tools").is_some_and(serde_json::Value::is_array)
+            })
+        });
+    if !is_lite_request {
+        return false;
+    }
+    if has_responses_lite_web_run(raw_body) {
+        return false;
+    }
+
+    if raw_body.get("tools").is_none_or(serde_json::Value::is_null) {
+        raw_body["tools"] = json!([]);
+    }
+    let Some(tools) = raw_body
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return false;
+    };
+    if tools.iter().any(is_hosted_web_search_tool) {
+        return false;
+    }
+
+    tools.push(json!({
+        "type": "web_search",
+        "external_web_access": true,
+        "search_content_types": ["text", "image"]
+    }));
+    true
+}
+
+fn has_responses_lite_web_run(raw_body: &serde_json::Value) -> bool {
+    raw_body
+        .get("input")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|input| {
+            input.iter().any(|item| {
+                if item.get("type").and_then(serde_json::Value::as_str) != Some("additional_tools")
+                {
+                    return false;
+                }
+
+                item.get("tools")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|tools| tools.iter().any(is_responses_lite_web_run_namespace))
+            })
+        })
+}
+
+fn is_responses_lite_web_run_namespace(tool: &serde_json::Value) -> bool {
+    tool.get("type").and_then(serde_json::Value::as_str) == Some("namespace")
+        && tool.get("name").and_then(serde_json::Value::as_str) == Some("web")
+        && tool
+            .get("tools")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| {
+                tools.iter().any(|tool| {
+                    tool.get("type").and_then(serde_json::Value::as_str) == Some("function")
+                        && tool.get("name").and_then(serde_json::Value::as_str) == Some("run")
+                })
+            })
+}
+
+fn is_gpt_5_6_family(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model == "gpt-5.6" || model.starts_with("gpt-5.6-")
+}
+
+fn is_hosted_web_search_tool(tool: &serde_json::Value) -> bool {
+    matches!(
+        tool.get("type").and_then(serde_json::Value::as_str),
+        Some("web_search") | Some("web_search_preview")
+    )
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -455,6 +783,59 @@ fn insert_initial_log(
     }
 }
 
+fn insert_initial_image_log(
+    store: &RequestLogStore,
+    ctx: &GatewayContext,
+    headers: &HeaderMap,
+    model: &str,
+    provider: Option<&ProviderConfig>,
+    endpoint: openai_images::ImageEndpoint,
+    sanitized_body: &serde_json::Value,
+    started_at: Instant,
+    created_at_ms: i64,
+    details_enabled: bool,
+) -> Option<RequestLogContext> {
+    let record = RequestLogRecord {
+        request_id: ctx.request_id.clone(),
+        model_id: model.to_string(),
+        stream: false,
+        channel: provider
+            .map(|provider| provider.name.clone())
+            .unwrap_or_else(|| "-".to_string()),
+        provider_type: endpoint.log_type().to_string(),
+        status: "running".to_string(),
+        usage: Default::default(),
+        cost_usd: None,
+        latency_ms: None,
+        ttft_ms: None,
+        created_at_ms,
+        error_message: None,
+        request_headers_json: details_enabled
+            .then(|| request_log::headers_to_redacted_json(headers))
+            .flatten(),
+        request_json: details_enabled
+            .then(|| serde_json::to_string(sanitized_body).ok())
+            .flatten(),
+        upstream_request_body_bytes: None,
+        upstream_request_headers_json: None,
+        upstream_request_json: None,
+        upstream_response_sse: None,
+        response_json: None,
+    };
+    match store.insert_record(&record) {
+        Ok(log_id) => Some(RequestLogContext {
+            store: store.clone(),
+            log_id,
+            started_at,
+            details_enabled,
+        }),
+        Err(error) => {
+            request_log::log_insert_error(error);
+            None
+        }
+    }
+}
+
 fn update_failed_log(log_context: &Option<RequestLogContext>, message: &str) {
     let Some(log_context) = log_context else {
         return;
@@ -495,11 +876,109 @@ fn set_etag_header(response: &mut axum::response::Response, etag: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
+    use axum::http::{HeaderMap, HeaderValue};
     use serde_json::json;
+
+    use crate::ai_gateway::config::{ProviderConfig, ProviderType};
+    use crate::ai_gateway::context::GatewayContext;
+    use crate::ai_gateway::providers::openai_images;
+    use crate::ai_gateway::request_log::RequestLogStore;
 
     use super::{
         GatewayRequestEnvelope, deserialize_gateway_request, filter_image_generation_tools,
+        inject_hosted_web_search_into_lite_request_tools, insert_initial_image_log,
     };
+
+    fn lite_request(model: &str) -> serde_json::Value {
+        json!({
+            "model": model,
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [
+                        {"type": "custom", "name": "exec"},
+                        {"type": "function", "name": "request_user_input"}
+                    ]
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "latest Rust news"}]
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn initial_image_log_is_listed_with_redacted_headers() {
+        let db_path = std::env::temp_dir().join(format!(
+            "codexhub-image-handler-log-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let store = RequestLogStore::new(db_path.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer local-codex-token"),
+        );
+        let context = GatewayContext::extract(&headers, None);
+        let provider = ProviderConfig {
+            name: "image-provider".to_string(),
+            ..ProviderConfig::default()
+        };
+        let sanitized = json!({
+            "model": "gpt-image-2",
+            "images": [{"payloadRedacted": true, "base64Chars": 16}]
+        });
+
+        let log_context = insert_initial_image_log(
+            &store,
+            &context,
+            &headers,
+            "gpt-image-2",
+            Some(&provider),
+            openai_images::ImageEndpoint::Edits,
+            &sanitized,
+            Instant::now(),
+            1,
+            true,
+        )
+        .expect("insert initial image log");
+
+        let entries = store.list_recent(10).expect("list image logs");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].model_id, "gpt-image-2");
+        assert_eq!(entries[0].channel, "image-provider");
+        assert_eq!(entries[0].provider_type, "image_edit");
+        let detail = store
+            .get_detail(log_context.log_id)
+            .expect("read image log")
+            .expect("image log exists");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                detail
+                    .request_headers_json
+                    .as_deref()
+                    .expect("request headers")
+            )
+            .expect("request headers JSON")["authorization"],
+            "<redacted>"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                detail.request_json.as_deref().expect("request JSON")
+            )
+            .expect("request log JSON")["images"][0]["payloadRedacted"],
+            true
+        );
+
+        drop(log_context);
+        drop(store);
+        let _ = std::fs::remove_file(db_path);
+    }
 
     #[test]
     fn filter_image_generation_tools_removes_only_builtin_image_tool() {
@@ -524,12 +1003,302 @@ mod tests {
     fn filter_image_generation_tools_keeps_tools_when_filter_disabled() {
         let mut body = json!({
             "model": "gpt-5.5",
-            "tools": [{"type": "image_generation", "output_format": "png"}]
+            "tools": [
+                {"type": "image_generation", "output_format": "png"},
+                {
+                    "type": "namespace",
+                    "name": "image_gen",
+                    "tools": [{"type": "function", "name": "imagegen"}]
+                }
+            ]
         });
 
         filter_image_generation_tools(&mut body, false);
 
+        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn filter_image_generation_tools_removes_standalone_namespace_tools() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "image_gen",
+                    "tools": [{"type": "function", "name": "imagegen"}]
+                },
+                {
+                    "type": "namespace",
+                    "name": "web",
+                    "tools": [{"type": "function", "name": "run"}]
+                }
+            ],
+            "input": [{
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [
+                    {"type": "function", "name": "image_gen__imagegen"},
+                    {"type": "function", "name": "request_user_input"}
+                ]
+            }]
+        });
+
+        filter_image_generation_tools(&mut body, true);
+
+        let top_level_tools = body["tools"].as_array().unwrap();
+        assert_eq!(top_level_tools.len(), 1);
+        assert_eq!(top_level_tools[0]["name"], "web");
+        let additional_tools = body["input"][0]["tools"].as_array().unwrap();
+        assert_eq!(additional_tools.len(), 1);
+        assert_eq!(additional_tools[0]["name"], "request_user_input");
+    }
+
+    #[test]
+    fn filter_image_generation_tools_removes_code_mode_exec_section() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [{
+                "type": "additional_tools",
+                "role": "developer",
+                "tools": [{
+                    "type": "custom",
+                    "name": "exec",
+                    "description": concat!(
+                        "Run JavaScript.\r\n\r\n",
+                        "## shell\r\nShell tools.\r\n\r\n",
+                        "## image_gen\r\nTools in the image_gen namespace.\r\n\r\n",
+                        "### `image_gen__imagegen`\r\nGenerate images.\r\n\r\n",
+                        "## codex_app\r\nCodex App tools.\r\n"
+                    )
+                }]
+            }]
+        });
+
+        filter_image_generation_tools(&mut body, true);
+
+        let description = body["input"][0]["tools"][0]["description"]
+            .as_str()
+            .unwrap();
+        assert!(description.contains("## shell"));
+        assert!(description.contains("## codex_app"));
+        assert!(!description.contains("## image_gen"));
+        assert!(!description.contains("image_gen__imagegen"));
+    }
+
+    #[test]
+    fn filter_image_generation_tools_removes_final_code_mode_exec_section() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [
+                {
+                    "type": "additional_tools",
+                    "role": "developer",
+                    "tools": [{
+                        "type": "custom",
+                        "name": "exec",
+                        "description": concat!(
+                            "Run JavaScript.\n",
+                            "- `generatedImage(result)`: Appends a generated image.\n",
+                            "- `ALL_TOOLS`: metadata for enabled nested tools.\n\n",
+                            "## image_gen\nTools in the image_gen namespace.\n\n",
+                            "### `image_gen__imagegen`\nGenerate images."
+                        )
+                    }]
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{
+                        "type": "input_text",
+                        "text": concat!(
+                            "<skills_instructions>\n",
+                            "### Available skills\n",
+                            "- imagegen: Generate or edit raster images.\n",
+                            "</skills_instructions>"
+                        )
+                    }]
+                }
+            ]
+        });
+
+        filter_image_generation_tools(&mut body, true);
+
+        assert_eq!(
+            body["input"][0]["tools"][0]["description"],
+            concat!(
+                "Run JavaScript.\n",
+                "- `generatedImage(result)`: Appends a generated image.\n",
+                "- `ALL_TOOLS`: metadata for enabled nested tools."
+            )
+        );
+        assert!(
+            body["input"][1]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("- imagegen: Generate or edit raster images.")
+        );
+    }
+
+    #[test]
+    fn injects_hosted_web_search_into_gpt_5_6_lite_top_level_tools() {
+        let mut body = lite_request("gpt-5.6-sol");
+
+        assert!(inject_hosted_web_search_into_lite_request_tools(
+            &mut body,
+            "gpt-5.6-sol",
+            &ProviderType::OpenAiResponses,
+        ));
+
+        assert_eq!(body["input"][0]["tools"].as_array().unwrap().len(), 2);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(
+            tools[0],
+            json!({
+                "type": "web_search",
+                "external_web_access": true,
+                "search_content_types": ["text", "image"]
+            })
+        );
+    }
+
+    #[test]
+    fn hosted_web_search_lite_injection_is_idempotent() {
+        let mut body = lite_request("gpt-5.6-terra");
+
+        assert!(inject_hosted_web_search_into_lite_request_tools(
+            &mut body,
+            "gpt-5.6-terra",
+            &ProviderType::OpenAiResponses,
+        ));
+        assert!(!inject_hosted_web_search_into_lite_request_tools(
+            &mut body,
+            "gpt-5.6-terra",
+            &ProviderType::OpenAiResponses,
+        ));
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(
+            tools
+                .iter()
+                .filter(|tool| tool["type"] == "web_search")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn hosted_web_search_lite_injection_is_scoped_to_openai_gpt_5_6() {
+        let mut older_model = lite_request("gpt-5.5");
+        let mut grok_provider = lite_request("gpt-5.6-luna");
+
+        assert!(!inject_hosted_web_search_into_lite_request_tools(
+            &mut older_model,
+            "gpt-5.5",
+            &ProviderType::OpenAiResponses,
+        ));
+        assert!(!inject_hosted_web_search_into_lite_request_tools(
+            &mut grok_provider,
+            "gpt-5.6-luna",
+            &ProviderType::GrokResponses,
+        ));
+        assert!(older_model.get("tools").is_none());
+        assert!(grok_provider.get("tools").is_none());
+    }
+
+    #[test]
+    fn hosted_web_search_lite_injection_requires_additional_tools() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "input": [{"type": "message", "role": "user", "content": []}],
+            "tools": [{"type": "function", "name": "exec"}]
+        });
+
+        assert!(!inject_hosted_web_search_into_lite_request_tools(
+            &mut body,
+            "gpt-5.6-sol",
+            &ProviderType::OpenAiResponses,
+        ));
         assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hosted_web_search_lite_injection_skips_native_web_run() {
+        let mut body = lite_request("gpt-5.6-sol");
+        body["input"][0]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "namespace",
+                "name": "web",
+                "tools": [{
+                    "type": "function",
+                    "name": "run",
+                    "parameters": {"type": "object"}
+                }]
+            }));
+
+        assert!(!inject_hosted_web_search_into_lite_request_tools(
+            &mut body,
+            "gpt-5.6-sol",
+            &ProviderType::OpenAiResponses,
+        ));
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn hosted_web_search_lite_injection_does_not_confuse_other_namespaced_tools_with_web_run() {
+        let mut other_web_tool = lite_request("gpt-5.6-sol");
+        other_web_tool["input"][0]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "namespace",
+                "name": "web",
+                "tools": [{"type": "function", "name": "open"}]
+            }));
+        let mut other_namespace = lite_request("gpt-5.6-sol");
+        other_namespace["input"][0]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "namespace",
+                "name": "browser",
+                "tools": [{"type": "function", "name": "run"}]
+            }));
+
+        assert!(inject_hosted_web_search_into_lite_request_tools(
+            &mut other_web_tool,
+            "gpt-5.6-sol",
+            &ProviderType::OpenAiResponses,
+        ));
+        assert!(inject_hosted_web_search_into_lite_request_tools(
+            &mut other_namespace,
+            "gpt-5.6-sol",
+            &ProviderType::OpenAiResponses,
+        ));
+    }
+
+    #[test]
+    fn hosted_web_search_lite_injection_preserves_existing_top_level_tools() {
+        let mut body = lite_request("gpt-5.6-luna");
+        body["tools"] = json!([{
+            "type": "function",
+            "name": "existing_tool",
+            "parameters": {"type": "object", "properties": {}}
+        }]);
+
+        assert!(inject_hosted_web_search_into_lite_request_tools(
+            &mut body,
+            "gpt-5.6-luna",
+            &ProviderType::OpenAiResponses,
+        ));
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["name"], "existing_tool");
+        assert_eq!(tools[1]["type"], "web_search");
     }
 
     #[test]

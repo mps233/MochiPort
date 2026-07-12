@@ -570,9 +570,11 @@ impl GuiText {
 
     pub(super) fn image_generation_feature_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "勾选后，大模型接入会从 Codex 请求中移除 image_generation 工具。",
+            GuiLocale::ZhCn => {
+                "勾选后，AI Gateway 会从 Codex 请求中移除 image_generation 和 image_gen 生图工具。"
+            }
             GuiLocale::EnUs => {
-                "When checked, AI Gateway removes image_generation tools from Codex requests."
+                "When checked, AI Gateway removes image_generation and image_gen tools from Codex requests."
             }
         }
     }
