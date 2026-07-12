@@ -5,15 +5,20 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde_json::json;
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 use crate::ai_gateway::config::{ProviderConfig, ProviderType, provider_api_root};
 use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
+use crate::ai_gateway::encrypted_content::{
+    EncryptedContentScope, prepare_responses_request, remove_all_responses_encrypted_content,
+};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
-use crate::ai_gateway::responses_compat::{ResponsesCompatSseStream, normalize_json_body};
+use crate::ai_gateway::responses_compat::{
+    ResponsesCompatSseStream, normalize_json_body_with_scope,
+};
 
 use super::{
     apply_total_request_timeout, ensure_success_response, execute_stream_start,
@@ -45,6 +50,18 @@ pub async fn passthrough(
         }
     }
     raw_body["model"] = json!(upstream_model);
+    let encrypted_content_scope = EncryptedContentScope::for_provider(provider);
+    let encrypted_content_stats =
+        prepare_responses_request(&mut raw_body, &encrypted_content_scope);
+    if encrypted_content_stats.filtered > 0 || encrypted_content_stats.decoded > 0 {
+        debug!(
+            provider = %provider.name,
+            decoded = encrypted_content_stats.decoded,
+            filtered = encrypted_content_stats.filtered,
+            dropped_items = encrypted_content_stats.dropped_items,
+            "prepared scoped encrypted reasoning content for upstream"
+        );
+    }
     normalize_grok_reasoning_replay(&mut raw_body, provider);
 
     let is_stream = raw_body
@@ -52,61 +69,92 @@ pub async fn passthrough(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    // 3. 构建上游请求
     let url = format!("{}/v1/responses", provider_api_root(&provider.base_url));
+    let mut invalid_encrypted_content_retry = false;
+    let upstream_resp = loop {
+        // 3. 构建上游请求。密文恢复重试会使用清理后的 body 重建请求。
+        let req_builder = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", provider.api_key));
+        let req_builder =
+            apply_total_request_timeout(req_builder, provider.timeout_secs, is_stream)
+                .json(&raw_body);
+        let req_builder = apply_upstream_headers(req_builder, &ctx.upstream_headers);
+        let upstream_req = req_builder.build().map_err(|e| {
+            error!(error = %e, "build upstream request failed");
+            GatewayError::upstream(
+                StatusCode::BAD_GATEWAY,
+                format!("build upstream request: {e}"),
+            )
+        })?;
 
-    let req_builder = client
-        .post(&url)
-        .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {}", provider.api_key));
-    let req_builder =
-        apply_total_request_timeout(req_builder, provider.timeout_secs, is_stream).json(&raw_body);
-
-    let req_builder = apply_upstream_headers(req_builder, &ctx.upstream_headers);
-    let upstream_req = req_builder.build().map_err(|e| {
-        error!(error = %e, "build upstream request failed");
-        GatewayError::upstream(
-            StatusCode::BAD_GATEWAY,
-            format!("build upstream request: {e}"),
-        )
-    })?;
-
-    if let Some(log_context) = &log_context {
-        let update = RequestLogUpdate {
-            upstream_request_headers_json: log_context
-                .details_enabled
-                .then(|| request_log::headers_to_json(upstream_req.headers()))
-                .flatten(),
-            upstream_request_body_bytes: request_log::json_body_size_bytes(&raw_body),
-            upstream_request_json: log_context
-                .details_enabled
-                .then(|| serde_json::to_string(&raw_body).ok())
-                .flatten(),
-            ..RequestLogUpdate::default()
-        };
-        if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
-            request_log::log_update_error(err);
+        if let Some(log_context) = &log_context {
+            let update = RequestLogUpdate {
+                upstream_request_headers_json: log_context
+                    .details_enabled
+                    .then(|| request_log::headers_to_json(upstream_req.headers()))
+                    .flatten(),
+                upstream_request_body_bytes: request_log::json_body_size_bytes(&raw_body),
+                upstream_request_json: log_context
+                    .details_enabled
+                    .then(|| serde_json::to_string(&raw_body).ok())
+                    .flatten(),
+                ..RequestLogUpdate::default()
+            };
+            if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
+                request_log::log_update_error(err);
+            }
         }
-    }
 
-    debug!(url = %url, stream = is_stream, "proxying to openai responses");
+        debug!(
+            url = %url,
+            stream = is_stream,
+            encrypted_content_retry = invalid_encrypted_content_retry,
+            "proxying to openai responses"
+        );
 
-    let upstream_resp = if is_stream {
-        execute_stream_start(
-            client,
-            upstream_req,
-            provider.timeout_secs,
-            "upstream request failed",
-        )
-        .await?
-    } else {
-        execute_upstream_request(
-            client,
-            upstream_req,
-            provider.timeout_secs,
-            "upstream request failed",
-        )
-        .await?
+        let upstream_resp = if is_stream {
+            execute_stream_start(
+                client,
+                upstream_req,
+                provider.timeout_secs,
+                "upstream request failed",
+            )
+            .await?
+        } else {
+            execute_upstream_request(
+                client,
+                upstream_req,
+                provider.timeout_secs,
+                "upstream request failed",
+            )
+            .await?
+        };
+
+        if upstream_resp.status() == StatusCode::BAD_REQUEST && !invalid_encrypted_content_retry {
+            let body_text = upstream_resp.text().await.unwrap_or_default();
+            if is_invalid_encrypted_content_error(StatusCode::BAD_REQUEST, &body_text) {
+                let cleanup = remove_all_responses_encrypted_content(&mut raw_body);
+                if cleanup.filtered > 0 {
+                    invalid_encrypted_content_retry = true;
+                    warn!(
+                        provider = %provider.name,
+                        filtered = cleanup.filtered,
+                        dropped_items = cleanup.dropped_items,
+                        "retrying once after upstream rejected legacy or stale encrypted content"
+                    );
+                    continue;
+                }
+            }
+            return Err(GatewayError::from_upstream_body(
+                StatusCode::BAD_REQUEST,
+                &provider.name,
+                &body_text,
+            ));
+        }
+
+        break upstream_resp;
     };
 
     let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
@@ -135,13 +183,19 @@ pub async fn passthrough(
         });
         let body = if let Some(log_context) = log_context {
             let captured_upstream = UpstreamSseCaptureStream::new(byte_stream, log_context.clone());
-            let compat_stream = ResponsesCompatSseStream::new(Box::pin(captured_upstream));
+            let compat_stream = ResponsesCompatSseStream::with_encrypted_content_scope(
+                Box::pin(captured_upstream),
+                encrypted_content_scope.clone(),
+            );
             Body::from_stream(ResponsesSseLogStream::new(
                 Box::pin(compat_stream),
                 log_context,
             ))
         } else {
-            Body::from_stream(ResponsesCompatSseStream::new(Box::pin(byte_stream)))
+            Body::from_stream(ResponsesCompatSseStream::with_encrypted_content_scope(
+                Box::pin(byte_stream),
+                encrypted_content_scope.clone(),
+            ))
         };
         let mut response = Response::new(body);
         *response.status_mut() = StatusCode::OK;
@@ -153,7 +207,8 @@ pub async fn passthrough(
     let body_bytes = upstream_resp.bytes().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("read upstream body: {e}"))
     })?;
-    let (body_bytes, response_json) = normalize_json_body(body_bytes);
+    let (body_bytes, response_json) =
+        normalize_json_body_with_scope(body_bytes, Some(&encrypted_content_scope));
     if let Some(log_context) = &log_context {
         let (status, usage, response_text) = response_json
             .as_ref()
@@ -187,6 +242,18 @@ pub async fn passthrough(
         HeaderValue::from_static("application/json"),
     );
     Ok(response)
+}
+
+fn is_invalid_encrypted_content_error(status: StatusCode, body: &str) -> bool {
+    if status != StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let normalized = body.to_ascii_lowercase();
+    normalized.contains("invalid_encrypted_content")
+        || (normalized.contains("encrypted content")
+            && (normalized.contains("could not be verified")
+                || normalized.contains("could not be decrypted")
+                || normalized.contains("could not be parsed")))
 }
 
 fn normalize_grok_reasoning_replay(raw_body: &mut serde_json::Value, provider: &ProviderConfig) {
@@ -240,11 +307,92 @@ fn normalize_grok_reasoning_replay(raw_body: &mut serde_json::Value, provider: &
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use axum::{
+        Json, Router,
+        body::to_bytes,
+        extract::State,
+        http::{HeaderMap, StatusCode},
+        response::{IntoResponse, Response},
+        routing::post,
+    };
     use serde_json::json;
+    use tokio::sync::mpsc;
 
     use crate::ai_gateway::config::{ProviderConfig, ProviderType};
+    use crate::ai_gateway::context::GatewayContext;
 
-    use super::normalize_grok_reasoning_replay;
+    use super::{is_invalid_encrypted_content_error, normalize_grok_reasoning_replay, passthrough};
+
+    struct RetryServerState {
+        attempts: AtomicUsize,
+        requests: mpsc::UnboundedSender<serde_json::Value>,
+    }
+
+    async fn invalid_encrypted_content_then_success(
+        State(state): State<Arc<RetryServerState>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response {
+        state
+            .requests
+            .send(body)
+            .expect("request capture receiver should stay open");
+        if state.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "code": "invalid_encrypted_content",
+                        "type": "invalid_request_error",
+                        "message": "The encrypted content could not be verified."
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Json(json!({
+            "id": "resp_recovered",
+            "object": "response",
+            "output": [{
+                "type": "reasoning",
+                "summary": [],
+                "encrypted_content": "fresh-openai-content"
+            }]
+        }))
+        .into_response()
+    }
+
+    async fn retry_server() -> (
+        String,
+        mpsc::UnboundedReceiver<serde_json::Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let state = Arc::new(RetryServerState {
+            attempts: AtomicUsize::new(0),
+            requests: sender,
+        });
+        let app = Router::new()
+            .route(
+                "/v1/responses",
+                post(invalid_encrypted_content_then_success),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind retry server");
+        let address = listener.local_addr().expect("retry server address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve retry endpoint");
+        });
+        (format!("http://{address}/v1"), receiver, task)
+    }
 
     fn grok_provider() -> ProviderConfig {
         ProviderConfig {
@@ -334,5 +482,80 @@ mod tests {
                 .is_some_and(|value| value.is_null())
         );
         assert!(reasoning.get("status").is_none());
+    }
+
+    #[test]
+    fn recognizes_direct_and_wrapped_invalid_encrypted_content_errors() {
+        assert!(is_invalid_encrypted_content_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"invalid_encrypted_content","message":"bad blob"}}"#,
+        ));
+        assert!(is_invalid_encrypted_content_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            r#"{"error":{"code":"upstream_error","message":"The encrypted content p3HD could not be verified. Reason: Encrypted content could not be decrypted or parsed."}}"#,
+        ));
+        assert!(!is_invalid_encrypted_content_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Unknown parameter"}}"#,
+        ));
+        assert!(!is_invalid_encrypted_content_error(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":{"code":"invalid_encrypted_content"}}"#,
+        ));
+    }
+
+    #[tokio::test]
+    async fn retries_once_without_legacy_encrypted_content_and_marks_response() {
+        let (base_url, mut requests, server) = retry_server().await;
+        let provider = ProviderConfig {
+            name: "openai".to_string(),
+            provider_type: ProviderType::OpenAiResponses,
+            base_url,
+            api_key: "secret".to_string(),
+            timeout_secs: 10,
+            ..ProviderConfig::default()
+        };
+        let client = reqwest::Client::new();
+        let context = GatewayContext::extract(&HeaderMap::new(), Some("retry-session"));
+        let request = json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "input": [
+                {
+                    "type": "reasoning",
+                    "encrypted_content": "legacy-grok-content"
+                },
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "continue"}]
+                }
+            ]
+        });
+
+        let response = passthrough(&client, &context, request, "gpt-5.6-sol", &provider, None)
+            .await
+            .expect("retry should recover");
+
+        let first = requests.recv().await.expect("first request");
+        let second = requests.recv().await.expect("retry request");
+        assert_eq!(
+            first["input"][0]["encrypted_content"],
+            "legacy-grok-content"
+        );
+        assert_eq!(second["input"].as_array().unwrap().len(), 1);
+        assert_eq!(second["input"][0]["type"], "message");
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read recovered response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("response JSON");
+        let encrypted = body["output"][0]["encrypted_content"]
+            .as_str()
+            .expect("marked encrypted content");
+        assert!(encrypted.starts_with("codexhub:enc:v1:openai:"));
+        assert!(encrypted.ends_with(":fresh-openai-content"));
+
+        server.abort();
     }
 }

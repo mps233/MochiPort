@@ -7,12 +7,23 @@ use std::{
     task::{Context, Poll},
 };
 
+use super::encrypted_content::{EncryptedContentScope, encode_response_object};
+
 /// Applies narrow, idempotent compatibility rules to a Responses payload while
 /// preserving fields that CodexHub does not know about yet.
+#[cfg(test)]
 pub(crate) fn normalize_response_value(value: &mut Value) -> bool {
+    normalize_response_value_with_scope(value, None)
+}
+
+pub(crate) fn normalize_response_value_with_scope(
+    value: &mut Value,
+    encrypted_content_scope: Option<&EncryptedContentScope>,
+) -> bool {
     match value {
         Value::Object(object) => {
-            let mut changed = false;
+            let mut changed =
+                encrypted_content_scope.is_some_and(|scope| encode_response_object(object, scope));
             let duplicate_exec_namespace = object
                 .get("type")
                 .and_then(Value::as_str)
@@ -31,14 +42,14 @@ pub(crate) fn normalize_response_value(value: &mut Value) -> bool {
             }
 
             for child in object.values_mut() {
-                changed |= normalize_response_value(child);
+                changed |= normalize_response_value_with_scope(child, encrypted_content_scope);
             }
             changed
         }
         Value::Array(items) => {
             let mut changed = false;
             for item in items {
-                changed |= normalize_response_value(item);
+                changed |= normalize_response_value_with_scope(item, encrypted_content_scope);
             }
             changed
         }
@@ -48,12 +59,20 @@ pub(crate) fn normalize_response_value(value: &mut Value) -> bool {
 
 /// Normalizes a complete Responses JSON payload. Unchanged and invalid payloads
 /// retain their original bytes so whitespace and unknown wire details survive.
+#[cfg(test)]
 pub(crate) fn normalize_json_body(body_bytes: Bytes) -> (Bytes, Option<Value>) {
+    normalize_json_body_with_scope(body_bytes, None)
+}
+
+pub(crate) fn normalize_json_body_with_scope(
+    body_bytes: Bytes,
+    encrypted_content_scope: Option<&EncryptedContentScope>,
+) -> (Bytes, Option<Value>) {
     let mut response_json = serde_json::from_slice::<Value>(&body_bytes).ok();
     let Some(value) = response_json.as_mut() else {
         return (body_bytes, response_json);
     };
-    if normalize_response_value(value) {
+    if normalize_response_value_with_scope(value, encrypted_content_scope) {
         let rewritten = serde_json::to_vec(value)
             .map(Bytes::from)
             .unwrap_or_else(|_| body_bytes.clone());
@@ -68,15 +87,32 @@ pub(crate) fn normalize_json_body(body_bytes: Bytes) -> (Bytes, Option<Value>) {
 /// upstream network chunks.
 pub(crate) struct ResponsesCompatSseStream<S> {
     inner: S,
+    encrypted_content_scope: Option<EncryptedContentScope>,
     line_buf: Vec<u8>,
     output_queue: VecDeque<Result<Bytes, std::io::Error>>,
     ended: bool,
 }
 
 impl<S> ResponsesCompatSseStream<S> {
+    #[cfg(test)]
     pub(crate) fn new(inner: S) -> Self {
+        Self::with_optional_encrypted_content_scope(inner, None)
+    }
+
+    pub(crate) fn with_encrypted_content_scope(
+        inner: S,
+        encrypted_content_scope: EncryptedContentScope,
+    ) -> Self {
+        Self::with_optional_encrypted_content_scope(inner, Some(encrypted_content_scope))
+    }
+
+    fn with_optional_encrypted_content_scope(
+        inner: S,
+        encrypted_content_scope: Option<EncryptedContentScope>,
+    ) -> Self {
         Self {
             inner,
+            encrypted_content_scope,
             line_buf: Vec::new(),
             output_queue: VecDeque::new(),
             ended: false,
@@ -134,7 +170,7 @@ impl<S> ResponsesCompatSseStream<S> {
     }
 
     fn push_rewritten_line(&mut self, line: &[u8]) {
-        let rewritten = rewrite_sse_line(line);
+        let rewritten = rewrite_sse_line(line, self.encrypted_content_scope.as_ref());
         let mut output = Vec::with_capacity(rewritten.len() + 1);
         output.extend_from_slice(&rewritten);
         output.push(b'\n');
@@ -142,7 +178,7 @@ impl<S> ResponsesCompatSseStream<S> {
     }
 }
 
-fn rewrite_sse_line(line: &[u8]) -> Bytes {
+fn rewrite_sse_line(line: &[u8], encrypted_content_scope: Option<&EncryptedContentScope>) -> Bytes {
     let Ok(line_text) = std::str::from_utf8(line) else {
         return Bytes::copy_from_slice(line);
     };
@@ -155,7 +191,7 @@ fn rewrite_sse_line(line: &[u8]) -> Bytes {
     let Ok(mut event) = serde_json::from_str::<Value>(data) else {
         return Bytes::copy_from_slice(line);
     };
-    if !normalize_response_value(&mut event) {
+    if !normalize_response_value_with_scope(&mut event, encrypted_content_scope) {
         return Bytes::copy_from_slice(line);
     }
     serde_json::to_vec(&event)
@@ -176,8 +212,18 @@ fn sse_data_value(line: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ai_gateway::config::{ProviderConfig, ProviderType};
     use futures_util::{StreamExt, stream};
     use serde_json::json;
+
+    fn grok_scope() -> EncryptedContentScope {
+        EncryptedContentScope::for_provider(&ProviderConfig {
+            name: "grok".to_string(),
+            provider_type: ProviderType::GrokResponses,
+            base_url: "https://api.x.ai/v1".to_string(),
+            ..ProviderConfig::default()
+        })
+    }
 
     #[test]
     fn removes_namespace_only_from_exec_custom_tool_calls() {
@@ -243,6 +289,27 @@ mod tests {
         assert!(parsed.is_none());
     }
 
+    #[test]
+    fn json_body_marks_provider_encrypted_content() {
+        let body = Bytes::from_static(
+            br#"{"output":[{"type":"reasoning","encrypted_content":"opaque-grok"}]}"#,
+        );
+        let scope = grok_scope();
+
+        let (normalized, parsed) = normalize_json_body_with_scope(body, Some(&scope));
+
+        let parsed = parsed.expect("parsed response");
+        let encrypted = parsed["output"][0]["encrypted_content"]
+            .as_str()
+            .expect("encrypted content");
+        assert!(encrypted.starts_with("codexhub:enc:v1:grok:"));
+        assert!(encrypted.ends_with(":opaque-grok"));
+        assert_eq!(
+            serde_json::from_slice::<Value>(&normalized).unwrap(),
+            parsed
+        );
+    }
+
     #[tokio::test]
     async fn stream_normalizes_exec_namespace_and_keeps_other_namespaces() {
         let chunks = stream::iter(vec![
@@ -296,5 +363,24 @@ mod tests {
             });
 
         assert_eq!(String::from_utf8(output).expect("utf8"), payload);
+    }
+
+    #[tokio::test]
+    async fn stream_marks_reasoning_encrypted_content() {
+        let chunks = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
+            "event: response.output_item.done\n\
+             data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"opaque-grok\"}}\n\n",
+        ))]);
+
+        let output =
+            ResponsesCompatSseStream::with_encrypted_content_scope(Box::pin(chunks), grok_scope())
+                .collect::<Vec<Result<Bytes, std::io::Error>>>()
+                .await
+                .into_iter()
+                .map(|item| String::from_utf8(item.expect("chunk").to_vec()).expect("utf8"))
+                .collect::<String>();
+
+        assert!(output.contains("codexhub:enc:v1:grok:"));
+        assert!(output.contains(":opaque-grok"));
     }
 }
