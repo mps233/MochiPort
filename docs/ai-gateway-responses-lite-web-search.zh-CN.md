@@ -934,3 +934,124 @@ upstream_response_sse：上游原始流
 5. 原生 `web.run` 与 hosted `web_search` 已互斥：有原生声明时不重复注入 hosted 工具，没有原生声明时仍可兼容旧路径。
 
 发布前应以本文第 11、14、15 节为验收基线，确认客户端 provider gate、CodexHub endpoint、搜索 backend、账户模型和 Remote Control 在同一版本中同时可用。
+
+## 17. 待探讨方案：Gateway 内部搜索工具循环
+
+状态：**仅记录设计，当前未实现、未启用，也不进入当前发布范围。**
+
+### 17.1 提出背景
+
+当前原生 `web.run` 有两条已确认的限制：
+
+1. 使用 Actor Authorization 可以通过 Codex Web Search extension gate，但会让 provider account 变成 `None`，并触发官方 Statsig 模型白名单，导致 CodexHub 自定义模型消失。
+2. 仅在 Gateway 请求中注入 `web.run` 工具定义，只会让模型看见工具，不会在 Codex App 本地注册对应 executor。若工具调用被直接透传，Codex 仍可能报 unsupported tool。
+
+因此可以考虑把搜索执行和后续模型调用全部留在 Gateway 内部，对 Codex 隐藏中间工具轮次。
+
+### 17.2 Codex 原生流程不是一次请求
+
+GPT-5.6 Code Mode 下，原生搜索通常不是模型直接返回 namespace `web.run`，而是：
+
+```text
+模型返回 custom_tool_call(name=exec)
+  -> exec JavaScript 调用 tools.web__run(...)
+  -> Codex 本地 Code Mode runtime 执行 JavaScript
+  -> Web Search extension 请求 /v1/alpha/search
+  -> Codex 生成 custom_tool_call_output
+  -> Codex 再次请求模型
+  -> 模型生成最终回答
+```
+
+对应源码与测试：
+
+- `references/codex-main/codex-rs/core/tests/suite/code_mode.rs::assert_code_mode_standalone_web_search`
+- `references/codex-main/codex-rs/ext/web-search/src/tool.rs::WebSearchTool::handle_call`
+- `references/codex-main/codex-rs/ext/web-search/src/extension.rs::WebSearchExtensionConfig`
+
+这意味着 Gateway 不能把 `/alpha/search` 的原始结果直接当作模型回答返回 Codex。搜索结果必须先作为 tool output 交回模型，再由模型生成用户可读的最终回答。
+
+### 17.3 候选请求链路
+
+```text
+Codex App
+  -> CodexHub /v1/responses
+CodexHub
+  -> 向上游请求临时注入 Gateway 私有搜索 function
+上游模型
+  -> 返回私有搜索 function_call
+CodexHub
+  -> 截流，不把该 function_call 发给 Codex App
+  -> 调用现有 /v1/alpha/search
+  -> 把 function_call + function_call_output 追加到内部请求
+  -> 再次请求上游模型
+上游模型
+  -> 返回最终 assistant response
+CodexHub
+  -> 将最终响应流式返回 Codex App
+```
+
+该模式本质上是 Gateway 托管的 agent loop，不是 Codex 原生 `web.run` runtime。
+
+### 17.4 不建议直接使用 `web.run` 名称
+
+候选实现应优先注入只对上游可见的私有 function，例如：
+
+```text
+codexhub_web_run
+```
+
+它可以复用 `SearchCommands` 的参数 schema 和 `web.run` 的工具说明，但不应伪装成 Codex 本地已经注册的 namespace tool。原因包括：
+
+- 避免与未来真正注册的 `web.run` 冲突。
+- 避免 Codex 把中间调用当作需要本地执行的工具。
+- Gateway 可以精确识别并只截流自己注入的 function。
+- hosted `web_search`、原生 `web.run` 和 Gateway 私有搜索必须保持互斥。
+
+### 17.5 关键可行性探针
+
+实现完整内部循环前，必须先用真实 GPT-5.6 上游验证：
+
+1. 在 Responses Lite 顶层注入普通 function。
+2. 不修改 Codex 原有 `exec` description。
+3. 让模型执行一次明确的搜索任务。
+4. 检查模型是否直接返回该 function 的 `function_call`。
+
+只有直接返回 `function_call`，Gateway 才能稳定截流。
+
+如果模型仍返回：
+
+```text
+custom_tool_call(name=exec)
+input = "const result = await tools.web__run(...);"
+```
+
+则 Gateway 需要执行模型生成的任意 JavaScript，或者解析 JavaScript 并模拟 Code Mode runtime。两者都会显著扩大安全面、依赖和维护成本。不得使用正则或字符串截取来模拟 JavaScript 语义；在没有可靠沙箱和完整工具注册表前，该分支应判定为不可落地。
+
+### 17.6 候选 MVP 边界
+
+若关键探针通过，第一版仍应严格限制：
+
+1. 只针对 `OpenAiResponses` 和明确支持的 GPT-5.6 模型。
+2. 私有搜索 function 只注入上游请求，不写入 Codex 会话历史。
+3. 每轮只截流 Gateway 自己注入的搜索调用。
+4. 同一响应混有未知工具调用时不进入内部循环，避免 Gateway 和 Codex 同时拥有工具执行权。
+5. 最多执行 3 至 4 轮搜索，超过上限返回明确错误。
+6. 搜索请求使用稳定的 thread/session id，保证同一内部循环中的 `open`、`click`、`find` 和 ref id 可继续使用。
+7. 客户端取消、Gateway 超时和上游失败必须能终止整个内部循环。
+8. 请求日志分别记录模型轮次和 `/alpha/search` 轮次，并统计隐藏轮次的 token usage。
+9. 中间搜索轮次不透传；最终 assistant response 尽量保持正常 SSE 流式输出。
+10. MVP 不伪造 Codex 原生 WebSearch begin/end item，Codex App 只显示最终回答；搜索过程先在 CodexHub 请求日志中展示。
+
+### 17.7 仍需解决的问题
+
+- 如何在不完整缓冲最终响应的前提下，判断当前响应是搜索调用还是最终文本。
+- 多个并行搜索调用的执行顺序和 tool output 顺序。
+- 第一轮模型产生 reasoning item 时，内部 follow-up 应保留哪些字段和私有状态。
+- `store=false`、Responses Lite input 和 `previous_response_id` 的兼容策略。
+- 隐藏搜索历史不进入 Codex 下一轮上下文后，跨用户轮次 ref id 是否仍能稳定复用。
+- 多轮模型 usage、TTFT、总延迟和错误状态如何汇总到单条用户请求日志。
+- 是否需要在后续版本中合成标准 `web_search_call` SSE 事件，以及 Codex App 对合成事件序列的容忍度。
+
+### 17.8 当前决策
+
+当前不实现 Gateway 内部搜索循环。保留本节作为后续设计输入，只有在“GPT-5.6 能直接调用 Gateway 私有 function”的真实上游探针通过后，才继续评估 MVP；若必须执行 `exec` JavaScript，则暂不采用该方案。
