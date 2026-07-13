@@ -434,13 +434,20 @@ custom_tool_call_output
 | 目标 Provider | 历史 `custom_tool_call` | `additional_tools` 注册表 |
 | --- | --- | --- |
 | OpenAI Responses | 原生保留 | 原生保留 |
-| Grok Responses | 已规范化 | 尚未执行通用提取和工具定义降级 |
-| DeepSeek Chat Completions | 已转换 | 反序列化后作为未知 input 跳过，工具定义会丢失 |
-| Anthropic Messages | 已转换 | 反序列化后作为未知 input 跳过，工具定义会丢失 |
+| Grok Responses | 已规范化 | 已提取并合并；`custom`/`namespace` 降级为 function，并使用可逆名称映射 |
+| DeepSeek Chat Completions | 已转换 | 已在反序列化前提取并合并，由现有 Chat 工具转换器降级 |
+| Anthropic Messages | 已转换 | 已在反序列化前提取并合并，由现有 Anthropic 工具转换器降级 |
 
-因此，当前修复保证 GPT-5.6 历史切换到 Grok 时不会再因为 `ModelInput` 中的 custom item、结构化 output 或 `phase` 报错；DeepSeek 和 Anthropic 也能够转换已有 custom tool 历史。但这不等于非 OpenAI Provider 已完整支持 Responses Lite：当当前请求只通过 `additional_tools` 注册工具时，切换后可能不立即报协议错误，却会表现为 `exec`、`apply_patch` 等工具不可见或无法继续调用。
+当前处理位于 Provider 分发和 `GatewayRequest` 反序列化之前，因此 `additional_tools` 不会先退化成 `ItemType::Unknown`。顶层 `tools` 保持优先，后续 carrier 按出现顺序追加，重复工具去重；重复 namespace 会继续合并未出现的子工具。
 
-后续实现通用 Lite 降级时，必须把工具注册表转换放在 Provider 分发之前，并增加以下端到端测试：
+Grok Responses 不接受 Codex 私有 `additional_tools` carrier，也不原生接受 `custom`/`namespace` 定义。CodexHub 会：
+
+1. 将 custom tool 包装成参数为 `{input: string}` 的 function。
+2. 将 namespace 子 function 编码成 Provider-safe 名称。
+3. 用同一份名称映射重写旧历史中的 custom/namespace 调用。
+4. 在 JSON、SSE `output_item` 和 `response.completed.output` 中把 Grok function call 还原为 Codex 的 custom/namespace item。
+
+因此 `exec`、`apply_patch` 和 namespace 插件不会因为降级而被 Codex 当成错误类型的普通函数。仍需持续保留以下回归范围：
 
 - GPT-5.6 -> Grok Responses。
 - GPT-5.6 -> DeepSeek Chat Completions。
@@ -505,9 +512,10 @@ Anthropic 路径不猜测、不降级私有状态：
 | 文件 | 职责 |
 | --- | --- |
 | `src/ai_gateway/encrypted_content.rs` | marker、协议类型、footprint、Responses 请求清理和 Anthropic typed marker |
-| `src/ai_gateway/responses_compat.rs` | Responses JSON/SSE 响应递归包装 |
+| `src/ai_gateway/responses_lite_tools.rs` | `additional_tools` 提取、顶层工具合并去重、Grok 工具定义降级和名称映射 |
+| `src/ai_gateway/responses_compat.rs` | Responses JSON/SSE 密文包装，以及 Grok function call 向 Codex custom/namespace item 的回程还原 |
 | `src/ai_gateway/providers/openai_responses.rs` | OpenAI/Grok 请求解包、Grok ModelInput 工具历史规范化、错误识别和单次清理重试 |
-| `src/ai_gateway/handler.rs` | Provider 分发、Responses Lite 顶层工具处理；后续通用 `additional_tools` 降级应在此层完成 |
+| `src/ai_gateway/handler.rs` | Provider 分发前调用通用 Lite 工具准备逻辑 |
 | `src/ai_gateway/transform/responses_to_chat.rs` | Responses custom tool 历史 -> DeepSeek/OpenAI Chat `tool_calls` / tool message |
 | `src/ai_gateway/providers/anthropic_messages/mod.rs` | Anthropic Provider scope 创建、JSON/SSE 返回路径接入 |
 | `src/ai_gateway/providers/anthropic_messages/response.rs` | Anthropic JSON thinking/redacted -> Responses reasoning |

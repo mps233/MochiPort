@@ -16,6 +16,7 @@ pub struct GatewayContext {
 
 const LIB_MANAGED_HEADERS: &[&str] = &[
     "content-length",
+    "content-encoding",
     "transfer-encoding",
     "accept-encoding",
     "host",
@@ -29,6 +30,7 @@ const SENSITIVE_HEADERS: &[&str] = &[
     "x-api-token",
     "x-goog-api-key",
     "x-google-api-key",
+    "x-openai-actor-authorization",
     "cookie",
     "set-cookie",
     "proxy-authorization",
@@ -277,6 +279,10 @@ mod tests {
         headers.insert("thread-id", HeaderValue::from_static("thread-1"));
         headers.insert("x-codex-window-id", HeaderValue::from_static("win-1"));
         headers.insert("authorization", HeaderValue::from_static("Bearer codex"));
+        headers.insert(
+            "x-openai-actor-authorization",
+            HeaderValue::from_static("codexhub-local"),
+        );
         headers.insert("content-type", HeaderValue::from_static("text/plain"));
         headers.insert("content-length", HeaderValue::from_static("123"));
         headers.insert("accept-encoding", HeaderValue::from_static("gzip"));
@@ -299,6 +305,11 @@ mod tests {
             "win-1"
         );
         assert!(ctx.upstream_headers.get("authorization").is_none());
+        assert!(
+            ctx.upstream_headers
+                .get("x-openai-actor-authorization")
+                .is_none()
+        );
         assert!(ctx.upstream_headers.get("content-type").is_none());
         assert!(ctx.upstream_headers.get("content-length").is_none());
         assert!(ctx.upstream_headers.get("accept-encoding").is_none());
@@ -315,6 +326,7 @@ mod tests {
         headers.insert("accept", HeaderValue::from_static("application/json"));
         headers.insert("authorization", HeaderValue::from_static("Bearer codex"));
         headers.insert("content-type", HeaderValue::from_static("text/plain"));
+        headers.insert("content-encoding", HeaderValue::from_static("zstd"));
 
         let ctx = GatewayContext::extract(&headers, Some("key"));
         let client = reqwest::Client::new();
@@ -338,6 +350,7 @@ mod tests {
             request_headers.get("content-type").unwrap(),
             "application/json"
         );
+        assert!(request_headers.get("content-encoding").is_none());
         assert_eq!(request_headers.get("user-agent").unwrap(), "Codex/1.0");
         assert_eq!(request_headers.get("accept").unwrap(), "application/json");
     }

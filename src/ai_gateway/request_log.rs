@@ -369,7 +369,13 @@ pub fn elapsed_ms(started_at: Instant) -> i64 {
 }
 
 pub fn headers_to_json(headers: &HeaderMap) -> Option<String> {
-    headers_to_json_with(headers, |_, value| value)
+    headers_to_json_with(headers, |name, value| {
+        if name.eq_ignore_ascii_case("x-openai-actor-authorization") {
+            "<redacted>".to_string()
+        } else {
+            value
+        }
+    })
 }
 
 pub fn headers_to_redacted_json(headers: &HeaderMap) -> Option<String> {
@@ -418,6 +424,7 @@ fn is_sensitive_header(name: &str) -> bool {
             | "x-api-key"
             | "x-api-secret"
             | "x-api-token"
+            | "x-openai-actor-authorization"
     )
 }
 
@@ -1434,11 +1441,16 @@ mod tests {
     fn headers_to_json_preserves_values() {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer local-key".parse().unwrap());
+        headers.insert(
+            "x-openai-actor-authorization",
+            "codexhub-local".parse().unwrap(),
+        );
         headers.append("x-debug", "one".parse().unwrap());
         headers.append("x-debug", "two".parse().unwrap());
 
         let value: Value = serde_json::from_str(&headers_to_json(&headers).unwrap()).unwrap();
         assert_eq!(value["authorization"], "Bearer local-key");
+        assert_eq!(value["x-openai-actor-authorization"], "<redacted>");
         assert_eq!(value["x-debug"], json!(["one", "two"]));
     }
 
@@ -1447,12 +1459,17 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer provider-key".parse().unwrap());
         headers.insert("x-api-key", "secret-key".parse().unwrap());
+        headers.insert(
+            "x-openai-actor-authorization",
+            "codexhub-local".parse().unwrap(),
+        );
         headers.insert("x-debug", "visible".parse().unwrap());
 
         let value: Value =
             serde_json::from_str(&headers_to_redacted_json(&headers).unwrap()).unwrap();
         assert_eq!(value["authorization"], "<redacted>");
         assert_eq!(value["x-api-key"], "<redacted>");
+        assert_eq!(value["x-openai-actor-authorization"], "<redacted>");
         assert_eq!(value["x-debug"], "visible");
     }
 

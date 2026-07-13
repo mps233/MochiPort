@@ -375,6 +375,7 @@ dependencies = [
  "winreg",
  "wxdragon",
  "zip",
+ "zstd",
 ]
 
 [[package]]

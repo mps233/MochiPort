@@ -1,6 +1,8 @@
 use std::time::Instant;
 
-use super::config::{AiGatewayConfig, ProviderConfig, provider_route_id, select_by_priority};
+use super::config::{
+    AiGatewayConfig, ProviderConfig, ProviderType, provider_route_id, select_by_priority,
+};
 use super::error::GatewayError;
 use super::routing_state::GatewayRoutingState;
 
@@ -32,10 +34,35 @@ pub fn resolve_provider_with_state<'a>(
     state: &mut GatewayRoutingState,
     now: Instant,
 ) -> Result<(&'a ProviderConfig, String), GatewayError> {
+    resolve_provider_with_state_matching(model, session_id, config, state, now, |_| true)
+}
+
+/// 与普通状态路由相同，但只在指定 provider 类型中选择。
+pub fn resolve_provider_with_state_for_type<'a>(
+    model: &str,
+    session_id: Option<&str>,
+    config: &'a AiGatewayConfig,
+    state: &mut GatewayRoutingState,
+    now: Instant,
+    provider_type: &ProviderType,
+) -> Result<(&'a ProviderConfig, String), GatewayError> {
+    resolve_provider_with_state_matching(model, session_id, config, state, now, |provider| {
+        &provider.provider_type == provider_type
+    })
+}
+
+fn resolve_provider_with_state_matching<'a>(
+    model: &str,
+    session_id: Option<&str>,
+    config: &'a AiGatewayConfig,
+    state: &mut GatewayRoutingState,
+    now: Instant,
+    mut matches: impl FnMut(&ProviderConfig) -> bool,
+) -> Result<(&'a ProviderConfig, String), GatewayError> {
     let candidates: Vec<&ProviderConfig> = config
         .providers
         .iter()
-        .filter(|provider| provider.enabled && provider.matches_model(model))
+        .filter(|provider| provider.enabled && provider.matches_model(model) && matches(provider))
         .collect();
     if candidates.is_empty() {
         return Err(GatewayError::invalid_model(model));
@@ -81,7 +108,6 @@ pub fn resolve_provider_with_state<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ai_gateway::config::ProviderType;
     use crate::ai_gateway::routing_state::{COOLDOWN, FAILURE_THRESHOLD};
     use std::time::Duration;
 
@@ -181,5 +207,29 @@ mod tests {
             resolve_provider_with_state("nope", Some("s1"), &cfg, &mut state, Instant::now())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn provider_type_filter_ignores_sticky_incompatible_route() {
+        let openai = provider("openai", 50, "m");
+        let mut grok = provider("grok", 100, "m");
+        grok.provider_type = ProviderType::GrokResponses;
+        let cfg = config(vec![openai, grok]);
+        let mut state = GatewayRoutingState::default();
+        let now = Instant::now();
+        let grok_route = provider_route_id(&cfg.providers[1]);
+        state.bind("s1", &grok_route, now);
+
+        let (selected, _) = resolve_provider_with_state_for_type(
+            "m",
+            Some("s1"),
+            &cfg,
+            &mut state,
+            now,
+            &ProviderType::OpenAiResponses,
+        )
+        .unwrap();
+
+        assert_eq!(selected.name, "openai");
     }
 }

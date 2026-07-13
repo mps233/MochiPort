@@ -17,23 +17,127 @@ use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
 use crate::ai_gateway::responses_compat::{
-    ResponsesCompatSseStream, normalize_json_body_with_scope,
+    ResponsesCompatSseStream, normalize_json_body_with_scope_and_tool_names,
 };
+use crate::ai_gateway::tool_names::ToolNameMap;
 
 use super::{
     apply_total_request_timeout, ensure_success_response, execute_stream_start,
     execute_upstream_request,
 };
 
+#[derive(Clone, Copy)]
+enum ResponsesEndpoint {
+    Responses,
+    Compact,
+}
+
+impl ResponsesEndpoint {
+    fn path(self) -> &'static str {
+        match self {
+            Self::Responses => "/v1/responses",
+            Self::Compact => "/v1/responses/compact",
+        }
+    }
+
+    fn is_compact(self) -> bool {
+        matches!(self, Self::Compact)
+    }
+}
+
 /// OpenAI Responses API 透传：补齐 cache 字段后代理到上游。
 pub async fn passthrough(
+    client: &reqwest::Client,
+    ctx: &GatewayContext,
+    raw_body: serde_json::Value,
+    upstream_model: &str,
+    provider: &ProviderConfig,
+    log_context: Option<RequestLogContext>,
+) -> Result<Response<Body>, GatewayError> {
+    passthrough_with_tool_names(
+        client,
+        ctx,
+        raw_body,
+        upstream_model,
+        provider,
+        None,
+        log_context,
+    )
+    .await
+}
+
+pub async fn passthrough_with_tool_names(
+    client: &reqwest::Client,
+    ctx: &GatewayContext,
+    raw_body: serde_json::Value,
+    upstream_model: &str,
+    provider: &ProviderConfig,
+    grok_tool_names: Option<ToolNameMap>,
+    log_context: Option<RequestLogContext>,
+) -> Result<Response<Body>, GatewayError> {
+    passthrough_to_endpoint(
+        client,
+        ctx,
+        raw_body,
+        upstream_model,
+        provider,
+        grok_tool_names,
+        log_context,
+        ResponsesEndpoint::Responses,
+    )
+    .await
+}
+
+/// OpenAI Responses Compact API 透传。该接口始终返回 unary JSON。
+pub async fn passthrough_compact(
+    client: &reqwest::Client,
+    ctx: &GatewayContext,
+    raw_body: serde_json::Value,
+    upstream_model: &str,
+    provider: &ProviderConfig,
+    log_context: Option<RequestLogContext>,
+) -> Result<Response<Body>, GatewayError> {
+    passthrough_to_endpoint(
+        client,
+        ctx,
+        raw_body,
+        upstream_model,
+        provider,
+        None,
+        log_context,
+        ResponsesEndpoint::Compact,
+    )
+    .await
+}
+
+async fn passthrough_to_endpoint(
     client: &reqwest::Client,
     ctx: &GatewayContext,
     mut raw_body: serde_json::Value,
     upstream_model: &str,
     provider: &ProviderConfig,
+    mut grok_tool_names: Option<ToolNameMap>,
     log_context: Option<RequestLogContext>,
+    endpoint: ResponsesEndpoint,
 ) -> Result<Response<Body>, GatewayError> {
+    if endpoint.is_compact()
+        && raw_body
+            .get("stream")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err(GatewayError::bad_request(
+            "responses compact does not support streaming",
+        ));
+    }
+
+    if !endpoint.is_compact()
+        && provider.provider_type == ProviderType::GrokResponses
+        && grok_tool_names.is_none()
+    {
+        grok_tool_names = Some(ToolNameMap::default());
+    }
+
     // 1. 补齐 prompt_cache_key
     let existing_key = raw_body
         .get("prompt_cache_key")
@@ -44,7 +148,9 @@ pub async fn passthrough(
     }
 
     // 2. 补齐 prompt_cache_retention
-    if let Some(retention) = &provider.prompt_cache_retention {
+    if !endpoint.is_compact()
+        && let Some(retention) = &provider.prompt_cache_retention
+    {
         if raw_body.get("prompt_cache_retention").is_none() {
             raw_body["prompt_cache_retention"] = json!(retention);
         }
@@ -62,8 +168,16 @@ pub async fn passthrough(
             "prepared scoped encrypted reasoning content for upstream"
         );
     }
-    normalize_grok_reasoning_replay(&mut raw_body, provider);
-    let grok_compatibility = normalize_grok_model_input(&mut raw_body, provider);
+    let grok_compatibility = if endpoint.is_compact() {
+        GrokModelInputStats::default()
+    } else {
+        normalize_grok_reasoning_replay(&mut raw_body, provider);
+        normalize_grok_model_input_with_tool_names(
+            &mut raw_body,
+            provider,
+            grok_tool_names.as_mut(),
+        )
+    };
     if grok_compatibility.changed() {
         debug!(
             provider = %provider.name,
@@ -71,16 +185,22 @@ pub async fn passthrough(
             custom_outputs = grok_compatibility.custom_outputs,
             structured_outputs = grok_compatibility.structured_outputs,
             removed_phase_fields = grok_compatibility.removed_phase_fields,
+            namespaced_calls = grok_compatibility.namespaced_calls,
             "normalized Codex tool history for Grok ModelInput"
         );
     }
 
-    let is_stream = raw_body
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let is_stream = !endpoint.is_compact()
+        && raw_body
+            .get("stream")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
-    let url = format!("{}/v1/responses", provider_api_root(&provider.base_url));
+    let url = format!(
+        "{}{}",
+        provider_api_root(&provider.base_url),
+        endpoint.path()
+    );
     let mut invalid_encrypted_content_retry = false;
     let upstream_resp = loop {
         // 3. 构建上游请求。密文恢复重试会使用清理后的 body 重建请求。
@@ -92,13 +212,19 @@ pub async fn passthrough(
             apply_total_request_timeout(req_builder, provider.timeout_secs, is_stream)
                 .json(&raw_body);
         let req_builder = apply_upstream_headers(req_builder, &ctx.upstream_headers);
-        let upstream_req = req_builder.build().map_err(|e| {
+        let mut upstream_req = req_builder.build().map_err(|e| {
             error!(error = %e, "build upstream request failed");
             GatewayError::upstream(
                 StatusCode::BAD_GATEWAY,
                 format!("build upstream request: {e}"),
             )
         })?;
+        if endpoint.is_compact() {
+            upstream_req.headers_mut().insert(
+                HeaderName::from_static("accept"),
+                HeaderValue::from_static("application/json"),
+            );
+        }
 
         if let Some(log_context) = &log_context {
             let update = RequestLogUpdate {
@@ -122,7 +248,7 @@ pub async fn passthrough(
             url = %url,
             stream = is_stream,
             encrypted_content_retry = invalid_encrypted_content_retry,
-            "proxying to openai responses"
+            "proxying to openai responses endpoint"
         );
 
         let upstream_resp = if is_stream {
@@ -185,6 +311,7 @@ pub async fn passthrough(
             HeaderName::from_static("connection"),
             HeaderValue::from_static("keep-alive"),
         );
+        copy_upstream_response_headers(upstream_resp.headers(), &mut headers);
 
         let byte_stream = upstream_resp.bytes_stream().map(|result| {
             result.map_err(|e| {
@@ -194,18 +321,20 @@ pub async fn passthrough(
         });
         let body = if let Some(log_context) = log_context {
             let captured_upstream = UpstreamSseCaptureStream::new(byte_stream, log_context.clone());
-            let compat_stream = ResponsesCompatSseStream::with_encrypted_content_scope(
+            let compat_stream = ResponsesCompatSseStream::with_compatibility(
                 Box::pin(captured_upstream),
                 encrypted_content_scope.clone(),
+                grok_tool_names.clone(),
             );
             Body::from_stream(ResponsesSseLogStream::new(
                 Box::pin(compat_stream),
                 log_context,
             ))
         } else {
-            Body::from_stream(ResponsesCompatSseStream::with_encrypted_content_scope(
+            Body::from_stream(ResponsesCompatSseStream::with_compatibility(
                 Box::pin(byte_stream),
                 encrypted_content_scope.clone(),
+                grok_tool_names.clone(),
             ))
         };
         let mut response = Response::new(body);
@@ -215,11 +344,15 @@ pub async fn passthrough(
     }
 
     // 7. 非流式：透传 JSON 响应
+    let upstream_headers = upstream_resp.headers().clone();
     let body_bytes = upstream_resp.bytes().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("read upstream body: {e}"))
     })?;
-    let (body_bytes, response_json) =
-        normalize_json_body_with_scope(body_bytes, Some(&encrypted_content_scope));
+    let (body_bytes, response_json) = normalize_json_body_with_scope_and_tool_names(
+        body_bytes,
+        Some(&encrypted_content_scope),
+        grok_tool_names.as_ref(),
+    );
     if let Some(log_context) = &log_context {
         let (status, usage, response_text) = response_json
             .as_ref()
@@ -252,7 +385,17 @@ pub async fn passthrough(
         HeaderName::from_static("content-type"),
         HeaderValue::from_static("application/json"),
     );
+    copy_upstream_response_headers(&upstream_headers, response.headers_mut());
     Ok(response)
+}
+
+fn copy_upstream_response_headers(source: &HeaderMap, target: &mut HeaderMap) {
+    for name in ["x-codex-turn-state", "x-request-id", "openai-model"] {
+        let name = HeaderName::from_static(name);
+        if let Some(value) = source.get(&name) {
+            target.insert(name, value.clone());
+        }
+    }
 }
 
 fn is_invalid_encrypted_content_error(status: StatusCode, body: &str) -> bool {
@@ -322,6 +465,7 @@ struct GrokModelInputStats {
     custom_outputs: usize,
     structured_outputs: usize,
     removed_phase_fields: usize,
+    namespaced_calls: usize,
 }
 
 impl GrokModelInputStats {
@@ -330,12 +474,22 @@ impl GrokModelInputStats {
             || self.custom_outputs > 0
             || self.structured_outputs > 0
             || self.removed_phase_fields > 0
+            || self.namespaced_calls > 0
     }
 }
 
+#[cfg(test)]
 fn normalize_grok_model_input(
     raw_body: &mut serde_json::Value,
     provider: &ProviderConfig,
+) -> GrokModelInputStats {
+    normalize_grok_model_input_with_tool_names(raw_body, provider, None)
+}
+
+fn normalize_grok_model_input_with_tool_names(
+    raw_body: &mut serde_json::Value,
+    provider: &ProviderConfig,
+    mut tool_names: Option<&mut ToolNameMap>,
 ) -> GrokModelInputStats {
     let mut stats = GrokModelInputStats::default();
     if provider.provider_type != ProviderType::GrokResponses {
@@ -366,6 +520,14 @@ fn normalize_grok_model_input(
                 }
             }
             "custom_tool_call" => {
+                if let Some(name) = item
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    && let Some(tool_names) = tool_names.as_deref_mut()
+                {
+                    item.insert("name".to_string(), json!(tool_names.encode_custom(&name)));
+                }
                 let input = item
                     .remove("input")
                     .map(grok_custom_tool_input_text)
@@ -376,6 +538,26 @@ fn normalize_grok_model_input(
                 item.insert("arguments".to_string(), json!(arguments));
                 item.remove("status");
                 stats.custom_calls += 1;
+            }
+            "function_call" => {
+                let namespace = item
+                    .get("namespace")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                let name = item
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+                if let (Some(namespace), Some(name), Some(tool_names)) =
+                    (namespace, name, tool_names.as_deref_mut())
+                {
+                    item.insert(
+                        "name".to_string(),
+                        json!(tool_names.encode_function(Some(&namespace), &name)),
+                    );
+                    item.remove("namespace");
+                    stats.namespaced_calls += 1;
+                }
             }
             "custom_tool_call_output" => {
                 item.insert("type".to_string(), json!("function_call_output"));
@@ -453,7 +635,7 @@ mod tests {
         Json, Router,
         body::to_bytes,
         extract::State,
-        http::{HeaderMap, StatusCode},
+        http::{HeaderMap, HeaderValue, StatusCode},
         response::{IntoResponse, Response},
         routing::post,
     };
@@ -462,10 +644,12 @@ mod tests {
 
     use crate::ai_gateway::config::{ProviderConfig, ProviderType};
     use crate::ai_gateway::context::GatewayContext;
+    use crate::ai_gateway::tool_names::ToolNameMap;
 
     use super::{
         is_invalid_encrypted_content_error, normalize_grok_model_input,
-        normalize_grok_reasoning_replay, passthrough,
+        normalize_grok_model_input_with_tool_names, normalize_grok_reasoning_replay, passthrough,
+        passthrough_compact,
     };
 
     struct RetryServerState {
@@ -541,13 +725,18 @@ mod tests {
         requests
             .send(body)
             .expect("request capture receiver should stay open");
-        Json(json!({
+        let mut response = Json(json!({
             "id": "resp_ok",
             "object": "response",
             "status": "completed",
             "output": []
         }))
-        .into_response()
+        .into_response();
+        response.headers_mut().insert(
+            "x-codex-turn-state",
+            HeaderValue::from_static("response-state"),
+        );
+        response
     }
 
     async fn capture_server() -> (
@@ -567,6 +756,59 @@ mod tests {
             axum::serve(listener, app)
                 .await
                 .expect("serve capture endpoint");
+        });
+        (format!("http://{address}/v1"), receiver, task)
+    }
+
+    async fn capture_compact_success(
+        State(requests): State<mpsc::UnboundedSender<(HeaderMap, serde_json::Value)>>,
+        headers: HeaderMap,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response {
+        requests
+            .send((headers, body))
+            .expect("request capture receiver should stay open");
+        let mut response = Json(json!({
+            "id": "cmp_ok",
+            "object": "response.compaction",
+            "created_at": 1_700_000_000,
+            "output": [{
+                "type": "compaction",
+                "encrypted_content": "opaque-compact"
+            }],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "total_tokens": 110
+            }
+        }))
+        .into_response();
+        response.headers_mut().insert(
+            "x-codex-turn-state",
+            HeaderValue::from_static("compact-state"),
+        );
+        response
+    }
+
+    async fn compact_capture_server() -> (
+        String,
+        mpsc::UnboundedReceiver<(HeaderMap, serde_json::Value)>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/v1/responses/compact", post(capture_compact_success))
+            .with_state(sender);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind compact capture server");
+        let address = listener
+            .local_addr()
+            .expect("compact capture server address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve compact capture endpoint");
         });
         (format!("http://{address}/v1"), receiver, task)
     }
@@ -722,6 +964,43 @@ mod tests {
     }
 
     #[test]
+    fn grok_model_input_reencodes_custom_and_namespace_history() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_exec",
+                    "name": "exec",
+                    "input": "pwd"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_open",
+                    "namespace": "browser",
+                    "name": "open",
+                    "arguments": "{\"url\":\"https://example.com\"}"
+                }
+            ]
+        });
+        let mut tool_names = ToolNameMap::default();
+        tool_names.encode_custom("exec");
+        let browser_name = tool_names.encode_function(Some("browser"), "open");
+
+        let stats = normalize_grok_model_input_with_tool_names(
+            &mut body,
+            &grok_provider(),
+            Some(&mut tool_names),
+        );
+
+        assert_eq!(stats.custom_calls, 1);
+        assert_eq!(stats.namespaced_calls, 1);
+        assert_eq!(body["input"][0]["type"], "function_call");
+        assert_eq!(body["input"][0]["name"], "exec");
+        assert_eq!(body["input"][1]["name"], browser_name);
+        assert!(body["input"][1].get("namespace").is_none());
+    }
+
+    #[test]
     fn openai_responses_provider_keeps_custom_tool_history_unchanged() {
         let mut body = json!({
             "input": [{
@@ -785,6 +1064,10 @@ mod tests {
             .await
             .expect("Grok history normalization should reach upstream");
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-codex-turn-state").unwrap(),
+            "response-state"
+        );
 
         let upstream = requests.recv().await.expect("captured upstream request");
         assert!(upstream["input"][0].get("phase").is_none());
@@ -796,6 +1079,95 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn compact_passthrough_uses_unary_compact_endpoint() {
+        let (base_url, mut requests, server) = compact_capture_server().await;
+        let provider = ProviderConfig {
+            name: "openai".to_string(),
+            provider_type: ProviderType::OpenAiResponses,
+            base_url,
+            api_key: "secret".to_string(),
+            prompt_cache_retention: Some("24h".to_string()),
+            timeout_secs: 10,
+            ..ProviderConfig::default()
+        };
+        let client = reqwest::Client::new();
+        let mut client_headers = HeaderMap::new();
+        client_headers.insert("accept", HeaderValue::from_static("text/event-stream"));
+        let context = GatewayContext::extract(&client_headers, Some("compact-cache-key"));
+        let request = json!({
+            "model": "gpt-client",
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "compact this"}]
+            }],
+            "tools": [{"type": "function", "name": "lookup", "parameters": {}}],
+            "parallel_tool_calls": true,
+            "reasoning": {"effort": "high", "summary": "auto"},
+            "service_tier": "priority",
+            "text": {"verbosity": "low"},
+            "future_field": {"preserved": true}
+        });
+
+        let response =
+            passthrough_compact(&client, &context, request, "gpt-upstream", &provider, None)
+                .await
+                .expect("compact request should reach upstream");
+
+        let (headers, upstream) = requests.recv().await.expect("captured compact request");
+        assert_eq!(headers.get("accept").unwrap(), "application/json");
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer secret");
+        assert_eq!(upstream["model"], "gpt-upstream");
+        assert_eq!(upstream["prompt_cache_key"], "compact-cache-key");
+        assert!(upstream.get("prompt_cache_retention").is_none());
+        assert_eq!(upstream["tools"][0]["name"], "lookup");
+        assert_eq!(upstream["parallel_tool_calls"], true);
+        assert_eq!(upstream["service_tier"], "priority");
+        assert_eq!(upstream["future_field"]["preserved"], true);
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("x-codex-turn-state").unwrap(),
+            "compact-state"
+        );
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read compact response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("compact response JSON");
+        assert_eq!(body["object"], "response.compaction");
+        let encrypted = body["output"][0]["encrypted_content"]
+            .as_str()
+            .expect("marked compact encrypted content");
+        assert!(encrypted.starts_with("codexhub:enc:v1:openai:"));
+        assert!(encrypted.ends_with(":opaque-compact"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn compact_passthrough_rejects_streaming() {
+        let provider = openai_responses_provider();
+        let client = reqwest::Client::new();
+        let context = GatewayContext::extract(&HeaderMap::new(), Some("compact-cache-key"));
+        let result = passthrough_compact(
+            &client,
+            &context,
+            json!({"model": "gpt-5", "stream": true, "input": []}),
+            "gpt-5",
+            &provider,
+            None,
+        )
+        .await;
+
+        let error = match result {
+            Ok(_) => panic!("streaming compact request should fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("does not support streaming"));
     }
 
     #[test]

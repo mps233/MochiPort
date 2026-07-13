@@ -1,4 +1,5 @@
 use std::{
+    io::{Cursor, Read},
     sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
@@ -6,8 +7,11 @@ use std::{
 use axum::{
     Json,
     body::Bytes,
-    extract::{Path, Query, State},
-    http::{HeaderMap, HeaderName, HeaderValue, header::ETAG},
+    extract::{Path, Query, RawQuery, State},
+    http::{
+        HeaderMap, HeaderName, HeaderValue,
+        header::{CONTENT_ENCODING, ETAG},
+    },
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, de::IntoDeserializer};
@@ -21,13 +25,134 @@ use super::config::{ProviderConfig, ProviderType};
 use super::context::GatewayContext;
 use super::error::GatewayError;
 use super::model::GatewayRequest;
-use super::providers::{anthropic_messages, deepseek_chat, openai_images, openai_responses};
+use super::providers::{
+    anthropic_messages, deepseek_chat, openai_alpha_search, openai_images, openai_responses,
+};
 use super::request_log::{
     self, RequestLogContext, RequestLogRecord, RequestLogStore, RequestLogUpdate,
 };
-use super::router::resolve_provider_with_state;
+use super::responses_lite_tools::prepare_for_provider;
+use super::router::{resolve_provider_with_state, resolve_provider_with_state_for_type};
 
 static AI_GATEWAY_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+const MAX_DECOMPRESSED_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
+
+/// POST /ai-gateway/v1/alpha/search
+pub async fn handle_alpha_search(
+    State(state): State<SharedState>,
+    RawQuery(raw_query): RawQuery,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let started_at = Instant::now();
+    let created_at_ms = request_log::now_ms();
+    let body = match decode_request_body(&headers, body) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let config = state.config.lock().await;
+    let gateway_config = config.ai_gateway.clone();
+    let request_logging_enabled = gateway_config.request_logging_enabled;
+    let request_log_details_enabled = gateway_config.request_log_details_enabled;
+    drop(config);
+
+    let inspection = match openai_alpha_search::inspect_request(&body) {
+        Ok(inspection) => inspection,
+        Err(error) => return error.into_response(),
+    };
+    let request_model = inspection.model.clone();
+    let context = GatewayContext::extract(&headers, None);
+    let routing_session_id = context
+        .session_id
+        .as_deref()
+        .or(inspection.session_id.as_deref());
+    let routing_now = Instant::now();
+    let (provider, route_id) = {
+        let mut routing = state.ai_gateway_routing.lock().await;
+        routing.evict_stale(routing_now);
+        match resolve_provider_with_state_for_type(
+            &request_model,
+            routing_session_id,
+            &gateway_config,
+            &mut routing,
+            routing_now,
+            &ProviderType::OpenAiResponses,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(routing);
+                let log_context = request_logging_enabled
+                    .then(|| {
+                        insert_initial_alpha_search_log(
+                            &state.ai_gateway_request_logs,
+                            &context,
+                            &headers,
+                            &request_model,
+                            None,
+                            &inspection.body,
+                            started_at,
+                            created_at_ms,
+                            request_log_details_enabled,
+                        )
+                    })
+                    .flatten();
+                update_failed_log(&log_context, &error.message);
+                return error.into_response();
+            }
+        }
+    };
+    let upstream_model = provider
+        .resolve_upstream_model(&request_model)
+        .unwrap_or(request_model.as_str())
+        .to_string();
+
+    info!(
+        model = %request_model,
+        upstream_model = %upstream_model,
+        provider = %provider.name,
+        "ai-gateway alpha search request routed"
+    );
+
+    let log_context = request_logging_enabled
+        .then(|| {
+            insert_initial_alpha_search_log(
+                &state.ai_gateway_request_logs,
+                &context,
+                &headers,
+                &request_model,
+                Some(provider),
+                &inspection.body,
+                started_at,
+                created_at_ms,
+                request_log_details_enabled,
+            )
+        })
+        .flatten();
+    let client = crate::outbound_http::get();
+    let result = openai_alpha_search::passthrough(
+        &client,
+        &context,
+        inspection.body,
+        &upstream_model,
+        provider,
+        raw_query.as_deref(),
+        log_context.clone(),
+    )
+    .await;
+    let outcome = match &result {
+        Ok(response) => classify_response_status(response.status()),
+        Err(error) if is_circuit_breaker_failure(error.status) => RoutingOutcome::UpstreamFailure,
+        Err(_) => RoutingOutcome::Ignore,
+    };
+    record_routing_outcome(&state, &route_id, outcome).await;
+    match result {
+        Ok(response) => response,
+        Err(error) => {
+            update_failed_log(&log_context, &error.message);
+            error.into_response()
+        }
+    }
+}
 
 /// POST /ai-gateway/v1/images/generations
 pub async fn handle_image_generations(
@@ -168,6 +293,139 @@ async fn handle_image_request(
     }
 }
 
+/// POST /ai-gateway/v1/responses/compact
+pub async fn handle_responses_compact(
+    State(state): State<SharedState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let started_at = Instant::now();
+    let created_at_ms = request_log::now_ms();
+    let config = state.config.lock().await;
+    let gw_config = config.ai_gateway.clone();
+    let request_logging_enabled = gw_config.request_logging_enabled;
+    let request_log_details_enabled = gw_config.request_log_details_enabled;
+    let models_etag = configured_models_etag(&gw_config);
+    drop(config);
+    let in_flight = AI_GATEWAY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) + 1;
+    let _in_flight_guard = AiGatewayInFlightGuard;
+
+    let body = match decode_request_body(&headers, body) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let raw_body: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return GatewayError::bad_request(format!("invalid JSON: {error}")).into_response();
+        }
+    };
+    let envelope: GatewayRequestEnvelope = match serde_json::from_value(raw_body.clone()) {
+        Ok(envelope) => envelope,
+        Err(error) => {
+            return GatewayError::bad_request(format!("invalid compact request envelope: {error}"))
+                .into_response();
+        }
+    };
+    if envelope.stream {
+        return GatewayError::bad_request("responses compact does not support streaming")
+            .into_response();
+    }
+
+    let ctx = GatewayContext::extract(&headers, envelope.prompt_cache_key.as_deref());
+    let routing_now = Instant::now();
+    let route_started = Instant::now();
+    let (provider, route_id) = {
+        let mut routing = state.ai_gateway_routing.lock().await;
+        routing.evict_stale(routing_now);
+        match resolve_provider_with_state_for_type(
+            &envelope.model,
+            ctx.session_id.as_deref(),
+            &gw_config,
+            &mut routing,
+            routing_now,
+            &ProviderType::OpenAiResponses,
+        ) {
+            Ok(result) => result,
+            Err(error) => {
+                drop(routing);
+                let log_context = request_logging_enabled
+                    .then(|| {
+                        insert_initial_log(
+                            &state.ai_gateway_request_logs,
+                            &ctx,
+                            &headers,
+                            &envelope,
+                            None,
+                            &raw_body,
+                            started_at,
+                            created_at_ms,
+                            request_log_details_enabled,
+                        )
+                    })
+                    .flatten();
+                update_failed_log(&log_context, &error.message);
+                return error.into_response();
+            }
+        }
+    };
+    let route_ms = request_log::elapsed_ms(route_started);
+    let log_context = request_logging_enabled
+        .then(|| {
+            insert_initial_log(
+                &state.ai_gateway_request_logs,
+                &ctx,
+                &headers,
+                &envelope,
+                Some(provider),
+                &raw_body,
+                started_at,
+                created_at_ms,
+                request_log_details_enabled,
+            )
+        })
+        .flatten();
+    let upstream_model = provider
+        .resolve_upstream_model(&envelope.model)
+        .unwrap_or(envelope.model.as_str())
+        .to_string();
+
+    info!(
+        model = %envelope.model,
+        upstream_model = %upstream_model,
+        provider = %provider.name,
+        session_id = ?ctx.session_id,
+        prompt_cache_key = %ctx.prompt_cache_key,
+        in_flight,
+        route_ms,
+        details = request_log_details_enabled,
+        "ai-gateway compact request routed"
+    );
+
+    let http_client = crate::outbound_http::get();
+    let result = openai_responses::passthrough_compact(
+        &http_client,
+        &ctx,
+        raw_body,
+        &upstream_model,
+        provider,
+        log_context.clone(),
+    )
+    .await;
+    let outcome = classify_outcome(&result);
+    record_routing_outcome(&state, &route_id, outcome).await;
+    match result {
+        Ok(mut response) => {
+            set_models_etag_header(&mut response, &models_etag);
+            response
+        }
+        Err(error) => {
+            update_failed_log(&log_context, &error.message);
+            error.into_response()
+        }
+    }
+}
+
 /// POST /ai-gateway/v1/responses
 pub async fn handle_responses(
     State(state): State<SharedState>,
@@ -187,6 +445,10 @@ pub async fn handle_responses(
     let _in_flight_guard = AiGatewayInFlightGuard;
 
     // 1. 解析请求 body
+    let body = match decode_request_body(&headers, body) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
     let mut raw_body: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(e) => {
@@ -291,15 +553,39 @@ pub async fn handle_responses(
             "injected hosted web_search into top-level tools for Responses Lite request"
         );
     }
+    let tool_preparation = match prepare_for_provider(&mut raw_body, &provider.provider_type) {
+        Ok(preparation) => preparation,
+        Err(error) => {
+            update_failed_log(
+                &log_context,
+                &format!("invalid Responses Lite tools: {error}"),
+            );
+            return GatewayError::bad_request(format!("invalid Responses Lite tools: {error}"))
+                .into_response();
+        }
+    };
+    if tool_preparation.changed() {
+        info!(
+            model = %envelope.model,
+            provider = %provider.name,
+            carriers_removed = tool_preparation.carriers_removed,
+            tools_added = tool_preparation.tools_added,
+            duplicates_removed = tool_preparation.duplicates_removed,
+            grok_tools_converted = tool_preparation.grok_tools_converted,
+            "prepared Responses Lite tools for upstream provider"
+        );
+    }
+    let grok_tool_names = tool_preparation.grok_tool_names;
     let http_client = crate::outbound_http::get();
     match provider.provider_type {
         ProviderType::OpenAiResponses | ProviderType::GrokResponses => {
-            let result = openai_responses::passthrough(
+            let result = openai_responses::passthrough_with_tool_names(
                 &http_client,
                 &ctx,
                 raw_body,
                 &upstream_model,
                 provider,
+                grok_tool_names,
                 log_context.clone(),
             )
             .await;
@@ -385,6 +671,49 @@ pub async fn handle_responses(
     }
 }
 
+fn decode_request_body(headers: &HeaderMap, body: Bytes) -> Result<Bytes, GatewayError> {
+    let mut encodings = Vec::new();
+    for value in headers.get_all(CONTENT_ENCODING) {
+        let value = value
+            .to_str()
+            .map_err(|_| GatewayError::bad_request("invalid Content-Encoding header"))?;
+        encodings.extend(
+            value.split(',').map(str::trim).filter(|encoding| {
+                !encoding.is_empty() && !encoding.eq_ignore_ascii_case("identity")
+            }),
+        );
+    }
+
+    if encodings.is_empty() {
+        return Ok(body);
+    }
+    if encodings.len() != 1 || !encodings[0].eq_ignore_ascii_case("zstd") {
+        return Err(GatewayError::bad_request(format!(
+            "unsupported Content-Encoding: {}",
+            encodings.join(", ")
+        )));
+    }
+
+    let decoder =
+        zstd::stream::read::Decoder::new(Cursor::new(body.as_ref())).map_err(|error| {
+            GatewayError::bad_request(format!("invalid zstd request body: {error}"))
+        })?;
+    let mut decoded = Vec::new();
+    decoder
+        .take((MAX_DECOMPRESSED_REQUEST_BODY_BYTES as u64) + 1)
+        .read_to_end(&mut decoded)
+        .map_err(|error| {
+            GatewayError::bad_request(format!("invalid zstd request body: {error}"))
+        })?;
+    if decoded.len() > MAX_DECOMPRESSED_REQUEST_BODY_BYTES {
+        return Err(GatewayError::bad_request(format!(
+            "decompressed request body exceeds {} bytes",
+            MAX_DECOMPRESSED_REQUEST_BODY_BYTES
+        )));
+    }
+    Ok(Bytes::from(decoded))
+}
+
 struct AiGatewayInFlightGuard;
 
 impl Drop for AiGatewayInFlightGuard {
@@ -410,6 +739,16 @@ fn classify_outcome<T>(result: &Result<T, GatewayError>) -> RoutingOutcome {
         Ok(_) => RoutingOutcome::Success,
         Err(e) if is_circuit_breaker_failure(e.status) => RoutingOutcome::UpstreamFailure,
         Err(_) => RoutingOutcome::Ignore,
+    }
+}
+
+fn classify_response_status(status: axum::http::StatusCode) -> RoutingOutcome {
+    if status.is_success() {
+        RoutingOutcome::Success
+    } else if is_circuit_breaker_failure(status) {
+        RoutingOutcome::UpstreamFailure
+    } else {
+        RoutingOutcome::Ignore
     }
 }
 
@@ -600,9 +939,13 @@ fn has_responses_lite_web_run(raw_body: &serde_json::Value) -> bool {
 
                 item.get("tools")
                     .and_then(serde_json::Value::as_array)
-                    .is_some_and(|tools| tools.iter().any(is_responses_lite_web_run_namespace))
+                    .is_some_and(|tools| tools.iter().any(is_responses_lite_web_run_tool))
             })
         })
+}
+
+fn is_responses_lite_web_run_tool(tool: &serde_json::Value) -> bool {
+    is_responses_lite_web_run_namespace(tool) || is_code_mode_exec_with_web_run(tool)
 }
 
 fn is_responses_lite_web_run_namespace(tool: &serde_json::Value) -> bool {
@@ -617,6 +960,27 @@ fn is_responses_lite_web_run_namespace(tool: &serde_json::Value) -> bool {
                         && tool.get("name").and_then(serde_json::Value::as_str) == Some("run")
                 })
             })
+}
+
+fn is_code_mode_exec_with_web_run(tool: &serde_json::Value) -> bool {
+    tool.get("type").and_then(serde_json::Value::as_str) == Some("custom")
+        && tool.get("name").and_then(serde_json::Value::as_str) == Some("exec")
+        && tool
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|description| {
+                code_mode_description_registers_tool(description, "web__run")
+            })
+}
+
+fn code_mode_description_registers_tool(description: &str, tool_name: &str) -> bool {
+    description.lines().any(|line| {
+        line.trim()
+            .strip_prefix("### ")
+            .map(str::trim)
+            .map(|heading| heading.trim_matches('`'))
+            == Some(tool_name)
+    })
 }
 
 fn is_gpt_5_6_family(model: &str) -> bool {
@@ -836,6 +1200,58 @@ fn insert_initial_image_log(
     }
 }
 
+fn insert_initial_alpha_search_log(
+    store: &RequestLogStore,
+    ctx: &GatewayContext,
+    headers: &HeaderMap,
+    model: &str,
+    provider: Option<&ProviderConfig>,
+    raw_body: &serde_json::Value,
+    started_at: Instant,
+    created_at_ms: i64,
+    details_enabled: bool,
+) -> Option<RequestLogContext> {
+    let record = RequestLogRecord {
+        request_id: ctx.request_id.clone(),
+        model_id: model.to_string(),
+        stream: false,
+        channel: provider
+            .map(|provider| provider.name.clone())
+            .unwrap_or_else(|| "-".to_string()),
+        provider_type: "alpha_search".to_string(),
+        status: "running".to_string(),
+        usage: Default::default(),
+        cost_usd: None,
+        latency_ms: None,
+        ttft_ms: None,
+        created_at_ms,
+        error_message: None,
+        request_headers_json: details_enabled
+            .then(|| request_log::headers_to_redacted_json(headers))
+            .flatten(),
+        request_json: details_enabled
+            .then(|| serde_json::to_string(raw_body).ok())
+            .flatten(),
+        upstream_request_body_bytes: None,
+        upstream_request_headers_json: None,
+        upstream_request_json: None,
+        upstream_response_sse: None,
+        response_json: None,
+    };
+    match store.insert_record(&record) {
+        Ok(log_id) => Some(RequestLogContext {
+            store: store.clone(),
+            log_id,
+            started_at,
+            details_enabled,
+        }),
+        Err(error) => {
+            request_log::log_insert_error(error);
+            None
+        }
+    }
+}
+
 fn update_failed_log(log_context: &Option<RequestLogContext>, message: &str) {
     let Some(log_context) = log_context else {
         return;
@@ -876,9 +1292,13 @@ fn set_etag_header(response: &mut axum::response::Response, etag: &str) {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
     use std::time::Instant;
 
-    use axum::http::{HeaderMap, HeaderValue};
+    use axum::{
+        body::Bytes,
+        http::{HeaderMap, HeaderValue, header::CONTENT_ENCODING},
+    };
     use serde_json::json;
 
     use crate::ai_gateway::config::{ProviderConfig, ProviderType};
@@ -887,8 +1307,9 @@ mod tests {
     use crate::ai_gateway::request_log::RequestLogStore;
 
     use super::{
-        GatewayRequestEnvelope, deserialize_gateway_request, filter_image_generation_tools,
-        inject_hosted_web_search_into_lite_request_tools, insert_initial_image_log,
+        GatewayRequestEnvelope, decode_request_body, deserialize_gateway_request,
+        filter_image_generation_tools, inject_hosted_web_search_into_lite_request_tools,
+        insert_initial_image_log,
     };
 
     fn lite_request(model: &str) -> serde_json::Value {
@@ -910,6 +1331,33 @@ mod tests {
                 }
             ]
         })
+    }
+
+    #[test]
+    fn decode_request_body_accepts_codex_zstd_payload() {
+        let original = br#"{"model":"gpt-5.6-sol","stream":true,"input":"hello"}"#;
+        let compressed =
+            zstd::stream::encode_all(Cursor::new(original), 3).expect("compress request body");
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("zstd"));
+
+        let decoded = decode_request_body(&headers, Bytes::from(compressed))
+            .expect("decode zstd request body");
+
+        assert_eq!(decoded.as_ref(), original);
+        serde_json::from_slice::<serde_json::Value>(&decoded).expect("decoded JSON");
+    }
+
+    #[test]
+    fn decode_request_body_rejects_unknown_content_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+
+        let error = decode_request_body(&headers, Bytes::from_static(b"payload"))
+            .expect_err("unsupported encoding should fail");
+
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(error.message.contains("unsupported Content-Encoding"));
     }
 
     #[test]
@@ -1245,6 +1693,53 @@ mod tests {
             &ProviderType::OpenAiResponses,
         ));
         assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn hosted_web_search_lite_injection_skips_code_mode_web_run() {
+        let mut body = lite_request("gpt-5.6-sol");
+        body["input"][0]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "custom",
+                "name": "exec",
+                "description": concat!(
+                    "Run JavaScript code to orchestrate tools.\n\n",
+                    "## web\n",
+                    "### `web__run`\n",
+                    "Tool for accessing the internet.\n\n",
+                    "exec tool declaration:\n",
+                    "declare const tools: { web__run(args: object): Promise<unknown>; };\n"
+                )
+            }));
+
+        assert!(!inject_hosted_web_search_into_lite_request_tools(
+            &mut body,
+            "gpt-5.6-sol",
+            &ProviderType::OpenAiResponses,
+        ));
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn hosted_web_search_lite_injection_ignores_code_mode_web_run_prose() {
+        let mut body = lite_request("gpt-5.6-sol");
+        body["input"][0]["tools"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({
+                "type": "custom",
+                "name": "exec",
+                "description": "The web__run tool is unavailable in this runtime."
+            }));
+
+        assert!(inject_hosted_web_search_into_lite_request_tools(
+            &mut body,
+            "gpt-5.6-sol",
+            &ProviderType::OpenAiResponses,
+        ));
+        assert_eq!(body["tools"][0]["type"], "web_search");
     }
 
     #[test]

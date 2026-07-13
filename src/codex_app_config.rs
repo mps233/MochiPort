@@ -24,6 +24,9 @@ use crate::{chain_log, config::LocalConnectionMode};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
+const OPENAI_PROVIDER_NAME: &str = "OpenAI";
+const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
+const CODEXHUB_ACTOR_AUTHORIZATION_VALUE: &str = "codexhub-local";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
 const CODEX_API_ENDPOINT_ENV: &str = "CODEX_API_ENDPOINT";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
@@ -1329,7 +1332,7 @@ fn inspect_managed_ai_gateway_provider(path: &Path, backend_url: &str) -> bool {
     else {
         return false;
     };
-    managed_provider_names_in_config(&doc, backend_url).contains(active_provider)
+    managed_provider_names_in_config(&doc, backend_url, false).contains(active_provider)
 }
 
 fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
@@ -1481,9 +1484,11 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         } else {
             provider_name(options.provider_name.as_deref())?
         };
-
         if options.activate_provider {
             doc["model_provider"] = toml_edit::value(provider_name.as_str());
+        }
+        if inject_default_ai_gateway {
+            doc["web_search"] = toml_edit::value("live");
         }
 
         let provider = provider_table_mut(&mut doc, provider_name.as_str());
@@ -1498,6 +1503,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
             provider.remove("env_key_instructions");
             provider["experimental_bearer_token"] = toml_edit::value("dummy-token");
             provider.remove("auth");
+            remove_provider_http_header(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER);
         } else if let Some(provider_base_url) = explicit_provider_base_url {
             provider["base_url"] = toml_edit::value(provider_base_url);
         }
@@ -1871,6 +1877,7 @@ fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)>
 fn managed_provider_names_in_config(
     doc: &toml_edit::DocumentMut,
     backend_url: &str,
+    include_legacy_shape: bool,
 ) -> HashSet<String> {
     let mut names = HashSet::new();
     let ai_gateway_base_url = ai_gateway_base_url_from_backend_url(backend_url);
@@ -1891,7 +1898,10 @@ fn managed_provider_names_in_config(
             .map(str::trim)
             .map(|value| backend_urls_equivalent(value, &ai_gateway_base_url))
             .unwrap_or(false);
-        if local_gateway_provider && provider_table_has_codexhub_shape(provider, provider_name) {
+        let managed_shape = provider_table_has_codexhub_shape(provider, provider_name)
+            || include_legacy_shape
+                && provider_table_has_legacy_codexhub_shape(provider, provider_name);
+        if local_gateway_provider && managed_shape {
             names.insert(provider_name.to_string());
         }
     }
@@ -1960,21 +1970,118 @@ fn inspect_connection_mode(path: &Path, backend_url: &str) -> LocalConnectionMod
 }
 
 fn provider_table_has_codexhub_shape(provider: &toml_edit::Table, provider_name: &str) -> bool {
+    provider_name == AI_GATEWAY_PROVIDER_NAME
+        && provider_table_has_codexhub_identity(provider, AI_GATEWAY_PROVIDER_NAME)
+        && provider
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(true)
+}
+
+fn provider_table_has_legacy_codexhub_shape(
+    provider: &toml_edit::Table,
+    provider_name: &str,
+) -> bool {
+    if provider_name == AI_GATEWAY_PROVIDER_NAME
+        && provider_table_has_codexhub_identity(provider, OPENAI_PROVIDER_NAME)
+    {
+        return provider
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            == Some(true);
+    }
+
+    if !provider_table_has_legacy_codexhub_identity(provider, provider_name) {
+        return false;
+    }
+
+    match provider
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool())
+    {
+        Some(true) => true,
+        Some(false) => {
+            provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER)
+                == Some(CODEXHUB_ACTOR_AUTHORIZATION_VALUE)
+        }
+        None => false,
+    }
+}
+
+fn provider_table_has_legacy_codexhub_identity(
+    provider: &toml_edit::Table,
+    provider_name: &str,
+) -> bool {
     let name_matches = provider
         .get("name")
         .and_then(|item| item.as_str())
         .map(str::trim)
         .is_none_or(|name| name == provider_name);
-    let responses_wire_api = provider
+    name_matches && provider_uses_responses_wire_api(provider)
+}
+
+fn provider_table_has_codexhub_identity(provider: &toml_edit::Table, identity: &str) -> bool {
+    let name_matches = provider
+        .get("name")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        == Some(identity);
+    name_matches && provider_uses_responses_wire_api(provider)
+}
+
+fn provider_uses_responses_wire_api(provider: &toml_edit::Table) -> bool {
+    provider
         .get("wire_api")
         .and_then(|item| item.as_str())
         .map(str::trim)
-        == Some("responses");
-    let requires_openai_auth = provider
-        .get("requires_openai_auth")
-        .and_then(|item| item.as_bool())
-        == Some(true);
-    name_matches && responses_wire_api && requires_openai_auth
+        == Some("responses")
+}
+
+fn provider_http_header_value<'a>(
+    provider: &'a toml_edit::Table,
+    header_name: &str,
+) -> Option<&'a str> {
+    let headers = provider.get("http_headers")?;
+    if let Some(headers) = headers.as_inline_table() {
+        return headers.iter().find_map(|(name, value)| {
+            name.eq_ignore_ascii_case(header_name)
+                .then(|| value.as_str())
+                .flatten()
+        });
+    }
+    headers.as_table()?.iter().find_map(|(name, value)| {
+        name.eq_ignore_ascii_case(header_name)
+            .then(|| value.as_str())
+            .flatten()
+    })
+}
+
+fn remove_provider_http_header(provider: &mut toml_edit::Table, header_name: &str) {
+    let mut remove_headers = false;
+    if let Some(item) = provider.get_mut("http_headers") {
+        if let Some(headers) = item.as_inline_table_mut() {
+            let existing_name = headers.iter().find_map(|(name, _)| {
+                name.eq_ignore_ascii_case(header_name)
+                    .then(|| name.to_string())
+            });
+            if let Some(existing_name) = existing_name {
+                headers.remove(&existing_name);
+            }
+            remove_headers = headers.is_empty();
+        } else if let Some(headers) = item.as_table_mut() {
+            let existing_name = headers.iter().find_map(|(name, _)| {
+                name.eq_ignore_ascii_case(header_name)
+                    .then(|| name.to_string())
+            });
+            if let Some(existing_name) = existing_name {
+                headers.remove(&existing_name);
+            }
+            remove_headers = headers.is_empty();
+        }
+    }
+    if remove_headers {
+        provider.remove("http_headers");
+    }
 }
 
 fn backend_urls_equivalent(actual: &str, expected: &str) -> bool {
@@ -2362,7 +2469,7 @@ fn cleanup_codexhub_config(
         return Ok((false, false));
     }
     let mut doc = parse_existing_config_toml(path)?;
-    let managed_provider_names = managed_provider_names_in_config(&doc, backend_url);
+    let managed_provider_names = managed_provider_names_in_config(&doc, backend_url, true);
 
     let removed_chatgpt_base_url = doc
         .get("chatgpt_base_url")
@@ -2405,6 +2512,14 @@ fn cleanup_codexhub_config(
 }
 
 fn remove_created_feature_defaults(doc: &mut toml_edit::DocumentMut) {
+    if doc
+        .get("web_search")
+        .and_then(|item| item.as_str())
+        .is_some_and(|mode| mode == "live")
+    {
+        doc.remove("web_search");
+    }
+
     let features_empty =
         if let Some(features) = doc.get_mut("features").and_then(|item| item.as_table_mut()) {
             if features
@@ -2898,6 +3013,32 @@ mod tests {
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    fn assert_authenticated_provider(config: &str, provider_name: &str) {
+        let doc = config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse config");
+        let provider = doc
+            .get("model_providers")
+            .and_then(|item| item.as_table())
+            .and_then(|providers| providers.get(provider_name))
+            .and_then(|item| item.as_table())
+            .expect("provider table");
+        assert_eq!(
+            provider.get("name").and_then(|item| item.as_str()),
+            Some(provider_name)
+        );
+        assert_eq!(
+            provider
+                .get("requires_openai_auth")
+                .and_then(|item| item.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER),
+            None
+        );
+    }
+
     #[test]
     fn restore_managed_no_proxy_value_restores_unchanged_original() {
         assert_eq!(
@@ -2965,15 +3106,18 @@ mod tests {
         assert!(!config.contains("disable_response_storage"));
         assert!(!config.contains("network_access"));
         assert!(!config.contains("windows_wsl_setup_acknowledged"));
+        assert!(!config.contains("web_search = \"live\""));
         assert!(config.contains("[features]"));
         assert!(config.contains("apps = false"));
         assert!(!config.contains("image_generation = false"));
         assert!(config.contains("[model_providers.ai-codex]"));
+        assert!(config.contains("name = \"ai-codex\""));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(config.contains("wire_api = \"responses\""));
         assert!(config.contains("requires_openai_auth = true"));
         assert!(config.contains("supports_websockets = true"));
         assert!(config.contains("experimental_bearer_token = \"test-provider-key\""));
+        assert!(!config.contains(OPENAI_ACTOR_AUTHORIZATION_HEADER));
 
         let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
         assert!(auth.contains(&format!("\"auth_mode\": \"{LOCAL_AUTH_MODE}\"")));
@@ -3008,6 +3152,7 @@ mod tests {
         let config = std::fs::read_to_string(report.config_path).expect("read config");
         assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
         assert!(config.contains("model_provider = \"ai-gateway\""));
+        assert!(config.contains("web_search = \"live\""));
         assert!(config.contains("[model_providers.ai-gateway]"));
         assert!(config.contains("name = \"ai-gateway\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
@@ -3015,6 +3160,7 @@ mod tests {
         assert!(config.contains("requires_openai_auth = true"));
         assert!(config.contains("supports_websockets = false"));
         assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
+        assert_authenticated_provider(&config, AI_GATEWAY_PROVIDER_NAME);
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -3048,9 +3194,50 @@ requires_openai_auth = true
 experimental_bearer_token = "dummy-token"
 "#,
         )
-        .expect("write gateway config");
+        .expect("write current gateway config");
 
         assert!(inspect_managed_ai_gateway_provider(
+            &config_path,
+            "http://127.0.0.1:3847/backend-api",
+        ));
+
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "OpenAI"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "dummy-token"
+"#,
+        )
+        .expect("write legacy OpenAI gateway config");
+
+        assert!(!inspect_managed_ai_gateway_provider(
+            &config_path,
+            "http://127.0.0.1:3847/backend-api",
+        ));
+
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "dummy-token"
+http_headers = { x-openai-actor-authorization = "codexhub-local" }
+"#,
+        )
+        .expect("write legacy actor-authorized gateway config");
+
+        assert!(!inspect_managed_ai_gateway_provider(
             &config_path,
             "http://127.0.0.1:3847/backend-api",
         ));
@@ -3259,6 +3446,7 @@ command = "print-token"
         assert!(!config.contains("env_key"));
         assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
         assert!(!config.contains("[model_providers.ai-gateway.auth]"));
+        assert_authenticated_provider(&config, AI_GATEWAY_PROVIDER_NAME);
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -3276,7 +3464,10 @@ model = "custom-model"
 [model_providers.ai-gateway]
 name = "ai-gateway"
 base_url = "http://localhost:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = false
 env_key = "AI_GATEWAY_API_KEY"
+http_headers = { x-existing = "keep", X-OpenAI-Actor-Authorization = "codexhub-local" }
 "#,
         )
         .expect("write config");
@@ -3306,6 +3497,17 @@ env_key = "AI_GATEWAY_API_KEY"
         assert!(config.contains("requires_openai_auth = true"));
         assert!(!config.contains("env_key"));
         assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
+        assert_authenticated_provider(&config, AI_GATEWAY_PROVIDER_NAME);
+        let doc = config
+            .parse::<toml_edit::DocumentMut>()
+            .expect("parse config");
+        let provider = doc["model_providers"][AI_GATEWAY_PROVIDER_NAME]
+            .as_table()
+            .expect("provider table");
+        assert_eq!(
+            provider_http_header_value(provider, "x-existing"),
+            Some("keep")
+        );
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -4151,7 +4353,7 @@ image_generation = true
 new_codex_app_flag = true
 
 [model_providers.ai-gateway]
-name = "ai-gateway"
+name = "OpenAI"
 base_url = "http://127.0.0.1:3847/ai-gateway/v1"
 wire_api = "responses"
 requires_openai_auth = true
@@ -4257,6 +4459,49 @@ base_url = "https://api.example.invalid"
         assert!(config.contains("[model_providers.keep]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
         assert!(!auth_path.exists());
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn uninstall_codex_app_without_backup_cleans_legacy_provider_shapes() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = false
+http_headers = { x-openai-actor-authorization = "codexhub-local" }
+
+[model_providers.ai-codex]
+name = "ai-codex"
+base_url = "http://localhost:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+
+[model_providers.keep]
+name = "keep"
+base_url = "https://api.example.invalid"
+"#,
+        )
+        .expect("write legacy config");
+
+        let (removed_chatgpt_base_url, removed_model_provider) =
+            uninstall_config_toml(&config_path, "http://127.0.0.1:3847/backend-api")
+                .expect("uninstall legacy config");
+
+        assert!(removed_chatgpt_base_url);
+        assert!(removed_model_provider);
+        let config = std::fs::read_to_string(&config_path).expect("read cleaned config");
+        assert!(!config.contains("[model_providers.ai-gateway]"));
+        assert!(!config.contains("[model_providers.ai-codex]"));
+        assert!(config.contains("[model_providers.keep]"));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }

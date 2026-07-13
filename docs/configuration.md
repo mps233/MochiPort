@@ -263,6 +263,23 @@ experimental_bearer_token = "your-third-party-key"
 `chatgpt_base_url` is not the model API base URL. It is the ChatGPT backend-shaped URL used by Codex App features such as remote-control enrollment.
 `codexhub` does not manage Codex App runtime settings such as `[features]`, `[windows]`, `[desktop]`, `[mcp_servers]`, or per-plugin `enabled` flags.
 
+When CodexHub injects its default local AI Gateway provider, it keeps ChatGPT-shaped authentication enabled so Codex App retains its account-backed model catalog and Remote Control state:
+
+```toml
+web_search = "live"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "dummy-token"
+```
+
+The provider identity remains `ai-gateway`, so `provider.is_openai()` is false and OpenAI-only remote compaction, request compression, and private metadata behavior stay disabled. The managed provider intentionally does not use Actor Authorization by default.
+
+Actor Authorization requires `requires_openai_auth = false`, which makes the provider account API return no account. In Codex App 26.707.8479 this also causes the frontend to apply the official Statsig `available_models` allowlist; custom CodexHub models then disappear even though `/ai-gateway/v1/models` returns them. For that reason the native `web.run` provider gate remains disabled in the default configuration, and GPT-5.6 uses CodexHub's hosted `web_search` compatibility path instead. The `/alpha/search` proxy remains available for future Codex versions or explicit experimental configurations.
+
 ## Codex App Auth
 
 Remote-control requires ChatGPT-compatible auth. API-key-only auth is rejected before the websocket connects.

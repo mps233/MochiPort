@@ -13,6 +13,7 @@ pub mod model;
 pub mod providers;
 pub mod request_log;
 pub mod responses_compat;
+pub mod responses_lite_tools;
 pub mod router;
 pub mod routing_state;
 pub mod tool_names;
@@ -30,6 +31,11 @@ use crate::app_state::SharedState;
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route("/v1/responses", post(handler::handle_responses))
+        .route(
+            "/v1/responses/compact",
+            post(handler::handle_responses_compact),
+        )
+        .route("/v1/alpha/search", post(handler::handle_alpha_search))
         .route(
             "/v1/images/generations",
             post(handler::handle_image_generations),

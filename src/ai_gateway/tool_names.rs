@@ -57,6 +57,10 @@ pub struct ToolNameMap {
 }
 
 impl ToolNameMap {
+    pub fn is_empty(&self) -> bool {
+        self.encoded_to_target.is_empty()
+    }
+
     pub fn insert(&mut self, encoded: impl Into<String>, target: ToolCallTarget) {
         let encoded = encoded.into();
         self.encoded_to_target

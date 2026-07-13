@@ -8,6 +8,7 @@ use std::{
 };
 
 use super::encrypted_content::{EncryptedContentScope, encode_response_object};
+use super::tool_names::{ToolCallKind, ToolNameMap};
 
 /// Applies narrow, idempotent compatibility rules to a Responses payload while
 /// preserving fields that CodexHub does not know about yet.
@@ -16,14 +17,25 @@ pub(crate) fn normalize_response_value(value: &mut Value) -> bool {
     normalize_response_value_with_scope(value, None)
 }
 
+#[cfg(test)]
 pub(crate) fn normalize_response_value_with_scope(
     value: &mut Value,
     encrypted_content_scope: Option<&EncryptedContentScope>,
+) -> bool {
+    normalize_response_value_with_scope_and_tool_names(value, encrypted_content_scope, None)
+}
+
+pub(crate) fn normalize_response_value_with_scope_and_tool_names(
+    value: &mut Value,
+    encrypted_content_scope: Option<&EncryptedContentScope>,
+    tool_names: Option<&ToolNameMap>,
 ) -> bool {
     match value {
         Value::Object(object) => {
             let mut changed =
                 encrypted_content_scope.is_some_and(|scope| encode_response_object(object, scope));
+            changed |=
+                tool_names.is_some_and(|tool_names| restore_provider_tool_call(object, tool_names));
             let duplicate_exec_namespace = object
                 .get("type")
                 .and_then(Value::as_str)
@@ -42,14 +54,22 @@ pub(crate) fn normalize_response_value_with_scope(
             }
 
             for child in object.values_mut() {
-                changed |= normalize_response_value_with_scope(child, encrypted_content_scope);
+                changed |= normalize_response_value_with_scope_and_tool_names(
+                    child,
+                    encrypted_content_scope,
+                    tool_names,
+                );
             }
             changed
         }
         Value::Array(items) => {
             let mut changed = false;
             for item in items {
-                changed |= normalize_response_value_with_scope(item, encrypted_content_scope);
+                changed |= normalize_response_value_with_scope_and_tool_names(
+                    item,
+                    encrypted_content_scope,
+                    tool_names,
+                );
             }
             changed
         }
@@ -64,15 +84,28 @@ pub(crate) fn normalize_json_body(body_bytes: Bytes) -> (Bytes, Option<Value>) {
     normalize_json_body_with_scope(body_bytes, None)
 }
 
+#[cfg(test)]
 pub(crate) fn normalize_json_body_with_scope(
     body_bytes: Bytes,
     encrypted_content_scope: Option<&EncryptedContentScope>,
+) -> (Bytes, Option<Value>) {
+    normalize_json_body_with_scope_and_tool_names(body_bytes, encrypted_content_scope, None)
+}
+
+pub(crate) fn normalize_json_body_with_scope_and_tool_names(
+    body_bytes: Bytes,
+    encrypted_content_scope: Option<&EncryptedContentScope>,
+    tool_names: Option<&ToolNameMap>,
 ) -> (Bytes, Option<Value>) {
     let mut response_json = serde_json::from_slice::<Value>(&body_bytes).ok();
     let Some(value) = response_json.as_mut() else {
         return (body_bytes, response_json);
     };
-    if normalize_response_value_with_scope(value, encrypted_content_scope) {
+    if normalize_response_value_with_scope_and_tool_names(
+        value,
+        encrypted_content_scope,
+        tool_names,
+    ) {
         let rewritten = serde_json::to_vec(value)
             .map(Bytes::from)
             .unwrap_or_else(|_| body_bytes.clone());
@@ -88,6 +121,7 @@ pub(crate) fn normalize_json_body_with_scope(
 pub(crate) struct ResponsesCompatSseStream<S> {
     inner: S,
     encrypted_content_scope: Option<EncryptedContentScope>,
+    tool_names: Option<ToolNameMap>,
     line_buf: Vec<u8>,
     output_queue: VecDeque<Result<Bytes, std::io::Error>>,
     ended: bool,
@@ -103,16 +137,34 @@ impl<S> ResponsesCompatSseStream<S> {
         inner: S,
         encrypted_content_scope: EncryptedContentScope,
     ) -> Self {
-        Self::with_optional_encrypted_content_scope(inner, Some(encrypted_content_scope))
+        Self::with_optional_compatibility(inner, Some(encrypted_content_scope), None)
     }
 
+    pub(crate) fn with_compatibility(
+        inner: S,
+        encrypted_content_scope: EncryptedContentScope,
+        tool_names: Option<ToolNameMap>,
+    ) -> Self {
+        Self::with_optional_compatibility(inner, Some(encrypted_content_scope), tool_names)
+    }
+
+    #[cfg(test)]
     fn with_optional_encrypted_content_scope(
         inner: S,
         encrypted_content_scope: Option<EncryptedContentScope>,
     ) -> Self {
+        Self::with_optional_compatibility(inner, encrypted_content_scope, None)
+    }
+
+    fn with_optional_compatibility(
+        inner: S,
+        encrypted_content_scope: Option<EncryptedContentScope>,
+        tool_names: Option<ToolNameMap>,
+    ) -> Self {
         Self {
             inner,
             encrypted_content_scope,
+            tool_names,
             line_buf: Vec::new(),
             output_queue: VecDeque::new(),
             ended: false,
@@ -170,7 +222,11 @@ impl<S> ResponsesCompatSseStream<S> {
     }
 
     fn push_rewritten_line(&mut self, line: &[u8]) {
-        let rewritten = rewrite_sse_line(line, self.encrypted_content_scope.as_ref());
+        let rewritten = rewrite_sse_line(
+            line,
+            self.encrypted_content_scope.as_ref(),
+            self.tool_names.as_ref(),
+        );
         let mut output = Vec::with_capacity(rewritten.len() + 1);
         output.extend_from_slice(&rewritten);
         output.push(b'\n');
@@ -178,7 +234,11 @@ impl<S> ResponsesCompatSseStream<S> {
     }
 }
 
-fn rewrite_sse_line(line: &[u8], encrypted_content_scope: Option<&EncryptedContentScope>) -> Bytes {
+fn rewrite_sse_line(
+    line: &[u8],
+    encrypted_content_scope: Option<&EncryptedContentScope>,
+    tool_names: Option<&ToolNameMap>,
+) -> Bytes {
     let Ok(line_text) = std::str::from_utf8(line) else {
         return Bytes::copy_from_slice(line);
     };
@@ -191,7 +251,11 @@ fn rewrite_sse_line(line: &[u8], encrypted_content_scope: Option<&EncryptedConte
     let Ok(mut event) = serde_json::from_str::<Value>(data) else {
         return Bytes::copy_from_slice(line);
     };
-    if !normalize_response_value_with_scope(&mut event, encrypted_content_scope) {
+    if !normalize_response_value_with_scope_and_tool_names(
+        &mut event,
+        encrypted_content_scope,
+        tool_names,
+    ) {
         return Bytes::copy_from_slice(line);
     }
     serde_json::to_vec(&event)
@@ -202,6 +266,75 @@ fn rewrite_sse_line(line: &[u8], encrypted_content_scope: Option<&EncryptedConte
             Bytes::from(rewritten)
         })
         .unwrap_or_else(|_| Bytes::copy_from_slice(line))
+}
+
+fn restore_provider_tool_call(
+    object: &mut serde_json::Map<String, Value>,
+    tool_names: &ToolNameMap,
+) -> bool {
+    if object.get("type").and_then(Value::as_str) != Some("function_call") {
+        return false;
+    }
+    let Some(encoded_name) = object
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return false;
+    };
+    if !tool_names.has_encoded(&encoded_name) {
+        return false;
+    }
+
+    let target = tool_names.decode(&encoded_name);
+    let mut changed = set_string_field(object, "name", &target.name);
+    match target.namespace.as_deref() {
+        Some(namespace) => changed |= set_string_field(object, "namespace", namespace),
+        None => changed |= object.remove("namespace").is_some(),
+    }
+
+    if target.kind == ToolCallKind::Custom {
+        changed |= set_string_field(object, "type", "custom_tool_call");
+        if let Some(arguments) = object.remove("arguments") {
+            object.insert(
+                "input".to_string(),
+                Value::String(custom_input_from_arguments(arguments)),
+            );
+            changed = true;
+        } else {
+            object
+                .entry("input".to_string())
+                .or_insert_with(|| Value::String(String::new()));
+        }
+    }
+    changed
+}
+
+fn set_string_field(object: &mut serde_json::Map<String, Value>, key: &str, value: &str) -> bool {
+    if object.get(key).and_then(Value::as_str) == Some(value) {
+        return false;
+    }
+    object.insert(key.to_string(), Value::String(value.to_string()));
+    true
+}
+
+fn custom_input_from_arguments(arguments: Value) -> String {
+    match arguments {
+        Value::String(arguments) => serde_json::from_str::<Value>(&arguments)
+            .ok()
+            .and_then(custom_input_value)
+            .unwrap_or(arguments),
+        arguments => custom_input_value(arguments.clone())
+            .unwrap_or_else(|| serde_json::to_string(&arguments).unwrap_or_default()),
+    }
+}
+
+fn custom_input_value(arguments: Value) -> Option<String> {
+    let input = arguments.as_object()?.get("input")?;
+    Some(match input {
+        Value::String(input) => input.clone(),
+        input => serde_json::to_string(input).unwrap_or_default(),
+    })
 }
 
 fn sse_data_value(line: &str) -> Option<&str> {
@@ -310,6 +443,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn json_body_restores_grok_custom_and_namespace_tool_calls() {
+        let mut tool_names = ToolNameMap::default();
+        let exec_name = tool_names.encode_custom("exec");
+        let browser_name = tool_names.encode_function(Some("browser"), "open");
+        let body = Bytes::from(
+            json!({
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_exec",
+                        "name": exec_name,
+                        "arguments": "{\"input\":\"Get-ChildItem\"}"
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_open",
+                        "name": browser_name,
+                        "arguments": "{\"url\":\"https://example.com\"}"
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let (_, parsed) = normalize_json_body_with_scope_and_tool_names(
+            body,
+            Some(&grok_scope()),
+            Some(&tool_names),
+        );
+        let parsed = parsed.unwrap();
+
+        assert_eq!(parsed["output"][0]["type"], "custom_tool_call");
+        assert_eq!(parsed["output"][0]["name"], "exec");
+        assert_eq!(parsed["output"][0]["input"], "Get-ChildItem");
+        assert!(parsed["output"][0].get("arguments").is_none());
+        assert_eq!(parsed["output"][1]["type"], "function_call");
+        assert_eq!(parsed["output"][1]["name"], "open");
+        assert_eq!(parsed["output"][1]["namespace"], "browser");
+    }
+
     #[tokio::test]
     async fn stream_normalizes_exec_namespace_and_keeps_other_namespaces() {
         let chunks = stream::iter(vec![
@@ -382,5 +556,49 @@ mod tests {
 
         assert!(output.contains("codexhub:enc:v1:grok:"));
         assert!(output.contains(":opaque-grok"));
+    }
+
+    #[tokio::test]
+    async fn stream_restores_grok_custom_tool_items() {
+        let mut tool_names = ToolNameMap::default();
+        let exec_name = tool_names.encode_custom("exec");
+        let chunks = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": exec_name,
+                    "arguments": ""
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_1",
+                    "name": exec_name,
+                    "arguments": "{\"input\":\"pwd\"}"
+                }
+            })
+        )))]);
+
+        let output = ResponsesCompatSseStream::with_compatibility(
+            Box::pin(chunks),
+            grok_scope(),
+            Some(tool_names),
+        )
+        .collect::<Vec<Result<Bytes, std::io::Error>>>()
+        .await
+        .into_iter()
+        .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+        .collect::<String>();
+
+        assert!(output.contains("\"type\":\"custom_tool_call\""));
+        assert!(output.contains("\"name\":\"exec\""));
+        assert!(output.contains("\"input\":\"pwd\""));
     }
 }
