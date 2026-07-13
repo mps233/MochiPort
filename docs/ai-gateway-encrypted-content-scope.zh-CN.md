@@ -1,5 +1,7 @@
 # AI Gateway Provider 私有密文作用域
 
+完整的字段映射、JSON/SSE 转换示例、错误恢复和排查方法见 [`ai-gateway-provider-private-state-conversion.zh-CN.md`](ai-gateway-provider-private-state-conversion.zh-CN.md)。
+
 ## 背景
 
 OpenAI Responses、Grok Responses 等上游会在 `reasoning.encrypted_content` 中返回只能由原渠道继续使用的不透明状态。Anthropic Messages 也有同类 Provider 私有状态：

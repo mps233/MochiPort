@@ -15,6 +15,7 @@
 - Anthropic Fine-grained Tool Streaming: <https://docs.anthropic.com/en/docs/agents-and-tools/tool-use/fine-grained-tool-streaming>
 - Anthropic Prompt Caching: <https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching>
 - [`ai-gateway-web-search-protocol.zh-CN.md`](ai-gateway-web-search-protocol.zh-CN.md)：Codex Responses `web_search` 与 Anthropic web search server tool 的详细对接规则。
+- [`ai-gateway-provider-private-state-conversion.zh-CN.md`](ai-gateway-provider-private-state-conversion.zh-CN.md)：thinking signature、redacted data、typed marker 和跨 Provider 回放规则。
 
 ## 1. 目标
 

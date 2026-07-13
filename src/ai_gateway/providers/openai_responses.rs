@@ -63,6 +63,17 @@ pub async fn passthrough(
         );
     }
     normalize_grok_reasoning_replay(&mut raw_body, provider);
+    let grok_compatibility = normalize_grok_model_input(&mut raw_body, provider);
+    if grok_compatibility.changed() {
+        debug!(
+            provider = %provider.name,
+            custom_calls = grok_compatibility.custom_calls,
+            custom_outputs = grok_compatibility.custom_outputs,
+            structured_outputs = grok_compatibility.structured_outputs,
+            removed_phase_fields = grok_compatibility.removed_phase_fields,
+            "normalized Codex tool history for Grok ModelInput"
+        );
+    }
 
     let is_stream = raw_body
         .get("stream")
@@ -305,6 +316,132 @@ fn normalize_grok_reasoning_replay(raw_body: &mut serde_json::Value, provider: &
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct GrokModelInputStats {
+    custom_calls: usize,
+    custom_outputs: usize,
+    structured_outputs: usize,
+    removed_phase_fields: usize,
+}
+
+impl GrokModelInputStats {
+    fn changed(self) -> bool {
+        self.custom_calls > 0
+            || self.custom_outputs > 0
+            || self.structured_outputs > 0
+            || self.removed_phase_fields > 0
+    }
+}
+
+fn normalize_grok_model_input(
+    raw_body: &mut serde_json::Value,
+    provider: &ProviderConfig,
+) -> GrokModelInputStats {
+    let mut stats = GrokModelInputStats::default();
+    if provider.provider_type != ProviderType::GrokResponses {
+        return stats;
+    }
+
+    let Some(input) = raw_body
+        .get_mut("input")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return stats;
+    };
+
+    for item in input {
+        let Some(item) = item.as_object_mut() else {
+            continue;
+        };
+        let item_type = item
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        match item_type.as_str() {
+            "message" => {
+                if item.remove("phase").is_some() {
+                    stats.removed_phase_fields += 1;
+                }
+            }
+            "custom_tool_call" => {
+                let input = item
+                    .remove("input")
+                    .map(grok_custom_tool_input_text)
+                    .unwrap_or_default();
+                let arguments = serde_json::to_string(&json!({ "input": input }))
+                    .unwrap_or_else(|_| "{\"input\":\"\"}".to_string());
+                item.insert("type".to_string(), json!("function_call"));
+                item.insert("arguments".to_string(), json!(arguments));
+                item.remove("status");
+                stats.custom_calls += 1;
+            }
+            "custom_tool_call_output" => {
+                item.insert("type".to_string(), json!("function_call_output"));
+                stats.custom_outputs += 1;
+                if normalize_grok_tool_output(item) {
+                    stats.structured_outputs += 1;
+                }
+            }
+            "function_call_output" => {
+                if normalize_grok_tool_output(item) {
+                    stats.structured_outputs += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    stats
+}
+
+fn grok_custom_tool_input_text(input: serde_json::Value) -> String {
+    match input {
+        serde_json::Value::String(input) => input,
+        other => serde_json::to_string(&other).unwrap_or_default(),
+    }
+}
+
+fn normalize_grok_tool_output(item: &mut serde_json::Map<String, serde_json::Value>) -> bool {
+    let Some(output) = item.get_mut("output") else {
+        return false;
+    };
+    if output.is_string() {
+        return false;
+    }
+    let normalized = grok_tool_output_text(output);
+    *output = serde_json::Value::String(normalized);
+    true
+}
+
+fn grok_tool_output_text(output: &serde_json::Value) -> String {
+    let serde_json::Value::Array(items) = output else {
+        return serde_json::to_string(output).unwrap_or_default();
+    };
+    if items.is_empty() {
+        return String::new();
+    }
+
+    let mut text = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(item) = item.as_object() else {
+            return serde_json::to_string(output).unwrap_or_default();
+        };
+        let is_text = item
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|item_type| matches!(item_type, "input_text" | "output_text" | "text"));
+        if !is_text {
+            return serde_json::to_string(output).unwrap_or_default();
+        }
+        if let Some(value) = item.get("text").and_then(serde_json::Value::as_str) {
+            text.push(value);
+        }
+    }
+    text.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -326,7 +463,10 @@ mod tests {
     use crate::ai_gateway::config::{ProviderConfig, ProviderType};
     use crate::ai_gateway::context::GatewayContext;
 
-    use super::{is_invalid_encrypted_content_error, normalize_grok_reasoning_replay, passthrough};
+    use super::{
+        is_invalid_encrypted_content_error, normalize_grok_model_input,
+        normalize_grok_reasoning_replay, passthrough,
+    };
 
     struct RetryServerState {
         attempts: AtomicUsize,
@@ -394,6 +534,43 @@ mod tests {
         (format!("http://{address}/v1"), receiver, task)
     }
 
+    async fn capture_success(
+        State(requests): State<mpsc::UnboundedSender<serde_json::Value>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response {
+        requests
+            .send(body)
+            .expect("request capture receiver should stay open");
+        Json(json!({
+            "id": "resp_ok",
+            "object": "response",
+            "status": "completed",
+            "output": []
+        }))
+        .into_response()
+    }
+
+    async fn capture_server() -> (
+        String,
+        mpsc::UnboundedReceiver<serde_json::Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let app = Router::new()
+            .route("/v1/responses", post(capture_success))
+            .with_state(sender);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind capture server");
+        let address = listener.local_addr().expect("capture server address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve capture endpoint");
+        });
+        (format!("http://{address}/v1"), receiver, task)
+    }
+
     fn grok_provider() -> ProviderConfig {
         ProviderConfig {
             name: "grok".to_string(),
@@ -456,6 +633,169 @@ mod tests {
         assert_eq!(reasoning["encrypted_content"], "opaque-blob");
         assert_eq!(reasoning["status"], "completed");
         assert!(reasoning.get("content").is_none());
+    }
+
+    #[test]
+    fn grok_model_input_normalizes_gpt_5_6_custom_tool_history() {
+        let mut body = json!({
+            "model": "grok-4.5",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "running"}]
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_exec",
+                    "name": "exec",
+                    "status": "completed",
+                    "input": "Get-ChildItem"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_exec",
+                    "output": [
+                        {"type": "input_text", "text": "Wall time: 0.1 seconds"},
+                        {"type": "input_text", "text": "file.txt"}
+                    ]
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_wait",
+                    "output": [
+                        {"type": "output_text", "text": "done"}
+                    ]
+                }
+            ]
+        });
+
+        let stats = normalize_grok_model_input(&mut body, &grok_provider());
+
+        assert_eq!(stats.custom_calls, 1);
+        assert_eq!(stats.custom_outputs, 1);
+        assert_eq!(stats.structured_outputs, 2);
+        assert_eq!(stats.removed_phase_fields, 1);
+        assert!(body["input"][0].get("phase").is_none());
+
+        let call = &body["input"][1];
+        assert_eq!(call["type"], "function_call");
+        assert_eq!(call["call_id"], "call_exec");
+        assert_eq!(call["name"], "exec");
+        assert!(call.get("input").is_none());
+        assert!(call.get("status").is_none());
+        let arguments: serde_json::Value =
+            serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, json!({"input": "Get-ChildItem"}));
+
+        let custom_output = &body["input"][2];
+        assert_eq!(custom_output["type"], "function_call_output");
+        assert_eq!(custom_output["output"], "Wall time: 0.1 seconds\nfile.txt");
+        assert_eq!(body["input"][3]["output"], "done");
+    }
+
+    #[test]
+    fn grok_model_input_serializes_non_text_tool_output_as_string() {
+        let mut body = json!({
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_image",
+                "output": [{
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,AAAA"
+                }]
+            }]
+        });
+
+        let stats = normalize_grok_model_input(&mut body, &grok_provider());
+
+        assert_eq!(stats.structured_outputs, 1);
+        let output = body["input"][0]["output"].as_str().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(output).unwrap(),
+            json!([{
+                "type": "input_image",
+                "image_url": "data:image/png;base64,AAAA"
+            }])
+        );
+    }
+
+    #[test]
+    fn openai_responses_provider_keeps_custom_tool_history_unchanged() {
+        let mut body = json!({
+            "input": [{
+                "type": "custom_tool_call",
+                "call_id": "call_exec",
+                "name": "exec",
+                "status": "completed",
+                "input": "pwd"
+            }]
+        });
+        let original = body.clone();
+
+        let stats = normalize_grok_model_input(&mut body, &openai_responses_provider());
+
+        assert!(!stats.changed());
+        assert_eq!(body, original);
+    }
+
+    #[tokio::test]
+    async fn grok_passthrough_sends_normalized_model_input() {
+        let (base_url, mut requests, server) = capture_server().await;
+        let provider = ProviderConfig {
+            name: "grok".to_string(),
+            provider_type: ProviderType::GrokResponses,
+            base_url,
+            api_key: "secret".to_string(),
+            timeout_secs: 10,
+            ..ProviderConfig::default()
+        };
+        let client = reqwest::Client::new();
+        let context = GatewayContext::extract(&HeaderMap::new(), Some("grok-history-session"));
+        let request = json!({
+            "model": "grok-4.5",
+            "stream": false,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "running"}]
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_exec",
+                    "name": "exec",
+                    "status": "completed",
+                    "input": "Get-ChildItem"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_exec",
+                    "output": [
+                        {"type": "input_text", "text": "Wall time: 0.1 seconds"},
+                        {"type": "input_text", "text": "file.txt"}
+                    ]
+                }
+            ]
+        });
+
+        let response = passthrough(&client, &context, request, "grok-4.5", &provider, None)
+            .await
+            .expect("Grok history normalization should reach upstream");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let upstream = requests.recv().await.expect("captured upstream request");
+        assert!(upstream["input"][0].get("phase").is_none());
+        assert_eq!(upstream["input"][1]["type"], "function_call");
+        assert_eq!(upstream["input"][2]["type"], "function_call_output");
+        assert_eq!(
+            upstream["input"][2]["output"],
+            "Wall time: 0.1 seconds\nfile.txt"
+        );
+
+        server.abort();
     }
 
     #[test]
