@@ -190,7 +190,15 @@ mod tests {
             ]
         );
         assert_eq!(response["models"][3]["display_name"], "Grok-4.5");
+        assert_eq!(
+            response["models"][3]["comp_hash"],
+            "codexhub-grok-summary-v1"
+        );
         assert_eq!(response["models"][5]["display_name"], "deepseek-v4-pro");
+        assert_eq!(
+            response["models"][5]["comp_hash"],
+            "codexhub-deepseek-summary-v1"
+        );
         assert_eq!(response["models"][5]["apply_patch_tool_type"], "freeform");
         assert_eq!(response["models"][5]["supports_search_tool"], false);
         assert_eq!(
@@ -275,6 +283,72 @@ mod tests {
         assert!(!is_catalog_model_visible(&json!({
             "visibility": "list"
         })));
+    }
+
+    #[test]
+    fn all_visible_catalog_models_declare_comp_hash() {
+        let missing = catalog_models()
+            .iter()
+            .filter(|model| is_catalog_model_visible(model))
+            .filter_map(|model| {
+                let comp_hash = model
+                    .get("comp_hash")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                comp_hash
+                    .is_empty()
+                    .then(|| model_slug(model).unwrap_or("<missing-slug>").to_string())
+            })
+            .collect::<Vec<_>>();
+
+        assert!(missing.is_empty(), "models missing comp_hash: {missing:?}");
+    }
+
+    #[test]
+    fn non_openai_comp_hashes_follow_protocol_families() {
+        let comp_hash = |slug: &str| {
+            catalog_models()
+                .iter()
+                .find(|model| model_slug(model) == Some(slug))
+                .and_then(|model| model.get("comp_hash"))
+                .and_then(Value::as_str)
+                .expect("catalog model should declare comp_hash")
+        };
+
+        assert_eq!(comp_hash("grok-4.5"), "codexhub-grok-summary-v1");
+        assert_eq!(comp_hash("deepseek-v4-pro"), "codexhub-deepseek-summary-v1");
+        assert_eq!(
+            comp_hash("deepseek-v4-flash"),
+            "codexhub-deepseek-summary-v1"
+        );
+        assert_eq!(comp_hash("GLM-5.2"), "codexhub-anthropic-summary-v1");
+        assert_eq!(comp_hash("Opus-4.8"), "codexhub-anthropic-summary-v1");
+        assert_eq!(comp_hash("Sonnet-4.6"), "codexhub-anthropic-summary-v1");
+
+        assert_ne!(comp_hash("grok-4.5"), comp_hash("gpt-5.6-sol"));
+        assert_ne!(comp_hash("deepseek-v4-pro"), comp_hash("gpt-5.5"));
+        assert_ne!(comp_hash("Opus-4.8"), comp_hash("deepseek-v4-pro"));
+    }
+
+    #[test]
+    fn non_openai_models_use_372k_context_window() {
+        for slug in [
+            "grok-4.5",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash",
+            "GLM-5.2",
+            "Opus-4.8",
+            "Sonnet-4.6",
+        ] {
+            let model = catalog_models()
+                .iter()
+                .find(|model| model_slug(model) == Some(slug))
+                .expect("catalog model should exist");
+
+            assert_eq!(model["context_window"], 372_000, "model {slug}");
+            assert_eq!(model["max_context_window"], 372_000, "model {slug}");
+        }
     }
 
     #[test]

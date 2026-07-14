@@ -133,29 +133,27 @@ pub(crate) fn encode_response_object(
     object: &mut Map<String, Value>,
     scope: &EncryptedContentScope,
 ) -> bool {
-    if !is_provider_private_item(object) {
+    // Responses providers already return their native opaque state in the
+    // exact shape Codex expects. Only Anthropic needs an envelope to preserve
+    // whether the source block was thinking or redacted_thinking.
+    if scope.protocol != "anthropic" || !is_provider_private_item(object) {
         return false;
     }
-    let anthropic_kind = (scope.protocol == "anthropic").then(|| {
-        if object
-            .get("summary")
-            .is_some_and(|summary| !summary.is_null())
-        {
-            AnthropicEncryptedContentKind::Thinking
-        } else {
-            AnthropicEncryptedContentKind::RedactedThinking
-        }
-    });
+    let anthropic_kind = if object
+        .get("summary")
+        .is_some_and(|summary| !summary.is_null())
+    {
+        AnthropicEncryptedContentKind::Thinking
+    } else {
+        AnthropicEncryptedContentKind::RedactedThinking
+    };
     let Some(Value::String(content)) = object.get_mut("encrypted_content") else {
         return false;
     };
     if content.is_empty() || content.starts_with(MARKER_PREFIX) {
         return false;
     }
-    *content = match anthropic_kind {
-        Some(kind) => scope.encode_anthropic(kind, content),
-        None => scope.encode(content),
-    };
+    *content = scope.encode_anthropic(anthropic_kind, content);
     true
 }
 
@@ -163,10 +161,9 @@ pub(crate) fn prepare_responses_request(
     value: &mut Value,
     scope: &EncryptedContentScope,
 ) -> EncryptedContentStats {
-    let has_marker = value
-        .get("input")
-        .is_some_and(input_contains_codexhub_marker);
-    prepare_input(value, scope, has_marker, false)
+    // New Responses state is never scoped. Decode markers written by older
+    // CodexHub versions, while preserving all native unmarked state verbatim.
+    prepare_input(value, scope, false, false)
 }
 
 pub(crate) fn remove_all_responses_encrypted_content(value: &mut Value) -> EncryptedContentStats {
@@ -285,17 +282,6 @@ fn has_replayable_content(object: &Map<String, Value>) -> bool {
         }
         _ => true,
     })
-}
-
-fn input_contains_codexhub_marker(value: &Value) -> bool {
-    match value {
-        Value::Array(items) => items.iter().any(input_contains_codexhub_marker),
-        Value::Object(object) => object
-            .get("encrypted_content")
-            .and_then(Value::as_str)
-            .is_some_and(|content| content.starts_with(MARKER_PREFIX)),
-        _ => false,
-    }
 }
 
 fn is_provider_private_item(object: &Map<String, Value>) -> bool {
@@ -502,7 +488,7 @@ mod tests {
     }
 
     #[test]
-    fn marked_history_filters_unmarked_legacy_private_content() {
+    fn legacy_marker_migration_preserves_native_unmarked_content() {
         let scope = EncryptedContentScope::for_provider(&provider(
             "openai",
             ProviderType::OpenAiResponses,
@@ -525,9 +511,9 @@ mod tests {
 
         let stats = prepare_responses_request(&mut request, &scope);
 
-        assert_eq!(stats.filtered, 1);
+        assert_eq!(stats.filtered, 0);
         assert_eq!(stats.decoded, 1);
-        assert!(request["input"][0].get("encrypted_content").is_none());
+        assert_eq!(request["input"][0]["encrypted_content"], "legacy-unmarked");
         assert_eq!(request["input"][1]["encrypted_content"], "current-marked");
     }
 
@@ -552,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn response_items_are_marked_idempotently() {
+    fn responses_provider_items_keep_native_encrypted_content() {
         let scope = EncryptedContentScope::for_provider(&provider(
             "grok",
             ProviderType::GrokResponses,
@@ -563,16 +549,10 @@ mod tests {
             "encrypted_content": "opaque-grok-content"
         });
 
-        assert!(encode_response_object(
-            item.as_object_mut().unwrap(),
-            &scope
-        ));
-        let encoded = item["encrypted_content"].as_str().unwrap().to_string();
-        assert!(encoded.starts_with("codexhub:enc:v1:grok:"));
         assert!(!encode_response_object(
             item.as_object_mut().unwrap(),
             &scope
         ));
-        assert_eq!(item["encrypted_content"], encoded);
+        assert_eq!(item["encrypted_content"], "opaque-grok-content");
     }
 }

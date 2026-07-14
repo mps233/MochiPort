@@ -1,128 +1,129 @@
-# AI Gateway Provider 私有密文作用域
+# AI Gateway Provider 私有密文策略
 
-完整的字段映射、JSON/SSE 转换示例、错误恢复和排查方法见 [`ai-gateway-provider-private-state-conversion.zh-CN.md`](ai-gateway-provider-private-state-conversion.zh-CN.md)。
+更新时间：2026-07-14
 
-## 背景
+## 当前观察方案
 
-OpenAI Responses、Grok Responses 等上游会在 `reasoning.encrypted_content` 中返回只能由原渠道继续使用的不透明状态。Anthropic Messages 也有同类 Provider 私有状态：
+状态：待验证，不是最终架构结论。
 
-- `thinking.signature`：与 thinking 内容绑定的签名。
-- `redacted_thinking.data`：不可解析的 redacted thinking 数据。
+当前版本优先保证 OpenAI 原生密文兼容，同时观察 Grok 在不加前缀时的连续推理、模型切换和异常恢复效果。后续可以根据真实日志重新启用 Grok scope marker；本文保留两种方案及切换条件。
 
-CodexHub 会把 Anthropic 的这两个字段映射到 Responses `reasoning.encrypted_content`。Codex 会保存该字段，并在同一会话的后续请求中原样回放。
+CodexHub 对两类私有状态采用不同策略：
 
-当用户在同一会话中切换模型时，Codex 只知道自己仍在访问 CodexHub 的 Responses 接口，并不知道 CodexHub 内部已经从 Grok 切换到 OpenAI。若直接把 Grok 密文发送给 OpenAI，上游会返回 `invalid_encrypted_content` 或“encrypted content could not be verified”。
+| 协议 | 返回 Codex | 后续请求 |
+| --- | --- | --- |
+| OpenAI Responses | 原样透传 `encrypted_content` | 原样回放 |
+| Grok Responses | 原样透传 `encrypted_content` | 原样回放 |
+| Anthropic Messages | 使用 typed marker 映射到 `encrypted_content` | 解包为 `thinking.signature` 或 `redacted_thinking.data` |
 
-CodexHub 参考 AxonHub 的 signature marking 方案，为 Provider 私有密文增加稳定的内部作用域标记。
+当前实现中，OpenAI 和 Grok 的新响应暂不增加 `codexhub:enc:v1:` 前缀。这样可以先保证 OpenAI 原生密文仍是 Codex 可直接保存、回放和迁移的原生值，用户停用或卸载 CodexHub 后不会因为 CodexHub 私有前缀而破坏会话。
 
-## 标记格式
+跨模型或跨协议族切换依赖模型目录中的不同 `comp_hash`。Codex 检测到 `comp_hash` 变化后，会在使用新模型前通过旧模型生成本地文本摘要；新的 replacement history 不再携带旧 reasoning 密文。因此正常切换流程不需要 Gateway 给 Responses 密文增加作用域前缀。
 
-```text
-codexhub:enc:v1:<protocol>:<footprint>:<raw encrypted content>
+## OpenAI 与 Grok
+
+### 响应方向
+
+JSON、SSE 和 Compact 响应中的下列字段保持原值：
+
+```json
+{
+  "type": "reasoning",
+  "encrypted_content": "opaque-provider-state"
+}
 ```
 
-示例：
+CodexHub 可以执行与密文无关的兼容转换，例如 Grok 工具名恢复，但不得修改 `encrypted_content` 的内容。
 
-```text
-codexhub:enc:v1:grok:4f3b0cb6a91e:p3HD...G1SY
-```
+### 请求方向
 
-Anthropic 额外保存原始 content block 类型：
+无前缀的原生密文原样发送给当前 Responses Provider。CodexHub 不猜测该密文来自 OpenAI 还是 Grok，也不维护会话级旁路索引。
+
+若上游明确返回以下密文校验错误，Gateway 可以删除请求中的 Provider 私有密文并最多重试一次：
+
+- `invalid_encrypted_content`
+- encrypted content could not be verified
+- encrypted content could not be decrypted or parsed
+
+该重试只是异常恢复，不代替 `comp_hash` 驱动的正常切换压缩。
+
+## Anthropic typed marker
+
+Anthropic 继续使用 marker：
 
 ```text
 codexhub:enc:v1:anthropic:<footprint>:thinking:<raw signature>
 codexhub:enc:v1:anthropic:<footprint>:redacted_thinking:<raw data>
 ```
 
-- `codexhub:enc:v1:`：固定版本前缀。
-- `protocol`：当前上游协议，现有值为 `openai`、`grok` 或 `anthropic`。
-- `footprint`：Provider route 的 SHA-256 前 6 字节，编码为 12 位十六进制。
-- `raw encrypted content`：上游返回的原始密文，不修改内容。
-- Anthropic `kind`：明确区分 `thinking.signature` 和 `redacted_thinking.data`，不能根据 thinking 文本是否为空推断。
+原因不是为了给 OpenAI/Grok 做跨 Provider 隔离，而是 Responses 的单个 `encrypted_content` 字段无法表示 Anthropic 原始 block 类型。marker 必须显式记录：
 
-Provider route 由以下字段组成：
+- `thinking.signature`
+- `redacted_thinking.data`
 
-```text
-provider name + provider type + base URL
-```
+`footprint` 是 Provider route 的 SHA-256 前 6 字节，route 由 Provider 名称、类型和 Base URL 组成；API Key 不参与计算。
 
-API Key 不进入指纹，避免泄漏凭证，也允许同一渠道轮换 Key。修改 Provider 名称、类型或 Base URL 会生成新指纹，旧密文会被视为其他渠道的私有状态。
+同一 Anthropic route 回放时，CodexHub 解包 marker 并恢复原始 block。marker 不匹配时忽略该私有 block。OpenAI、Grok 与 Anthropic 之间正常切换时，`comp_hash` 应先触发文本压缩，因此 Anthropic marker 不应进入新的 Responses Provider 请求。
 
-## 响应方向
+## 旧前缀兼容
 
-在把上游响应返回给 Codex 前：
-
-1. 检查 `reasoning`、`compaction`、`compaction_summary` 和 `context_compaction` item。
-2. 若存在非空 `encrypted_content`，添加当前 Provider 的协议和渠道指纹。
-3. JSON 响应与 SSE 的 `data:` 事件使用同一套递归处理。
-4. 已带 CodexHub 标记的值不会重复包装。
-
-Anthropic JSON 响应和 SSE 响应都会在返回 Codex 前完成包装。流式响应中的 `response.output_item.done` 和最终 `response.completed` 使用相同 marker，避免 Codex 在不同事件中保存到不一致的私有状态。
-
-Codex 将标记后的字符串当作不透明内容保存，不需要理解前缀。
-
-## 请求方向
-
-在把 Codex 请求发送给上游前：
-
-1. 标记的协议和指纹与当前 Provider 完全一致：移除 CodexHub 前缀，恢复原始密文并发送。
-2. 协议或指纹不一致：删除 `encrypted_content`、Provider 私有 item `id` 和 `status`。
-3. 删除密文后仍有可读 `summary` 或 `content`：保留该 reasoning item。
-4. 删除密文后 item 已无有效内容：删除整个 item。
-
-因此：
+旧版 CodexHub 曾给 OpenAI 和 Grok 的 Responses 密文写入：
 
 ```text
-Grok -> Grok   保留并恢复 Grok 密文
-Grok -> OpenAI 删除 Grok 密文
-OpenAI -> Grok 删除 OpenAI 密文
-OpenAI -> OpenAI 保留并恢复 OpenAI 密文
-Anthropic -> Anthropic（同渠道）恢复 thinking.signature 或 redacted_thinking.data
-Anthropic -> Anthropic（不同渠道）删除 Anthropic 私有状态
-OpenAI/Grok -> Anthropic 忽略非 Anthropic 私有状态
-Anthropic -> OpenAI/Grok 删除 Anthropic 私有状态
+codexhub:enc:v1:<protocol>:<footprint>:<raw encrypted content>
 ```
 
-不同 Base URL 或不同 Provider 配置之间也不会误用密文。
+该设计现为兼容保留方案，不再写入新响应。请求读取规则为：
 
-Anthropic 请求重建还有一条额外约束：reasoning、assistant 文本和紧随其后的 `tool_use` 必须合并到同一条 assistant message，保持原始内容顺序。具体恢复规则为：
+1. marker 与当前 Responses route 匹配：解包并恢复原始密文。
+2. marker 属于其他 route：删除密文、Provider 私有 `id` 和 `status`；item 没有可回放内容时删除整个 item。
+3. 无 marker 的原生密文：始终保留，不会因为同一请求中存在旧 marker 而被误删。
 
-1. marker 与当前 Anthropic Provider 匹配、类型是 `thinking` 且 reasoning 有非空 summary：构造 `thinking`，summary 作为 `thinking`，解包后的原始值作为 `signature`。
-2. marker 类型是 `thinking` 且 summary 是空数组：仍构造 `thinking`，thinking 文本为空，原始值作为 `signature`。这是上游隐藏 thinking 展示内容时的合法形态，不能降级为 redacted。
-3. marker 类型是 `redacted_thinking`：构造 `redacted_thinking`，解包后的原始值作为 `data`。
-4. marker 的协议、类型或渠道指纹不匹配：忽略整个 Anthropic 私有 reasoning block。
+这使旧会话可以逐步迁移，同时保证新会话只保存 Provider 原生密文。
 
-## 旧会话迁移
+## 待定方案：只隔离 Grok 密文
 
-旧版本保存的密文没有 CodexHub 前缀，无法可靠判断来源。迁移规则如下：
+如果观察表明 Grok 原生密文会在以下场景造成稳定问题，可以只恢复 Grok marker，不改变 OpenAI：
 
-1. 请求中完全没有 CodexHub 标记时，首次仍保留旧密文，避免升级后破坏原有同渠道会话。
-2. 上游若明确返回 `invalid_encrypted_content` 或密文无法校验，删除 Provider 私有密文并只重试一次。
-3. 新的成功响应会带作用域标记。
-4. 请求中一旦出现任意 CodexHub 标记，未标记的旧密文会被视为迁移残留并过滤，避免以后重复触发 400。
+```text
+codexhub:enc:v1:grok:<footprint>:<raw encrypted content>
+```
 
-该迁移不依赖进程内映射或数据库，CodexHub 重启后行为保持一致。
+候选行为：
 
-上述兼容迁移只适用于 OpenAI/Grok Responses 透传路径。Anthropic 的旧无 marker `encrypted_content` 一律忽略，不尝试回放。原因是旧值已经被统一映射到 Responses 字段，无法可靠区分它原本是 `thinking.signature`、`redacted_thinking.data`，还是其他 Provider 的私有密文；贸然发送可能造成签名校验失败或跨渠道污染。新的 Anthropic 响应会自动带 marker，之后的同渠道回放不受影响。
+1. OpenAI 密文始终原样透传，保证 Codex 原生会话兼容。
+2. Grok 响应返回 Codex 前添加 Grok marker。
+3. 后续请求仍是同一 Grok route 时解包并回放原始密文。
+4. 请求进入 OpenAI 或其他 route 时过滤 Grok marker、私有 item `id` 和 `status`。
+5. 模型切换正常触发 `comp_hash` 压缩时，marker 通常不会进入新模型请求；过滤只作为异常边界保护。
 
-## 约束
+重新启用的判断依据：
 
-- CodexHub 标记只能存在于 Codex 与 CodexHub 之间，绝不能原样发送给上游。
-- 匹配渠道解包后，原始密文字节必须保持不变。
-- 不得仅按模型名称判断密文来源；模型 alias 和多渠道配置会导致误判。
-- 不得把一个 Provider 的 item `id` 与另一个 Provider 的请求组合发送。
-- 密文错误恢复最多重试一次，防止无效请求循环。
-- 新增 Provider 私有签名协议时，应分配新的 `protocol` 标记，并在请求和响应两个方向同时接入。
-- Anthropic block 类型必须显式保存在 marker 中；不得用 summary 文本是否为空区分 `thinking` 和 `redacted_thinking`。
+- Grok 同模型连续多轮因缺少或误处理密文而出现明显能力下降。
+- Grok 与 OpenAI 切换时，`comp_hash` 压缩没有覆盖某类真实会话，导致密文校验错误。
+- 上游频繁返回 `invalid_encrypted_content`，一次性清理重试成为常态而非偶发兜底。
+- 日志能够确认问题来自 Grok 私有状态，而不是工具历史、Compact V2 或模型输入结构。
 
-## 升级审计
+暂不建议恢复“OpenAI 和 Grok 全部加前缀”。若确需隔离，优先只包装 Grok，继续保持 OpenAI 原生密文不变。
 
-Codex 或上游协议更新后至少检查：
+## 不变量
 
-1. 新增的私有状态字段是否仍为 `encrypted_content`。
-2. 新增的 item type 是否需要加入标记范围。
-3. SSE 是否仍通过 `response.output_item.added`、`response.output_item.done` 或 `response.completed` 携带完整 item。
-4. Codex 是否仍会在后续请求中回放标记后的字符串。
-5. 同渠道工具调用续跑、Grok 切 OpenAI、OpenAI 切 Grok 是否通过集成测试。
-6. Anthropic 的 `thinking.signature`、`redacted_thinking.data` 是否仍可在同渠道回放，并在切换 Provider 时被过滤。
-7. Anthropic reasoning、assistant 文本和 `tool_use` 是否仍合并在同一条 assistant message 中。
+1. OpenAI Responses 的原生 `encrypted_content` 不得添加前缀、编码或改写。
+2. 当前观察期内，Grok Responses 的原生 `encrypted_content` 不添加前缀；未来只能通过明确的配置或版本决策启用 Grok marker。
+3. Anthropic marker 绝不能原样发送给 Anthropic 上游。
+4. 不使用模型名称猜测密文来源；跨协议切换由 `comp_hash` 负责。
+5. 密文错误恢复最多重试一次，避免请求循环。
+6. 所有可见模型必须声明非空 `comp_hash`；不同协议族使用不同值。
+
+## 升级检查
+
+Codex 或模型目录更新后至少验证：
+
+1. 同一 OpenAI 模型连续两轮时，密文原样往返。
+2. OpenAI Compact V2 返回的 blob 原样到达 Codex。
+3. OpenAI/Grok 的 JSON 与 SSE 都不出现新的 `codexhub:enc:v1:`。
+4. 不同 `comp_hash` 的模型切换仍会执行 pre-turn 本地压缩。
+5. Anthropic `thinking` 和 `redacted_thinking` 仍可在同 route 回放。
+6. 历史 OpenAI/Grok marker 仍能解包，外来历史 marker 仍会被清理。
+
+详细字段映射和 Anthropic 转换见 [`ai-gateway-provider-private-state-conversion.zh-CN.md`](ai-gateway-provider-private-state-conversion.zh-CN.md)。

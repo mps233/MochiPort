@@ -423,24 +423,17 @@ mod tests {
     }
 
     #[test]
-    fn json_body_marks_provider_encrypted_content() {
+    fn json_body_preserves_responses_provider_encrypted_content() {
         let body = Bytes::from_static(
             br#"{"output":[{"type":"reasoning","encrypted_content":"opaque-grok"}]}"#,
         );
         let scope = grok_scope();
 
-        let (normalized, parsed) = normalize_json_body_with_scope(body, Some(&scope));
+        let (normalized, parsed) = normalize_json_body_with_scope(body.clone(), Some(&scope));
 
         let parsed = parsed.expect("parsed response");
-        let encrypted = parsed["output"][0]["encrypted_content"]
-            .as_str()
-            .expect("encrypted content");
-        assert!(encrypted.starts_with("codexhub:enc:v1:grok:"));
-        assert!(encrypted.ends_with(":opaque-grok"));
-        assert_eq!(
-            serde_json::from_slice::<Value>(&normalized).unwrap(),
-            parsed
-        );
+        assert_eq!(parsed["output"][0]["encrypted_content"], "opaque-grok");
+        assert_eq!(normalized, body);
     }
 
     #[test]
@@ -540,7 +533,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_marks_reasoning_encrypted_content() {
+    async fn stream_preserves_responses_reasoning_encrypted_content() {
         let chunks = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(
             "event: response.output_item.done\n\
              data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"encrypted_content\":\"opaque-grok\"}}\n\n",
@@ -554,8 +547,8 @@ mod tests {
                 .map(|item| String::from_utf8(item.expect("chunk").to_vec()).expect("utf8"))
                 .collect::<String>();
 
-        assert!(output.contains("codexhub:enc:v1:grok:"));
-        assert!(output.contains(":opaque-grok"));
+        assert!(output.contains("\"encrypted_content\":\"opaque-grok\""));
+        assert!(!output.contains("codexhub:enc:v1:"));
     }
 
     #[tokio::test]

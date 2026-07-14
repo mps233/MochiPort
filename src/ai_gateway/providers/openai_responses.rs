@@ -1138,11 +1138,7 @@ mod tests {
             .expect("read compact response");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("compact response JSON");
         assert_eq!(body["object"], "response.compaction");
-        let encrypted = body["output"][0]["encrypted_content"]
-            .as_str()
-            .expect("marked compact encrypted content");
-        assert!(encrypted.starts_with("codexhub:enc:v1:openai:"));
-        assert!(encrypted.ends_with(":opaque-compact"));
+        assert_eq!(body["output"][0]["encrypted_content"], "opaque-compact");
 
         server.abort();
     }
@@ -1217,7 +1213,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retries_once_without_legacy_encrypted_content_and_marks_response() {
+    async fn retries_once_without_stale_encrypted_content_and_preserves_response() {
         let (base_url, mut requests, server) = retry_server().await;
         let provider = ProviderConfig {
             name: "openai".to_string(),
@@ -1262,11 +1258,10 @@ mod tests {
             .await
             .expect("read recovered response");
         let body: serde_json::Value = serde_json::from_slice(&body).expect("response JSON");
-        let encrypted = body["output"][0]["encrypted_content"]
-            .as_str()
-            .expect("marked encrypted content");
-        assert!(encrypted.starts_with("codexhub:enc:v1:openai:"));
-        assert!(encrypted.ends_with(":fresh-openai-content"));
+        assert_eq!(
+            body["output"][0]["encrypted_content"],
+            "fresh-openai-content"
+        );
 
         server.abort();
     }

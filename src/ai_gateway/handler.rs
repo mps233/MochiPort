@@ -542,15 +542,17 @@ pub async fn handle_responses(
         .resolve_upstream_model(&envelope.model)
         .unwrap_or(envelope.model.as_str())
         .to_string();
-    if inject_hosted_web_search_into_lite_request_tools(
-        &mut raw_body,
-        &envelope.model,
-        &provider.provider_type,
-    ) {
+    // Responses Lite rejects hosted tools such as web_search:
+    // "only supports function tools, custom tools, and client-executed tool search."
+    // Never inject hosted web_search into Lite requests; strip if present.
+    let stripped_hosted_web_search =
+        strip_hosted_web_search_from_lite_request_tools(&mut raw_body, &provider.provider_type);
+    if stripped_hosted_web_search > 0 {
         info!(
             model = %envelope.model,
             provider = %provider.name,
-            "injected hosted web_search into top-level tools for Responses Lite request"
+            stripped = stripped_hosted_web_search,
+            "stripped hosted web_search from Responses Lite request tools"
         );
     }
     let tool_preparation = match prepare_for_provider(&mut raw_body, &provider.provider_type) {
@@ -878,18 +880,54 @@ fn remove_markdown_h2_section(text: &str, heading: &str) -> Option<String> {
     })
 }
 
-fn inject_hosted_web_search_into_lite_request_tools(
+/// Responses Lite upstream rejects hosted tools (`web_search`, etc.) with:
+/// `X-OpenAI-Internal-Codex-Responses-Lite only supports function tools,
+/// custom tools, and client-executed tool search.`
+///
+/// Strip any hosted web_search entries from both top-level `tools` and Lite
+/// `input[].additional_tools.tools`.
+/// Do not inject hosted web_search as a compatibility path for Lite.
+fn strip_hosted_web_search_from_lite_request_tools(
     raw_body: &mut serde_json::Value,
-    model: &str,
     provider_type: &ProviderType,
-) -> bool {
-    if provider_type != &ProviderType::OpenAiResponses || !is_gpt_5_6_family(model) {
-        return false;
+) -> usize {
+    if provider_type != &ProviderType::OpenAiResponses || !is_responses_lite_request(raw_body) {
+        return 0;
     }
 
-    // Lite keeps client-executed schemas in additional_tools, while the upstream
-    // still discovers hosted tools such as web_search from the top-level tools array.
-    let is_lite_request = raw_body
+    let mut stripped = raw_body
+        .get_mut("tools")
+        .and_then(serde_json::Value::as_array_mut)
+        .map(strip_hosted_web_search_tools)
+        .unwrap_or(0);
+
+    if let Some(input) = raw_body
+        .get_mut("input")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for item in input {
+            if item.get("type").and_then(serde_json::Value::as_str) != Some("additional_tools") {
+                continue;
+            }
+            stripped += item
+                .get_mut("tools")
+                .and_then(serde_json::Value::as_array_mut)
+                .map(strip_hosted_web_search_tools)
+                .unwrap_or(0);
+        }
+    }
+
+    stripped
+}
+
+fn strip_hosted_web_search_tools(tools: &mut Vec<serde_json::Value>) -> usize {
+    let before = tools.len();
+    tools.retain(|tool| !is_hosted_web_search_tool(tool));
+    before.saturating_sub(tools.len())
+}
+
+fn is_responses_lite_request(raw_body: &serde_json::Value) -> bool {
+    raw_body
         .get("input")
         .and_then(serde_json::Value::as_array)
         .is_some_and(|input| {
@@ -897,95 +935,7 @@ fn inject_hosted_web_search_into_lite_request_tools(
                 item.get("type").and_then(serde_json::Value::as_str) == Some("additional_tools")
                     && item.get("tools").is_some_and(serde_json::Value::is_array)
             })
-        });
-    if !is_lite_request {
-        return false;
-    }
-    if has_responses_lite_web_run(raw_body) {
-        return false;
-    }
-
-    if raw_body.get("tools").is_none_or(serde_json::Value::is_null) {
-        raw_body["tools"] = json!([]);
-    }
-    let Some(tools) = raw_body
-        .get_mut("tools")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return false;
-    };
-    if tools.iter().any(is_hosted_web_search_tool) {
-        return false;
-    }
-
-    tools.push(json!({
-        "type": "web_search",
-        "external_web_access": true,
-        "search_content_types": ["text", "image"]
-    }));
-    true
-}
-
-fn has_responses_lite_web_run(raw_body: &serde_json::Value) -> bool {
-    raw_body
-        .get("input")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|input| {
-            input.iter().any(|item| {
-                if item.get("type").and_then(serde_json::Value::as_str) != Some("additional_tools")
-                {
-                    return false;
-                }
-
-                item.get("tools")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|tools| tools.iter().any(is_responses_lite_web_run_tool))
-            })
         })
-}
-
-fn is_responses_lite_web_run_tool(tool: &serde_json::Value) -> bool {
-    is_responses_lite_web_run_namespace(tool) || is_code_mode_exec_with_web_run(tool)
-}
-
-fn is_responses_lite_web_run_namespace(tool: &serde_json::Value) -> bool {
-    tool.get("type").and_then(serde_json::Value::as_str) == Some("namespace")
-        && tool.get("name").and_then(serde_json::Value::as_str) == Some("web")
-        && tool
-            .get("tools")
-            .and_then(serde_json::Value::as_array)
-            .is_some_and(|tools| {
-                tools.iter().any(|tool| {
-                    tool.get("type").and_then(serde_json::Value::as_str) == Some("function")
-                        && tool.get("name").and_then(serde_json::Value::as_str) == Some("run")
-                })
-            })
-}
-
-fn is_code_mode_exec_with_web_run(tool: &serde_json::Value) -> bool {
-    tool.get("type").and_then(serde_json::Value::as_str) == Some("custom")
-        && tool.get("name").and_then(serde_json::Value::as_str) == Some("exec")
-        && tool
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|description| {
-                code_mode_description_registers_tool(description, "web__run")
-            })
-}
-
-fn code_mode_description_registers_tool(description: &str, tool_name: &str) -> bool {
-    description.lines().any(|line| {
-        line.trim()
-            .strip_prefix("### ")
-            .map(str::trim)
-            .map(|heading| heading.trim_matches('`'))
-            == Some(tool_name)
-    })
-}
-
-fn is_gpt_5_6_family(model: &str) -> bool {
-    let model = model.trim().to_ascii_lowercase();
-    model == "gpt-5.6" || model.starts_with("gpt-5.6-")
 }
 
 fn is_hosted_web_search_tool(tool: &serde_json::Value) -> bool {
@@ -1308,8 +1258,8 @@ mod tests {
 
     use super::{
         GatewayRequestEnvelope, decode_request_body, deserialize_gateway_request,
-        filter_image_generation_tools, inject_hosted_web_search_into_lite_request_tools,
-        insert_initial_image_log,
+        filter_image_generation_tools, insert_initial_image_log,
+        strip_hosted_web_search_from_lite_request_tools,
     };
 
     fn lite_request(model: &str) -> serde_json::Value {
@@ -1589,211 +1539,144 @@ mod tests {
     }
 
     #[test]
-    fn injects_hosted_web_search_into_gpt_5_6_lite_top_level_tools() {
+    fn does_not_add_hosted_web_search_to_lite_request_tools() {
         let mut body = lite_request("gpt-5.6-sol");
 
-        assert!(inject_hosted_web_search_into_lite_request_tools(
-            &mut body,
-            "gpt-5.6-sol",
-            &ProviderType::OpenAiResponses,
-        ));
-
-        assert_eq!(body["input"][0]["tools"].as_array().unwrap().len(), 2);
-        let tools = body["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
         assert_eq!(
-            tools[0],
-            json!({
+            strip_hosted_web_search_from_lite_request_tools(
+                &mut body,
+                &ProviderType::OpenAiResponses,
+            ),
+            0
+        );
+        assert!(body.get("tools").is_none());
+        assert_eq!(body["input"][0]["tools"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn strips_hosted_web_search_from_lite_top_level_tools() {
+        let mut body = lite_request("gpt-5.6-terra");
+        body["tools"] = json!([
+            {
+                "type": "function",
+                "name": "existing_tool",
+                "parameters": {"type": "object", "properties": {}}
+            },
+            {
                 "type": "web_search",
                 "external_web_access": true,
                 "search_content_types": ["text", "image"]
-            })
+            },
+            {"type": "web_search_preview"}
+        ]);
+
+        assert_eq!(
+            strip_hosted_web_search_from_lite_request_tools(
+                &mut body,
+                &ProviderType::OpenAiResponses,
+            ),
+            2
         );
-    }
-
-    #[test]
-    fn hosted_web_search_lite_injection_is_idempotent() {
-        let mut body = lite_request("gpt-5.6-terra");
-
-        assert!(inject_hosted_web_search_into_lite_request_tools(
-            &mut body,
-            "gpt-5.6-terra",
-            &ProviderType::OpenAiResponses,
-        ));
-        assert!(!inject_hosted_web_search_into_lite_request_tools(
-            &mut body,
-            "gpt-5.6-terra",
-            &ProviderType::OpenAiResponses,
-        ));
 
         let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "existing_tool");
         assert_eq!(
-            tools
-                .iter()
-                .filter(|tool| tool["type"] == "web_search")
-                .count(),
-            1
+            strip_hosted_web_search_from_lite_request_tools(
+                &mut body,
+                &ProviderType::OpenAiResponses,
+            ),
+            0
         );
     }
 
     #[test]
-    fn hosted_web_search_lite_injection_is_scoped_to_openai_gpt_5_6() {
-        let mut older_model = lite_request("gpt-5.5");
-        let mut grok_provider = lite_request("gpt-5.6-luna");
+    fn strips_hosted_web_search_from_lite_additional_tools() {
+        let mut body = lite_request("gpt-5.6-sol");
+        body["input"][0]["tools"] = json!([
+            {
+                "type": "function",
+                "name": "existing_tool",
+                "parameters": {"type": "object", "properties": {}}
+            },
+            {
+                "type": "custom",
+                "name": "exec",
+                "description": "Run JavaScript."
+            },
+            {
+                "type": "tool_search",
+                "execution": "client",
+                "description": "Search tools",
+                "parameters": {"type": "object", "properties": {}}
+            },
+            {"type": "web_search"},
+            {"type": "web_search_preview"}
+        ]);
 
-        assert!(!inject_hosted_web_search_into_lite_request_tools(
-            &mut older_model,
-            "gpt-5.5",
-            &ProviderType::OpenAiResponses,
-        ));
-        assert!(!inject_hosted_web_search_into_lite_request_tools(
-            &mut grok_provider,
-            "gpt-5.6-luna",
-            &ProviderType::GrokResponses,
-        ));
-        assert!(older_model.get("tools").is_none());
-        assert!(grok_provider.get("tools").is_none());
+        assert_eq!(
+            strip_hosted_web_search_from_lite_request_tools(
+                &mut body,
+                &ProviderType::OpenAiResponses,
+            ),
+            2
+        );
+
+        let tools = body["input"][0]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[1]["type"], "custom");
+        assert_eq!(tools[2]["type"], "tool_search");
+        assert_eq!(tools[2]["execution"], "client");
     }
 
     #[test]
-    fn hosted_web_search_lite_injection_requires_additional_tools() {
+    fn hosted_web_search_lite_strip_is_scoped_to_openai_lite() {
+        let mut non_lite = json!({
+            "model": "gpt-5.4",
+            "input": [{"type": "message", "role": "user", "content": []}],
+            "tools": [{"type": "web_search"}]
+        });
+        let mut grok_lite = lite_request("gpt-5.6-luna");
+        grok_lite["tools"] = json!([{"type": "web_search"}]);
+
+        assert_eq!(
+            strip_hosted_web_search_from_lite_request_tools(
+                &mut non_lite,
+                &ProviderType::OpenAiResponses,
+            ),
+            0
+        );
+        assert_eq!(non_lite["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            strip_hosted_web_search_from_lite_request_tools(
+                &mut grok_lite,
+                &ProviderType::GrokResponses,
+            ),
+            0
+        );
+        assert_eq!(grok_lite["tools"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hosted_web_search_lite_strip_requires_additional_tools() {
         let mut body = json!({
             "model": "gpt-5.6-sol",
             "input": [{"type": "message", "role": "user", "content": []}],
-            "tools": [{"type": "function", "name": "exec"}]
+            "tools": [
+                {"type": "function", "name": "exec"},
+                {"type": "web_search"}
+            ]
         });
 
-        assert!(!inject_hosted_web_search_into_lite_request_tools(
-            &mut body,
-            "gpt-5.6-sol",
-            &ProviderType::OpenAiResponses,
-        ));
-        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn hosted_web_search_lite_injection_skips_native_web_run() {
-        let mut body = lite_request("gpt-5.6-sol");
-        body["input"][0]["tools"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "type": "namespace",
-                "name": "web",
-                "tools": [{
-                    "type": "function",
-                    "name": "run",
-                    "parameters": {"type": "object"}
-                }]
-            }));
-
-        assert!(!inject_hosted_web_search_into_lite_request_tools(
-            &mut body,
-            "gpt-5.6-sol",
-            &ProviderType::OpenAiResponses,
-        ));
-        assert!(body.get("tools").is_none());
-    }
-
-    #[test]
-    fn hosted_web_search_lite_injection_skips_code_mode_web_run() {
-        let mut body = lite_request("gpt-5.6-sol");
-        body["input"][0]["tools"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "type": "custom",
-                "name": "exec",
-                "description": concat!(
-                    "Run JavaScript code to orchestrate tools.\n\n",
-                    "## web\n",
-                    "### `web__run`\n",
-                    "Tool for accessing the internet.\n\n",
-                    "exec tool declaration:\n",
-                    "declare const tools: { web__run(args: object): Promise<unknown>; };\n"
-                )
-            }));
-
-        assert!(!inject_hosted_web_search_into_lite_request_tools(
-            &mut body,
-            "gpt-5.6-sol",
-            &ProviderType::OpenAiResponses,
-        ));
-        assert!(body.get("tools").is_none());
-    }
-
-    #[test]
-    fn hosted_web_search_lite_injection_ignores_code_mode_web_run_prose() {
-        let mut body = lite_request("gpt-5.6-sol");
-        body["input"][0]["tools"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "type": "custom",
-                "name": "exec",
-                "description": "The web__run tool is unavailable in this runtime."
-            }));
-
-        assert!(inject_hosted_web_search_into_lite_request_tools(
-            &mut body,
-            "gpt-5.6-sol",
-            &ProviderType::OpenAiResponses,
-        ));
-        assert_eq!(body["tools"][0]["type"], "web_search");
-    }
-
-    #[test]
-    fn hosted_web_search_lite_injection_does_not_confuse_other_namespaced_tools_with_web_run() {
-        let mut other_web_tool = lite_request("gpt-5.6-sol");
-        other_web_tool["input"][0]["tools"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "type": "namespace",
-                "name": "web",
-                "tools": [{"type": "function", "name": "open"}]
-            }));
-        let mut other_namespace = lite_request("gpt-5.6-sol");
-        other_namespace["input"][0]["tools"]
-            .as_array_mut()
-            .unwrap()
-            .push(json!({
-                "type": "namespace",
-                "name": "browser",
-                "tools": [{"type": "function", "name": "run"}]
-            }));
-
-        assert!(inject_hosted_web_search_into_lite_request_tools(
-            &mut other_web_tool,
-            "gpt-5.6-sol",
-            &ProviderType::OpenAiResponses,
-        ));
-        assert!(inject_hosted_web_search_into_lite_request_tools(
-            &mut other_namespace,
-            "gpt-5.6-sol",
-            &ProviderType::OpenAiResponses,
-        ));
-    }
-
-    #[test]
-    fn hosted_web_search_lite_injection_preserves_existing_top_level_tools() {
-        let mut body = lite_request("gpt-5.6-luna");
-        body["tools"] = json!([{
-            "type": "function",
-            "name": "existing_tool",
-            "parameters": {"type": "object", "properties": {}}
-        }]);
-
-        assert!(inject_hosted_web_search_into_lite_request_tools(
-            &mut body,
-            "gpt-5.6-luna",
-            &ProviderType::OpenAiResponses,
-        ));
-
-        let tools = body["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0]["name"], "existing_tool");
-        assert_eq!(tools[1]["type"], "web_search");
+        assert_eq!(
+            strip_hosted_web_search_from_lite_request_tools(
+                &mut body,
+                &ProviderType::OpenAiResponses,
+            ),
+            0
+        );
+        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
     }
 
     #[test]

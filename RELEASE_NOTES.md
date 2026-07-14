@@ -10,9 +10,9 @@ CodexHub v0.3.36
 
 ## Web Search
 
-- GPT-5.6 Responses Lite 请求使用 OpenAI Responses 渠道时，在顶层注入标准 hosted `web_search`，恢复当前上游已支持的搜索能力。
-- 注入逻辑保持幂等，并保留原有工具；当请求已经包含原生 `web.run` 时不会重复注入 hosted Web Search。
-- 本版本暂不伪装 `/alpha/search` 或原生 `web.run` runtime，避免出现工具可见但执行 404 的半成品状态。
+- **撤销** GPT-5.6 Responses Lite 顶层 hosted `web_search` 注入：上游返回 `unsupported_value`（Lite 仅支持 function/custom/client-executed tool search）。
+- Lite 请求若顶层 `tools` 或 `input[].additional_tools.tools` 带有 `web_search` / `web_search_preview`，Gateway 会剥离后再转发；合法的客户端 `tool_search` 保留，标准非 Lite Responses 仍可使用 hosted Web Search。
+- 原生 Lite 搜索仍走 `web.run` + `/alpha/search`；默认未注册 `web.run` 时不伪装搜索工具，避免半成品链路。
 
 ## Image Generation
 
@@ -27,6 +27,12 @@ CodexHub v0.3.36
 - 会话历史改为直接查询已初始化且健康的 Codex App、CLI 或 VS Code remote-control 连接，优先使用当前活跃和最近有响应的连接。
 - `thread/list` 使用 `useStateDbOnly = true`，只扫描 CLI 和 VS Code 交互会话，避免慢速文件系统全量发现。
 - 支持分页拉取，并在当前连接失败时切换到其他健康连接，提高历史会话列表的打开速度和稳定性。
+
+## Provider Private State
+
+- 当前观察版本将 OpenAI 与 Grok Responses 的 `reasoning.encrypted_content` 和 Compact blob 改为原样透传；优先保持 OpenAI 原生会话可移植性，并继续观察 Grok 连续推理效果。
+- 跨协议模型切换由模型目录中的不同 `comp_hash` 触发 Codex 本地文本压缩，不再依赖 Gateway 给 Responses 密文做渠道标记。
+- 保留旧 `codexhub:enc:v1:` Responses marker 的读取迁移能力；Anthropic 继续使用 typed marker 区分 `thinking.signature` 与 `redacted_thinking.data`。
 
 ## Documentation
 
