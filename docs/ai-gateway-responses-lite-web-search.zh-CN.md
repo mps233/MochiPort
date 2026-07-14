@@ -669,27 +669,9 @@ dynamic_configs["107580212"].v.default_model
 
 Codex App 前端据此得到 `authMethod=null`，不会调用 CodexHub 的 `/wham/statsig/bootstrap`，而是访问硬编码 Statsig 地址。无 VPN 时这会造成启动等待；成功读取官方缓存后，又可能用官方 `available_models` 白名单过滤 CodexHub 模型。
 
-CodexHub 通过 Codex App 官方支持的 `CODEX_CLI_PATH` 指向自身 app-server 透明代理。代理启动真正的 Codex CLI，记录 `account/read` 请求 ID，并只把对应响应改为：
+曾验证通过 `CODEX_CLI_PATH` 代理改写 `account/read` 可以让前端走 CodexHub Statsig，并显示完整模型列表。但该方案会修改用户级 GUI 环境并介入 Codex App 的 app-server 启动链路，当前发布版本不采用。
 
-```json
-{
-  "account": {
-    "type": "chatgpt",
-    "email": "codexhub-local@example.local",
-    "planType": "pro"
-  },
-  "requiresOpenaiAuth": false
-}
-```
-
-这两个字段承担不同职责：
-
-1. `account.type=chatgpt` 只让桌面前端选择 ChatGPT/Statsig bootstrap 分支。
-2. `requiresOpenaiAuth=false` 继续反映 Core 的真实 Provider 能力，不触发 OpenAI token 注入。
-3. 模型请求、工具调用、审批、通知和流式 delta 均由真正的 app-server 处理；代理对非 `account/read` 行保持原字节透传。
-4. Provider 名称仍是 `ai-gateway`，因此不会仅因前端展示账户而满足 `provider.is_openai()`，远程压缩判定不变。
-
-初始化会备份用户原有的 `CODEX_CLI_PATH` 和 `CODEXHUB_REAL_CODEX_CLI_PATH`，再写入当前 CodexHub 和真实 Codex CLI 路径。CodexHub 启动时会根据当前受管 Provider 同步路径；恢复配置时，只有环境值仍等于 CodexHub 最后写入值才会恢复备份，用户后续手动修改的值不会被覆盖。修改环境变量后必须彻底退出并重启 Codex App。
+当前模型目录仍由 `ai-gateway /models` 提供。实机验证表明 app-server 和 Remote Control 可以读取完整目录，但 Codex App 前端仍可能使用官方 Statsig `available_models` 二次过滤。这个问题属于桌面前端展示层，不影响 Core 请求、模型路由和原生 `web.run` 执行，后续围绕 `account/read` 单独设计不依赖 `CODEX_CLI_PATH` 的方案。
 
 ### 11.4 CodexHub 路由
 

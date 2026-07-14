@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(target_os = "windows")]
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
-use crate::{chain_log, codex_app_server_proxy, config::LocalConnectionMode};
+use crate::{chain_log, config::LocalConnectionMode};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
@@ -30,6 +30,8 @@ const CODEXHUB_ACTOR_AUTHORIZATION_VALUE: &str = "codexhub-local";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
 const CODEX_API_ENDPOINT_ENV: &str = "CODEX_API_ENDPOINT";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
+const CODEX_CLI_PATH_ENV: &str = "CODEX_CLI_PATH";
+const REAL_CODEX_CLI_PATH_ENV: &str = "CODEXHUB_REAL_CODEX_CLI_PATH";
 const APP_SERVER_PROXY_ENVIRONMENT_BACKUP_VERSION: u32 = 1;
 const APP_SERVER_PROXY_ENVIRONMENT_BACKUP_FILE: &str = "app-server-proxy-environment.json";
 const NO_PROXY_ENV: &str = "NO_PROXY";
@@ -300,7 +302,7 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     #[cfg(not(test))]
     let _ = configure_gui_environment(&options.backend_url, options.fast_startup_enabled);
     #[cfg(not(test))]
-    configure_app_server_proxy_environment().map_err(anyhow::Error::msg)?;
+    cleanup_app_server_proxy_environment().map_err(anyhow::Error::msg)?;
     #[cfg(not(test))]
     chain_log::write_line("[codex_app_config] event=gui_environment_configure_done");
 
@@ -1064,79 +1066,8 @@ pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
     }
 }
 
-pub fn sync_app_server_proxy_environment(
-    codex_home: Option<PathBuf>,
-    backend_url: &str,
-) -> Result<bool, String> {
-    let codex_home = codex_home.unwrap_or_else(default_codex_home);
-    let config_path = codex_home.join("config.toml");
-    if inspect_managed_ai_gateway_provider(&config_path, backend_url) {
-        configure_app_server_proxy_environment()?;
-        Ok(true)
-    } else {
-        cleanup_app_server_proxy_environment()?;
-        Ok(false)
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-fn configure_app_server_proxy_environment() -> Result<(), String> {
-    let current_exe = std::env::current_exe().map_err(|err| err.to_string())?;
-    let managed_codex_cli_path = current_exe.to_string_lossy().into_owned();
-    let backup_path = managed_app_server_proxy_environment_backup_path();
-    let existing_backup = read_app_server_proxy_environment_backup(&backup_path)?;
-    let current_codex_cli_path = gui_getenv(codex_app_server_proxy::CODEX_CLI_PATH_ENV)?;
-    let current_real_codex_cli_path = gui_getenv(codex_app_server_proxy::REAL_CODEX_CLI_PATH_ENV)?;
-
-    let configured_real_path = current_codex_cli_path
-        .as_deref()
-        .filter(|path| {
-            existing_backup
-                .as_ref()
-                .is_none_or(|backup| *path != backup.managed_codex_cli_path)
-        })
-        .map(PathBuf::from)
-        .filter(|path| path.is_file() && !paths_equivalent(path, &current_exe))
-        .or_else(|| codex_app_server_proxy::resolve_platform_codex_cli(&current_exe))
-        .or_else(|| current_real_codex_cli_path.as_deref().map(PathBuf::from))
-        .filter(|path| path.is_file() && !paths_equivalent(path, &current_exe));
-    let real_codex = configured_real_path
-        .or_else(|| codex_app_server_proxy::resolve_real_codex_cli(&current_exe).ok())
-        .ok_or_else(|| "failed to locate the real Codex CLI for app-server proxy".to_string())?;
-    let managed_real_codex_cli_path = real_codex.to_string_lossy().into_owned();
-
-    let backup = if let Some(mut backup) = existing_backup {
-        backup.managed_codex_cli_path = managed_codex_cli_path.clone();
-        backup.managed_real_codex_cli_path = managed_real_codex_cli_path.clone();
-        backup
-    } else {
-        ManagedAppServerProxyEnvironmentBackup {
-            version: APP_SERVER_PROXY_ENVIRONMENT_BACKUP_VERSION,
-            original_codex_cli_path: current_codex_cli_path,
-            original_real_codex_cli_path: current_real_codex_cli_path,
-            managed_codex_cli_path: managed_codex_cli_path.clone(),
-            managed_real_codex_cli_path: managed_real_codex_cli_path.clone(),
-        }
-    };
-    write_app_server_proxy_environment_backup(&backup_path, &backup)?;
-    gui_setenv(
-        codex_app_server_proxy::REAL_CODEX_CLI_PATH_ENV,
-        &managed_real_codex_cli_path,
-    )?;
-    gui_setenv(
-        codex_app_server_proxy::CODEX_CLI_PATH_ENV,
-        &managed_codex_cli_path,
-    )?;
-    chain_log::write_line(format!(
-        "[codex_app_config] event=app_server_proxy_environment_configured proxy={} real={}",
-        managed_codex_cli_path, managed_real_codex_cli_path
-    ));
-    Ok(())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn configure_app_server_proxy_environment() -> Result<(), String> {
-    Ok(())
+pub fn cleanup_legacy_app_server_proxy_environment() -> Result<(), String> {
+    cleanup_app_server_proxy_environment()
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1146,17 +1077,17 @@ fn cleanup_app_server_proxy_environment() -> Result<(), String> {
         return Ok(());
     };
 
-    let current_codex_cli_path = gui_getenv(codex_app_server_proxy::CODEX_CLI_PATH_ENV)?;
+    let current_codex_cli_path = gui_getenv(CODEX_CLI_PATH_ENV)?;
     if current_codex_cli_path.as_deref() == Some(backup.managed_codex_cli_path.as_str()) {
         gui_set_or_unsetenv(
-            codex_app_server_proxy::CODEX_CLI_PATH_ENV,
+            CODEX_CLI_PATH_ENV,
             backup.original_codex_cli_path.as_deref(),
         )?;
     }
-    let current_real_codex_cli_path = gui_getenv(codex_app_server_proxy::REAL_CODEX_CLI_PATH_ENV)?;
+    let current_real_codex_cli_path = gui_getenv(REAL_CODEX_CLI_PATH_ENV)?;
     if current_real_codex_cli_path.as_deref() == Some(backup.managed_real_codex_cli_path.as_str()) {
         gui_set_or_unsetenv(
-            codex_app_server_proxy::REAL_CODEX_CLI_PATH_ENV,
+            REAL_CODEX_CLI_PATH_ENV,
             backup.original_real_codex_cli_path.as_deref(),
         )?;
     }
@@ -1173,17 +1104,6 @@ fn cleanup_app_server_proxy_environment() -> Result<(), String> {
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn cleanup_app_server_proxy_environment() -> Result<(), String> {
     Ok(())
-}
-
-fn paths_equivalent(left: &Path, right: &Path) -> bool {
-    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
-    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
-    if cfg!(target_os = "windows") {
-        left.to_string_lossy()
-            .eq_ignore_ascii_case(&right.to_string_lossy())
-    } else {
-        left == right
-    }
 }
 
 fn read_app_server_proxy_environment_backup(
@@ -1203,17 +1123,6 @@ fn read_app_server_proxy_environment_backup(
         ));
     }
     Ok(Some(backup))
-}
-
-fn write_app_server_proxy_environment_backup(
-    path: &Path,
-    backup: &ManagedAppServerProxyEnvironmentBackup,
-) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-    let raw = serde_json::to_string_pretty(backup).map_err(|err| err.to_string())?;
-    std::fs::write(path, format!("{raw}\n")).map_err(|err| err.to_string())
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]

@@ -7,7 +7,6 @@ mod chain_log;
 mod cli;
 mod codex;
 mod codex_app_config;
-mod codex_app_server_proxy;
 mod codex_session_history;
 mod config;
 mod daemon_process;
@@ -45,11 +44,6 @@ use crate::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    if codex_app_server_proxy::is_proxy_invocation() {
-        let exit_code = codex_app_server_proxy::run()?;
-        std::process::exit(exit_code);
-    }
-
     let cli = Cli::parse()?;
     if matches!(cli.command, Command::Gui) {
         return run_gui_command();
@@ -195,10 +189,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             &config.remote_control_base_url(),
             config.codex_app_fast_startup,
         );
-        let app_server_proxy = codex_app_config::sync_app_server_proxy_environment(
-            None,
-            &config.remote_control_base_url(),
-        );
+        let proxy_cleanup = codex_app_config::cleanup_legacy_app_server_proxy_environment();
         state
             .push_event(
                 "info",
@@ -214,15 +205,15 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             .await;
         state
             .push_event(
-                if app_server_proxy.is_ok() {
+                if proxy_cleanup.is_ok() {
                     "info"
                 } else {
                     "warn"
                 },
-                "codex_app_server_proxy_environment_checked",
-                match app_server_proxy {
-                    Ok(enabled) => format!("enabled={enabled}"),
-                    Err(error) => format!("enabled=false error={error}"),
+                "codex_app_server_proxy_environment_cleanup_checked",
+                match proxy_cleanup {
+                    Ok(()) => "cleaned=true".to_string(),
+                    Err(error) => format!("cleaned=false error={error}"),
                 },
             )
             .await;
