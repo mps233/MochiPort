@@ -20,7 +20,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(target_os = "windows")]
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
-use crate::{chain_log, config::LocalConnectionMode};
+use crate::{chain_log, codex_app_server_proxy, config::LocalConnectionMode};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
@@ -30,6 +30,8 @@ const CODEXHUB_ACTOR_AUTHORIZATION_VALUE: &str = "codexhub-local";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
 const CODEX_API_ENDPOINT_ENV: &str = "CODEX_API_ENDPOINT";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
+const APP_SERVER_PROXY_ENVIRONMENT_BACKUP_VERSION: u32 = 1;
+const APP_SERVER_PROXY_ENVIRONMENT_BACKUP_FILE: &str = "app-server-proxy-environment.json";
 const NO_PROXY_ENV: &str = "NO_PROXY";
 #[cfg(target_os = "macos")]
 const LOWERCASE_NO_PROXY_ENV: &str = "no_proxy";
@@ -209,6 +211,16 @@ struct ManagedProxyEnvironmentBackup {
     managed_lowercase_no_proxy: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManagedAppServerProxyEnvironmentBackup {
+    version: u32,
+    original_codex_cli_path: Option<String>,
+    original_real_codex_cli_path: Option<String>,
+    managed_codex_cli_path: String,
+    managed_real_codex_cli_path: String,
+}
+
 pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<ConfigureCodexAppReport> {
     let codex_home = options
         .codex_home
@@ -288,6 +300,8 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     #[cfg(not(test))]
     let _ = configure_gui_environment(&options.backend_url, options.fast_startup_enabled);
     #[cfg(not(test))]
+    configure_app_server_proxy_environment().map_err(anyhow::Error::msg)?;
+    #[cfg(not(test))]
     chain_log::write_line("[codex_app_config] event=gui_environment_configure_done");
 
     Ok(ConfigureCodexAppReport {
@@ -323,6 +337,8 @@ pub fn uninstall_codex_app(
         };
     #[cfg(not(test))]
     let gui_api_base = cleanup_gui_environment(backend_url);
+    #[cfg(not(test))]
+    cleanup_app_server_proxy_environment().map_err(anyhow::Error::msg)?;
     #[cfg(test)]
     let gui_api_base = inspect_gui_api_base_url(backend_url);
 
@@ -1048,6 +1064,158 @@ pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
     }
 }
 
+pub fn sync_app_server_proxy_environment(
+    codex_home: Option<PathBuf>,
+    backend_url: &str,
+) -> Result<bool, String> {
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    let config_path = codex_home.join("config.toml");
+    if inspect_managed_ai_gateway_provider(&config_path, backend_url) {
+        configure_app_server_proxy_environment()?;
+        Ok(true)
+    } else {
+        cleanup_app_server_proxy_environment()?;
+        Ok(false)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn configure_app_server_proxy_environment() -> Result<(), String> {
+    let current_exe = std::env::current_exe().map_err(|err| err.to_string())?;
+    let managed_codex_cli_path = current_exe.to_string_lossy().into_owned();
+    let backup_path = managed_app_server_proxy_environment_backup_path();
+    let existing_backup = read_app_server_proxy_environment_backup(&backup_path)?;
+    let current_codex_cli_path = gui_getenv(codex_app_server_proxy::CODEX_CLI_PATH_ENV)?;
+    let current_real_codex_cli_path = gui_getenv(codex_app_server_proxy::REAL_CODEX_CLI_PATH_ENV)?;
+
+    let configured_real_path = current_codex_cli_path
+        .as_deref()
+        .filter(|path| {
+            existing_backup
+                .as_ref()
+                .is_none_or(|backup| *path != backup.managed_codex_cli_path)
+        })
+        .map(PathBuf::from)
+        .filter(|path| path.is_file() && !paths_equivalent(path, &current_exe))
+        .or_else(|| codex_app_server_proxy::resolve_platform_codex_cli(&current_exe))
+        .or_else(|| current_real_codex_cli_path.as_deref().map(PathBuf::from))
+        .filter(|path| path.is_file() && !paths_equivalent(path, &current_exe));
+    let real_codex = configured_real_path
+        .or_else(|| codex_app_server_proxy::resolve_real_codex_cli(&current_exe).ok())
+        .ok_or_else(|| "failed to locate the real Codex CLI for app-server proxy".to_string())?;
+    let managed_real_codex_cli_path = real_codex.to_string_lossy().into_owned();
+
+    let backup = if let Some(mut backup) = existing_backup {
+        backup.managed_codex_cli_path = managed_codex_cli_path.clone();
+        backup.managed_real_codex_cli_path = managed_real_codex_cli_path.clone();
+        backup
+    } else {
+        ManagedAppServerProxyEnvironmentBackup {
+            version: APP_SERVER_PROXY_ENVIRONMENT_BACKUP_VERSION,
+            original_codex_cli_path: current_codex_cli_path,
+            original_real_codex_cli_path: current_real_codex_cli_path,
+            managed_codex_cli_path: managed_codex_cli_path.clone(),
+            managed_real_codex_cli_path: managed_real_codex_cli_path.clone(),
+        }
+    };
+    write_app_server_proxy_environment_backup(&backup_path, &backup)?;
+    gui_setenv(
+        codex_app_server_proxy::REAL_CODEX_CLI_PATH_ENV,
+        &managed_real_codex_cli_path,
+    )?;
+    gui_setenv(
+        codex_app_server_proxy::CODEX_CLI_PATH_ENV,
+        &managed_codex_cli_path,
+    )?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=app_server_proxy_environment_configured proxy={} real={}",
+        managed_codex_cli_path, managed_real_codex_cli_path
+    ));
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn configure_app_server_proxy_environment() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn cleanup_app_server_proxy_environment() -> Result<(), String> {
+    let backup_path = managed_app_server_proxy_environment_backup_path();
+    let Some(backup) = read_app_server_proxy_environment_backup(&backup_path)? else {
+        return Ok(());
+    };
+
+    let current_codex_cli_path = gui_getenv(codex_app_server_proxy::CODEX_CLI_PATH_ENV)?;
+    if current_codex_cli_path.as_deref() == Some(backup.managed_codex_cli_path.as_str()) {
+        gui_set_or_unsetenv(
+            codex_app_server_proxy::CODEX_CLI_PATH_ENV,
+            backup.original_codex_cli_path.as_deref(),
+        )?;
+    }
+    let current_real_codex_cli_path = gui_getenv(codex_app_server_proxy::REAL_CODEX_CLI_PATH_ENV)?;
+    if current_real_codex_cli_path.as_deref() == Some(backup.managed_real_codex_cli_path.as_str()) {
+        gui_set_or_unsetenv(
+            codex_app_server_proxy::REAL_CODEX_CLI_PATH_ENV,
+            backup.original_real_codex_cli_path.as_deref(),
+        )?;
+    }
+
+    match std::fs::remove_file(&backup_path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err.to_string()),
+    }
+    chain_log::write_line("[codex_app_config] event=app_server_proxy_environment_restored");
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn cleanup_app_server_proxy_environment() -> Result<(), String> {
+    Ok(())
+}
+
+fn paths_equivalent(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    if cfg!(target_os = "windows") {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    } else {
+        left == right
+    }
+}
+
+fn read_app_server_proxy_environment_backup(
+    path: &Path,
+) -> Result<Option<ManagedAppServerProxyEnvironmentBackup>, String> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err.to_string()),
+    };
+    let backup = serde_json::from_str::<ManagedAppServerProxyEnvironmentBackup>(&raw)
+        .map_err(|err| err.to_string())?;
+    if backup.version != APP_SERVER_PROXY_ENVIRONMENT_BACKUP_VERSION {
+        return Err(format!(
+            "unsupported app-server proxy environment backup version {}",
+            backup.version
+        ));
+    }
+    Ok(Some(backup))
+}
+
+fn write_app_server_proxy_environment_backup(
+    path: &Path,
+    backup: &ManagedAppServerProxyEnvironmentBackup,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let raw = serde_json::to_string_pretty(backup).map_err(|err| err.to_string())?;
+    std::fs::write(path, format!("{raw}\n")).map_err(|err| err.to_string())
+}
+
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn cleanup_legacy_global_proxy_bypass() -> Result<(), String> {
     let backup_path = managed_proxy_environment_backup_path();
@@ -1497,7 +1665,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         let provider = provider_table_mut(&mut doc, provider_name.as_str());
         provider["name"] = toml_edit::value(provider_name.as_str());
         provider["wire_api"] = toml_edit::value("responses");
-        provider["requires_openai_auth"] = toml_edit::value(true);
+        provider["requires_openai_auth"] = toml_edit::value(!inject_default_ai_gateway);
 
         if inject_default_ai_gateway {
             provider["base_url"] =
@@ -1506,7 +1674,11 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
             provider.remove("env_key_instructions");
             provider["experimental_bearer_token"] = toml_edit::value("dummy-token");
             provider.remove("auth");
-            remove_provider_http_header(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER);
+            set_provider_http_header(
+                provider,
+                OPENAI_ACTOR_AUTHORIZATION_HEADER,
+                CODEXHUB_ACTOR_AUTHORIZATION_VALUE,
+            );
         } else if let Some(provider_base_url) = explicit_provider_base_url {
             provider["base_url"] = toml_edit::value(provider_base_url);
         }
@@ -1978,7 +2150,9 @@ fn provider_table_has_codexhub_shape(provider: &toml_edit::Table, provider_name:
         && provider
             .get("requires_openai_auth")
             .and_then(|item| item.as_bool())
-            == Some(true)
+            == Some(false)
+        && provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER)
+            == Some(CODEXHUB_ACTOR_AUTHORIZATION_VALUE)
 }
 
 fn provider_table_has_legacy_codexhub_shape(
@@ -2084,6 +2258,25 @@ fn remove_provider_http_header(provider: &mut toml_edit::Table, header_name: &st
     }
     if remove_headers {
         provider.remove("http_headers");
+    }
+}
+
+fn set_provider_http_header(provider: &mut toml_edit::Table, header_name: &str, value: &str) {
+    remove_provider_http_header(provider, header_name);
+    if provider.get("http_headers").is_none() {
+        provider["http_headers"] =
+            toml_edit::Item::Value(toml_edit::Value::InlineTable(toml_edit::InlineTable::new()));
+    }
+    if let Some(headers) = provider
+        .get_mut("http_headers")
+        .and_then(toml_edit::Item::as_inline_table_mut)
+    {
+        headers.insert(header_name, toml_edit::Value::from(value));
+    } else if let Some(headers) = provider
+        .get_mut("http_headers")
+        .and_then(toml_edit::Item::as_table_mut)
+    {
+        headers[header_name] = toml_edit::value(value);
     }
 }
 
@@ -2757,6 +2950,12 @@ fn managed_proxy_environment_backup_path() -> PathBuf {
         .join(PROXY_ENVIRONMENT_BACKUP_FILE)
 }
 
+fn managed_app_server_proxy_environment_backup_path() -> PathBuf {
+    codexhub_app_support_dir()
+        .join("backups")
+        .join(APP_SERVER_PROXY_ENVIRONMENT_BACKUP_FILE)
+}
+
 fn codex_home_backup_id(codex_home: &Path) -> String {
     let normalized = codex_home
         .to_string_lossy()
@@ -3076,7 +3275,7 @@ mod tests {
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-    fn assert_authenticated_provider(config: &str, provider_name: &str) {
+    fn assert_actor_authorized_provider(config: &str, provider_name: &str) {
         let doc = config
             .parse::<toml_edit::DocumentMut>()
             .expect("parse config");
@@ -3094,11 +3293,11 @@ mod tests {
             provider
                 .get("requires_openai_auth")
                 .and_then(|item| item.as_bool()),
-            Some(true)
+            Some(false)
         );
         assert_eq!(
             provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER),
-            None
+            Some(CODEXHUB_ACTOR_AUTHORIZATION_VALUE)
         );
     }
 
@@ -3220,10 +3419,10 @@ mod tests {
         assert!(config.contains("name = \"ai-gateway\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
         assert!(config.contains("wire_api = \"responses\""));
-        assert!(config.contains("requires_openai_auth = true"));
+        assert!(config.contains("requires_openai_auth = false"));
         assert!(config.contains("supports_websockets = false"));
         assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
-        assert_authenticated_provider(&config, AI_GATEWAY_PROVIDER_NAME);
+        assert_actor_authorized_provider(&config, AI_GATEWAY_PROVIDER_NAME);
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -3253,11 +3452,12 @@ model_provider = "ai-gateway"
 name = "ai-gateway"
 base_url = "http://127.0.0.1:3847/ai-gateway/v1"
 wire_api = "responses"
-requires_openai_auth = true
+requires_openai_auth = false
 experimental_bearer_token = "dummy-token"
+http_headers = { x-openai-actor-authorization = "codexhub-local" }
 "#,
         )
-        .expect("write current gateway config");
+        .expect("write current actor-authorized gateway config");
 
         assert!(inspect_managed_ai_gateway_provider(
             &config_path,
@@ -3298,9 +3498,9 @@ experimental_bearer_token = "dummy-token"
 http_headers = { x-openai-actor-authorization = "codexhub-local" }
 "#,
         )
-        .expect("write legacy actor-authorized gateway config");
+        .expect("write actor-authorized gateway config");
 
-        assert!(!inspect_managed_ai_gateway_provider(
+        assert!(inspect_managed_ai_gateway_provider(
             &config_path,
             "http://127.0.0.1:3847/backend-api",
         ));
@@ -3505,11 +3705,11 @@ command = "print-token"
         assert!(config.contains("model_provider = \"ai-gateway\""));
         assert!(config.contains("model = \"custom-model\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
-        assert!(config.contains("requires_openai_auth = true"));
+        assert!(config.contains("requires_openai_auth = false"));
         assert!(!config.contains("env_key"));
         assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
         assert!(!config.contains("[model_providers.ai-gateway.auth]"));
-        assert_authenticated_provider(&config, AI_GATEWAY_PROVIDER_NAME);
+        assert_actor_authorized_provider(&config, AI_GATEWAY_PROVIDER_NAME);
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -3557,10 +3757,10 @@ http_headers = { x-existing = "keep", X-OpenAI-Actor-Authorization = "codexhub-l
         assert!(config.contains("model_provider = \"ai-gateway\""));
         assert!(config.contains("model = \"custom-model\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
-        assert!(config.contains("requires_openai_auth = true"));
+        assert!(config.contains("requires_openai_auth = false"));
         assert!(!config.contains("env_key"));
         assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
-        assert_authenticated_provider(&config, AI_GATEWAY_PROVIDER_NAME);
+        assert_actor_authorized_provider(&config, AI_GATEWAY_PROVIDER_NAME);
         let doc = config
             .parse::<toml_edit::DocumentMut>()
             .expect("parse config");

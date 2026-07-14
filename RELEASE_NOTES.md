@@ -1,6 +1,6 @@
-CodexHub v0.3.36
+CodexHub v0.3.37
 
-本版本重点适配 GPT-5.6 Sol、Terra、Luna 的 Responses Lite 工具协议，并完善 Web Search、生图和会话历史拉取。
+这是一次架构级更新：CodexHub 完成 GPT-5.6 Sol、Terra、Luna Responses Lite 工具协议适配，并打通 Codex App 前端账户态、完整模型目录、原生 `web.run`、独立 Images API 和跨 Provider 会话状态。Provider 继续保持 `ai-gateway`，无需冒充 OpenAI，也不会因此启用远程压缩。
 
 ## GPT-5.6 Responses Lite
 
@@ -12,7 +12,11 @@ CodexHub v0.3.36
 
 - **撤销** GPT-5.6 Responses Lite 顶层 hosted `web_search` 注入：上游返回 `unsupported_value`（Lite 仅支持 function/custom/client-executed tool search）。
 - Lite 请求若顶层 `tools` 或 `input[].additional_tools.tools` 带有 `web_search` / `web_search_preview`，Gateway 会剥离后再转发；合法的客户端 `tool_search` 保留，标准非 Lite Responses 仍可使用 hosted Web Search。
-- 原生 Lite 搜索仍走 `web.run` + `/alpha/search`；默认未注册 `web.run` 时不伪装搜索工具，避免半成品链路。
+- 默认 `ai-gateway` Provider 改用 Actor Authorization capability gate；新版 Codex 会为 GPT-5.6 Responses Lite 注册原生 `web.run`，并通过 CodexHub `/alpha/search` 转发到支持该协议的 OpenAI Responses 渠道。
+- Provider 名称保持 `ai-gateway`，Actor header 仅用于本地工具注册且不会转发给上游；模型目录继续从 `/models` 拉取。
+- 修复 Codex App Statsig `107580212` 模型白名单：bootstrap 根据当前可见模型动态返回 `available_models`、`default_model` 和 `use_hidden_models`，避免 `/models` 已成功缓存但前端模型列表为空。
+- 新增 Codex App app-server 透明代理：仅将桌面端 `account/read` 映射为本地 ChatGPT 展示账户，使 Statsig 初始化走 CodexHub bootstrap；Core 仍保持 `ai-gateway + requires_openai_auth=false`，不改变请求认证和远程压缩判定。
+- 初始化时通过 `CODEX_CLI_PATH` 安装代理并记录原环境值；CodexHub 更新后自动刷新代理路径，恢复原配置时只撤销仍由 CodexHub 管理的值。
 
 ## Image Generation
 
