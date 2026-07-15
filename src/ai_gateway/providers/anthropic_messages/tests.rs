@@ -801,7 +801,7 @@ fn groups_parallel_tool_uses_and_results_in_single_messages() {
 }
 
 #[test]
-fn builds_anthropic_tool_result_with_image_content_blocks() {
+fn lifts_anthropic_tool_result_images_into_user_content() {
     let image_url = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD";
     let output = image_tool_result("toolu_image", image_url);
 
@@ -811,11 +811,11 @@ fn builds_anthropic_tool_result_with_image_content_blocks() {
     )
     .unwrap();
 
-    assert_anthropic_tool_result_image_content(&body);
+    assert_anthropic_lifted_tool_result_image(&body);
 }
 
 #[test]
-fn builds_glm_tool_result_with_image_content_blocks() {
+fn lifts_glm_tool_result_images_into_user_content() {
     let image_url = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD";
     let output = image_tool_result("toolu_image", image_url);
 
@@ -825,7 +825,7 @@ fn builds_glm_tool_result_with_image_content_blocks() {
     )
     .unwrap();
 
-    assert_anthropic_tool_result_image_content(&body);
+    assert_anthropic_lifted_tool_result_image(&body);
 }
 
 fn image_tool_result(call_id: &str, image_url: &str) -> ResponseItem {
@@ -859,17 +859,120 @@ fn image_tool_result(call_id: &str, image_url: &str) -> ResponseItem {
     output
 }
 
-fn assert_anthropic_tool_result_image_content(body: &Value) {
-    let content = &body["messages"][1]["content"][0]["content"];
-    assert!(content.is_array());
-    assert_eq!(content[0]["type"], "text");
-    assert_eq!(content[0]["text"], "Wall time: 0.0060 seconds\nOutput:");
-    assert_eq!(content[1]["type"], "text");
-    assert_eq!(content[1]["text"], "有的！这是B站搜索结果的截图：");
+fn assert_anthropic_lifted_tool_result_image(body: &Value) {
+    let message_content = body["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(message_content.len(), 2);
+    assert_eq!(message_content[0]["type"], "tool_result");
+    let tool_content = message_content[0]["content"].as_array().unwrap();
+    assert_eq!(tool_content[0]["type"], "text");
+    assert_eq!(
+        tool_content[0]["text"],
+        "Wall time: 0.0060 seconds\nOutput:"
+    );
+    assert_eq!(tool_content[1]["type"], "text");
+    assert_eq!(tool_content[1]["text"], "有的！这是B站搜索结果的截图：");
+    assert_eq!(message_content[1]["type"], "image");
+    assert_eq!(message_content[1]["source"]["type"], "base64");
+    assert_eq!(message_content[1]["source"]["media_type"], "image/jpeg");
+    assert_eq!(
+        message_content[1]["source"]["data"],
+        "/9j/4AAQSkZJRgABAQAAAQABAAD"
+    );
+    assert_eq!(message_content[1]["cache_control"]["type"], "ephemeral");
+}
+
+#[test]
+fn image_only_tool_result_uses_placeholder_and_lifted_image() {
+    let mut output = image_tool_result("toolu_image_only", "data:image/png;base64,iVBORw0KGgo=");
+    output.output = Some(FunctionCallOutput::ContentItems(vec![
+        FunctionCallOutputContentItem {
+            item_type: "input_image".to_string(),
+            text: None,
+            image_url: Some("data:image/png;base64,iVBORw0KGgo=".to_string()),
+            encrypted_content: None,
+            detail: Some(json!("original")),
+        },
+    ]));
+
+    let (body, _) = build_anthropic_request(
+        &request(vec![message("user", "inspect"), output]),
+        AnthropicProviderProfile::Anthropic,
+    )
+    .unwrap();
+
+    let content = body["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "tool_result");
+    assert_eq!(content[0]["content"], "Image output attached below.");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["source"]["data"], "iVBORw0KGgo=");
+}
+
+#[test]
+fn parses_current_codex_view_image_output_and_lifts_image() {
+    let request: GatewayRequest = serde_json::from_value(json!({
+        "model": "claude-opus-4-8",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "inspect the image"}]
+            },
+            {
+                "type": "function_call",
+                "name": "view_image",
+                "arguments": "{\"path\":\"C:/tmp/example.png\"}",
+                "call_id": "view-image-call"
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "view-image-call",
+                "output": [{
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,aW1hZ2U=",
+                    "detail": "original"
+                }]
+            }
+        ]
+    }))
+    .unwrap();
+
+    let (body, _) = build_anthropic_request(&request, AnthropicProviderProfile::Anthropic).unwrap();
+
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(body["messages"][1]["content"][0]["name"], "view_image");
+    let content = body["messages"][2]["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "tool_result");
+    assert_eq!(content[0]["tool_use_id"], "view-image-call");
+    assert_eq!(content[0]["content"], "Image output attached below.");
+    assert_eq!(content[1]["type"], "image");
+    assert_eq!(content[1]["source"]["media_type"], "image/png");
+    assert_eq!(content[1]["source"]["data"], "aW1hZ2U=");
+}
+
+#[test]
+fn parallel_image_tool_results_keep_results_before_images() {
+    let first = image_tool_result("toolu_first_image", "data:image/png;base64,Zmlyc3Q=");
+    let second = image_tool_result("toolu_second_image", "data:image/jpeg;base64,c2Vjb25k");
+
+    let (body, _) = build_anthropic_request(
+        &request(vec![message("user", "inspect"), first, second]),
+        AnthropicProviderProfile::Anthropic,
+    )
+    .unwrap();
+
+    let content = body["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 4);
+    assert_eq!(content[0]["type"], "tool_result");
+    assert_eq!(content[0]["tool_use_id"], "toolu_first_image");
+    assert_eq!(content[1]["type"], "tool_result");
+    assert_eq!(content[1]["tool_use_id"], "toolu_second_image");
     assert_eq!(content[2]["type"], "image");
-    assert_eq!(content[2]["source"]["type"], "base64");
-    assert_eq!(content[2]["source"]["media_type"], "image/jpeg");
-    assert_eq!(content[2]["source"]["data"], "/9j/4AAQSkZJRgABAQAAAQABAAD");
+    assert_eq!(content[2]["source"]["data"], "Zmlyc3Q=");
+    assert_eq!(content[3]["type"], "image");
+    assert_eq!(content[3]["source"]["data"], "c2Vjb25k");
 }
 
 #[test]

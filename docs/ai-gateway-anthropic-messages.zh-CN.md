@@ -239,7 +239,14 @@ Responses `function_call_output` / `custom_tool_call_output` / `tool_search_outp
 }
 ```
 
-若 output 是结构化 content items，第一阶段可转为文本或 JSON 字符串；后续再按 Anthropic 支持的 block 类型细化。
+若 output 是结构化 content items：
+
+- 文本继续放在 `tool_result.content` 中。
+- `view_image`、MCP 截图等 `input_image` 不嵌入 `tool_result.content`，而是提升为同一条 `role=user` 消息中位于所有 `tool_result` 后面的并列 `image` block。
+- 纯图片结果在 `tool_result.content` 中使用短占位文本 `Image output attached below.`，继续保留 `tool_use_id` 配对。
+- 多个并行工具结果合并为一条 user message，并保持“全部 tool_result 在前、全部 image 在后”的顺序。
+
+提升后的结构仍是标准 Anthropic Messages。这样既保留工具调用配对，也兼容内部会再次转换为 Responses 的上游，避免部分节点把嵌套图片的 base64 当作普通文本估算 token。
 
 ### 4.4 Tool Search
 

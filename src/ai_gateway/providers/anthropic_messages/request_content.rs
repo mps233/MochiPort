@@ -51,22 +51,20 @@ pub(super) fn build_anthropic_messages(
                     ));
                 }
                 validate_tool_use_id(call_id)?;
-                let content = match item.item_type {
-                    ItemType::ToolSearchOutput => {
-                        Value::String(tool_search_output_to_anthropic_content(item))
-                    }
+                let (content, attachments) = match item.item_type {
+                    ItemType::ToolSearchOutput => (
+                        Value::String(tool_search_output_to_anthropic_content(item)),
+                        Vec::new(),
+                    ),
                     _ => item
                         .output
                         .as_ref()
                         .map(function_call_output_to_anthropic_content)
-                        .unwrap_or_else(|| Value::String(String::new())),
+                        .unwrap_or_else(|| (Value::String(String::new()), Vec::new())),
                 };
-                push_anthropic_message(
-                    &mut messages,
-                    "user",
-                    vec![tool_result_block(call_id, content)],
-                    MergeMode::ToolResult,
-                );
+                let mut blocks = vec![tool_result_block(call_id, content)];
+                blocks.extend(attachments);
+                push_anthropic_message(&mut messages, "user", blocks, MergeMode::ToolResult);
             }
             ItemType::FunctionCall | ItemType::ToolSearchCall | ItemType::CustomToolCall => {
                 if let Some(block) = response_tool_call_to_anthropic(item, tool_name_map)? {
@@ -153,9 +151,13 @@ fn should_merge_with_last_message(messages: &[Value], role: &str, merge_mode: Me
         MergeMode::None => false,
         MergeMode::AssistantContent => role == "assistant",
         MergeMode::ToolUse => role == "assistant",
-        MergeMode::ToolResult => content
-            .iter()
-            .all(|block| block.get("type").and_then(Value::as_str) == Some("tool_result")),
+        MergeMode::ToolResult => {
+            content.iter().any(is_tool_result_block)
+                && content.iter().all(|block| {
+                    is_tool_result_block(block)
+                        || block.get("type").and_then(Value::as_str) == Some("image")
+                })
+        }
     }
 }
 
@@ -194,9 +196,15 @@ fn anthropic_reasoning_block(
 fn append_content_blocks(target: &mut Vec<Value>, content: Vec<Value>, merge_mode: MergeMode) {
     match merge_mode {
         MergeMode::ToolResult => {
+            let mut attachments = Vec::new();
             for block in content {
+                if !is_tool_result_block(&block) {
+                    attachments.push(block);
+                    continue;
+                }
                 append_tool_result_block(target, block);
             }
+            target.extend(attachments);
         }
         _ => target.extend(content),
     }
@@ -212,16 +220,24 @@ fn append_tool_result_block(target: &mut Vec<Value>, mut block: Value) {
         return;
     };
     let Some(existing) = target.iter_mut().find(|existing| {
-        existing.get("type").and_then(Value::as_str) == Some("tool_result")
+        is_tool_result_block(existing)
             && existing.get("tool_use_id").and_then(Value::as_str) == Some(tool_use_id.as_str())
     }) else {
-        target.push(block);
+        let index = target
+            .iter()
+            .position(|existing| !is_tool_result_block(existing))
+            .unwrap_or(target.len());
+        target.insert(index, block);
         return;
     };
     let next_content = block.get_mut("content").map(Value::take);
     if let Some(next_content) = next_content {
         merge_tool_result_content(existing, next_content);
     }
+}
+
+fn is_tool_result_block(block: &Value) -> bool {
+    block.get("type").and_then(Value::as_str) == Some("tool_result")
 }
 
 fn tool_result_block(tool_use_id: &str, content: Value) -> Value {
@@ -390,22 +406,31 @@ fn tool_search_output_to_anthropic_content(item: &ResponseItem) -> String {
     .unwrap_or_else(|_| "{\"tools\":[]}".to_string())
 }
 
-fn function_call_output_to_anthropic_content(output: &FunctionCallOutput) -> Value {
+const TOOL_RESULT_IMAGE_PLACEHOLDER: &str = "Image output attached below.";
+
+fn function_call_output_to_anthropic_content(output: &FunctionCallOutput) -> (Value, Vec<Value>) {
     match output {
-        FunctionCallOutput::Text(text) => Value::String(text.clone()),
+        FunctionCallOutput::Text(text) => (Value::String(text.clone()), Vec::new()),
         FunctionCallOutput::ContentItems(items) if tool_output_items_are_text_only(items) => {
-            Value::String(output.to_chat_tool_content())
+            (Value::String(output.to_chat_tool_content()), Vec::new())
         }
         FunctionCallOutput::ContentItems(items) => {
-            let blocks = items
+            let text_blocks = items
                 .iter()
-                .filter_map(tool_output_content_item_to_anthropic)
+                .filter_map(tool_output_text_item_to_anthropic)
                 .collect::<Vec<_>>();
-            if blocks.is_empty() {
+            let images = items
+                .iter()
+                .filter_map(tool_output_image_item_to_anthropic)
+                .collect::<Vec<_>>();
+            let content = if text_blocks.is_empty() && !images.is_empty() {
+                Value::String(TOOL_RESULT_IMAGE_PLACEHOLDER.to_string())
+            } else if text_blocks.is_empty() {
                 Value::String(output.to_chat_tool_content())
             } else {
-                Value::Array(blocks)
-            }
+                Value::Array(text_blocks)
+            };
+            (content, images)
         }
     }
 }
@@ -419,9 +444,15 @@ fn tool_output_items_are_text_only(items: &[FunctionCallOutputContentItem]) -> b
     })
 }
 
-fn tool_output_content_item_to_anthropic(item: &FunctionCallOutputContentItem) -> Option<Value> {
+fn tool_output_text_item_to_anthropic(item: &FunctionCallOutputContentItem) -> Option<Value> {
     match item.item_type.as_str() {
         "input_text" | "output_text" | "text" => text_block(item.text.as_deref().unwrap_or("")),
+        _ => None,
+    }
+}
+
+fn tool_output_image_item_to_anthropic(item: &FunctionCallOutputContentItem) -> Option<Value> {
+    match item.item_type.as_str() {
         "input_image" | "image_url" => image_block(item.image_url.as_deref().unwrap_or(""), None),
         _ => None,
     }
