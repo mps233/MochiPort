@@ -88,7 +88,15 @@ pub(super) async fn handle_server_envelope(
             received_at_ms,
         )
         .await;
-        mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, segment_id).await;
+        mark_server_envelope_acked(
+            state,
+            connection_epoch,
+            &client_id,
+            &stream_id,
+            seq_id,
+            segment_id,
+        )
+        .await;
         observe_stale_server_envelope(
             state,
             connection_epoch,
@@ -101,7 +109,16 @@ pub(super) async fn handle_server_envelope(
         .await;
         return Ok(());
     }
-    if is_duplicate_server_envelope(state, &client_id, &stream_id, seq_id, segment_id).await {
+    if is_duplicate_server_envelope(
+        state,
+        connection_epoch,
+        &client_id,
+        &stream_id,
+        seq_id,
+        segment_id,
+    )
+    .await
+    {
         ack_server_envelope(
             state,
             outbound_tx,
@@ -171,7 +188,15 @@ pub(super) async fn handle_server_envelope(
                 received_at_ms,
             )
             .await;
-            mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
+            mark_server_envelope_acked(
+                state,
+                connection_epoch,
+                &client_id,
+                &stream_id,
+                seq_id,
+                None,
+            )
+            .await;
             log_server_envelope_handoff(
                 connection_epoch,
                 seq_id,
@@ -248,8 +273,15 @@ pub(super) async fn handle_server_envelope(
                 received_at_ms,
             )
             .await;
-            mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, Some(segment_id))
-                .await;
+            mark_server_envelope_acked(
+                state,
+                connection_epoch,
+                &client_id,
+                &stream_id,
+                seq_id,
+                Some(segment_id),
+            )
+            .await;
             log_server_envelope_handoff(
                 connection_epoch,
                 seq_id,
@@ -289,7 +321,15 @@ pub(super) async fn handle_server_envelope(
                 received_at_ms,
             )
             .await;
-            mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
+            mark_server_envelope_acked(
+                state,
+                connection_epoch,
+                &client_id,
+                &stream_id,
+                seq_id,
+                None,
+            )
+            .await;
             log_server_envelope_handoff(
                 connection_epoch,
                 seq_id,
@@ -334,7 +374,15 @@ pub(super) async fn handle_server_envelope(
                 received_at_ms,
             )
             .await;
-            mark_server_envelope_acked(state, &client_id, &stream_id, seq_id, None).await;
+            mark_server_envelope_acked(
+                state,
+                connection_epoch,
+                &client_id,
+                &stream_id,
+                seq_id,
+                None,
+            )
+            .await;
             log_server_envelope_handoff(
                 connection_epoch,
                 seq_id,
@@ -351,13 +399,14 @@ pub(super) async fn handle_server_envelope(
 
 async fn mark_server_envelope_acked(
     state: &SharedState,
+    connection_epoch: u64,
     client_id: &str,
     stream_id: &str,
     seq_id: u64,
     segment_id: Option<usize>,
 ) {
     let mut remote = state.remote_control.inner.lock().await;
-    let key = server_ack_cursor_key(client_id, stream_id);
+    let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
     let next = (seq_id, segment_id);
     let should_update = remote
         .server_ack_cursors
@@ -370,13 +419,14 @@ async fn mark_server_envelope_acked(
 
 async fn is_duplicate_server_envelope(
     state: &SharedState,
+    connection_epoch: u64,
     client_id: &str,
     stream_id: &str,
     seq_id: u64,
     segment_id: Option<usize>,
 ) -> bool {
     let remote = state.remote_control.inner.lock().await;
-    let key = server_ack_cursor_key(client_id, stream_id);
+    let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
     remote
         .server_ack_cursors
         .get(&key)
@@ -384,10 +434,20 @@ async fn is_duplicate_server_envelope(
 }
 
 pub(in crate::remote_control_backend) fn server_ack_cursor_key(
+    connection_epoch: u64,
     client_id: &str,
     stream_id: &str,
 ) -> String {
-    format!("{client_id}\n{stream_id}")
+    format!(
+        "{}{client_id}\n{stream_id}",
+        server_connection_cursor_prefix(connection_epoch)
+    )
+}
+
+pub(in crate::remote_control_backend) fn server_connection_cursor_prefix(
+    connection_epoch: u64,
+) -> String {
+    format!("{connection_epoch}\n")
 }
 
 pub(super) fn ack_cursor_gt(left: (u64, Option<usize>), right: (u64, Option<usize>)) -> bool {

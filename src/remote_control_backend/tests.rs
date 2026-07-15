@@ -432,7 +432,7 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
         },
     );
 
-    let ack_keys = reset_remote_clients_for_connection_locked(&mut remote);
+    let ack_keys = reset_remote_clients_for_connection_locked(&mut remote, 0);
     let client = remote
         .clients
         .get(DEFAULT_REMOTE_CLIENT_KEY)
@@ -1518,7 +1518,7 @@ async fn server_flood_fast_ack_does_not_wait_for_work_queue_drain() {
     );
 
     let remote = state.remote_control.inner.lock().await;
-    let key = server_ack_cursor_key(&client_id, &stream_id);
+    let key = server_ack_cursor_key(connection_epoch, &client_id, &stream_id);
     assert_eq!(remote.server_ack_cursors.get(&key), Some(&(300, None)));
     assert_eq!(
         remote
@@ -1526,6 +1526,91 @@ async fn server_flood_fast_ack_does_not_wait_for_work_queue_drain() {
             .get(&key)
             .map(|diagnostics| diagnostics.ack_count),
         Some(300)
+    );
+}
+
+#[tokio::test]
+async fn reconnected_server_can_restart_sequence_for_same_stream() {
+    let state = test_state();
+    let (outbound_tx, mut outbound_rx, client_id, stream_id, first_epoch) =
+        setup_connected_default_client(&state).await;
+    let second_epoch = first_epoch + 1;
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.connections.insert(
+            "first".to_string(),
+            test_connection(
+                "first",
+                first_epoch,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::Vscode,
+                Some(outbound_tx.clone()),
+            ),
+        );
+        remote.connections.insert(
+            "second".to_string(),
+            test_connection(
+                "second",
+                second_epoch,
+                true,
+                false,
+                crate::app_state::RemoteControlSourceKind::Vscode,
+                Some(outbound_tx.clone()),
+            ),
+        );
+    }
+    let (server_work_tx, mut server_work_rx) = tokio::sync::mpsc::channel(4);
+    let mut chunks = HashMap::new();
+    let envelope = test_server_message_envelope(
+        &client_id,
+        &stream_id,
+        1,
+        json!({"id": 200003, "result": {"userAgent": "codex_vscode/test"}}),
+    );
+
+    handle_server_envelope(
+        &state,
+        &outbound_tx,
+        first_epoch,
+        &envelope,
+        &mut chunks,
+        &server_work_tx,
+    )
+    .await
+    .expect("first connection response");
+    handle_server_envelope(
+        &state,
+        &outbound_tx,
+        second_epoch,
+        &envelope,
+        &mut chunks,
+        &server_work_tx,
+    )
+    .await
+    .expect("reconnected server response");
+
+    assert!(server_work_rx.try_recv().is_ok());
+    assert!(server_work_rx.try_recv().is_ok());
+    assert_eq!(
+        take_text_envelopes(&mut outbound_rx)
+            .iter()
+            .filter(|envelope| envelope_is_ack(envelope))
+            .count(),
+        2
+    );
+    let remote = state.remote_control.inner.lock().await;
+    assert_eq!(
+        remote
+            .server_ack_cursors
+            .get(&server_ack_cursor_key(first_epoch, &client_id, &stream_id)),
+        Some(&(1, None))
+    );
+    assert_eq!(
+        remote
+            .server_ack_cursors
+            .get(&server_ack_cursor_key(second_epoch, &client_id, &stream_id)),
+        Some(&(1, None))
     );
 }
 

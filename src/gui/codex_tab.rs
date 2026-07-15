@@ -159,6 +159,17 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
     );
+    let models_scope_warning = StaticText::builder(&models_box)
+        .with_label(text.codex_visible_models_scope_warning())
+        .build();
+    models_scope_warning.set_foreground_color(theme::theme().error);
+    models_scope_warning.wrap(980);
+    models_section.add(
+        &models_scope_warning,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        6,
+    );
     let models_warning = StaticText::builder(&models_box)
         .with_label(text.codex_visible_models_warning())
         .build();

@@ -3842,7 +3842,7 @@ mod model_mapping_tests {
     }
 
     #[test]
-    fn endpoint_status_keeps_codex_app_vscode_and_cli_independent() {
+    fn endpoint_status_requires_initialized_source_connection() {
         let remote = RemoteControlStatus {
             connected: true,
             initialized: true,
@@ -3863,7 +3863,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "codex_app", true),
-            EndpointStatusState::Connected
+            EndpointStatusState::NotConnected
         );
         assert_eq!(
             endpoint_status_state(Some(&remote), "vscode", true),
@@ -3876,7 +3876,7 @@ mod model_mapping_tests {
     }
 
     #[test]
-    fn endpoint_status_uninitialized_source_is_connected_when_channel_is_open() {
+    fn endpoint_status_uninitialized_source_is_not_connected_when_channel_is_open() {
         let remote = RemoteControlStatus {
             connected: true,
             initialized: false,
@@ -3890,7 +3890,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "vscode", true),
-            EndpointStatusState::Connected
+            EndpointStatusState::NotConnected
         );
         assert_eq!(
             endpoint_status_state(Some(&remote), "cli", true),
@@ -3899,7 +3899,7 @@ mod model_mapping_tests {
     }
 
     #[test]
-    fn endpoint_status_connected_takes_priority_over_config_state() {
+    fn endpoint_status_does_not_use_legacy_active_source_without_connection() {
         let remote = RemoteControlStatus {
             connected: true,
             initialized: true,
@@ -3909,7 +3909,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "codex_app", false),
-            EndpointStatusState::Connected
+            EndpointStatusState::UninitializedConfig
         );
     }
 
@@ -3936,7 +3936,7 @@ mod model_mapping_tests {
     }
 
     #[test]
-    fn codex_app_status_is_connected_for_open_uninitialized_channel() {
+    fn codex_app_status_is_not_connected_for_open_uninitialized_channel() {
         let remote = RemoteControlStatus {
             connected: true,
             initialized: false,
@@ -3950,7 +3950,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "codex_app", true),
-            EndpointStatusState::Connected
+            EndpointStatusState::NotConnected
         );
     }
 
@@ -5047,19 +5047,13 @@ fn apply_pending_diagnostics_export(
 fn remote_source_connected(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
     remote
         .map(|remote| {
-            remote
-                .connections
-                .iter()
-                .any(|connection| connection.source_kind == source_kind && connection.connected)
+            remote.connections.iter().any(|connection| {
+                connection.source_kind == source_kind
+                    && connection.connected
+                    && connection.initialized
+            })
         })
         .unwrap_or(false)
-}
-
-fn remote_active_connected(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
-    remote
-        .filter(|remote| remote.connected)
-        .and_then(|remote| remote.active_source_kind.as_deref())
-        == Some(source_kind)
 }
 
 fn endpoint_status_state(
@@ -5069,9 +5063,7 @@ fn endpoint_status_state(
 ) -> EndpointStatusState {
     if remote.is_none() {
         EndpointStatusState::Loading
-    } else if remote_source_connected(remote, source_kind)
-        || remote_active_connected(remote, source_kind)
-    {
+    } else if remote_source_connected(remote, source_kind) {
         EndpointStatusState::Connected
     } else if !configured {
         EndpointStatusState::UninitializedConfig

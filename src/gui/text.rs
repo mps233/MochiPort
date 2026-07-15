@@ -629,6 +629,17 @@ impl GuiText {
         }
     }
 
+    pub(super) fn codex_visible_models_scope_warning(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "重要：当前版本的模型列表仅影响 Codex CLI 中的模型显示；Codex App 的模型显示仍在研究中。"
+            }
+            GuiLocale::EnUs => {
+                "Important: In this version, the model list only affects model visibility in Codex CLI. Codex App model visibility is still under investigation."
+            }
+        }
+    }
+
     pub(super) fn codex_visible_models_warning(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {

@@ -485,11 +485,12 @@ pub(in crate::remote_control_backend) fn remove_pending_initialize_for_connectio
 #[allow(dead_code)]
 pub(in crate::remote_control_backend) fn reset_remote_clients_for_connection_locked(
     remote: &mut RemoteControlInner,
+    connection_epoch: u64,
 ) -> Vec<String> {
     let ack_cursor_keys = remote
         .clients
         .values()
-        .map(|client| server_ack_cursor_key(&client.client_id, &client.stream_id))
+        .map(|client| server_ack_cursor_key(connection_epoch, &client.client_id, &client.stream_id))
         .collect::<Vec<_>>();
     for client in remote.clients.values_mut() {
         client.initialized = false;

@@ -31,7 +31,9 @@ use super::diagnostics::{
 };
 use super::outbound::{send_envelope_on_connection, send_ws_control_ping, send_ws_control_pong};
 use super::protocol::build_client_ping_envelope;
-use super::server_envelopes::{ServerChunkMap, handle_server_envelope};
+use super::server_envelopes::{
+    ServerChunkMap, handle_server_envelope, server_connection_cursor_prefix,
+};
 use super::server_work::{RemoteServerWorkItem, run_remote_server_work_queue};
 use super::{
     OutboundWsMessage, PROTOCOL_VERSION, REMOTE_CONTROL_APP_PING_INTERVAL,
@@ -366,6 +368,13 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 connection_epoch, removed_initialize_count
             ));
         }
+        let cursor_prefix = server_connection_cursor_prefix(connection_epoch);
+        remote
+            .server_ack_cursors
+            .retain(|key, _| !key.starts_with(&cursor_prefix));
+        remote
+            .stream_diagnostics
+            .retain(|key, _| !key.starts_with(&cursor_prefix));
         remote.connections.remove(&connection_id);
         remote.last_error = last_error;
         prune_inactive_remote_connections_locked(&mut remote);

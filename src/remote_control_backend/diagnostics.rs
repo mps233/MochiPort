@@ -276,7 +276,7 @@ pub(super) async fn observe_command_output_delta_received(
         if !connection_exists_locked(&remote, connection_epoch) {
             return;
         }
-        let key = server_ack_cursor_key(client_id, stream_id);
+        let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
         let diagnostics = remote.stream_diagnostics.entry(key).or_default();
         observe_stream_window_event(
             diagnostics,
@@ -319,7 +319,7 @@ pub(super) async fn observe_server_envelope_window(
     if !connection_exists_locked(&remote, connection_epoch) {
         return;
     }
-    let key = server_ack_cursor_key(client_id, stream_id);
+    let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
     let diagnostics = remote.stream_diagnostics.entry(key).or_default();
     observe_stream_window_event(
         diagnostics,
@@ -418,7 +418,7 @@ pub(super) async fn record_server_ack_diagnostics(
         if !connection_exists_locked(&remote, connection_epoch) {
             return;
         }
-        let key = server_ack_cursor_key(client_id, stream_id);
+        let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
         let diagnostics = remote.stream_diagnostics.entry(key).or_default();
         observe_stream_window_event(diagnostics, ack_at_ms, seq_id, StreamWindowEvent::Ack);
         diagnostics.ack_count = diagnostics.ack_count.saturating_add(1);
@@ -449,7 +449,7 @@ async fn log_remote_control_unknown_context(
         if !connection_exists_locked(&remote, connection_epoch) {
             return;
         }
-        let key = server_ack_cursor_key(client_id, stream_id);
+        let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
         let diagnostics = remote
             .stream_diagnostics
             .get(&key)

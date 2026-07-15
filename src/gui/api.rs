@@ -430,9 +430,11 @@ pub(super) struct ImAccountItem {
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct RemoteControlStatus {
+    #[allow(dead_code)]
     pub(super) connected: bool,
     #[allow(dead_code)]
     pub(super) initialized: bool,
+    #[allow(dead_code)]
     pub(super) active_source_kind: Option<String>,
     #[serde(default)]
     pub(super) connections: Vec<RemoteControlConnectionStatus>,
@@ -442,7 +444,6 @@ pub(super) struct RemoteControlStatus {
 #[serde(rename_all = "camelCase")]
 pub(super) struct RemoteControlConnectionStatus {
     pub(super) connected: bool,
-    #[allow(dead_code)]
     pub(super) initialized: bool,
     pub(super) source_kind: String,
 }
