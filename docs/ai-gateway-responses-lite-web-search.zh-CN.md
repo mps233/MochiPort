@@ -8,6 +8,7 @@
 
 相关文档：
 
+- [`codex-app-web-run-model-visibility-tradeoff.zh-CN.md`](codex-app-web-run-model-visibility-tradeoff.zh-CN.md)：Codex App 模型显示、原生 `web.run` 与本地压缩之间的当前取舍和暂缓决策。
 - [`ai-gateway-web-search-protocol.zh-CN.md`](ai-gateway-web-search-protocol.zh-CN.md)：标准 Responses 托管 `web_search` 以及 Anthropic/GLM 转换规则。
 - [`ai-gateway-architecture.zh-CN.md`](ai-gateway-architecture.zh-CN.md)：AI Gateway 总体架构。
 - [`codex-app-fast-startup-statsig.zh-CN.md`](codex-app-fast-startup-statsig.zh-CN.md)：Codex App 本地后端与 feature gate 兼容边界。
@@ -407,7 +408,7 @@ http_headers = { x-openai-actor-authorization = "codexhub-local" }
 1. `DefaultModelProvider::models_manager()` 对自定义 Provider 也创建 `OpenAiModelsManager`，通过 provider base URL 请求 `/models`。
 2. Responses Lite 集成测试明确覆盖 `name="local" + requires_openai_auth=false + x-openai-actor-authorization`，并断言 `web.run` 与 `image_gen` 同时可见。
 
-Codex App 26.707.9981 前端仍会使用 Statsig `107580212` 的 `available_models` 二次过滤。CodexHub 现在从当前 `ai_gateway.codex_visible_models` 和内置目录动态生成该数组，使 bootstrap 白名单与 `/models` 保持一致。因此可以重新将 Actor Authorization 作为默认方案，不需要把 Provider 改名为 `OpenAI`。
+Codex App 26.707.9981 前端仍会使用 Statsig `107580212` 的 `available_models` 二次过滤。CodexHub 虽然会从当前 `ai_gateway.codex_visible_models` 和内置目录动态生成本地 bootstrap 白名单，但 `requires_openai_auth=false` 会让 renderer 进入 `authMethod=null` 的 pre-login 路径，并直接访问硬编码的官方 Statsig 地址；此时本地 bootstrap 不会被调用。因此 Actor Authorization 可以解决 `web.run`，但 Codex App 自定义模型显示仍未解决，详见独立取舍文档。
 
 ### 6.2 为什么不再使用 `name = "OpenAI"`
 
