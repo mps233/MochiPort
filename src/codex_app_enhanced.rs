@@ -128,7 +128,8 @@ pub async fn launch_and_inject(
     let status = wait_for_injected_status(&client, DEFAULT_CDP_PORT, &target.id, &models).await?;
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=routes_ready elapsed_ms={startup_elapsed_ms} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={}",
+        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={}",
+        status.routes_mounted,
         status
             .renderer_ready_ms
             .map(|value| value.to_string())
@@ -340,15 +341,16 @@ async fn wait_for_injected_status(
             return Ok(status);
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Codex App renderer 已启动，但界面和增强模型配置未在 20 秒内就绪");
+            bail!("Codex App renderer 已启动，但增强模型配置未在 20 秒内生效");
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
 fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String]) -> bool {
+    // Renderer routes may mount well after Statsig is updated; the retained script
+    // will keep the enhanced configuration active while the UI finishes loading.
     status.ready
-        && status.routes_mounted
         && status.available_models == expected_models
         && !status.use_hidden_models
         && status.key_gates_enabled == KEY_FEATURE_GATES.len()
@@ -811,7 +813,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_ready_does_not_require_post_login_bootstrap_interception() {
+    fn enhanced_config_ready_does_not_require_renderer_routes_or_bootstrap_interception() {
         let expected_models = vec!["gpt-5.6-sol".to_string()];
         let status = InjectedStatus {
             ready: true,
@@ -820,8 +822,8 @@ mod tests {
             key_gates_enabled: KEY_FEATURE_GATES.len(),
             bootstrap_intercepted: false,
             bootstrap_source: None,
-            routes_mounted: true,
-            renderer_ready_ms: Some(2_040),
+            routes_mounted: false,
+            renderer_ready_ms: None,
         };
 
         assert!(injected_status_is_ready(&status, &expected_models));
