@@ -30,6 +30,9 @@ type CodexModelsInitialized = Rc<Cell<bool>>;
 type CodexConfigured = Rc<Cell<bool>>;
 type CodexHubReady = Rc<Cell<bool>>;
 type CodexServiceEnabled = Rc<Cell<bool>>;
+type CodexRetroThemeEnabled = Rc<Cell<bool>>;
+type CodexRetroThemeInitialized = Rc<Cell<bool>>;
+type CodexRetroThemeSyncing = Rc<Cell<bool>>;
 
 #[derive(Clone)]
 pub(super) struct CodexTab {
@@ -39,6 +42,7 @@ pub(super) struct CodexTab {
     clear_button: Button,
     session_history_button: Button,
     enhanced_launch_button: Button,
+    retro_theme_checkbox: CheckBox,
     save_models_button: Button,
     model_checks: CodexModelChecks,
     model_slugs: CodexModelSlugs,
@@ -46,6 +50,9 @@ pub(super) struct CodexTab {
     configured: CodexConfigured,
     remote_ready: CodexHubReady,
     service_enabled: CodexServiceEnabled,
+    retro_theme_enabled: CodexRetroThemeEnabled,
+    retro_theme_initialized: CodexRetroThemeInitialized,
+    retro_theme_syncing: CodexRetroThemeSyncing,
     local_connection_mode: Rc<Cell<LocalConnectionMode>>,
 }
 
@@ -73,6 +80,13 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .build();
     enhanced_launch_button.set_tooltip(text.codex_enhanced_launch_help());
     enhanced_launch_button.enable(false);
+    let retro_theme_checkbox = CheckBox::builder(&local_config_box)
+        .with_label(text.codex_retro_theme())
+        .with_value(false)
+        .build();
+    retro_theme_checkbox.set_tooltip(text.codex_retro_theme_help());
+    retro_theme_checkbox.set_foreground_color(theme::theme().ink_primary);
+    retro_theme_checkbox.enable(false);
     let clear_button = Button::builder(&local_config_box)
         .with_label(text.clear_codex_access())
         .build();
@@ -80,6 +94,12 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
     clear_button.enable(false);
     local_config_section.add(
         &local_config_hint,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+    local_config_section.add(
+        &retro_theme_checkbox,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
@@ -253,6 +273,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         clear_button,
         session_history_button,
         enhanced_launch_button,
+        retro_theme_checkbox,
         save_models_button,
         model_checks,
         model_slugs,
@@ -260,6 +281,9 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         configured: Rc::new(Cell::new(false)),
         remote_ready: Rc::new(Cell::new(false)),
         service_enabled: Rc::new(Cell::new(false)),
+        retro_theme_enabled: Rc::new(Cell::new(false)),
+        retro_theme_initialized: Rc::new(Cell::new(false)),
+        retro_theme_syncing: Rc::new(Cell::new(false)),
         local_connection_mode: Rc::new(Cell::new(LocalConnectionMode::Standard)),
     }
 }
@@ -274,6 +298,7 @@ pub(super) fn bind_actions(
 ) {
     bind_inject_action(api, frame, tab, refresh, gui_tx, in_flight);
     bind_enhanced_launch_action(api, frame, tab, refresh, gui_tx, in_flight);
+    bind_retro_theme_action(api, frame, tab, refresh, gui_tx, in_flight);
     bind_save_models_action(api, frame, tab, refresh, gui_tx, in_flight);
     bind_clear_action(api, frame, tab, refresh, gui_tx, in_flight);
     bind_session_history_action(api, frame, tab, refresh);
@@ -283,6 +308,7 @@ pub(super) fn set_actions_enabled(tab: &CodexTab, enabled: bool) {
     tab.service_enabled.set(enabled);
     tab.save_models_button.enable(enabled);
     tab.enhanced_launch_button.enable(enabled);
+    tab.retro_theme_checkbox.enable(enabled);
     for checkbox in tab.model_checks.iter() {
         checkbox.enable(enabled);
     }
@@ -298,6 +324,20 @@ pub(super) fn refresh_configured(tab: &CodexTab, configured: bool) {
 
 pub(super) fn refresh_local_connection_mode(tab: &CodexTab, mode: LocalConnectionMode) {
     tab.local_connection_mode.set(mode);
+}
+
+pub(super) fn refresh_retro_theme(tab: &CodexTab, enabled: bool) {
+    if tab.retro_theme_initialized.get()
+        && tab.retro_theme_enabled.get() == enabled
+        && tab.retro_theme_checkbox.get_value() == enabled
+    {
+        return;
+    }
+    tab.retro_theme_syncing.set(true);
+    tab.retro_theme_enabled.set(enabled);
+    tab.retro_theme_checkbox.set_value(enabled);
+    tab.retro_theme_initialized.set(true);
+    tab.retro_theme_syncing.set(false);
 }
 
 pub(super) fn refresh_remote_ready(tab: &CodexTab, remote_ready: bool) {
@@ -341,6 +381,7 @@ pub(super) fn apply_pending_action(
     refresh_config_buttons(tab, service_enabled);
     tab.save_models_button.enable(service_enabled);
     tab.enhanced_launch_button.enable(service_enabled);
+    tab.retro_theme_checkbox.enable(service_enabled);
 
     match result {
         CodexActionResult::Inject(Ok(_)) => {
@@ -375,6 +416,17 @@ pub(super) fn apply_pending_action(
             show_error(frame, &err);
             force_dashboard_refresh(api, refresh);
         }
+        CodexActionResult::RetroTheme { enabled, result } => match result {
+            Ok(()) => {
+                refresh_retro_theme(tab, enabled);
+                force_dashboard_refresh(api, refresh);
+            }
+            Err(err) => {
+                refresh_retro_theme(tab, tab.retro_theme_enabled.get());
+                show_error(frame, &err);
+                force_dashboard_refresh(api, refresh);
+            }
+        },
     }
 }
 
@@ -390,6 +442,10 @@ pub(super) enum CodexActionResult {
     Clear(Result<serde_json::Value, String>),
     SaveModels(Result<(), String>),
     EnhancedLaunch(Result<serde_json::Value, String>),
+    RetroTheme {
+        enabled: bool,
+        result: Result<(), String>,
+    },
 }
 
 fn bind_inject_action(
@@ -593,6 +649,54 @@ fn wait_for_codex_app_to_close(parent: &Frame, text: GuiText, api: &ApiClient) -
     confirmed
 }
 
+fn bind_retro_theme_action(
+    api: &ApiClient,
+    frame: &Frame,
+    tab: &CodexTab,
+    refresh: &DashboardRefresh,
+    gui_tx: &UnboundedSender<super::GuiMessage>,
+    in_flight: &Arc<AtomicBool>,
+) {
+    let api = api.clone();
+    let refresh = refresh.clone();
+    let frame = *frame;
+    let tab = tab.clone();
+    let gui_tx = gui_tx.clone();
+    let in_flight = in_flight.clone();
+    let checkbox = tab.retro_theme_checkbox;
+    checkbox.on_toggled(move |event| {
+        if tab.retro_theme_syncing.get() || !tab.retro_theme_initialized.get() {
+            return;
+        }
+        let enabled = event.is_checked();
+        let previous = tab.retro_theme_enabled.get();
+        if enabled == previous {
+            return;
+        }
+        if in_flight.swap(true, Ordering::SeqCst) {
+            refresh_retro_theme(&tab, previous);
+            return;
+        }
+        if !ensure_service_ready_for_action(&api, &frame, &refresh) {
+            in_flight.store(false, Ordering::SeqCst);
+            refresh_retro_theme(&tab, previous);
+            return;
+        }
+        checkbox.enable(false);
+        let thread_api = api.clone();
+        let gui_tx = gui_tx.clone();
+        let in_flight = in_flight.clone();
+        thread::spawn(move || {
+            let result = save_retro_theme(&thread_api, enabled);
+            in_flight.store(false, Ordering::SeqCst);
+            let _ = gui_tx.send(super::GuiMessage::CodexAction(
+                CodexActionResult::RetroTheme { enabled, result },
+            ));
+            wxdragon::wake_up_idle();
+        });
+    });
+}
+
 fn refresh_enhanced_launch_preflight(
     api: &ApiClient,
     text: GuiText,
@@ -741,5 +845,12 @@ fn save_visible_models(api: &ApiClient, models: Vec<String>) -> Result<(), Strin
     config.ai_gateway.codex_visible_models = models;
     api.save_app_config(&config)?;
     let _ = api.refresh_codex_app_models();
+    Ok(())
+}
+
+fn save_retro_theme(api: &ApiClient, enabled: bool) -> Result<(), String> {
+    let mut config = api.get_app_config()?;
+    config.codex_app_retro_theme_enabled = enabled;
+    api.save_app_config(&config)?;
     Ok(())
 }

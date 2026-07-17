@@ -893,6 +893,24 @@ impl GuiText {
         }
     }
 
+    pub(super) fn codex_retro_theme(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "CodexHub 2007 复古主题",
+            GuiLocale::EnUs => "CodexHub 2007 Retro Theme",
+        }
+    }
+
+    pub(super) fn codex_retro_theme_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "勾选后，使用增强模式启动 Codex App 时应用复古配色；不改变布局和功能。取消勾选后，下次增强启动恢复官方主题。"
+            }
+            GuiLocale::EnUs => {
+                "Apply retro styling when Codex App is started in enhanced mode without changing its layout or features. Clear it and launch again to restore the official theme."
+            }
+        }
+    }
+
     pub(super) fn codex_enhanced_launch_ready(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "Codex App 已进入增强模式，前端模型列表已同步。",

@@ -1,0 +1,1188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CodexHub 2007 主题视觉稿</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --blue-950: #06366f;
+      --blue-900: #0a4f9e;
+      --blue-800: #1265bc;
+      --blue-700: #2b7ed1;
+      --blue-500: #6aace7;
+      --blue-300: #acd3f3;
+      --blue-200: #cae3f7;
+      --blue-100: #e8f4fd;
+      --blue-050: #f6fbff;
+      --line: #78a9d4;
+      --line-soft: #b5d3ec;
+      --ink: #172c45;
+      --muted: #5f7890;
+      --green: #4e9c24;
+      --orange: #dd8a19;
+      --paper: #ffffff;
+      --shadow: rgba(7, 49, 97, 0.36);
+    }
+
+    * {
+      box-sizing: border-box;
+      letter-spacing: 0;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+    }
+
+    body {
+      font-family: Tahoma, "Microsoft YaHei UI", "Segoe UI", sans-serif;
+      font-size: 13px;
+      color: var(--ink);
+      background: #4b8fd0;
+    }
+
+    button,
+    input,
+    textarea {
+      font: inherit;
+      letter-spacing: 0;
+    }
+
+    button {
+      color: inherit;
+    }
+
+    .desktop {
+      width: 100%;
+      height: 100%;
+      padding: 12px;
+      background:
+        linear-gradient(180deg, #327dc7 0, #71b2e5 54%, #2d76bd 100%);
+    }
+
+    .app-window {
+      width: 100%;
+      height: 100%;
+      min-width: 940px;
+      min-height: 620px;
+      display: grid;
+      grid-template-rows: 34px 52px minmax(0, 1fr) 27px;
+      overflow: hidden;
+      border: 1px solid #064287;
+      border-radius: 6px 6px 3px 3px;
+      background: var(--blue-100);
+      box-shadow: 0 8px 26px var(--shadow), inset 0 0 0 1px #9dd3ff;
+    }
+
+    .titlebar {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 6px 0 9px;
+      color: #ffffff;
+      background: linear-gradient(180deg, #318ce4 0, #1467c2 49%, #0d57ad 50%, #287bd0 100%);
+      border-bottom: 1px solid #073c7a;
+      text-shadow: 0 1px #17467b;
+    }
+
+    .window-title {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 14px;
+      font-weight: 700;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .window-title img {
+      width: 21px;
+      height: 21px;
+      border-radius: 3px;
+      image-rendering: auto;
+    }
+
+    .window-subtitle {
+      font-weight: 400;
+      opacity: 0.86;
+    }
+
+    .window-controls {
+      display: grid;
+      grid-template-columns: repeat(3, 28px);
+      gap: 3px;
+    }
+
+    .window-button {
+      width: 28px;
+      height: 23px;
+      padding: 0;
+      display: grid;
+      place-items: center;
+      border: 1px solid rgba(255, 255, 255, 0.72);
+      border-radius: 4px;
+      color: #ffffff;
+      background: #2479ca;
+      box-shadow: inset 0 1px rgba(255, 255, 255, 0.55), inset 0 -2px rgba(5, 54, 106, 0.38);
+      cursor: pointer;
+    }
+
+    .window-button:hover {
+      background: #4b9ae0;
+    }
+
+    .window-button.close {
+      background: #d95338;
+    }
+
+    .window-button.close:hover {
+      background: #ed704f;
+    }
+
+    .toolbar {
+      min-width: 0;
+      display: flex;
+      align-items: stretch;
+      gap: 1px;
+      padding: 4px 8px;
+      overflow: hidden;
+      background: linear-gradient(180deg, #f8fcff 0, #dceefa 48%, #c2def3 100%);
+      border-bottom: 1px solid var(--line);
+      box-shadow: inset 0 1px #ffffff;
+    }
+
+    .tool-button {
+      min-width: 88px;
+      height: 42px;
+      padding: 0 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      border: 1px solid transparent;
+      border-radius: 3px;
+      background: transparent;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .tool-button:hover,
+    .tool-button.active {
+      border-color: #76a7d2;
+      background: linear-gradient(180deg, #ffffff 0, #dceeff 100%);
+      box-shadow: inset 0 0 0 1px #f8fdff;
+    }
+
+    .tool-icon {
+      width: 25px;
+      height: 25px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 25px;
+      border: 1px solid #6398c7;
+      border-radius: 4px;
+      color: #135492;
+      font-size: 16px;
+      font-weight: 700;
+      background: linear-gradient(180deg, #ffffff 0, #bcdcf5 100%);
+      box-shadow: inset 0 0 0 1px #eef8ff, 0 1px #ffffff;
+    }
+
+    .tool-separator {
+      width: 1px;
+      height: 32px;
+      align-self: center;
+      margin: 0 4px;
+      background: #a7c8e3;
+      box-shadow: 1px 0 #ffffff;
+    }
+
+    .shell {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 238px minmax(480px, 1fr) 268px;
+      gap: 6px;
+      padding: 6px;
+      overflow: hidden;
+      background: #d5e8f7;
+    }
+
+    .pane {
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: var(--paper);
+      box-shadow: inset 0 0 0 1px #edf7ff;
+    }
+
+    .pane-title {
+      height: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 0 8px;
+      color: #173e6c;
+      font-weight: 700;
+      background: linear-gradient(180deg, #ffffff 0, #d9ebf8 51%, #c5e0f4 100%);
+      border-bottom: 1px solid var(--line);
+      white-space: nowrap;
+    }
+
+    .pane-title .title-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .collapse-glyph {
+      color: #1d5e9c;
+      font-size: 11px;
+    }
+
+    .left-pane {
+      display: grid;
+      grid-template-rows: 30px auto auto minmax(0, 1fr) 33px;
+    }
+
+    .primary-nav {
+      padding: 5px 5px 4px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .nav-item,
+    .tree-item,
+    .session-item,
+    .file-item {
+      width: 100%;
+      min-width: 0;
+      border: 1px solid transparent;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .nav-item {
+      height: 29px;
+      padding: 0 7px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-radius: 3px;
+      text-align: left;
+    }
+
+    .nav-item:hover,
+    .nav-item.active {
+      border-color: #8db7db;
+      background: #e5f2fc;
+      box-shadow: inset 0 1px #ffffff;
+    }
+
+    .nav-glyph {
+      width: 18px;
+      color: #2269a9;
+      font-size: 16px;
+      text-align: center;
+    }
+
+    .section-title {
+      height: 25px;
+      display: flex;
+      align-items: center;
+      padding: 0 8px;
+      color: #2d5f91;
+      font-size: 12px;
+      font-weight: 700;
+      background: linear-gradient(180deg, #eff8ff 0, #d6eaf9 100%);
+      border-top: 1px solid #ffffff;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .project-list {
+      padding: 4px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .tree-item {
+      height: 25px;
+      padding: 0 6px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 2px;
+      text-align: left;
+    }
+
+    .tree-item:hover,
+    .tree-item.active {
+      border-color: #9ac1e1;
+      background: #e7f3fc;
+    }
+
+    .folder {
+      width: 15px;
+      height: 11px;
+      position: relative;
+      flex: 0 0 15px;
+      border: 1px solid #b27c16;
+      border-radius: 2px;
+      background: #f4c95f;
+      box-shadow: inset 0 1px #fff2aa;
+    }
+
+    .folder::before {
+      content: "";
+      width: 7px;
+      height: 3px;
+      position: absolute;
+      top: -4px;
+      left: 1px;
+      border: 1px solid #b27c16;
+      border-bottom: 0;
+      border-radius: 2px 2px 0 0;
+      background: #eebd49;
+    }
+
+    .sessions {
+      min-height: 0;
+      overflow: auto;
+      padding: 4px;
+    }
+
+    .session-item {
+      height: 36px;
+      padding: 3px 7px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 7px;
+      border-radius: 3px;
+      text-align: left;
+    }
+
+    .session-item:hover,
+    .session-item.active {
+      border-color: #88b5db;
+      background: #dceefa;
+    }
+
+    .session-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .session-time {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .search-box {
+      height: 33px;
+      padding: 4px 5px;
+      border-top: 1px solid var(--line-soft);
+      background: #eaf4fb;
+    }
+
+    .search-box input {
+      width: 100%;
+      height: 24px;
+      padding: 0 8px;
+      border: 1px solid #8eb5d5;
+      border-radius: 3px;
+      outline: none;
+      background: #ffffff;
+      box-shadow: inset 1px 1px 2px rgba(31, 78, 119, 0.14);
+    }
+
+    .center-pane {
+      display: grid;
+      grid-template-rows: 34px minmax(0, 1fr) 128px;
+    }
+
+    .conversation-title {
+      height: 34px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px;
+      color: #173e6c;
+      font-weight: 700;
+      background: linear-gradient(180deg, #ffffff 0, #dbeefa 100%);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .task-meta {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 400;
+    }
+
+    .conversation {
+      min-height: 0;
+      overflow: auto;
+      padding: 18px 24px 24px;
+      background: #ffffff;
+    }
+
+    .assistant-block {
+      max-width: 820px;
+      line-height: 1.65;
+    }
+
+    .assistant-block h2 {
+      margin: 0 0 9px;
+      color: #173e6c;
+      font-size: 15px;
+    }
+
+    .assistant-block p {
+      margin: 7px 0;
+    }
+
+    .assistant-block ul {
+      margin: 6px 0 12px;
+      padding-left: 21px;
+    }
+
+    .assistant-block li {
+      margin: 3px 0;
+    }
+
+    .assistant-block li::marker {
+      color: #1f6fbd;
+    }
+
+    code.inline {
+      padding: 1px 5px;
+      border: 1px solid #b4cce0;
+      border-radius: 3px;
+      color: #2c4259;
+      background: #edf5fb;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+    }
+
+    .code-block {
+      position: relative;
+      margin: 10px 0;
+      padding: 27px 13px 12px;
+      overflow: hidden;
+      border: 1px solid #80aed5;
+      border-radius: 4px;
+      background: #f2f8fd;
+      box-shadow: inset 0 0 0 1px #ffffff;
+    }
+
+    .code-label {
+      position: absolute;
+      top: 0;
+      right: 0;
+      left: 0;
+      height: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 8px;
+      color: #48677f;
+      font-size: 11px;
+      background: #dcecf8;
+      border-bottom: 1px solid #a9c7de;
+    }
+
+    .copy-glyph {
+      width: 14px;
+      height: 14px;
+      border: 1px solid #5f87a8;
+      border-radius: 2px;
+      background: #ffffff;
+    }
+
+    .code-block pre {
+      margin: 0;
+      color: #24374a;
+      font-family: Consolas, "Courier New", monospace;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .command {
+      color: #8a4f13;
+    }
+
+    .string {
+      color: #3f7a23;
+    }
+
+    .message-actions {
+      display: flex;
+      align-items: center;
+      gap: 13px;
+      margin-top: 10px;
+      color: #6a8196;
+      font-size: 11px;
+    }
+
+    .user-message {
+      max-width: 70%;
+      margin: 14px 0 6px auto;
+      padding: 8px 10px;
+      border: 1px solid #8db7d9;
+      border-radius: 4px;
+      background: #e7f3fc;
+      line-height: 1.5;
+    }
+
+    .composer {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: 29px minmax(0, 1fr) 31px;
+      margin: 0 8px 8px;
+      overflow: hidden;
+      border: 1px solid #6f9fc8;
+      border-radius: 4px;
+      background: #ffffff;
+      box-shadow: inset 0 0 0 1px #dcecf8;
+    }
+
+    .composer-toolbar,
+    .composer-footer {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 8px;
+      color: #3c6385;
+      background: linear-gradient(180deg, #f8fcff 0, #dcecf8 100%);
+    }
+
+    .composer-toolbar {
+      border-bottom: 1px solid #aac7df;
+    }
+
+    .composer-footer {
+      justify-content: space-between;
+      border-top: 1px solid #c4d9e9;
+    }
+
+    .composer textarea {
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      padding: 9px 10px;
+      resize: none;
+      border: 0;
+      outline: none;
+      color: var(--ink);
+      background: #ffffff;
+    }
+
+    .composer textarea::placeholder,
+    .search-box input::placeholder {
+      color: #8498aa;
+      opacity: 1;
+    }
+
+    .composer-mode {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .send-button {
+      min-width: 78px;
+      height: 25px;
+      padding: 0 14px;
+      border: 1px solid #145a9b;
+      border-radius: 4px;
+      color: #ffffff;
+      font-weight: 700;
+      background: linear-gradient(180deg, #55a3e3 0, #1870be 52%, #0b5ca8 100%);
+      box-shadow: inset 0 1px rgba(255, 255, 255, 0.64);
+      cursor: pointer;
+    }
+
+    .send-button:hover {
+      background: #2c83cb;
+    }
+
+    .right-pane {
+      display: grid;
+      grid-template-rows: minmax(280px, 1fr) 250px;
+      gap: 6px;
+      border: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .tool-panel {
+      min-width: 0;
+      min-height: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: #ffffff;
+      box-shadow: inset 0 0 0 1px #edf7ff;
+    }
+
+    .tabs {
+      height: 30px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      background: #d8ebf8;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .tab {
+      border: 0;
+      border-right: 1px solid #a8c7df;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .tab:last-child {
+      border-right: 0;
+    }
+
+    .tab.active {
+      color: #174e83;
+      font-weight: 700;
+      background: #ffffff;
+      box-shadow: inset 0 3px #4a94d1;
+    }
+
+    .file-tree {
+      height: calc(100% - 30px);
+      overflow: auto;
+      padding: 6px 4px;
+    }
+
+    .file-item {
+      height: 25px;
+      padding: 0 6px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      border-radius: 2px;
+      text-align: left;
+    }
+
+    .file-item:hover,
+    .file-item.active {
+      border-color: #9abfdf;
+      background: #e8f4fc;
+    }
+
+    .file-indent-1 {
+      padding-left: 20px;
+    }
+
+    .file-indent-2 {
+      padding-left: 35px;
+    }
+
+    .file-glyph {
+      width: 13px;
+      height: 15px;
+      flex: 0 0 13px;
+      border: 1px solid #7697b3;
+      border-radius: 1px;
+      background: #f8fcff;
+      box-shadow: inset 0 3px #d9e9f5;
+    }
+
+    .change-mark {
+      margin-left: auto;
+      color: var(--green);
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .assistant-panel {
+      display: grid;
+      grid-template-rows: 30px 122px minmax(0, 1fr);
+    }
+
+    .assistant-stage {
+      position: relative;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 18% 22%, rgba(255, 255, 255, 0.92) 0 2px, transparent 3px),
+        radial-gradient(circle at 84% 68%, rgba(255, 255, 255, 0.92) 0 2px, transparent 3px),
+        #d9edff;
+      background-size: 38px 38px, 46px 46px, auto;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .pixel-bot {
+      width: 104px;
+      height: 100px;
+      position: relative;
+      image-rendering: pixelated;
+      filter: drop-shadow(0 4px 1px rgba(34, 83, 130, 0.22));
+    }
+
+    .bot-antenna {
+      width: 8px;
+      height: 18px;
+      position: absolute;
+      top: 0;
+      left: 48px;
+      border: 3px solid #194c87;
+      border-bottom: 0;
+      background: #68b6f1;
+    }
+
+    .bot-antenna::before {
+      content: "";
+      width: 11px;
+      height: 11px;
+      position: absolute;
+      top: -8px;
+      left: -4px;
+      border: 3px solid #194c87;
+      background: #f5c84c;
+    }
+
+    .bot-head {
+      width: 78px;
+      height: 48px;
+      position: absolute;
+      top: 15px;
+      left: 13px;
+      border: 4px solid #194c87;
+      border-radius: 8px;
+      background: #4d9fe3;
+      box-shadow: inset 0 4px #8fd0ff, inset 0 -5px #2876bf;
+    }
+
+    .bot-screen {
+      position: absolute;
+      inset: 10px 12px;
+      border: 3px solid #143b6d;
+      border-radius: 3px;
+      background: #173252;
+    }
+
+    .bot-screen::before,
+    .bot-screen::after {
+      content: "";
+      width: 8px;
+      height: 8px;
+      position: absolute;
+      top: 6px;
+      background: #7ceaff;
+      box-shadow: 0 0 0 2px #266b8f;
+    }
+
+    .bot-screen::before {
+      left: 9px;
+    }
+
+    .bot-screen::after {
+      right: 9px;
+    }
+
+    .bot-body {
+      width: 52px;
+      height: 34px;
+      position: absolute;
+      top: 62px;
+      left: 26px;
+      border: 4px solid #194c87;
+      border-radius: 5px;
+      background: #347fc8;
+      box-shadow: inset 0 4px #69b4ec;
+    }
+
+    .bot-body::before,
+    .bot-body::after {
+      content: "";
+      width: 14px;
+      height: 25px;
+      position: absolute;
+      top: 2px;
+      border: 4px solid #194c87;
+      background: #4d9fe3;
+    }
+
+    .bot-body::before {
+      left: -18px;
+    }
+
+    .bot-body::after {
+      right: -18px;
+    }
+
+    .bot-light {
+      width: 10px;
+      height: 10px;
+      position: absolute;
+      top: 72px;
+      left: 47px;
+      z-index: 2;
+      border: 2px solid #17447a;
+      background: #79d75f;
+    }
+
+    .assistant-copy {
+      min-height: 0;
+      padding: 8px 10px;
+      overflow: auto;
+      line-height: 1.55;
+      background: #f7fbff;
+    }
+
+    .assistant-name {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 5px;
+      color: #1a4e80;
+      font-weight: 700;
+    }
+
+    .online-dot {
+      width: 10px;
+      height: 10px;
+      border: 1px solid #387c19;
+      border-radius: 50%;
+      background: #75c944;
+      box-shadow: inset 0 1px #d7f6bd;
+    }
+
+    .assistant-note {
+      color: #4d657b;
+    }
+
+    .statusbar {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 0 9px;
+      overflow: hidden;
+      color: #17466f;
+      font-size: 11px;
+      background: linear-gradient(180deg, #b9dcf6 0, #77b5e5 100%);
+      border-top: 1px solid #4f92c8;
+      box-shadow: inset 0 1px #eaf7ff;
+    }
+
+    .status-group {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      white-space: nowrap;
+    }
+
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+    }
+
+    .status-led {
+      width: 9px;
+      height: 9px;
+      border: 1px solid #347317;
+      border-radius: 50%;
+      background: #6cbd36;
+    }
+
+    .closed-view {
+      display: none;
+      width: 100%;
+      height: 100%;
+      place-items: center;
+      color: #ffffff;
+      background: #4b8fd0;
+    }
+
+    .reopen-button {
+      height: 32px;
+      padding: 0 18px;
+      border: 1px solid #184f85;
+      border-radius: 4px;
+      color: #183f65;
+      background: #e5f3fd;
+      cursor: pointer;
+    }
+
+    body.is-closed .desktop {
+      display: none;
+    }
+
+    body.is-closed .closed-view {
+      display: grid;
+    }
+
+    .app-window.is-minimized {
+      height: 34px;
+      min-height: 34px;
+      grid-template-rows: 34px;
+    }
+
+    .app-window.is-minimized > :not(.titlebar) {
+      display: none;
+    }
+
+    .desktop.is-maximized {
+      padding: 0;
+    }
+
+    .desktop.is-maximized .app-window {
+      border-radius: 0;
+    }
+
+    @media (max-width: 1120px) {
+      .shell {
+        grid-template-columns: 220px minmax(460px, 1fr);
+      }
+
+      .right-pane {
+        display: none;
+      }
+
+      .tool-button {
+        min-width: 74px;
+        padding: 0 8px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="desktop" id="desktop">
+    <main class="app-window" id="appWindow" aria-label="CodexHub 2007 视觉稿">
+      <header class="titlebar">
+        <div class="window-title">
+          <img src="../../packaging/icons/dolphin-rounded-48.png" alt="">
+          <span>CodexHub 2007</span>
+          <span class="window-subtitle">· 协议转换与主题接入</span>
+        </div>
+        <div class="window-controls" aria-label="窗口控制">
+          <button class="window-button" id="minimizeButton" type="button" title="最小化" aria-label="最小化">_</button>
+          <button class="window-button" id="maximizeButton" type="button" title="最大化" aria-label="最大化">□</button>
+          <button class="window-button close" id="closeButton" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+      </header>
+
+      <nav class="toolbar" aria-label="主工具栏">
+        <button class="tool-button active" type="button"><span class="tool-icon">＋</span><span>新建任务</span></button>
+        <button class="tool-button" type="button"><span class="tool-icon">⌕</span><span>搜索</span></button>
+        <span class="tool-separator" aria-hidden="true"></span>
+        <button class="tool-button" type="button"><span class="tool-icon">✣</span><span>插件</span></button>
+        <button class="tool-button" type="button"><span class="tool-icon">▣</span><span>工作区</span></button>
+        <button class="tool-button" type="button"><span class="tool-icon">⇄</span><span>变更</span></button>
+      </nav>
+
+      <section class="shell">
+        <aside class="pane left-pane" aria-label="任务与项目">
+          <div class="pane-title">
+            <span class="title-label">CodexHub</span>
+            <span class="collapse-glyph">▲</span>
+          </div>
+          <div class="primary-nav">
+            <button class="nav-item active" type="button"><span class="nav-glyph">＋</span><span>新建任务</span></button>
+            <button class="nav-item" type="button"><span class="nav-glyph">◴</span><span>已安排</span></button>
+            <button class="nav-item" type="button"><span class="nav-glyph">✣</span><span>插件</span></button>
+            <button class="nav-item" type="button"><span class="nav-glyph">◎</span><span>自动化</span></button>
+          </div>
+          <div>
+            <div class="section-title">项目</div>
+            <div class="project-list">
+              <button class="tree-item active" type="button"><span class="folder"></span><span>codexhub</span></button>
+              <button class="tree-item" type="button"><span class="folder"></span><span>sub2api-main</span></button>
+              <button class="tree-item" type="button"><span class="folder"></span><span>codex-main</span></button>
+            </div>
+          </div>
+          <div class="sessions">
+            <div class="section-title">最近会话</div>
+            <button class="session-item active" type="button"><span class="session-name">复古主题视觉稿</span><span class="session-time">刚刚</span></button>
+            <button class="session-item" type="button"><span class="session-name">Responses Lite 搜索</span><span class="session-time">28 分</span></button>
+            <button class="session-item" type="button"><span class="session-name">Anthropic 图片转换</span><span class="session-time">1 小时</span></button>
+            <button class="session-item" type="button"><span class="session-name">远程控制连接</span><span class="session-time">昨天</span></button>
+          </div>
+          <div class="search-box"><input type="search" placeholder="搜索任务..." aria-label="搜索任务"></div>
+        </aside>
+
+        <section class="pane center-pane" aria-label="当前会话">
+          <header class="conversation-title">
+            <span>协议转换与主题接入</span>
+            <span class="task-meta">codexhub · main</span>
+          </header>
+          <div class="conversation" id="conversation">
+            <article class="assistant-block">
+              <h2>结构确认完成</h2>
+              <p>请求链路已经对齐，当前改动只影响主题资源，不改变会话与工具调用。</p>
+              <ul>
+                <li><code class="inline">responses</code> 请求继续透传到 AI Gateway。</li>
+                <li><code class="inline">web.run</code> 与本地工具注册保持原有语义。</li>
+                <li>主题关闭后恢复 Codex App 默认视觉。</li>
+              </ul>
+
+              <div class="code-block">
+                <div class="code-label"><span>PowerShell</span><span class="copy-glyph" title="复制"></span></div>
+                <pre><span class="command">cargo test</span>
+<span class="command">cargo build</span> --release --features gui --bin codexhub</pre>
+              </div>
+
+              <p>测试通过后，再确认增强模式没有引入额外监听器。</p>
+
+              <div class="code-block">
+                <div class="code-label"><span>Rust</span><span class="copy-glyph" title="复制"></span></div>
+                <pre>const THEME_STYLE_ID: &amp;str = <span class="string">"codexhub-retro-theme"</span>;
+const CDP_PORT: u16 = 9335;</pre>
+              </div>
+
+              <div class="message-actions">
+                <span>有用</span><span>复制</span><span>重新生成</span><span>今天 12:48</span>
+              </div>
+            </article>
+          </div>
+          <div class="composer">
+            <div class="composer-toolbar"><span>文本</span><span>图片</span><span>附件</span></div>
+            <textarea id="composerInput" placeholder="要求后续变更" aria-label="消息内容"></textarea>
+            <div class="composer-footer">
+              <span class="composer-mode">默认权限 · GPT-5.6 Sol 高</span>
+              <button class="send-button" id="sendButton" type="button">发送</button>
+            </div>
+          </div>
+        </section>
+
+        <aside class="right-pane" aria-label="工作区与助手">
+          <section class="tool-panel">
+            <div class="tabs" role="tablist" aria-label="工作区视图">
+              <button class="tab active" type="button" data-tab="files" role="tab">文件</button>
+              <button class="tab" type="button" data-tab="changes" role="tab">变更</button>
+            </div>
+            <div class="file-tree" id="filesView">
+              <button class="file-item active" type="button"><span class="folder"></span><span>codexhub</span></button>
+              <button class="file-item file-indent-1" type="button"><span class="folder"></span><span>src</span></button>
+              <button class="file-item file-indent-2" type="button"><span class="file-glyph"></span><span>codex_app_enhanced.rs</span><span class="change-mark">M</span></button>
+              <button class="file-item file-indent-2" type="button"><span class="file-glyph"></span><span>gui.rs</span></button>
+              <button class="file-item file-indent-1" type="button"><span class="folder"></span><span>docs</span></button>
+              <button class="file-item file-indent-2" type="button"><span class="file-glyph"></span><span>theme-notes.md</span><span class="change-mark">A</span></button>
+              <button class="file-item file-indent-1" type="button"><span class="file-glyph"></span><span>Cargo.toml</span></button>
+            </div>
+            <div class="file-tree" id="changesView" hidden>
+              <button class="file-item active" type="button"><span class="file-glyph"></span><span>codex_app_enhanced.rs</span><span class="change-mark">+42</span></button>
+              <button class="file-item" type="button"><span class="file-glyph"></span><span>theme-notes.md</span><span class="change-mark">新增</span></button>
+            </div>
+          </section>
+
+          <section class="tool-panel assistant-panel">
+            <div class="pane-title"><span class="title-label">CodexHub 助手</span><span class="collapse-glyph">▲</span></div>
+            <div class="assistant-stage">
+              <div class="pixel-bot" aria-label="原创蓝色像素机器人">
+                <div class="bot-antenna"></div>
+                <div class="bot-head"><div class="bot-screen"></div></div>
+                <div class="bot-body"></div>
+                <div class="bot-light"></div>
+              </div>
+            </div>
+            <div class="assistant-copy">
+              <div class="assistant-name"><span class="online-dot"></span><span>小海豚 · 在线</span></div>
+              <div class="assistant-note">当前工作区有 2 个文件发生变更。测试已通过，可以继续检查主题选择器。</div>
+            </div>
+          </section>
+        </aside>
+      </section>
+
+      <footer class="statusbar">
+        <div class="status-group">
+          <span class="status-item"><span class="status-led"></span>AI Gateway 已连接</span>
+          <span class="status-item">main</span>
+          <span class="status-item">UTF-8</span>
+        </div>
+        <div class="status-group"><span>增强模式</span><span>GPT-5.6 Sol</span></div>
+      </footer>
+    </main>
+  </div>
+
+  <div class="closed-view"><button class="reopen-button" id="reopenButton" type="button">重新打开视觉稿</button></div>
+
+  <script>
+    const appWindow = document.getElementById("appWindow");
+    const desktop = document.getElementById("desktop");
+    const conversation = document.getElementById("conversation");
+    const composerInput = document.getElementById("composerInput");
+
+    document.querySelectorAll(".tool-button").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll(".tool-button").forEach((item) => item.classList.remove("active"));
+        button.classList.add("active");
+      });
+    });
+
+    for (const selector of [".nav-item", ".tree-item", ".session-item", ".file-item"]) {
+      document.querySelectorAll(selector).forEach((button) => {
+        button.addEventListener("click", () => {
+          const parent = button.parentElement;
+          parent?.querySelectorAll(selector).forEach((item) => item.classList.remove("active"));
+          button.classList.add("active");
+        });
+      });
+    }
+
+    document.querySelectorAll(".tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".tab").forEach((item) => item.classList.toggle("active", item === tab));
+        const showChanges = tab.dataset.tab === "changes";
+        document.getElementById("filesView").hidden = showChanges;
+        document.getElementById("changesView").hidden = !showChanges;
+      });
+    });
+
+    const send = () => {
+      const value = composerInput.value.trim();
+      if (!value) return;
+      const message = document.createElement("div");
+      message.className = "user-message";
+      message.textContent = value;
+      conversation.appendChild(message);
+      composerInput.value = "";
+      conversation.scrollTop = conversation.scrollHeight;
+    };
+
+    document.getElementById("sendButton").addEventListener("click", send);
+    composerInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        send();
+      }
+    });
+
+    document.getElementById("minimizeButton").addEventListener("click", () => {
+      appWindow.classList.toggle("is-minimized");
+    });
+    document.getElementById("maximizeButton").addEventListener("click", () => {
+      desktop.classList.toggle("is-maximized");
+    });
+    document.getElementById("closeButton").addEventListener("click", () => {
+      document.body.classList.add("is-closed");
+    });
+    document.getElementById("reopenButton").addEventListener("click", () => {
+      document.body.classList.remove("is-closed");
+      appWindow.classList.remove("is-minimized");
+    });
+  </script>
+</body>
+</html>

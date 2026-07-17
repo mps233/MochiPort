@@ -356,6 +356,7 @@ pub(super) struct DashboardSnapshot {
     pub(super) service_online: bool,
     pub(super) local_connection_mode: LocalConnectionMode,
     pub(super) compatible_connection_available: bool,
+    pub(super) codex_app_retro_theme_enabled: bool,
     pub(super) status: Option<ServerStatus>,
     pub(super) remote: Option<RemoteControlStatus>,
     pub(super) codex_app: Option<CodexAppStatus>,
@@ -372,6 +373,7 @@ impl DashboardSnapshot {
             compatible_connection_available: false,
             remote: Some(dashboard.remote),
             codex_app: Some(dashboard.codex_app),
+            codex_app_retro_theme_enabled: dashboard.codex_app_retro_theme_enabled,
             im_accounts: Some(dashboard.im_accounts),
             status: Some(dashboard.status),
             ai_gateway: Some(dashboard.ai_gateway),
@@ -402,6 +404,8 @@ struct GuiDashboardResponse {
     status: ServerStatus,
     remote: RemoteControlStatus,
     codex_app: CodexAppStatus,
+    #[serde(default)]
+    codex_app_retro_theme_enabled: bool,
     im_accounts: ImAccountsResponse,
     ai_gateway: AiGatewayConfig,
 }
