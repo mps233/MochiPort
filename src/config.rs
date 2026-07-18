@@ -16,7 +16,6 @@ pub struct AppConfig {
     pub language: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    pub codex_app_retro_theme_enabled: bool,
     #[serde(default)]
     pub state_path: PathBuf,
     pub logging: LoggingConfig,
@@ -118,7 +117,6 @@ impl Default for AppConfig {
             outbound_proxy: OutboundProxyConfig::default(),
             language: None,
             theme: None,
-            codex_app_retro_theme_enabled: false,
             state_path: PathBuf::from("codexhub-state.json"),
             logging: LoggingConfig::default(),
             feishu: FeishuConfig::default(),
@@ -613,19 +611,6 @@ mod tests {
             toml::from_str("bind = '127.0.0.1:3847'\ncodexAppFastStartup = true\n").unwrap();
         let serialized = toml::to_string(&config).unwrap();
         assert!(!serialized.contains("codexAppFastStartup"));
-    }
-
-    #[test]
-    fn retro_theme_defaults_off_and_round_trips() {
-        let default_config: AppConfig = toml::from_str("bind = '127.0.0.1:3847'").unwrap();
-        assert!(!default_config.codex_app_retro_theme_enabled);
-
-        let mut enabled_config = AppConfig::default();
-        enabled_config.codex_app_retro_theme_enabled = true;
-        let serialized = toml::to_string(&enabled_config).unwrap();
-        assert!(serialized.contains("codexAppRetroThemeEnabled = true"));
-        let restored: AppConfig = toml::from_str(&serialized).unwrap();
-        assert!(restored.codex_app_retro_theme_enabled);
     }
 
     #[test]

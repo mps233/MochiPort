@@ -334,7 +334,7 @@ pub(super) async fn refresh_codex_app_models(
 pub(super) async fn launch_codex_app_enhanced(
     State(state): State<SharedState>,
 ) -> impl IntoResponse {
-    let (models, backend_url, retro_theme_enabled) = {
+    let (models, backend_url) = {
         let config = state.config.lock().await;
         let (response, _) = configured_models_response_with_etag(&config.ai_gateway);
         let models = response["models"]
@@ -344,36 +344,27 @@ pub(super) async fn launch_codex_app_enhanced(
             .filter_map(|model| model.get("slug").and_then(serde_json::Value::as_str))
             .map(str::to_string)
             .collect::<Vec<_>>();
-        (
-            models,
-            config.remote_control_base_url(),
-            config.codex_app_retro_theme_enabled,
-        )
+        (models, config.remote_control_base_url())
     };
     state
         .push_event(
             "info",
             "codex_app_enhanced_launch_start",
-            format!(
-                "models={} retro_theme_enabled={retro_theme_enabled}",
-                models.len()
-            ),
+            format!("models={}", models.len()),
         )
         .await;
-    match codex_app_enhanced::launch_and_inject(models, &backend_url, retro_theme_enabled).await {
+    match codex_app_enhanced::launch_and_inject(models, &backend_url).await {
         Ok(report) => {
             state
                 .push_event(
                     "info",
                     "codex_app_enhanced_launch_ready",
                     format!(
-                        "launched={} port={} models={} gates={} retro_theme_enabled={} retro_theme_applied={}",
+                        "launched={} port={} models={} gates={}",
                         report.launched,
                         report.port,
                         report.available_models.len(),
-                        report.key_gates_enabled,
-                        report.retro_theme_enabled,
-                        report.retro_theme_applied,
+                        report.key_gates_enabled
                     ),
                 )
                 .await;

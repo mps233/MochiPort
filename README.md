@@ -1,4 +1,4 @@
-﻿# codexhub
+# codexhub
 
 [English](README.en.md)
 

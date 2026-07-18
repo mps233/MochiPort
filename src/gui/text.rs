@@ -632,10 +632,10 @@ impl GuiText {
     pub(super) fn codex_visible_models_scope_warning(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "重要：普通方式启动 Codex App 时，模型列表仍只影响 CLI；请使用上方“增强模式启动 Codex App”同步前端模型列表。"
+                "重要：普通方式启动 Codex App 时，模型列表仍只影响 CLI；请使用上方“自定义模型列表启动 Codex”同步前端模型列表。"
             }
             GuiLocale::EnUs => {
-                "Important: With a normally launched Codex App, this list still only affects the CLI. Use Enhanced Launch above to sync the App model picker."
+                "Important: With a normally launched Codex App, this list still only affects the CLI. Use Launch Codex with Custom Models above to sync the App model picker."
             }
         }
     }
@@ -870,53 +870,33 @@ impl GuiText {
 
     pub(super) fn codex_enhanced_launch(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "增强模式启动 Codex App",
-            GuiLocale::EnUs => "Enhanced Launch Codex App",
+            GuiLocale::ZhCn => "自定义模型列表启动 Codex",
+            GuiLocale::EnUs => "Launch Codex with Custom Models",
         }
     }
 
     pub(super) fn codex_enhanced_launching(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "正在启动增强模式...",
-            GuiLocale::EnUs => "Starting enhanced mode...",
+            GuiLocale::ZhCn => "正在使用自定义模型列表启动 Codex...",
+            GuiLocale::EnUs => "Launching Codex with custom models...",
         }
     }
 
     pub(super) fn codex_enhanced_launch_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "以增强模式启动 Codex App，并同步 CodexHub 模型列表。Codex App 正在运行时，需要先完全退出。"
+                "使用 CodexHub 当前模型列表启动 Codex，并同步 Codex 前端模型选项。Codex App 正在运行时，需要先完全退出。"
             }
             GuiLocale::EnUs => {
-                "Launch Codex App in enhanced mode and sync the CodexHub model list. Exit Codex App first if it is already running."
-            }
-        }
-    }
-
-    pub(super) fn codex_retro_theme(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "CodexHub 2007 复古主题",
-            GuiLocale::EnUs => "CodexHub 2007 Retro Theme",
-        }
-    }
-
-    pub(super) fn codex_retro_theme_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => {
-                "勾选后，使用增强模式启动 Codex App 时应用复古配色；不改变布局和功能。取消勾选后，下次增强启动恢复官方主题。"
-            }
-            GuiLocale::EnUs => {
-                "Apply retro styling when Codex App is started in enhanced mode without changing its layout or features. Clear it and launch again to restore the official theme."
+                "Launch Codex with the current CodexHub model list and sync the model picker. Exit Codex App first if it is already running."
             }
         }
     }
 
     pub(super) fn codex_enhanced_launch_ready(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex App 已进入增强模式，前端模型列表已同步。",
-            GuiLocale::EnUs => {
-                "Codex App is running in enhanced mode and its model picker is synchronized."
-            }
+            GuiLocale::ZhCn => "Codex 已使用自定义模型列表启动，前端模型列表已同步。",
+            GuiLocale::EnUs => "Codex is running with the custom model list synchronized.",
         }
     }
 
@@ -936,26 +916,26 @@ impl GuiText {
 
     pub(super) fn codex_enhanced_launch_confirm(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "启动增强模式",
-            GuiLocale::EnUs => "Launch Enhanced Mode",
+            GuiLocale::ZhCn => "使用自定义模型列表启动",
+            GuiLocale::EnUs => "Launch with Custom Models",
         }
     }
 
     pub(super) fn codex_enhanced_launch_close_running(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "检测到 Codex App 正在运行。请完全退出 Codex App，退出后即可启动增强模式。"
+                "检测到 Codex App 正在运行。请完全退出 Codex App，退出后即可使用自定义模型列表启动。"
             }
             GuiLocale::EnUs => {
-                "Codex App is running. Exit it completely before launching enhanced mode."
+                "Codex App is running. Exit it completely before launching with custom models."
             }
         }
     }
 
     pub(super) fn codex_enhanced_launch_ready_to_start(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "未检测到 Codex App 进程，可以使用增强模式启动。",
-            GuiLocale::EnUs => "Codex App is not running. Enhanced launch is ready.",
+            GuiLocale::ZhCn => "未检测到 Codex App 进程，可以使用自定义模型列表启动 Codex。",
+            GuiLocale::EnUs => "Codex App is not running. Custom model launch is ready.",
         }
     }
 

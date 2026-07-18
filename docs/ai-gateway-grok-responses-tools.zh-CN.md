@@ -100,6 +100,8 @@ Grok 标准 Responses 路径使用 JSON function tool。CodexHub 按 Grok Build 
 - Grok function 的 JSON 参数字段叫 `patch`。
 - custom tool 的 grammar `format` 不发送给 Grok function。
 - 工具说明中的示例和约束会同步改成 `patch`，避免模型仍生成 `{ "input": ... }`。
+- Grok 专属说明把控制行定义为字面量，并给出正确/错误对照，明确禁止把
+  `*** Begin Patch` 写成 Markdown 风格的 `*** Begin Patch ***`。
 - `ToolNameMap` 保存“这个 function 原本是 custom tool”的请求级映射，响应时据此恢复原语义。
 
 普通 custom tool 仍使用 `{ "input": string }`；只有 `apply_patch` 使用
@@ -161,7 +163,27 @@ CodexHub 恢复为 Codex 能执行的形态：
 响应解析同时兼容 `patch` 和旧的通用 `input` 参数，但新发给 Grok 的 `apply_patch` 声明和历史
 统一使用 `patch`。
 
-### 4.2 SSE 流式事件
+### 4.2 Grok 对称星号兼容
+
+真实请求日志 `14704` 确认，Grok 在已经收到完整规则和 5 组 few-shot 的情况下，仍可能把所有
+控制行误当成 Markdown 强调符号：
+
+```text
+*** Begin Patch ***
+*** Add File: notes.md ***
++content
+*** End Patch ***
+```
+
+Codex 本地执行器会正确拒绝它，因为标准语法要求控制行没有尾随 ` ***`。CodexHub 对 Grok
+function 的 `patch` 参数增加了一个严格、局部的兼容修复：只移除已知控制行末尾的单个 ` ***`，
+包括 Begin/End、Add/Delete/Update/Move 和 End of File。以 `+`、`-` 或空格开头的补丁内容不会
+修改；普通 custom tool 的 `input` 也不会进入该规则。合法补丁保持字节语义不变。
+
+这层修复不是通用“猜测补丁意图”。除此之外的非法 hunk、上下文不匹配、路径错误和内容错误仍由
+Codex 原生 `apply_patch` 返回，模型必须根据真实错误重试。
+
+### 4.3 SSE 流式事件
 
 标准 function 流使用：
 
@@ -245,6 +267,8 @@ custom tool、新字段和原生 SSE 语义。
 自动化覆盖包括：
 
 - `apply_patch` custom declaration 到 `{ patch: string }` function schema。
+- Grok 专属字面量规则、正反例和参数说明完整进入 function declaration。
+- 对称 Markdown 星号只在 Grok `patch` 参数的已知控制行上修复。
 - 普通 custom tool 继续使用 `{ input: string }`。
 - 历史 `custom_tool_call` 到 Grok `function_call` 的 `patch` 参数转换。
 - 完整响应和非流式 JSON 恢复。

@@ -459,11 +459,62 @@ fn parsed_custom_input_from_arguments(arguments: &Value) -> Option<String> {
 
 fn custom_input_value(arguments: Value) -> Option<String> {
     let object = arguments.as_object()?;
-    let input = object.get("input").or_else(|| object.get("patch"))?;
-    Some(match input {
+    let (input, is_grok_apply_patch) = object
+        .get("patch")
+        .map(|input| (input, true))
+        .or_else(|| object.get("input").map(|input| (input, false)))?;
+    let input = match input {
         Value::String(input) => input.clone(),
         input => serde_json::to_string(input).unwrap_or_default(),
+    };
+    Some(if is_grok_apply_patch {
+        normalize_grok_apply_patch_markers(&input)
+    } else {
+        input
     })
+}
+
+fn normalize_grok_apply_patch_markers(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut changed = false;
+
+    for (index, line) in input.split('\n').enumerate() {
+        if index > 0 {
+            output.push('\n');
+        }
+        let (line, had_carriage_return) = line
+            .strip_suffix('\r')
+            .map(|line| (line, true))
+            .unwrap_or((line, false));
+        if let Some(normalized) = normalize_grok_apply_patch_control_line(line) {
+            output.push_str(normalized);
+            changed = true;
+        } else {
+            output.push_str(line);
+        }
+        if had_carriage_return {
+            output.push('\r');
+        }
+    }
+
+    if changed { output } else { input.to_string() }
+}
+
+fn normalize_grok_apply_patch_control_line(line: &str) -> Option<&str> {
+    let normalized = line.strip_suffix(" ***")?;
+    let exact_marker = matches!(
+        normalized,
+        "*** Begin Patch" | "*** End Patch" | "*** End of File"
+    );
+    let file_operation = [
+        "*** Add File: ",
+        "*** Delete File: ",
+        "*** Update File: ",
+        "*** Move to: ",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix) && normalized.len() > prefix.len());
+    (exact_marker || file_operation).then_some(normalized)
 }
 
 fn sse_data_value(line: &str) -> Option<&str> {
@@ -528,6 +579,45 @@ mod tests {
         let normalized_once = event.clone();
         assert!(!normalize_response_value(&mut event));
         assert_eq!(event, normalized_once);
+    }
+
+    #[test]
+    fn grok_apply_patch_arguments_repair_symmetric_markdown_markers() {
+        let malformed = concat!(
+            "*** Begin Patch ***\r\n",
+            "*** Add File: notes.md ***\r\n",
+            "+# Notes\r\n",
+            "+*** End Patch ***\r\n",
+            "*** End Patch ***\r\n"
+        );
+
+        let restored = custom_input_value(json!({"patch": malformed})).unwrap();
+
+        assert_eq!(
+            restored,
+            concat!(
+                "*** Begin Patch\r\n",
+                "*** Add File: notes.md\r\n",
+                "+# Notes\r\n",
+                "+*** End Patch ***\r\n",
+                "*** End Patch\r\n"
+            )
+        );
+    }
+
+    #[test]
+    fn grok_apply_patch_marker_repair_does_not_change_valid_or_generic_custom_input() {
+        let valid = "*** Begin Patch\n*** Add File: notes.md\n+hello\n*** End Patch";
+        assert_eq!(
+            custom_input_value(json!({"patch": valid})).as_deref(),
+            Some(valid)
+        );
+
+        let generic = "*** Begin Patch ***\n*** End Patch ***";
+        assert_eq!(
+            custom_input_value(json!({"input": generic})).as_deref(),
+            Some(generic)
+        );
     }
 
     #[test]

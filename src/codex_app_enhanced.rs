@@ -16,8 +16,6 @@ use crate::chain_log;
 
 const DEFAULT_CDP_PORT: u16 = 9335;
 const CODEX_APP_READY_TIMEOUT: Duration = Duration::from_secs(30);
-const RETRO_THEME_STYLE_ID: &str = "codexhub-2007-retro-theme";
-const RETRO_THEME_ROOT_CLASS: &str = "codexhub-retro-theme";
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 static ENHANCED_CDP_SESSION: OnceLock<Mutex<Option<tokio::task::JoinHandle<()>>>> = OnceLock::new();
 const KEY_FEATURE_GATES: &[&str] = &[
@@ -50,8 +48,6 @@ pub struct EnhancedLaunchReport {
     pub bootstrap_source: Option<String>,
     pub routes_mounted: bool,
     pub renderer_ready_ms: Option<u64>,
-    pub retro_theme_enabled: bool,
-    pub retro_theme_applied: bool,
     pub startup_elapsed_ms: u64,
 }
 
@@ -81,7 +77,6 @@ struct CdpTarget {
 pub async fn launch_and_inject(
     models: Vec<String>,
     backend_url: &str,
-    retro_theme_enabled: bool,
 ) -> Result<EnhancedLaunchReport> {
     let started = Instant::now();
     let models = normalized_models(models);
@@ -89,9 +84,11 @@ pub async fn launch_and_inject(
         bail!("Codex 可见模型列表为空，请先在 Codex 接入页面保存模型");
     }
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=launch_start model_count={} retro_theme_enabled={retro_theme_enabled}",
-        models.len(),
+        "[codex_app_enhanced] event=launch_start model_count={}",
+        models.len()
     ));
+    crate::codex_app_config::prepare_codex_app_config_recovery_snapshot(None)
+        .context("准备 Codex 配置恢复快照失败")?;
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -108,7 +105,7 @@ pub async fn launch_and_inject(
                     .map_err(|err| anyhow!("配置 CODEX_API_BASE_URL 失败: {err}"))?;
                 target
             }
-            None => bail!("Codex App 正在运行。请先完全退出，再使用增强模式启动"),
+            None => bail!("Codex App 正在运行。请先完全退出，再使用自定义模型列表启动 Codex"),
         }
     } else {
         crate::codex_app_config::configure_gui_direct_api_base(backend_url)
@@ -124,32 +121,23 @@ pub async fn launch_and_inject(
         target.id
     ));
 
-    inject_target(&target, DEFAULT_CDP_PORT, &models, retro_theme_enabled).await?;
+    inject_target(&target, DEFAULT_CDP_PORT, &models).await?;
     chain_log::write_line(format!(
         "[codex_app_enhanced] event=injection_applied elapsed_ms={} target_id={}",
         started.elapsed().as_millis(),
         target.id
     ));
-    let status = wait_for_injected_status(
-        &client,
-        DEFAULT_CDP_PORT,
-        &target.id,
-        &models,
-        retro_theme_enabled,
-    )
-    .await?;
+    let status = wait_for_injected_status(&client, DEFAULT_CDP_PORT, &target.id, &models).await?;
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={} retro_theme_enabled={} retro_theme_applied={}",
+        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={}",
         status.routes_mounted,
         status
             .renderer_ready_ms
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
         status.bootstrap_intercepted,
-        status.bootstrap_source.as_deref().unwrap_or("none"),
-        status.retro_theme_enabled,
-        status.retro_theme_applied,
+        status.bootstrap_source.as_deref().unwrap_or("none")
     ));
 
     Ok(EnhancedLaunchReport {
@@ -163,8 +151,6 @@ pub async fn launch_and_inject(
         bootstrap_source: status.bootstrap_source,
         routes_mounted: status.routes_mounted,
         renderer_ready_ms: status.renderer_ready_ms,
-        retro_theme_enabled: status.retro_theme_enabled,
-        retro_theme_applied: status.retro_theme_applied,
         startup_elapsed_ms,
     })
 }
@@ -221,33 +207,24 @@ fn validated_websocket_url(target: &CdpTarget, expected_port: u16) -> Result<Str
     Ok(raw.to_string())
 }
 
-async fn inject_target(
-    target: &CdpTarget,
-    port: u16,
-    models: &[String],
-    retro_theme_enabled: bool,
-) -> Result<()> {
+async fn inject_target(target: &CdpTarget, port: u16, models: &[String]) -> Result<()> {
     let websocket_url = validated_websocket_url(target, port)?;
     let (mut socket, _) = connect_async(websocket_url)
         .await
         .context("连接 Codex App CDP 失败")?;
-    let source = enhanced_statsig_script(models, retro_theme_enabled)?;
+    let source = enhanced_statsig_script(models)?;
     let mut command_id = 1_u64;
     cdp_command(&mut socket, &mut command_id, "Page.enable", json!({})).await?;
-    cdp_command(
-        &mut socket,
-        &mut command_id,
-        "Page.addScriptToEvaluateOnNewDocument",
-        json!({ "source": source }),
-    )
-    .await?;
-    cdp_command(
-        &mut socket,
-        &mut command_id,
-        "Page.reload",
-        json!({ "ignoreCache": false }),
-    )
-    .await?;
+    for (method, params) in enhanced_script_install_commands(&source) {
+        let result = cdp_command(&mut socket, &mut command_id, method, params).await?;
+        if method == "Runtime.evaluate" {
+            ensure_runtime_evaluation_succeeded(&result)?;
+        }
+    }
+    chain_log::write_line(format!(
+        "[codex_app_enhanced] event=script_installed reload=false target_id={}",
+        target.id
+    ));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         let applied = cdp_command(
@@ -267,12 +244,40 @@ async fn inject_target(
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Codex App renderer 已刷新，但增强模型配置未能生效");
+            bail!("Codex App 已启动，但自定义模型列表未能生效；可以继续普通使用 Codex App");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     retain_cdp_session(socket);
     Ok(())
+}
+
+fn enhanced_script_install_commands(source: &str) -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": source }),
+        ),
+        (
+            "Runtime.evaluate",
+            json!({
+                "expression": source,
+                "returnByValue": true,
+            }),
+        ),
+    ]
+}
+
+fn ensure_runtime_evaluation_succeeded(result: &Value) -> Result<()> {
+    let Some(exception) = result.get("exceptionDetails") else {
+        return Ok(());
+    };
+    let message = exception
+        .pointer("/exception/description")
+        .and_then(Value::as_str)
+        .or_else(|| exception.get("text").and_then(Value::as_str))
+        .unwrap_or("unknown JavaScript error");
+    bail!("Codex App 增强脚本执行失败: {message}")
 }
 
 fn retain_cdp_session(mut socket: CdpSocket) {
@@ -344,8 +349,6 @@ struct InjectedStatus {
     bootstrap_source: Option<String>,
     routes_mounted: bool,
     renderer_ready_ms: Option<u64>,
-    retro_theme_enabled: bool,
-    retro_theme_applied: bool,
 }
 
 async fn wait_for_injected_status(
@@ -353,67 +356,50 @@ async fn wait_for_injected_status(
     port: u16,
     target_id: &str,
     expected_models: &[String],
-    expected_retro_theme_enabled: bool,
 ) -> Result<InjectedStatus> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     loop {
         if let Some(target) = find_app_target(client, port).await?
             && target.id == target_id
             && let Ok(status) = inspect_injected_status(&target, port).await
-            && injected_status_is_ready(&status, expected_models, expected_retro_theme_enabled)
+            && injected_status_is_ready(&status, expected_models)
         {
             return Ok(status);
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Codex App renderer 已启动，但增强模型配置未在 20 秒内生效");
+            bail!("Codex App 已启动，但自定义模型列表未在 20 秒内生效");
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
-fn injected_status_is_ready(
-    status: &InjectedStatus,
-    expected_models: &[String],
-    expected_retro_theme_enabled: bool,
-) -> bool {
+fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String]) -> bool {
     // Renderer routes may mount well after Statsig is updated; the retained script
     // will keep the enhanced configuration active while the UI finishes loading.
     status.ready
         && status.available_models == expected_models
         && !status.use_hidden_models
         && status.key_gates_enabled == KEY_FEATURE_GATES.len()
-        && status.retro_theme_enabled == expected_retro_theme_enabled
-        && status.retro_theme_applied == expected_retro_theme_enabled
 }
 
 async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<InjectedStatus> {
     let websocket_url = validated_websocket_url(target, port)?;
     let (mut socket, _) = connect_async(websocket_url).await?;
     let gates = serde_json::to_string(KEY_FEATURE_GATES)?;
-    let theme_style_id = serde_json::to_string(RETRO_THEME_STYLE_ID)?;
-    let theme_root_class = serde_json::to_string(RETRO_THEME_ROOT_CLASS)?;
     let expression = format!(
         r#"(() => {{
           const client = window.__STATSIG__?.firstInstance;
           const config = client?.getDynamicConfig?.("107580212")?.value;
           const gates = {gates};
-          const marker = window.__CODEXHUB_ENHANCED_MODE__;
-          const themeStyleId = {theme_style_id};
-          const themeRootClass = {theme_root_class};
           return {{
             ready: Boolean(Array.isArray(config?.available_models)),
             availableModels: config?.available_models ?? [],
             useHiddenModels: config?.use_hidden_models ?? true,
             keyGatesEnabled: gates.filter((gate) => client?.checkGate?.(gate) === true).length,
-            bootstrapIntercepted: Boolean(marker?.bootstrapIntercepted),
-            bootstrapSource: marker?.bootstrapSource ?? null,
-            routesMounted: Boolean(marker?.routesMounted),
-            rendererReadyMs: marker?.routesMountedAtMs ?? null,
-            retroThemeEnabled: Boolean(marker?.retroThemeEnabled),
-            retroThemeApplied: Boolean(
-              document.documentElement?.classList.contains(themeRootClass)
-              && document.getElementById(themeStyleId)
-            ),
+            bootstrapIntercepted: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.bootstrapIntercepted),
+            bootstrapSource: window.__CODEXHUB_ENHANCED_MODE__?.bootstrapSource ?? null,
+            routesMounted: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.routesMounted),
+            rendererReadyMs: window.__CODEXHUB_ENHANCED_MODE__?.routesMountedAtMs ?? null,
           }};
         }})()"#
     );
@@ -432,153 +418,17 @@ async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<Inject
     Ok(serde_json::from_value(value)?)
 }
 
-fn retro_theme_css() -> &'static str {
-    r#"
-html.codexhub-retro-theme {
-  color-scheme: light;
-  scrollbar-color: #6f9bc3 #dcecf8;
-}
-html.codexhub-retro-theme body {
-  color: #172c45 !important;
-  background: #4b8fd0 !important;
-  font-family: Tahoma, "Microsoft YaHei UI", "Segoe UI", sans-serif !important;
-  letter-spacing: 0 !important;
-}
-html.codexhub-retro-theme aside.app-shell-left-panel {
-  color: #172c45 !important;
-  background: linear-gradient(180deg, #f7fcff 0%, #d9ecf9 52%, #c3def2 100%) !important;
-  border-color: #78a9d4 !important;
-  box-shadow: inset -1px 0 #ffffff !important;
-}
-html.codexhub-retro-theme main.main-surface,
-html.codexhub-retro-theme .app-shell-main-content-viewport,
-html.codexhub-retro-theme [role="tabpanel"] {
-  color: #172c45 !important;
-  background: #f6fbff !important;
-}
-html.codexhub-retro-theme header.app-header-tint {
-  color: #ffffff !important;
-  background: linear-gradient(180deg, #2f8adb 0%, #1265bc 48%, #0a4f9e 100%) !important;
-  border-color: #06366f !important;
-  box-shadow: inset 0 1px #8bc7f5, 0 1px #ffffff !important;
-  text-shadow: 0 1px #06366f !important;
-}
-html.codexhub-retro-theme .composer-surface-chrome {
-  color: #172c45 !important;
-  background: #ffffff !important;
-  border: 1px solid #78a9d4 !important;
-  border-radius: 4px !important;
-  box-shadow: inset 0 0 0 1px #edf7ff, 0 1px 3px rgba(7, 49, 97, 0.22) !important;
-}
-html.codexhub-retro-theme button {
-  color: #173652 !important;
-  background-image: linear-gradient(180deg, #ffffff 0%, #dceefa 55%, #c5e0f4 100%) !important;
-  border-color: #78a9d4 !important;
-  border-radius: 3px !important;
-  box-shadow: inset 0 1px #ffffff, 0 1px 2px rgba(7, 49, 97, 0.18) !important;
-  font-family: Tahoma, "Microsoft YaHei UI", "Segoe UI", sans-serif !important;
-  letter-spacing: 0 !important;
-}
-html.codexhub-retro-theme button:hover {
-  color: #0a3d6a !important;
-  background-image: linear-gradient(180deg, #ffffff 0%, #cfe8fb 100%) !important;
-  border-color: #4d91cb !important;
-}
-html.codexhub-retro-theme button:disabled {
-  color: #7a8e9f !important;
-  background-image: linear-gradient(180deg, #f4f7f9 0%, #dce5eb 100%) !important;
-}
-html.codexhub-retro-theme input,
-html.codexhub-retro-theme textarea {
-  color: #172c45 !important;
-  background: #ffffff !important;
-  border-color: #78a9d4 !important;
-  border-radius: 2px !important;
-  box-shadow: inset 1px 1px 2px rgba(7, 49, 97, 0.16) !important;
-  font-family: Tahoma, "Microsoft YaHei UI", "Segoe UI", sans-serif !important;
-  letter-spacing: 0 !important;
-}
-html.codexhub-retro-theme pre {
-  color: #24374a !important;
-  background: #f2f7fb !important;
-  border: 1px solid #b4cce0 !important;
-  border-radius: 3px !important;
-  box-shadow: inset 0 1px 3px rgba(7, 49, 97, 0.12) !important;
-}
-html.codexhub-retro-theme code {
-  color: #143c62 !important;
-  font-family: Consolas, "Courier New", monospace !important;
-  letter-spacing: 0 !important;
-}
-html.codexhub-retro-theme ::selection {
-  color: #ffffff;
-  background: #2b7ed1;
-}
-html.codexhub-retro-theme ::-webkit-scrollbar-track {
-  background: #dcecf8;
-  border: 1px solid #b5d3ec;
-}
-html.codexhub-retro-theme ::-webkit-scrollbar-thumb {
-  background: linear-gradient(90deg, #b9d9ef 0%, #6f9bc3 100%);
-  border: 1px solid #4f83af;
-  border-radius: 2px;
-}
-"#
-}
-
-fn enhanced_statsig_script(models: &[String], retro_theme_enabled: bool) -> Result<String> {
+fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     let models = serde_json::to_string(models)?;
     let gates = serde_json::to_string(KEY_FEATURE_GATES)?;
-    let retro_theme_css = serde_json::to_string(retro_theme_css())?;
-    let retro_theme_style_id = serde_json::to_string(RETRO_THEME_STYLE_ID)?;
-    let retro_theme_root_class = serde_json::to_string(RETRO_THEME_ROOT_CLASS)?;
     Ok(format!(
         r#"(() => {{
   const MARKER = "__CODEXHUB_ENHANCED_MODE__";
   const MODELS = {models};
   const GATES = {gates};
-  const RETRO_THEME_ENABLED = {retro_theme_enabled};
-  const RETRO_THEME_CSS = {retro_theme_css};
-  const RETRO_THEME_STYLE_ID = {retro_theme_style_id};
-  const RETRO_THEME_ROOT_CLASS = {retro_theme_root_class};
-  const installRetroTheme = (enabled) => {{
-    const root = document.documentElement;
-    if (!root) {{
-      const pendingKey = "__CODEXHUB_RETRO_THEME_DOM_READY__";
-      if (!window[pendingKey]) {{
-        window[pendingKey] = true;
-        document.addEventListener("DOMContentLoaded", () => {{
-          window[pendingKey] = false;
-          installRetroTheme(Boolean(window[MARKER]?.retroThemeEnabled));
-        }}, {{ once: true }});
-      }}
-      return false;
-    }}
-    let style = document.getElementById(RETRO_THEME_STYLE_ID);
-    if (enabled) {{
-      if (!style) {{
-        style = document.createElement("style");
-        style.id = RETRO_THEME_STYLE_ID;
-        (document.head ?? root).appendChild(style);
-      }}
-      if (style.textContent !== RETRO_THEME_CSS) style.textContent = RETRO_THEME_CSS;
-      root.classList.add(RETRO_THEME_ROOT_CLASS);
-    }} else {{
-      style?.remove();
-      root.classList.remove(RETRO_THEME_ROOT_CLASS);
-    }}
-    const applied = Boolean(enabled
-      && root.classList.contains(RETRO_THEME_ROOT_CLASS)
-      && document.getElementById(RETRO_THEME_STYLE_ID));
-    if (window[MARKER]) window[MARKER].retroThemeApplied = applied;
-    return applied;
-  }};
   const existing = window[MARKER];
   if (existing?.installed) {{
-    existing.installRetroTheme = installRetroTheme;
-    existing.retroThemeEnabled = RETRO_THEME_ENABLED;
-    existing.retroThemeApplied = installRetroTheme(RETRO_THEME_ENABLED);
-    existing.update?.(MODELS, GATES, RETRO_THEME_ENABLED);
+    existing.update?.(MODELS, GATES);
     return;
   }}
   const CONFIG_ID = "107580212";
@@ -594,12 +444,8 @@ fn enhanced_statsig_script(models: &[String], retro_theme_enabled: bool) -> Resu
     bootstrapSource: null,
     routesMounted: false,
     routesMountedAtMs: null,
-    retroThemeEnabled: RETRO_THEME_ENABLED,
-    retroThemeApplied: false,
-    installRetroTheme,
   }};
   window[MARKER] = state;
-  state.retroThemeApplied = installRetroTheme(state.retroThemeEnabled);
 
   const patchValues = (values) => {{
     if (!values || typeof values !== "object") values = {{}};
@@ -843,11 +689,9 @@ fn enhanced_statsig_script(models: &[String], retro_theme_enabled: bool) -> Resu
       }});
     }}
   }};
-  state.update = (models, gates, retroThemeEnabled) => {{
+  state.update = (models, gates) => {{
     state.models = models;
     state.gates = gates;
-    state.retroThemeEnabled = Boolean(retroThemeEnabled);
-    state.retroThemeApplied = installRetroTheme(state.retroThemeEnabled);
     state.applied = false;
     state.attempts = 0;
     queueMicrotask(attach);
@@ -916,7 +760,7 @@ $appId="$($package.PackageFamilyName)!App"
         .creation_flags(CREATE_NO_WINDOW)
         .status()?;
     if !status.success() {
-        bail!("Windows 无法以增强模式激活 Codex App");
+        bail!("Windows 无法使用自定义模型列表启动 Codex App");
     }
     Ok(())
 }
@@ -938,7 +782,7 @@ fn launch_codex_app_blocking(port: u16) -> Result<()> {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn launch_codex_app_blocking(_port: u16) -> Result<()> {
-    bail!("增强模式启动当前仅支持 Windows 和 macOS")
+    bail!("自定义模型列表启动当前仅支持 Windows 和 macOS")
 }
 
 #[cfg(target_os = "windows")]
@@ -974,8 +818,8 @@ mod tests {
 
     #[test]
     fn enhanced_script_embeds_models_and_only_patches_selected_statsig_sections() {
-        let script = enhanced_statsig_script(&["gpt-5.6-sol".into(), "grok-4.5".into()], false)
-            .expect("script");
+        let script =
+            enhanced_statsig_script(&["gpt-5.6-sol".into(), "grok-4.5".into()]).expect("script");
         assert!(script.contains("gpt-5.6-sol"));
         assert!(script.contains("grok-4.5"));
         assert!(script.contains("107580212"));
@@ -987,75 +831,32 @@ mod tests {
     }
 
     #[test]
-    fn enhanced_script_installs_or_removes_the_retro_theme_without_polling_or_navigation() {
-        let enabled = enhanced_statsig_script(&["gpt-5.6-sol".into()], true).expect("script");
-        let disabled = enhanced_statsig_script(&["gpt-5.6-sol".into()], false).expect("script");
+    fn enhanced_install_executes_in_place_without_reloading_codex_app() {
+        let commands = enhanced_script_install_commands("window.testEnhanced = true;");
+        let methods = commands
+            .iter()
+            .map(|(method, _)| *method)
+            .collect::<Vec<_>>();
 
-        assert!(enabled.contains("const RETRO_THEME_ENABLED = true"));
-        assert!(disabled.contains("const RETRO_THEME_ENABLED = false"));
-        assert!(enabled.contains(RETRO_THEME_STYLE_ID));
-        assert!(enabled.contains(RETRO_THEME_ROOT_CLASS));
-        assert!(enabled.contains("style?.remove()"));
-        assert!(enabled.contains("root.classList.remove(RETRO_THEME_ROOT_CLASS)"));
-        for forbidden in ["MutationObserver", "setInterval", "Page.navigate"] {
-            assert!(!enabled.contains(forbidden), "found {forbidden}");
-        }
+        assert_eq!(
+            methods,
+            vec!["Page.addScriptToEvaluateOnNewDocument", "Runtime.evaluate"]
+        );
+        assert!(!methods.contains(&"Page.reload"));
+        assert_eq!(commands[1].1["expression"], "window.testEnhanced = true;");
     }
 
     #[test]
-    fn retro_theme_css_only_changes_visual_properties() {
-        let css = retro_theme_css();
-        for forbidden in [
-            "display",
-            "position",
-            "order",
-            "width",
-            "min-width",
-            "max-width",
-            "height",
-            "min-height",
-            "max-height",
-            "flex",
-            "grid",
-            "overflow",
-            "pointer-events",
-            "transform",
-            "margin",
-            "padding",
-            "top",
-            "right",
-            "bottom",
-            "left",
-        ] {
-            assert!(
-                !css.lines()
-                    .any(|line| line.trim_start().starts_with(&format!("{forbidden}:"))),
-                "retro theme must not set structural property {forbidden}"
-            );
-        }
-    }
+    fn enhanced_install_reports_runtime_script_exceptions() {
+        let result = json!({
+            "exceptionDetails": {
+                "text": "Uncaught",
+                "exception": { "description": "TypeError: failed" }
+            }
+        });
 
-    #[test]
-    fn retro_theme_css_keeps_selectors_narrow() {
-        let css = retro_theme_css();
-        for forbidden in [
-            "html.codexhub-retro-theme *",
-            "[class*=",
-            "[role=\"button\"]",
-            "[role=\"menuitem\"]",
-            "[role=\"option\"]",
-            "[data-state=",
-            "[aria-selected=",
-            "html.codexhub-retro-theme aside {",
-            "html.codexhub-retro-theme header {",
-            "html.codexhub-retro-theme main {",
-            "html.codexhub-retro-theme nav {",
-        ] {
-            assert!(
-                !css.contains(forbidden),
-                "retro theme selector is too broad: {forbidden}"
-            );
-        }
+        let error = ensure_runtime_evaluation_succeeded(&result).unwrap_err();
+        assert!(error.to_string().contains("TypeError: failed"));
     }
 
     #[test]
@@ -1078,33 +879,9 @@ mod tests {
             bootstrap_source: None,
             routes_mounted: false,
             renderer_ready_ms: None,
-            retro_theme_enabled: false,
-            retro_theme_applied: false,
         };
 
-        assert!(injected_status_is_ready(&status, &expected_models, false));
-    }
-
-    #[test]
-    fn enhanced_config_ready_requires_the_requested_theme_state() {
-        let expected_models = vec!["gpt-5.6-sol".to_string()];
-        let mut status = InjectedStatus {
-            ready: true,
-            available_models: expected_models.clone(),
-            use_hidden_models: false,
-            key_gates_enabled: KEY_FEATURE_GATES.len(),
-            bootstrap_intercepted: false,
-            bootstrap_source: None,
-            routes_mounted: false,
-            renderer_ready_ms: None,
-            retro_theme_enabled: true,
-            retro_theme_applied: false,
-        };
-
-        assert!(!injected_status_is_ready(&status, &expected_models, true));
-        status.retro_theme_applied = true;
-        assert!(injected_status_is_ready(&status, &expected_models, true));
-        assert!(!injected_status_is_ready(&status, &expected_models, false));
+        assert!(injected_status_is_ready(&status, &expected_models));
     }
 
     #[tokio::test]
@@ -1129,18 +906,15 @@ mod tests {
         .into_iter()
         .map(str::to_string)
         .collect();
-        let report = launch_and_inject(models, "http://127.0.0.1:3847/backend-api", true)
+        let report = launch_and_inject(models, "http://127.0.0.1:3847/backend-api")
             .await
             .expect("live enhanced injection");
         assert_eq!(report.available_models.len(), 12);
         assert!(!report.use_hidden_models);
         assert_eq!(report.key_gates_enabled, KEY_FEATURE_GATES.len());
-        assert!(report.retro_theme_enabled);
-        assert!(report.retro_theme_applied);
         let repeated = launch_and_inject(
             report.available_models.clone(),
             "http://127.0.0.1:3847/backend-api",
-            true,
         )
         .await
         .expect("repeat live enhanced injection");

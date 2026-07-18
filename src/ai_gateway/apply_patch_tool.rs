@@ -1,5 +1,20 @@
 pub const APPLY_PATCH_TOOL_NAME: &str = "apply_patch";
 pub const APPLY_PATCH_INPUT_DESCRIPTION: &str = "The entire apply_patch patch body.";
+pub const GROK_APPLY_PATCH_INPUT_DESCRIPTION: &str = "Raw Codex apply_patch text. Marker and file-operation lines are exact literals. Start with `*** Begin Patch`, end with `*** End Patch`, and never append a trailing ` ***` to either marker or to Add/Update/Delete/Move headers.";
+
+const GROK_APPLY_PATCH_LITERAL_RULES: &str = "CRITICAL LITERAL-SYNTAX RULE FOR GROK:\n\
+The leading `***` characters are part of the Codex patch language, not Markdown emphasis. Never make the lines symmetrical by appending another ` ***`.\n\n\
+CORRECT (use these lines exactly):\n\
+*** Begin Patch\n\
+*** Add File: notes.md\n\
++hello\n\
+*** End Patch\n\n\
+INCORRECT (never emit this form):\n\
+*** Begin Patch ***\n\
+*** Add File: notes.md ***\n\
++hello\n\
+*** End Patch ***\n\n\
+Before calling the tool, verify that the first line is exactly `*** Begin Patch`, the final non-whitespace line is exactly `*** End Patch`, and no file-operation header has a trailing ` ***`. If the tool reports an envelope or marker format error, correct that exact syntax and retry `apply_patch`; do not blame a non-ASCII or absolute path and do not switch to a shell write merely because the marker syntax was wrong.";
 
 pub const APPLY_PATCH_DESCRIPTION: &str = "Apply file changes using a structured patch format. This is ideal for multi-file or multi-hunk edits where shell-based file writes would be brittle.\n\
 The patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. A patch must use this envelope:\n\n\
@@ -82,4 +97,11 @@ pub fn apply_patch_description_for_argument(argument_name: &str) -> String {
             "The `input` value must contain only the patch body",
             &format!("The `{argument_name}` value must contain only the patch body"),
         )
+}
+
+pub fn grok_apply_patch_description() -> String {
+    format!(
+        "{GROK_APPLY_PATCH_LITERAL_RULES}\n\n{}",
+        apply_patch_description_for_argument("patch")
+    )
 }

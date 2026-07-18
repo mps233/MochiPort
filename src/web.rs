@@ -224,7 +224,6 @@ struct GuiDashboardResponse {
     status: StatusResponse,
     remote: remote_control_backend::RemoteControlStatusResponse,
     codex_app: codex_app_config::CodexAppConfigStatus,
-    codex_app_retro_theme_enabled: bool,
     im_accounts: im_api::ImAccountsResponse,
     ai_gateway: crate::ai_gateway::config::AiGatewayConfig,
 }
@@ -234,18 +233,11 @@ async fn gui_dashboard(State(state): State<SharedState>) -> Json<GuiDashboardRes
     let remote = remote_control_backend::status_snapshot(&state).await;
     let codex_app = codex_app::codex_app_status_snapshot(&state).await;
     let im_accounts = im_api::im_accounts_snapshot(&state).await;
-    let (ai_gateway, codex_app_retro_theme_enabled) = {
-        let config = state.config.lock().await;
-        (
-            config.ai_gateway.clone(),
-            config.codex_app_retro_theme_enabled,
-        )
-    };
+    let ai_gateway = state.config.lock().await.ai_gateway.clone();
     Json(GuiDashboardResponse {
         status,
         remote,
         codex_app,
-        codex_app_retro_theme_enabled,
         im_accounts,
         ai_gateway,
     })

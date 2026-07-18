@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use super::apply_patch_tool::{
-    APPLY_PATCH_INPUT_DESCRIPTION, APPLY_PATCH_TOOL_NAME, apply_patch_description_for_argument,
+    APPLY_PATCH_TOOL_NAME, GROK_APPLY_PATCH_INPUT_DESCRIPTION, grok_apply_patch_description,
 };
 use super::config::ProviderType;
 use super::tool_names::ToolNameMap;
@@ -351,7 +351,7 @@ fn grok_custom_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Result<Option
         return Err("custom tool name is required".to_string());
     };
     let description = if name == APPLY_PATCH_TOOL_NAME {
-        Value::String(apply_patch_description_for_argument("patch"))
+        Value::String(grok_apply_patch_description())
     } else {
         object
             .get("description")
@@ -359,7 +359,7 @@ fn grok_custom_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Result<Option
             .unwrap_or_else(|| Value::String(String::new()))
     };
     let input_description = if name == APPLY_PATCH_TOOL_NAME {
-        APPLY_PATCH_INPUT_DESCRIPTION
+        GROK_APPLY_PATCH_INPUT_DESCRIPTION
     } else {
         "Freeform input for the custom tool."
     };
@@ -573,6 +573,15 @@ mod tests {
         let description = tools[0]["description"].as_str().unwrap();
         assert!(description.contains("{\"patch\":\"<the entire patch body>\"}"));
         assert!(description.contains("The `patch` value must contain only the patch body"));
+        assert!(description.contains("CRITICAL LITERAL-SYNTAX RULE FOR GROK"));
+        assert!(description.contains("*** Begin Patch ***"));
+        assert!(description.contains("do not blame a non-ASCII or absolute path"));
+        assert!(
+            tools[0]["parameters"]["properties"]["patch"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("never append a trailing ` ***`")
+        );
         assert!(tools[0].get("format").is_none());
 
         let search = &tools[1];

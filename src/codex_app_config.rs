@@ -361,6 +361,25 @@ pub fn inspect_codex_app_config(
     inspect_codex_app_config_for_mode(codex_home, backend_url, false)
 }
 
+pub fn prepare_codex_app_config_recovery_snapshot(
+    codex_home: Option<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    let config_path = codex_home.join("config.toml");
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    parse_existing_config_toml_for_update(&config_path)?;
+    backup_existing(&config_path)?;
+    let backup = backup_path(&config_path)?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=recovery_snapshot_ready path={} backup={}",
+        config_path.display(),
+        backup.display()
+    ));
+    Ok(Some(backup))
+}
+
 pub fn inspect_codex_app_config_for_mode(
     codex_home: Option<PathBuf>,
     backend_url: &str,
@@ -442,7 +461,7 @@ pub fn set_codex_app_provider_websocket(
     let codex_home = codex_home.unwrap_or_else(default_codex_home);
     let config_path = codex_home.join("config.toml");
     let mut doc = if config_path.exists() {
-        parse_existing_config_toml(&config_path)?
+        parse_existing_config_toml_for_update(&config_path)?
     } else {
         toml_edit::DocumentMut::new()
     };
@@ -453,8 +472,7 @@ pub fn set_codex_app_provider_websocket(
 
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(&config_path)?;
-    std::fs::write(&config_path, raw)
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    write_file_atomically(&config_path, raw.as_bytes())?;
     Ok(config_path)
 }
 
@@ -1518,7 +1536,7 @@ fn config_value(value: &str) -> Option<String> {
 
 fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()> {
     let mut doc = if path.exists() {
-        parse_existing_config_toml(path)?
+        parse_existing_config_toml_for_update(path)?
     } else {
         toml_edit::DocumentMut::new()
     };
@@ -1599,7 +1617,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
 
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
-    std::fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
+    write_file_atomically(path, raw.as_bytes())
 }
 
 fn remove_disabled_plugin_feature_flags(doc: &mut toml_edit::DocumentMut) {
@@ -2221,7 +2239,7 @@ fn delete_provider_from_config_toml(path: &Path, requested_provider_name: &str) 
         return Err(anyhow!("config.toml not found"));
     }
     let provider_name = provider_name(Some(requested_provider_name))?;
-    let mut doc = parse_existing_config_toml(path)?;
+    let mut doc = parse_existing_config_toml_for_update(path)?;
     let active_provider = doc
         .get("model_provider")
         .and_then(|item| item.as_str())
@@ -2232,8 +2250,8 @@ fn delete_provider_from_config_toml(path: &Path, requested_provider_name: &str) 
     }
     remove_provider_table(&mut doc, &provider_name);
     backup_existing(path)?;
-    std::fs::write(path, normalize_config_toml_order(&doc.to_string()))
-        .with_context(|| format!("failed to write {}", path.display()))
+    let raw = normalize_config_toml_order(&doc.to_string());
+    write_file_atomically(path, raw.as_bytes())
 }
 
 fn uninstall_auth_json(path: &Path) -> Result<bool> {
@@ -2256,6 +2274,47 @@ fn uninstall_auth_json(path: &Path) -> Result<bool> {
 fn parse_existing_config_toml(path: &Path) -> Result<toml_edit::DocumentMut> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
+    parse_config_toml_document(&raw, path)
+}
+
+fn parse_existing_config_toml_for_update(path: &Path) -> Result<toml_edit::DocumentMut> {
+    recover_zeroed_config_from_backup(path)?;
+    parse_existing_config_toml(path)
+}
+
+fn recover_zeroed_config_from_backup(path: &Path) -> Result<bool> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    if bytes.is_empty() || bytes.iter().any(|byte| *byte != 0) {
+        return Ok(false);
+    }
+
+    let backup = backup_path(path)?;
+    let backup_raw = std::fs::read_to_string(&backup).with_context(|| {
+        format!(
+            "{} is zero-filled and recovery backup {} cannot be read",
+            path.display(),
+            backup.display()
+        )
+    })?;
+    let recovered = parse_config_toml_document(&backup_raw, &backup).with_context(|| {
+        format!(
+            "{} is zero-filled and recovery backup {} is invalid",
+            path.display(),
+            backup.display()
+        )
+    })?;
+    let recovered_raw = normalize_config_toml_order(&recovered.to_string());
+    write_file_atomically(path, recovered_raw.as_bytes())?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=zeroed_config_recovered path={} backup={}",
+        path.display(),
+        backup.display()
+    ));
+    Ok(true)
+}
+
+fn parse_config_toml_document(raw: &str, path: &Path) -> Result<toml_edit::DocumentMut> {
     match raw.parse::<toml_edit::DocumentMut>() {
         Ok(doc) => Ok(doc),
         Err(err) => {
@@ -2432,8 +2491,8 @@ fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()
     });
     let raw = serde_json::to_string_pretty(&auth)?;
     backup_existing(path)?;
-    std::fs::write(path, format!("{raw}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))
+    let raw = format!("{raw}\n");
+    write_file_atomically(path, raw.as_bytes())
 }
 
 fn derive_local_auth_identity(
@@ -2603,7 +2662,7 @@ fn cleanup_codexhub_config(
     if !path.exists() {
         return Ok((false, false));
     }
-    let mut doc = parse_existing_config_toml(path)?;
+    let mut doc = parse_existing_config_toml_for_update(path)?;
     let managed_provider_names = managed_provider_names_in_config(&doc, backend_url, true);
 
     let removed_chatgpt_base_url = doc
@@ -2647,8 +2706,8 @@ fn cleanup_codexhub_config(
             .with_context(|| format!("failed to remove {}", path.display()))?;
     } else {
         backup_existing(path)?;
-        std::fs::write(path, normalize_config_toml_order(&doc.to_string()))
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        let raw = normalize_config_toml_order(&doc.to_string());
+        write_file_atomically(path, raw.as_bytes())?;
     }
 
     Ok((removed_chatgpt_base_url, removed_model_provider))
@@ -2903,14 +2962,23 @@ fn backup_existing(path: &Path) -> Result<()> {
         return Ok(());
     }
     let backup = backup_path(path)?;
-    std::fs::copy(path, &backup).with_context(|| {
+    let contents = std::fs::read(path)
+        .with_context(|| format!("failed to read {} before backup", path.display()))?;
+    if !contents.is_empty() && contents.iter().all(|byte| *byte == 0) {
+        chain_log::write_line(format!(
+            "[codex_app_config] event=zeroed_backup_source_skipped path={} backup={}",
+            path.display(),
+            backup.display()
+        ));
+        return Ok(());
+    }
+    write_file_atomically(&backup, &contents).with_context(|| {
         format!(
             "failed to backup existing {} to {}",
             path.display(),
             backup.display()
         )
-    })?;
-    Ok(())
+    })
 }
 
 fn backup_path(path: &Path) -> Result<PathBuf> {
@@ -2919,6 +2987,53 @@ fn backup_path(path: &Path) -> Result<PathBuf> {
         .ok_or_else(|| anyhow!("invalid backup path {}", path.display()))?
         .to_string_lossy();
     Ok(path.with_file_name(format!("{file_name}.bak")))
+}
+
+fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
+    let write_path = match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::canonicalize(path)
+            .with_context(|| format!("failed to resolve symlink {}", path.display()))?,
+        Ok(_) => path.to_path_buf(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => path.to_path_buf(),
+        Err(err) => {
+            return Err(err).with_context(|| format!("failed to inspect {}", path.display()));
+        }
+    };
+    let parent = write_path.parent().ok_or_else(|| {
+        anyhow!(
+            "cannot atomically write path without a parent: {}",
+            write_path.display()
+        )
+    })?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create {}", parent.display()))?;
+
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)
+        .with_context(|| format!("failed to create temporary file in {}", parent.display()))?;
+    temporary.write_all(contents).with_context(|| {
+        format!(
+            "failed to write temporary file for {}",
+            write_path.display()
+        )
+    })?;
+    temporary
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("failed to sync temporary file for {}", write_path.display()))?;
+    let persisted = temporary
+        .persist(&write_path)
+        .map_err(|err| err.error)
+        .with_context(|| format!("failed to replace {}", write_path.display()))?;
+    persisted
+        .sync_all()
+        .with_context(|| format!("failed to sync {}", write_path.display()))?;
+
+    #[cfg(unix)]
+    std::fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("failed to sync directory {}", parent.display()))?;
+
+    Ok(())
 }
 
 fn local_chatgpt_jwt(identity: &LocalAuthIdentity) -> Result<String> {
@@ -3192,6 +3307,102 @@ mod tests {
         assert_eq!(
             provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER),
             Some(CODEXHUB_ACTOR_AUTHORIZATION_VALUE)
+        );
+    }
+
+    #[test]
+    fn atomic_config_write_replaces_existing_contents() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(&config_path, "model = \"old\"\n").expect("write old config");
+
+        write_file_atomically(&config_path, b"model = \"new\"\n").expect("replace config");
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read replaced config"),
+            "model = \"new\"\n"
+        );
+        let files = std::fs::read_dir(&codex_home)
+            .expect("read codex home")
+            .map(|entry| entry.expect("read entry").file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(files, vec![std::ffi::OsString::from("config.toml")]);
+    }
+
+    #[test]
+    fn zeroed_config_recovers_from_valid_backup() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let backup_path = backup_path(&config_path).expect("backup path");
+        std::fs::write(&config_path, vec![0_u8; 128]).expect("write zeroed config");
+        std::fs::write(&backup_path, "model_provider = \"custom\"\n").expect("write valid backup");
+
+        assert!(parse_existing_config_toml(&config_path).is_err());
+        assert_eq!(
+            std::fs::read(&config_path).expect("read zeroed config"),
+            vec![0_u8; 128]
+        );
+
+        let doc =
+            parse_existing_config_toml_for_update(&config_path).expect("recover zeroed config");
+
+        assert_eq!(
+            doc.get("model_provider").and_then(|item| item.as_str()),
+            Some("custom")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read recovered config"),
+            "model_provider = \"custom\"\n"
+        );
+    }
+
+    #[test]
+    fn invalid_nonzero_config_is_not_replaced_by_backup() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let backup_path = backup_path(&config_path).expect("backup path");
+        let invalid = "model = [\n";
+        std::fs::write(&config_path, invalid).expect("write invalid config");
+        std::fs::write(&backup_path, "model = \"backup\"\n").expect("write valid backup");
+
+        assert!(parse_existing_config_toml_for_update(&config_path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read invalid config"),
+            invalid
+        );
+    }
+
+    #[test]
+    fn recovery_snapshot_refreshes_backup_from_valid_config() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let backup_path = backup_path(&config_path).expect("backup path");
+        std::fs::write(&config_path, "model = \"current\"\n").expect("write current config");
+        std::fs::write(&backup_path, "model = \"old\"\n").expect("write old backup");
+
+        let snapshot = prepare_codex_app_config_recovery_snapshot(Some(codex_home))
+            .expect("prepare recovery snapshot");
+
+        assert_eq!(snapshot.as_deref(), Some(backup_path.as_path()));
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).expect("read refreshed backup"),
+            "model = \"current\"\n"
+        );
+    }
+
+    #[test]
+    fn zeroed_source_does_not_overwrite_valid_backup() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let backup_path = backup_path(&config_path).expect("backup path");
+        std::fs::write(&config_path, vec![0_u8; 64]).expect("write zeroed source");
+        std::fs::write(&backup_path, "model = \"safe\"\n").expect("write valid backup");
+
+        backup_existing(&config_path).expect("skip zeroed backup source");
+
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).expect("read preserved backup"),
+            "model = \"safe\"\n"
         );
     }
 
