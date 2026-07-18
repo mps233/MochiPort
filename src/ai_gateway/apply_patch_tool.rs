@@ -68,3 +68,18 @@ Insert at end of file:\n\
 *** End of File\n\
 +appended line\n\
 *** End Patch";
+
+pub fn apply_patch_description_for_argument(argument_name: &str) -> String {
+    if argument_name == "input" {
+        return APPLY_PATCH_DESCRIPTION.to_string();
+    }
+    APPLY_PATCH_DESCRIPTION
+        .replace(
+            "{\"input\":\"<the entire patch body>\"}",
+            &format!("{{\"{argument_name}\":\"<the entire patch body>\"}}"),
+        )
+        .replace(
+            "The `input` value must contain only the patch body",
+            &format!("The `{argument_name}` value must contain only the patch body"),
+        )
+}

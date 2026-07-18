@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use serde_json::json;
 use tracing::{debug, error, warn};
 
+use crate::ai_gateway::apply_patch_tool::APPLY_PATCH_TOOL_NAME;
 use crate::ai_gateway::config::{ProviderConfig, ProviderType, provider_api_root};
 use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::encrypted_content::{
@@ -520,20 +521,25 @@ fn normalize_grok_model_input_with_tool_names(
                 }
             }
             "custom_tool_call" => {
-                if let Some(name) = item
+                let name = item
                     .get("name")
                     .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-                    && let Some(tool_names) = tool_names.as_deref_mut()
+                    .map(str::to_string);
+                if let (Some(name), Some(tool_names)) = (name.as_deref(), tool_names.as_deref_mut())
                 {
-                    item.insert("name".to_string(), json!(tool_names.encode_custom(&name)));
+                    item.insert("name".to_string(), json!(tool_names.encode_custom(name)));
                 }
                 let input = item
                     .remove("input")
                     .map(grok_custom_tool_input_text)
                     .unwrap_or_default();
-                let arguments = serde_json::to_string(&json!({ "input": input }))
-                    .unwrap_or_else(|_| "{\"input\":\"\"}".to_string());
+                let argument_name = if name.as_deref() == Some(APPLY_PATCH_TOOL_NAME) {
+                    "patch"
+                } else {
+                    "input"
+                };
+                let arguments = serde_json::to_string(&json!({ (argument_name): input }))
+                    .unwrap_or_else(|_| format!("{{\"{argument_name}\":\"\"}}"));
                 item.insert("type".to_string(), json!("function_call"));
                 item.insert("arguments".to_string(), json!(arguments));
                 item.remove("status");
@@ -998,6 +1004,34 @@ mod tests {
         assert_eq!(body["input"][0]["name"], "exec");
         assert_eq!(body["input"][1]["name"], browser_name);
         assert!(body["input"][1].get("namespace").is_none());
+    }
+
+    #[test]
+    fn grok_model_input_uses_grok_build_patch_argument_for_apply_patch_history() {
+        let patch = "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch";
+        let mut body = json!({
+            "input": [{
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": patch
+            }]
+        });
+        let mut tool_names = ToolNameMap::default();
+        tool_names.encode_custom("apply_patch");
+
+        let stats = normalize_grok_model_input_with_tool_names(
+            &mut body,
+            &grok_provider(),
+            Some(&mut tool_names),
+        );
+
+        assert_eq!(stats.custom_calls, 1);
+        assert_eq!(body["input"][0]["type"], "function_call");
+        assert_eq!(body["input"][0]["name"], "apply_patch");
+        let arguments: serde_json::Value =
+            serde_json::from_str(body["input"][0]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, json!({"patch": patch}));
     }
 
     #[test]

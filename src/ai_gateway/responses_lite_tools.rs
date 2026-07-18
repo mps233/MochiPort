@@ -1,48 +1,51 @@
 use serde_json::{Value, json};
 
 use super::apply_patch_tool::{
-    APPLY_PATCH_DESCRIPTION, APPLY_PATCH_INPUT_DESCRIPTION, APPLY_PATCH_TOOL_NAME,
+    APPLY_PATCH_INPUT_DESCRIPTION, APPLY_PATCH_TOOL_NAME, apply_patch_description_for_argument,
 };
 use super::config::ProviderType;
 use super::tool_names::ToolNameMap;
 
 #[derive(Debug, Default)]
-pub struct ResponsesLiteToolPreparation {
+pub struct ResponsesToolPreparation {
     pub carriers_removed: usize,
     pub tools_added: usize,
     pub duplicates_removed: usize,
     pub grok_tools_converted: usize,
+    pub grok_hosted_tools_normalized: usize,
     pub grok_tool_names: Option<ToolNameMap>,
 }
 
-impl ResponsesLiteToolPreparation {
+impl ResponsesToolPreparation {
     pub fn changed(&self) -> bool {
         self.carriers_removed > 0
             || self.tools_added > 0
             || self.duplicates_removed > 0
             || self.grok_tools_converted > 0
+            || self.grok_hosted_tools_normalized > 0
     }
 }
 
-/// Responses Lite stores client-executed tools in an `additional_tools` input
-/// item. Only OpenAI Responses understands that carrier natively. Other
-/// providers receive the same declarations through the ordinary top-level
-/// `tools` field, and the carrier is removed from conversation history.
+/// Normalizes Responses tool declarations for the selected upstream.
+/// Responses Lite may store client-executed tools in an `additional_tools`
+/// input item; standard Responses already supplies them in top-level `tools`.
 pub fn prepare_for_provider(
     raw_body: &mut Value,
     provider_type: &ProviderType,
-) -> Result<ResponsesLiteToolPreparation, String> {
+) -> Result<ResponsesToolPreparation, String> {
     if provider_type == &ProviderType::OpenAiResponses {
-        return Ok(ResponsesLiteToolPreparation::default());
+        return Ok(ResponsesToolPreparation::default());
     }
 
-    let mut preparation = ResponsesLiteToolPreparation::default();
+    let mut preparation = ResponsesToolPreparation::default();
     let additional_tools = extract_additional_tools(raw_body, &mut preparation)?;
     merge_top_level_tools(raw_body, additional_tools, &mut preparation)?;
 
     if provider_type == &ProviderType::GrokResponses {
         let mut tool_names = ToolNameMap::default();
-        preparation.grok_tools_converted = convert_grok_tools(raw_body, &mut tool_names)?;
+        let stats = convert_grok_tools(raw_body, &mut tool_names)?;
+        preparation.grok_tools_converted = stats.converted;
+        preparation.grok_hosted_tools_normalized = stats.hosted_normalized;
         normalize_grok_tool_choice(raw_body, &mut tool_names);
         if !tool_names.is_empty() {
             preparation.grok_tool_names = Some(tool_names);
@@ -54,7 +57,7 @@ pub fn prepare_for_provider(
 
 fn extract_additional_tools(
     raw_body: &mut Value,
-    preparation: &mut ResponsesLiteToolPreparation,
+    preparation: &mut ResponsesToolPreparation,
 ) -> Result<Vec<Value>, String> {
     let Some(input) = raw_body.get_mut("input") else {
         return Ok(Vec::new());
@@ -85,7 +88,7 @@ fn extract_additional_tools(
 fn merge_top_level_tools(
     raw_body: &mut Value,
     additional_tools: Vec<Value>,
-    preparation: &mut ResponsesLiteToolPreparation,
+    preparation: &mut ResponsesToolPreparation,
 ) -> Result<(), String> {
     let object = raw_body
         .as_object_mut()
@@ -205,20 +208,29 @@ fn tool_identity(tool: &Value) -> String {
     }
 }
 
-fn convert_grok_tools(raw_body: &mut Value, tool_names: &mut ToolNameMap) -> Result<usize, String> {
+#[derive(Debug, Default)]
+struct GrokToolPreparation {
+    converted: usize,
+    hosted_normalized: usize,
+}
+
+fn convert_grok_tools(
+    raw_body: &mut Value,
+    tool_names: &mut ToolNameMap,
+) -> Result<GrokToolPreparation, String> {
     let Some(tools) = raw_body.get_mut("tools").and_then(Value::as_array_mut) else {
-        return Ok(0);
+        return Ok(GrokToolPreparation::default());
     };
     let original = std::mem::take(tools);
     let mut converted = Vec::with_capacity(original.len());
-    let mut converted_count = 0;
+    let mut stats = GrokToolPreparation::default();
 
     for tool in original {
         match tool.get("type").and_then(Value::as_str) {
             Some("custom") => {
                 if let Some(tool) = grok_custom_tool(&tool, tool_names)? {
                     converted.push(tool);
-                    converted_count += 1;
+                    stats.converted += 1;
                 }
             }
             Some("namespace") => {
@@ -230,7 +242,7 @@ fn convert_grok_tools(raw_body: &mut Value, tool_names: &mut ToolNameMap) -> Res
                         }
                         if let Some(tool) = grok_function_tool(child, Some(namespace), tool_names) {
                             converted.push(tool);
-                            converted_count += 1;
+                            stats.converted += 1;
                         }
                     }
                 }
@@ -239,6 +251,11 @@ fn convert_grok_tools(raw_body: &mut Value, tool_names: &mut ToolNameMap) -> Res
                 if let Some(tool) = grok_function_tool(&tool, None, tool_names) {
                     converted.push(tool);
                 }
+            }
+            Some("web_search") | Some("web_search_preview") => {
+                let (tool, changed) = normalize_grok_web_search_tool(tool);
+                converted.push(tool);
+                stats.hosted_normalized += usize::from(changed);
             }
             _ => converted.push(tool),
         }
@@ -249,7 +266,46 @@ fn convert_grok_tools(raw_body: &mut Value, tool_names: &mut ToolNameMap) -> Res
         merge_tool(&mut deduplicated, tool);
     }
     *tools = deduplicated;
-    Ok(converted_count)
+    Ok(stats)
+}
+
+/// Codex uses OpenAI-specific knobs for its hosted search declaration. Grok
+/// exposes the same hosted tool through standard Responses, but image search
+/// and domain exclusions use xAI's field names.
+fn normalize_grok_web_search_tool(tool: Value) -> (Value, bool) {
+    let Value::Object(mut object) = tool else {
+        return (tool, false);
+    };
+    let original = object.clone();
+
+    object.insert("type".to_string(), json!("web_search"));
+
+    let image_search_requested = object
+        .remove("search_content_types")
+        .and_then(|value| value.as_array().cloned())
+        .is_some_and(|types| types.iter().any(|value| value.as_str() == Some("image")));
+    if image_search_requested && !object.contains_key("enable_image_search") {
+        object.insert("enable_image_search".to_string(), json!(true));
+    }
+
+    for key in [
+        "external_web_access",
+        "indexed_web_access",
+        "search_context_size",
+        "user_location",
+    ] {
+        object.remove(key);
+    }
+
+    if let Some(filters) = object.get_mut("filters").and_then(Value::as_object_mut)
+        && !filters.contains_key("excluded_domains")
+        && let Some(blocked) = filters.remove("blocked_domains")
+    {
+        filters.insert("excluded_domains".to_string(), blocked);
+    }
+
+    let changed = object != original;
+    (Value::Object(object), changed)
 }
 
 fn grok_function_tool(
@@ -295,7 +351,7 @@ fn grok_custom_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Result<Option
         return Err("custom tool name is required".to_string());
     };
     let description = if name == APPLY_PATCH_TOOL_NAME {
-        Value::String(APPLY_PATCH_DESCRIPTION.to_string())
+        Value::String(apply_patch_description_for_argument("patch"))
     } else {
         object
             .get("description")
@@ -307,6 +363,11 @@ fn grok_custom_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Result<Option
     } else {
         "Freeform input for the custom tool."
     };
+    let argument_name = if name == APPLY_PATCH_TOOL_NAME {
+        "patch"
+    } else {
+        "input"
+    };
 
     Ok(Some(json!({
         "type": "function",
@@ -315,12 +376,12 @@ fn grok_custom_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Result<Option
         "parameters": {
             "type": "object",
             "properties": {
-                "input": {
+                (argument_name): {
                     "type": "string",
                     "description": input_description
                 }
             },
-            "required": ["input"],
+            "required": [argument_name],
             "additionalProperties": false
         },
         "strict": false
@@ -466,5 +527,93 @@ mod tests {
             ToolCallTarget::function(Some("browser"), "open")
         );
         assert!(body["input"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grok_standard_responses_normalizes_apply_patch_and_hosted_search() {
+        let mut body = json!({
+            "model": "grok-4.5",
+            "input": [{"role":"user","content":"update the file and verify online"}],
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "client freeform patch",
+                    "format": {"type":"grammar","syntax":"lark","definition":"start: /.+/"}
+                },
+                {
+                    "type": "web_search",
+                    "external_web_access": true,
+                    "indexed_web_access": true,
+                    "search_context_size": "high",
+                    "search_content_types": ["text", "image"],
+                    "filters": {
+                        "allowed_domains": ["docs.x.ai"],
+                        "blocked_domains": ["example.com"]
+                    }
+                }
+            ]
+        });
+
+        let preparation = prepare_for_provider(&mut body, &ProviderType::GrokResponses).unwrap();
+
+        assert_eq!(preparation.carriers_removed, 0);
+        assert_eq!(preparation.grok_tools_converted, 1);
+        assert_eq!(preparation.grok_hosted_tools_normalized, 1);
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["name"], "apply_patch");
+        assert_eq!(tools[0]["parameters"]["required"], json!(["patch"]));
+        assert_eq!(
+            tools[0]["parameters"]["properties"]["patch"]["type"],
+            "string"
+        );
+        let description = tools[0]["description"].as_str().unwrap();
+        assert!(description.contains("{\"patch\":\"<the entire patch body>\"}"));
+        assert!(description.contains("The `patch` value must contain only the patch body"));
+        assert!(tools[0].get("format").is_none());
+
+        let search = &tools[1];
+        assert_eq!(search["type"], "web_search");
+        assert_eq!(search["enable_image_search"], true);
+        assert_eq!(search["filters"]["allowed_domains"], json!(["docs.x.ai"]));
+        assert_eq!(
+            search["filters"]["excluded_domains"],
+            json!(["example.com"])
+        );
+        for removed in [
+            "external_web_access",
+            "indexed_web_access",
+            "search_context_size",
+            "search_content_types",
+        ] {
+            assert!(search.get(removed).is_none(), "unexpected field: {removed}");
+        }
+
+        let map = preparation.grok_tool_names.unwrap();
+        assert_eq!(
+            map.decode("apply_patch"),
+            ToolCallTarget::custom("apply_patch")
+        );
+    }
+
+    #[test]
+    fn grok_normalizes_web_search_preview_without_forcing_image_search() {
+        let mut body = json!({
+            "input": [{"role":"user","content":"search"}],
+            "tools": [{
+                "type": "web_search_preview",
+                "external_web_access": true,
+                "search_content_types": ["text"]
+            }]
+        });
+
+        let preparation = prepare_for_provider(&mut body, &ProviderType::GrokResponses).unwrap();
+
+        assert_eq!(preparation.grok_hosted_tools_normalized, 1);
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert!(body["tools"][0].get("enable_image_search").is_none());
     }
 }

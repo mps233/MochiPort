@@ -558,11 +558,8 @@ pub async fn handle_responses(
     let tool_preparation = match prepare_for_provider(&mut raw_body, &provider.provider_type) {
         Ok(preparation) => preparation,
         Err(error) => {
-            update_failed_log(
-                &log_context,
-                &format!("invalid Responses Lite tools: {error}"),
-            );
-            return GatewayError::bad_request(format!("invalid Responses Lite tools: {error}"))
+            update_failed_log(&log_context, &format!("invalid Responses tools: {error}"));
+            return GatewayError::bad_request(format!("invalid Responses tools: {error}"))
                 .into_response();
         }
     };
@@ -574,7 +571,8 @@ pub async fn handle_responses(
             tools_added = tool_preparation.tools_added,
             duplicates_removed = tool_preparation.duplicates_removed,
             grok_tools_converted = tool_preparation.grok_tools_converted,
-            "prepared Responses Lite tools for upstream provider"
+            grok_hosted_tools_normalized = tool_preparation.grok_hosted_tools_normalized,
+            "prepared Responses tools for upstream provider"
         );
     }
     let grok_tool_names = tool_preparation.grok_tool_names;

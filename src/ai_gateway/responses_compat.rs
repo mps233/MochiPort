@@ -2,7 +2,7 @@ use axum::body::Bytes;
 use futures_util::Stream;
 use serde_json::Value;
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     pin::Pin,
     task::{Context, Poll},
 };
@@ -122,6 +122,8 @@ pub(crate) struct ResponsesCompatSseStream<S> {
     inner: S,
     encrypted_content_scope: Option<EncryptedContentScope>,
     tool_names: Option<ToolNameMap>,
+    custom_tool_stream_ids: HashSet<String>,
+    custom_tool_stream_delta_ids: HashSet<String>,
     line_buf: Vec<u8>,
     output_queue: VecDeque<Result<Bytes, std::io::Error>>,
     ended: bool,
@@ -165,6 +167,8 @@ impl<S> ResponsesCompatSseStream<S> {
             inner,
             encrypted_content_scope,
             tool_names,
+            custom_tool_stream_ids: HashSet::new(),
+            custom_tool_stream_delta_ids: HashSet::new(),
             line_buf: Vec::new(),
             output_queue: VecDeque::new(),
             ended: false,
@@ -226,6 +230,8 @@ impl<S> ResponsesCompatSseStream<S> {
             line,
             self.encrypted_content_scope.as_ref(),
             self.tool_names.as_ref(),
+            &mut self.custom_tool_stream_ids,
+            &mut self.custom_tool_stream_delta_ids,
         );
         let mut output = Vec::with_capacity(rewritten.len() + 1);
         output.extend_from_slice(&rewritten);
@@ -238,6 +244,8 @@ fn rewrite_sse_line(
     line: &[u8],
     encrypted_content_scope: Option<&EncryptedContentScope>,
     tool_names: Option<&ToolNameMap>,
+    custom_tool_stream_ids: &mut HashSet<String>,
+    custom_tool_stream_delta_ids: &mut HashSet<String>,
 ) -> Bytes {
     let Ok(line_text) = std::str::from_utf8(line) else {
         return Bytes::copy_from_slice(line);
@@ -251,11 +259,20 @@ fn rewrite_sse_line(
     let Ok(mut event) = serde_json::from_str::<Value>(data) else {
         return Bytes::copy_from_slice(line);
     };
-    if !normalize_response_value_with_scope_and_tool_names(
+    if let Some(tool_names) = tool_names {
+        remember_custom_tool_stream_item(&event, tool_names, custom_tool_stream_ids);
+    }
+    let mut changed = restore_custom_tool_stream_event(
+        &mut event,
+        custom_tool_stream_ids,
+        custom_tool_stream_delta_ids,
+    );
+    changed |= normalize_response_value_with_scope_and_tool_names(
         &mut event,
         encrypted_content_scope,
         tool_names,
-    ) {
+    );
+    if !changed {
         return Bytes::copy_from_slice(line);
     }
     serde_json::to_vec(&event)
@@ -266,6 +283,109 @@ fn rewrite_sse_line(
             Bytes::from(rewritten)
         })
         .unwrap_or_else(|_| Bytes::copy_from_slice(line))
+}
+
+fn remember_custom_tool_stream_item(
+    event: &Value,
+    tool_names: &ToolNameMap,
+    custom_tool_stream_ids: &mut HashSet<String>,
+) {
+    let Some(item) = event.get("item").and_then(Value::as_object) else {
+        return;
+    };
+    if item.get("type").and_then(Value::as_str) != Some("function_call") {
+        return;
+    }
+    let Some(name) = item.get("name").and_then(Value::as_str) else {
+        return;
+    };
+    if !tool_names.has_encoded(name) || tool_names.decode(name).kind != ToolCallKind::Custom {
+        return;
+    }
+
+    for key in ["id", "call_id"] {
+        if let Some(id) = item.get(key).and_then(Value::as_str) {
+            custom_tool_stream_ids.insert(id.to_string());
+        }
+    }
+}
+
+fn restore_custom_tool_stream_event(
+    event: &mut Value,
+    custom_tool_stream_ids: &HashSet<String>,
+    custom_tool_stream_delta_ids: &mut HashSet<String>,
+) -> bool {
+    let Some(object) = event.as_object_mut() else {
+        return false;
+    };
+    let Some(event_type) = object
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return false;
+    };
+    if !matches!(
+        event_type.as_str(),
+        "response.function_call_arguments.delta" | "response.function_call_arguments.done"
+    ) {
+        return false;
+    }
+    let stream_id = ["item_id", "call_id"].into_iter().find_map(|key| {
+        object
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|id| custom_tool_stream_ids.contains(*id))
+            .map(str::to_string)
+    });
+    let Some(stream_id) = stream_id else {
+        return false;
+    };
+
+    match event_type.as_str() {
+        "response.function_call_arguments.delta" => {
+            let Some(input) = object
+                .get("delta")
+                .and_then(parsed_custom_input_from_arguments)
+            else {
+                // Function argument fragments are not necessarily valid JSON.
+                // The final output_item.done still carries the complete input.
+                return false;
+            };
+            object.insert(
+                "type".to_string(),
+                Value::String("response.custom_tool_call_input.delta".to_string()),
+            );
+            object.insert("delta".to_string(), Value::String(input));
+            custom_tool_stream_delta_ids.insert(stream_id);
+        }
+        "response.function_call_arguments.done" => {
+            let input = object.remove("arguments").map(custom_input_from_arguments);
+            if custom_tool_stream_delta_ids.contains(&stream_id) {
+                object.insert(
+                    "type".to_string(),
+                    Value::String("response.custom_tool_call_input.done".to_string()),
+                );
+                if let Some(input) = input {
+                    object.insert("input".to_string(), Value::String(input));
+                }
+            } else if let Some(input) = input {
+                object.insert(
+                    "type".to_string(),
+                    Value::String("response.custom_tool_call_input.delta".to_string()),
+                );
+                object.insert("delta".to_string(), Value::String(input));
+                custom_tool_stream_delta_ids.insert(stream_id);
+            } else {
+                object.insert(
+                    "type".to_string(),
+                    Value::String("response.custom_tool_call_input.done".to_string()),
+                );
+            }
+        }
+        _ => unreachable!(),
+    }
+    true
 }
 
 fn restore_provider_tool_call(
@@ -319,18 +439,27 @@ fn set_string_field(object: &mut serde_json::Map<String, Value>, key: &str, valu
 }
 
 fn custom_input_from_arguments(arguments: Value) -> String {
+    if let Some(input) = parsed_custom_input_from_arguments(&arguments) {
+        return input;
+    }
     match arguments {
-        Value::String(arguments) => serde_json::from_str::<Value>(&arguments)
+        Value::String(arguments) => arguments,
+        arguments => serde_json::to_string(&arguments).unwrap_or_default(),
+    }
+}
+
+fn parsed_custom_input_from_arguments(arguments: &Value) -> Option<String> {
+    match arguments {
+        Value::String(arguments) => serde_json::from_str::<Value>(arguments)
             .ok()
-            .and_then(custom_input_value)
-            .unwrap_or(arguments),
-        arguments => custom_input_value(arguments.clone())
-            .unwrap_or_else(|| serde_json::to_string(&arguments).unwrap_or_default()),
+            .and_then(custom_input_value),
+        arguments => custom_input_value(arguments.clone()),
     }
 }
 
 fn custom_input_value(arguments: Value) -> Option<String> {
-    let input = arguments.as_object()?.get("input")?;
+    let object = arguments.as_object()?;
+    let input = object.get("input").or_else(|| object.get("patch"))?;
     Some(match input {
         Value::String(input) => input.clone(),
         input => serde_json::to_string(input).unwrap_or_default(),
@@ -552,20 +681,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_restores_grok_custom_tool_items() {
+    async fn stream_restores_grok_apply_patch_items_and_input_events() {
         let mut tool_names = ToolNameMap::default();
-        let exec_name = tool_names.encode_custom("exec");
+        let apply_patch_name = tool_names.encode_custom("apply_patch");
+        let patch = "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch";
         let chunks = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(format!(
-            "data: {}\n\ndata: {}\n\n",
+            "data: {}\n\ndata: {}\n\ndata: {}\n\ndata: {}\n\n",
             json!({
                 "type": "response.output_item.added",
                 "item": {
                     "type": "function_call",
                     "id": "fc_1",
                     "call_id": "call_1",
-                    "name": exec_name,
+                    "name": apply_patch_name,
                     "arguments": ""
                 }
+            }),
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "item_id": "fc_1",
+                "output_index": 0,
+                "delta": json!({"patch": patch}).to_string()
+            }),
+            json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": "fc_1",
+                "output_index": 0,
+                "arguments": json!({"patch": patch}).to_string()
             }),
             json!({
                 "type": "response.output_item.done",
@@ -573,8 +715,8 @@ mod tests {
                     "type": "function_call",
                     "id": "fc_1",
                     "call_id": "call_1",
-                    "name": exec_name,
-                    "arguments": "{\"input\":\"pwd\"}"
+                    "name": apply_patch_name,
+                    "arguments": json!({"patch": patch}).to_string()
                 }
             })
         )))]);
@@ -590,8 +732,58 @@ mod tests {
         .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
         .collect::<String>();
 
+        let events = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str::<Value>(data).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(events[0]["item"]["type"], "custom_tool_call");
+        assert_eq!(events[0]["item"]["name"], "apply_patch");
+        assert_eq!(events[0]["item"]["input"], "");
+        assert_eq!(events[1]["type"], "response.custom_tool_call_input.delta");
+        assert_eq!(events[1]["delta"], patch);
+        assert_eq!(events[2]["type"], "response.custom_tool_call_input.done");
+        assert_eq!(events[2]["input"], patch);
+        assert!(events[2].get("arguments").is_none());
+        assert_eq!(events[3]["item"]["type"], "custom_tool_call");
+        assert_eq!(events[3]["item"]["input"], patch);
+    }
+
+    #[tokio::test]
+    async fn stream_keeps_fragmented_custom_function_arguments_until_done_item() {
+        let mut tool_names = ToolNameMap::default();
+        tool_names.encode_custom("apply_patch");
+        let chunks = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(concat!(
+            "data: {\"type\":\"response.output_item.added\",\"item\":",
+            "{\"type\":\"function_call\",\"id\":\"fc_1\",",
+            "\"call_id\":\"call_1\",\"name\":\"apply_patch\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",",
+            "\"item_id\":\"fc_1\",\"delta\":\"{\\\"patch\\\":\\\"*** Begin\"}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.done\",",
+            "\"item_id\":\"fc_1\",",
+            "\"arguments\":\"{\\\"patch\\\":\\\"*** Begin Patch\\\"}\"}\n\n",
+            "data: {\"type\":\"response.output_item.done\",\"item\":",
+            "{\"type\":\"function_call\",\"id\":\"fc_1\",",
+            "\"call_id\":\"call_1\",\"name\":\"apply_patch\",",
+            "\"arguments\":\"{\\\"patch\\\":\\\"*** Begin Patch\\\"}\"}}\n\n"
+        )))]);
+
+        let output = ResponsesCompatSseStream::with_compatibility(
+            Box::pin(chunks),
+            grok_scope(),
+            Some(tool_names),
+        )
+        .collect::<Vec<Result<Bytes, std::io::Error>>>()
+        .await
+        .into_iter()
+        .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+        .collect::<String>();
+
+        assert!(output.contains("response.function_call_arguments.delta"));
+        assert!(output.contains("response.custom_tool_call_input.delta"));
+        assert!(output.contains("\"delta\":\"*** Begin Patch\""));
         assert!(output.contains("\"type\":\"custom_tool_call\""));
-        assert!(output.contains("\"name\":\"exec\""));
-        assert!(output.contains("\"input\":\"pwd\""));
+        assert!(output.contains("\"input\":\"*** Begin Patch\""));
     }
 }
