@@ -18,6 +18,7 @@
 2. CodexHub 需要的 remote-control 入口保持可见。
 3. bundled/local plugin 可见性不被错误 gate 关闭。
 4. i18n/bootstrap 这类基础配置不阻塞 UI。
+5. 恢复超长会话时按页加载历史，不在启动后台排空全部 turn。
 
 以下能力当前不作为快速启动兼容目标:
 
@@ -156,16 +157,40 @@ dynamic config / layer config 推荐使用间接引用:
 | `824038554` | true | remote/mobile/browser-use 相关 UI | 多处远控和浏览器设置使用 |
 | `410065390` | true | browser/computer use 可见性 | `use-is-plugins-enabled` 里检查外部 browser/computer use 能力 |
 | `2296472986` | true | 插件安装流程中的 remote-control / locked computer use 判断 | 影响 plugin install flow |
+| `3446105535` | true | `suppressResumeHistoryDrain` | 启动只恢复最近 5 个 turn，旧历史在用户滚动时分页加载，避免超长会话启动时被完整排空 |
 | `2055603567` | false 或不返回 | 官方 mobile setup / server pairing 流程 | 设为 true 会触发 `remoteControl/pairing/start`，在 CodexHub 当前本地 enrollment 模式下会报 `remote control pairing is unavailable until enrollment completes` |
 | `3936985709` | false 或不返回 | remote pair 分支反向 gate | 代码里存在 `!gate(3936985709)`；当前不依赖官方 pairing 流程，不要用它解决本地兼容问题 |
 
-已有但需要继续观察的 gate:
+历史上曾强制开启、现在不再由 CodexHub 覆盖的 gate:
 
-| Gate ID | 当前建议 | 说明 |
+| Gate ID | 当前处理 | 说明 |
 | --- | --- | --- |
-| `1186680773` | 可保持 true | ultra reasoning effort / model list 相关，不是快速启动核心 |
-| `1834314516` | 可保持 true | debug / external link target 等 UI 使用，风险较低 |
-| `1714131075`、`72045066`、`2982604767`、`2177625257`、`3657624089`、`3245360288`、`3646210497` | 保持现状，升级时复查 | 当前来源为历史兼容集合，未确认具体业务语义前不要扩散 |
+| `1186680773`、`1834314516` | 保留官方值 | 不是 CodexHub 当前兼容目标，不再强制 true |
+| `1714131075`、`72045066`、`2982604767`、`2177625257`、`3657624089`、`3245360288`、`3646210497` | 保留官方值 | 来源为旧兼容集合，语义未被当前版本确认 |
+
+增强启动升级后会清除这些 gate 中由旧版 CodexHub 写入且 `rule_id/r` 为
+`codexhub-local` 的值，但不会删除或改写官方 Statsig 返回的值。这样可以撤销旧注入副作用，同时保留
+官方灰度配置。
+
+## 超长会话恢复与 `tail_history`
+
+2026-07-18 对四份 `codex.exe` 转储和两次最新启动日志的联合排查确认：
+
+1. 转储均为 app-server 原生进程异常，最新异常码为 `0xC0000409`，WER 将其归类为
+   `FAST_FAIL_UNEXPECTED_HEAP_EXCEPTION`，故障模块为 `ntdll.dll`；
+2. 两次最新崩溃都在恢复会话 `019f122d-3c78-7c82-88a6-34a483c36dbd` 时发生；
+3. 对应 JSONL 已约 146 MB、超过 4.2 万行，启动阶段连续请求 `thread/turns/list`，来源为
+   `tail_history`；
+4. `skills cache cleared` 或插件同步只是进程退出前最后打印的日志，不是两次崩溃的共同触发器；
+5. Codex App `26.715.4045` renderer 已提供 gate `3446105535`，其语义名称为
+   `suppressResumeHistoryDrain`。
+
+CodexHub 在本地 bootstrap 和自定义模型列表启动的增量 Statsig 注入中都将该 gate 设为 true。
+启用后，恢复会话只先读取最近 5 个 turn；更早历史仍保留在原 JSONL 中，用户向上滚动时再分页读取。
+这项修复不删除、不截断、不归档，也不改写会话内容。
+
+该 gate 针对的是已经确认的超长历史启动触发路径，不能承诺消除所有 Windows 原生堆异常。若开启后
+仍在不加载该会话时崩溃，应按新的转储和时间线独立排查。
 
 ## 当前必须维护的 Layer / Dynamic Config
 
@@ -269,9 +294,11 @@ layer_configs
 1. `1042620455` 为 true。
 2. `410065390` 为 true。
 3. `2296472986` 为 true。
-4. `2055603567` 不为 true。
-5. `3936985709` 不为 true。
-6. `72216192` layer 存在且 `enable_i18n=true`。
+4. `3446105535` 为 true。
+5. `2055603567` 不为 true。
+6. `3936985709` 不为 true。
+7. 本地 bootstrap 只包含 6 个已确认 gate，旧兼容集合不再被强制开启。
+8. `72216192` layer 存在且 `enable_i18n=true`。
 
 ### 5. 手动验证
 
@@ -283,6 +310,7 @@ layer_configs
 4. 插件列表不会长时间卡远端刷新。
 5. 日志里没有关键 `/wham/statsig/bootstrap` 或 `/wham/accounts/check` 失败。
 6. 未实现的官方接口如果出现 404，应确认是否属于明确不兼容范围。
+7. 恢复超长会话时只先请求最近一页历史，不再自动排空全部 `tail_history`。
 
 ## 维护原则
 

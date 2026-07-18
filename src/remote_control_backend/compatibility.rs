@@ -52,20 +52,12 @@ pub(super) async fn statsig_bootstrap(State(state): State<SharedState>) -> Json<
 fn statsig_bootstrap_payload(now_ms: u64, model_slugs: &[String]) -> Value {
     let mut feature_gates = Map::new();
     for gate in [
-        "1834314516",
-        "1714131075",
-        "72045066",
-        "2982604767",
-        "2177625257",
-        "3657624089",
-        "3245360288",
-        "3646210497",
-        "1186680773",
         "1042620455",
         "4114442250",
         "824038554",
         "410065390",
         "2296472986",
+        "3446105535",
     ] {
         feature_gates.insert(
             gate.to_string(),
@@ -237,17 +229,30 @@ mod tests {
         assert_eq!(response["time"], 1234);
         assert_eq!(response["user"]["userID"], "user_codexhub_local");
         let gates = response["feature_gates"].as_object().unwrap();
-        assert!(gates["1834314516"].is_object());
+        assert_eq!(gates.len(), 6);
         for gate in [
             "1042620455",
             "4114442250",
             "824038554",
             "410065390",
             "2296472986",
+            "3446105535",
         ] {
             assert_eq!(gates[gate]["v"], true);
         }
-        for gate in ["2055603567", "3936985709"] {
+        for gate in [
+            "1834314516",
+            "1714131075",
+            "72045066",
+            "2982604767",
+            "2177625257",
+            "3657624089",
+            "3245360288",
+            "3646210497",
+            "1186680773",
+            "2055603567",
+            "3936985709",
+        ] {
             assert_ne!(
                 gates
                     .get(gate)

@@ -18,7 +18,15 @@ const DEFAULT_CDP_PORT: u16 = 9335;
 const CODEX_APP_READY_TIMEOUT: Duration = Duration::from_secs(30);
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 static ENHANCED_CDP_SESSION: OnceLock<Mutex<Option<tokio::task::JoinHandle<()>>>> = OnceLock::new();
-const KEY_FEATURE_GATES: &[&str] = &[
+const SUPPORTED_FEATURE_GATES: &[&str] = &[
+    "1042620455",
+    "4114442250",
+    "824038554",
+    "410065390",
+    "2296472986",
+    "3446105535",
+];
+const LEGACY_CODEXHUB_FEATURE_GATES: &[&str] = &[
     "1834314516",
     "1714131075",
     "72045066",
@@ -379,13 +387,13 @@ fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String])
     status.ready
         && status.available_models == expected_models
         && !status.use_hidden_models
-        && status.key_gates_enabled == KEY_FEATURE_GATES.len()
+        && status.key_gates_enabled == SUPPORTED_FEATURE_GATES.len()
 }
 
 async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<InjectedStatus> {
     let websocket_url = validated_websocket_url(target, port)?;
     let (mut socket, _) = connect_async(websocket_url).await?;
-    let gates = serde_json::to_string(KEY_FEATURE_GATES)?;
+    let gates = serde_json::to_string(SUPPORTED_FEATURE_GATES)?;
     let expression = format!(
         r#"(() => {{
           const client = window.__STATSIG__?.firstInstance;
@@ -420,16 +428,18 @@ async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<Inject
 
 fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     let models = serde_json::to_string(models)?;
-    let gates = serde_json::to_string(KEY_FEATURE_GATES)?;
+    let gates = serde_json::to_string(SUPPORTED_FEATURE_GATES)?;
+    let legacy_gates = serde_json::to_string(LEGACY_CODEXHUB_FEATURE_GATES)?;
     Ok(format!(
         r#"(() => {{
   const MARKER = "__CODEXHUB_ENHANCED_MODE__";
   const MODELS = {models};
-  const GATES = {gates};
+  const SUPPORTED_GATES = {gates};
+  const LEGACY_CODEXHUB_GATES = {legacy_gates};
   const existing = window[MARKER];
   if (existing?.installed) {{
-    existing.update?.(MODELS, GATES);
-    return;
+      existing.update?.(MODELS);
+      return;
   }}
   const CONFIG_ID = "107580212";
   const state = {{
@@ -438,7 +448,6 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     attempts: 0,
     client: null,
     models: MODELS,
-    gates: GATES,
     bootstrapIntercepted: false,
     bootstrapInterceptedAtMs: null,
     bootstrapSource: null,
@@ -457,7 +466,13 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     values.param_stores ??= {{}};
     values.sdkParams ??= {{}};
     values.sdk_flags ??= {{}};
-    for (const gate of state.gates) {{
+    for (const gate of LEGACY_CODEXHUB_GATES) {{
+      const current = values.feature_gates[gate];
+      if (current?.rule_id === "codexhub-local" || current?.r === "codexhub-local") {{
+        delete values.feature_gates[gate];
+      }}
+    }}
+    for (const gate of SUPPORTED_GATES) {{
       const current = values.feature_gates[gate];
       values.feature_gates[gate] = {{
         ...(current && typeof current === "object" ? current : {{}}),
@@ -657,7 +672,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     const currentConfig = current.dynamic_configs?.[CONFIG_ID]?.value;
     const alreadyApplied = currentConfig?.use_hidden_models === false
       && JSON.stringify(currentConfig.available_models) === JSON.stringify(state.models)
-      && state.gates.every((gate) => current.feature_gates?.[gate]?.value === true);
+      && SUPPORTED_GATES.every((gate) => current.feature_gates?.[gate]?.value === true);
     if (!alreadyApplied) {{
       const next = patchValues(structuredClone(current));
       const packet = {{
@@ -689,9 +704,8 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       }});
     }}
   }};
-  state.update = (models, gates) => {{
+  state.update = (models) => {{
     state.models = models;
-    state.gates = gates;
     state.applied = false;
     state.attempts = 0;
     queueMicrotask(attach);
@@ -823,7 +837,11 @@ mod tests {
         assert!(script.contains("gpt-5.6-sol"));
         assert!(script.contains("grok-4.5"));
         assert!(script.contains("107580212"));
-        assert!(script.contains("1042620455"));
+        assert!(script.contains("3446105535"));
+        assert!(script.contains("LEGACY_CODEXHUB_GATES"));
+        assert!(script.contains("current?.rule_id === \"codexhub-local\""));
+        assert!(script.contains("delete values.feature_gates[gate]"));
+        assert!(!script.contains("state.gates.every"));
         assert!(script.contains("/wham/statsig/bootstrap"));
         assert!(script.contains("codex-message-from-view"));
         assert!(script.contains("routesMountedAtMs"));
@@ -874,7 +892,7 @@ mod tests {
             ready: true,
             available_models: expected_models.clone(),
             use_hidden_models: false,
-            key_gates_enabled: KEY_FEATURE_GATES.len(),
+            key_gates_enabled: SUPPORTED_FEATURE_GATES.len(),
             bootstrap_intercepted: false,
             bootstrap_source: None,
             routes_mounted: false,
@@ -911,7 +929,7 @@ mod tests {
             .expect("live enhanced injection");
         assert_eq!(report.available_models.len(), 12);
         assert!(!report.use_hidden_models);
-        assert_eq!(report.key_gates_enabled, KEY_FEATURE_GATES.len());
+        assert_eq!(report.key_gates_enabled, SUPPORTED_FEATURE_GATES.len());
         let repeated = launch_and_inject(
             report.available_models.clone(),
             "http://127.0.0.1:3847/backend-api",
@@ -919,6 +937,6 @@ mod tests {
         .await
         .expect("repeat live enhanced injection");
         assert_eq!(repeated.available_models, report.available_models);
-        assert_eq!(repeated.key_gates_enabled, KEY_FEATURE_GATES.len());
+        assert_eq!(repeated.key_gates_enabled, SUPPORTED_FEATURE_GATES.len());
     }
 }
