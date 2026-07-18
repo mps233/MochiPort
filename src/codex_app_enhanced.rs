@@ -52,6 +52,7 @@ pub struct EnhancedLaunchReport {
     pub available_models: Vec<String>,
     pub use_hidden_models: bool,
     pub key_gates_enabled: usize,
+    pub i18n_enabled: bool,
     pub bootstrap_intercepted: bool,
     pub bootstrap_source: Option<String>,
     pub routes_mounted: bool,
@@ -138,7 +139,8 @@ pub async fn launch_and_inject(
     let status = wait_for_injected_status(&client, DEFAULT_CDP_PORT, &target.id, &models).await?;
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={}",
+        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} i18n_enabled={} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={}",
+        status.i18n_enabled,
         status.routes_mounted,
         status
             .renderer_ready_ms
@@ -155,6 +157,7 @@ pub async fn launch_and_inject(
         available_models: status.available_models,
         use_hidden_models: status.use_hidden_models,
         key_gates_enabled: status.key_gates_enabled,
+        i18n_enabled: status.i18n_enabled,
         bootstrap_intercepted: status.bootstrap_intercepted,
         bootstrap_source: status.bootstrap_source,
         routes_mounted: status.routes_mounted,
@@ -252,7 +255,9 @@ async fn inject_target(target: &CdpTarget, port: u16, models: &[String]) -> Resu
             break;
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Codex App 已启动，但自定义模型列表未能生效；可以继续普通使用 Codex App");
+            bail!(
+                "Codex App 已启动，但增强配置（模型列表/语言）未能生效；可以继续普通使用 Codex App"
+            );
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -353,6 +358,7 @@ struct InjectedStatus {
     available_models: Vec<String>,
     use_hidden_models: bool,
     key_gates_enabled: usize,
+    i18n_enabled: bool,
     bootstrap_intercepted: bool,
     bootstrap_source: Option<String>,
     routes_mounted: bool,
@@ -375,7 +381,7 @@ async fn wait_for_injected_status(
             return Ok(status);
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Codex App 已启动，但自定义模型列表未在 20 秒内生效");
+            bail!("Codex App 已启动，但增强配置（模型列表/语言）未在 20 秒内生效");
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -388,6 +394,7 @@ fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String])
         && status.available_models == expected_models
         && !status.use_hidden_models
         && status.key_gates_enabled == SUPPORTED_FEATURE_GATES.len()
+        && status.i18n_enabled
 }
 
 async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<InjectedStatus> {
@@ -398,12 +405,14 @@ async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<Inject
         r#"(() => {{
           const client = window.__STATSIG__?.firstInstance;
           const config = client?.getDynamicConfig?.("107580212")?.value;
+          const i18n = client?.getLayer?.("72216192");
           const gates = {gates};
           return {{
             ready: Boolean(Array.isArray(config?.available_models)),
             availableModels: config?.available_models ?? [],
             useHiddenModels: config?.use_hidden_models ?? true,
             keyGatesEnabled: gates.filter((gate) => client?.checkGate?.(gate) === true).length,
+            i18nEnabled: i18n?.get?.("enable_i18n", false) === true,
             bootstrapIntercepted: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.bootstrapIntercepted),
             bootstrapSource: window.__CODEXHUB_ENHANCED_MODE__?.bootstrapSource ?? null,
             routesMounted: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.routesMounted),
@@ -433,17 +442,20 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     Ok(format!(
         r#"(() => {{
   const MARKER = "__CODEXHUB_ENHANCED_MODE__";
+  const SCRIPT_VERSION = 6;
   const MODELS = {models};
   const SUPPORTED_GATES = {gates};
   const LEGACY_CODEXHUB_GATES = {legacy_gates};
   const existing = window[MARKER];
-  if (existing?.installed) {{
+  if (existing?.installed && existing.version === SCRIPT_VERSION) {{
       existing.update?.(MODELS);
       return;
   }}
+  if (existing?.installed) existing.applying = true;
   const CONFIG_ID = "107580212";
   const state = {{
     installed: true,
+    version: SCRIPT_VERSION,
     applied: false,
     attempts: 0,
     client: null,
@@ -451,6 +463,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     bootstrapIntercepted: false,
     bootstrapInterceptedAtMs: null,
     bootstrapSource: null,
+    i18nReactCacheInvalidated: 0,
     routesMounted: false,
     routesMountedAtMs: null,
   }};
@@ -463,9 +476,39 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     values.feature_gates ??= {{}};
     values.dynamic_configs ??= {{}};
     values.layer_configs ??= {{}};
+    values.values ??= {{}};
     values.param_stores ??= {{}};
     values.sdkParams ??= {{}};
     values.sdk_flags ??= {{}};
+    const currentI18nLayer = values.layer_configs["72216192"];
+    const currentI18nValue = currentI18nLayer?.value && typeof currentI18nLayer.value === "object"
+      ? currentI18nLayer.value
+      : currentI18nLayer?.v && values.values[currentI18nLayer.v]
+        && typeof values.values[currentI18nLayer.v] === "object"
+        ? values.values[currentI18nLayer.v]
+        : values.values.codexhub_i18n_layer_config
+        && typeof values.values.codexhub_i18n_layer_config === "object"
+        ? values.values.codexhub_i18n_layer_config
+        : {{}};
+    const modelEntry = values.dynamic_configs[CONFIG_ID];
+    const modelIsV2 = typeof modelEntry?.v === "string"
+      && Object.prototype.hasOwnProperty.call(values.values, modelEntry.v)
+      && !modelEntry?.value;
+    const i18nIsV2 = typeof currentI18nLayer?.v === "string"
+      && Object.prototype.hasOwnProperty.call(values.values, currentI18nLayer.v)
+      && !currentI18nLayer?.value;
+    const allEntries = [
+      ...Object.values(values.feature_gates),
+      ...Object.values(values.dynamic_configs),
+      ...Object.values(values.layer_configs),
+    ];
+    const hasV1Entries = allEntries.some((entry) => entry
+      && typeof entry === "object"
+      && Object.prototype.hasOwnProperty.call(entry, "value"));
+    const isV2 = !hasV1Entries && (values.response_format === "init-v2"
+      || modelIsV2 && i18nIsV2);
+    if (isV2) values.response_format = "init-v2";
+    else if (values.response_format === "init-v2") delete values.response_format;
     for (const gate of LEGACY_CODEXHUB_GATES) {{
       const current = values.feature_gates[gate];
       if (current?.rule_id === "codexhub-local" || current?.r === "codexhub-local") {{
@@ -474,34 +517,162 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     }}
     for (const gate of SUPPORTED_GATES) {{
       const current = values.feature_gates[gate];
-      values.feature_gates[gate] = {{
+      const next = {{
         ...(current && typeof current === "object" ? current : {{}}),
         name: gate,
         rule_id: "codexhub-local",
-        secondary_exposures: current?.secondary_exposures ?? [],
+        r: "codexhub-local",
+        secondary_exposures: current?.secondary_exposures ?? current?.s ?? [],
+        s: current?.s ?? current?.secondary_exposures ?? [],
         version: current?.version ?? 1,
-        id_type: current?.id_type ?? "userID",
+        id_type: current?.id_type ?? current?.i ?? "userID",
+        i: current?.i ?? current?.id_type ?? "userID",
         value: true,
+        v: true,
       }};
+      if (isV2) delete next.value;
+      else delete next.v;
+      values.feature_gates[gate] = next;
     }}
     const current = values.dynamic_configs[CONFIG_ID];
-    values.dynamic_configs[CONFIG_ID] = {{
+    const modelValue = {{
+      ...(current?.value && typeof current.value === "object" ? current.value : {{}}),
+      ...(current?.v && values.values[current.v] && typeof values.values[current.v] === "object"
+        ? values.values[current.v]
+        : {{}}),
+      available_models: state.models,
+      default_model: state.models[0] ?? "gpt-5.6-sol",
+      use_hidden_models: false,
+    }};
+    const nextConfig = {{
       ...(current && typeof current === "object" ? current : {{}}),
       name: CONFIG_ID,
       rule_id: "codexhub-local",
+      r: "codexhub-local",
       secondary_exposures: current?.secondary_exposures ?? [],
+      s: current?.s ?? current?.secondary_exposures ?? [],
       version: current?.version ?? 1,
-      id_type: current?.id_type ?? "userID",
-      value: {{
-        ...(current?.value && typeof current.value === "object" ? current.value : {{}}),
-        available_models: state.models,
-        default_model: state.models[0] ?? "gpt-5.6-sol",
-        use_hidden_models: false,
-      }},
+      id_type: current?.id_type ?? current?.i ?? "userID",
+      i: current?.i ?? current?.id_type ?? "userID",
       is_device_based: current?.is_device_based ?? false,
       passed: true,
     }};
+    if (isV2) {{
+      const modelKey = typeof current?.v === "string" ? current.v : "codexhub_model_list_config";
+      nextConfig.v = modelKey;
+      delete nextConfig.value;
+      values.values[modelKey] = modelValue;
+    }} else {{
+      nextConfig.value = modelValue;
+      delete nextConfig.v;
+    }}
+    values.dynamic_configs[CONFIG_ID] = nextConfig;
+    const i18nValue = {{
+      ...currentI18nValue,
+      enable_i18n: true,
+      locale_source: currentI18nValue.locale_source ?? "FIRST_AVAILABLE",
+    }};
+    const nextI18nLayer = {{
+      ...(currentI18nLayer && typeof currentI18nLayer === "object" ? currentI18nLayer : {{}}),
+      name: "72216192",
+      rule_id: "codexhub-local",
+      r: "codexhub-local",
+      secondary_exposures: currentI18nLayer?.secondary_exposures ?? currentI18nLayer?.s ?? [],
+      s: currentI18nLayer?.s ?? currentI18nLayer?.secondary_exposures ?? [],
+      id_type: currentI18nLayer?.id_type ?? currentI18nLayer?.i ?? "userID",
+      i: currentI18nLayer?.i ?? currentI18nLayer?.id_type ?? "userID",
+      passed: true,
+    }};
+    if (isV2) {{
+      const layerKey = typeof currentI18nLayer?.v === "string"
+        ? currentI18nLayer.v
+        : "codexhub_i18n_layer_config";
+      nextI18nLayer.v = layerKey;
+      delete nextI18nLayer.value;
+      values.values[layerKey] = i18nValue;
+    }} else {{
+      nextI18nLayer.value = i18nValue;
+      delete nextI18nLayer.v;
+    }}
+    values.layer_configs["72216192"] = nextI18nLayer;
     return values;
+  }};
+
+  const STORE_PATCH_MARKER = "__CODEXHUB_ENHANCED_SET_VALUES_PATCH__";
+  const installStorePatch = (client) => {{
+    const store = client?._store;
+    if (!store || typeof store.setValues !== "function") return false;
+    const installed = store[STORE_PATCH_MARKER];
+    if (installed) {{
+      installed.patch = patchValues;
+      return true;
+    }}
+    const control = {{
+      original: store.setValues.bind(store),
+      patch: patchValues,
+    }};
+    store.setValues = (packet, user) => {{
+      if (!packet || typeof packet.data !== "string") return control.original(packet, user);
+      try {{
+        const values = control.patch(JSON.parse(packet.data));
+        packet = {{ ...packet, data: JSON.stringify(values) }};
+      }} catch {{}}
+      return control.original(packet, user);
+    }};
+    store[STORE_PATCH_MARKER] = control;
+    return true;
+  }};
+
+  const hookFirstInstance = (statsig) => {{
+    if (!statsig || typeof statsig !== "object") return;
+    const marker = "__CODEXHUB_ENHANCED_FIRST_INSTANCE_HOOK__";
+    if (statsig[marker]) {{
+      installStorePatch(statsig.firstInstance);
+      return;
+    }}
+    const descriptor = Object.getOwnPropertyDescriptor(statsig, "firstInstance");
+    if (descriptor?.configurable === false) {{
+      installStorePatch(statsig.firstInstance);
+      return;
+    }}
+    let current = statsig.firstInstance;
+    Object.defineProperty(statsig, "firstInstance", {{
+      configurable: true,
+      enumerable: true,
+      get: () => current,
+      set: (client) => {{
+        current = client;
+        installStorePatch(client);
+      }},
+    }});
+    statsig[marker] = true;
+    installStorePatch(current);
+  }};
+
+  const hookStatsigGlobal = () => {{
+    const marker = "__CODEXHUB_ENHANCED_GLOBAL_HOOK__";
+    const descriptor = Object.getOwnPropertyDescriptor(window, "__STATSIG__");
+    if (descriptor?.get?.[marker]) {{
+      hookFirstInstance(window.__STATSIG__);
+      return;
+    }}
+    if (descriptor?.configurable === false) {{
+      hookFirstInstance(window.__STATSIG__);
+      return;
+    }}
+    let current = window.__STATSIG__;
+    const getStatsig = () => current;
+    getStatsig[marker] = true;
+    Object.defineProperty(window, "__STATSIG__", {{
+      configurable: true,
+      enumerable: descriptor?.enumerable ?? true,
+      get: getStatsig,
+      set: (statsig) => {{
+        current = statsig;
+        hookFirstInstance(statsig);
+      }},
+    }});
+    hookFirstInstance(current);
   }};
 
   const patchSerialized = (raw) => {{
@@ -517,7 +688,9 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
         }}
         if (Array.isArray(value)) return value.map((item) => visit(item, depth + 1));
         if (typeof value !== "object") return value;
-        if (value.dynamic_configs?.[CONFIG_ID]) patchValues(value);
+        if (value.dynamic_configs?.[CONFIG_ID] || value.layer_configs?.["72216192"]) {{
+          patchValues(value);
+        }}
         for (const key of Object.keys(value)) value[key] = visit(value[key], depth + 1);
         return value;
       }};
@@ -557,7 +730,16 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
   const minimalBootstrapValues = () => ({{
     response_format: "init-v2",
     feature_gates: {{}},
-    dynamic_configs: {{}},
+    dynamic_configs: {{
+      "107580212": {{
+        v: "codexhub_model_list_config",
+        r: "codexhub-local",
+        s: [],
+        i: "userID",
+        ue: false,
+        p: true,
+      }},
+    }},
     layer_configs: {{
       "2096615506": {{
         v: "codexhub_primary_runtime_config",
@@ -614,7 +796,6 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     }}
 
     const values = patchValues(structuredClone(selected?.values ?? minimalBootstrapValues()));
-    values.response_format ??= "init-v2";
     values.user = localUser(values, selected?.envelope);
     state.bootstrapSource = selected
       ? selected.priority === 2
@@ -666,42 +847,142 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       : raw;
   }};
 
+  const patchCachedI18nLayer = (layer, value) => {{
+    if (!layer || typeof layer !== "object") return;
+    const marker = "__CODEXHUB_I18N_VALUE__";
+    let control = layer[marker];
+    if (!control) {{
+      control = {{ fallback: typeof layer.get === "function" ? layer.get.bind(layer) : null, value }};
+      layer[marker] = control;
+      layer.get = (key, fallback) => Object.prototype.hasOwnProperty.call(control.value, key)
+        ? control.value[key]
+        : control.fallback?.(key, fallback) ?? fallback;
+    }}
+    control.value = value;
+    layer.__value = value;
+  }};
+
+  const invalidateI18nReactCache = (i18nValue) => {{
+    const rootElement = document.getElementById("root");
+    const containerKey = Object.getOwnPropertyNames(rootElement ?? {{}})
+      .find((key) => key.startsWith("__reactContainer"));
+    const container = containerKey ? rootElement?.[containerKey] : null;
+    const rootFiber = container?.stateNode?.current ?? container;
+    if (!rootFiber) return 0;
+
+    const stack = [rootFiber];
+    const seenFibers = new Set();
+    const seenRows = new Set();
+    let invalidated = 0;
+    while (stack.length > 0) {{
+      const fiber = stack.pop();
+      if (!fiber || seenFibers.has(fiber)) continue;
+      seenFibers.add(fiber);
+      for (const candidate of [fiber, fiber.alternate]) {{
+        const rows = candidate?.updateQueue?.memoCache?.data;
+        if (!Array.isArray(rows)) continue;
+        for (const row of rows) {{
+          if (!Array.isArray(row) || seenRows.has(row)) continue;
+          seenRows.add(row);
+          for (let index = 0; index < row.length - 1; index += 1) {{
+            const layer = row[index];
+            if (layer?.name !== "72216192" || typeof layer.get !== "function") continue;
+            patchCachedI18nLayer(layer, i18nValue);
+            if (typeof row[index + 1] === "boolean" && row[index + 1] !== true) {{
+              row[index] = null;
+              invalidated += 1;
+            }}
+          }}
+        }}
+      }}
+      if (fiber.sibling) stack.push(fiber.sibling);
+      if (fiber.child) stack.push(fiber.child);
+    }}
+    state.i18nReactCacheInvalidated =
+      (state.i18nReactCacheInvalidated ?? 0) + invalidated;
+    return invalidated;
+  }};
+
   const applyClient = (client) => {{
     if (!client?._store?.setValues || typeof client._finalizeUpdate !== "function") return false;
-    const current = client._store.getValues?.() ?? {{}};
-    const currentConfig = current.dynamic_configs?.[CONFIG_ID]?.value;
+    installStorePatch(client);
+    const stored = client._store.getValues?.();
+    const hasStoredValues = stored && typeof stored === "object"
+      && stored.feature_gates && stored.dynamic_configs && stored.layer_configs;
+    const current = hasStoredValues ? stored : minimalBootstrapValues();
+    if (!hasStoredValues) state.bootstrapSource ??= "codexhub-minimal-store";
+    const currentConfigEntry = current.dynamic_configs[CONFIG_ID];
+    const currentConfig = currentConfigEntry?.v
+      && current.values?.[currentConfigEntry.v]
+      && typeof current.values[currentConfigEntry.v] === "object"
+      ? current.values[currentConfigEntry.v]
+      : currentConfigEntry?.value;
+    const currentI18nEntry = current.layer_configs["72216192"];
+    const currentI18n = currentI18nEntry?.v
+      && current.values?.[currentI18nEntry.v]
+      && typeof current.values[currentI18nEntry.v] === "object"
+      ? current.values[currentI18nEntry.v]
+      : currentI18nEntry?.value;
+    const gateEnabled = (gate) => current.feature_gates?.[gate]?.v === true
+      || current.feature_gates?.[gate]?.value === true;
     const alreadyApplied = currentConfig?.use_hidden_models === false
       && JSON.stringify(currentConfig.available_models) === JSON.stringify(state.models)
-      && SUPPORTED_GATES.every((gate) => current.feature_gates?.[gate]?.value === true);
-    if (!alreadyApplied) {{
-      const next = patchValues(structuredClone(current));
+      && currentI18n?.enable_i18n === true
+      && SUPPORTED_GATES.every(gateEnabled);
+    const cachedI18nLayer = client.getLayer?.("72216192");
+    const publicI18nEnabled = cachedI18nLayer?.get?.("enable_i18n", false) === true;
+    const next = patchValues(structuredClone(current));
+    const nextI18nEntry = next.layer_configs["72216192"];
+    const nextI18nValue = nextI18nEntry?.value
+      ?? next.values?.[nextI18nEntry?.v]
+      ?? {{ enable_i18n: true, locale_source: "FIRST_AVAILABLE" }};
+    patchCachedI18nLayer(cachedI18nLayer, nextI18nValue);
+    const invalidatedI18nCache = state.i18nReactCacheInvalidated > 0
+      ? 0
+      : invalidateI18nReactCache(nextI18nValue);
+    if (!alreadyApplied || !publicI18nEnabled || invalidatedI18nCache > 0) {{
       const packet = {{
         data: JSON.stringify(next),
-        source: client._store.getSource?.() ?? "Bootstrap",
+        source: ["Loading", "NoValues", "Uninitialized"].includes(client._store.getSource?.())
+          ? "Bootstrap"
+          : client._store.getSource?.() ?? "Bootstrap",
         receivedAt: Date.now(),
       }};
       if (!client._store.setValues(packet, client._user)) return false;
       client._finalizeUpdate(packet);
     }}
-    state.applied = true;
+    const resolvedConfig = client.getDynamicConfig?.(CONFIG_ID)?.value;
+    const resolvedI18n = client.getLayer?.("72216192");
+    state.applied = resolvedConfig?.use_hidden_models === false
+      && JSON.stringify(resolvedConfig.available_models) === JSON.stringify(state.models)
+      && resolvedI18n?.get?.("enable_i18n", false) === true
+      && SUPPORTED_GATES.every((gate) => client.checkGate?.(gate) === true);
     state.client = client;
-    return true;
+    return state.applied;
   }};
 
   const attach = () => {{
     state.attempts += 1;
     const client = window.__STATSIG__?.firstInstance;
-    if (!applyClient(client)) {{
+    if (!client) {{
       if (state.attempts < 300) setTimeout(attach, state.attempts < 80 ? 25 : 100);
       return;
     }}
-    if (!client.__CODEXHUB_ENHANCED_LISTENER__) {{
-      client.__CODEXHUB_ENHANCED_LISTENER__ = true;
-      client.on?.("values_updated", () => {{
+    installStorePatch(client);
+    if (client.__CODEXHUB_ENHANCED_LISTENER_VERSION__ !== SCRIPT_VERSION) {{
+      const listener = () => {{
         if (state.applying) return;
         state.applying = true;
-        try {{ applyClient(client); }} finally {{ state.applying = false; }}
-      }});
+        try {{
+          if (!applyClient(client)) queueMicrotask(attach);
+        }} finally {{ state.applying = false; }}
+      }};
+      state.listener = listener;
+      client.__CODEXHUB_ENHANCED_LISTENER_VERSION__ = SCRIPT_VERSION;
+      client.on?.("values_updated", listener);
+    }}
+    if (!applyClient(client) && state.attempts < 300) {{
+      setTimeout(attach, state.attempts < 80 ? 25 : 100);
     }}
   }};
   state.update = (models) => {{
@@ -710,6 +991,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     state.attempts = 0;
     queueMicrotask(attach);
   }};
+  hookStatsigGlobal();
   queueMicrotask(attach);
 }})();"#
     ))
@@ -838,6 +1120,24 @@ mod tests {
         assert!(script.contains("grok-4.5"));
         assert!(script.contains("107580212"));
         assert!(script.contains("3446105535"));
+        assert!(script.contains("72216192"));
+        assert!(script.contains("enable_i18n: true"));
+        assert!(script.contains("response_format = \"init-v2\""));
+        assert!(script.contains("const modelIsV2"));
+        assert!(script.contains("installStorePatch"));
+        assert!(script.contains("patchCachedI18nLayer"));
+        assert!(script.contains("SCRIPT_VERSION = 6"));
+        assert!(script.contains("const hasStoredValues"));
+        assert!(script.contains("current = hasStoredValues ? stored : minimalBootstrapValues()"));
+        assert!(script.contains("codexhub-minimal-store"));
+        assert!(script.contains("invalidateI18nReactCache"));
+        assert!(script.contains("__reactContainer"));
+        assert!(script.contains("memoCache?.data"));
+        assert!(script.contains("invalidatedI18nCache > 0"));
+        assert!(script.contains("const hasV1Entries"));
+        assert!(script.contains("delete values.response_format"));
+        assert!(script.contains("delete nextConfig.value"));
+        assert!(script.contains("delete nextConfig.v"));
         assert!(script.contains("LEGACY_CODEXHUB_GATES"));
         assert!(script.contains("current?.rule_id === \"codexhub-local\""));
         assert!(script.contains("delete values.feature_gates[gate]"));
@@ -845,7 +1145,7 @@ mod tests {
         assert!(script.contains("/wham/statsig/bootstrap"));
         assert!(script.contains("codex-message-from-view"));
         assert!(script.contains("routesMountedAtMs"));
-        assert!(!script.contains("values.layer_configs["));
+        assert!(script.contains("values.layer_configs[\"72216192\"]"));
     }
 
     #[test]
@@ -888,11 +1188,12 @@ mod tests {
     #[test]
     fn enhanced_config_ready_does_not_require_renderer_routes_or_bootstrap_interception() {
         let expected_models = vec!["gpt-5.6-sol".to_string()];
-        let status = InjectedStatus {
+        let mut status = InjectedStatus {
             ready: true,
             available_models: expected_models.clone(),
             use_hidden_models: false,
             key_gates_enabled: SUPPORTED_FEATURE_GATES.len(),
+            i18n_enabled: true,
             bootstrap_intercepted: false,
             bootstrap_source: None,
             routes_mounted: false,
@@ -900,6 +1201,8 @@ mod tests {
         };
 
         assert!(injected_status_is_ready(&status, &expected_models));
+        status.i18n_enabled = false;
+        assert!(!injected_status_is_ready(&status, &expected_models));
     }
 
     #[tokio::test]
@@ -930,6 +1233,7 @@ mod tests {
         assert_eq!(report.available_models.len(), 12);
         assert!(!report.use_hidden_models);
         assert_eq!(report.key_gates_enabled, SUPPORTED_FEATURE_GATES.len());
+        assert!(report.i18n_enabled);
         let repeated = launch_and_inject(
             report.available_models.clone(),
             "http://127.0.0.1:3847/backend-api",
@@ -938,5 +1242,6 @@ mod tests {
         .expect("repeat live enhanced injection");
         assert_eq!(repeated.available_models, report.available_models);
         assert_eq!(repeated.key_gates_enabled, SUPPORTED_FEATURE_GATES.len());
+        assert!(repeated.i18n_enabled);
     }
 }

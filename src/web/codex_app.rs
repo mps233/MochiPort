@@ -360,11 +360,12 @@ pub(super) async fn launch_codex_app_enhanced(
                     "info",
                     "codex_app_enhanced_launch_ready",
                     format!(
-                        "launched={} port={} models={} gates={}",
+                        "launched={} port={} models={} gates={} i18n={}",
                         report.launched,
                         report.port,
                         report.available_models.len(),
-                        report.key_gates_enabled
+                        report.key_gates_enabled,
+                        report.i18n_enabled
                     ),
                 )
                 .await;
