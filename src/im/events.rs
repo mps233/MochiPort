@@ -423,62 +423,148 @@ async fn deliver_telegram_command_progress_with_api(
     route: &RouteTarget,
     snapshot: TelegramCommandProgressSnapshot,
 ) {
-    let text = telegram_progress::render_command_progress(&snapshot, im_text_for_state(state));
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .claim_telegram_command_progress_delivery(thread_id, &snapshot.turn_id);
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    spawn_telegram_command_progress_driver(state, api, thread_id, route, snapshot);
+}
+
+fn spawn_telegram_command_progress_driver(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    snapshot: TelegramCommandProgressSnapshot,
+) {
+    let state = state.clone();
+    let thread_id = thread_id.to_string();
+    let route = route.clone();
+    tokio::spawn(async move {
+        telegram_command_progress_driver(state, api, thread_id, route, snapshot).await;
+    });
+}
+
+async fn telegram_command_progress_driver(
+    state: SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: String,
+    route: RouteTarget,
+    mut snapshot: TelegramCommandProgressSnapshot,
+) {
     let adapter = TelegramAdapter::new(api);
-    let mut result = adapter
-        .send_or_update_rich_markdown(&route.chat_id, snapshot.message_id.as_deref(), &text)
-        .await;
-    if let Err(err) = result.as_ref()
-        && let Some(delay_ms) = telegram_command_progress_retry_delay_ms(
-            err,
-            snapshot.message_id.is_some(),
-            snapshot.completed,
-        )
-    {
-        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        result = adapter
+    let mut consecutive_failures = 0_u32;
+    loop {
+        let is_current = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_delivery_is_current(
+                &thread_id,
+                &snapshot.turn_id,
+                snapshot.revision,
+            );
+        if !is_current {
+            return;
+        }
+
+        let text = telegram_progress::render_command_progress(&snapshot, im_text_for_state(&state));
+        let result = adapter
             .send_or_update_rich_markdown(&route.chat_id, snapshot.message_id.as_deref(), &text)
             .await;
-    }
-    match result {
-        Ok(message_id) => {
-            state
-                .runtime
-                .lock()
-                .await
-                .remember_telegram_command_progress_delivery(
-                    thread_id,
-                    &snapshot.turn_id,
-                    snapshot.revision,
-                    message_id.clone(),
-                );
-            state
-                .push_event(
-                    "info",
-                    "telegram_command_progress_sent",
-                    format!(
-                        "thread={thread_id} turn={} chat={} message={} revision={} steps={} completed={}",
-                        snapshot.turn_id,
-                        route.chat_id,
-                        message_id,
+
+        match result {
+            Ok(message_id) => {
+                consecutive_failures = 0;
+                let next = state
+                    .runtime
+                    .lock()
+                    .await
+                    .complete_telegram_command_progress_delivery(
+                        &thread_id,
+                        &snapshot.turn_id,
                         snapshot.revision,
-                        snapshot.dropped_entries.saturating_add(snapshot.entries.len()),
-                        snapshot.completed
-                    ),
-                )
-                .await;
-        }
-        Err(err) => {
-            state
-                .push_event(
-                    "warn",
-                    "telegram_command_progress_failed",
-                    format!(
-                        "thread={thread_id} turn={} chat={} revision={} completed={} err={err}",
-                        snapshot.turn_id, route.chat_id, snapshot.revision, snapshot.completed
-                    ),
-                )
-                .await;
+                        message_id.clone(),
+                    );
+                state
+                    .push_event(
+                        "info",
+                        "telegram_command_progress_sent",
+                        format!(
+                            "thread={thread_id} turn={} chat={} message={} revision={} steps={} completed={}",
+                            snapshot.turn_id,
+                            route.chat_id,
+                            message_id,
+                            snapshot.revision,
+                            snapshot.dropped_entries.saturating_add(snapshot.entries.len()),
+                            snapshot.completed
+                        ),
+                    )
+                    .await;
+                let Some(next) = next else {
+                    return;
+                };
+                snapshot = next;
+            }
+            Err(err) => {
+                let retry_delay = telegram_command_progress_retry_delay_ms(
+                    &err,
+                    snapshot.message_id.is_some(),
+                    snapshot.completed,
+                );
+                let delivery_retained = state
+                    .runtime
+                    .lock()
+                    .await
+                    .fail_telegram_command_progress_delivery(
+                        &thread_id,
+                        &snapshot.turn_id,
+                        snapshot.revision,
+                    );
+                let should_retry =
+                    delivery_retained || (!snapshot.completed && retry_delay.is_some());
+                state
+                    .push_event(
+                        "warn",
+                        "telegram_command_progress_failed",
+                        format!(
+                            "thread={thread_id} turn={} chat={} revision={} completed={} retry={} err={err}",
+                            snapshot.turn_id,
+                            route.chat_id,
+                            snapshot.revision,
+                            snapshot.completed,
+                            should_retry
+                        ),
+                    )
+                    .await;
+                if !should_retry {
+                    return;
+                }
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let delay_ms = retry_delay.unwrap_or_else(|| {
+                    let exponent = consecutive_failures.saturating_sub(1).min(6);
+                    500_u64.saturating_mul(1_u64 << exponent).min(30_000)
+                });
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                let next = {
+                    let mut runtime = state.runtime.lock().await;
+                    if delivery_retained {
+                        runtime
+                            .retry_telegram_command_progress_delivery(&thread_id, &snapshot.turn_id)
+                    } else {
+                        runtime
+                            .claim_telegram_command_progress_delivery(&thread_id, &snapshot.turn_id)
+                    }
+                };
+                let Some(next) = next else {
+                    return;
+                };
+                snapshot = next;
+            }
         }
     }
 }
@@ -2104,6 +2190,14 @@ pub(crate) async fn handle_codex_notification(
             let Some(route) = route else {
                 return;
             };
+            if route.platform == ImPlatformKind::Telegram
+                && !matches!(
+                    telegram_command_turn(&state, thread_id, params).await,
+                    TelegramCommandTurn::Active(_)
+                )
+            {
+                return;
+            }
             if matches!(
                 route.platform,
                 ImPlatformKind::Telegram | ImPlatformKind::Wechat | ImPlatformKind::Wecom
