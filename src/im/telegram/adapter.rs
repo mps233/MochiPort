@@ -33,8 +33,9 @@ impl TelegramAdapter {
     }
 
     pub async fn send_text(&self, target: &str, text: &str) -> Result<String> {
+        let text = telegram_cleanup_text(text);
         let mut last_message_id = 0;
-        let chunks = telegram_text_chunks(text);
+        let chunks = telegram_text_chunks(&text);
         log_adapter(
             "send_text_begin",
             format!(
@@ -42,7 +43,7 @@ impl TelegramAdapter {
                 target,
                 text.chars().count(),
                 chunks.len(),
-                log_text_preview(text, 500)
+                log_text_preview(&text, 500)
             ),
         );
         for (index, chunk) in chunks.iter().enumerate() {
@@ -183,7 +184,7 @@ impl TelegramAdapter {
         reply_text: &str,
     ) -> Result<()> {
         let rendered = crate::im::core::text_renderer::render_agent_message_body(reply_text);
-        let preview = telegram_draft_preview(&rendered);
+        let preview = telegram_cleanup_text(&telegram_draft_preview(&rendered));
         log_adapter(
             "send_turn_draft",
             format!(
@@ -250,7 +251,9 @@ impl TelegramAdapter {
         local_path: &Path,
         caption: Option<&str>,
     ) -> Result<String> {
-        let caption_html = caption.map(telegram_markdown_to_html);
+        let caption_html = caption
+            .map(telegram_cleanup_text)
+            .map(|caption| telegram_markdown_to_html(&caption));
         log_adapter(
             "send_image_begin",
             format!(
@@ -317,7 +320,7 @@ impl TelegramAdapter {
         approval: &PendingApproval,
         im_text: ImText,
     ) -> Result<String> {
-        let text = approval_text(approval, im_text);
+        let text = telegram_cleanup_text(&approval_text(approval, im_text));
         let Some(keyboard) = approval_keyboard(approval) else {
             return self.send_text(target, &text).await;
         };
@@ -501,11 +504,12 @@ impl TelegramAdapter {
         text: &str,
         reply_markup: serde_json::Value,
     ) -> Result<String> {
+        let text = telegram_cleanup_text(text);
         let updated = self
             .try_edit_message_text(
                 target,
                 message_id.unwrap_or_default(),
-                text,
+                &text,
                 None,
                 Some(reply_markup.clone()),
             )
@@ -516,7 +520,7 @@ impl TelegramAdapter {
         let _ = self.clear_reply_markup(target, message_id).await;
         Ok(self
             .api
-            .send_text_with_reply_markup(target, text, reply_markup)
+            .send_text_with_reply_markup(target, &text, reply_markup)
             .await?
             .to_string())
     }
@@ -529,11 +533,12 @@ impl TelegramAdapter {
         reply_markup: serde_json::Value,
         parse_mode: TelegramParseMode,
     ) -> Result<String> {
+        let text = telegram_cleanup_text(text);
         let updated = self
             .try_edit_message_text(
                 target,
                 message_id.unwrap_or_default(),
-                text,
+                &text,
                 Some(parse_mode),
                 Some(reply_markup.clone()),
             )
@@ -544,7 +549,7 @@ impl TelegramAdapter {
         let _ = self.clear_reply_markup(target, message_id).await;
         Ok(self
             .api
-            .send_text_with_reply_markup_parse_mode(target, text, reply_markup, parse_mode)
+            .send_text_with_reply_markup_parse_mode(target, &text, reply_markup, parse_mode)
             .await?
             .to_string())
     }
@@ -555,11 +560,12 @@ impl TelegramAdapter {
         message_id: Option<&str>,
         text: &str,
     ) -> Result<String> {
+        let text = telegram_cleanup_text(text);
         let updated = self
             .try_edit_message_text(
                 target,
                 message_id.unwrap_or_default(),
-                &telegram_markdown_to_html(text),
+                &telegram_markdown_to_html(&text),
                 Some(TelegramParseMode::Html),
                 Some(empty_inline_keyboard()),
             )
@@ -568,7 +574,7 @@ impl TelegramAdapter {
             return Ok(message_id.to_string());
         }
         let _ = self.clear_reply_markup(target, message_id).await;
-        self.send_text(target, text).await
+        self.send_text(target, &text).await
     }
 
     pub async fn send_or_update_rich_markdown(
@@ -1385,9 +1391,72 @@ fn telegram_inline_markdown_to_html(text: &str) -> String {
 }
 
 fn telegram_cleanup_text(text: &str) -> String {
-    text.replace("<font color='grey'>", "")
+    strip_codex_ui_directives(text)
+        .replace("<font color='grey'>", "")
         .replace("<font color=\"grey\">", "")
         .replace("</font>", "")
+}
+
+fn strip_codex_ui_directives(text: &str) -> String {
+    let mut in_fenced_code = false;
+    let mut removed_any = false;
+    let mut lines = Vec::new();
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim_end_matches('\r');
+        if !in_fenced_code && is_codex_ui_directive_line(line) {
+            removed_any = true;
+            continue;
+        }
+        lines.push(line);
+        if is_markdown_fence_line(line) {
+            in_fenced_code = !in_fenced_code;
+        }
+    }
+
+    if !removed_any {
+        return text.to_string();
+    }
+
+    let mut output = String::new();
+    for line in lines {
+        let is_blank = line.trim().is_empty();
+        if is_blank && output.ends_with('\n') {
+            continue;
+        }
+        if !output.is_empty() {
+            output.push('\n');
+        }
+        output.push_str(line);
+    }
+    output.trim().to_string()
+}
+
+fn is_codex_ui_directive_line(line: &str) -> bool {
+    let line = line.trim();
+    let Some(rest) = line.strip_prefix("::") else {
+        return false;
+    };
+    let Some(open_brace) = rest.find('{') else {
+        return false;
+    };
+    let name = &rest[..open_brace];
+    let arguments = &rest[open_brace + 1..];
+    arguments.ends_with('}')
+        && matches!(
+            name,
+            "code-comment"
+                | "git-commit"
+                | "git-create-branch"
+                | "git-create-pr"
+                | "git-push"
+                | "git-stage"
+        )
+}
+
+fn is_markdown_fence_line(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("```") || line.starts_with("~~~")
 }
 
 fn telegram_turn_completed_messages(reply_text: &str, footer_text: &str) -> (String, String) {
@@ -1583,8 +1652,8 @@ mod tests {
 
     use super::{
         TELEGRAM_MAX_MESSAGE_CHARS, empty_inline_keyboard, resolved_approval_text,
-        telegram_context_compaction_messages, telegram_draft_preview, telegram_text_chunks,
-        telegram_turn_completed_chunks, telegram_turn_completed_messages,
+        telegram_cleanup_text, telegram_context_compaction_messages, telegram_draft_preview,
+        telegram_text_chunks, telegram_turn_completed_chunks, telegram_turn_completed_messages,
         telegram_user_message_chunks, telegram_user_message_messages,
     };
 
@@ -1615,6 +1684,39 @@ mod tests {
         let chunks = telegram_text_chunks("  \n ");
 
         assert_eq!(chunks, vec![" "]);
+    }
+
+    #[test]
+    fn telegram_cleanup_removes_codex_ui_directives_from_standalone_lines() {
+        let text = concat!(
+            "提交完成\n\n",
+            "::git-stage{cwd=\"/tmp/codexhub\"}\n",
+            "::git-commit{cwd=\"/tmp/codexhub\"}\n\n",
+            "下一行"
+        );
+
+        let cleaned = telegram_cleanup_text(text);
+
+        assert_eq!(cleaned, "提交完成\n\n下一行");
+        assert!(!cleaned.contains("::git-stage"));
+        assert!(!cleaned.contains("::git-commit"));
+    }
+
+    #[test]
+    fn telegram_cleanup_preserves_code_examples_and_unknown_directives() {
+        let text = concat!(
+            "```text\n",
+            "::git-commit{cwd=\"/tmp/codexhub\"}\n",
+            "```\n",
+            "::custom{value=\"keep\"}\n",
+            "::git-not-a-real-directive{value=\"keep\"}"
+        );
+
+        let cleaned = telegram_cleanup_text(text);
+
+        assert!(cleaned.contains("```text\n::git-commit{cwd=\"/tmp/codexhub\"}\n```"));
+        assert!(cleaned.contains("::custom{value=\"keep\"}"));
+        assert!(cleaned.contains("::git-not-a-real-directive{value=\"keep\"}"));
     }
 
     #[test]
