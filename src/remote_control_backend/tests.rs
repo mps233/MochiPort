@@ -11,6 +11,7 @@ use crate::{
     app_state::{AppState, PendingRemoteRequest},
     config::AppConfig,
     im_runtime::RouteTarget,
+    store::PersistedState,
     types::ImPlatformKind,
 };
 
@@ -1130,24 +1131,45 @@ async fn recovery_resubscribes_bound_threads_without_changing_current_session() 
 }
 
 #[tokio::test]
-async fn initialize_remote_clients_for_connection_sends_connection_default_client() {
+async fn initialize_remote_clients_for_connection_sends_default_and_bound_clients_only() {
     let state = test_state();
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
-    let connection_epoch = {
+    let bound_client_key = "im:telegram:bound-chat";
+    let unbound_client_key = "im:telegram:stale-chat";
+    let (connection_epoch, bound_stream_id, unbound_stream_id) = {
         let mut remote = state.remote_control.inner.lock().await;
         remote.connected = true;
         remote.connection_epoch = 11;
         remote.outbound_tx = Some(outbound_tx);
         remote.stream_id = "stream-root".to_string();
         ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
-        ensure_client_state_locked(&mut remote, "feishu:default:chat-1");
-        ensure_client_state_locked(&mut remote, "wechat:bot:user-1");
-        remote.connection_epoch
+        let bound_stream_id = ensure_client_state_locked(&mut remote, bound_client_key)
+            .stream_id
+            .clone();
+        let unbound_stream_id = ensure_client_state_locked(&mut remote, unbound_client_key)
+            .stream_id
+            .clone();
+        (remote.connection_epoch, bound_stream_id, unbound_stream_id)
     };
+    {
+        let mut runtime = state.runtime.lock().await;
+        for thread_id in ["thread-1", "thread-2"] {
+            runtime.bind_route(
+                thread_id,
+                RouteTarget {
+                    platform: ImPlatformKind::Telegram,
+                    conversation_key: "telegram:default:chat-1".to_string(),
+                    account_id: "default".to_string(),
+                    chat_id: "chat-1".to_string(),
+                    remote_client_key: bound_client_key.to_string(),
+                },
+            );
+        }
+    }
 
     initialize_remote_clients_for_connection(&state, connection_epoch)
         .await
-        .expect("initialize all clients");
+        .expect("initialize bound clients");
 
     let envelopes = take_text_envelopes(&mut outbound_rx);
     let initialize_streams = envelopes
@@ -1160,9 +1182,329 @@ async fn initialize_remote_clients_for_connection_sends_connection_default_clien
                 .unwrap_or_default()
                 .to_string()
         })
+        .collect::<Vec<_>>();
+    let expected_streams =
+        std::collections::HashSet::from(["stream-root".to_string(), bound_stream_id.clone()]);
+    assert_eq!(initialize_streams.len(), expected_streams.len());
+    let initialize_streams = initialize_streams
+        .into_iter()
         .collect::<std::collections::HashSet<_>>();
-    let expected_streams = std::collections::HashSet::from(["stream-root".to_string()]);
     assert_eq!(initialize_streams, expected_streams);
+    assert!(!initialize_streams.contains(&unbound_stream_id));
+}
+
+#[tokio::test]
+async fn initial_initialize_response_resubscribes_bound_thread_asynchronously_once() {
+    let state = test_state();
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let connection_epoch = 21;
+    let bound_client_key = "im:telegram:restart-chat";
+    let bound_stream_id = {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.connected = true;
+        remote.connection_epoch = connection_epoch;
+        remote.outbound_tx = Some(outbound_tx);
+        remote.stream_id = "stream-root".to_string();
+        ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
+        ensure_client_state_locked(&mut remote, bound_client_key)
+            .stream_id
+            .clone()
+    };
+    {
+        state.runtime.lock().await.bind_route(
+            "thread-restart",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "telegram:default:restart-chat".to_string(),
+                account_id: "default".to_string(),
+                chat_id: "restart-chat".to_string(),
+                remote_client_key: bound_client_key.to_string(),
+            },
+        );
+    }
+
+    initialize_remote_clients_for_connection(&state, connection_epoch)
+        .await
+        .expect("initialize bound client");
+    let initial_envelopes = take_text_envelopes(&mut outbound_rx);
+    let initialize = initial_envelopes
+        .iter()
+        .find(|envelope| {
+            envelope_message_method(envelope) == Some("initialize")
+                && envelope["stream_id"] == bound_stream_id
+        })
+        .expect("bound initialize envelope");
+    let client_id = initialize["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_string();
+    let initialize_request_id = initialize["message"]["id"].clone();
+
+    tokio::time::timeout(
+        Duration::from_millis(200),
+        observe_app_server_message(
+            &state,
+            connection_epoch,
+            &client_id,
+            &bound_stream_id,
+            &json!({
+                "id": initialize_request_id,
+                "result": {"userAgent": "Codex Desktop/1.0"}
+            }),
+        ),
+    )
+    .await
+    .expect("initialize response handler must not wait for thread/resume");
+
+    let envelopes = tokio::time::timeout(Duration::from_secs(1), async {
+        let mut seen = Vec::new();
+        loop {
+            seen.extend(take_text_envelopes(&mut outbound_rx));
+            if seen
+                .iter()
+                .any(|envelope| envelope_message_method(envelope) == Some("thread/resume"))
+            {
+                return seen;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("thread/resume should be sent after initialize");
+    let resumes = envelopes
+        .iter()
+        .filter(|envelope| envelope_message_method(envelope) == Some("thread/resume"))
+        .collect::<Vec<_>>();
+    assert_eq!(resumes.len(), 1);
+    let resume = resumes[0];
+    assert_eq!(resume["stream_id"], bound_stream_id);
+    assert_eq!(resume["message"]["params"]["threadId"], "thread-restart");
+    assert_eq!(resume["message"]["params"]["excludeTurns"], true);
+    let resume_request_id = resume["message"]["id"].clone();
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &bound_stream_id,
+        &json!({
+            "id": resume_request_id,
+            "result": {
+                "thread": {
+                    "id": "thread-restart",
+                    "status": {"type": "idle"}
+                }
+            }
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    assert_eq!(
+        take_text_envelopes(&mut outbound_rx)
+            .iter()
+            .filter(|envelope| envelope_message_method(envelope) == Some("thread/resume"))
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn initialize_response_does_not_duplicate_running_recovery_resubscribe() {
+    let state = test_state();
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let connection_epoch = 22;
+    let bound_client_key = "im:telegram:recovering-chat";
+    let bound_stream_id = {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.connected = true;
+        remote.connection_epoch = connection_epoch;
+        remote.outbound_tx = Some(outbound_tx);
+        remote.stream_id = "stream-root".to_string();
+        ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
+        ensure_client_state_locked(&mut remote, bound_client_key)
+            .stream_id
+            .clone()
+    };
+    {
+        state.runtime.lock().await.bind_route(
+            "thread-recovering",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "telegram:default:recovering-chat".to_string(),
+                account_id: "default".to_string(),
+                chat_id: "recovering-chat".to_string(),
+                remote_client_key: bound_client_key.to_string(),
+            },
+        );
+    }
+
+    initialize_remote_clients_for_connection(&state, connection_epoch)
+        .await
+        .expect("initialize recovering client");
+    let initial_envelopes = take_text_envelopes(&mut outbound_rx);
+    let initialize = initial_envelopes
+        .iter()
+        .find(|envelope| {
+            envelope_message_method(envelope) == Some("initialize")
+                && envelope["stream_id"] == bound_stream_id
+        })
+        .expect("recovering initialize envelope");
+    let client_id = initialize["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_string();
+    let initialize_request_id = initialize["message"]["id"].clone();
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        let client = remote
+            .clients
+            .get_mut(bound_client_key)
+            .expect("recovering client");
+        client.recovery_attempt = 4;
+        client.recovery_started_at_ms = Some(123);
+    }
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &bound_stream_id,
+        &json!({
+            "id": initialize_request_id,
+            "result": {"userAgent": "Codex Desktop/1.0"}
+        }),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        take_text_envelopes(&mut outbound_rx)
+            .iter()
+            .all(|envelope| envelope_message_method(envelope) != Some("thread/resume"))
+    );
+    let remote = state.remote_control.inner.lock().await;
+    let client = remote
+        .clients
+        .get(bound_client_key)
+        .expect("recovering client");
+    assert!(client.initialized);
+    assert!(client.recovery_started_at_ms.is_none());
+    assert_eq!(client.recovery_attempt, 4);
+}
+
+#[tokio::test]
+async fn initial_resubscribe_missing_rollout_clears_saved_binding() {
+    let state = test_state();
+    let state_path = state.config.lock().await.state_path.clone();
+    let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let connection_epoch = 23;
+    let bound_client_key = "im:telegram:missing-chat";
+    let bound_stream_id = {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.connected = true;
+        remote.connection_epoch = connection_epoch;
+        remote.outbound_tx = Some(outbound_tx);
+        remote.stream_id = "stream-root".to_string();
+        ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
+        ensure_client_state_locked(&mut remote, bound_client_key)
+            .stream_id
+            .clone()
+    };
+    {
+        state.runtime.lock().await.bind_route(
+            "thread-missing",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "telegram:default:missing-chat".to_string(),
+                account_id: "default".to_string(),
+                chat_id: "missing-chat".to_string(),
+                remote_client_key: bound_client_key.to_string(),
+            },
+        );
+        let mut persisted = state.persisted.lock().await;
+        persisted.im_thread_bindings.insert(
+            "telegram:default:missing-chat".to_string(),
+            "thread-missing".to_string(),
+        );
+        persisted.save(&state_path).expect("save binding");
+    }
+
+    initialize_remote_clients_for_connection(&state, connection_epoch)
+        .await
+        .expect("initialize bound client");
+    let initial_envelopes = take_text_envelopes(&mut outbound_rx);
+    let initialize = initial_envelopes
+        .iter()
+        .find(|envelope| {
+            envelope_message_method(envelope) == Some("initialize")
+                && envelope["stream_id"] == bound_stream_id
+        })
+        .expect("bound initialize envelope");
+    let client_id = initialize["client_id"]
+        .as_str()
+        .expect("client id")
+        .to_string();
+    let initialize_request_id = initialize["message"]["id"].clone();
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &bound_stream_id,
+        &json!({
+            "id": initialize_request_id,
+            "result": {"userAgent": "Codex Desktop/1.0"}
+        }),
+    )
+    .await;
+
+    let resume = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(resume) = take_text_envelopes(&mut outbound_rx)
+                .into_iter()
+                .find(|envelope| envelope_message_method(envelope) == Some("thread/resume"))
+            {
+                return resume;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("thread/resume should be sent");
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &bound_stream_id,
+        &json!({
+            "id": resume["message"]["id"].clone(),
+            "error": {
+                "code": -32600,
+                "message": "no rollout found for thread id thread-missing"
+            }
+        }),
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let route_removed = state.runtime.lock().await.route_by_thread.is_empty();
+            let binding_removed = state.persisted.lock().await.im_thread_bindings.is_empty();
+            if route_removed && binding_removed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("stale binding should be removed");
+
+    assert!(
+        PersistedState::load(&state_path)
+            .im_thread_bindings
+            .is_empty()
+    );
 }
 
 #[tokio::test]

@@ -12,6 +12,7 @@ use uuid::Uuid;
 use crate::types::now_ms;
 
 pub const DAEMON_INSTANCE_ENV: &str = "CODEXHUB_DAEMON_INSTANCE_ID";
+pub const CODEXHUB_GUI_PID_ENV: &str = "CODEXHUB_GUI_PID";
 pub const DAEMON_SERVICE_NAME: &str = "codexhub";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

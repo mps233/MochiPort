@@ -4,13 +4,16 @@ use crate::{
     im::core::i18n::ImText,
     im_runtime::{
         TelegramCommandProgressEntry, TelegramCommandProgressEntryKind,
-        TelegramCommandProgressSnapshot, TelegramCommandProgressStatus, TelegramDiffSummary,
-        TelegramPlanStep, TelegramPlanStepStatus,
+        TelegramCommandProgressSnapshot, TelegramCommandProgressStatus, TelegramDiffFileSummary,
+        TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus,
     },
 };
 
-const TELEGRAM_COMMAND_PROGRESS_VISIBLE_STEPS: usize = 5;
+use super::{collab_progress, rich_blocks};
+
+const TELEGRAM_COMMAND_PROGRESS_VISIBLE_STEPS: usize = 3;
 const TELEGRAM_COMMAND_PROGRESS_COMMAND_CHARS: usize = 180;
+const TELEGRAM_COMMAND_PROGRESS_RICH_COMMAND_CHARS: usize = 56;
 const TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS: usize = 480;
 const TELEGRAM_COMMAND_PROGRESS_FAILURE_LINES: usize = 6;
 const TELEGRAM_COMMAND_PROGRESS_RETRY_ERROR_CHARS: usize = 600;
@@ -19,8 +22,17 @@ const TELEGRAM_PLAN_RENDER_STEPS: usize = 6;
 const TELEGRAM_PLAN_STEP_CHARS: usize = 180;
 const TELEGRAM_DIFF_RENDER_PATHS: usize = 8;
 const TELEGRAM_DIFF_PATH_CHARS: usize = 180;
+const TELEGRAM_DIFF_TABLE_PATH_CHARS: usize = 48;
 const TELEGRAM_DIFF_MAX_PATHS: usize = 128;
-pub(crate) const TELEGRAM_COMMAND_PROGRESS_MAX_CHARS: usize = 3_800;
+const TELEGRAM_COMMAND_PROGRESS_DETAILS_STEPS: usize = 12;
+const TELEGRAM_TASK_PROGRESS_FALLBACK_MAX_CHARS: usize = 3_800;
+pub(crate) const TELEGRAM_COMMAND_PROGRESS_MAX_CHARS: usize = 3_600;
+
+#[derive(Debug, Clone)]
+pub(crate) struct TelegramTaskProgressRender {
+    pub blocks: Vec<Value>,
+    pub fallback_markdown: String,
+}
 
 pub(crate) fn reasoning_summary_from_item(item: &Value) -> Option<String> {
     let mut parts = Vec::new();
@@ -97,7 +109,7 @@ pub(crate) fn plan_from_item(item: &Value) -> (Option<String>, Vec<TelegramPlanS
 
 pub(crate) fn diff_summary_from_item(item: &Value) -> Option<TelegramDiffSummary> {
     let changes = item.get("changes").and_then(Value::as_array)?;
-    let mut paths = Vec::new();
+    let mut files = Vec::new();
     let mut additions = 0usize;
     let mut deletions = 0usize;
     for change in changes {
@@ -117,22 +129,28 @@ pub(crate) fn diff_summary_from_item(item: &Value) -> Option<TelegramDiffSummary
             Some(move_path) if move_path != path => format!("{path} -> {move_path}"),
             _ => path.to_string(),
         };
-        if paths.len() < TELEGRAM_DIFF_MAX_PATHS {
-            push_unique_path(&mut paths, display_path);
-        }
-        if let Some(diff) = change.get("diff").and_then(Value::as_str) {
-            let (added, removed) = diff_line_stats(diff);
-            additions = additions.saturating_add(added);
-            deletions = deletions.saturating_add(removed);
-        }
+        let (added, removed) = diff_change_stats(change);
+        additions = additions.saturating_add(added);
+        deletions = deletions.saturating_add(removed);
+        push_unique_diff_file(
+            &mut files,
+            TelegramDiffFileSummary {
+                path: display_path,
+                additions: added,
+                deletions: removed,
+            },
+        );
     }
-    let file_count = changes.len().max(paths.len());
+    let file_count = changes.len().max(files.len());
+    let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+    let omitted_paths = file_count.saturating_sub(paths.len());
     (file_count > 0).then(|| TelegramDiffSummary {
         file_count,
         additions,
         deletions,
-        omitted_paths: file_count.saturating_sub(paths.len()),
+        files,
         paths,
+        omitted_paths,
     })
 }
 
@@ -144,21 +162,41 @@ pub(crate) fn diff_summary_from_diff(diff: &str) -> Option<TelegramDiffSummary> 
     if diff.trim().is_empty() {
         return None;
     }
-    let mut paths = Vec::new();
+    let mut files = Vec::new();
     let mut file_count = 0usize;
+    let mut current_path = None;
+    let mut current_additions = 0usize;
+    let mut current_deletions = 0usize;
     let mut pending_old_path = None;
     let mut additions = 0usize;
     let mut deletions = 0usize;
+    let mut current_has_header = false;
     let mut in_hunk = false;
     for line in diff.lines() {
         if let Some(rest) = line.strip_prefix("diff --git ") {
+            finish_diff_file(
+                &mut files,
+                &mut current_path,
+                &mut current_additions,
+                &mut current_deletions,
+            );
             file_count = file_count.saturating_add(1);
-            if let Some(path) = diff_git_target_path(rest) {
-                push_unique_path(&mut paths, path);
-            }
+            current_path = diff_git_target_path(rest);
+            current_has_header = false;
             pending_old_path = None;
             in_hunk = false;
         } else if let Some(rest) = line.strip_prefix("--- ") {
+            if current_has_header {
+                finish_diff_file(
+                    &mut files,
+                    &mut current_path,
+                    &mut current_additions,
+                    &mut current_deletions,
+                );
+                file_count = file_count.saturating_add(1);
+                current_has_header = false;
+                in_hunk = false;
+            }
             pending_old_path = diff_header_path(rest, 'a');
             if pending_old_path.as_deref() == Some("/dev/null") {
                 pending_old_path = None;
@@ -172,25 +210,37 @@ pub(crate) fn diff_summary_from_diff(diff: &str) -> Option<TelegramDiffSummary> 
                 .filter(|path| path != "/dev/null")
                 .or(pending_old_path.take());
             if let Some(path) = path.filter(|path| path != "/dev/null") {
-                push_unique_path(&mut paths, path);
+                current_path = Some(path);
             }
+            current_has_header = true;
         } else if line.starts_with("@@") {
             in_hunk = true;
         } else if let Some(rest) = line.strip_prefix("rename to ") {
-            push_unique_path(&mut paths, rest.trim().to_string());
+            current_path = Some(rest.trim().to_string());
         } else if in_hunk && line.starts_with('+') {
+            current_additions = current_additions.saturating_add(1);
             additions = additions.saturating_add(1);
         } else if in_hunk && line.starts_with('-') {
+            current_deletions = current_deletions.saturating_add(1);
             deletions = deletions.saturating_add(1);
         }
     }
-    file_count = file_count.max(paths.len());
+    finish_diff_file(
+        &mut files,
+        &mut current_path,
+        &mut current_additions,
+        &mut current_deletions,
+    );
+    file_count = file_count.max(files.len());
+    let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
+    let omitted_paths = file_count.saturating_sub(paths.len());
     (file_count > 0).then(|| TelegramDiffSummary {
         file_count,
         additions,
         deletions,
-        omitted_paths: file_count.saturating_sub(paths.len()),
+        files,
         paths,
+        omitted_paths,
     })
 }
 
@@ -210,6 +260,42 @@ fn diff_line_stats(diff: &str) -> (usize, usize) {
     (additions, deletions)
 }
 
+fn diff_change_stats(change: &Value) -> (usize, usize) {
+    let diff = change
+        .get("diff")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let kind = change
+        .get("kind")
+        .and_then(|kind| {
+            kind.get("type")
+                .and_then(Value::as_str)
+                .or_else(|| kind.as_str())
+        })
+        .or_else(|| change.get("type").and_then(Value::as_str))
+        .unwrap_or("change")
+        .trim()
+        .to_ascii_lowercase();
+    match kind.as_str() {
+        "add" | "added" | "create" | "created" => (count_text_lines(diff), 0),
+        "delete" | "deleted" | "remove" | "removed" => (0, count_text_lines(diff)),
+        _ => diff_line_stats(diff),
+    }
+}
+
+fn count_text_lines(text: &str) -> usize {
+    if text.is_empty() {
+        return 0;
+    }
+    let normalized = text.replace("\r\n", "\n");
+    let lines = normalized.split('\n').collect::<Vec<_>>();
+    if lines.last() == Some(&"") {
+        lines.len().saturating_sub(1)
+    } else {
+        lines.len()
+    }
+}
+
 fn diff_git_target_path(rest: &str) -> Option<String> {
     let index = rest.rfind(" b/")?;
     Some(rest[index + 3..].trim_matches('"').to_string())
@@ -221,16 +307,33 @@ fn diff_header_path(rest: &str, prefix: char) -> Option<String> {
     Some(raw.strip_prefix(&prefix).unwrap_or(raw).to_string())
 }
 
-fn push_unique_path(paths: &mut Vec<String>, path: String) {
-    let path = path.trim().trim_matches('"');
-    if path.is_empty()
-        || path == "/dev/null"
-        || paths.len() >= TELEGRAM_DIFF_MAX_PATHS
-        || paths.iter().any(|current| current == path)
-    {
-        return;
+fn finish_diff_file(
+    files: &mut Vec<TelegramDiffFileSummary>,
+    current_path: &mut Option<String>,
+    additions: &mut usize,
+    deletions: &mut usize,
+) {
+    if let Some(path) = current_path.take() {
+        push_unique_diff_file(
+            files,
+            TelegramDiffFileSummary {
+                path,
+                additions: *additions,
+                deletions: *deletions,
+            },
+        );
     }
-    paths.push(path.to_string());
+    *additions = 0;
+    *deletions = 0;
+}
+
+fn push_unique_diff_file(files: &mut Vec<TelegramDiffFileSummary>, file: TelegramDiffFileSummary) {
+    if let Some(existing) = files.iter_mut().find(|existing| existing.path == file.path) {
+        existing.additions = existing.additions.saturating_add(file.additions);
+        existing.deletions = existing.deletions.saturating_add(file.deletions);
+    } else if files.len() < TELEGRAM_DIFF_MAX_PATHS {
+        files.push(file);
+    }
 }
 
 pub(crate) fn running_entry(item_id: &str, item: &Value) -> TelegramCommandProgressEntry {
@@ -383,12 +486,411 @@ pub(crate) fn render_command_progress(
     }
 }
 
+pub(crate) fn render_task_progress(
+    snapshot: &TelegramCommandProgressSnapshot,
+    text: ImText,
+) -> TelegramTaskProgressRender {
+    let command_fallback = render_command_progress(snapshot, text);
+    let fallback_markdown = match snapshot.collab.as_ref() {
+        Some(collab) => {
+            let rendered_collab = collab_progress::render_collab_progress(collab, text);
+            let combined = format!("{command_fallback}\n\n{rendered_collab}");
+            if combined.chars().count() <= TELEGRAM_TASK_PROGRESS_FALLBACK_MAX_CHARS {
+                combined
+            } else {
+                let summary = rendered_collab.lines().next().unwrap_or_default();
+                let combined = format!("{command_fallback}\n\n{summary}");
+                if combined.chars().count() <= TELEGRAM_TASK_PROGRESS_FALLBACK_MAX_CHARS {
+                    combined
+                } else {
+                    command_fallback
+                }
+            }
+        }
+        None => command_fallback,
+    };
+    TelegramTaskProgressRender {
+        blocks: render_task_progress_blocks(snapshot, text),
+        fallback_markdown,
+    }
+}
+
+fn render_task_progress_blocks(
+    snapshot: &TelegramCommandProgressSnapshot,
+    text: ImText,
+) -> Vec<Value> {
+    let mut blocks = vec![rich_blocks::heading(
+        rich_blocks::text(command_progress_title(snapshot, text)),
+        3,
+    )];
+
+    if snapshot.retry_count > 0 {
+        blocks.push(rich_blocks::paragraph(rich_blocks::text(
+            text.telegram_retry_progress_summary(snapshot.retry_count),
+        )));
+    }
+
+    if snapshot.plan_explanation.is_some() || !snapshot.plan.is_empty() {
+        let completed = snapshot
+            .plan
+            .iter()
+            .filter(|step| step.status == TelegramPlanStepStatus::Completed)
+            .count();
+        blocks.push(rich_blocks::paragraph(rich_blocks::bold(
+            text.telegram_plan_heading(completed, snapshot.plan.len()),
+        )));
+        if let Some(explanation) = snapshot.plan_explanation.as_deref() {
+            blocks.push(rich_blocks::paragraph(rich_blocks::text(compact_text(
+                explanation,
+                TELEGRAM_PLAN_STEP_CHARS,
+            ))));
+        }
+        let items = snapshot
+            .plan
+            .iter()
+            .take(TELEGRAM_PLAN_RENDER_STEPS)
+            .map(|step| {
+                let mut line = Vec::new();
+                if step.status == TelegramPlanStepStatus::InProgress {
+                    line.push(rich_blocks::bold(
+                        text.telegram_progress_status_label("in_progress"),
+                    ));
+                    line.push(rich_blocks::text(" · "));
+                }
+                line.push(rich_blocks::text(compact_text(
+                    &step.step,
+                    TELEGRAM_PLAN_STEP_CHARS,
+                )));
+                rich_blocks::checklist_item(
+                    vec![rich_blocks::paragraph(rich_blocks::rich_text(line))],
+                    step.status == TelegramPlanStepStatus::Completed,
+                )
+            })
+            .collect::<Vec<_>>();
+        if !items.is_empty() {
+            blocks.push(rich_blocks::list(items));
+        }
+        if snapshot.plan.len() > TELEGRAM_PLAN_RENDER_STEPS {
+            blocks.push(rich_blocks::paragraph(rich_blocks::text(
+                text.telegram_plan_omitted(snapshot.plan.len() - TELEGRAM_PLAN_RENDER_STEPS),
+            )));
+        }
+    }
+
+    let selected = selected_entry_indices(&snapshot.entries);
+    let command_total = snapshot
+        .dropped_entries
+        .saturating_add(snapshot.entries.len());
+    if has_plan_progress(snapshot) && command_total > 0 {
+        blocks.push(rich_blocks::divider());
+        blocks.push(rich_blocks::paragraph(rich_blocks::bold(
+            command_execution_progress_title(snapshot, text),
+        )));
+    }
+    if !selected.is_empty() {
+        for index in &selected {
+            blocks.extend(rich_command_entry_blocks(&snapshot.entries[*index], text));
+        }
+    }
+
+    let hidden = (0..snapshot.entries.len())
+        .filter(|index| !selected.contains(index))
+        .take(TELEGRAM_COMMAND_PROGRESS_DETAILS_STEPS)
+        .collect::<Vec<_>>();
+    if !hidden.is_empty() || snapshot.dropped_entries > 0 {
+        let omitted = snapshot
+            .dropped_entries
+            .saturating_add(snapshot.entries.len().saturating_sub(selected.len()));
+        let mut hidden_blocks = hidden
+            .iter()
+            .flat_map(|index| rich_command_entry_blocks(&snapshot.entries[*index], text))
+            .collect::<Vec<_>>();
+        let still_hidden = omitted.saturating_sub(hidden.len());
+        if still_hidden > 0 {
+            hidden_blocks.push(rich_blocks::paragraph(rich_blocks::text(
+                text.telegram_command_progress_omitted(still_hidden),
+            )));
+        }
+        blocks.push(rich_blocks::details(
+            rich_blocks::text(text.telegram_command_progress_omitted(omitted)),
+            hidden_blocks,
+            false,
+        ));
+    }
+
+    for index in &selected {
+        let entry = &snapshot.entries[*index];
+        if let Some(output) = entry.failure_output.as_deref() {
+            blocks.push(rich_blocks::details(
+                rich_blocks::rich_text(vec![
+                    rich_blocks::text(format!(
+                        "{} ",
+                        text.telegram_command_progress_error_summary()
+                            .trim_end_matches([':', '：'])
+                    )),
+                    rich_blocks::code(truncate_middle(
+                        &entry.command,
+                        TELEGRAM_COMMAND_PROGRESS_RICH_COMMAND_CHARS,
+                    )),
+                ]),
+                vec![rich_blocks::preformatted(
+                    truncate_tail(output, TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS),
+                    Some("text"),
+                )],
+                false,
+            ));
+        }
+    }
+
+    if let Some(collab) = snapshot.collab.as_ref() {
+        blocks.push(collab_progress::render_collab_progress_details(
+            collab, text,
+        ));
+    }
+    if let Some(reasoning) = snapshot.reasoning_summary.as_deref() {
+        blocks.push(rich_blocks::details(
+            rich_blocks::text(text.telegram_reasoning_heading()),
+            vec![rich_blocks::paragraph(rich_blocks::text(compact_text(
+                reasoning,
+                TELEGRAM_REASONING_RENDER_CHARS,
+            )))],
+            false,
+        ));
+    }
+    if let Some(diff) = snapshot.diff_summary.as_ref() {
+        let mut rows = vec![vec![
+            rich_blocks::table_cell(
+                rich_blocks::text(text.telegram_diff_table_file()),
+                true,
+                "left",
+            ),
+            rich_blocks::table_cell(
+                rich_blocks::text(text.telegram_diff_table_additions()),
+                true,
+                "right",
+            ),
+            rich_blocks::table_cell(
+                rich_blocks::text(text.telegram_diff_table_deletions()),
+                true,
+                "right",
+            ),
+        ]];
+        if diff.files.is_empty() {
+            for path in diff.paths.iter().take(TELEGRAM_DIFF_RENDER_PATHS) {
+                let file_name = diff_file_display_name(path);
+                rows.push(vec![
+                    rich_blocks::table_cell(
+                        rich_blocks::code(compact_text(&file_name, TELEGRAM_DIFF_TABLE_PATH_CHARS)),
+                        false,
+                        "left",
+                    ),
+                    rich_blocks::table_cell(rich_blocks::text("+0"), false, "right"),
+                    rich_blocks::table_cell(rich_blocks::text("-0"), false, "right"),
+                ]);
+            }
+        } else {
+            for file in diff.files.iter().take(TELEGRAM_DIFF_RENDER_PATHS) {
+                let file_name = diff_file_display_name(&file.path);
+                rows.push(vec![
+                    rich_blocks::table_cell(
+                        rich_blocks::code(compact_text(&file_name, TELEGRAM_DIFF_TABLE_PATH_CHARS)),
+                        false,
+                        "left",
+                    ),
+                    rich_blocks::table_cell(
+                        rich_blocks::text(format!("+{}", file.additions)),
+                        false,
+                        "right",
+                    ),
+                    rich_blocks::table_cell(
+                        rich_blocks::text(format!("-{}", file.deletions)),
+                        false,
+                        "right",
+                    ),
+                ]);
+            }
+        }
+        let visible_files = if diff.files.is_empty() {
+            diff.paths.len()
+        } else {
+            diff.files.len()
+        };
+        let omitted = diff
+            .omitted_paths
+            .saturating_add(visible_files.saturating_sub(TELEGRAM_DIFF_RENDER_PATHS));
+        blocks.push(rich_blocks::details(
+            rich_blocks::text(text.telegram_diff_heading(
+                diff.file_count,
+                diff.additions,
+                diff.deletions,
+            )),
+            {
+                let mut details_blocks = vec![rich_blocks::table(rows, true, true)];
+                if omitted > 0 {
+                    details_blocks.push(rich_blocks::paragraph(rich_blocks::text(
+                        text.telegram_diff_omitted(omitted),
+                    )));
+                }
+                details_blocks
+            },
+            false,
+        ));
+    }
+    if snapshot.retry_count > 0
+        && let Some(error) = snapshot.retry_error.as_deref()
+    {
+        blocks.push(rich_blocks::details(
+            rich_blocks::text(
+                text.telegram_retry_error_summary()
+                    .trim_end_matches([':', '：']),
+            ),
+            vec![rich_blocks::preformatted(
+                truncate_middle(error, TELEGRAM_COMMAND_PROGRESS_RETRY_ERROR_CHARS),
+                Some("text"),
+            )],
+            false,
+        ));
+    }
+
+    blocks.push(rich_blocks::footer(rich_blocks::rich_text(vec![
+        rich_blocks::text("turn "),
+        rich_blocks::code(short_identifier(&snapshot.turn_id)),
+    ])));
+    blocks
+}
+
+fn rich_command_entry_blocks(entry: &TelegramCommandProgressEntry, text: ImText) -> Vec<Value> {
+    let command = truncate_middle(&entry.command, TELEGRAM_COMMAND_PROGRESS_RICH_COMMAND_CHARS);
+    let language = match entry.kind {
+        TelegramCommandProgressEntryKind::Command => "shell",
+        TelegramCommandProgressEntryKind::McpTool => "text",
+    };
+
+    let mut metadata = Vec::new();
+    if entry.kind == TelegramCommandProgressEntryKind::McpTool {
+        metadata.push(rich_blocks::bold("MCP"));
+        metadata.push(rich_blocks::text(" · "));
+    }
+    metadata.push(rich_blocks::bold(text.telegram_progress_status_label(
+        command_progress_status_key(entry.status),
+    )));
+    if let Some(duration) = entry.duration_ms {
+        metadata.push(rich_blocks::text(format!(
+            " · {}",
+            format_duration(duration)
+        )));
+    }
+    if let Some(exit_code) = entry
+        .exit_code
+        .filter(|_| entry.status == TelegramCommandProgressStatus::Failed)
+    {
+        metadata.push(rich_blocks::text(format!(" · exit {exit_code}")));
+    }
+    vec![
+        rich_blocks::preformatted(command, Some(language)),
+        rich_blocks::footer(rich_blocks::rich_text(metadata)),
+    ]
+}
+
+fn command_progress_status_key(status: TelegramCommandProgressStatus) -> &'static str {
+    match status {
+        TelegramCommandProgressStatus::Running => "running",
+        TelegramCommandProgressStatus::Interrupted => "interrupted",
+        TelegramCommandProgressStatus::Succeeded => "succeeded",
+        TelegramCommandProgressStatus::Failed => "failed",
+    }
+}
+
+fn short_identifier(value: &str) -> String {
+    const MAX: usize = 8;
+    let value = value.trim();
+    if value.chars().count() <= MAX {
+        return value.to_string();
+    }
+    format!("{}…", value.chars().take(MAX).collect::<String>())
+}
+
 fn render_command_progress_with_limits(
     snapshot: &TelegramCommandProgressSnapshot,
     text: ImText,
     selected: &[usize],
     failure_output_chars: usize,
     retry_error_chars: usize,
+) -> String {
+    let total = snapshot
+        .dropped_entries
+        .saturating_add(snapshot.entries.len());
+    let omitted = total.saturating_sub(selected.len());
+    let mut sections = vec![command_progress_title(snapshot, text)];
+    if total > 0 && snapshot.retry_count > 0 {
+        sections.push(text.telegram_retry_progress_summary(snapshot.retry_count));
+    }
+    if let Some(plan) = render_plan_progress(snapshot, text) {
+        sections.push(plan);
+    }
+    if total > 0 && has_plan_progress(snapshot) {
+        sections.push(command_execution_progress_title(snapshot, text));
+    }
+    if omitted > 0 {
+        sections.push(text.telegram_command_progress_omitted(omitted));
+    }
+    for index in selected {
+        sections.push(render_entry(
+            &snapshot.entries[*index],
+            text,
+            failure_output_chars,
+        ));
+    }
+    if let Some(supplemental) = render_supplemental_progress(snapshot, text) {
+        sections.push(supplemental);
+    }
+    if snapshot.retry_count > 0
+        && let Some(error) = snapshot.retry_error.as_deref()
+        && retry_error_chars > 0
+    {
+        let error = truncate_middle(&error.replace("```", "'''"), retry_error_chars);
+        sections.push(format!(
+            "{}\n```text\n{}\n```",
+            text.telegram_retry_error_summary(),
+            error
+        ));
+    }
+    sections.join("\n\n")
+}
+
+fn command_progress_title(snapshot: &TelegramCommandProgressSnapshot, text: ImText) -> String {
+    let total = snapshot
+        .dropped_entries
+        .saturating_add(snapshot.entries.len());
+    let has_supplemental = snapshot.reasoning_summary.is_some()
+        || snapshot.plan_explanation.is_some()
+        || !snapshot.plan.is_empty()
+        || snapshot.diff_summary.is_some()
+        || snapshot.collab.is_some();
+    if total == 0 && snapshot.retry_count > 0 {
+        text.telegram_retry_progress_title(
+            snapshot.completed,
+            snapshot.failed,
+            snapshot.retry_count,
+        )
+    } else if total == 0 && has_supplemental {
+        text.telegram_task_progress_title(snapshot.completed, snapshot.failed)
+            .to_string()
+    } else if has_plan_progress(snapshot) {
+        text.telegram_task_progress_title(snapshot.completed, snapshot.failed)
+            .to_string()
+    } else {
+        command_execution_progress_title(snapshot, text)
+    }
+}
+
+fn has_plan_progress(snapshot: &TelegramCommandProgressSnapshot) -> bool {
+    snapshot.plan_explanation.is_some() || !snapshot.plan.is_empty()
+}
+
+fn command_execution_progress_title(
+    snapshot: &TelegramCommandProgressSnapshot,
+    text: ImText,
 ) -> String {
     let total = snapshot
         .dropped_entries
@@ -408,66 +910,57 @@ fn render_command_progress_with_limits(
         .iter()
         .filter(|entry| entry.status == TelegramCommandProgressStatus::Interrupted)
         .count();
-    let omitted = total.saturating_sub(selected.len());
-    let has_supplemental = snapshot.reasoning_summary.is_some()
-        || snapshot.plan_explanation.is_some()
-        || !snapshot.plan.is_empty()
-        || snapshot.diff_summary.is_some();
-    let mut sections = if total == 0 && snapshot.retry_count > 0 {
-        vec![text.telegram_retry_progress_title(
-            snapshot.completed,
-            snapshot.failed,
-            snapshot.retry_count,
-        )]
-    } else if total == 0 && has_supplemental {
-        vec![
-            text.telegram_task_progress_title(snapshot.completed, snapshot.failed)
-                .to_string(),
-        ]
-    } else {
-        vec![text.telegram_command_progress_title(
-            snapshot.completed,
-            snapshot.failed,
-            total,
-            failed,
-            running,
-            interrupted,
-        )]
-    };
-    if total > 0 && snapshot.retry_count > 0 {
-        sections.push(text.telegram_retry_progress_summary(snapshot.retry_count));
-    }
-    if snapshot.retry_count > 0
-        && let Some(error) = snapshot.retry_error.as_deref()
-        && retry_error_chars > 0
-    {
-        let error = truncate_middle(&error.replace("```", "'''"), retry_error_chars);
-        sections.push(format!(
-            "{}\n```text\n{}\n```",
-            text.telegram_retry_error_summary(),
-            error
-        ));
-    }
-    if omitted > 0 {
-        sections.push(text.telegram_command_progress_omitted(omitted));
-    }
-    if let Some(supplemental) = render_supplemental_progress(snapshot, text) {
-        sections.push(supplemental);
-    }
-    for index in selected {
-        sections.push(render_entry(
-            &snapshot.entries[*index],
-            text,
-            failure_output_chars,
-        ));
-    }
-    sections.join("\n\n")
+    text.telegram_command_progress_title(
+        snapshot.completed,
+        snapshot.failed,
+        total,
+        failed,
+        running,
+        interrupted,
+    )
 }
 
 fn render_supplemental_progress(
     snapshot: &TelegramCommandProgressSnapshot,
     text: ImText,
 ) -> Option<String> {
+    let mut sections = Vec::new();
+    if let Some(reasoning) = snapshot.reasoning_summary.as_deref() {
+        let reasoning = compact_text(reasoning, TELEGRAM_REASONING_RENDER_CHARS);
+        sections.push(format!(
+            "{}\n{}",
+            text.telegram_reasoning_heading(),
+            reasoning
+        ));
+    }
+    if let Some(diff) = snapshot.diff_summary.as_ref() {
+        let mut lines =
+            vec![text.telegram_diff_heading(diff.file_count, diff.additions, diff.deletions)];
+        for path in diff.paths.iter().take(TELEGRAM_DIFF_RENDER_PATHS) {
+            let file_name = diff_file_display_name(path);
+            lines.push(format!(
+                "• {}",
+                compact_text(&file_name, TELEGRAM_DIFF_PATH_CHARS)
+            ));
+        }
+        let omitted = diff
+            .omitted_paths
+            .saturating_add(diff.paths.len().saturating_sub(TELEGRAM_DIFF_RENDER_PATHS));
+        if omitted > 0 {
+            lines.push(text.telegram_diff_omitted(omitted));
+        }
+        sections.push(lines.join("\n"));
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
+}
+
+fn render_plan_progress(
+    snapshot: &TelegramCommandProgressSnapshot,
+    text: ImText,
+) -> Option<String> {
+    if !has_plan_progress(snapshot) {
+        return None;
+    }
     let mut sections = Vec::new();
     if snapshot.plan_explanation.is_some() || !snapshot.plan.is_empty() {
         let completed = snapshot
@@ -487,39 +980,14 @@ fn render_supplemental_progress(
                 TelegramPlanStepStatus::Completed => "completed",
             };
             lines.push(format!(
-                "{} {}",
-                text.telegram_plan_step_icon(status),
+                "{} · {}",
+                text.telegram_progress_status_label(status),
                 compact_text(&step.step, TELEGRAM_PLAN_STEP_CHARS)
             ));
         }
         if snapshot.plan.len() > TELEGRAM_PLAN_RENDER_STEPS {
             lines
                 .push(text.telegram_plan_omitted(snapshot.plan.len() - TELEGRAM_PLAN_RENDER_STEPS));
-        }
-        sections.push(lines.join("\n"));
-    }
-    if let Some(reasoning) = snapshot.reasoning_summary.as_deref() {
-        let reasoning = compact_text(reasoning, TELEGRAM_REASONING_RENDER_CHARS);
-        sections.push(format!(
-            "{}\n{}",
-            text.telegram_reasoning_heading(),
-            reasoning
-        ));
-    }
-    if let Some(diff) = snapshot.diff_summary.as_ref() {
-        let mut lines =
-            vec![text.telegram_diff_heading(diff.file_count, diff.additions, diff.deletions)];
-        for path in diff.paths.iter().take(TELEGRAM_DIFF_RENDER_PATHS) {
-            lines.push(format!(
-                "• {}",
-                compact_text(path, TELEGRAM_DIFF_PATH_CHARS)
-            ));
-        }
-        let omitted = diff
-            .omitted_paths
-            .saturating_add(diff.paths.len().saturating_sub(TELEGRAM_DIFF_RENDER_PATHS));
-        if omitted > 0 {
-            lines.push(text.telegram_diff_omitted(omitted));
         }
         sections.push(lines.join("\n"));
     }
@@ -579,13 +1047,9 @@ fn render_entry(
     text: ImText,
     failure_output_chars: usize,
 ) -> String {
-    let icon = match entry.status {
-        TelegramCommandProgressStatus::Running => "⏳",
-        TelegramCommandProgressStatus::Interrupted => "⚠️",
-        TelegramCommandProgressStatus::Succeeded => "✅",
-        TelegramCommandProgressStatus::Failed => "❌",
-    };
-    let mut line = icon.to_string();
+    let mut line = text
+        .telegram_progress_status_label(command_progress_status_key(entry.status))
+        .to_string();
     if entry.kind == TelegramCommandProgressEntryKind::McpTool {
         line.push_str(" · MCP");
     }
@@ -821,6 +1285,21 @@ fn compact_text(text: &str, max_chars: usize) -> String {
     truncate_middle(&lines.join("\n"), max_chars)
 }
 
+fn diff_file_display_name(path: &str) -> String {
+    if let Some((from, to)) = path.split_once(" -> ") {
+        return format!("{} -> {}", file_name(from), file_name(to));
+    }
+    file_name(path).to_string()
+}
+
+fn file_name(path: &str) -> &str {
+    let trimmed = path.trim().trim_matches('"');
+    trimmed
+        .rsplit(|ch| ch == '/' || ch == '\\')
+        .find(|part| !part.is_empty())
+        .unwrap_or(trimmed)
+}
+
 fn truncate_middle(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -875,18 +1354,22 @@ mod tests {
     use crate::{
         im::core::i18n::ImText,
         im_runtime::{
-            TelegramCommandProgressEntryKind, TelegramCommandProgressSnapshot,
-            TelegramCommandProgressStatus,
+            TelegramCollabProgressEntry, TelegramCollabProgressSnapshot,
+            TelegramCollabProgressStatus, TelegramCommandProgressEntryKind,
+            TelegramCommandProgressSnapshot, TelegramCommandProgressStatus,
         },
     };
 
     use super::{
-        TELEGRAM_COMMAND_PROGRESS_MAX_CHARS, completed_entry, diff_summary_from_diff,
-        file_change_diff_summary, mcp_completed_entry, mcp_running_entry, parse_plan_update,
-        reasoning_summary_from_item, render_command_progress, running_entry,
+        TELEGRAM_COMMAND_PROGRESS_MAX_CHARS, TELEGRAM_DIFF_TABLE_PATH_CHARS, completed_entry,
+        diff_file_display_name, diff_summary_from_diff, file_change_diff_summary,
+        mcp_completed_entry, mcp_running_entry, parse_plan_update, reasoning_summary_from_item,
+        render_command_progress, render_task_progress, rich_command_entry_blocks, running_entry,
     };
 
-    use crate::im_runtime::{TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus};
+    use crate::im_runtime::{
+        TelegramDiffFileSummary, TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus,
+    };
 
     #[test]
     fn parses_array_commands_and_keeps_failure_tail() {
@@ -952,13 +1435,14 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: false,
                 failed: false,
             },
             ImText::zh_cn(),
         );
 
-        assert!(rendered.contains("⏳ · MCP\nbrowser.screenshot · 获取页面截图"));
+        assert!(rendered.contains("进行中 · MCP\nbrowser.screenshot · 获取页面截图"));
         assert!(!rendered.contains("```shell"));
     }
 
@@ -996,12 +1480,13 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: false,
                 failed: false,
             },
             ImText::zh_cn(),
         );
-        assert!(rendered.contains("❌ · MCP\nbrowser.navigate"));
+        assert!(rendered.contains("失败 · MCP\nbrowser.navigate"));
         assert!(rendered.contains("503 Service Unavailable"));
     }
 
@@ -1029,7 +1514,7 @@ mod tests {
     }
 
     #[test]
-    fn mcp_entries_share_the_five_visible_step_limit() {
+    fn rich_progress_shows_three_mcp_steps_and_folds_the_rest() {
         let entries = (0..8)
             .map(|index| {
                 mcp_completed_entry(
@@ -1043,7 +1528,7 @@ mod tests {
                 )
             })
             .collect();
-        let rendered = render_command_progress(
+        let rendered = render_task_progress(
             &TelegramCommandProgressSnapshot {
                 turn_id: "turn".to_string(),
                 revision: 8,
@@ -1056,15 +1541,45 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: true,
                 failed: false,
             },
             ImText::zh_cn(),
         );
 
-        assert!(rendered.contains("另外 3 个较早步骤"));
-        assert!(!rendered.contains("browser.tool-2"));
-        assert!(rendered.contains("browser.tool-7"));
+        let visible_commands = rendered
+            .blocks
+            .iter()
+            .filter(|block| block["type"] == "pre")
+            .collect::<Vec<_>>();
+        assert_eq!(visible_commands.len(), 3);
+        assert!(
+            visible_commands
+                .iter()
+                .all(|block| block["language"] == "text")
+        );
+        let folded = rendered
+            .blocks
+            .iter()
+            .find(|block| block["summary"] == "… 另外 5 个较早步骤")
+            .expect("folded earlier steps");
+        assert_eq!(
+            folded["blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|block| block["type"] == "pre")
+                .count(),
+            5
+        );
+
+        let encoded = serde_json::to_string(&rendered.blocks).expect("rich progress");
+        assert!(encoded.contains("browser.tool-7"));
+        assert!(encoded.contains("browser.tool-0"));
+        assert!(rendered.fallback_markdown.contains("另外 5 个较早步骤"));
+        assert!(!rendered.fallback_markdown.contains("browser.tool-2"));
+        assert!(rendered.fallback_markdown.contains("browser.tool-7"));
     }
 
     #[test]
@@ -1095,6 +1610,7 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: false,
                 failed: false,
             },
@@ -1104,7 +1620,7 @@ mod tests {
         assert!(rendered.contains("执行中"));
         assert!(rendered.contains("failed early"));
         assert!(rendered.contains("still running"));
-        assert!(rendered.contains("另外 3 个较早步骤"));
+        assert!(rendered.contains("另外 5 个较早步骤"));
         assert!(!rendered.contains("command 0"));
     }
 
@@ -1136,6 +1652,7 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: true,
                 failed: false,
             },
@@ -1144,11 +1661,11 @@ mod tests {
 
         assert!(rendered.chars().count() <= TELEGRAM_COMMAND_PROGRESS_MAX_CHARS);
         assert!(rendered.contains("执行完成"));
-        assert!(rendered.contains("另外 148 个较早步骤"));
+        assert!(rendered.contains("另外 150 个较早步骤"));
     }
 
     #[test]
-    fn render_bounds_five_max_failures_with_a_max_retry_error() {
+    fn render_bounds_three_visible_failures_with_a_max_retry_error() {
         let entries = (0..5)
             .map(|index| {
                 completed_entry(
@@ -1178,6 +1695,7 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: true,
                 failed: true,
             },
@@ -1186,10 +1704,12 @@ mod tests {
 
         assert!(rendered.chars().count() <= TELEGRAM_COMMAND_PROGRESS_MAX_CHARS);
         assert!(rendered.contains(&retry_error));
-        for index in 0..5 {
+        for index in 2..5 {
             assert!(rendered.contains(&format!("command-tail-{index}")));
             assert!(rendered.contains(&format!("failure-tail-{index}")));
         }
+        assert!(!rendered.contains("command-tail-0"));
+        assert!(!rendered.contains("command-tail-1"));
     }
 
     #[test]
@@ -1209,14 +1729,15 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: true,
                 failed: false,
             },
             ImText::zh_cn(),
         );
 
-        assert!(rendered.contains("⚠️ 执行结束 · 1 步 · 1 个中断"));
-        assert!(rendered.contains("⚠️\n```shell\ncargo test\n```"));
+        assert!(rendered.contains("执行结束 · 1 步 · 1 个中断"));
+        assert!(rendered.contains("已中断\n```shell\ncargo test\n```"));
         assert!(!rendered.contains("进行中"));
     }
 
@@ -1238,13 +1759,14 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: true,
                 failed: true,
             },
             ImText::zh_cn(),
         );
 
-        assert!(rendered.contains("❌ 执行失败 · 1 步"));
+        assert!(rendered.contains("执行失败 · 1 步"));
         assert!(!rendered.contains("执行完成"));
     }
 
@@ -1262,6 +1784,7 @@ mod tests {
             plan_explanation: None,
             plan: Vec::new(),
             diff_summary: None,
+            collab: None,
             completed: false,
             failed: false,
         };
@@ -1294,6 +1817,7 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                collab: None,
                 completed: false,
                 failed: false,
             },
@@ -1352,6 +1876,21 @@ mod tests {
         assert_eq!(summary.additions, 3);
         assert_eq!(summary.deletions, 3);
         assert_eq!(summary.paths, vec!["src/a.rs", "src/b.rs"]);
+        assert_eq!(
+            summary.files,
+            vec![
+                TelegramDiffFileSummary {
+                    path: "src/a.rs".to_string(),
+                    additions: 3,
+                    deletions: 1,
+                },
+                TelegramDiffFileSummary {
+                    path: "src/b.rs".to_string(),
+                    additions: 0,
+                    deletions: 2,
+                },
+            ]
+        );
         assert_eq!(summary.omitted_paths, 0);
     }
 
@@ -1372,6 +1911,68 @@ mod tests {
         assert_eq!(summary.additions, 1);
         assert_eq!(summary.deletions, 1);
         assert_eq!(summary.paths, vec!["src/old.rs -> src/new.rs"]);
+        assert_eq!(
+            summary.files,
+            vec![TelegramDiffFileSummary {
+                path: "src/old.rs -> src/new.rs".to_string(),
+                additions: 1,
+                deletions: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn file_change_summary_counts_raw_add_and_delete_content() {
+        let item = json!({
+            "type": "fileChange",
+            "changes": [
+                {
+                    "path": "src/new.rs",
+                    "kind": {"type": "add"},
+                    "diff": "fn main() {}\n\n"
+                },
+                {
+                    "path": "src/old.rs",
+                    "kind": {"type": "delete"},
+                    "diff": "fn old() {}\nremoved\n"
+                }
+            ]
+        });
+
+        let summary = file_change_diff_summary(&item).expect("file change summary");
+
+        assert_eq!(summary.additions, 2);
+        assert_eq!(summary.deletions, 2);
+        assert_eq!(
+            summary.files,
+            vec![
+                TelegramDiffFileSummary {
+                    path: "src/new.rs".to_string(),
+                    additions: 2,
+                    deletions: 0,
+                },
+                TelegramDiffFileSummary {
+                    path: "src/old.rs".to_string(),
+                    additions: 0,
+                    deletions: 2,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_summary_splits_unified_headers_without_git_markers() {
+        let diff = "--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -1 +1,2 @@\n-kept\n+kept\n+added\n";
+
+        let summary = diff_summary_from_diff(diff).expect("diff summary");
+
+        assert_eq!(summary.file_count, 2);
+        assert_eq!(summary.additions, 3);
+        assert_eq!(summary.deletions, 2);
+        assert_eq!(summary.files.len(), 2);
+        assert_eq!(summary.files[1].path, "src/b.rs");
+        assert_eq!(summary.files[1].additions, 2);
+        assert_eq!(summary.files[1].deletions, 1);
     }
 
     #[test]
@@ -1401,9 +2002,15 @@ mod tests {
                     file_count: 1,
                     additions: 2,
                     deletions: 1,
+                    files: vec![TelegramDiffFileSummary {
+                        path: "src/main.rs".to_string(),
+                        additions: 2,
+                        deletions: 1,
+                    }],
                     paths: vec!["src/main.rs".to_string()],
                     omitted_paths: 0,
                 }),
+                collab: None,
                 completed: true,
                 failed: false,
             },
@@ -1411,10 +2018,380 @@ mod tests {
         );
 
         assert!(rendered.chars().count() <= TELEGRAM_COMMAND_PROGRESS_MAX_CHARS);
-        assert!(rendered.contains("🧠 思考摘要"));
-        assert!(rendered.contains("📋 计划 · 1/2"));
-        assert!(rendered.contains("📝 文件修改 · 1 个文件 · +2 -1"));
-        assert!(rendered.contains("• src/main.rs"));
+        assert!(rendered.contains("思考摘要"));
+        assert!(rendered.contains("计划 · 1/2"));
+        assert!(rendered.contains("文件修改 · 1 个文件 · +2 -1"));
+        assert!(rendered.contains("• main.rs"));
+        assert!(!rendered.contains("• src/main.rs"));
         assert!(!rendered.contains("```diff"));
+    }
+
+    #[test]
+    fn render_task_progress_builds_one_complete_rich_message() {
+        let rendered = render_task_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn-019f-example".to_string(),
+                revision: 7,
+                message_id: Some("42".to_string()),
+                entries: vec![
+                    running_entry("cmd", &json!({"command": "cargo test"})),
+                    mcp_completed_entry(
+                        "mcp",
+                        &json!({
+                            "type": "mcpToolCall",
+                            "server": "browser",
+                            "tool": "screenshot",
+                            "status": "completed",
+                            "durationMs": 850
+                        }),
+                    ),
+                ],
+                dropped_entries: 2,
+                retry_count: 2,
+                retry_error: Some("503 Service Unavailable".to_string()),
+                reasoning_summary: Some("Check the active Telegram delivery state.".to_string()),
+                plan_explanation: Some("Inspect, implement, verify.".to_string()),
+                plan: vec![
+                    TelegramPlanStep {
+                        step: "Inspect the current flow".to_string(),
+                        status: TelegramPlanStepStatus::Completed,
+                    },
+                    TelegramPlanStep {
+                        step: "Run regression tests".to_string(),
+                        status: TelegramPlanStepStatus::InProgress,
+                    },
+                ],
+                diff_summary: Some(TelegramDiffSummary {
+                    file_count: 1,
+                    additions: 12,
+                    deletions: 3,
+                    files: vec![TelegramDiffFileSummary {
+                        path: "src/im/events.rs".to_string(),
+                        additions: 12,
+                        deletions: 3,
+                    }],
+                    paths: vec!["src/im/events.rs".to_string()],
+                    omitted_paths: 0,
+                }),
+                collab: Some(TelegramCollabProgressSnapshot {
+                    entries: vec![TelegramCollabProgressEntry {
+                        agent_id: "secret-agent-id".to_string(),
+                        name: "api_review".to_string(),
+                        status: TelegramCollabProgressStatus::Running,
+                        detail: Some("Reviewing the official Telegram API".to_string()),
+                        started_at_ms: 1_000,
+                        updated_at_ms: 2_000,
+                    }],
+                    dropped_entries: 0,
+                    completed: false,
+                }),
+                completed: false,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        let blocks = serde_json::Value::Array(rendered.blocks.clone());
+        let encoded = serde_json::to_string(&blocks).expect("rich blocks should serialize");
+        assert_eq!(blocks[0]["type"], "heading");
+        assert_eq!(blocks[0]["text"], "任务进行中");
+        assert_eq!(
+            blocks[blocks.as_array().unwrap().len() - 1]["type"],
+            "footer"
+        );
+        let first_divider = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|block| block["type"] == "divider")
+            .expect("plan and execution should have a divider");
+        assert_eq!(blocks[first_divider + 1]["type"], "paragraph");
+        assert_eq!(blocks[first_divider + 1]["text"]["type"], "bold");
+        assert_eq!(
+            blocks[first_divider + 1]["text"]["text"],
+            "执行中 · 4 步 · 1 个进行中"
+        );
+        assert_eq!(blocks[first_divider + 2]["type"], "pre");
+        assert_eq!(blocks[first_divider + 2]["language"], "shell");
+        assert_eq!(
+            blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|block| block["type"] == "divider")
+                .count(),
+            1,
+            "only the plan-to-execution divider should remain"
+        );
+        assert!(encoded.contains("details"));
+        assert!(encoded.contains("browser.screenshot"));
+        assert!(encoded.contains("api_review"));
+        assert!(encoded.contains("503 Service Unavailable"));
+        assert!(encoded.contains("events.rs"));
+        assert!(!encoded.contains("src/im/events.rs"));
+        assert!(encoded.contains("\"type\":\"table\""));
+        assert!(encoded.contains("\"is_bordered\":true"));
+        assert!(encoded.contains("\"is_striped\":true"));
+        assert!(encoded.contains("\"is_header\":true"));
+        assert!(encoded.contains("\"text\":\"+12\""));
+        assert!(encoded.contains("\"text\":\"-3\""));
+        assert!(!encoded.contains("secret-agent-id"));
+        assert_eq!(encoded.matches("\"has_checkbox\":true").count(), 3);
+        assert_eq!(encoded.matches("\"is_checked\":true").count(), 1);
+        for marker in ["✅", "❌", "⚠️", "⏳", "🛠", "🔄"] {
+            assert!(!encoded.contains(marker), "rich progress leaked {marker}");
+        }
+        assert!(rendered.fallback_markdown.chars().count() <= 3_800);
+        assert!(rendered.fallback_markdown.contains("api_review"));
+        assert!(rendered.fallback_markdown.starts_with("任务进行中"));
+        let fallback_plan = rendered
+            .fallback_markdown
+            .find("计划 · 1/2")
+            .expect("fallback plan heading");
+        let fallback_execution = rendered
+            .fallback_markdown
+            .find("执行中 · 4 步 · 1 个进行中")
+            .expect("fallback execution heading");
+        let fallback_reasoning = rendered
+            .fallback_markdown
+            .find("思考摘要")
+            .expect("fallback reasoning heading");
+        let fallback_diff = rendered
+            .fallback_markdown
+            .find("文件修改 · 1 个文件 · +12 -3")
+            .expect("fallback diff heading");
+        assert!(fallback_plan < fallback_execution);
+        assert!(fallback_execution < fallback_reasoning);
+        assert!(fallback_reasoning < fallback_diff);
+        for marker in ["✅", "❌", "⚠️", "⏳", "🛠", "🔄"] {
+            assert!(
+                !rendered.fallback_markdown.contains(marker),
+                "fallback progress leaked {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn rich_diff_table_limits_rows_and_shows_only_file_names() {
+        let files = (0..10)
+            .map(|index| TelegramDiffFileSummary {
+                path: format!(
+                    "src/very/long/path/that/should/stay/readable/on/mobile/file-{index}.rs"
+                ),
+                additions: index + 1,
+                deletions: index,
+            })
+            .collect::<Vec<_>>();
+        let paths = files.iter().map(|file| file.path.clone()).collect();
+        let rendered = render_task_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 1,
+                message_id: None,
+                entries: Vec::new(),
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: Some(TelegramDiffSummary {
+                    file_count: 10,
+                    additions: 55,
+                    deletions: 45,
+                    files,
+                    paths,
+                    omitted_paths: 0,
+                }),
+                collab: None,
+                completed: true,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        let details = rendered
+            .blocks
+            .iter()
+            .find(|block| block["summary"] == "文件修改 · 10 个文件 · +55 -45")
+            .expect("file change details");
+        let table = &details["blocks"][0];
+        assert_eq!(table["type"], "table");
+        assert_eq!(table["cells"].as_array().unwrap().len(), 9);
+        assert_eq!(table["cells"][0][0]["text"], "文件");
+        assert_eq!(table["cells"][0][1]["text"], "新增");
+        assert_eq!(table["cells"][0][2]["text"], "删除");
+        assert_eq!(table["cells"][1][1]["text"], "+1");
+        assert_eq!(table["cells"][1][2]["text"], "-0");
+        assert_eq!(table["cells"][1][0]["text"]["text"], "file-0.rs");
+        assert!("file-0.rs".chars().count() <= TELEGRAM_DIFF_TABLE_PATH_CHARS);
+        assert_eq!(details["blocks"][1]["text"], "… 另外 2 个文件");
+        assert!(rendered.fallback_markdown.contains("• file-0.rs"));
+        assert!(!rendered.fallback_markdown.contains("src/very/long/path"));
+        assert!(rendered.fallback_markdown.contains("… 另外 2 个文件"));
+    }
+
+    #[test]
+    fn diff_file_display_name_handles_moves_and_both_path_separators() {
+        assert_eq!(diff_file_display_name("src/main.rs"), "main.rs");
+        assert_eq!(
+            diff_file_display_name(r"C:\\workspace\\src\\main.rs"),
+            "main.rs"
+        );
+        assert_eq!(
+            diff_file_display_name("src/old.rs -> nested/new.rs"),
+            "old.rs -> new.rs"
+        );
+    }
+
+    #[test]
+    fn rich_failure_details_and_step_share_a_compact_command_budget() {
+        let command = format!("prefix-{}-suffix", "x".repeat(100));
+        let rendered = render_task_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 1,
+                message_id: None,
+                entries: vec![completed_entry(
+                    "failed",
+                    &json!({
+                        "command": command,
+                        "exitCode": 1,
+                        "aggregatedOutput": "boom",
+                    }),
+                )],
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                collab: None,
+                completed: true,
+                failed: true,
+            },
+            ImText::zh_cn(),
+        );
+
+        let error_details = rendered
+            .blocks
+            .iter()
+            .find(|block| block["type"] == "details" && block["blocks"][0]["type"] == "pre")
+            .expect("failure details");
+        assert_eq!(
+            error_details["summary"],
+            json!([
+                "错误摘要 ",
+                {
+                    "type": "code",
+                    "text": "prefix-xxxxxxxxxxxxxxxxxxx...xxxxxxxxxxxxxxxxxxxx-suffix",
+                },
+            ])
+        );
+        assert_eq!(error_details["blocks"][0]["text"], "boom");
+
+        let command_block_index = rendered
+            .blocks
+            .iter()
+            .position(|block| block["type"] == "pre" && block["language"] == "shell")
+            .expect("command block");
+        assert_eq!(
+            rendered.blocks[command_block_index],
+            json!({
+                "type": "pre",
+                "text": "prefix-xxxxxxxxxxxxxxxxxxx...xxxxxxxxxxxxxxxxxxxx-suffix",
+                "language": "shell",
+            })
+        );
+        assert_eq!(rendered.blocks[command_block_index + 1]["type"], "footer");
+        assert_eq!(
+            rendered.blocks[command_block_index + 1]["text"],
+            json!([
+                {"type": "bold", "text": "失败"},
+                " · exit 1",
+            ])
+        );
+        assert!(rendered.fallback_markdown.contains(&command));
+    }
+
+    #[test]
+    fn rich_progress_without_plan_keeps_execution_as_the_top_level_section() {
+        let rendered = render_task_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 1,
+                message_id: None,
+                entries: vec![running_entry("cmd", &json!({"command": "cargo test"}))],
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                collab: None,
+                completed: false,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        let blocks = serde_json::Value::Array(rendered.blocks);
+        assert_eq!(blocks[0]["type"], "heading");
+        assert_eq!(blocks[0]["text"], "执行中 · 1 步 · 1 个进行中");
+        assert_eq!(blocks[1]["type"], "pre");
+        assert_eq!(blocks[1]["language"], "shell");
+        assert_eq!(
+            blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|block| block["type"] == "divider")
+                .count(),
+            0,
+            "the footer should not add a redundant divider"
+        );
+        assert!(
+            rendered
+                .fallback_markdown
+                .starts_with("执行中 · 1 步 · 1 个进行中")
+        );
+    }
+
+    #[test]
+    fn command_entries_use_left_aligned_shell_blocks_with_status_footers() {
+        let mut interrupted = running_entry("interrupted", &json!({"command": "stop-me"}));
+        interrupted.status = TelegramCommandProgressStatus::Interrupted;
+        let entries = [
+            running_entry("running", &json!({"command": "still-running"})),
+            completed_entry("succeeded", &json!({"command": "done", "exitCode": 0})),
+            completed_entry("failed", &json!({"command": "broken", "exitCode": 1})),
+            interrupted,
+        ];
+
+        let rendered = entries
+            .iter()
+            .map(|entry| rich_command_entry_blocks(entry, ImText::zh_cn()))
+            .collect::<Vec<_>>();
+        assert!(rendered.iter().all(|blocks| blocks.len() == 2));
+        assert!(rendered.iter().all(|blocks| blocks[0]["type"] == "pre"));
+        assert!(
+            rendered
+                .iter()
+                .all(|blocks| blocks[0]["language"] == "shell")
+        );
+        assert!(rendered.iter().all(|blocks| blocks[1]["type"] == "footer"));
+
+        let encoded = serde_json::to_string(&rendered).expect("entries should serialize");
+        assert!(encoded.contains("成功"));
+        assert!(!encoded.contains("已完成"));
+        assert!(encoded.contains("进行中"));
+        assert!(encoded.contains("失败"));
+        assert!(encoded.contains("已中断"));
+        assert!(!encoded.contains("has_checkbox"));
+        assert!(!encoded.contains("✅"));
+        assert!(!encoded.contains("❌"));
+        assert!(!encoded.contains("⚠️"));
     }
 }

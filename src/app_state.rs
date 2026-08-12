@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::Arc,
@@ -19,7 +19,7 @@ use crate::{
     codex::CodexNotification,
     config::AppConfig,
     daemon_process::DaemonIdentity,
-    im_runtime::RuntimeState,
+    im_runtime::{RouteTarget, RuntimeState, route_from_conversation_key},
     store::PersistedState,
     types::{EventRecord, ImPlatformKind, now_ms},
 };
@@ -34,6 +34,7 @@ pub struct AppState {
     pub ai_gateway_routing: Mutex<GatewayRoutingState>,
     pub persisted: Mutex<PersistedState>,
     pub runtime: Mutex<RuntimeState>,
+    pub im_route_binding_ops: Mutex<()>,
     pub remote_control: RemoteControlState,
     pub events: Mutex<Vec<EventRecord>>,
     pub bridge_task: Mutex<Option<JoinHandle<()>>>,
@@ -44,6 +45,7 @@ pub struct AppState {
     pub im_accounts: Mutex<HashMap<String, ImAccountRuntimeState>>,
     pub wechat_onboard: Mutex<Option<WechatOnboardSession>>,
     pub wecom_onboard: Mutex<Option<WecomOnboardSession>>,
+    pub safe_relaunch: Mutex<Option<crate::safe_relaunch::PendingSafeRelaunch>>,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -338,8 +340,14 @@ impl AppState {
         shutdown_tx: Option<oneshot::Sender<()>>,
         daemon_identity: Option<DaemonIdentity>,
     ) -> SharedState {
-        let persisted = PersistedState::load(&config.state_path);
-        let runtime = RuntimeState::default();
+        let mut persisted = PersistedState::load(&config.state_path);
+        let (runtime, bindings_changed) = restore_persisted_im_bindings(&config, &mut persisted);
+        if bindings_changed && let Err(err) = persisted.save(&config.state_path) {
+            chain_log::write_line(format!(
+                "[im_route] level=warn event=persisted_binding_cleanup_save_failed path={} err={err}",
+                config.state_path.display()
+            ));
+        }
         let request_log_db_path = crate::ai_gateway::request_log::database_path(&config);
         crate::ai_gateway::request_log::migrate_legacy_database(&config, &request_log_db_path);
         let ai_gateway_request_logs = RequestLogStore::new(request_log_db_path);
@@ -351,6 +359,7 @@ impl AppState {
             ai_gateway_routing: Mutex::new(GatewayRoutingState::default()),
             persisted: Mutex::new(persisted),
             runtime: Mutex::new(runtime),
+            im_route_binding_ops: Mutex::new(()),
             remote_control: RemoteControlState::new(),
             events: Mutex::new(Vec::new()),
             bridge_task: Mutex::new(None),
@@ -361,6 +370,7 @@ impl AppState {
             im_accounts: Mutex::new(HashMap::new()),
             wechat_onboard: Mutex::new(None),
             wecom_onboard: Mutex::new(None),
+            safe_relaunch: Mutex::new(None),
             shutdown_tx: Mutex::new(shutdown_tx),
         })
     }
@@ -415,6 +425,206 @@ impl AppState {
     }
 }
 
+fn restore_persisted_im_bindings(
+    config: &AppConfig,
+    persisted: &mut PersistedState,
+) -> (RuntimeState, bool) {
+    let original_bindings = persisted.im_thread_bindings.clone();
+    let mut bindings = original_bindings.iter().collect::<Vec<_>>();
+    bindings.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+
+    let mut runtime = RuntimeState::default();
+    let mut restored_bindings = HashMap::new();
+    let mut claimed_threads = HashSet::new();
+
+    for (conversation_key, thread_id) in bindings {
+        let thread_id = thread_id.trim();
+        if thread_id.is_empty() {
+            continue;
+        }
+        let Some(route) = valid_persisted_telegram_route(config, conversation_key) else {
+            continue;
+        };
+        if !claimed_threads.insert(thread_id.to_string()) {
+            continue;
+        }
+
+        runtime.bind_route(thread_id, route);
+        restored_bindings.insert(conversation_key.clone(), thread_id.to_string());
+    }
+
+    let changed = restored_bindings != original_bindings;
+    persisted.im_thread_bindings = restored_bindings;
+    (runtime, changed)
+}
+
+fn valid_persisted_telegram_route(
+    config: &AppConfig,
+    conversation_key: &str,
+) -> Option<RouteTarget> {
+    let route = route_from_conversation_key(conversation_key)?;
+    if route.platform != ImPlatformKind::Telegram
+        || route.account_id.trim() != route.account_id
+        || route.chat_id.trim() != route.chat_id
+    {
+        return None;
+    }
+
+    let account = config.telegram_account(&route.account_id)?;
+    if !account.is_active()
+        || !account
+            .allowed_chat_ids
+            .iter()
+            .any(|chat_id| chat_id.trim() == route.chat_id)
+    {
+        return None;
+    }
+
+    Some(route.with_deterministic_remote_client_key())
+}
+
 pub fn im_account_key(platform: ImPlatformKind, account_id: &str) -> String {
     format!("{}:{}", platform.key(), account_id.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::config::TelegramConfig;
+
+    fn telegram_account(
+        account_id: &str,
+        enabled: bool,
+        allowed_chat_ids: &[&str],
+    ) -> TelegramConfig {
+        TelegramConfig {
+            enabled,
+            account_id: account_id.to_string(),
+            bot_token: "token".to_string(),
+            allowed_chat_ids: allowed_chat_ids
+                .iter()
+                .map(|chat_id| (*chat_id).to_string())
+                .collect(),
+            ..TelegramConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_restores_only_valid_telegram_thread_bindings() {
+        let temp_dir = tempdir().expect("temp dir");
+        let state_path = temp_dir.path().join("state.json");
+        let config_path = temp_dir.path().join("config.toml");
+        let mut persisted = PersistedState::default();
+        persisted.im_thread_bindings = HashMap::from([
+            ("telegram:active:42".to_string(), "thread-42".to_string()),
+            (
+                "telegram:active:99".to_string(),
+                "thread-disallowed".to_string(),
+            ),
+            (
+                "telegram:disabled:43".to_string(),
+                "thread-disabled".to_string(),
+            ),
+            (
+                "telegram:missing:44".to_string(),
+                "thread-missing".to_string(),
+            ),
+            ("feishu:active:42".to_string(), "thread-feishu".to_string()),
+            ("telegram:active:45".to_string(), "   ".to_string()),
+        ]);
+        persisted.save(&state_path).expect("save initial state");
+
+        let mut config = AppConfig::default();
+        config.state_path = state_path.clone();
+        config.telegram_accounts = vec![
+            telegram_account("active", true, &["42"]),
+            telegram_account("disabled", false, &["43"]),
+        ];
+
+        let state = AppState::new(config_path, config, None, None);
+        let runtime = state.runtime.lock().await;
+        let route = runtime
+            .route_by_thread
+            .get("thread-42")
+            .expect("restored route");
+        assert_eq!(route.conversation_key, "telegram:active:42");
+        assert_eq!(
+            route.remote_client_key,
+            RouteTarget::deterministic_remote_client_key_for(
+                ImPlatformKind::Telegram,
+                "active",
+                "42"
+            )
+        );
+        assert_eq!(runtime.route_by_thread.len(), 1);
+        drop(runtime);
+
+        let persisted = state.persisted.lock().await;
+        assert_eq!(
+            persisted.im_thread_bindings,
+            HashMap::from([("telegram:active:42".to_string(), "thread-42".to_string())])
+        );
+        drop(persisted);
+
+        let saved = PersistedState::load(&state_path);
+        assert_eq!(
+            saved.im_thread_bindings,
+            HashMap::from([("telegram:active:42".to_string(), "thread-42".to_string())])
+        );
+    }
+
+    #[test]
+    fn duplicate_thread_binding_restores_one_conversation_deterministically() {
+        let mut config = AppConfig::default();
+        config.telegram_accounts = vec![telegram_account("active", true, &["41", "42"])];
+        let mut persisted = PersistedState::default();
+        persisted.im_thread_bindings = HashMap::from([
+            ("telegram:active:42".to_string(), "same-thread".to_string()),
+            ("telegram:active:41".to_string(), "same-thread".to_string()),
+        ]);
+
+        let (runtime, changed) = restore_persisted_im_bindings(&config, &mut persisted);
+
+        assert!(changed);
+        assert_eq!(runtime.route_by_thread.len(), 1);
+        assert_eq!(
+            runtime
+                .route_by_thread
+                .get("same-thread")
+                .map(|route| route.conversation_key.as_str()),
+            Some("telegram:active:41")
+        );
+        assert_eq!(
+            persisted.im_thread_bindings,
+            HashMap::from([("telegram:active:41".to_string(), "same-thread".to_string())])
+        );
+    }
+
+    #[test]
+    fn invalid_binding_does_not_claim_thread_needed_by_valid_binding() {
+        let mut config = AppConfig::default();
+        config.telegram_accounts = vec![telegram_account("active", true, &["42"])];
+        let mut persisted = PersistedState::default();
+        persisted.im_thread_bindings = HashMap::from([
+            ("feishu:active:41".to_string(), "same-thread".to_string()),
+            ("telegram:active:42".to_string(), "same-thread".to_string()),
+        ]);
+
+        let (runtime, changed) = restore_persisted_im_bindings(&config, &mut persisted);
+
+        assert!(changed);
+        assert_eq!(
+            runtime
+                .route_by_thread
+                .get("same-thread")
+                .map(|route| route.conversation_key.as_str()),
+            Some("telegram:active:42")
+        );
+        assert_eq!(
+            persisted.im_thread_bindings,
+            HashMap::from([("telegram:active:42".to_string(), "same-thread".to_string())])
+        );
+    }
 }

@@ -18,6 +18,7 @@ mod im;
 mod im_runtime;
 mod outbound_http;
 mod remote_control_backend;
+mod safe_relaunch;
 mod store;
 mod types;
 mod vscode_extension_patch;
@@ -45,6 +46,38 @@ use crate::{
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
+    if let Command::SafeRelaunchHelper {
+        bundle_path,
+        expected_bundle_identifier,
+        expected_version,
+        expected_build,
+        daemon_pid,
+        daemon_instance_id,
+        old_executable_path,
+        gui_pid,
+        bind_addr,
+        log_path,
+        config_path,
+        start_delay_ms,
+        shutdown_mode,
+    } = &cli.command
+    {
+        return safe_relaunch::run_helper(safe_relaunch::SafeRelaunchHelperArgs {
+            bundle_path: bundle_path.clone(),
+            expected_bundle_identifier: expected_bundle_identifier.clone(),
+            expected_version: expected_version.clone(),
+            expected_build: expected_build.clone(),
+            daemon_pid: *daemon_pid,
+            daemon_instance_id: daemon_instance_id.clone(),
+            old_executable_path: old_executable_path.clone(),
+            gui_pid: *gui_pid,
+            bind_addr: *bind_addr,
+            log_path: log_path.clone(),
+            config_path: config_path.clone(),
+            start_delay_ms: *start_delay_ms,
+            shutdown_mode: *shutdown_mode,
+        });
+    }
     // GUI 需要在自己的线程里创建 tokio 运行时，若这里先建立外层运行时，
     // gui::run() 内层运行时退出时会在 async 上下文中被 drop，触发
     // "Cannot drop a runtime in a context where blocking is not allowed" panic。
@@ -140,6 +173,9 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
                 report.gui_api_base.value.as_deref().unwrap_or("<unset>")
             );
             Ok(())
+        }
+        Command::SafeRelaunchHelper { .. } => {
+            unreachable!("safe relaunch helper is handled before runtime creation")
         }
         Command::Gui => unreachable!("GUI command is handled before config loading"),
     }

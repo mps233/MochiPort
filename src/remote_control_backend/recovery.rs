@@ -1,7 +1,12 @@
 use anyhow::{Result, anyhow};
 use serde_json::json;
 
-use crate::{app_state::SharedState, chain_log, types::now_ms};
+use crate::{
+    app_state::SharedState,
+    chain_log,
+    im::core::routing::{clear_thread_binding_for_thread_with_reason, is_stale_thread_error},
+    types::now_ms,
+};
 
 use super::client_state::{
     connection_exists_locked, ensure_client_state_locked, is_legacy_default_client_key,
@@ -346,6 +351,37 @@ async fn resubscribe_thread_after_recovery(
                     ),
                 )
                 .await;
+            clear_thread_binding_for_thread_with_reason(
+                state,
+                thread_id,
+                client_key,
+                "recovery_missing_rollout",
+            )
+            .await?;
+            return Ok(());
+        }
+        Err(err) if is_stale_thread_error(&err) => {
+            chain_log::write_line(format!(
+                "[remote_control] event=recovery_thread_resubscribe_stale connection_epoch={} client_key={} thread={} attempt={} source={} err={}",
+                connection_epoch, client_key, thread_id, attempt, source, err
+            ));
+            state
+                .push_event(
+                    "warn",
+                    "remote_control_recovery_thread_resubscribe_stale",
+                    format!(
+                        "client_key={} thread={} attempt={} source={} err={}",
+                        client_key, thread_id, attempt, source, err
+                    ),
+                )
+                .await;
+            clear_thread_binding_for_thread_with_reason(
+                state,
+                thread_id,
+                client_key,
+                "recovery_stale_thread",
+            )
+            .await?;
             return Ok(());
         }
         Err(err) => return Err(err),

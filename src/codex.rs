@@ -45,6 +45,17 @@ pub fn extract_agent_message_text(item: &Value) -> Option<String> {
     extract_message_text(item)
 }
 
+pub fn agent_message_is_final_answer(item: &Value) -> bool {
+    if !is_agent_message_item(item) {
+        return false;
+    }
+    match agent_message_phase(item) {
+        Some("final_answer") => true,
+        None => true,
+        Some(_) => false,
+    }
+}
+
 pub fn extract_turn_reply_text(params: &Value) -> Option<String> {
     extract_direct_turn_reply_text(params)
         .or_else(|| {
@@ -53,20 +64,46 @@ pub fn extract_turn_reply_text(params: &Value) -> Option<String> {
                 .and_then(extract_direct_turn_reply_text)
         })
         .or_else(|| params.get("turn").and_then(extract_direct_turn_reply_text))
-        .or_else(|| extract_agent_message_text(params))
-        .or_else(|| latest_agent_message_in_items(params))
-        .or_else(|| params.get("turn").and_then(latest_agent_message_in_items))
+        .or_else(|| {
+            agent_message_is_final_answer(params)
+                .then(|| extract_agent_message_text(params))
+                .flatten()
+        })
+        .or_else(|| latest_final_agent_message_in_items(params))
+        .or_else(|| {
+            params
+                .get("turn")
+                .and_then(latest_final_agent_message_in_items)
+        })
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
 }
 
-fn latest_agent_message_in_items(value: &Value) -> Option<String> {
-    value
+fn agent_message_phase(item: &Value) -> Option<&str> {
+    item.get("phase")
+        .and_then(Value::as_str)
+        .or_else(|| item.get("payload").and_then(agent_message_phase))
+}
+
+fn latest_final_agent_message_in_items(value: &Value) -> Option<String> {
+    let items = value
         .get("turn")
         .and_then(|turn| turn.get("items"))
         .or_else(|| value.get("items"))
-        .and_then(|items| items.as_array())
-        .and_then(|items| items.iter().rev().find_map(extract_agent_message_text))
+        .and_then(Value::as_array)?;
+
+    items
+        .iter()
+        .rev()
+        .filter(|item| agent_message_phase(item) == Some("final_answer"))
+        .find_map(extract_agent_message_text)
+        .or_else(|| {
+            items
+                .iter()
+                .rev()
+                .filter(|item| agent_message_phase(item).is_none())
+                .find_map(extract_agent_message_text)
+        })
 }
 
 fn extract_direct_turn_reply_text(value: &Value) -> Option<String> {
@@ -1285,5 +1322,62 @@ mod tests {
         });
 
         assert_eq!(extract_turn_reply_text(&params).as_deref(), Some("final"));
+    }
+
+    #[test]
+    fn turn_reply_text_prefers_final_answer_over_later_commentary() {
+        let params = json!({
+            "threadId": "thread",
+            "turn": {
+                "items": [
+                    {
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": "final"
+                    },
+                    {
+                        "type": "agentMessage",
+                        "phase": "commentary",
+                        "text": "later commentary"
+                    }
+                ]
+            }
+        });
+
+        assert_eq!(extract_turn_reply_text(&params).as_deref(), Some("final"));
+    }
+
+    #[test]
+    fn turn_reply_text_ignores_commentary_only_items() {
+        let params = json!({
+            "threadId": "thread",
+            "turn": {
+                "items": [{
+                    "type": "agentMessage",
+                    "phase": "commentary",
+                    "text": "still working"
+                }]
+            }
+        });
+
+        assert_eq!(extract_turn_reply_text(&params), None);
+    }
+
+    #[test]
+    fn turn_reply_text_supports_legacy_agent_messages_without_phase() {
+        let params = json!({
+            "threadId": "thread",
+            "turn": {
+                "items": [{
+                    "type": "agentMessage",
+                    "text": "legacy final"
+                }]
+            }
+        });
+
+        assert_eq!(
+            extract_turn_reply_text(&params).as_deref(),
+            Some("legacy final")
+        );
     }
 }

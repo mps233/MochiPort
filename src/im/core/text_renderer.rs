@@ -17,8 +17,17 @@ pub(crate) struct MarkdownImageRef {
 }
 
 pub(crate) fn render_agent_message_text(text: &str) -> String {
-    let text = replace_local_markdown_images_with_text(text);
-    format!("{}\n\n{}", type_header("agentMessage"), text.trim())
+    format!(
+        "{}\n\n{}",
+        type_header("agentMessage"),
+        render_agent_message_body(text)
+    )
+}
+
+pub(crate) fn render_agent_message_body(text: &str) -> String {
+    replace_local_markdown_images_with_text(text)
+        .trim()
+        .to_string()
 }
 
 pub(crate) fn local_markdown_image_refs(text: &str) -> Vec<MarkdownImageRef> {
@@ -209,6 +218,10 @@ fn render_todo_list(item: &Value) -> Option<String> {
 }
 
 fn render_user_message(item: &Value) -> Option<String> {
+    render_user_message_body(item).map(|body| format!("{}\n\n{body}", type_header("userMessage")))
+}
+
+pub(crate) fn render_user_message_body(item: &Value) -> Option<String> {
     let content = item.get("content").and_then(|v| v.as_array())?;
     let parts = content
         .iter()
@@ -238,7 +251,7 @@ fn render_user_message(item: &Value) -> Option<String> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    (!parts.is_empty()).then(|| format!("{}\n\n{}", type_header("userMessage"), parts.join("\n\n")))
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
 }
 
 fn render_image_generation(item: &Value) -> Option<String> {
@@ -745,8 +758,8 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{
-        local_markdown_image_refs, render_agent_message_text, render_item_text,
-        replace_markdown_image_targets,
+        local_markdown_image_refs, render_agent_message_body, render_agent_message_text,
+        render_item_text, render_user_message_body, replace_markdown_image_targets,
     };
 
     #[test]
@@ -758,6 +771,28 @@ mod tests {
         assert!(!rendered.contains("agentMessage"));
         assert!(rendered.contains(&"hello\n".repeat(100)));
         assert!(!rendered.contains("[truncated]"));
+    }
+
+    #[test]
+    fn agent_message_body_omits_the_shared_role_header() {
+        assert_eq!(render_agent_message_body("  **完成**  "), "**完成**");
+        assert!(!render_agent_message_body("完成").contains("🤖 Codex"));
+    }
+
+    #[test]
+    fn user_message_body_omits_the_shared_role_header() {
+        let item = json!({
+            "type": "userMessage",
+            "content": [
+                {"type": "text", "text": "继续修改"},
+                {"type": "skill", "name": "review"}
+            ]
+        });
+
+        let rendered = render_user_message_body(&item).expect("user message body");
+
+        assert_eq!(rendered, "继续修改\n\nskill: `review`");
+        assert!(!rendered.contains("👤 用户"));
     }
 
     #[test]

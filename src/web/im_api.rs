@@ -612,6 +612,7 @@ fn clear_legacy_im_account(config: &mut AppConfig, platform: &str, account_id: &
 }
 
 async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_id: &str) {
+    let _binding_guard = state.im_route_binding_ops.lock().await;
     {
         let mut runtime = state.runtime.lock().await;
         let removed = runtime
@@ -635,6 +636,32 @@ async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_
                 route.conversation_key
             ));
         }
+    }
+    let persisted_cleanup_error = if platform == ImPlatformKind::Telegram.key() {
+        let mut persisted = state.persisted.lock().await;
+        let previous_len = persisted.im_thread_bindings.len();
+        persisted.im_thread_bindings.retain(|conversation_key, _| {
+            !crate::im_runtime::route_from_conversation_key(conversation_key).is_some_and(|route| {
+                route.platform == ImPlatformKind::Telegram && route.account_id == account_id
+            })
+        });
+        if persisted.im_thread_bindings.len() == previous_len {
+            None
+        } else {
+            let state_path = state.config.lock().await.state_path.clone();
+            persisted.save(&state_path).err().map(|err| err.to_string())
+        }
+    } else {
+        None
+    };
+    if let Some(err) = persisted_cleanup_error {
+        state
+            .push_event(
+                "warn",
+                "im_persisted_binding_cleanup_failed",
+                format!("platform={platform} account={account_id} err={err}"),
+            )
+            .await;
     }
     if let Some(kind) = im_platform_from_key(platform) {
         state
@@ -1024,4 +1051,72 @@ pub(super) async fn wecom_bot_status(State(state): State<SharedState>) -> Json<W
 fn non_empty_string(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::{app_state::AppState, im_runtime::RouteTarget, store::PersistedState};
+
+    #[tokio::test]
+    async fn deleting_telegram_account_clears_only_its_saved_bindings() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(
+            temp_dir.path().join("config.toml"),
+            config.clone(),
+            None,
+            None,
+        );
+        let first_route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:first:41".to_string(),
+            account_id: "first".to_string(),
+            chat_id: "41".to_string(),
+            remote_client_key: "im:telegram:first".to_string(),
+        };
+        let second_route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:second:42".to_string(),
+            account_id: "second".to_string(),
+            chat_id: "42".to_string(),
+            remote_client_key: "im:telegram:second".to_string(),
+        };
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread-41", first_route);
+            runtime.bind_route("thread-42", second_route);
+        }
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted.im_thread_bindings = HashMap::from([
+                ("telegram:first:41".to_string(), "thread-41".to_string()),
+                ("telegram:second:42".to_string(), "thread-42".to_string()),
+            ]);
+            persisted.save(&config.state_path).expect("save bindings");
+        }
+
+        clear_im_account_bindings(&state, "telegram", "first").await;
+
+        assert_eq!(
+            state
+                .runtime
+                .lock()
+                .await
+                .route_by_thread
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            vec!["thread-42".to_string()]
+        );
+        let expected = HashMap::from([("telegram:second:42".to_string(), "thread-42".to_string())]);
+        assert_eq!(state.persisted.lock().await.im_thread_bindings, expected);
+        assert_eq!(
+            PersistedState::load(&config.state_path).im_thread_bindings,
+            expected
+        );
+    }
 }

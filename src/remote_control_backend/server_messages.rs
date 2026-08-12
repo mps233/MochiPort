@@ -20,6 +20,7 @@ use super::log_format::{
     turn_id_from_payload,
 };
 use super::outbound::{send_initialized_for_stream, send_response_for_stream};
+use super::recovery::resubscribe_bound_threads_after_recovery;
 use super::session_api::{
     is_terminal_or_inactive_thread_status, mark_notification_thread_active_for_client,
     mark_thread_active_for_client, should_track_notification_thread_for_client,
@@ -187,6 +188,7 @@ pub(super) async fn observe_app_server_message(
                     json_preview(&result.to_string())
                 ));
                 let mut initialized_client_key = client_key.clone();
+                let mut should_resubscribe_bound_threads = false;
                 {
                     let mut remote = state.remote_control.inner.lock().await;
                     let mut connection_source_kind = result_source_kind;
@@ -219,9 +221,11 @@ pub(super) async fn observe_app_server_message(
                         );
                         initialized_client_key = Some(migrated_client_key.clone());
                         if let Some(client) = remote.clients.get_mut(&migrated_client_key) {
+                            let was_recovering = client.recovery_started_at_ms.is_some();
                             client.initialized = true;
                             client.last_app_pong_status = Some("active".to_string());
                             client.recovery_started_at_ms = None;
+                            should_resubscribe_bound_threads = !was_recovering;
                         }
                         if is_legacy_default_client_key(&migrated_client_key) {
                             sync_default_client_legacy_locked(&mut remote);
@@ -255,6 +259,32 @@ pub(super) async fn observe_app_server_message(
                             err.to_string(),
                         )
                         .await;
+                }
+                if should_resubscribe_bound_threads && let Some(client_key) = initialized_client_key
+                {
+                    let resubscribe_state = state.clone();
+                    tokio::spawn(async move {
+                        if let Err(err) = resubscribe_bound_threads_after_recovery(
+                            &resubscribe_state,
+                            connection_epoch,
+                            &client_key,
+                            0,
+                        )
+                        .await
+                        {
+                            chain_log::write_line(format!(
+                                "[remote_control] event=initial_thread_resubscribe_failed connection_epoch={} client_key={} err={}",
+                                connection_epoch, client_key, err
+                            ));
+                            resubscribe_state
+                                .push_event(
+                                    "warn",
+                                    "remote_control_initial_thread_resubscribe_failed",
+                                    format!("client_key={} err={}", client_key, err),
+                                )
+                                .await;
+                        }
+                    });
                 }
             }
             if track_thread_active && let Some(thread_id) = thread_id_from_payload(result) {

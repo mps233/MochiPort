@@ -10,7 +10,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
@@ -37,6 +37,11 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/status", get(status))
         .route("/api/gui/dashboard", get(gui_dashboard))
         .route("/api/shutdown", post(shutdown))
+        .route("/api/shutdown/instance", post(shutdown_instance))
+        .route(
+            "/api/update/safe-relaunch",
+            get(crate::safe_relaunch::status).post(crate::safe_relaunch::register),
+        )
         .route("/api/config", get(get_config).post(save_config))
         .route(
             "/api/codex-app/configure",
@@ -253,8 +258,37 @@ async fn gui_dashboard(State(state): State<SharedState>) -> Json<GuiDashboardRes
 }
 
 async fn shutdown(State(state): State<SharedState>) -> impl IntoResponse {
+    perform_shutdown(&state, "daemon shutdown requested").await
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstanceShutdownRequest {
+    daemon_instance_id: String,
+}
+
+async fn shutdown_instance(
+    State(state): State<SharedState>,
+    Json(request): Json<InstanceShutdownRequest>,
+) -> impl IntoResponse {
+    if request.daemon_instance_id.trim() != state.daemon_identity.instance_id {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": "daemon instance id does not match the active service",
+            })),
+        );
+    }
+    perform_shutdown(&state, "instance-guarded daemon shutdown requested").await
+}
+
+async fn perform_shutdown(
+    state: &SharedState,
+    event_message: &'static str,
+) -> (StatusCode, Json<serde_json::Value>) {
     state
-        .push_event("warn", "shutdown_requested", "daemon shutdown requested")
+        .push_event("warn", "shutdown_requested", event_message)
         .await;
     im_api::stop_bridge_task(&state).await;
     let accepted = state.request_shutdown().await;
@@ -358,4 +392,50 @@ async fn remote_control_backend_status(
 async fn events(State(state): State<SharedState>) -> impl IntoResponse {
     let events = state.events.lock().await.clone();
     Json(events)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{app_state::AppState, daemon_process::DaemonIdentity};
+
+    #[tokio::test]
+    async fn instance_guarded_shutdown_rejects_stale_daemon_before_accepting_current() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        config.state_path = temp.path().join("state.json");
+        let identity = DaemonIdentity::new();
+        let instance_id = identity.instance_id.clone();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let state = AppState::new(
+            temp.path().join("config.toml"),
+            config,
+            Some(shutdown_tx),
+            Some(identity),
+        );
+
+        let stale = shutdown_instance(
+            State(state.clone()),
+            Json(InstanceShutdownRequest {
+                daemon_instance_id: "stale-instance".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+        let accepted = shutdown_instance(
+            State(state),
+            Json(InstanceShutdownRequest {
+                daemon_instance_id: instance_id,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx)
+            .await
+            .expect("shutdown signal timeout")
+            .expect("shutdown signal sender");
+    }
 }

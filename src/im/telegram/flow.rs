@@ -294,14 +294,6 @@ pub(crate) async fn handle_inbound(
                 &turn_id,
             )
             .await;
-            events::finish_telegram_collab_progress_with_api(
-                &state,
-                api.clone(),
-                &thread_id,
-                &route,
-                &turn_id,
-            )
-            .await;
             state
                 .runtime
                 .lock()
@@ -336,14 +328,6 @@ pub(crate) async fn handle_inbound(
                 )
                 .await;
                 events::finish_telegram_command_progress_with_api(
-                    &state,
-                    api.clone(),
-                    &thread_id,
-                    &route,
-                    &turn_id,
-                )
-                .await;
-                events::finish_telegram_collab_progress_with_api(
                     &state,
                     api.clone(),
                     &thread_id,

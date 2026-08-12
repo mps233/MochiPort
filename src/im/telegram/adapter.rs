@@ -117,8 +117,63 @@ impl TelegramAdapter {
         Ok(last_message_id.to_string())
     }
 
-    pub async fn send_turn_completed(&self, target: &str, reply_text: &str) -> Result<String> {
-        self.send_text(target, reply_text).await
+    pub async fn send_turn_completed(
+        &self,
+        target: &str,
+        reply_text: &str,
+        footer_text: &str,
+    ) -> Result<String> {
+        let chunks = telegram_turn_completed_chunks(reply_text, footer_text);
+        let mut last_message_id = String::new();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let is_last = index + 1 == chunks.len();
+            if is_last {
+                let (rich_markdown, fallback_markdown) =
+                    telegram_turn_completed_messages(chunk, footer_text);
+                let rich_message = TelegramInputRichMessage::markdown(rich_markdown);
+                last_message_id = self
+                    .send_or_update_rich_message(target, None, &rich_message, &fallback_markdown)
+                    .await?;
+            } else {
+                last_message_id = self.send_text(target, chunk).await?;
+                sleep(Duration::from_millis(TELEGRAM_CHUNK_DELAY_MS)).await;
+            }
+        }
+        Ok(last_message_id)
+    }
+
+    pub async fn send_user_message_quote(
+        &self,
+        target: &str,
+        message_text: &str,
+        credit_text: &str,
+    ) -> Result<String> {
+        let chunks = telegram_user_message_chunks(message_text, credit_text);
+        let mut last_message_id = String::new();
+        for (index, chunk) in chunks.iter().enumerate() {
+            let (rich_html, fallback_markdown) = telegram_user_message_messages(chunk, credit_text);
+            let rich_message = TelegramInputRichMessage::html(rich_html);
+            last_message_id = self
+                .send_or_update_rich_message(target, None, &rich_message, &fallback_markdown)
+                .await?;
+            if index + 1 < chunks.len() {
+                sleep(Duration::from_millis(TELEGRAM_CHUNK_DELAY_MS)).await;
+            }
+        }
+        Ok(last_message_id)
+    }
+
+    pub async fn send_context_compaction(
+        &self,
+        target: &str,
+        title_text: &str,
+        credit_text: &str,
+    ) -> Result<String> {
+        let (rich_html, fallback_text) =
+            telegram_context_compaction_messages(title_text, credit_text);
+        let rich_message = TelegramInputRichMessage::html(rich_html);
+        self.send_or_update_rich_message(target, None, &rich_message, &fallback_text)
+            .await
     }
 
     pub async fn send_turn_draft(
@@ -127,7 +182,7 @@ impl TelegramAdapter {
         draft_id: i64,
         reply_text: &str,
     ) -> Result<()> {
-        let rendered = crate::im::core::text_renderer::render_agent_message_text(reply_text);
+        let rendered = crate::im::core::text_renderer::render_agent_message_body(reply_text);
         let preview = telegram_draft_preview(&rendered);
         log_adapter(
             "send_turn_draft",
@@ -142,9 +197,51 @@ impl TelegramAdapter {
             .trim()
             .parse::<i64>()
             .with_context(|| format!("invalid Telegram private chat id: {target}"))?;
-        self.api
-            .send_message_draft(chat_id, draft_id, &preview)
+        let rich_message = TelegramInputRichMessage::markdown(&preview);
+        match self
+            .api
+            .send_rich_message_draft(chat_id, draft_id, &rich_message)
             .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) if should_fallback_from_rich_message(&err) => {
+                log_adapter(
+                    "send_turn_draft_fallback",
+                    format!("chat={target} draft={draft_id} fallback=text err={err}"),
+                );
+                self.api
+                    .send_message_draft(chat_id, draft_id, &preview)
+                    .await
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn clear_turn_draft(&self, target: &str, draft_id: i64) -> Result<()> {
+        let chat_id = target
+            .trim()
+            .parse::<i64>()
+            .with_context(|| format!("invalid Telegram private chat id: {target}"))?;
+        log_adapter(
+            "clear_turn_draft",
+            format!("chat={target} draft={draft_id}"),
+        );
+        let rich_message = TelegramInputRichMessage::markdown("");
+        match self
+            .api
+            .send_rich_message_draft(chat_id, draft_id, &rich_message)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(err) if should_fallback_from_rich_message(&err) => {
+                log_adapter(
+                    "clear_turn_draft_fallback",
+                    format!("chat={target} draft={draft_id} fallback=text err={err}"),
+                );
+                self.api.send_message_draft(chat_id, draft_id, "").await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub async fn send_image_path(
@@ -482,11 +579,35 @@ impl TelegramAdapter {
     ) -> Result<String> {
         let markdown = telegram_cleanup_text(markdown);
         let rich_message = TelegramInputRichMessage::markdown(markdown.clone());
+        self.send_or_update_rich_message(target, message_id, &rich_message, &markdown)
+            .await
+    }
+
+    pub async fn send_or_update_rich_blocks(
+        &self,
+        target: &str,
+        message_id: Option<&str>,
+        blocks: Vec<serde_json::Value>,
+        fallback_markdown: &str,
+    ) -> Result<String> {
+        let fallback_markdown = telegram_cleanup_text(fallback_markdown);
+        let rich_message = TelegramInputRichMessage::blocks(blocks);
+        self.send_or_update_rich_message(target, message_id, &rich_message, &fallback_markdown)
+            .await
+    }
+
+    async fn send_or_update_rich_message(
+        &self,
+        target: &str,
+        message_id: Option<&str>,
+        rich_message: &TelegramInputRichMessage,
+        fallback_markdown: &str,
+    ) -> Result<String> {
         match self
             .try_edit_rich_message(
                 target,
                 message_id.unwrap_or_default(),
-                &rich_message,
+                rich_message,
                 Some(empty_inline_keyboard()),
             )
             .await
@@ -504,7 +625,7 @@ impl TelegramAdapter {
                     ),
                 );
                 return self
-                    .send_or_update_text(target, message_id, &markdown)
+                    .send_or_update_text(target, message_id, fallback_markdown)
                     .await;
             }
             Err(err) => return Err(err),
@@ -523,7 +644,7 @@ impl TelegramAdapter {
                     "send_rich_message_fallback",
                     format!("chat={} fallback=text err={}", target, err),
                 );
-                self.send_or_update_text(target, message_id, &markdown)
+                self.send_or_update_text(target, message_id, fallback_markdown)
                     .await
             }
             Err(err) => Err(err)
@@ -1269,6 +1390,61 @@ fn telegram_cleanup_text(text: &str) -> String {
         .replace("</font>", "")
 }
 
+fn telegram_turn_completed_messages(reply_text: &str, footer_text: &str) -> (String, String) {
+    let reply_text = telegram_cleanup_text(reply_text).trim().to_string();
+    let footer_text = footer_text.trim();
+    if footer_text.is_empty() {
+        return (reply_text.clone(), reply_text);
+    }
+    let rich_footer = telegram_html_escape(footer_text);
+    if reply_text.is_empty() {
+        return (
+            format!("<footer>{rich_footer}</footer>"),
+            footer_text.to_string(),
+        );
+    }
+    (
+        format!("{reply_text}\n\n<footer>{rich_footer}</footer>"),
+        format!("{reply_text}\n\n{footer_text}"),
+    )
+}
+
+fn telegram_user_message_messages(message_text: &str, credit_text: &str) -> (String, String) {
+    let message_text = telegram_cleanup_text(message_text).trim().to_string();
+    let credit_text = credit_text.trim();
+    let rich_body = telegram_markdown_to_html(&message_text);
+    let rich_credit = telegram_html_escape(credit_text);
+    let rich_html = format!("<blockquote>{rich_body}\n<cite>{rich_credit}</cite></blockquote>");
+    let fallback_markdown = if credit_text.is_empty() {
+        message_text
+    } else if message_text.is_empty() {
+        credit_text.to_string()
+    } else {
+        format!("{message_text}\n\n{credit_text}")
+    };
+    (rich_html, fallback_markdown)
+}
+
+fn telegram_context_compaction_messages(title_text: &str, credit_text: &str) -> (String, String) {
+    let title_text = title_text.trim();
+    let credit_text = credit_text.trim();
+    let rich_title = telegram_html_escape(title_text);
+    let rich_credit = telegram_html_escape(credit_text);
+    let rich_html = if credit_text.is_empty() {
+        format!("<aside>{rich_title}</aside>")
+    } else {
+        format!("<aside>{rich_title}<cite>{rich_credit}</cite></aside>")
+    };
+    let fallback_text = if credit_text.is_empty() {
+        title_text.to_string()
+    } else if title_text.is_empty() {
+        credit_text.to_string()
+    } else {
+        format!("{title_text}\n\n{credit_text}")
+    };
+    (rich_html, fallback_text)
+}
+
 fn telegram_html_escape(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -1308,15 +1484,40 @@ fn telegram_draft_preview(text: &str) -> String {
 }
 
 fn telegram_text_chunks(text: &str) -> Vec<String> {
+    telegram_text_chunks_with_limit(text, TELEGRAM_MAX_MESSAGE_CHARS)
+}
+
+fn telegram_turn_completed_chunks(text: &str, footer_text: &str) -> Vec<String> {
+    let footer_chars = footer_text.trim().chars().count();
+    let reserved_chars = if footer_chars == 0 {
+        0
+    } else {
+        footer_chars.saturating_add(2)
+    };
+    let max_chars = TELEGRAM_MAX_MESSAGE_CHARS
+        .saturating_sub(reserved_chars)
+        .max(TELEGRAM_CONTINUATION_OVERHEAD + 1);
+    telegram_text_chunks_with_limit(text, max_chars)
+}
+
+fn telegram_user_message_chunks(text: &str, credit_text: &str) -> Vec<String> {
+    let reserved_chars = credit_text.trim().chars().count().saturating_add(2);
+    let max_chars = TELEGRAM_MAX_MESSAGE_CHARS
+        .saturating_sub(reserved_chars)
+        .max(TELEGRAM_CONTINUATION_OVERHEAD + 1);
+    telegram_text_chunks_with_limit(text, max_chars)
+}
+
+fn telegram_text_chunks_with_limit(text: &str, max_chars: usize) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return vec![" ".to_string()];
     }
-    if trimmed.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS {
+    if trimmed.chars().count() <= max_chars {
         return vec![trimmed.to_string()];
     }
 
-    let chunks = split_message_for_telegram(trimmed);
+    let chunks = split_message_for_telegram(trimmed, max_chars);
     let chunk_count = chunks.len();
     chunks
         .into_iter()
@@ -1333,8 +1534,8 @@ fn telegram_text_chunks(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn split_message_for_telegram(message: &str) -> Vec<String> {
-    let content_limit = TELEGRAM_MAX_MESSAGE_CHARS - TELEGRAM_CONTINUATION_OVERHEAD;
+fn split_message_for_telegram(message: &str, max_chars: usize) -> Vec<String> {
+    let content_limit = max_chars.saturating_sub(TELEGRAM_CONTINUATION_OVERHEAD);
 
     let mut chunks = Vec::new();
     let mut remaining = message;
@@ -1382,7 +1583,9 @@ mod tests {
 
     use super::{
         TELEGRAM_MAX_MESSAGE_CHARS, empty_inline_keyboard, resolved_approval_text,
-        telegram_draft_preview, telegram_text_chunks,
+        telegram_context_compaction_messages, telegram_draft_preview, telegram_text_chunks,
+        telegram_turn_completed_chunks, telegram_turn_completed_messages,
+        telegram_user_message_chunks, telegram_user_message_messages,
     };
 
     #[test]
@@ -1434,6 +1637,106 @@ mod tests {
         assert_eq!(preview.chars().count(), TELEGRAM_MAX_MESSAGE_CHARS);
         assert!(preview.starts_with("(continued)\n\n"));
         assert!(preview.ends_with("tail"));
+    }
+
+    #[test]
+    fn turn_completed_message_uses_a_native_footer_with_plain_fallback() {
+        let (rich, fallback) =
+            telegram_turn_completed_messages("🤖 Codex\n\n**Build:** `323`", "已完成");
+
+        assert_eq!(
+            rich,
+            "🤖 Codex\n\n**Build:** `323`\n\n<footer>已完成</footer>"
+        );
+        assert_eq!(fallback, "🤖 Codex\n\n**Build:** `323`\n\n已完成");
+    }
+
+    #[test]
+    fn turn_completed_footer_escapes_html_and_handles_an_empty_reply() {
+        let (rich, fallback) = telegram_turn_completed_messages("  ", "Done & closed");
+
+        assert_eq!(rich, "<footer>Done &amp; closed</footer>");
+        assert_eq!(fallback, "Done & closed");
+    }
+
+    #[test]
+    fn turn_completed_chunks_reserve_space_for_the_fallback_footer() {
+        for text in ["a".repeat(TELEGRAM_MAX_MESSAGE_CHARS), "界".repeat(4_500)] {
+            let chunks = telegram_turn_completed_chunks(&text, "已完成");
+            assert!(chunks.len() > 1);
+            assert!(
+                chunks[..chunks.len() - 1]
+                    .iter()
+                    .all(|chunk| chunk.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS)
+            );
+            assert!(
+                chunks[..chunks.len() - 1]
+                    .iter()
+                    .all(|chunk| !chunk.contains("已完成"))
+            );
+            let (rich, fallback) =
+                telegram_turn_completed_messages(chunks.last().expect("final chunk"), "已完成");
+            assert!(fallback.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
+            assert_eq!(rich.matches("<footer>").count(), 1);
+            assert_eq!(rich.matches("已完成").count(), 1);
+            assert!(!rich.contains("<hr"));
+        }
+    }
+
+    #[test]
+    fn context_compaction_uses_a_native_aside_with_credit_and_plain_fallback() {
+        let (rich, fallback) =
+            telegram_context_compaction_messages("上下文 <已> & 压缩", "任务 & 继续");
+
+        assert_eq!(
+            rich,
+            "<aside>上下文 &lt;已&gt; &amp; 压缩<cite>任务 &amp; 继续</cite></aside>"
+        );
+        assert_eq!(fallback, "上下文 <已> & 压缩\n\n任务 & 继续");
+    }
+
+    #[test]
+    fn user_message_uses_a_native_quote_with_credit_and_plain_fallback() {
+        let (rich, fallback) = telegram_user_message_messages(
+            "**打开** `<draft>` & [文档](https://example.com)",
+            "你 & 我 · Codex 电脑端",
+        );
+
+        assert_eq!(
+            rich,
+            "<blockquote><b>打开</b> <code>&lt;draft&gt;</code> &amp; <a href=\"https://example.com\">文档</a>\n<cite>你 &amp; 我 · Codex 电脑端</cite></blockquote>"
+        );
+        assert_eq!(
+            fallback,
+            "**打开** `<draft>` & [文档](https://example.com)\n\n你 & 我 · Codex 电脑端"
+        );
+        assert!(!fallback.contains('🤖'));
+        assert!(!fallback.contains('👤'));
+    }
+
+    #[test]
+    fn long_user_message_chunks_preserve_text_and_credit_each_quote() {
+        let source = "界".repeat(4_500);
+        let credit = "你 · Codex 电脑端";
+        let chunks = telegram_user_message_chunks(&source, credit);
+
+        assert!(chunks.len() > 1);
+        let restored = chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .strip_prefix("(continued)\n\n")
+                    .unwrap_or(chunk)
+                    .strip_suffix("\n\n(continues...)")
+                    .unwrap_or_else(|| chunk.strip_prefix("(continued)\n\n").unwrap_or(chunk))
+            })
+            .collect::<String>();
+        assert_eq!(restored, source);
+        for chunk in chunks {
+            let (rich, fallback) = telegram_user_message_messages(&chunk, credit);
+            assert_eq!(rich.matches("<cite>").count(), 1);
+            assert!(fallback.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
+        }
     }
 
     #[test]

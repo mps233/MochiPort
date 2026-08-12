@@ -7,6 +7,8 @@ use crate::{
     },
 };
 
+use super::rich_blocks;
+
 const TELEGRAM_COLLAB_VISIBLE_AGENTS: usize = 8;
 const TELEGRAM_COLLAB_NAME_CHARS: usize = 72;
 const TELEGRAM_COLLAB_DETAIL_CHARS: usize = 180;
@@ -57,15 +59,9 @@ pub(crate) fn render_collab_progress(
     let selected = selected_entry_indices(snapshot);
     for index in &selected {
         let entry = &snapshot.entries[*index];
-        let icon = match entry.status {
-            TelegramCollabProgressStatus::Running => "⏳",
-            TelegramCollabProgressStatus::Responded => "✅",
-            TelegramCollabProgressStatus::Succeeded => "✅",
-            TelegramCollabProgressStatus::Failed => "❌",
-            TelegramCollabProgressStatus::Interrupted => "⚠️",
-        };
         let name = truncate_inline(&entry.name, TELEGRAM_COLLAB_NAME_CHARS);
-        let mut line = format!("{icon} `{name}`");
+        let status = text.telegram_progress_status_label(collab_progress_status_key(entry.status));
+        let mut line = format!("{status} · `{name}`");
         if entry.status != TelegramCollabProgressStatus::Running {
             let duration_ms = entry.updated_at_ms.saturating_sub(entry.started_at_ms);
             if duration_ms > 0 {
@@ -87,6 +83,94 @@ pub(crate) fn render_collab_progress(
     let rendered = sections.join("\n\n");
     debug_assert!(rendered.chars().count() <= TELEGRAM_COLLAB_PROGRESS_MAX_CHARS);
     rendered
+}
+
+pub(crate) fn render_collab_progress_details(
+    snapshot: &TelegramCollabProgressSnapshot,
+    text: ImText,
+) -> Value {
+    let running = snapshot
+        .entries
+        .iter()
+        .filter(|entry| entry.status == TelegramCollabProgressStatus::Running)
+        .count();
+    let failed = snapshot
+        .entries
+        .iter()
+        .filter(|entry| entry.status == TelegramCollabProgressStatus::Failed)
+        .count();
+    let interrupted = snapshot
+        .entries
+        .iter()
+        .filter(|entry| entry.status == TelegramCollabProgressStatus::Interrupted)
+        .count();
+    let total = snapshot
+        .dropped_entries
+        .saturating_add(snapshot.entries.len());
+    let summary = text.telegram_collab_progress_title(
+        snapshot.completed,
+        total,
+        failed,
+        running,
+        interrupted,
+    );
+
+    let mut items = Vec::new();
+    for index in selected_entry_indices(snapshot) {
+        let entry = &snapshot.entries[index];
+        let mut line = Vec::new();
+        if entry.status != TelegramCollabProgressStatus::Succeeded {
+            line.push(rich_blocks::bold(text.telegram_progress_status_label(
+                collab_progress_status_key(entry.status),
+            )));
+            line.push(rich_blocks::text(" · "));
+        }
+        line.push(rich_blocks::code(truncate_inline(
+            &entry.name,
+            TELEGRAM_COLLAB_NAME_CHARS,
+        )));
+        if entry.status != TelegramCollabProgressStatus::Running {
+            let duration_ms = entry.updated_at_ms.saturating_sub(entry.started_at_ms);
+            if duration_ms > 0 {
+                line.push(rich_blocks::text(format!(
+                    " · {}",
+                    text.telegram_collab_duration(duration_ms)
+                )));
+            }
+        }
+        let mut blocks = vec![rich_blocks::paragraph(rich_blocks::rich_text(line))];
+        if let Some(detail) = entry.detail.as_deref() {
+            blocks.push(rich_blocks::paragraph(rich_blocks::text(truncate_inline(
+                detail,
+                TELEGRAM_COLLAB_DETAIL_CHARS,
+            ))));
+        }
+        items.push(rich_blocks::checklist_item(
+            blocks,
+            entry.status == TelegramCollabProgressStatus::Succeeded,
+        ));
+    }
+    let omitted = total.saturating_sub(items.len());
+    if omitted > 0 {
+        items.push(rich_blocks::list_item(vec![rich_blocks::paragraph(
+            rich_blocks::text(text.telegram_collab_progress_omitted(omitted)),
+        )]));
+    }
+    rich_blocks::details(
+        rich_blocks::text(summary),
+        vec![rich_blocks::list(items)],
+        false,
+    )
+}
+
+fn collab_progress_status_key(status: TelegramCollabProgressStatus) -> &'static str {
+    match status {
+        TelegramCollabProgressStatus::Running => "running",
+        TelegramCollabProgressStatus::Responded => "responded",
+        TelegramCollabProgressStatus::Succeeded => "succeeded",
+        TelegramCollabProgressStatus::Failed => "failed",
+        TelegramCollabProgressStatus::Interrupted => "interrupted",
+    }
 }
 
 fn subagent_activity_update(item: &Value, now_ms: u128) -> Option<TelegramCollabProgressUpdate> {
@@ -469,9 +553,6 @@ mod tests {
             .collect();
         let rendered = render_collab_progress(
             &TelegramCollabProgressSnapshot {
-                turn_id: "turn".to_string(),
-                revision: 1,
-                message_id: Some("77".to_string()),
                 entries,
                 dropped_entries: 0,
                 completed: true,
@@ -483,5 +564,63 @@ mod tests {
         assert!(!rendered.contains("call-secret"));
         assert!(rendered.chars().count() <= TELEGRAM_COLLAB_PROGRESS_MAX_CHARS);
         assert!(rendered.contains("另外 12 个子代理"));
+    }
+
+    #[test]
+    fn rich_collab_entries_use_native_checkboxes_and_text_statuses() {
+        let statuses = [
+            TelegramCollabProgressStatus::Running,
+            TelegramCollabProgressStatus::Responded,
+            TelegramCollabProgressStatus::Succeeded,
+            TelegramCollabProgressStatus::Failed,
+            TelegramCollabProgressStatus::Interrupted,
+        ];
+        let snapshot = TelegramCollabProgressSnapshot {
+            entries: statuses
+                .into_iter()
+                .enumerate()
+                .map(|(index, status)| TelegramCollabProgressEntry {
+                    agent_id: format!("secret-{index}"),
+                    name: format!("agent_{index}"),
+                    status,
+                    detail: None,
+                    started_at_ms: 1_000,
+                    updated_at_ms: 2_000,
+                })
+                .collect(),
+            dropped_entries: 0,
+            completed: false,
+        };
+
+        let details = render_collab_progress_details(&snapshot, ImText::zh_cn());
+        let items = details["blocks"][0]["items"]
+            .as_array()
+            .expect("collaboration details should contain a list");
+        assert_eq!(items.len(), 5);
+        assert!(items.iter().all(|item| item["has_checkbox"] == true));
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item["is_checked"] == true)
+                .count(),
+            1
+        );
+
+        let encoded = serde_json::to_string(&details).expect("details should serialize");
+        for label in ["进行中", "已回复", "失败", "已中断"] {
+            assert!(encoded.contains(label), "missing status label {label}");
+        }
+        for marker in ["✅", "❌", "⚠️", "⏳"] {
+            assert!(!encoded.contains(marker), "rich progress leaked {marker}");
+        }
+
+        let fallback = render_collab_progress(&snapshot, ImText::zh_cn());
+        for label in ["进行中", "已回复", "成功", "失败", "已中断"] {
+            assert!(fallback.contains(label), "missing fallback label {label}");
+        }
+        assert!(!fallback.contains("已完成"));
+        for marker in ["✅", "❌", "⚠️", "⏳"] {
+            assert!(!fallback.contains(marker), "fallback leaked {marker}");
+        }
     }
 }

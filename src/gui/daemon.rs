@@ -29,7 +29,7 @@ use super::{force_dashboard_refresh, schedule_dashboard_refresh, set_actions_ena
 use super::{show_dashboard_starting, show_dashboard_startup_error};
 use crate::{
     config::AppConfig,
-    daemon_process::{DAEMON_INSTANCE_ENV, read_active_daemon_metadata},
+    daemon_process::{CODEXHUB_GUI_PID_ENV, DAEMON_INSTANCE_ENV, read_active_daemon_metadata},
     types::now_ms,
 };
 
@@ -552,6 +552,7 @@ fn spawn_daemon(text: GuiText) -> Result<SpawnedDaemon, String> {
     let mut command = daemon_command(text)?;
     let instance_id = uuid::Uuid::new_v4().to_string();
     command.env(DAEMON_INSTANCE_ENV, &instance_id);
+    command.env(CODEXHUB_GUI_PID_ENV, std::process::id().to_string());
     hide_command_window(&mut command);
     command.stdin(Stdio::null());
     if let Some((stdout, stderr)) = daemon_output_stdio() {

@@ -18,6 +18,7 @@ const PENDING_ATTACHMENTS_MAX_AGE_MS: u128 = 10 * 60 * 1000;
 const PENDING_ATTACHMENTS_MAX_COUNT: usize = 8;
 const TELEGRAM_COMMAND_PROGRESS_MAX_ENTRIES: usize = 128;
 const TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS: usize = 64;
+const TELEGRAM_COMPLETED_DRAFT_HISTORY_MAX: usize = 512;
 const TERMINAL_NOTICE_TURN_HISTORY_MAX: usize = 256;
 const TELEGRAM_REASONING_MAX_CHARS: usize = 12_000;
 const TELEGRAM_PLAN_MAX_STEPS: usize = 64;
@@ -136,8 +137,9 @@ pub struct RuntimeState {
     pub pending_approval_request_keys: HashSet<String>,
     pub feishu_streaming_cards_by_item: HashMap<String, FeishuStreamingCardState>,
     telegram_drafts_by_item: HashMap<String, TelegramDraftState>,
+    telegram_completed_draft_keys: HashSet<String>,
+    telegram_completed_draft_order: VecDeque<String>,
     telegram_command_progress_by_thread: HashMap<String, TelegramCommandProgressState>,
-    telegram_collab_progress_by_thread: HashMap<String, TelegramCollabProgressState>,
     next_telegram_draft_id: i64,
     pub wecom_streams_by_thread: HashMap<String, WecomStreamState>,
     pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
@@ -203,6 +205,7 @@ pub(crate) struct TelegramCommandProgressSnapshot {
     pub plan_explanation: Option<String>,
     pub plan: Vec<TelegramPlanStep>,
     pub diff_summary: Option<TelegramDiffSummary>,
+    pub collab: Option<TelegramCollabProgressSnapshot>,
     pub completed: bool,
     pub failed: bool,
 }
@@ -221,10 +224,18 @@ pub(crate) enum TelegramPlanStepStatus {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramDiffFileSummary {
+    pub path: String,
+    pub additions: usize,
+    pub deletions: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TelegramDiffSummary {
     pub file_count: usize,
     pub additions: usize,
     pub deletions: usize,
+    pub files: Vec<TelegramDiffFileSummary>,
     pub paths: Vec<String>,
     pub omitted_paths: usize,
 }
@@ -245,6 +256,8 @@ struct TelegramCommandProgressState {
     plan_explanation: Option<String>,
     plan: Vec<TelegramPlanStep>,
     diff_summary: Option<TelegramDiffSummary>,
+    collab_entries: Vec<TelegramCollabProgressEntry>,
+    collab_dropped_entries: usize,
     completed: bool,
     failed: bool,
     dirty: bool,
@@ -285,26 +298,9 @@ pub(crate) struct TelegramCollabProgressEntry {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TelegramCollabProgressSnapshot {
-    pub turn_id: String,
-    pub revision: u64,
-    pub message_id: Option<String>,
     pub entries: Vec<TelegramCollabProgressEntry>,
     pub dropped_entries: usize,
     pub completed: bool,
-}
-
-#[derive(Debug, Clone)]
-struct TelegramCollabProgressState {
-    turn_id: String,
-    revision: u64,
-    message_id: Option<String>,
-    entries: Vec<TelegramCollabProgressEntry>,
-    dropped_entries: usize,
-    completed: bool,
-    dirty: bool,
-    sending: bool,
-    in_flight_revision: Option<u64>,
-    cleanup_after_delivery: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -333,7 +329,6 @@ impl RuntimeState {
         self.feishu_streaming_cards_by_item.clear();
         self.clear_all_telegram_drafts();
         self.telegram_command_progress_by_thread.clear();
-        self.telegram_collab_progress_by_thread.clear();
         self.terminal_notice_failed_by_turn.clear();
         self.terminal_notice_turn_order.clear();
         self.terminal_status_fallback_by_thread.clear();
@@ -347,7 +342,6 @@ impl RuntimeState {
         self.feishu_streaming_cards_by_item.clear();
         self.clear_all_telegram_drafts();
         self.telegram_command_progress_by_thread.clear();
-        self.telegram_collab_progress_by_thread.clear();
         self.terminal_notice_failed_by_turn.clear();
         self.terminal_notice_turn_order.clear();
         self.terminal_status_fallback_by_thread.clear();
@@ -379,7 +373,6 @@ impl RuntimeState {
             log_route_unbind("unbind_thread", "direct", thread_id, &route);
         }
         self.telegram_command_progress_by_thread.remove(thread_id);
-        self.telegram_collab_progress_by_thread.remove(thread_id);
         self.terminal_status_fallback_by_thread.remove(thread_id);
     }
 
@@ -411,7 +404,6 @@ impl RuntimeState {
             self.turn_finished_at_by_thread.remove(thread_id);
             self.clear_telegram_drafts_for_thread(thread_id);
             self.telegram_command_progress_by_thread.remove(thread_id);
-            self.telegram_collab_progress_by_thread.remove(thread_id);
             self.terminal_status_fallback_by_thread.remove(thread_id);
             log_route_unbind("unbind_conversation", reason, thread_id, route);
         }
@@ -430,13 +422,6 @@ impl RuntimeState {
             .is_some_and(|progress| progress.turn_id != turn_id)
         {
             self.telegram_command_progress_by_thread.remove(thread_id);
-        }
-        if self
-            .telegram_collab_progress_by_thread
-            .get(thread_id)
-            .is_some_and(|progress| progress.turn_id != turn_id)
-        {
-            self.telegram_collab_progress_by_thread.remove(thread_id);
         }
         self.current_turn_by_thread
             .insert(thread_id.to_string(), turn_id.to_string());
@@ -663,6 +648,9 @@ impl RuntimeState {
         delta: &str,
     ) -> Option<i64> {
         let key = telegram_draft_key(thread_id, item_id);
+        if self.telegram_completed_draft_keys.contains(&key) {
+            return None;
+        }
         if !self.telegram_drafts_by_item.contains_key(&key) {
             self.next_telegram_draft_id = self.next_telegram_draft_id.saturating_add(1);
             if self.next_telegram_draft_id <= 0 {
@@ -701,9 +689,9 @@ impl RuntimeState {
         item_id: &str,
         final_text: &str,
     ) -> Option<(i64, bool, Arc<Notify>)> {
-        let draft = self
-            .telegram_drafts_by_item
-            .get_mut(&telegram_draft_key(thread_id, item_id))?;
+        let key = telegram_draft_key(thread_id, item_id);
+        self.remember_completed_telegram_draft(&key);
+        let draft = self.telegram_drafts_by_item.get_mut(&key)?;
         draft.content = final_text.to_string();
         draft.dirty = true;
         draft.finished = true;
@@ -866,6 +854,19 @@ impl RuntimeState {
         if let Some(draft) = self.telegram_drafts_by_item.remove(key) {
             draft.wake_driver.notify_one();
             draft.completed.notify_one();
+        }
+    }
+
+    fn remember_completed_telegram_draft(&mut self, key: &str) {
+        if !self.telegram_completed_draft_keys.insert(key.to_string()) {
+            return;
+        }
+        self.telegram_completed_draft_order
+            .push_back(key.to_string());
+        while self.telegram_completed_draft_order.len() > TELEGRAM_COMPLETED_DRAFT_HISTORY_MAX {
+            if let Some(oldest) = self.telegram_completed_draft_order.pop_front() {
+                self.telegram_completed_draft_keys.remove(&oldest);
+            }
         }
     }
 
@@ -1162,10 +1163,20 @@ impl RuntimeState {
                 entry.status = TelegramCommandProgressStatus::Interrupted;
             })
             .count();
+        let now_ms = crate::types::now_ms();
+        let interrupted_collab = progress
+            .collab_entries
+            .iter_mut()
+            .filter(|entry| entry.status == TelegramCollabProgressStatus::Running)
+            .map(|entry| {
+                entry.status = TelegramCollabProgressStatus::Interrupted;
+                entry.updated_at_ms = entry.updated_at_ms.max(now_ms).max(entry.started_at_ms);
+            })
+            .count();
         if failed {
             progress.failed = true;
         }
-        if !progress.completed || interrupted > 0 || failed {
+        if !progress.completed || interrupted > 0 || interrupted_collab > 0 || failed {
             progress.completed = true;
             progress.revision = progress.revision.saturating_add(1);
             progress.dirty = true;
@@ -1310,262 +1321,34 @@ impl RuntimeState {
         self.telegram_command_progress_by_thread.remove(thread_id);
     }
 
-    pub(crate) fn apply_telegram_collab_progress_updates(
+    pub(crate) fn upsert_telegram_collab_task_progress(
         &mut self,
         thread_id: &str,
         turn_id: &str,
         updates: Vec<TelegramCollabProgressUpdate>,
-    ) -> Option<TelegramCollabProgressSnapshot> {
+    ) -> Option<TelegramCommandProgressSnapshot> {
         if updates.is_empty() || self.current_turn_id(thread_id) != Some(turn_id) {
             return None;
         }
         let progress = self
-            .telegram_collab_progress_by_thread
+            .telegram_command_progress_by_thread
             .entry(thread_id.to_string())
-            .or_insert_with(|| TelegramCollabProgressState {
-                turn_id: turn_id.to_string(),
-                revision: 0,
-                message_id: None,
-                entries: Vec::new(),
-                dropped_entries: 0,
-                completed: false,
-                dirty: false,
-                sending: false,
-                in_flight_revision: None,
-                cleanup_after_delivery: false,
-            });
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
         if progress.turn_id != turn_id {
-            *progress = TelegramCollabProgressState {
-                turn_id: turn_id.to_string(),
-                revision: 0,
-                message_id: None,
-                entries: Vec::new(),
-                dropped_entries: 0,
-                completed: false,
-                dirty: false,
-                sending: false,
-                in_flight_revision: None,
-                cleanup_after_delivery: false,
-            };
+            *progress = telegram_command_progress_state(turn_id);
         }
-        if progress.completed {
-            return None;
-        }
-
-        let mut changed = false;
-        for update in updates {
-            let timestamp = update.occurred_at_ms.max(1);
-            if let Some(entry) = progress
-                .entries
-                .iter_mut()
-                .find(|entry| entry.agent_id == update.agent_id)
-            {
-                if timestamp < entry.updated_at_ms {
-                    continue;
-                }
-                let mut entry_changed = false;
-                let mut clear_stale_detail = false;
-                if let Some(name) = update.name.filter(|name| !name.trim().is_empty())
-                    && entry.name != name
-                {
-                    entry.name = name;
-                    entry_changed = true;
-                }
-                if let Some(status) = update.status {
-                    let should_change = if entry.status == status {
-                        false
-                    } else if update.restart && status == TelegramCollabProgressStatus::Running {
-                        true
-                    } else {
-                        match entry.status {
-                            TelegramCollabProgressStatus::Running => true,
-                            TelegramCollabProgressStatus::Responded => matches!(
-                                status,
-                                TelegramCollabProgressStatus::Succeeded
-                                    | TelegramCollabProgressStatus::Failed
-                            ),
-                            TelegramCollabProgressStatus::Succeeded
-                            | TelegramCollabProgressStatus::Interrupted => {
-                                status == TelegramCollabProgressStatus::Failed
-                            }
-                            TelegramCollabProgressStatus::Failed => false,
-                        }
-                    };
-                    clear_stale_detail = (entry.status == status || should_change)
-                        && (status == TelegramCollabProgressStatus::Succeeded
-                            || (update.restart && status == TelegramCollabProgressStatus::Running));
-                    if should_change {
-                        if status == TelegramCollabProgressStatus::Running {
-                            entry.started_at_ms = timestamp;
-                        }
-                        entry.status = status;
-                        entry_changed = true;
-                    }
-                }
-                if let Some(detail) = update.detail.filter(|detail| !detail.trim().is_empty()) {
-                    if entry.detail.as_deref() != Some(detail.as_str()) {
-                        entry.detail = Some(detail);
-                        entry_changed = true;
-                    }
-                } else if clear_stale_detail && entry.detail.take().is_some() {
-                    entry_changed = true;
-                }
-                if entry_changed {
-                    entry.updated_at_ms =
-                        entry.updated_at_ms.max(timestamp).max(entry.started_at_ms);
-                    changed = true;
-                }
-                continue;
-            }
-
-            if !update.create_if_missing {
-                continue;
-            }
-            let Some(name) = update.name.filter(|name| !name.trim().is_empty()) else {
-                continue;
-            };
-            progress.entries.push(TelegramCollabProgressEntry {
-                agent_id: update.agent_id,
-                name,
-                status: update
-                    .status
-                    .unwrap_or(TelegramCollabProgressStatus::Running),
-                detail: update.detail.filter(|detail| !detail.trim().is_empty()),
-                started_at_ms: timestamp,
-                updated_at_ms: timestamp,
-            });
-            if progress.entries.len() > TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS {
-                let excess = progress.entries.len() - TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS;
-                progress.entries.drain(..excess);
-                progress.dropped_entries = progress.dropped_entries.saturating_add(excess);
-            }
-            changed = true;
-        }
-
-        if !changed {
+        if progress.completed
+            || !merge_telegram_collab_progress_updates(
+                &mut progress.collab_entries,
+                &mut progress.collab_dropped_entries,
+                updates,
+            )
+        {
             return None;
         }
         progress.revision = progress.revision.saturating_add(1);
         progress.dirty = true;
-        claim_telegram_collab_progress_snapshot(progress)
-    }
-
-    pub(crate) fn finish_telegram_collab_progress(
-        &mut self,
-        thread_id: &str,
-        turn_id: &str,
-    ) -> Option<TelegramCollabProgressSnapshot> {
-        let progress = self.telegram_collab_progress_by_thread.get_mut(thread_id)?;
-        if progress.turn_id != turn_id || progress.entries.is_empty() {
-            return None;
-        }
-        let now_ms = crate::types::now_ms();
-        let interrupted = progress
-            .entries
-            .iter_mut()
-            .filter(|entry| entry.status == TelegramCollabProgressStatus::Running)
-            .map(|entry| {
-                entry.status = TelegramCollabProgressStatus::Interrupted;
-                entry.updated_at_ms = entry.updated_at_ms.max(now_ms).max(entry.started_at_ms);
-            })
-            .count();
-        if !progress.completed || interrupted > 0 {
-            progress.completed = true;
-            progress.revision = progress.revision.saturating_add(1);
-            progress.dirty = true;
-        }
-        claim_telegram_collab_progress_snapshot(progress)
-    }
-
-    pub(crate) fn complete_telegram_collab_progress_delivery(
-        &mut self,
-        thread_id: &str,
-        turn_id: &str,
-        revision: u64,
-        message_id: String,
-    ) -> Option<TelegramCollabProgressSnapshot> {
-        let mut cleanup = false;
-        let next = {
-            let progress = self.telegram_collab_progress_by_thread.get_mut(thread_id)?;
-            if progress.turn_id != turn_id
-                || !progress.sending
-                || progress.in_flight_revision != Some(revision)
-            {
-                return None;
-            }
-            progress.message_id = Some(message_id);
-            progress.in_flight_revision = None;
-            if progress.dirty {
-                claim_next_telegram_collab_progress_snapshot(progress)
-            } else {
-                progress.sending = false;
-                cleanup = progress.completed && progress.cleanup_after_delivery;
-                None
-            }
-        };
-        if cleanup {
-            self.telegram_collab_progress_by_thread.remove(thread_id);
-        }
-        next
-    }
-
-    pub(crate) fn fail_telegram_collab_progress_delivery(
-        &mut self,
-        thread_id: &str,
-        turn_id: &str,
-        revision: u64,
-    ) -> bool {
-        let Some(progress) = self.telegram_collab_progress_by_thread.get_mut(thread_id) else {
-            return false;
-        };
-        if progress.turn_id != turn_id
-            || !progress.sending
-            || progress.in_flight_revision != Some(revision)
-        {
-            return false;
-        }
-        progress.in_flight_revision = None;
-        progress.dirty = true;
-        if progress.completed {
-            true
-        } else {
-            progress.sending = false;
-            false
-        }
-    }
-
-    pub(crate) fn retry_telegram_collab_progress_delivery(
-        &mut self,
-        thread_id: &str,
-        turn_id: &str,
-    ) -> Option<TelegramCollabProgressSnapshot> {
-        let progress = self.telegram_collab_progress_by_thread.get_mut(thread_id)?;
-        if progress.turn_id != turn_id
-            || !progress.sending
-            || progress.in_flight_revision.is_some()
-            || !progress.dirty
-        {
-            return None;
-        }
-        claim_next_telegram_collab_progress_snapshot(progress)
-    }
-
-    pub(crate) fn clear_telegram_collab_progress_for_turn(
-        &mut self,
-        thread_id: &str,
-        turn_id: &str,
-    ) {
-        if self
-            .telegram_collab_progress_by_thread
-            .get(thread_id)
-            .is_some_and(|progress| progress.turn_id == turn_id)
-        {
-            self.telegram_collab_progress_by_thread.remove(thread_id);
-        }
-    }
-
-    pub(crate) fn clear_telegram_collab_progress_for_thread(&mut self, thread_id: &str) {
-        self.telegram_collab_progress_by_thread.remove(thread_id);
+        Some(telegram_command_progress_snapshot(progress))
     }
 
     pub fn hold_pending_attachments(
@@ -1639,20 +1422,6 @@ impl RuntimeState {
             };
         if !retain_command_progress {
             self.clear_telegram_command_progress_for_thread(thread_id);
-        }
-        let retain_collab_progress =
-            if let Some(progress) = self.telegram_collab_progress_by_thread.get_mut(thread_id) {
-                if progress.completed && (progress.sending || progress.dirty) {
-                    progress.cleanup_after_delivery = true;
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-        if !retain_collab_progress {
-            self.clear_telegram_collab_progress_for_thread(thread_id);
         }
         self.turn_finished_at_by_thread
             .insert(thread_id.to_string(), crate::types::now_ms());
@@ -1828,6 +1597,101 @@ impl RuntimeState {
     }
 }
 
+fn merge_telegram_collab_progress_updates(
+    entries: &mut Vec<TelegramCollabProgressEntry>,
+    dropped_entries: &mut usize,
+    updates: Vec<TelegramCollabProgressUpdate>,
+) -> bool {
+    let mut changed = false;
+    for update in updates {
+        let timestamp = update.occurred_at_ms.max(1);
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| entry.agent_id == update.agent_id)
+        {
+            if timestamp < entry.updated_at_ms {
+                continue;
+            }
+            let mut entry_changed = false;
+            let mut clear_stale_detail = false;
+            if let Some(name) = update.name.filter(|name| !name.trim().is_empty())
+                && entry.name != name
+            {
+                entry.name = name;
+                entry_changed = true;
+            }
+            if let Some(status) = update.status {
+                let should_change = if entry.status == status {
+                    false
+                } else if update.restart && status == TelegramCollabProgressStatus::Running {
+                    true
+                } else {
+                    match entry.status {
+                        TelegramCollabProgressStatus::Running => true,
+                        TelegramCollabProgressStatus::Responded => matches!(
+                            status,
+                            TelegramCollabProgressStatus::Succeeded
+                                | TelegramCollabProgressStatus::Failed
+                        ),
+                        TelegramCollabProgressStatus::Succeeded
+                        | TelegramCollabProgressStatus::Interrupted => {
+                            status == TelegramCollabProgressStatus::Failed
+                        }
+                        TelegramCollabProgressStatus::Failed => false,
+                    }
+                };
+                clear_stale_detail = (entry.status == status || should_change)
+                    && (status == TelegramCollabProgressStatus::Succeeded
+                        || (update.restart && status == TelegramCollabProgressStatus::Running));
+                if should_change {
+                    if status == TelegramCollabProgressStatus::Running {
+                        entry.started_at_ms = timestamp;
+                    }
+                    entry.status = status;
+                    entry_changed = true;
+                }
+            }
+            if let Some(detail) = update.detail.filter(|detail| !detail.trim().is_empty()) {
+                if entry.detail.as_deref() != Some(detail.as_str()) {
+                    entry.detail = Some(detail);
+                    entry_changed = true;
+                }
+            } else if clear_stale_detail && entry.detail.take().is_some() {
+                entry_changed = true;
+            }
+            if entry_changed {
+                entry.updated_at_ms = entry.updated_at_ms.max(timestamp).max(entry.started_at_ms);
+                changed = true;
+            }
+            continue;
+        }
+
+        if !update.create_if_missing {
+            continue;
+        }
+        let Some(name) = update.name.filter(|name| !name.trim().is_empty()) else {
+            continue;
+        };
+        entries.push(TelegramCollabProgressEntry {
+            agent_id: update.agent_id,
+            name,
+            status: update
+                .status
+                .unwrap_or(TelegramCollabProgressStatus::Running),
+            detail: update.detail.filter(|detail| !detail.trim().is_empty()),
+            started_at_ms: timestamp,
+            updated_at_ms: timestamp,
+        });
+        if entries.len() > TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS {
+            let excess = entries.len() - TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS;
+            entries.drain(..excess);
+            *dropped_entries = dropped_entries.saturating_add(excess);
+        }
+        changed = true;
+    }
+    changed
+}
+
 fn telegram_command_progress_snapshot(
     progress: &TelegramCommandProgressState,
 ) -> TelegramCommandProgressSnapshot {
@@ -1846,6 +1710,11 @@ fn telegram_command_progress_snapshot(
         plan_explanation: progress.plan_explanation.clone(),
         plan: progress.plan.clone(),
         diff_summary: progress.diff_summary.clone(),
+        collab: (!progress.collab_entries.is_empty()).then(|| TelegramCollabProgressSnapshot {
+            entries: progress.collab_entries.clone(),
+            dropped_entries: progress.collab_dropped_entries,
+            completed: progress.completed,
+        }),
         completed: progress.completed,
         failed: progress.failed,
     }
@@ -1867,6 +1736,8 @@ fn telegram_command_progress_state(turn_id: &str) -> TelegramCommandProgressStat
         plan_explanation: None,
         plan: Vec::new(),
         diff_summary: None,
+        collab_entries: Vec::new(),
+        collab_dropped_entries: 0,
         completed: false,
         failed: false,
         dirty: false,
@@ -1883,6 +1754,7 @@ fn telegram_command_progress_has_content(progress: &TelegramCommandProgressState
         || progress.plan_explanation.is_some()
         || !progress.plan.is_empty()
         || progress.diff_summary.is_some()
+        || !progress.collab_entries.is_empty()
 }
 
 fn claim_next_telegram_command_progress_snapshot(
@@ -1906,46 +1778,13 @@ fn append_bounded_text(target: &mut String, delta: &str, max_chars: usize) {
 }
 
 fn limit_telegram_diff_summary(mut summary: TelegramDiffSummary) -> TelegramDiffSummary {
-    if summary.paths.len() > TELEGRAM_DIFF_MAX_PATHS {
-        let omitted = summary.paths.len() - TELEGRAM_DIFF_MAX_PATHS;
-        summary.paths.truncate(TELEGRAM_DIFF_MAX_PATHS);
-        summary.omitted_paths = summary.omitted_paths.saturating_add(omitted);
-    }
+    summary.files.truncate(TELEGRAM_DIFF_MAX_PATHS);
+    summary.paths.truncate(TELEGRAM_DIFF_MAX_PATHS);
+    let visible_files = summary.files.len().max(summary.paths.len());
+    summary.omitted_paths = summary
+        .omitted_paths
+        .max(summary.file_count.saturating_sub(visible_files));
     summary
-}
-
-fn telegram_collab_progress_snapshot(
-    progress: &TelegramCollabProgressState,
-) -> TelegramCollabProgressSnapshot {
-    TelegramCollabProgressSnapshot {
-        turn_id: progress.turn_id.clone(),
-        revision: progress.revision,
-        message_id: progress.message_id.clone(),
-        entries: progress.entries.clone(),
-        dropped_entries: progress.dropped_entries,
-        completed: progress.completed,
-    }
-}
-
-fn claim_telegram_collab_progress_snapshot(
-    progress: &mut TelegramCollabProgressState,
-) -> Option<TelegramCollabProgressSnapshot> {
-    if progress.sending || !progress.dirty {
-        return None;
-    }
-    progress.sending = true;
-    claim_next_telegram_collab_progress_snapshot(progress)
-}
-
-fn claim_next_telegram_collab_progress_snapshot(
-    progress: &mut TelegramCollabProgressState,
-) -> Option<TelegramCollabProgressSnapshot> {
-    if !progress.sending || progress.in_flight_revision.is_some() || !progress.dirty {
-        return None;
-    }
-    progress.dirty = false;
-    progress.in_flight_revision = Some(progress.revision);
-    Some(telegram_collab_progress_snapshot(progress))
 }
 
 fn telegram_draft_key(thread_id: &str, item_id: &str) -> String {
@@ -2082,9 +1921,9 @@ mod tests {
     use super::{
         PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, RouteTarget, RuntimeState,
         TelegramCollabProgressStatus, TelegramCollabProgressUpdate, TelegramCommandProgressEntry,
-        TelegramCommandProgressEntryKind, TelegramCommandProgressStatus, TelegramDiffSummary,
-        TelegramDraftSendAction, TelegramPlanStep, TelegramPlanStepStatus, ThreadTurnState,
-        TurnOrigin, route_from_conversation_key,
+        TelegramCommandProgressEntryKind, TelegramCommandProgressStatus, TelegramDiffFileSummary,
+        TelegramDiffSummary, TelegramDraftSendAction, TelegramPlanStep, TelegramPlanStepStatus,
+        ThreadTurnState, TurnOrigin, route_from_conversation_key,
     };
 
     fn approval(id: i64) -> PendingApproval {
@@ -2588,6 +2427,11 @@ mod tests {
             file_count: 1,
             additions: 2,
             deletions: 1,
+            files: vec![TelegramDiffFileSummary {
+                path: "src/lib.rs".to_string(),
+                additions: 2,
+                deletions: 1,
+            }],
             paths: vec!["src/lib.rs".to_string()],
             omitted_paths: 0,
         };
@@ -2683,6 +2527,18 @@ mod tests {
             file_count: 2,
             additions: 3,
             deletions: 1,
+            files: vec![
+                TelegramDiffFileSummary {
+                    path: "src/a.rs".to_string(),
+                    additions: 2,
+                    deletions: 1,
+                },
+                TelegramDiffFileSummary {
+                    path: "src/b.rs".to_string(),
+                    additions: 1,
+                    deletions: 0,
+                },
+            ],
             paths: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
             omitted_paths: 0,
         };
@@ -2733,6 +2589,11 @@ mod tests {
                         file_count: 1,
                         additions: 1,
                         deletions: 0,
+                        files: vec![TelegramDiffFileSummary {
+                            path: "old.rs".to_string(),
+                            additions: 1,
+                            deletions: 0,
+                        }],
                         paths: vec!["old.rs".to_string()],
                         omitted_paths: 0,
                     }),
@@ -2742,12 +2603,29 @@ mod tests {
     }
 
     #[test]
-    fn telegram_collab_progress_reuses_message_and_merges_by_agent() {
+    fn telegram_collab_progress_shares_command_delivery_and_message() {
         let mut runtime = RuntimeState::default();
         runtime.mark_turn_started("thread", "turn");
 
-        let started = runtime
-            .apply_telegram_collab_progress_updates(
+        let command = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "cmd-1",
+                    "cargo check",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                true,
+            )
+            .expect("command should create the aggregate");
+        let first = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("first aggregate revision should be claimable");
+        assert_eq!(first.revision, command.revision);
+
+        let collab = runtime
+            .upsert_telegram_collab_task_progress(
                 "thread",
                 "turn",
                 vec![collab_progress_update(
@@ -2757,22 +2635,41 @@ mod tests {
                     1_000,
                 )],
             )
-            .expect("first agent should create progress");
-        assert_eq!(started.entries.len(), 1);
-        assert_eq!(started.message_id, None);
+            .expect("collaboration update should dirty the same aggregate");
+        assert!(collab.revision > first.revision);
+        assert_eq!(collab.collab.as_ref().unwrap().entries.len(), 1);
         assert!(
             runtime
-                .complete_telegram_collab_progress_delivery(
+                .claim_telegram_command_progress_delivery("thread", "turn")
+                .is_none()
+        );
+
+        let next = runtime
+            .complete_telegram_command_progress_delivery(
+                "thread",
+                "turn",
+                first.revision,
+                "88".to_string(),
+            )
+            .expect("queued collaboration state should follow the first send");
+        assert_eq!(next.message_id.as_deref(), Some("88"));
+        assert_eq!(
+            next.collab.as_ref().unwrap().entries[0].status,
+            TelegramCollabProgressStatus::Running
+        );
+        assert!(
+            runtime
+                .complete_telegram_command_progress_delivery(
                     "thread",
                     "turn",
-                    started.revision,
-                    "88".to_string(),
+                    first.revision,
+                    "stale".to_string(),
                 )
                 .is_none()
         );
 
         let completed = runtime
-            .apply_telegram_collab_progress_updates(
+            .upsert_telegram_collab_task_progress(
                 "thread",
                 "turn",
                 vec![collab_progress_update(
@@ -2782,187 +2679,34 @@ mod tests {
                     43_000,
                 )],
             )
-            .expect("agent completion should edit progress");
-        assert_eq!(completed.entries.len(), 1);
-        assert_eq!(completed.message_id.as_deref(), Some("88"));
+            .expect("agent completion should edit the aggregate");
         assert_eq!(
-            completed.entries[0].status,
+            completed.collab.as_ref().unwrap().entries[0].status,
             TelegramCollabProgressStatus::Succeeded
-        );
-        assert_eq!(completed.entries[0].updated_at_ms, 43_000);
-    }
-
-    #[test]
-    fn telegram_collab_progress_serializes_updates_and_rejects_stale_ack() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "turn");
-
-        let first = runtime
-            .apply_telegram_collab_progress_updates(
-                "thread",
-                "turn",
-                vec![collab_progress_update(
-                    "agent-a",
-                    Some("review"),
-                    Some(TelegramCollabProgressStatus::Running),
-                    1_000,
-                )],
-            )
-            .expect("first update should claim the delivery driver");
-        assert!(
-            runtime
-                .apply_telegram_collab_progress_updates(
-                    "thread",
-                    "turn",
-                    vec![collab_progress_update(
-                        "agent-a",
-                        None,
-                        Some(TelegramCollabProgressStatus::Succeeded),
-                        2_000,
-                    )],
-                )
-                .is_none()
-        );
-        assert!(
-            runtime
-                .finish_telegram_collab_progress("thread", "turn")
-                .is_none()
         );
 
         let final_snapshot = runtime
-            .complete_telegram_collab_progress_delivery(
+            .complete_telegram_command_progress_delivery(
                 "thread",
                 "turn",
-                first.revision,
-                "100".to_string(),
+                next.revision,
+                "88".to_string(),
             )
-            .expect("queued terminal state should follow the first delivery");
-        assert!(final_snapshot.completed);
-        assert_eq!(final_snapshot.message_id.as_deref(), Some("100"));
-        assert!(
-            runtime
-                .complete_telegram_collab_progress_delivery(
-                    "thread",
-                    "turn",
-                    first.revision,
-                    "stale".to_string(),
-                )
-                .is_none()
-        );
+            .expect("latest state should be sent after the queued update");
+        assert_eq!(final_snapshot.message_id.as_deref(), Some("88"));
         assert_eq!(
-            runtime
-                .telegram_collab_progress_by_thread
-                .get("thread")
-                .and_then(|progress| progress.message_id.as_deref()),
-            Some("100")
-        );
-
-        assert!(runtime.mark_turn_completed("thread", Some("turn")));
-        assert!(
-            runtime
-                .telegram_collab_progress_by_thread
-                .contains_key("thread")
-        );
-        assert!(
-            runtime
-                .complete_telegram_collab_progress_delivery(
-                    "thread",
-                    "turn",
-                    final_snapshot.revision,
-                    "100".to_string(),
-                )
-                .is_none()
-        );
-        assert!(runtime.telegram_collab_progress_by_thread.is_empty());
-    }
-
-    #[test]
-    fn telegram_collab_progress_retries_failed_terminal_delivery_after_turn_cleanup() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "turn");
-        let first = runtime
-            .apply_telegram_collab_progress_updates(
-                "thread",
-                "turn",
-                vec![collab_progress_update(
-                    "agent-a",
-                    Some("review"),
-                    Some(TelegramCollabProgressStatus::Running),
-                    1_000,
-                )],
-            )
-            .expect("first update should start delivery");
-        assert!(
-            runtime
-                .finish_telegram_collab_progress("thread", "turn")
-                .is_none()
-        );
-        assert!(runtime.mark_turn_completed("thread", Some("turn")));
-
-        assert!(runtime.fail_telegram_collab_progress_delivery("thread", "turn", first.revision,));
-        let retry = runtime
-            .retry_telegram_collab_progress_delivery("thread", "turn")
-            .expect("terminal state should remain retryable");
-        assert!(retry.completed);
-        assert_eq!(
-            retry.entries[0].status,
-            TelegramCollabProgressStatus::Interrupted
-        );
-        assert!(
-            runtime
-                .complete_telegram_collab_progress_delivery(
-                    "thread",
-                    "turn",
-                    retry.revision,
-                    "101".to_string(),
-                )
-                .is_none()
-        );
-        assert!(runtime.telegram_collab_progress_by_thread.is_empty());
-    }
-
-    #[test]
-    fn telegram_collab_progress_nonterminal_failure_releases_the_driver() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "turn");
-        let first = runtime
-            .apply_telegram_collab_progress_updates(
-                "thread",
-                "turn",
-                vec![collab_progress_update(
-                    "agent-a",
-                    Some("review"),
-                    Some(TelegramCollabProgressStatus::Running),
-                    1_000,
-                )],
-            )
-            .expect("first update should start delivery");
-        assert!(!runtime.fail_telegram_collab_progress_delivery("thread", "turn", first.revision,));
-
-        let completed = runtime
-            .apply_telegram_collab_progress_updates(
-                "thread",
-                "turn",
-                vec![collab_progress_update(
-                    "agent-a",
-                    None,
-                    Some(TelegramCollabProgressStatus::Succeeded),
-                    2_000,
-                )],
-            )
-            .expect("a later update should restart delivery");
-        assert_eq!(
-            completed.entries[0].status,
-            TelegramCollabProgressStatus::Succeeded
+            final_snapshot.collab.as_ref().unwrap().entries[0].updated_at_ms,
+            43_000
         );
     }
 
     #[test]
-    fn telegram_collab_progress_ignores_updates_older_than_the_entry() {
+    fn telegram_collab_progress_merges_by_agent_and_ignores_stale_updates() {
         let mut runtime = RuntimeState::default();
         runtime.mark_turn_started("thread", "turn");
+
         let initial = runtime
-            .apply_telegram_collab_progress_updates(
+            .upsert_telegram_collab_task_progress(
                 "thread",
                 "turn",
                 vec![collab_progress_update(
@@ -2973,121 +2717,59 @@ mod tests {
                 )],
             )
             .expect("agent should create progress");
+        let claimed = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("initial progress should be claimable");
+        assert_eq!(claimed.revision, initial.revision);
         assert!(
             runtime
-                .complete_telegram_collab_progress_delivery(
+                .complete_telegram_command_progress_delivery(
                     "thread",
                     "turn",
-                    initial.revision,
+                    claimed.revision,
                     "90".to_string(),
                 )
                 .is_none()
         );
 
-        let mut newest = collab_progress_update(
+        let mut newest_update = collab_progress_update(
             "agent-a",
             Some("current_name"),
             Some(TelegramCollabProgressStatus::Succeeded),
             3_000,
         );
-        newest.detail = Some("current detail".to_string());
+        newest_update.detail = Some("current detail".to_string());
         let newest = runtime
-            .apply_telegram_collab_progress_updates("thread", "turn", vec![newest])
+            .upsert_telegram_collab_task_progress("thread", "turn", vec![newest_update])
             .expect("newer event should update progress");
+        let collab = newest.collab.as_ref().unwrap();
+        assert_eq!(collab.entries[0].name, "current_name");
+        assert_eq!(
+            collab.entries[0].status,
+            TelegramCollabProgressStatus::Succeeded
+        );
+        assert_eq!(collab.entries[0].detail.as_deref(), Some("current detail"));
+        assert_eq!(collab.entries[0].updated_at_ms, 3_000);
 
-        let mut stale = collab_progress_update(
+        let mut stale_update = collab_progress_update(
             "agent-a",
             Some("stale_name"),
             Some(TelegramCollabProgressStatus::Failed),
             2_000,
         );
-        stale.detail = Some("stale detail".to_string());
+        stale_update.detail = Some("stale detail".to_string());
         assert!(
             runtime
-                .apply_telegram_collab_progress_updates("thread", "turn", vec![stale])
+                .upsert_telegram_collab_task_progress("thread", "turn", vec![stale_update])
                 .is_none()
         );
-
-        let retained = runtime
-            .telegram_collab_progress_by_thread
-            .get("thread")
-            .expect("collaboration progress should remain");
-        assert_eq!(retained.revision, newest.revision);
-        assert_eq!(retained.entries, newest.entries);
-        assert_eq!(retained.entries[0].name, "current_name");
-        assert_eq!(
-            retained.entries[0].status,
-            TelegramCollabProgressStatus::Succeeded
-        );
-        assert_eq!(
-            retained.entries[0].detail.as_deref(),
-            Some("current detail")
-        );
-        assert_eq!(retained.entries[0].updated_at_ms, 3_000);
     }
 
     #[test]
-    fn telegram_collab_progress_restart_requires_a_current_event() {
+    fn telegram_collab_progress_restart_and_terminal_states_are_monotonic() {
         let mut runtime = RuntimeState::default();
         runtime.mark_turn_started("thread", "turn");
-        let initial = runtime
-            .apply_telegram_collab_progress_updates(
-                "thread",
-                "turn",
-                vec![collab_progress_update(
-                    "agent-a",
-                    Some("review"),
-                    Some(TelegramCollabProgressStatus::Succeeded),
-                    3_000,
-                )],
-            )
-            .expect("agent should create terminal progress");
-        assert!(
-            runtime
-                .complete_telegram_collab_progress_delivery(
-                    "thread",
-                    "turn",
-                    initial.revision,
-                    "91".to_string(),
-                )
-                .is_none()
-        );
 
-        let mut stale_restart = collab_progress_update(
-            "agent-a",
-            None,
-            Some(TelegramCollabProgressStatus::Running),
-            2_000,
-        );
-        stale_restart.restart = true;
-        assert!(
-            runtime
-                .apply_telegram_collab_progress_updates("thread", "turn", vec![stale_restart])
-                .is_none()
-        );
-
-        let mut current_restart = collab_progress_update(
-            "agent-a",
-            None,
-            Some(TelegramCollabProgressStatus::Running),
-            4_000,
-        );
-        current_restart.restart = true;
-        let restarted = runtime
-            .apply_telegram_collab_progress_updates("thread", "turn", vec![current_restart])
-            .expect("newer restart should reopen the agent");
-        assert_eq!(
-            restarted.entries[0].status,
-            TelegramCollabProgressStatus::Running
-        );
-        assert_eq!(restarted.entries[0].started_at_ms, 4_000);
-        assert_eq!(restarted.entries[0].updated_at_ms, 4_000);
-    }
-
-    #[test]
-    fn telegram_collab_progress_success_and_restart_clear_stale_detail() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "turn");
         let mut started = collab_progress_update(
             "agent-a",
             Some("review"),
@@ -3095,22 +2777,25 @@ mod tests {
             1_000,
         );
         started.detail = Some("temporary error".to_string());
-        let initial = runtime
-            .apply_telegram_collab_progress_updates("thread", "turn", vec![started])
+        runtime
+            .upsert_telegram_collab_task_progress("thread", "turn", vec![started])
             .expect("agent should create progress");
+        let claimed = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("initial state should be claimable");
         assert!(
             runtime
-                .complete_telegram_collab_progress_delivery(
+                .complete_telegram_command_progress_delivery(
                     "thread",
                     "turn",
-                    initial.revision,
+                    claimed.revision,
                     "92".to_string(),
                 )
                 .is_none()
         );
 
         let succeeded = runtime
-            .apply_telegram_collab_progress_updates(
+            .upsert_telegram_collab_task_progress(
                 "thread",
                 "turn",
                 vec![collab_progress_update(
@@ -3120,38 +2805,16 @@ mod tests {
                     2_000,
                 )],
             )
-            .expect("success should clear the old detail");
-        assert_eq!(succeeded.entries[0].detail, None);
-        assert!(
-            runtime
-                .complete_telegram_collab_progress_delivery(
-                    "thread",
-                    "turn",
-                    succeeded.revision,
-                    "92".to_string(),
-                )
-                .is_none()
-        );
-
-        let mut failed = collab_progress_update(
-            "agent-a",
-            None,
-            Some(TelegramCollabProgressStatus::Failed),
-            3_000,
-        );
-        failed.detail = Some("retry failed".to_string());
-        let failed = runtime
-            .apply_telegram_collab_progress_updates("thread", "turn", vec![failed])
-            .expect("failure should attach its detail");
-        assert!(
-            runtime
-                .complete_telegram_collab_progress_delivery(
-                    "thread",
-                    "turn",
-                    failed.revision,
-                    "92".to_string(),
-                )
-                .is_none()
+            .expect("success should update progress");
+        assert_eq!(succeeded.collab.as_ref().unwrap().entries[0].detail, None);
+        let succeeded_claim = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("success should be claimable");
+        runtime.complete_telegram_command_progress_delivery(
+            "thread",
+            "turn",
+            succeeded_claim.revision,
+            "92".to_string(),
         );
 
         let mut restarted = collab_progress_update(
@@ -3162,102 +2825,101 @@ mod tests {
         );
         restarted.restart = true;
         let restarted = runtime
-            .apply_telegram_collab_progress_updates("thread", "turn", vec![restarted])
-            .expect("restart should clear the old detail");
+            .upsert_telegram_collab_task_progress("thread", "turn", vec![restarted])
+            .expect("newer restart should reopen the agent");
         assert_eq!(
-            restarted.entries[0].status,
+            restarted.collab.as_ref().unwrap().entries[0].status,
             TelegramCollabProgressStatus::Running
         );
-        assert_eq!(restarted.entries[0].detail, None);
-    }
+        assert_eq!(
+            restarted.collab.as_ref().unwrap().entries[0].started_at_ms,
+            4_000
+        );
+        assert_eq!(restarted.collab.as_ref().unwrap().entries[0].detail, None);
 
-    #[test]
-    fn telegram_collab_progress_terminal_state_is_monotonic_and_finish_interrupts_running() {
-        let mut runtime = RuntimeState::default();
-        runtime.mark_turn_started("thread", "turn");
-        let initial = runtime
-            .apply_telegram_collab_progress_updates(
+        let running = runtime
+            .upsert_telegram_collab_task_progress(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-b",
+                    Some("running_agent"),
+                    Some(TelegramCollabProgressStatus::Running),
+                    5_000,
+                )],
+            )
+            .expect("second agent should be visible");
+        assert_eq!(running.collab.as_ref().unwrap().entries.len(), 2);
+
+        let terminal = runtime
+            .upsert_telegram_collab_task_progress(
                 "thread",
                 "turn",
                 vec![
                     collab_progress_update(
-                        "agent-a",
+                        "agent-c",
                         Some("completed_agent"),
                         Some(TelegramCollabProgressStatus::Succeeded),
-                        1_000,
+                        6_000,
                     ),
                     collab_progress_update(
-                        "agent-b",
-                        Some("running_agent"),
-                        Some(TelegramCollabProgressStatus::Running),
-                        2_000,
-                    ),
-                    collab_progress_update(
-                        "agent-c",
+                        "agent-d",
                         Some("failed_agent"),
                         Some(TelegramCollabProgressStatus::Failed),
-                        2_000,
+                        7_000,
                     ),
                 ],
             )
-            .expect("agents should create progress");
-        assert!(
-            runtime
-                .complete_telegram_collab_progress_delivery(
-                    "thread",
-                    "turn",
-                    initial.revision,
-                    "93".to_string(),
-                )
-                .is_none()
-        );
-
-        assert!(
-            runtime
-                .apply_telegram_collab_progress_updates(
-                    "thread",
-                    "turn",
-                    vec![
-                        collab_progress_update(
-                            "agent-a",
-                            None,
-                            Some(TelegramCollabProgressStatus::Running),
-                            3_000,
-                        ),
-                        collab_progress_update(
-                            "agent-c",
-                            None,
-                            Some(TelegramCollabProgressStatus::Succeeded),
-                            3_000,
-                        ),
-                    ],
-                )
-                .is_none()
-        );
-        let final_snapshot = runtime
-            .finish_telegram_collab_progress("thread", "turn")
-            .expect("turn finish should edit collaboration progress");
-        assert!(final_snapshot.completed);
+            .expect("terminal agents should be retained in order");
+        assert_eq!(terminal.collab.as_ref().unwrap().entries.len(), 4);
         assert_eq!(
-            final_snapshot.entries[0].status,
+            terminal.collab.as_ref().unwrap().entries[2].status,
             TelegramCollabProgressStatus::Succeeded
         );
         assert_eq!(
-            final_snapshot.entries[1].status,
+            terminal.collab.as_ref().unwrap().entries[3].status,
+            TelegramCollabProgressStatus::Failed
+        );
+        let mut stale_terminal = collab_progress_update(
+            "agent-c",
+            None,
+            Some(TelegramCollabProgressStatus::Running),
+            8_000,
+        );
+        stale_terminal.restart = false;
+        assert!(
+            runtime
+                .upsert_telegram_collab_task_progress("thread", "turn", vec![stale_terminal])
+                .is_none()
+        );
+        let final_snapshot = runtime
+            .finish_telegram_command_progress("thread", "turn")
+            .expect("turn finish should interrupt running agents");
+        assert!(final_snapshot.completed);
+        assert_eq!(
+            final_snapshot.collab.as_ref().unwrap().entries[0].status,
             TelegramCollabProgressStatus::Interrupted
         );
         assert_eq!(
-            final_snapshot.entries[2].status,
+            final_snapshot.collab.as_ref().unwrap().entries[1].status,
+            TelegramCollabProgressStatus::Interrupted
+        );
+        assert_eq!(
+            final_snapshot.collab.as_ref().unwrap().entries[2].status,
+            TelegramCollabProgressStatus::Succeeded
+        );
+        assert_eq!(
+            final_snapshot.collab.as_ref().unwrap().entries[3].status,
             TelegramCollabProgressStatus::Failed
         );
     }
 
     #[test]
-    fn telegram_collab_progress_does_not_reappear_after_turn_cleanup() {
+    fn telegram_collab_progress_terminal_delivery_survives_turn_cleanup_and_retry() {
         let mut runtime = RuntimeState::default();
         runtime.mark_turn_started("thread", "turn");
         runtime
-            .apply_telegram_collab_progress_updates(
+            .upsert_telegram_collab_task_progress(
                 "thread",
                 "turn",
                 vec![collab_progress_update(
@@ -3268,23 +2930,40 @@ mod tests {
                 )],
             )
             .expect("agent should create progress");
+        let first = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("initial state should be claimable");
+        let final_state = runtime
+            .finish_telegram_command_progress("thread", "turn")
+            .expect("terminal state should be queued");
+        assert!(final_state.completed);
         assert!(runtime.mark_turn_completed("thread", Some("turn")));
-        assert!(runtime.telegram_collab_progress_by_thread.is_empty());
         assert!(
             runtime
-                .apply_telegram_collab_progress_updates(
+                .telegram_command_progress_by_thread
+                .contains_key("thread")
+        );
+
+        assert!(runtime.fail_telegram_command_progress_delivery("thread", "turn", first.revision));
+        let retry = runtime
+            .retry_telegram_command_progress_delivery("thread", "turn")
+            .expect("terminal state should remain retryable");
+        assert!(retry.completed);
+        assert_eq!(
+            retry.collab.as_ref().unwrap().entries[0].status,
+            TelegramCollabProgressStatus::Interrupted
+        );
+        assert!(
+            runtime
+                .complete_telegram_command_progress_delivery(
                     "thread",
                     "turn",
-                    vec![collab_progress_update(
-                        "agent-a",
-                        None,
-                        Some(TelegramCollabProgressStatus::Succeeded),
-                        2_000,
-                    )],
+                    retry.revision,
+                    "101".to_string(),
                 )
                 .is_none()
         );
-        assert!(runtime.telegram_collab_progress_by_thread.is_empty());
+        assert!(runtime.telegram_command_progress_by_thread.is_empty());
     }
 
     #[test]
@@ -3632,6 +3311,32 @@ mod tests {
             runtime
                 .finish_telegram_draft("thread", "item", "again")
                 .is_none()
+        );
+        assert!(
+            runtime
+                .append_telegram_draft_delta("thread", "item", "late replay")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_completed_item_rejects_late_delta_without_a_prior_draft() {
+        let mut runtime = RuntimeState::default();
+
+        assert!(
+            runtime
+                .finish_telegram_draft("thread", "completed-item", "final")
+                .is_none()
+        );
+        assert!(
+            runtime
+                .append_telegram_draft_delta("thread", "completed-item", "late replay")
+                .is_none()
+        );
+        assert!(
+            runtime
+                .append_telegram_draft_delta("thread", "new-item", "new reply")
+                .is_some()
         );
     }
 

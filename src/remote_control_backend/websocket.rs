@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -22,7 +22,8 @@ use crate::{
 use super::client_state::{
     connection_exists_locked, default_client_key_for_connection_locked, ensure_client_state_locked,
     prune_inactive_remote_connections_locked, remove_pending_initialize_for_connection_locked,
-    source_default_client_key, source_kind_from_user_agent, sync_default_client_legacy_locked,
+    resolve_remote_client_key_for_connection_locked, source_default_client_key,
+    source_kind_from_user_agent, sync_default_client_legacy_locked,
     sync_legacy_from_active_connection_locked,
 };
 use super::diagnostics::{
@@ -402,15 +403,36 @@ pub(super) async fn initialize_remote_clients_for_connection(
     state: &SharedState,
     connection_epoch: u64,
 ) -> Result<()> {
+    let bound_client_keys = {
+        let runtime = state.runtime.lock().await;
+        runtime
+            .route_by_thread
+            .values()
+            .map(|route| route.remote_client_key.clone())
+            .collect::<Vec<_>>()
+    };
     let client_keys = {
         let remote = state.remote_control.inner.lock().await;
         if !connection_exists_locked(&remote, connection_epoch) {
             return Ok(());
         }
-        vec![default_client_key_for_connection_locked(
-            &remote,
-            connection_epoch,
-        )]
+        let default_client_key =
+            default_client_key_for_connection_locked(&remote, connection_epoch);
+        let additional_client_keys = bound_client_keys
+            .into_iter()
+            .map(|client_key| {
+                resolve_remote_client_key_for_connection_locked(
+                    &remote,
+                    connection_epoch,
+                    &client_key,
+                )
+            })
+            .filter(|client_key| client_key != &default_client_key)
+            .collect::<BTreeSet<_>>();
+        let mut client_keys = Vec::with_capacity(additional_client_keys.len() + 1);
+        client_keys.push(default_client_key);
+        client_keys.extend(additional_client_keys);
+        client_keys
     };
     for client_key in client_keys {
         ensure_remote_control_client_initialized(state, connection_epoch, &client_key).await?;
