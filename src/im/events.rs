@@ -23,21 +23,21 @@ use crate::{
         },
         telegram::{
             adapter::TelegramAdapter, api::TelegramApiError,
-            collab_progress as telegram_collab_progress, progress as telegram_progress,
-            search as telegram_search,
+            collab_progress as telegram_collab_progress, commentary as telegram_commentary,
+            progress as telegram_progress, search as telegram_search,
         },
         wechat::adapter::WechatAdapter,
     },
     im_runtime::{
-        PendingApproval, RouteTarget, TelegramCommandProgressSnapshot, TelegramDraftSendAction,
-        TurnOrigin,
+        PendingApproval, RouteTarget, TelegramCommandProgressSnapshot, TelegramTypingSendAction,
+        TelegramWebSearchProgressEntry, TurnOrigin,
     },
     types::ImPlatformKind,
 };
 
 const COMMAND_OUTPUT_PREVIEW_CHARS: usize = 2400;
-const TELEGRAM_DRAFT_THROTTLE_MS: u128 = 300;
-const TELEGRAM_DRAFT_HEARTBEAT_MS: u128 = 20_000;
+const TELEGRAM_TYPING_RETRY_THROTTLE_MS: u128 = 300;
+const TELEGRAM_TYPING_RENEWAL_MS: u128 = 4_000;
 const TURN_ERROR_SUMMARY_MAX_CHARS: usize = 600;
 const TERMINAL_STATUS_FALLBACK_DELAY_MS: u64 = 60_000;
 
@@ -110,6 +110,39 @@ async fn update_telegram_task_progress(
         .lock()
         .await
         .upsert_telegram_command_progress(thread_id, &turn_id, entry, completed);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+    true
+}
+
+async fn update_telegram_web_search_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    params: &serde_json::Value,
+    item_id: &str,
+    item: &serde_json::Value,
+) -> bool {
+    let turn_id = match telegram_command_turn(state, thread_id, params).await {
+        TelegramCommandTurn::Active(turn_id) => turn_id,
+        TelegramCommandTurn::Missing | TelegramCommandTurn::Stale { .. } => return true,
+    };
+    let Some(rendered) = telegram_search::render_web_search(item) else {
+        return true;
+    };
+    let entry = TelegramWebSearchProgressEntry {
+        item_id: item_id.to_string(),
+        summary: rendered.summary,
+        blocks: rendered.blocks,
+        fallback_markdown: rendered.fallback_markdown,
+    };
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .upsert_telegram_web_search_progress(thread_id, &turn_id, entry);
     if let Some(snapshot) = snapshot {
         deliver_telegram_command_progress(state, api_registry, thread_id, route, snapshot).await;
     }
@@ -458,12 +491,15 @@ async fn telegram_command_progress_driver(
                         "info",
                         "telegram_command_progress_sent",
                         format!(
-                            "thread={thread_id} turn={} chat={} message={} revision={} steps={} completed={}",
+                            "thread={thread_id} turn={} chat={} message={} revision={} steps={} searches={} completed={}",
                             snapshot.turn_id,
                             route.chat_id,
                             message_id,
                             snapshot.revision,
                             snapshot.dropped_entries.saturating_add(snapshot.entries.len()),
+                            snapshot
+                                .dropped_web_searches
+                                .saturating_add(snapshot.web_searches.len()),
                             snapshot.completed
                         ),
                     )
@@ -592,7 +628,6 @@ async fn enqueue_approval(
             .get("turnId")
             .and_then(|value| value.as_str())
             .map(str::to_string),
-        telegram_draft_id: None,
         route: route.clone(),
         item_id: Some(request_key),
         item_type: Some("approval".to_string()),
@@ -622,9 +657,9 @@ pub(crate) async fn send_turn_reply(
     thread_id: &str,
     turn_id: Option<&str>,
     route: &RouteTarget,
+    item_id: Option<&str>,
     text: &str,
     is_final_answer: bool,
-    telegram_draft_id: Option<i64>,
 ) {
     log_remote_to_im_enqueue(
         "turn_reply_input",
@@ -643,6 +678,7 @@ pub(crate) async fn send_turn_reply(
             route,
             thread_id,
             effective_turn_id.as_deref(),
+            item_id,
             is_final_answer,
         );
         if runtime.should_skip_duplicate_text(&key, text) {
@@ -707,19 +743,53 @@ pub(crate) async fn send_turn_reply(
                     "agentMessage",
                     &rendered,
                 );
+                let payload = if !is_final_answer {
+                    let Some(turn_id) = effective_turn_id.as_deref() else {
+                        return;
+                    };
+                    let item_id = item_id.unwrap_or(text);
+                    let snapshot = state.runtime.lock().await.append_telegram_commentary(
+                        thread_id,
+                        turn_id,
+                        item_id,
+                        rendered.clone(),
+                    );
+                    let Some(snapshot) = snapshot else {
+                        return;
+                    };
+                    let entries = snapshot
+                        .entries
+                        .iter()
+                        .map(|entry| entry.text.clone())
+                        .collect::<Vec<_>>();
+                    let rendered = telegram_commentary::render_commentary(
+                        &entries,
+                        snapshot.dropped_entries,
+                        im_text_for_state(state),
+                    );
+                    Some(ImOutboundPayload::TelegramCommentary {
+                        segment: snapshot.segment,
+                        rich_markdown: rendered.rich_markdown,
+                        fallback_text: rendered.fallback_markdown,
+                    })
+                } else {
+                    Some(ImOutboundPayload::Text(rendered))
+                };
+                let Some(payload) = payload else {
+                    return;
+                };
                 if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                     thread_id: thread_id.to_string(),
                     turn_id: effective_turn_id.clone(),
-                    telegram_draft_id,
                     route: route.clone(),
-                    item_id: None,
+                    item_id: item_id.map(str::to_string),
                     item_type: Some("agentMessage".to_string()),
                     kind: if is_final_answer {
                         ImOutboundKind::TurnReply
                     } else {
                         ImOutboundKind::Item
                     },
-                    payload: ImOutboundPayload::Text(rendered),
+                    payload,
                 }) {
                     state
                         .push_event(
@@ -766,21 +836,6 @@ pub(crate) async fn send_turn_reply(
                                 ),
                             )
                             .await;
-                        if let Some(draft_id) = telegram_draft_id
-                            && let Err(err) =
-                                adapter.clear_turn_draft(&route.chat_id, draft_id).await
-                        {
-                            state
-                                .push_event(
-                                    "warn",
-                                    "telegram_turn_draft_clear_failed",
-                                    format!(
-                                        "thread={thread_id} chat={} draft={draft_id} err={err}",
-                                        route.chat_id
-                                    ),
-                                )
-                                .await;
-                        }
                         if is_final_answer {
                             crate::safe_relaunch::on_telegram_turn_completed_sent(
                                 state,
@@ -816,7 +871,6 @@ pub(crate) async fn send_turn_reply(
                 if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                     thread_id: thread_id.to_string(),
                     turn_id: effective_turn_id.clone(),
-                    telegram_draft_id: None,
                     route: route.clone(),
                     item_id: None,
                     item_type: Some("agentMessage".to_string()),
@@ -894,7 +948,6 @@ pub(crate) async fn send_turn_reply(
             if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                 thread_id: thread_id.to_string(),
                 turn_id: effective_turn_id.clone(),
-                telegram_draft_id: None,
                 route: route.clone(),
                 item_id: None,
                 item_type: Some("agentMessage".to_string()),
@@ -913,99 +966,96 @@ pub(crate) async fn send_turn_reply(
     }
 }
 
-async fn send_telegram_agent_draft(
+async fn start_telegram_agent_typing(
     state: &SharedState,
     api_registry: &ImApiRegistry,
     thread_id: &str,
     item_id: &str,
     route: &RouteTarget,
-    delta: &str,
 ) {
     let Some(api) = api_registry.telegram_for_route(route) else {
-        log_missing_api(state, route, "agent_draft").await;
+        log_missing_api(state, route, "agent_typing").await;
         return;
     };
-    let draft_id = state
+    let generation = state
         .runtime
         .lock()
         .await
-        .append_telegram_draft_delta(thread_id, item_id, delta);
-    if let Some(draft_id) = draft_id {
-        spawn_telegram_draft_driver(state, api, thread_id, item_id, route, draft_id);
+        .start_telegram_typing(thread_id, item_id);
+    if let Some(generation) = generation {
+        spawn_telegram_typing_driver(state, api, thread_id, item_id, route, generation);
     }
 }
 
-async fn finish_telegram_agent_draft(
+async fn finish_telegram_agent_typing(
     state: &SharedState,
     api_registry: &ImApiRegistry,
     thread_id: &str,
     item_id: &str,
     route: &RouteTarget,
-    final_text: &str,
-) -> Option<i64> {
+) {
     let Some(api) = api_registry.telegram_for_route(route) else {
-        log_missing_api(state, route, "agent_draft_final").await;
-        return None;
+        log_missing_api(state, route, "agent_typing_final").await;
+        return;
     };
-    let draft = state
+    let typing = state
         .runtime
         .lock()
         .await
-        .finish_telegram_draft(thread_id, item_id, final_text);
-    let Some((draft_id, should_start, completed)) = draft else {
-        return None;
+        .finish_telegram_typing(thread_id, item_id);
+    let Some((generation, should_start, completed)) = typing else {
+        return;
     };
     if should_start {
-        spawn_telegram_draft_driver(state, api, thread_id, item_id, route, draft_id);
+        spawn_telegram_typing_driver(state, api, thread_id, item_id, route, generation);
     }
     completed.notified().await;
-    Some(draft_id)
 }
 
-fn spawn_telegram_draft_driver(
+fn spawn_telegram_typing_driver(
     state: &SharedState,
     api: crate::im::telegram::api::TelegramApi,
     thread_id: &str,
     item_id: &str,
     route: &RouteTarget,
-    draft_id: i64,
+    generation: i64,
 ) {
     let state = state.clone();
     let thread_id = thread_id.to_string();
     let item_id = item_id.to_string();
     let route = route.clone();
     tokio::spawn(async move {
-        telegram_draft_driver(state, api, thread_id, item_id, route, draft_id).await;
+        telegram_typing_driver(state, api, thread_id, item_id, route, generation).await;
     });
 }
 
-async fn telegram_draft_driver(
+async fn telegram_typing_driver(
     state: SharedState,
     api: crate::im::telegram::api::TelegramApi,
     thread_id: String,
     item_id: String,
     route: RouteTarget,
-    draft_id: i64,
+    generation: i64,
 ) {
     let adapter = TelegramAdapter::new(api);
     loop {
         let now_ms = crate::types::now_ms();
         let (send_delay_ms, wait_for_update) = {
             let runtime = state.runtime.lock().await;
-            if let Some(delay_ms) = runtime.telegram_draft_send_delay_ms(
+            if let Some(delay_ms) = runtime.telegram_typing_send_delay_ms(
                 &thread_id,
                 &item_id,
-                draft_id,
+                generation,
                 now_ms,
-                TELEGRAM_DRAFT_THROTTLE_MS,
+                TELEGRAM_TYPING_RETRY_THROTTLE_MS,
             ) {
                 (Some(delay_ms), None)
-            } else if let Some(wait) = runtime.telegram_draft_wait_for_update(
+            } else if let Some(wait) = runtime.telegram_typing_wait_for_update(
                 &thread_id,
                 &item_id,
-                draft_id,
+                generation,
                 now_ms,
-                TELEGRAM_DRAFT_HEARTBEAT_MS,
+                TELEGRAM_TYPING_RENEWAL_MS,
             ) {
                 (None, Some(wait))
             } else {
@@ -1017,10 +1067,10 @@ async fn telegram_draft_driver(
             tokio::select! {
                 _ = wake_driver.notified() => {}
                 _ = tokio::time::sleep(Duration::from_millis(heartbeat_delay_ms)) => {
-                    if !state.runtime.lock().await.mark_telegram_draft_heartbeat_due(
+                    if !state.runtime.lock().await.mark_telegram_typing_renewal_due(
                         &thread_id,
                         &item_id,
-                        draft_id,
+                        generation,
                     ) {
                         return;
                     }
@@ -1032,63 +1082,69 @@ async fn telegram_draft_driver(
         if let Some(delay_ms) = send_delay_ms
             && delay_ms > 0
         {
-            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let wake_driver = {
+                let runtime = state.runtime.lock().await;
+                runtime.telegram_typing_wake_driver(&thread_id, &item_id, generation)
+            };
+            if let Some(wake_driver) = wake_driver {
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
+                    _ = wake_driver.notified() => {}
+                }
+            } else {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
         }
-        let snapshot = state.runtime.lock().await.take_telegram_draft_snapshot(
+        let snapshot = state.runtime.lock().await.take_telegram_typing_snapshot(
             &thread_id,
             &item_id,
-            draft_id,
+            generation,
             crate::types::now_ms(),
         );
-        let Some((content, finished, revision)) = snapshot else {
+        let Some((finished, revision)) = snapshot else {
             return;
         };
-        let result = adapter
-            .send_turn_draft(&route.chat_id, draft_id, &content)
-            .await;
-        match &result {
-            Ok(()) => {
-                state
-                    .push_event(
-                        "info",
-                        if finished {
-                            "telegram_turn_draft_final_sent"
-                        } else {
-                            "telegram_turn_draft_sent"
-                        },
-                        format!(
-                            "thread={thread_id} item={item_id} chat={} draft={draft_id} chars={}",
-                            route.chat_id,
-                            content.chars().count()
-                        ),
-                    )
-                    .await;
-            }
-            Err(err) => {
-                state
-                    .push_event(
-                        "warn",
-                        if finished {
-                            "telegram_turn_draft_final_failed"
-                        } else {
-                            "telegram_turn_draft_failed"
-                        },
-                        format!(
-                            "thread={thread_id} item={item_id} chat={} draft={draft_id} err={err}",
-                            route.chat_id
-                        ),
-                    )
-                    .await;
+        let result = if finished {
+            Ok(())
+        } else {
+            adapter.send_typing_action(&route.chat_id).await
+        };
+        if !finished {
+            match &result {
+                Ok(()) => {
+                    state
+                        .push_event(
+                            "info",
+                            "telegram_typing_sent",
+                            format!(
+                                "thread={thread_id} item={item_id} chat={} generation={generation}",
+                                route.chat_id
+                            ),
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    state
+                        .push_event(
+                            "warn",
+                            "telegram_typing_failed",
+                            format!(
+                                "thread={thread_id} item={item_id} chat={} generation={generation} err={err}",
+                                route.chat_id
+                            ),
+                        )
+                        .await;
+                }
             }
         }
-        let action = state.runtime.lock().await.complete_telegram_draft_send(
+        let action = state.runtime.lock().await.complete_telegram_typing_send(
             &thread_id,
             &item_id,
-            draft_id,
+            generation,
             revision,
             result.is_ok(),
         );
-        if action == TelegramDraftSendAction::Stop {
+        if action == TelegramTypingSendAction::Stop {
             return;
         }
     }
@@ -1098,6 +1154,7 @@ fn turn_reply_dedupe_key(
     route: &RouteTarget,
     thread_id: &str,
     turn_id: Option<&str>,
+    item_id: Option<&str>,
     is_final_answer: bool,
 ) -> String {
     let turn_scope = turn_id
@@ -1105,9 +1162,15 @@ fn turn_reply_dedupe_key(
         .filter(|value| !value.is_empty())
         .unwrap_or(thread_id);
     let phase = if is_final_answer {
-        "final-answer"
+        "final-answer".to_string()
+    } else if route.platform == ImPlatformKind::Telegram {
+        let item_scope = item_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("unknown-item");
+        format!("commentary:{item_scope}")
     } else {
-        "commentary"
+        "commentary".to_string()
     };
     format!("{}:turn-reply:{turn_scope}:{phase}", route.conversation_key)
 }
@@ -1127,7 +1190,6 @@ fn queue_agent_message_images(
         outbound_tx.enqueue(ImOutboundMessage {
             thread_id: thread_id.to_string(),
             turn_id: None,
-            telegram_draft_id: None,
             route: route.clone(),
             item_id: item_id
                 .map(str::to_string)
@@ -1389,7 +1451,6 @@ async fn send_turn_terminal_mark(
             if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                 thread_id: thread_id.to_string(),
                 turn_id: None,
-                telegram_draft_id: None,
                 route: route.clone(),
                 item_id: None,
                 item_type: Some(if failed {
@@ -1841,7 +1902,7 @@ pub(crate) async fn handle_codex_notification(
                 return;
             }
             if route.platform == ImPlatformKind::Telegram {
-                send_telegram_agent_draft(&state, &api_registry, thread_id, item_id, &route, delta)
+                start_telegram_agent_typing(&state, &api_registry, thread_id, item_id, &route)
                     .await;
                 return;
             }
@@ -2133,6 +2194,19 @@ pub(crate) async fn handle_codex_notification(
                     .await;
                     return;
                 }
+                if route.platform == ImPlatformKind::Telegram && item_type == "webSearch" {
+                    update_telegram_web_search_progress(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        &route,
+                        params,
+                        item_id,
+                        item,
+                    )
+                    .await;
+                    return;
+                }
                 if route.platform == ImPlatformKind::Telegram && item_type == "reasoning" {
                     update_telegram_reasoning_progress(
                         &state,
@@ -2245,19 +2319,16 @@ pub(crate) async fn handle_codex_notification(
                     && let Some(text) = extract_agent_message_text(item)
                 {
                     let is_final_answer = agent_message_is_final_answer(item);
-                    let telegram_draft_id = if route.platform == ImPlatformKind::Telegram {
-                        finish_telegram_agent_draft(
+                    if route.platform == ImPlatformKind::Telegram {
+                        finish_telegram_agent_typing(
                             &state,
                             &api_registry,
                             thread_id,
                             item_id,
                             &route,
-                            &text,
                         )
-                        .await
-                    } else {
-                        None
-                    };
+                        .await;
+                    }
                     send_turn_reply(
                         &state,
                         &api_registry,
@@ -2265,9 +2336,9 @@ pub(crate) async fn handle_codex_notification(
                         thread_id,
                         turn_id,
                         &route,
+                        Some(item_id),
                         &text,
                         is_final_answer,
-                        telegram_draft_id,
                     )
                     .await;
                 } else if item_type == "userMessage" {
@@ -2282,15 +2353,23 @@ pub(crate) async fn handle_codex_notification(
                             &state,
                             &outbound_tx,
                             thread_id,
+                            turn_id,
                             &route,
                             item_id,
                             item,
                         )
                         .await;
                     }
-                } else if let Err(err) =
-                    send_text_im_codex_item(&state, &outbound_tx, thread_id, &route, item_id, item)
-                        .await
+                } else if let Err(err) = send_text_im_codex_item(
+                    &state,
+                    &outbound_tx,
+                    thread_id,
+                    turn_id,
+                    &route,
+                    item_id,
+                    item,
+                )
+                .await
                 {
                     let event_kind = format!("{}_item_failed", route.platform.key());
                     state
@@ -2335,6 +2414,7 @@ pub(crate) async fn handle_codex_notification(
                     &route,
                     thread_id,
                     turn_id,
+                    Some(item_id),
                     agent_message_is_final_answer(item),
                 );
                 runtime.remember_sent_text(&key, text);
@@ -2499,9 +2579,9 @@ pub(crate) async fn handle_codex_notification(
                     thread_id,
                     effective_turn_id.as_deref(),
                     &route,
+                    None,
                     &text,
                     true,
-                    None,
                 )
                 .await;
             }
@@ -2896,6 +2976,7 @@ async fn send_text_im_codex_item(
     state: &SharedState,
     outbound_tx: &ImOutboundSender,
     thread_id: &str,
+    turn_id: Option<&str>,
     route: &RouteTarget,
     item_id: &str,
     item: &serde_json::Value,
@@ -2905,6 +2986,19 @@ async fn send_text_im_codex_item(
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
     let platform = route.platform.key();
+    if route.platform == ImPlatformKind::Telegram && item_type == "webSearch" {
+        state
+            .push_event(
+                "info",
+                "telegram_item_skipped",
+                format!(
+                    "thread={thread_id} item={item_id} type={item_type} chat={} reason=handled_by_progress",
+                    route.chat_id
+                ),
+            )
+            .await;
+        return Ok(());
+    }
     let dedupe_payload = item.to_string();
     let should_send = {
         let mut runtime = state.runtime.lock().await;
@@ -2940,7 +3034,6 @@ async fn send_text_im_codex_item(
         outbound_tx.enqueue(ImOutboundMessage {
             thread_id: thread_id.to_string(),
             turn_id: None,
-            telegram_draft_id: None,
             route: route.clone(),
             item_id: Some(item_id.to_string()),
             item_type: Some(item_type.to_string()),
@@ -2958,51 +3051,6 @@ async fn send_text_im_codex_item(
                 &event_kind,
                 format!(
                     "thread={thread_id} item={item_id} type={item_type} chat={}",
-                    route.chat_id
-                ),
-            )
-            .await;
-        return Ok(());
-    }
-
-    if route.platform == ImPlatformKind::Telegram
-        && item_type == "webSearch"
-        && let Some(rendered) = telegram_search::render_web_search(item)
-    {
-        let telegram_search::TelegramWebSearchRender {
-            blocks,
-            fallback_markdown,
-        } = rendered;
-        log_remote_to_im_enqueue(
-            "item_enqueue_rich_search",
-            thread_id,
-            route,
-            item_id,
-            item_type,
-            &fallback_markdown,
-        );
-        let block_count = blocks.len();
-        let fallback_len = fallback_markdown.chars().count();
-        outbound_tx.enqueue(ImOutboundMessage {
-            thread_id: thread_id.to_string(),
-            turn_id: None,
-            telegram_draft_id: None,
-            route: route.clone(),
-            item_id: Some(item_id.to_string()),
-            item_type: Some(item_type.to_string()),
-            kind: ImOutboundKind::Item,
-            payload: ImOutboundPayload::RichBlocks {
-                blocks,
-                fallback_text: fallback_markdown,
-            },
-        })?;
-        let event_kind = format!("{platform}_item_queued");
-        state
-            .push_event(
-                "info",
-                &event_kind,
-                format!(
-                    "thread={thread_id} item={item_id} type={item_type} chat={} rich_blocks={block_count} fallback_len={fallback_len}",
                     route.chat_id
                 ),
             )
@@ -3038,14 +3086,23 @@ async fn send_text_im_codex_item(
     log_remote_to_im_enqueue("item_enqueue", thread_id, route, item_id, item_type, &text);
     outbound_tx.enqueue(ImOutboundMessage {
         thread_id: thread_id.to_string(),
-        turn_id: None,
-        telegram_draft_id: None,
+        turn_id: turn_id.map(str::to_string),
         route: route.clone(),
         item_id: Some(item_id.to_string()),
         item_type: Some(item_type.to_string()),
         kind: ImOutboundKind::Item,
         payload: ImOutboundPayload::Text(text.clone()),
     })?;
+    if route.platform == ImPlatformKind::Telegram
+        && item_type == "contextCompaction"
+        && let Some(turn_id) = turn_id
+    {
+        state
+            .runtime
+            .lock()
+            .await
+            .start_new_telegram_commentary_segment(thread_id, turn_id);
+    }
     let mcp_tool_image_count =
         queue_mcp_tool_images(outbound_tx, thread_id, route, item_id, mcp_tool_image_paths)?;
     let event_kind = format!("{platform}_item_queued");
@@ -3132,7 +3189,6 @@ fn queue_mcp_tool_images(
         outbound_tx.enqueue(ImOutboundMessage {
             thread_id: thread_id.to_string(),
             turn_id: None,
-            telegram_draft_id: None,
             route: route.clone(),
             item_id: Some(item_id.to_string()),
             item_type: Some("mcpToolCall".to_string()),
@@ -3556,9 +3612,9 @@ mod tests {
             "thread",
             Some("turn"),
             &route,
+            None,
             &reply,
             true,
-            Some(77),
         )
         .await;
 
@@ -3569,13 +3625,13 @@ mod tests {
         let reply = try_recv_for_test(&mut outbound_rx).expect("queued final reply");
         assert_eq!(reply.kind, ImOutboundKind::TurnReply);
         assert_eq!(reply.item_type.as_deref(), Some("agentMessage"));
-        assert_eq!(reply.telegram_draft_id, Some(77));
         match reply.payload {
             ImOutboundPayload::Text(text) => {
                 assert!(text.starts_with("result"));
                 assert!(!text.contains("🤖 Codex"));
             }
             ImOutboundPayload::RichBlocks { .. }
+            | ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. } => {
                 panic!("Telegram final reply must be queued as text")
@@ -3585,13 +3641,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn telegram_web_search_is_queued_as_rich_blocks() {
+    async fn telegram_web_search_is_folded_into_task_progress() {
         let state = test_state();
         let route = test_telegram_route();
+        let api_registry = ImApiRegistry::default();
         let (outbound_tx, mut outbound_rx) = outbound_channel();
         let item = json!({
+            "id": "search-item",
             "type": "webSearch",
-            "query": "Telegram sendMessageDraft",
+            "query": "Telegram typing indicator",
             "action": {"type": "openPage", "url": "https://core.telegram.org/bots/api"},
             "results": [{
                 "title": "Telegram Bot API",
@@ -3600,30 +3658,47 @@ mod tests {
                 "url": "https://core.telegram.org/bots/api"
             }]
         });
-
-        send_text_im_codex_item(&state, &outbound_tx, "thread", &route, "search-item", &item)
+        state
+            .runtime
+            .lock()
             .await
-            .expect("queue search item");
+            .bind_route("thread", route.clone());
+        state
+            .runtime
+            .lock()
+            .await
+            .mark_turn_started("thread", "turn");
 
-        let message = try_recv_for_test(&mut outbound_rx).expect("queued search item");
-        assert_eq!(message.item_type.as_deref(), Some("webSearch"));
-        match message.payload {
-            ImOutboundPayload::RichBlocks {
-                blocks,
-                fallback_text,
-            } => {
-                assert!(blocks.iter().any(|block| block["type"] == "list"));
-                assert!(blocks.iter().any(|block| block["type"] == "details"));
-                assert!(fallback_text.contains("Telegram Bot API"));
-                assert!(!fallback_text.contains("\"openPage\""));
-            }
-            ImOutboundPayload::Text(_)
-            | ImOutboundPayload::Approval(_)
-            | ImOutboundPayload::Image { .. } => {
-                panic!("Telegram web search should use rich blocks")
-            }
-        }
+        let notification = crate::codex::CodexNotification {
+            method: "item/completed".to_string(),
+            params: Some(json!({
+                "threadId": "thread",
+                "turnId": "turn",
+                "item": item,
+            })),
+            request_id: None,
+            remote_client_key: None,
+            remote_client_id: None,
+            remote_stream_id: None,
+        };
+        handle_codex_notification(state.clone(), api_registry, outbound_tx, &notification).await;
+
         assert!(try_recv_for_test(&mut outbound_rx).is_none());
+        let snapshot = state
+            .runtime
+            .lock()
+            .await
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("search should update task progress");
+        assert_eq!(snapshot.web_searches.len(), 1);
+        let rendered =
+            telegram_progress::render_task_progress(&snapshot, im_text_for_state(&state));
+        let blocks = serde_json::Value::Array(rendered.blocks);
+        assert!(blocks.as_array().unwrap().iter().any(|block| {
+            block["summary"] == "搜索 · Telegram typing indicator · 1 条结果"
+        }));
+        assert!(rendered.fallback_markdown.contains("Telegram Bot API"));
+        assert!(!rendered.fallback_markdown.contains("\"openPage\""));
     }
 
     #[tokio::test]
@@ -3641,9 +3716,9 @@ mod tests {
                 "thread",
                 Some(turn_id),
                 &route,
+                None,
                 "same final answer",
                 true,
-                None,
             )
             .await;
         }
@@ -3755,10 +3830,17 @@ mod tests {
         assert_eq!(commentary.kind, ImOutboundKind::Item);
         assert_eq!(commentary.item_type.as_deref(), Some("agentMessage"));
         assert_eq!(commentary.turn_id.as_deref(), Some("turn"));
-        assert!(matches!(
-            &commentary.payload,
-            ImOutboundPayload::Text(text) if text == "same text"
-        ));
+        match &commentary.payload {
+            ImOutboundPayload::TelegramCommentary {
+                rich_markdown,
+                fallback_text,
+                ..
+            } => {
+                assert_eq!(rich_markdown, "same text");
+                assert_eq!(fallback_text, "same text");
+            }
+            _ => panic!("commentary should use the aggregated Telegram payload"),
+        }
 
         let final_answer = try_recv_for_test(&mut outbound_rx).expect("queued final answer");
         assert_eq!(final_answer.kind, ImOutboundKind::TurnReply);
@@ -3769,6 +3851,263 @@ mod tests {
             ImOutboundPayload::Text(text) if text == "same text"
         ));
         assert!(try_recv_for_test(&mut outbound_rx).is_none());
+    }
+
+    #[tokio::test]
+    async fn telegram_commentary_folds_eight_updates_and_deduplicates_item_replays() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route);
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        for index in 1..=8 {
+            let notification = crate::codex::CodexNotification {
+                method: "item/completed".to_string(),
+                params: Some(json!({
+                    "threadId": "thread",
+                    "turnId": "turn",
+                    "item": {
+                        "id": format!("commentary-{index}"),
+                        "type": "agentMessage",
+                        "phase": "commentary",
+                        "text": format!("update {index}")
+                    }
+                })),
+                request_id: None,
+                remote_client_key: None,
+                remote_client_id: None,
+                remote_stream_id: None,
+            };
+            handle_codex_notification(
+                state.clone(),
+                ImApiRegistry::default(),
+                outbound_tx.clone(),
+                &notification,
+            )
+            .await;
+            if index == 3 {
+                handle_codex_notification(
+                    state.clone(),
+                    ImApiRegistry::default(),
+                    outbound_tx.clone(),
+                    &notification,
+                )
+                .await;
+            }
+        }
+
+        send_turn_reply(
+            &state,
+            &ImApiRegistry::default(),
+            Some(&outbound_tx),
+            "thread",
+            Some("turn"),
+            &test_telegram_route(),
+            Some("final-answer"),
+            "final answer",
+            true,
+        )
+        .await;
+
+        let mut queued = 0;
+        let mut last_rich = String::new();
+        let mut last_fallback = String::new();
+        for _ in 0..8 {
+            let message = try_recv_for_test(&mut outbound_rx).expect("commentary snapshot");
+            queued += 1;
+            assert_eq!(message.kind, ImOutboundKind::Item);
+            match message.payload {
+                ImOutboundPayload::TelegramCommentary {
+                    rich_markdown,
+                    fallback_text,
+                    ..
+                } => {
+                    last_rich = rich_markdown;
+                    last_fallback = fallback_text;
+                }
+                _ => panic!("commentary should use the aggregated Telegram payload"),
+            }
+        }
+
+        assert_eq!(
+            queued, 8,
+            "the replayed item must not enqueue a ninth update"
+        );
+        assert!(last_rich.contains("<summary>较早进展 · 6 条</summary>"));
+        assert!(last_rich.contains("update 1"));
+        assert!(last_rich.contains("update 6"));
+        assert!(last_rich.contains("update 1\n\n---\n\nupdate 2"));
+        assert!(last_rich.ends_with("update 7\n\n---\n\nupdate 8"));
+        assert_eq!(last_fallback, "较早进展 · 6 条\n\nupdate 7\n\nupdate 8");
+
+        let final_answer = try_recv_for_test(&mut outbound_rx).expect("final answer");
+        assert_eq!(final_answer.kind, ImOutboundKind::TurnReply);
+        assert!(matches!(
+            final_answer.payload,
+            ImOutboundPayload::Text(text) if text == "final answer"
+        ));
+        assert!(try_recv_for_test(&mut outbound_rx).is_none());
+    }
+
+    #[tokio::test]
+    async fn telegram_commentary_keeps_equal_text_from_different_items() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let api_registry = ImApiRegistry::default();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        state
+            .runtime
+            .lock()
+            .await
+            .mark_turn_started("thread", "turn");
+
+        for item_id in ["commentary-1", "commentary-2"] {
+            send_turn_reply(
+                &state,
+                &api_registry,
+                Some(&outbound_tx),
+                "thread",
+                Some("turn"),
+                &route,
+                Some(item_id),
+                "same update",
+                false,
+            )
+            .await;
+        }
+
+        let _first = try_recv_for_test(&mut outbound_rx).expect("first commentary snapshot");
+        let second = try_recv_for_test(&mut outbound_rx).expect("second commentary snapshot");
+        match second.payload {
+            ImOutboundPayload::TelegramCommentary {
+                rich_markdown,
+                fallback_text,
+                ..
+            } => {
+                assert_eq!(rich_markdown, "same update\n\n---\n\nsame update");
+                assert_eq!(fallback_text, "same update\n\nsame update");
+            }
+            _ => panic!("commentary should use the aggregated Telegram payload"),
+        }
+        assert!(try_recv_for_test(&mut outbound_rx).is_none());
+    }
+
+    #[tokio::test]
+    async fn telegram_context_compaction_splits_following_commentary_into_a_new_card() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let api_registry = ImApiRegistry::default();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route.clone());
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        send_turn_reply(
+            &state,
+            &api_registry,
+            Some(&outbound_tx),
+            "thread",
+            Some("turn"),
+            &route,
+            Some("before"),
+            "before compaction",
+            false,
+        )
+        .await;
+        let before = try_recv_for_test(&mut outbound_rx).expect("commentary before compaction");
+        let before_segment = match before.payload {
+            ImOutboundPayload::TelegramCommentary { segment, .. } => segment,
+            _ => panic!("commentary should use an aggregate payload"),
+        };
+
+        send_text_im_codex_item(
+            &state,
+            &outbound_tx,
+            "thread",
+            Some("turn"),
+            &route,
+            "compaction",
+            &json!({"id": "compaction", "type": "contextCompaction"}),
+        )
+        .await
+        .expect("queue context compaction");
+        let compaction = try_recv_for_test(&mut outbound_rx).expect("context compaction");
+        assert_eq!(compaction.item_type.as_deref(), Some("contextCompaction"));
+
+        send_turn_reply(
+            &state,
+            &api_registry,
+            Some(&outbound_tx),
+            "thread",
+            Some("turn"),
+            &route,
+            Some("after"),
+            "after compaction",
+            false,
+        )
+        .await;
+        let after = try_recv_for_test(&mut outbound_rx).expect("commentary after compaction");
+        match after.payload {
+            ImOutboundPayload::TelegramCommentary {
+                segment,
+                rich_markdown,
+                fallback_text,
+            } => {
+                assert_eq!(segment, before_segment + 1);
+                assert_eq!(rich_markdown, "after compaction");
+                assert_eq!(fallback_text, "after compaction");
+            }
+            _ => panic!("commentary should use an aggregate payload"),
+        }
+        assert!(try_recv_for_test(&mut outbound_rx).is_none());
+    }
+
+    #[tokio::test]
+    async fn telegram_context_compaction_does_not_split_when_enqueue_fails() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route.clone());
+            runtime.mark_turn_started("thread", "turn");
+        }
+        let before = state
+            .runtime
+            .lock()
+            .await
+            .append_telegram_commentary("thread", "turn", "before", "before".to_string())
+            .expect("commentary before compaction");
+        drop(outbound_rx);
+
+        assert!(
+            send_text_im_codex_item(
+                &state,
+                &outbound_tx,
+                "thread",
+                Some("turn"),
+                &route,
+                "compaction",
+                &json!({"id": "compaction", "type": "contextCompaction"}),
+            )
+            .await
+            .is_err()
+        );
+
+        let after = state
+            .runtime
+            .lock()
+            .await
+            .append_telegram_commentary("thread", "turn", "after", "after".to_string())
+            .expect("commentary should stay in the current segment");
+        assert_eq!(after.segment, before.segment);
+        assert_eq!(after.entries.len(), 2);
     }
 
     #[tokio::test]
@@ -3869,6 +4208,7 @@ mod tests {
             ImOutboundPayload::Image { path, .. } => assert!(path.is_file()),
             ImOutboundPayload::Text(_)
             | ImOutboundPayload::RichBlocks { .. }
+            | ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_) => {
                 panic!("MCP aggregation must not queue an item text message")
             }
@@ -3917,6 +4257,7 @@ mod tests {
                 assert!(text.contains("503 Service Unavailable"));
             }
             ImOutboundPayload::RichBlocks { .. }
+            | ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. } => {
                 panic!("terminal failure must be queued as text")
@@ -3950,6 +4291,7 @@ mod tests {
         match message.payload {
             ImOutboundPayload::Text(text) => assert!(text.contains("已完成")),
             ImOutboundPayload::RichBlocks { .. }
+            | ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. } => {
                 panic!("terminal success must be queued as text")

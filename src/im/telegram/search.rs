@@ -9,15 +9,16 @@ const MAX_VISIBLE_RESULTS: usize = 5;
 const MAX_TITLE_CHARS: usize = 180;
 const MAX_SNIPPET_CHARS: usize = 260;
 const MAX_URL_CHARS: usize = 320;
-const MAX_RAW_JSON_CHARS: usize = 3600;
+const MAX_PROGRESS_SUMMARY_QUERY_CHARS: usize = 72;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TelegramWebSearchRender {
+    pub summary: String,
     pub blocks: Vec<Value>,
     pub fallback_markdown: String,
 }
 
-/// Render a completed web search as a compact Telegram rich message.
+/// Render a completed web search as a compact section for Telegram progress.
 ///
 /// Search providers have emitted a few different result envelopes over time,
 /// so this intentionally accepts both a direct `results` array and common
@@ -37,14 +38,11 @@ pub(crate) fn render_web_search(item: &Value) -> Option<TelegramWebSearchRender>
     } else {
         query.as_str()
     };
-    let mut blocks = vec![
-        rich_blocks::heading(rich_blocks::text("🔎 搜索"), 3),
-        rich_blocks::paragraph(rich_blocks::rich_text(vec![
-            rich_blocks::bold("关键词"),
-            rich_blocks::text(" "),
-            rich_blocks::code(compact_inline(query_text, MAX_TITLE_CHARS)),
-        ])),
-    ];
+    let mut blocks = vec![rich_blocks::paragraph(rich_blocks::rich_text(vec![
+        rich_blocks::bold("关键词"),
+        rich_blocks::text(" "),
+        rich_blocks::code(compact_inline(query_text, MAX_TITLE_CHARS)),
+    ]))];
 
     if total_results > 0 {
         blocks.push(rich_blocks::paragraph(rich_blocks::bold(format!(
@@ -68,28 +66,12 @@ pub(crate) fn render_web_search(item: &Value) -> Option<TelegramWebSearchRender>
         blocks.push(rich_blocks::paragraph(rich_blocks::text("未返回结果")));
     }
 
-    let mut raw_blocks = Vec::new();
-    if let Some(action) = action {
-        raw_blocks.push(rich_blocks::preformatted(
-            truncate_json(action),
-            Some("json"),
-        ));
-    }
-    if let Some(results) = raw_results {
-        raw_blocks.push(rich_blocks::preformatted(
-            truncate_json(results),
-            Some("json"),
-        ));
-    }
-    if !raw_blocks.is_empty() {
-        blocks.push(rich_blocks::details(
-            rich_blocks::text("原始搜索数据"),
-            raw_blocks,
-            false,
-        ));
-    }
-
     Some(TelegramWebSearchRender {
+        summary: format!(
+            "搜索 · {} · {} 条结果",
+            compact_inline(query_text, MAX_PROGRESS_SUMMARY_QUERY_CHARS),
+            total_results
+        ),
         fallback_markdown: fallback_markdown(query_text, &visible_results, total_results),
         blocks,
     })
@@ -288,22 +270,17 @@ fn truncate(text: &str, max_chars: usize) -> String {
     format!("{}…", text.chars().take(keep).collect::<String>())
 }
 
-fn truncate_json(value: &Value) -> String {
-    let text = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
-    truncate(&text, MAX_RAW_JSON_CHARS)
-}
-
 #[cfg(test)]
 mod tests {
-    use serde_json::{Value, json};
+    use serde_json::json;
 
     use super::render_web_search;
 
     #[test]
-    fn renders_compact_results_and_collapsed_raw_data() {
+    fn renders_compact_results_for_progress_details() {
         let rendered = render_web_search(&json!({
             "type": "webSearch",
-            "query": "Telegram sendMessageDraft",
+            "query": "Telegram typing indicator",
             "action": {"type": "openPage", "url": "https://core.telegram.org/bots/api"},
             "results": [{
                 "title": "Telegram Bot API",
@@ -314,15 +291,19 @@ mod tests {
         }))
         .expect("search render");
 
-        assert_eq!(rendered.blocks[0]["type"], "heading");
-        assert_eq!(rendered.blocks[2]["type"], "paragraph");
+        assert_eq!(rendered.blocks[0]["type"], "paragraph");
+        assert_eq!(rendered.blocks[1]["type"], "paragraph");
         assert!(rendered.blocks.iter().any(|block| block["type"] == "list"));
-        let details = rendered
-            .blocks
-            .iter()
-            .find(|block| block["type"] == "details")
-            .expect("raw details");
-        assert_eq!(details["is_open"], Value::Null);
+        assert_eq!(
+            rendered.summary,
+            "搜索 · Telegram typing indicator · 1 条结果"
+        );
+        assert!(
+            rendered
+                .blocks
+                .iter()
+                .all(|block| block["type"] != "heading" && block["type"] != "details")
+        );
         assert!(rendered.fallback_markdown.contains("Telegram Bot API"));
         assert!(!rendered.fallback_markdown.contains("\"openPage\""));
     }

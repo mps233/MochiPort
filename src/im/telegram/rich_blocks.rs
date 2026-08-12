@@ -8,6 +8,65 @@ pub(crate) fn rich_text(parts: Vec<Value>) -> Value {
     Value::Array(parts)
 }
 
+pub(crate) fn inline_markdown(value: &str) -> Value {
+    let mut parts = Vec::new();
+    let mut plain = String::new();
+    let mut rest = value;
+
+    while !rest.is_empty() {
+        if let Some(after) = rest.strip_prefix("**")
+            && let Some(end) = after.find("**")
+            && end > 0
+        {
+            push_plain(&mut parts, &mut plain);
+            parts.push(bold(&after[..end]));
+            rest = &after[end + 2..];
+            continue;
+        }
+        if let Some(after) = rest.strip_prefix('`')
+            && let Some(end) = after.find('`')
+            && end > 0
+        {
+            push_plain(&mut parts, &mut plain);
+            parts.push(code(&after[..end]));
+            rest = &after[end + 1..];
+            continue;
+        }
+        if let Some(after_label) = rest.strip_prefix('[')
+            && let Some(label_end) = after_label.find("](")
+            && let Some(url_end) = after_label[label_end + 2..].find(')')
+        {
+            let label = &after_label[..label_end];
+            let target = &after_label[label_end + 2..label_end + 2 + url_end];
+            if !label.is_empty()
+                && (target.starts_with("https://") || target.starts_with("http://"))
+            {
+                push_plain(&mut parts, &mut plain);
+                parts.push(url(text(label), target));
+                rest = &after_label[label_end + 2 + url_end + 1..];
+                continue;
+            }
+        }
+
+        let ch = rest.chars().next().expect("rest is non-empty");
+        plain.push(ch);
+        rest = &rest[ch.len_utf8()..];
+    }
+    push_plain(&mut parts, &mut plain);
+
+    match parts.len() {
+        0 => text(""),
+        1 => parts.pop().expect("one inline part"),
+        _ => rich_text(parts),
+    }
+}
+
+fn push_plain(parts: &mut Vec<Value>, plain: &mut String) {
+    if !plain.is_empty() {
+        parts.push(text(std::mem::take(plain)));
+    }
+}
+
 pub(crate) fn bold(value: impl Into<String>) -> Value {
     json!({
         "type": "bold",
@@ -205,6 +264,29 @@ mod tests {
                 "url": "https://core.telegram.org",
             })
         );
+    }
+
+    #[test]
+    fn parses_supported_inline_markdown_without_leaking_markers() {
+        assert_eq!(
+            inline_markdown("**Done** with `cargo test` via [Telegram](https://telegram.org)"),
+            json!([
+                {"type": "bold", "text": "Done"},
+                " with ",
+                {"type": "code", "text": "cargo test"},
+                " via ",
+                {
+                    "type": "url",
+                    "text": "Telegram",
+                    "url": "https://telegram.org",
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn keeps_unmatched_inline_markdown_as_plain_text() {
+        assert_eq!(inline_markdown("**unfinished"), text("**unfinished"));
     }
 
     #[test]

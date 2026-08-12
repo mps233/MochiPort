@@ -177,72 +177,9 @@ impl TelegramAdapter {
             .await
     }
 
-    pub async fn send_turn_draft(
-        &self,
-        target: &str,
-        draft_id: i64,
-        reply_text: &str,
-    ) -> Result<()> {
-        let rendered = crate::im::core::text_renderer::render_agent_message_body(reply_text);
-        let preview = telegram_cleanup_text(&telegram_draft_preview(&rendered));
-        log_adapter(
-            "send_turn_draft",
-            format!(
-                "chat={} draft={} chars={}",
-                target,
-                draft_id,
-                preview.chars().count()
-            ),
-        );
-        let chat_id = target
-            .trim()
-            .parse::<i64>()
-            .with_context(|| format!("invalid Telegram private chat id: {target}"))?;
-        let rich_message = TelegramInputRichMessage::markdown(&preview);
-        match self
-            .api
-            .send_rich_message_draft(chat_id, draft_id, &rich_message)
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(err) if should_fallback_from_rich_message(&err) => {
-                log_adapter(
-                    "send_turn_draft_fallback",
-                    format!("chat={target} draft={draft_id} fallback=text err={err}"),
-                );
-                self.api
-                    .send_message_draft(chat_id, draft_id, &preview)
-                    .await
-            }
-            Err(err) => Err(err),
-        }
-    }
-
-    pub async fn clear_turn_draft(&self, target: &str, draft_id: i64) -> Result<()> {
-        let chat_id = target
-            .trim()
-            .parse::<i64>()
-            .with_context(|| format!("invalid Telegram private chat id: {target}"))?;
-        log_adapter(
-            "clear_turn_draft",
-            format!("chat={target} draft={draft_id}"),
-        );
-        let rich_message = TelegramInputRichMessage::markdown("");
-        match self
-            .api
-            .send_rich_message_draft(chat_id, draft_id, &rich_message)
-            .await
-        {
-            Ok(()) => Ok(()),
-            Err(err) if should_fallback_from_rich_message(&err) => {
-                log_adapter(
-                    "clear_turn_draft_fallback",
-                    format!("chat={target} draft={draft_id} fallback=text err={err}"),
-                );
-                self.api.send_message_draft(chat_id, draft_id, "").await
-            }
-            Err(err) => Err(err),
-        }
+    pub async fn send_typing_action(&self, target: &str) -> Result<()> {
+        log_adapter("send_typing_action", format!("chat={target}"));
+        self.api.send_chat_action(target, "typing").await
     }
 
     pub async fn send_image_path(
@@ -586,6 +523,20 @@ impl TelegramAdapter {
         let markdown = telegram_cleanup_text(markdown);
         let rich_message = TelegramInputRichMessage::markdown(markdown.clone());
         self.send_or_update_rich_message(target, message_id, &rich_message, &markdown)
+            .await
+    }
+
+    pub async fn send_or_update_rich_markdown_with_fallback(
+        &self,
+        target: &str,
+        message_id: Option<&str>,
+        markdown: &str,
+        fallback_markdown: &str,
+    ) -> Result<String> {
+        let markdown = telegram_cleanup_text(markdown);
+        let fallback_markdown = telegram_cleanup_text(fallback_markdown);
+        let rich_message = TelegramInputRichMessage::markdown(markdown);
+        self.send_or_update_rich_message(target, message_id, &rich_message, &fallback_markdown)
             .await
     }
 
@@ -1535,23 +1486,6 @@ fn truncate_button_text(text: &str) -> String {
     output
 }
 
-fn telegram_draft_preview(text: &str) -> String {
-    const PREFIX: &str = "(continued)\n\n";
-    if text.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS {
-        return text.to_string();
-    }
-    let tail_chars = TELEGRAM_MAX_MESSAGE_CHARS.saturating_sub(PREFIX.chars().count());
-    let tail = text
-        .chars()
-        .rev()
-        .take(tail_chars)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!("{PREFIX}{tail}")
-}
-
 fn telegram_text_chunks(text: &str) -> Vec<String> {
     telegram_text_chunks_with_limit(text, TELEGRAM_MAX_MESSAGE_CHARS)
 }
@@ -1652,8 +1586,8 @@ mod tests {
 
     use super::{
         TELEGRAM_MAX_MESSAGE_CHARS, empty_inline_keyboard, resolved_approval_text,
-        telegram_cleanup_text, telegram_context_compaction_messages, telegram_draft_preview,
-        telegram_text_chunks, telegram_turn_completed_chunks, telegram_turn_completed_messages,
+        telegram_cleanup_text, telegram_context_compaction_messages, telegram_text_chunks,
+        telegram_turn_completed_chunks, telegram_turn_completed_messages,
         telegram_user_message_chunks, telegram_user_message_messages,
     };
 
@@ -1729,16 +1663,6 @@ mod tests {
         assert!(chunks[0].contains('\n'));
         assert!(chunks[0].trim_start().starts_with('a'));
         assert!(chunks[1].contains('b'));
-    }
-
-    #[test]
-    fn draft_preview_keeps_the_latest_telegram_sized_window() {
-        let text = format!("{}tail", "a".repeat(TELEGRAM_MAX_MESSAGE_CHARS));
-        let preview = telegram_draft_preview(&text);
-
-        assert_eq!(preview.chars().count(), TELEGRAM_MAX_MESSAGE_CHARS);
-        assert!(preview.starts_with("(continued)\n\n"));
-        assert!(preview.ends_with("tail"));
     }
 
     #[test]

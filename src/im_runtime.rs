@@ -16,13 +16,45 @@ use crate::{
 
 const PENDING_ATTACHMENTS_MAX_AGE_MS: u128 = 10 * 60 * 1000;
 const PENDING_ATTACHMENTS_MAX_COUNT: usize = 8;
+const TELEGRAM_COMMENTARY_MAX_ENTRIES: usize = 64;
 const TELEGRAM_COMMAND_PROGRESS_MAX_ENTRIES: usize = 128;
 const TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS: usize = 64;
-const TELEGRAM_COMPLETED_DRAFT_HISTORY_MAX: usize = 512;
+const TELEGRAM_COMPLETED_TYPING_HISTORY_MAX: usize = 512;
 const TERMINAL_NOTICE_TURN_HISTORY_MAX: usize = 256;
 const TELEGRAM_REASONING_MAX_CHARS: usize = 12_000;
 const TELEGRAM_PLAN_MAX_STEPS: usize = 64;
 const TELEGRAM_DIFF_MAX_PATHS: usize = 128;
+const TELEGRAM_WEB_SEARCH_MAX_ENTRIES: usize = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramCommentaryEntry {
+    pub item_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramCommentarySnapshot {
+    pub turn_id: String,
+    pub segment: u64,
+    pub message_id: Option<String>,
+    pub entries: Vec<TelegramCommentaryEntry>,
+    pub dropped_entries: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TelegramCommentaryState {
+    turn_id: String,
+    active_segment: u64,
+    segments: HashMap<u64, TelegramCommentarySegmentState>,
+    completed: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TelegramCommentarySegmentState {
+    message_id: Option<String>,
+    entries: Vec<TelegramCommentaryEntry>,
+    dropped_entries: usize,
+}
 
 #[derive(Debug, Clone)]
 struct PendingAttachments {
@@ -136,11 +168,12 @@ pub struct RuntimeState {
     pub pending_approvals_by_conversation: HashMap<String, Vec<PendingApproval>>,
     pub pending_approval_request_keys: HashSet<String>,
     pub feishu_streaming_cards_by_item: HashMap<String, FeishuStreamingCardState>,
-    telegram_drafts_by_item: HashMap<String, TelegramDraftState>,
-    telegram_completed_draft_keys: HashSet<String>,
-    telegram_completed_draft_order: VecDeque<String>,
+    telegram_typing_by_item: HashMap<String, TelegramTypingState>,
+    telegram_completed_typing_keys: HashSet<String>,
+    telegram_completed_typing_order: VecDeque<String>,
     telegram_command_progress_by_thread: HashMap<String, TelegramCommandProgressState>,
-    next_telegram_draft_id: i64,
+    telegram_commentary_by_thread: HashMap<String, TelegramCommentaryState>,
+    next_telegram_typing_generation: i64,
     pub wecom_streams_by_thread: HashMap<String, WecomStreamState>,
     pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
     pending_attachments_by_conversation: HashMap<String, PendingAttachments>,
@@ -155,9 +188,8 @@ struct TerminalStatusFallbackState {
 }
 
 #[derive(Debug, Clone)]
-struct TelegramDraftState {
-    draft_id: i64,
-    content: String,
+struct TelegramTypingState {
+    generation: i64,
     sending: bool,
     dirty: bool,
     finished: bool,
@@ -192,6 +224,14 @@ pub(crate) struct TelegramCommandProgressEntry {
     pub failure_output: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramWebSearchProgressEntry {
+    pub item_id: String,
+    pub summary: String,
+    pub blocks: Vec<Value>,
+    pub fallback_markdown: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct TelegramCommandProgressSnapshot {
     pub turn_id: String,
@@ -205,6 +245,8 @@ pub(crate) struct TelegramCommandProgressSnapshot {
     pub plan_explanation: Option<String>,
     pub plan: Vec<TelegramPlanStep>,
     pub diff_summary: Option<TelegramDiffSummary>,
+    pub web_searches: Vec<TelegramWebSearchProgressEntry>,
+    pub dropped_web_searches: usize,
     pub collab: Option<TelegramCollabProgressSnapshot>,
     pub completed: bool,
     pub failed: bool,
@@ -256,6 +298,8 @@ struct TelegramCommandProgressState {
     plan_explanation: Option<String>,
     plan: Vec<TelegramPlanStep>,
     diff_summary: Option<TelegramDiffSummary>,
+    web_searches: Vec<TelegramWebSearchProgressEntry>,
+    dropped_web_searches: usize,
     collab_entries: Vec<TelegramCollabProgressEntry>,
     collab_dropped_entries: usize,
     completed: bool,
@@ -304,7 +348,7 @@ pub(crate) struct TelegramCollabProgressSnapshot {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TelegramDraftSendAction {
+pub enum TelegramTypingSendAction {
     Continue,
     Stop,
 }
@@ -327,8 +371,9 @@ impl RuntimeState {
     pub fn start_bridge_generation(&mut self) -> u64 {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();
-        self.clear_all_telegram_drafts();
+        self.clear_all_telegram_typing();
         self.telegram_command_progress_by_thread.clear();
+        self.telegram_commentary_by_thread.clear();
         self.terminal_notice_failed_by_turn.clear();
         self.terminal_notice_turn_order.clear();
         self.terminal_status_fallback_by_thread.clear();
@@ -340,8 +385,9 @@ impl RuntimeState {
     pub fn invalidate_bridge_generation(&mut self) {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();
-        self.clear_all_telegram_drafts();
+        self.clear_all_telegram_typing();
         self.telegram_command_progress_by_thread.clear();
+        self.telegram_commentary_by_thread.clear();
         self.terminal_notice_failed_by_turn.clear();
         self.terminal_notice_turn_order.clear();
         self.terminal_status_fallback_by_thread.clear();
@@ -373,6 +419,7 @@ impl RuntimeState {
             log_route_unbind("unbind_thread", "direct", thread_id, &route);
         }
         self.telegram_command_progress_by_thread.remove(thread_id);
+        self.telegram_commentary_by_thread.remove(thread_id);
         self.terminal_status_fallback_by_thread.remove(thread_id);
     }
 
@@ -402,8 +449,9 @@ impl RuntimeState {
             self.starting_turn_by_thread.remove(thread_id);
             self.turn_started_at_by_thread.remove(thread_id);
             self.turn_finished_at_by_thread.remove(thread_id);
-            self.clear_telegram_drafts_for_thread(thread_id);
+            self.clear_telegram_typing_for_thread(thread_id);
             self.telegram_command_progress_by_thread.remove(thread_id);
+            self.telegram_commentary_by_thread.remove(thread_id);
             self.terminal_status_fallback_by_thread.remove(thread_id);
             log_route_unbind("unbind_conversation", reason, thread_id, route);
         }
@@ -422,6 +470,13 @@ impl RuntimeState {
             .is_some_and(|progress| progress.turn_id != turn_id)
         {
             self.telegram_command_progress_by_thread.remove(thread_id);
+        }
+        if self
+            .telegram_commentary_by_thread
+            .get(thread_id)
+            .is_some_and(|commentary| commentary.turn_id != turn_id)
+        {
+            self.telegram_commentary_by_thread.remove(thread_id);
         }
         self.current_turn_by_thread
             .insert(thread_id.to_string(), turn_id.to_string());
@@ -641,26 +696,132 @@ impl RuntimeState {
             .insert(route_key.to_string(), text.to_string());
     }
 
-    pub fn append_telegram_draft_delta(
+    pub(crate) fn append_telegram_commentary(
         &mut self,
         thread_id: &str,
+        turn_id: &str,
         item_id: &str,
-        delta: &str,
-    ) -> Option<i64> {
-        let key = telegram_draft_key(thread_id, item_id);
-        if self.telegram_completed_draft_keys.contains(&key) {
+        text: String,
+    ) -> Option<TelegramCommentarySnapshot> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
             return None;
         }
-        if !self.telegram_drafts_by_item.contains_key(&key) {
-            self.next_telegram_draft_id = self.next_telegram_draft_id.saturating_add(1);
-            if self.next_telegram_draft_id <= 0 {
-                self.next_telegram_draft_id = 1;
+        let commentary = self
+            .telegram_commentary_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| TelegramCommentaryState {
+                turn_id: turn_id.to_string(),
+                active_segment: 0,
+                segments: HashMap::new(),
+                completed: false,
+            });
+        if commentary.turn_id != turn_id {
+            *commentary = TelegramCommentaryState {
+                turn_id: turn_id.to_string(),
+                active_segment: 0,
+                segments: HashMap::new(),
+                completed: false,
+            };
+        }
+        if commentary.completed {
+            return None;
+        }
+        let active_segment = commentary.active_segment;
+        let segment = commentary.segments.entry(active_segment).or_default();
+
+        match segment
+            .entries
+            .iter_mut()
+            .find(|entry| entry.item_id == item_id)
+        {
+            Some(entry) if entry.text == text => return None,
+            Some(entry) => entry.text = text,
+            None => segment.entries.push(TelegramCommentaryEntry {
+                item_id: item_id.to_string(),
+                text,
+            }),
+        }
+        if segment.entries.len() > TELEGRAM_COMMENTARY_MAX_ENTRIES {
+            let excess = segment.entries.len() - TELEGRAM_COMMENTARY_MAX_ENTRIES;
+            segment.entries.drain(..excess);
+            segment.dropped_entries = segment.dropped_entries.saturating_add(excess);
+        }
+        Some(telegram_commentary_snapshot(
+            &commentary.turn_id,
+            active_segment,
+            segment,
+        ))
+    }
+
+    pub(crate) fn remember_telegram_commentary_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        segment: u64,
+        message_id: String,
+    ) {
+        let Some(commentary) = self.telegram_commentary_by_thread.get_mut(thread_id) else {
+            return;
+        };
+        if commentary.turn_id == turn_id
+            && let Some(commentary_segment) = commentary.segments.get_mut(&segment)
+        {
+            commentary_segment.message_id = Some(message_id);
+        }
+    }
+
+    pub(crate) fn telegram_commentary_delivery_target(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        segment: u64,
+    ) -> Option<Option<String>> {
+        let commentary = self.telegram_commentary_by_thread.get(thread_id)?;
+        if commentary.turn_id != turn_id {
+            return None;
+        }
+        commentary
+            .segments
+            .get(&segment)
+            .map(|commentary_segment| commentary_segment.message_id.clone())
+    }
+
+    pub(crate) fn start_new_telegram_commentary_segment(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> bool {
+        let commentary = self
+            .telegram_commentary_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| TelegramCommentaryState {
+                turn_id: turn_id.to_string(),
+                active_segment: 0,
+                segments: HashMap::new(),
+                completed: false,
+            });
+        if commentary.turn_id != turn_id || commentary.completed {
+            return false;
+        }
+        commentary.active_segment = commentary.active_segment.saturating_add(1);
+        true
+    }
+
+    pub fn start_telegram_typing(&mut self, thread_id: &str, item_id: &str) -> Option<i64> {
+        let key = telegram_typing_key(thread_id, item_id);
+        if self.telegram_completed_typing_keys.contains(&key) {
+            return None;
+        }
+        if !self.telegram_typing_by_item.contains_key(&key) {
+            self.next_telegram_typing_generation =
+                self.next_telegram_typing_generation.saturating_add(1);
+            if self.next_telegram_typing_generation <= 0 {
+                self.next_telegram_typing_generation = 1;
             }
-            self.telegram_drafts_by_item.insert(
+            self.telegram_typing_by_item.insert(
                 key.clone(),
-                TelegramDraftState {
-                    draft_id: self.next_telegram_draft_id,
-                    content: String::new(),
+                TelegramTypingState {
+                    generation: self.next_telegram_typing_generation,
                     sending: false,
                     dirty: false,
                     finished: false,
@@ -671,201 +832,217 @@ impl RuntimeState {
                 },
             );
         }
-        let draft = self.telegram_drafts_by_item.get_mut(&key)?;
-        draft.content.push_str(delta);
-        draft.dirty = true;
-        draft.revision = draft.revision.saturating_add(1);
-        draft.wake_driver.notify_one();
-        if draft.sending {
+        let typing = self.telegram_typing_by_item.get_mut(&key)?;
+        if typing.sending {
             return None;
         }
-        draft.sending = true;
-        Some(draft.draft_id)
+        typing.sending = true;
+        typing.dirty = true;
+        typing.revision = typing.revision.saturating_add(1);
+        Some(typing.generation)
     }
 
-    pub fn finish_telegram_draft(
+    pub fn finish_telegram_typing(
         &mut self,
         thread_id: &str,
         item_id: &str,
-        final_text: &str,
     ) -> Option<(i64, bool, Arc<Notify>)> {
-        let key = telegram_draft_key(thread_id, item_id);
-        self.remember_completed_telegram_draft(&key);
-        let draft = self.telegram_drafts_by_item.get_mut(&key)?;
-        draft.content = final_text.to_string();
-        draft.dirty = true;
-        draft.finished = true;
-        draft.revision = draft.revision.saturating_add(1);
-        draft.wake_driver.notify_one();
-        let should_start = !draft.sending;
-        draft.sending = true;
-        Some((draft.draft_id, should_start, draft.completed.clone()))
+        let key = telegram_typing_key(thread_id, item_id);
+        self.remember_completed_telegram_typing(&key);
+        let typing = self.telegram_typing_by_item.get_mut(&key)?;
+        typing.dirty = true;
+        typing.finished = true;
+        typing.revision = typing.revision.saturating_add(1);
+        let should_start = !typing.sending;
+        typing.sending = true;
+        if !should_start {
+            typing.wake_driver.notify_one();
+        }
+        Some((typing.generation, should_start, typing.completed.clone()))
     }
 
-    pub fn take_telegram_draft_snapshot(
+    pub fn take_telegram_typing_snapshot(
         &mut self,
         thread_id: &str,
         item_id: &str,
-        draft_id: i64,
+        generation: i64,
         attempted_at_ms: u128,
-    ) -> Option<(String, bool, u64)> {
-        let draft = self
-            .telegram_drafts_by_item
-            .get_mut(&telegram_draft_key(thread_id, item_id))?;
-        if draft.draft_id != draft_id {
+    ) -> Option<(bool, u64)> {
+        let typing = self
+            .telegram_typing_by_item
+            .get_mut(&telegram_typing_key(thread_id, item_id))?;
+        if typing.generation != generation {
             return None;
         }
-        if !draft.sending || !draft.dirty {
-            draft.sending = false;
+        if !typing.sending || !typing.dirty {
+            typing.sending = false;
             return None;
         }
-        draft.dirty = false;
-        draft.last_attempt_at_ms = attempted_at_ms.max(1);
-        Some((draft.content.clone(), draft.finished, draft.revision))
+        typing.dirty = false;
+        typing.last_attempt_at_ms = attempted_at_ms.max(1);
+        Some((typing.finished, typing.revision))
     }
 
-    pub fn telegram_draft_send_delay_ms(
+    pub fn telegram_typing_send_delay_ms(
         &self,
         thread_id: &str,
         item_id: &str,
-        draft_id: i64,
+        generation: i64,
         now_ms: u128,
         throttle_ms: u128,
     ) -> Option<u64> {
-        let draft = self
-            .telegram_drafts_by_item
-            .get(&telegram_draft_key(thread_id, item_id))?;
-        if draft.draft_id != draft_id || !draft.sending || !draft.dirty {
+        let typing = self
+            .telegram_typing_by_item
+            .get(&telegram_typing_key(thread_id, item_id))?;
+        if typing.generation != generation || !typing.sending || !typing.dirty {
             return None;
         }
-        if draft.last_attempt_at_ms == 0 {
+        if typing.finished {
+            return Some(0);
+        }
+        if typing.last_attempt_at_ms == 0 {
             return Some(0);
         }
         let remaining = throttle_ms
-            .saturating_sub(now_ms.saturating_sub(draft.last_attempt_at_ms))
+            .saturating_sub(now_ms.saturating_sub(typing.last_attempt_at_ms))
             .min(u128::from(u64::MAX));
         Some(remaining as u64)
     }
 
-    pub fn telegram_draft_wait_for_update(
+    pub fn telegram_typing_wait_for_update(
         &self,
         thread_id: &str,
         item_id: &str,
-        draft_id: i64,
+        generation: i64,
         now_ms: u128,
         heartbeat_ms: u128,
     ) -> Option<(Arc<Notify>, u64)> {
-        let draft = self
-            .telegram_drafts_by_item
-            .get(&telegram_draft_key(thread_id, item_id))?;
-        if draft.draft_id != draft_id || !draft.sending || draft.dirty || draft.finished {
+        let typing = self
+            .telegram_typing_by_item
+            .get(&telegram_typing_key(thread_id, item_id))?;
+        if typing.generation != generation || !typing.sending || typing.dirty || typing.finished {
             return None;
         }
-        let delay_ms = if draft.last_attempt_at_ms == 0 {
+        let delay_ms = if typing.last_attempt_at_ms == 0 {
             heartbeat_ms
         } else {
-            heartbeat_ms.saturating_sub(now_ms.saturating_sub(draft.last_attempt_at_ms))
+            heartbeat_ms.saturating_sub(now_ms.saturating_sub(typing.last_attempt_at_ms))
         }
         .min(u128::from(u64::MAX));
-        Some((draft.wake_driver.clone(), delay_ms as u64))
+        Some((typing.wake_driver.clone(), delay_ms as u64))
     }
 
-    pub fn mark_telegram_draft_heartbeat_due(
+    pub fn telegram_typing_wake_driver(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+        generation: i64,
+    ) -> Option<Arc<Notify>> {
+        let typing = self
+            .telegram_typing_by_item
+            .get(&telegram_typing_key(thread_id, item_id))?;
+        (typing.generation == generation && typing.sending).then(|| typing.wake_driver.clone())
+    }
+
+    pub fn mark_telegram_typing_renewal_due(
         &mut self,
         thread_id: &str,
         item_id: &str,
-        draft_id: i64,
+        generation: i64,
     ) -> bool {
-        let Some(draft) = self
-            .telegram_drafts_by_item
-            .get_mut(&telegram_draft_key(thread_id, item_id))
+        let Some(typing) = self
+            .telegram_typing_by_item
+            .get_mut(&telegram_typing_key(thread_id, item_id))
         else {
             return false;
         };
-        if draft.draft_id != draft_id || !draft.sending || draft.finished {
+        if typing.generation != generation || !typing.sending {
             return false;
         }
-        if !draft.dirty {
-            draft.dirty = true;
-            draft.revision = draft.revision.saturating_add(1);
+        if typing.finished {
+            return true;
+        }
+        if !typing.dirty {
+            typing.dirty = true;
+            typing.revision = typing.revision.saturating_add(1);
         }
         true
     }
 
-    pub fn complete_telegram_draft_send(
+    pub fn complete_telegram_typing_send(
         &mut self,
         thread_id: &str,
         item_id: &str,
-        draft_id: i64,
+        generation: i64,
         revision: u64,
         succeeded: bool,
-    ) -> TelegramDraftSendAction {
-        let key = telegram_draft_key(thread_id, item_id);
-        let Some(draft) = self.telegram_drafts_by_item.get_mut(&key) else {
-            return TelegramDraftSendAction::Stop;
+    ) -> TelegramTypingSendAction {
+        let key = telegram_typing_key(thread_id, item_id);
+        let Some(typing) = self.telegram_typing_by_item.get_mut(&key) else {
+            return TelegramTypingSendAction::Stop;
         };
-        if draft.draft_id != draft_id {
-            return TelegramDraftSendAction::Stop;
+        if typing.generation != generation {
+            return TelegramTypingSendAction::Stop;
         }
         if !succeeded {
-            if draft.finished {
-                if let Some(draft) = self.telegram_drafts_by_item.remove(&key) {
-                    draft.completed.notify_one();
+            if typing.finished {
+                if let Some(typing) = self.telegram_typing_by_item.remove(&key) {
+                    typing.completed.notify_one();
                 }
             } else {
-                draft.sending = false;
-                draft.dirty = true;
+                typing.sending = false;
+                typing.dirty = true;
             }
-            return TelegramDraftSendAction::Stop;
+            return TelegramTypingSendAction::Stop;
         }
-        if draft.dirty || draft.revision != revision {
-            return TelegramDraftSendAction::Continue;
+        if typing.dirty || typing.revision != revision {
+            return TelegramTypingSendAction::Continue;
         }
-        if draft.finished {
-            if let Some(draft) = self.telegram_drafts_by_item.remove(&key) {
-                draft.completed.notify_one();
+        if typing.finished {
+            if let Some(typing) = self.telegram_typing_by_item.remove(&key) {
+                typing.completed.notify_one();
             }
-            return TelegramDraftSendAction::Stop;
+            return TelegramTypingSendAction::Stop;
         }
-        TelegramDraftSendAction::Continue
+        TelegramTypingSendAction::Continue
     }
 
-    pub fn clear_telegram_drafts_for_thread(&mut self, thread_id: &str) {
-        let prefix = telegram_draft_thread_prefix(thread_id);
+    pub fn clear_telegram_typing_for_thread(&mut self, thread_id: &str) {
+        let prefix = telegram_typing_thread_prefix(thread_id);
         let keys = self
-            .telegram_drafts_by_item
+            .telegram_typing_by_item
             .keys()
             .filter(|key| key.starts_with(&prefix))
             .cloned()
             .collect::<Vec<_>>();
         for key in keys {
-            self.remove_telegram_draft(&key);
+            self.remove_telegram_typing(&key);
         }
     }
 
-    fn clear_all_telegram_drafts(&mut self) {
-        for (_, draft) in self.telegram_drafts_by_item.drain() {
-            draft.wake_driver.notify_one();
-            draft.completed.notify_one();
+    fn clear_all_telegram_typing(&mut self) {
+        for (_, typing) in self.telegram_typing_by_item.drain() {
+            typing.wake_driver.notify_one();
+            typing.completed.notify_one();
         }
     }
 
-    fn remove_telegram_draft(&mut self, key: &str) {
-        if let Some(draft) = self.telegram_drafts_by_item.remove(key) {
-            draft.wake_driver.notify_one();
-            draft.completed.notify_one();
+    fn remove_telegram_typing(&mut self, key: &str) {
+        if let Some(typing) = self.telegram_typing_by_item.remove(key) {
+            typing.wake_driver.notify_one();
+            typing.completed.notify_one();
         }
     }
 
-    fn remember_completed_telegram_draft(&mut self, key: &str) {
-        if !self.telegram_completed_draft_keys.insert(key.to_string()) {
+    fn remember_completed_telegram_typing(&mut self, key: &str) {
+        if !self.telegram_completed_typing_keys.insert(key.to_string()) {
             return;
         }
-        self.telegram_completed_draft_order
+        self.telegram_completed_typing_order
             .push_back(key.to_string());
-        while self.telegram_completed_draft_order.len() > TELEGRAM_COMPLETED_DRAFT_HISTORY_MAX {
-            if let Some(oldest) = self.telegram_completed_draft_order.pop_front() {
-                self.telegram_completed_draft_keys.remove(&oldest);
+        while self.telegram_completed_typing_order.len() > TELEGRAM_COMPLETED_TYPING_HISTORY_MAX {
+            if let Some(oldest) = self.telegram_completed_typing_order.pop_front() {
+                self.telegram_completed_typing_keys.remove(&oldest);
             }
         }
     }
@@ -923,6 +1100,48 @@ impl RuntimeState {
         }
     }
 
+    pub(crate) fn upsert_telegram_web_search_progress(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        entry: TelegramWebSearchProgressEntry,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        let progress = self
+            .telegram_command_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id {
+            *progress = telegram_command_progress_state(turn_id);
+        }
+        if progress.completed {
+            return None;
+        }
+
+        match progress
+            .web_searches
+            .iter_mut()
+            .find(|current| current.item_id == entry.item_id)
+        {
+            Some(current) if *current == entry => return None,
+            Some(current) => *current = entry,
+            None => {
+                progress.web_searches.push(entry);
+                if progress.web_searches.len() > TELEGRAM_WEB_SEARCH_MAX_ENTRIES {
+                    let excess = progress.web_searches.len() - TELEGRAM_WEB_SEARCH_MAX_ENTRIES;
+                    progress.web_searches.drain(..excess);
+                    progress.dropped_web_searches =
+                        progress.dropped_web_searches.saturating_add(excess);
+                }
+            }
+        }
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        Some(telegram_command_progress_snapshot(progress))
+    }
+
     pub(crate) fn record_telegram_retry(
         &mut self,
         thread_id: &str,
@@ -978,11 +1197,14 @@ impl RuntimeState {
             progress.reasoning_summary_index = Some(summary_index);
             progress.reasoning_summary.clear();
             progress.reasoning_completed = false;
+        } else if progress
+            .reasoning_summary_index
+            .is_some_and(|current| summary_index < current)
+        {
+            return;
         } else if progress.reasoning_summary_index != Some(summary_index) {
-            if !progress.reasoning_summary.trim().is_empty() {
-                progress.reasoning_summary.push_str("\n\n");
-            }
             progress.reasoning_summary_index = Some(summary_index);
+            progress.reasoning_summary.clear();
         }
         append_bounded_text(
             &mut progress.reasoning_summary,
@@ -1408,7 +1630,7 @@ impl RuntimeState {
         if let Some(turn_id) = turn_id.or(completed_turn_id.as_deref()) {
             self.turn_origin_by_id.remove(turn_id);
         }
-        self.clear_telegram_drafts_for_thread(thread_id);
+        self.clear_telegram_typing_for_thread(thread_id);
         let retain_command_progress =
             if let Some(progress) = self.telegram_command_progress_by_thread.get_mut(thread_id) {
                 if progress.completed && progress.sending {
@@ -1422,6 +1644,13 @@ impl RuntimeState {
             };
         if !retain_command_progress {
             self.clear_telegram_command_progress_for_thread(thread_id);
+        }
+        if let Some(turn_id) = turn_id.or(completed_turn_id.as_deref()) {
+            if let Some(commentary) = self.telegram_commentary_by_thread.get_mut(thread_id)
+                && commentary.turn_id == turn_id
+            {
+                commentary.completed = true;
+            }
         }
         self.turn_finished_at_by_thread
             .insert(thread_id.to_string(), crate::types::now_ms());
@@ -1710,6 +1939,8 @@ fn telegram_command_progress_snapshot(
         plan_explanation: progress.plan_explanation.clone(),
         plan: progress.plan.clone(),
         diff_summary: progress.diff_summary.clone(),
+        web_searches: progress.web_searches.clone(),
+        dropped_web_searches: progress.dropped_web_searches,
         collab: (!progress.collab_entries.is_empty()).then(|| TelegramCollabProgressSnapshot {
             entries: progress.collab_entries.clone(),
             dropped_entries: progress.collab_dropped_entries,
@@ -1736,6 +1967,8 @@ fn telegram_command_progress_state(turn_id: &str) -> TelegramCommandProgressStat
         plan_explanation: None,
         plan: Vec::new(),
         diff_summary: None,
+        web_searches: Vec::new(),
+        dropped_web_searches: 0,
         collab_entries: Vec::new(),
         collab_dropped_entries: 0,
         completed: false,
@@ -1754,6 +1987,7 @@ fn telegram_command_progress_has_content(progress: &TelegramCommandProgressState
         || progress.plan_explanation.is_some()
         || !progress.plan.is_empty()
         || progress.diff_summary.is_some()
+        || !progress.web_searches.is_empty()
         || !progress.collab_entries.is_empty()
 }
 
@@ -1766,6 +2000,20 @@ fn claim_next_telegram_command_progress_snapshot(
     progress.dirty = false;
     progress.in_flight_revision = Some(progress.revision);
     Some(telegram_command_progress_snapshot(progress))
+}
+
+fn telegram_commentary_snapshot(
+    turn_id: &str,
+    segment: u64,
+    commentary: &TelegramCommentarySegmentState,
+) -> TelegramCommentarySnapshot {
+    TelegramCommentarySnapshot {
+        turn_id: turn_id.to_string(),
+        segment,
+        message_id: commentary.message_id.clone(),
+        entries: commentary.entries.clone(),
+        dropped_entries: commentary.dropped_entries,
+    }
 }
 
 fn append_bounded_text(target: &mut String, delta: &str, max_chars: usize) {
@@ -1787,11 +2035,11 @@ fn limit_telegram_diff_summary(mut summary: TelegramDiffSummary) -> TelegramDiff
     summary
 }
 
-fn telegram_draft_key(thread_id: &str, item_id: &str) -> String {
-    format!("{}{item_id}", telegram_draft_thread_prefix(thread_id))
+fn telegram_typing_key(thread_id: &str, item_id: &str) -> String {
+    format!("{}{item_id}", telegram_typing_thread_prefix(thread_id))
 }
 
-fn telegram_draft_thread_prefix(thread_id: &str) -> String {
+fn telegram_typing_thread_prefix(thread_id: &str) -> String {
     format!("{thread_id}\u{1f}")
 }
 
@@ -1922,8 +2170,8 @@ mod tests {
         PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, RouteTarget, RuntimeState,
         TelegramCollabProgressStatus, TelegramCollabProgressUpdate, TelegramCommandProgressEntry,
         TelegramCommandProgressEntryKind, TelegramCommandProgressStatus, TelegramDiffFileSummary,
-        TelegramDiffSummary, TelegramDraftSendAction, TelegramPlanStep, TelegramPlanStepStatus,
-        ThreadTurnState, TurnOrigin, route_from_conversation_key,
+        TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus, TelegramTypingSendAction,
+        TelegramWebSearchProgressEntry, ThreadTurnState, TurnOrigin, route_from_conversation_key,
     };
 
     fn approval(id: i64) -> PendingApproval {
@@ -1968,6 +2216,18 @@ mod tests {
             exit_code: None,
             duration_ms: None,
             failure_output: None,
+        }
+    }
+
+    fn web_search_progress_entry(item_id: &str, query: &str) -> TelegramWebSearchProgressEntry {
+        TelegramWebSearchProgressEntry {
+            item_id: item_id.to_string(),
+            summary: format!("搜索 · {query} · 1 条结果"),
+            blocks: vec![json!({
+                "type": "paragraph",
+                "text": format!("关键词：{query}"),
+            })],
+            fallback_markdown: format!("🔎 搜索\n\n关键词：`{query}`\n结果：1 条"),
         }
     }
 
@@ -2122,6 +2382,47 @@ mod tests {
     }
 
     #[test]
+    fn telegram_web_search_progress_reuses_one_message_and_deduplicates_items() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let first = runtime
+            .upsert_telegram_web_search_progress(
+                "thread",
+                "turn",
+                web_search_progress_entry("search-1", "rust"),
+            )
+            .expect("first search should create progress");
+        assert_eq!(first.message_id, None);
+        assert_eq!(first.web_searches.len(), 1);
+        runtime.remember_telegram_command_progress_delivery(
+            "thread",
+            "turn",
+            first.revision,
+            "77".to_string(),
+        );
+
+        let second = runtime
+            .upsert_telegram_web_search_progress(
+                "thread",
+                "turn",
+                web_search_progress_entry("search-2", "telegram"),
+            )
+            .expect("second search should edit progress");
+        assert_eq!(second.message_id.as_deref(), Some("77"));
+        assert_eq!(second.web_searches.len(), 2);
+        assert!(
+            runtime
+                .upsert_telegram_web_search_progress(
+                    "thread",
+                    "turn",
+                    web_search_progress_entry("search-2", "telegram"),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
     fn telegram_command_progress_allows_only_one_in_flight_snapshot() {
         let mut runtime = RuntimeState::default();
         runtime.mark_turn_started("thread", "turn");
@@ -2216,6 +2517,202 @@ mod tests {
                     "turn",
                     claimed.revision,
                     "stale".to_string(),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_commentary_reuses_delivery_and_deduplicates_items() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let first = runtime
+            .append_telegram_commentary("thread", "turn", "item-1", "first update".to_string())
+            .expect("first commentary");
+        assert_eq!(first.message_id, None);
+        assert_eq!(first.entries.len(), 1);
+
+        runtime.remember_telegram_commentary_delivery("thread", "turn", 0, "42".to_string());
+        assert!(
+            runtime
+                .append_telegram_commentary("thread", "turn", "item-1", "first update".to_string(),)
+                .is_none()
+        );
+
+        let second = runtime
+            .append_telegram_commentary("thread", "turn", "item-2", "second update".to_string())
+            .expect("second commentary");
+        assert_eq!(second.message_id.as_deref(), Some("42"));
+        assert_eq!(second.entries.len(), 2);
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", 0),
+            Some(Some("42".to_string()))
+        );
+    }
+
+    #[test]
+    fn telegram_commentary_compaction_starts_a_new_delivery_segment() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        let before = runtime
+            .append_telegram_commentary("thread", "turn", "item-1", "before".to_string())
+            .expect("commentary before compaction");
+        runtime.remember_telegram_commentary_delivery(
+            "thread",
+            "turn",
+            before.segment,
+            "42".to_string(),
+        );
+
+        assert!(runtime.start_new_telegram_commentary_segment("thread", "turn"));
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", before.segment),
+            Some(Some("42".to_string()))
+        );
+
+        let after = runtime
+            .append_telegram_commentary("thread", "turn", "item-2", "after".to_string())
+            .expect("commentary after compaction");
+        assert_eq!(after.segment, before.segment + 1);
+        assert_eq!(after.message_id, None);
+        assert_eq!(after.entries.len(), 1);
+        assert_eq!(after.entries[0].text, "after");
+
+        runtime.remember_telegram_commentary_delivery(
+            "thread",
+            "turn",
+            before.segment,
+            "stale".to_string(),
+        );
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", before.segment),
+            Some(Some("stale".to_string()))
+        );
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", after.segment),
+            Some(None)
+        );
+    }
+
+    #[test]
+    fn telegram_commentary_supports_repeated_compaction_without_crossing_deliveries() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let first = runtime
+            .append_telegram_commentary("thread", "turn", "first", "first".to_string())
+            .expect("first segment");
+        assert!(runtime.start_new_telegram_commentary_segment("thread", "turn"));
+        let second = runtime
+            .append_telegram_commentary("thread", "turn", "second", "second".to_string())
+            .expect("second segment");
+        assert!(runtime.start_new_telegram_commentary_segment("thread", "turn"));
+        let third = runtime
+            .append_telegram_commentary("thread", "turn", "third", "third".to_string())
+            .expect("third segment");
+
+        for (segment, message_id) in [
+            (first.segment, "10"),
+            (second.segment, "20"),
+            (third.segment, "30"),
+        ] {
+            runtime.remember_telegram_commentary_delivery(
+                "thread",
+                "turn",
+                segment,
+                message_id.to_string(),
+            );
+        }
+
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", first.segment),
+            Some(Some("10".to_string()))
+        );
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", second.segment),
+            Some(Some("20".to_string()))
+        );
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", third.segment),
+            Some(Some("30".to_string()))
+        );
+    }
+
+    #[test]
+    fn telegram_commentary_compaction_before_first_update_starts_segment_one() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        assert!(runtime.start_new_telegram_commentary_segment("thread", "turn"));
+        let after = runtime
+            .append_telegram_commentary("thread", "turn", "item", "after".to_string())
+            .expect("commentary after compaction");
+
+        assert_eq!(after.segment, 1);
+        assert_eq!(after.entries[0].text, "after");
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", 0),
+            None
+        );
+    }
+
+    #[test]
+    fn telegram_commentary_rejects_stale_turn_and_clears_on_replacement() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "old-turn");
+        runtime
+            .append_telegram_commentary("thread", "old-turn", "item-1", "old update".to_string())
+            .expect("old commentary");
+
+        runtime.mark_turn_started("thread", "new-turn");
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "old-turn", 0),
+            None
+        );
+        assert!(
+            runtime
+                .append_telegram_commentary(
+                    "thread",
+                    "old-turn",
+                    "late-item",
+                    "late update".to_string(),
+                )
+                .is_none()
+        );
+        assert!(
+            runtime
+                .append_telegram_commentary(
+                    "thread",
+                    "new-turn",
+                    "item-2",
+                    "new update".to_string(),
+                )
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn telegram_commentary_is_frozen_when_the_turn_completes() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        runtime
+            .append_telegram_commentary("thread", "turn", "item-1", "update".to_string())
+            .expect("commentary");
+        runtime.remember_telegram_commentary_delivery("thread", "turn", 0, "42".to_string());
+
+        assert!(runtime.mark_turn_completed("thread", Some("turn")));
+        assert_eq!(
+            runtime.telegram_commentary_delivery_target("thread", "turn", 0),
+            Some(Some("42".to_string()))
+        );
+        assert!(
+            runtime
+                .append_telegram_commentary(
+                    "thread",
+                    "turn",
+                    "late-item",
+                    "late update".to_string(),
                 )
                 .is_none()
         );
@@ -2564,6 +3061,25 @@ mod tests {
             .expect("details-only turn should flush at completion");
         assert!(final_snapshot.completed);
         assert!(final_snapshot.revision > duplicate_revision);
+    }
+
+    #[test]
+    fn telegram_reasoning_keeps_only_the_latest_summary_index() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        runtime.append_telegram_reasoning_delta("thread", "turn", "reasoning", 0, "older summary");
+        runtime.append_telegram_reasoning_delta("thread", "turn", "reasoning", 1, "**latest");
+        runtime.append_telegram_reasoning_delta("thread", "turn", "reasoning", 1, " summary**");
+        runtime.append_telegram_reasoning_delta("thread", "turn", "reasoning", 0, " stale replay");
+
+        let snapshot = runtime
+            .complete_telegram_reasoning("thread", "turn", "reasoning", None)
+            .expect("latest reasoning summary");
+        assert_eq!(
+            snapshot.reasoning_summary.as_deref(),
+            Some("**latest summary**")
+        );
     }
 
     #[test]
@@ -3195,208 +3711,308 @@ mod tests {
     }
 
     #[test]
-    fn telegram_draft_coalesces_updates_while_the_sender_is_active() {
+    fn telegram_typing_deltas_do_not_schedule_extra_actions() {
         let mut runtime = RuntimeState::default();
 
-        let first = runtime
-            .append_telegram_draft_delta("thread", "item", "hello")
-            .expect("first draft update");
-        let (content, finished, revision) = runtime
-            .take_telegram_draft_snapshot("thread", "item", first, 1_000)
-            .expect("first draft snapshot");
-        assert_eq!(content, "hello");
+        let generation = runtime
+            .start_telegram_typing("thread", "item")
+            .expect("first typing update");
+        let (finished, revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_000)
+            .expect("first typing snapshot");
         assert!(!finished);
+        assert!(runtime.start_telegram_typing("thread", "item").is_none());
+        assert!(runtime.start_telegram_typing("thread", "item").is_none());
+        assert_eq!(
+            runtime.complete_telegram_typing_send("thread", "item", generation, revision, true),
+            TelegramTypingSendAction::Continue
+        );
         assert!(
             runtime
-                .append_telegram_draft_delta("thread", "item", " world")
+                .telegram_typing_send_delay_ms("thread", "item", generation, 1_100, 300)
                 .is_none()
         );
-        assert_eq!(
-            runtime.complete_telegram_draft_send("thread", "item", first, revision, true),
-            TelegramDraftSendAction::Continue
-        );
-        assert_eq!(
-            runtime.telegram_draft_send_delay_ms("thread", "item", first, 1_100, 300),
-            Some(200)
-        );
-        let (content, finished, revision) = runtime
-            .take_telegram_draft_snapshot("thread", "item", first, 1_300)
-            .expect("coalesced draft snapshot");
-        assert_eq!(content, "hello world");
-        assert!(!finished);
-        assert_eq!(
-            runtime.complete_telegram_draft_send("thread", "item", first, revision, true),
-            TelegramDraftSendAction::Continue
-        );
-
-        assert!(
-            runtime
-                .append_telegram_draft_delta("thread", "item", "!")
-                .is_none()
-        );
-        assert_eq!(
-            runtime.telegram_draft_send_delay_ms("thread", "item", first, 1_400, 300),
-            Some(200)
-        );
-        assert_eq!(
-            runtime
-                .take_telegram_draft_snapshot("thread", "item", first, 1_600)
-                .expect("next draft snapshot")
-                .0,
-            "hello world!"
-        );
+        let (_, delay_ms) = runtime
+            .telegram_typing_wait_for_update("thread", "item", generation, 1_100, 4_000)
+            .expect("typing should wait for renewal");
+        assert_eq!(delay_ms, 3_900);
     }
 
     #[test]
-    fn telegram_draft_heartbeat_reuses_the_latest_content() {
+    fn telegram_typing_renews_after_four_seconds() {
         let mut runtime = RuntimeState::default();
-        let draft_id = runtime
-            .append_telegram_draft_delta("thread", "item", "working")
-            .expect("draft update");
-        let (_, _, revision) = runtime
-            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_000)
-            .expect("initial snapshot");
+        let generation = runtime
+            .start_telegram_typing("thread", "item")
+            .expect("typing update");
+        let (_, revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_000)
+            .expect("initial typing snapshot");
         assert_eq!(
-            runtime.complete_telegram_draft_send("thread", "item", draft_id, revision, true),
-            TelegramDraftSendAction::Continue
+            runtime.complete_telegram_typing_send("thread", "item", generation, revision, true),
+            TelegramTypingSendAction::Continue
         );
 
         let (_, delay_ms) = runtime
-            .telegram_draft_wait_for_update("thread", "item", draft_id, 1_100, 20_000)
-            .expect("idle draft should wait for an update or heartbeat");
-        assert_eq!(delay_ms, 19_900);
-        assert!(runtime.mark_telegram_draft_heartbeat_due("thread", "item", draft_id));
+            .telegram_typing_wait_for_update("thread", "item", generation, 1_100, 4_000)
+            .expect("typing should wait for an update or renewal");
+        assert_eq!(delay_ms, 3_900);
+        assert!(runtime.mark_telegram_typing_renewal_due("thread", "item", generation));
         assert_eq!(
-            runtime.telegram_draft_send_delay_ms("thread", "item", draft_id, 21_000, 300),
+            runtime.telegram_typing_send_delay_ms("thread", "item", generation, 5_000, 300),
             Some(0)
         );
-        assert_eq!(
-            runtime
-                .take_telegram_draft_snapshot("thread", "item", draft_id, 21_000)
-                .expect("heartbeat snapshot")
-                .0,
-            "working"
-        );
+        let (finished, renewal_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 5_000)
+            .expect("typing renewal snapshot");
+        assert!(!finished);
+        assert!(renewal_revision > revision);
     }
 
     #[test]
-    fn telegram_draft_is_removed_after_the_final_snapshot_is_delivered() {
+    fn telegram_typing_is_removed_after_internal_completion() {
         let mut runtime = RuntimeState::default();
-        let draft_id = runtime
-            .append_telegram_draft_delta("thread", "item", "hello")
-            .expect("draft update");
-        let (_, _, first_revision) = runtime
-            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_000)
-            .expect("initial snapshot");
+        let generation = runtime
+            .start_telegram_typing("thread", "item")
+            .expect("typing update");
+        let (_, first_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_000)
+            .expect("initial typing snapshot");
         assert_eq!(
-            runtime.complete_telegram_draft_send("thread", "item", draft_id, first_revision, true,),
-            TelegramDraftSendAction::Continue
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "item",
+                generation,
+                first_revision,
+                true,
+            ),
+            TelegramTypingSendAction::Continue
         );
 
-        let (finished_draft_id, should_start, _completed) = runtime
-            .finish_telegram_draft("thread", "item", "final answer")
-            .expect("final draft");
-        assert_eq!(finished_draft_id, draft_id);
+        let (finished_generation, should_start, _completed) = runtime
+            .finish_telegram_typing("thread", "item")
+            .expect("typing completion");
+        assert_eq!(finished_generation, generation);
         assert!(!should_start);
-        let (content, finished, final_revision) = runtime
-            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_300)
-            .expect("final snapshot");
-        assert_eq!(content, "final answer");
+        assert_eq!(
+            runtime.telegram_typing_send_delay_ms("thread", "item", generation, 1_001, 300),
+            Some(0)
+        );
+        let (finished, final_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_001)
+            .expect("internal completion snapshot");
         assert!(finished);
         assert_eq!(
-            runtime.complete_telegram_draft_send("thread", "item", draft_id, final_revision, true,),
-            TelegramDraftSendAction::Stop
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "item",
+                generation,
+                final_revision,
+                true,
+            ),
+            TelegramTypingSendAction::Stop
         );
-        assert!(
-            runtime
-                .finish_telegram_draft("thread", "item", "again")
-                .is_none()
-        );
-        assert!(
-            runtime
-                .append_telegram_draft_delta("thread", "item", "late replay")
-                .is_none()
-        );
+        assert!(runtime.finish_telegram_typing("thread", "item").is_none());
+        assert!(runtime.start_telegram_typing("thread", "item").is_none());
     }
 
     #[test]
-    fn telegram_completed_item_rejects_late_delta_without_a_prior_draft() {
+    fn telegram_typing_failure_can_restart_on_a_later_delta() {
+        let mut runtime = RuntimeState::default();
+        let generation = runtime
+            .start_telegram_typing("thread", "item")
+            .expect("typing update");
+        let (_, failed_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_000)
+            .expect("typing snapshot");
+
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "item",
+                generation,
+                failed_revision,
+                false,
+            ),
+            TelegramTypingSendAction::Stop
+        );
+        assert_eq!(
+            runtime.start_telegram_typing("thread", "item"),
+            Some(generation)
+        );
+        assert_eq!(
+            runtime.telegram_typing_send_delay_ms("thread", "item", generation, 1_100, 300),
+            Some(200)
+        );
+        let (finished, restarted_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_300)
+            .expect("restarted typing snapshot");
+        assert!(!finished);
+        assert!(restarted_revision > failed_revision);
+    }
+
+    #[test]
+    fn telegram_completed_item_rejects_late_typing_without_a_prior_state() {
         let mut runtime = RuntimeState::default();
 
         assert!(
             runtime
-                .finish_telegram_draft("thread", "completed-item", "final")
+                .finish_telegram_typing("thread", "completed-item")
                 .is_none()
         );
         assert!(
             runtime
-                .append_telegram_draft_delta("thread", "completed-item", "late replay")
+                .start_telegram_typing("thread", "completed-item")
                 .is_none()
         );
         assert!(
             runtime
-                .append_telegram_draft_delta("thread", "new-item", "new reply")
+                .start_telegram_typing("thread", "new-item")
                 .is_some()
         );
     }
 
     #[tokio::test]
-    async fn telegram_final_draft_notifies_the_persistent_message_waiter() {
+    async fn telegram_typing_completion_notifies_the_persistent_message_waiter() {
         let mut runtime = RuntimeState::default();
-        let draft_id = runtime
-            .append_telegram_draft_delta("thread", "item", "partial")
-            .expect("draft update");
-        let (_, _, first_revision) = runtime
-            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_000)
-            .expect("initial snapshot");
+        let generation = runtime
+            .start_telegram_typing("thread", "item")
+            .expect("typing update");
+        let (_, first_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_000)
+            .expect("initial typing snapshot");
         assert_eq!(
-            runtime.complete_telegram_draft_send("thread", "item", draft_id, first_revision, true),
-            TelegramDraftSendAction::Continue
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "item",
+                generation,
+                first_revision,
+                true,
+            ),
+            TelegramTypingSendAction::Continue
         );
         let (_, should_start, completed) = runtime
-            .finish_telegram_draft("thread", "item", "final")
-            .expect("final draft");
+            .finish_telegram_typing("thread", "item")
+            .expect("typing completion");
         assert!(!should_start);
-        let (_, finished, final_revision) = runtime
-            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_300)
-            .expect("final snapshot");
+        assert!(runtime.mark_telegram_typing_renewal_due("thread", "item", generation));
+        let (finished, final_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_001)
+            .expect("internal completion snapshot");
         assert!(finished);
         assert_eq!(
-            runtime.complete_telegram_draft_send("thread", "item", draft_id, final_revision, true),
-            TelegramDraftSendAction::Stop
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "item",
+                generation,
+                final_revision,
+                true,
+            ),
+            TelegramTypingSendAction::Stop
         );
 
         tokio::time::timeout(std::time::Duration::from_millis(50), completed.notified())
             .await
-            .expect("final draft completion should wake the persistent message sender");
+            .expect("typing completion should wake the persistent message sender");
+    }
+
+    #[tokio::test]
+    async fn telegram_typing_failure_during_finish_does_not_hang() {
+        let mut runtime = RuntimeState::default();
+        let generation = runtime
+            .start_telegram_typing("thread", "item")
+            .expect("typing update");
+        let (_, in_flight_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_000)
+            .expect("in-flight typing snapshot");
+        let (_, should_start, completed) = runtime
+            .finish_telegram_typing("thread", "item")
+            .expect("typing completion");
+        assert!(!should_start);
+
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "item",
+                generation,
+                in_flight_revision,
+                false,
+            ),
+            TelegramTypingSendAction::Stop
+        );
+        tokio::time::timeout(std::time::Duration::from_millis(50), completed.notified())
+            .await
+            .expect("typing failure during finish should still wake the final sender");
+    }
+
+    #[tokio::test]
+    async fn telegram_typing_finish_restarts_a_stopped_driver() {
+        let mut runtime = RuntimeState::default();
+        let generation = runtime
+            .start_telegram_typing("thread", "item")
+            .expect("typing update");
+        let (_, failed_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_000)
+            .expect("typing snapshot");
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "item",
+                generation,
+                failed_revision,
+                false,
+            ),
+            TelegramTypingSendAction::Stop
+        );
+
+        let (_, should_start, completed) = runtime
+            .finish_telegram_typing("thread", "item")
+            .expect("typing completion");
+        assert!(should_start);
+        let (finished, final_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "item", generation, 1_001)
+            .expect("internal completion snapshot");
+        assert!(finished);
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "item",
+                generation,
+                final_revision,
+                true,
+            ),
+            TelegramTypingSendAction::Stop
+        );
+        tokio::time::timeout(std::time::Duration::from_millis(50), completed.notified())
+            .await
+            .expect("completion should restart a stopped typing driver and wake the final sender");
     }
 
     #[test]
-    fn completing_a_turn_clears_all_of_its_telegram_drafts() {
+    fn completing_a_turn_clears_all_of_its_telegram_typing() {
         let mut runtime = RuntimeState::default();
         let first = runtime
-            .append_telegram_draft_delta("thread", "item-1", "one")
-            .expect("first draft");
+            .start_telegram_typing("thread", "item-1")
+            .expect("first typing state");
         let second = runtime
-            .append_telegram_draft_delta("thread", "item-2", "two")
-            .expect("second draft");
+            .start_telegram_typing("thread", "item-2")
+            .expect("second typing state");
         runtime
-            .append_telegram_draft_delta("other-thread", "item", "other")
-            .expect("other draft");
+            .start_telegram_typing("other-thread", "item")
+            .expect("other typing state");
 
         runtime.mark_turn_completed("thread", None);
 
         assert!(
             runtime
-                .take_telegram_draft_snapshot("thread", "item-1", first, 1_000)
+                .take_telegram_typing_snapshot("thread", "item-1", first, 1_000)
                 .is_none()
         );
         assert!(
             runtime
-                .take_telegram_draft_snapshot("thread", "item-2", second, 1_000)
+                .take_telegram_typing_snapshot("thread", "item-2", second, 1_000)
                 .is_none()
         );
-        assert_eq!(runtime.telegram_drafts_by_item.len(), 1);
+        assert_eq!(runtime.telegram_typing_by_item.len(), 1);
     }
 
     #[test]

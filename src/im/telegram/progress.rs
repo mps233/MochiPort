@@ -25,6 +25,10 @@ const TELEGRAM_DIFF_PATH_CHARS: usize = 180;
 const TELEGRAM_DIFF_TABLE_PATH_CHARS: usize = 48;
 const TELEGRAM_DIFF_MAX_PATHS: usize = 128;
 const TELEGRAM_COMMAND_PROGRESS_DETAILS_STEPS: usize = 12;
+const TELEGRAM_WEB_SEARCH_VISIBLE_ENTRIES: usize = 2;
+const TELEGRAM_WEB_SEARCH_HISTORY_ENTRIES: usize = 8;
+const TELEGRAM_WEB_SEARCH_SUMMARY_CHARS: usize = 140;
+const TELEGRAM_WEB_SEARCH_FALLBACK_CHARS: usize = 900;
 const TELEGRAM_TASK_PROGRESS_FALLBACK_MAX_CHARS: usize = 3_800;
 pub(crate) const TELEGRAM_COMMAND_PROGRESS_MAX_CHARS: usize = 3_600;
 
@@ -35,26 +39,22 @@ pub(crate) struct TelegramTaskProgressRender {
 }
 
 pub(crate) fn reasoning_summary_from_item(item: &Value) -> Option<String> {
-    let mut parts = Vec::new();
     for key in ["summary", "content"] {
         let Some(values) = item.get(key).and_then(Value::as_array) else {
             continue;
         };
-        for value in values {
-            let text = value
+        if let Some(text) = values.iter().rev().find_map(|value| {
+            value
                 .get("text")
                 .and_then(Value::as_str)
                 .or_else(|| value.as_str())
                 .map(str::trim)
-                .filter(|text| !text.is_empty());
-            if let Some(text) = text
-                && !parts.iter().any(|part: &String| part == text)
-            {
-                parts.push(text.to_string());
-            }
+                .filter(|text| !text.is_empty())
+        }) {
+            return Some(text.to_string());
         }
     }
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
+    None
 }
 
 pub(crate) fn plan_from_params(params: &Value) -> (Option<String>, Vec<TelegramPlanStep>) {
@@ -642,20 +642,19 @@ fn render_task_progress_blocks(
         }
     }
 
+    blocks.extend(render_web_search_progress_blocks(snapshot));
     if let Some(collab) = snapshot.collab.as_ref() {
         blocks.push(collab_progress::render_collab_progress_details(
             collab, text,
         ));
     }
     if let Some(reasoning) = snapshot.reasoning_summary.as_deref() {
-        blocks.push(rich_blocks::details(
-            rich_blocks::text(text.telegram_reasoning_heading()),
-            vec![rich_blocks::paragraph(rich_blocks::text(compact_text(
-                reasoning,
-                TELEGRAM_REASONING_RENDER_CHARS,
-            )))],
-            false,
-        ));
+        blocks.push(rich_blocks::paragraph(rich_blocks::bold(
+            text.telegram_reasoning_heading(),
+        )));
+        blocks.push(rich_blocks::paragraph(rich_blocks::inline_markdown(
+            &compact_text(reasoning, TELEGRAM_REASONING_RENDER_CHARS),
+        )));
     }
     if let Some(diff) = snapshot.diff_summary.as_ref() {
         let mut rows = vec![vec![
@@ -756,6 +755,70 @@ fn render_task_progress_blocks(
         rich_blocks::text("turn "),
         rich_blocks::code(short_identifier(&snapshot.turn_id)),
     ])));
+    blocks
+}
+
+fn render_web_search_progress_blocks(snapshot: &TelegramCommandProgressSnapshot) -> Vec<Value> {
+    let total = snapshot
+        .dropped_web_searches
+        .saturating_add(snapshot.web_searches.len());
+    if total == 0 {
+        return Vec::new();
+    }
+
+    let visible_start = snapshot
+        .web_searches
+        .len()
+        .saturating_sub(TELEGRAM_WEB_SEARCH_VISIBLE_ENTRIES);
+    let hidden = &snapshot.web_searches[..visible_start];
+    let visible = &snapshot.web_searches[visible_start..];
+    let earlier_count = snapshot.dropped_web_searches.saturating_add(hidden.len());
+    let mut blocks = vec![rich_blocks::paragraph(rich_blocks::bold(format!(
+        "搜索 · {total} 次"
+    )))];
+
+    if earlier_count > 0 {
+        let retained_start = hidden
+            .len()
+            .saturating_sub(TELEGRAM_WEB_SEARCH_HISTORY_ENTRIES);
+        let retained = &hidden[retained_start..];
+        let omitted = earlier_count.saturating_sub(retained.len());
+        let mut earlier_blocks = Vec::new();
+        if omitted > 0 {
+            earlier_blocks.push(rich_blocks::paragraph(rich_blocks::text(format!(
+                "… 另外 {omitted} 次较早搜索已省略"
+            ))));
+        }
+        earlier_blocks.extend(retained.iter().map(|entry| {
+            rich_blocks::paragraph(rich_blocks::text(compact_text(
+                &entry.summary,
+                TELEGRAM_WEB_SEARCH_SUMMARY_CHARS,
+            )))
+        }));
+        blocks.push(rich_blocks::details(
+            rich_blocks::text(format!("较早搜索 · {earlier_count} 次")),
+            earlier_blocks,
+            false,
+        ));
+    }
+
+    for entry in visible {
+        let body = if entry.blocks.is_empty() {
+            vec![rich_blocks::paragraph(rich_blocks::text(
+                "未返回可显示结果",
+            ))]
+        } else {
+            entry.blocks.clone()
+        };
+        blocks.push(rich_blocks::details(
+            rich_blocks::text(compact_text(
+                &entry.summary,
+                TELEGRAM_WEB_SEARCH_SUMMARY_CHARS,
+            )),
+            body,
+            false,
+        ));
+    }
     blocks
 }
 
@@ -866,6 +929,8 @@ fn command_progress_title(snapshot: &TelegramCommandProgressSnapshot, text: ImTe
         || snapshot.plan_explanation.is_some()
         || !snapshot.plan.is_empty()
         || snapshot.diff_summary.is_some()
+        || !snapshot.web_searches.is_empty()
+        || snapshot.dropped_web_searches > 0
         || snapshot.collab.is_some();
     if total == 0 && snapshot.retry_count > 0 {
         text.telegram_retry_progress_title(
@@ -925,6 +990,9 @@ fn render_supplemental_progress(
     text: ImText,
 ) -> Option<String> {
     let mut sections = Vec::new();
+    if let Some(searches) = render_web_search_progress(snapshot) {
+        sections.push(searches);
+    }
     if let Some(reasoning) = snapshot.reasoning_summary.as_deref() {
         let reasoning = compact_text(reasoning, TELEGRAM_REASONING_RENDER_CHARS);
         sections.push(format!(
@@ -952,6 +1020,30 @@ fn render_supplemental_progress(
         sections.push(lines.join("\n"));
     }
     (!sections.is_empty()).then(|| sections.join("\n\n"))
+}
+
+fn render_web_search_progress(snapshot: &TelegramCommandProgressSnapshot) -> Option<String> {
+    let total = snapshot
+        .dropped_web_searches
+        .saturating_add(snapshot.web_searches.len());
+    if total == 0 {
+        return None;
+    }
+    let visible_start = snapshot
+        .web_searches
+        .len()
+        .saturating_sub(TELEGRAM_WEB_SEARCH_VISIBLE_ENTRIES);
+    let earlier_count = snapshot.dropped_web_searches.saturating_add(visible_start);
+    let mut sections = vec![format!("搜索 · {total} 次")];
+    if earlier_count > 0 {
+        sections.push(format!("较早搜索 · {earlier_count} 次（已折叠）"));
+    }
+    sections.extend(
+        snapshot.web_searches[visible_start..].iter().map(|entry| {
+            compact_text(&entry.fallback_markdown, TELEGRAM_WEB_SEARCH_FALLBACK_CHARS)
+        }),
+    );
+    Some(sections.join("\n\n"))
 }
 
 fn render_plan_progress(
@@ -1369,6 +1461,7 @@ mod tests {
 
     use crate::im_runtime::{
         TelegramDiffFileSummary, TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus,
+        TelegramWebSearchProgressEntry,
     };
 
     #[test]
@@ -1435,6 +1528,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -1480,6 +1575,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -1541,6 +1638,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -1610,6 +1709,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -1652,6 +1753,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -1695,6 +1798,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: true,
                 failed: true,
@@ -1729,6 +1834,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -1759,6 +1866,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: true,
                 failed: true,
@@ -1784,6 +1893,8 @@ mod tests {
             plan_explanation: None,
             plan: Vec::new(),
             diff_summary: None,
+            web_searches: Vec::new(),
+            dropped_web_searches: 0,
             collab: None,
             completed: false,
             failed: false,
@@ -1817,6 +1928,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: false,
                 failed: false,
@@ -1853,7 +1966,7 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_summary_parser_accepts_protocol_strings_and_deduplicates_parts() {
+    fn reasoning_summary_parser_uses_only_the_latest_summary_part() {
         let item = json!({
             "type": "reasoning",
             "summary": ["first", "first", {"text": "second"}],
@@ -1862,7 +1975,7 @@ mod tests {
 
         assert_eq!(
             reasoning_summary_from_item(&item).as_deref(),
-            Some("first\n\nsecond\n\nthird")
+            Some("second")
         );
     }
 
@@ -2010,6 +2123,8 @@ mod tests {
                     paths: vec!["src/main.rs".to_string()],
                     omitted_paths: 0,
                 }),
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -2049,7 +2164,10 @@ mod tests {
                 dropped_entries: 2,
                 retry_count: 2,
                 retry_error: Some("503 Service Unavailable".to_string()),
-                reasoning_summary: Some("Check the active Telegram delivery state.".to_string()),
+                reasoning_summary: Some(
+                    "**Check** the active `Telegram` delivery [state](https://telegram.org)."
+                        .to_string(),
+                ),
                 plan_explanation: Some("Inspect, implement, verify.".to_string()),
                 plan: vec![
                     TelegramPlanStep {
@@ -2073,6 +2191,8 @@ mod tests {
                     paths: vec!["src/im/events.rs".to_string()],
                     omitted_paths: 0,
                 }),
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: Some(TelegramCollabProgressSnapshot {
                     entries: vec![TelegramCollabProgressEntry {
                         agent_id: "secret-agent-id".to_string(),
@@ -2138,6 +2258,30 @@ mod tests {
         assert!(!encoded.contains("secret-agent-id"));
         assert_eq!(encoded.matches("\"has_checkbox\":true").count(), 3);
         assert_eq!(encoded.matches("\"is_checked\":true").count(), 1);
+        let reasoning_heading = blocks
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|block| {
+                block["type"] == "paragraph"
+                    && block["text"]["type"] == "bold"
+                    && block["text"]["text"] == "思考摘要"
+            })
+            .expect("reasoning heading should be always visible");
+        let reasoning_body = &blocks[reasoning_heading + 1];
+        assert_eq!(reasoning_body["type"], "paragraph");
+        assert_eq!(reasoning_body["text"][0]["type"], "bold");
+        assert_eq!(reasoning_body["text"][0]["text"], "Check");
+        assert_eq!(reasoning_body["text"][2]["type"], "code");
+        assert_eq!(reasoning_body["text"][4]["type"], "url");
+        assert!(
+            !blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| { block["type"] == "details" && block["summary"] == "思考摘要" })
+        );
+        assert!(!encoded.contains("**Check**"));
         for marker in ["✅", "❌", "⚠️", "⏳", "🛠", "🔄"] {
             assert!(!encoded.contains(marker), "rich progress leaked {marker}");
         }
@@ -2172,6 +2316,82 @@ mod tests {
     }
 
     #[test]
+    fn web_searches_are_folded_into_the_task_progress_message() {
+        let web_searches = (1..=4)
+            .map(|index| TelegramWebSearchProgressEntry {
+                item_id: format!("search-{index}"),
+                summary: format!("搜索 · query {index} · 1 条结果"),
+                blocks: vec![json!({
+                    "type": "paragraph",
+                    "text": format!("result {index}"),
+                })],
+                fallback_markdown: format!(
+                    "🔎 搜索\n\n关键词：`query {index}`\n结果：1 条\n- result {index}"
+                ),
+            })
+            .collect();
+        let rendered = render_task_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 4,
+                message_id: Some("42".to_string()),
+                entries: Vec::new(),
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                web_searches,
+                dropped_web_searches: 2,
+                collab: None,
+                completed: false,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        let blocks = serde_json::Value::Array(rendered.blocks);
+        assert_eq!(blocks[0]["text"], "任务进行中");
+        assert!(blocks.as_array().unwrap().iter().any(|block| {
+            block["type"] == "paragraph"
+                && block["text"]["type"] == "bold"
+                && block["text"]["text"] == "搜索 · 6 次"
+        }));
+        assert!(
+            blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["summary"] == "较早搜索 · 4 次")
+        );
+        assert!(
+            blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["summary"] == "搜索 · query 3 · 1 条结果")
+        );
+        assert!(
+            blocks
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["summary"] == "搜索 · query 4 · 1 条结果")
+        );
+        assert!(rendered.fallback_markdown.contains("搜索 · 6 次"));
+        assert!(
+            rendered
+                .fallback_markdown
+                .contains("较早搜索 · 4 次（已折叠）")
+        );
+        assert!(rendered.fallback_markdown.contains("query 3"));
+        assert!(rendered.fallback_markdown.contains("query 4"));
+        assert!(!rendered.fallback_markdown.contains("query 1"));
+    }
+
+    #[test]
     fn rich_diff_table_limits_rows_and_shows_only_file_names() {
         let files = (0..10)
             .map(|index| TelegramDiffFileSummary {
@@ -2203,6 +2423,8 @@ mod tests {
                     paths,
                     omitted_paths: 0,
                 }),
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: true,
                 failed: false,
@@ -2267,6 +2489,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: true,
                 failed: true,
@@ -2330,6 +2554,8 @@ mod tests {
                 plan_explanation: None,
                 plan: Vec::new(),
                 diff_summary: None,
+                web_searches: Vec::new(),
+                dropped_web_searches: 0,
                 collab: None,
                 completed: false,
                 failed: false,

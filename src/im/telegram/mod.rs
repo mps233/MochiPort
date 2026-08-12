@@ -3,6 +3,7 @@
 pub mod adapter;
 pub mod api;
 pub mod collab_progress;
+pub mod commentary;
 pub mod flow;
 pub mod polling;
 pub mod progress;

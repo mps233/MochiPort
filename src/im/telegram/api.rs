@@ -254,7 +254,7 @@ impl TelegramApiError {
 
         // Older Bot API servers do not know the rich message endpoints at all.
         // Restrict 404 fallback to those endpoints so chat errors are preserved.
-        if matches!(method.as_str(), "sendrichmessage" | "sendrichmessagedraft") && is_not_found {
+        if method == "sendrichmessage" && is_not_found {
             return true;
         }
 
@@ -271,12 +271,11 @@ impl TelegramApiError {
             || description.contains("can't find end of the entity")
             || description.contains("unsupported start tag")
             || description.contains("unsupported end tag");
-        let rich_blocks_capability_error =
-            matches!(method.as_str(), "sendrichmessage" | "sendrichmessagedraft")
-                && (description.contains("blocks")
-                    || description.contains("inputrichblock")
-                    || description.contains("unsupported rich")
-                    || description.contains("unknown field"));
+        let rich_blocks_capability_error = method == "sendrichmessage"
+            && (description.contains("blocks")
+                || description.contains("inputrichblock")
+                || description.contains("unsupported rich")
+                || description.contains("unknown field"));
         let unsupported_rich_edit =
             method == "editmessagetext" && description.contains("message text is empty");
 
@@ -435,23 +434,6 @@ impl TelegramApi {
         Ok(message.message_id)
     }
 
-    pub async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
-        let body = send_message_draft_body(chat_id, draft_id, text);
-        let _: bool = self.post("sendMessageDraft", &body).await?;
-        Ok(())
-    }
-
-    pub async fn send_rich_message_draft(
-        &self,
-        chat_id: i64,
-        draft_id: i64,
-        rich_message: &TelegramInputRichMessage,
-    ) -> Result<()> {
-        let body = send_rich_message_draft_body(chat_id, draft_id, rich_message);
-        let _: bool = self.post("sendRichMessageDraft", &body).await?;
-        Ok(())
-    }
-
     pub async fn get_file(&self, file_id: &str) -> Result<TelegramFile> {
         self.post("getFile", &serde_json::json!({ "file_id": file_id }))
             .await
@@ -552,10 +534,7 @@ impl TelegramApi {
     }
 
     pub async fn send_chat_action(&self, chat_id: &str, action: &str) -> Result<()> {
-        let body = serde_json::json!({
-            "chat_id": chat_id,
-            "action": action,
-        });
+        let body = send_chat_action_body(chat_id, action);
         let _: bool = self.post("sendChatAction", &body).await?;
         Ok(())
     }
@@ -787,23 +766,10 @@ fn edit_message_reply_markup_body(
     })
 }
 
-fn send_message_draft_body(chat_id: i64, draft_id: i64, text: &str) -> serde_json::Value {
+fn send_chat_action_body(chat_id: &str, action: &str) -> serde_json::Value {
     serde_json::json!({
         "chat_id": chat_id,
-        "draft_id": draft_id,
-        "text": text,
-    })
-}
-
-fn send_rich_message_draft_body(
-    chat_id: i64,
-    draft_id: i64,
-    rich_message: &TelegramInputRichMessage,
-) -> serde_json::Value {
-    serde_json::json!({
-        "chat_id": chat_id,
-        "draft_id": draft_id,
-        "rich_message": rich_message,
+        "action": action,
     })
 }
 
@@ -814,8 +780,8 @@ mod tests {
     use super::{
         TelegramApiError, TelegramInputRichMessage, TelegramInputRichMessageMedia,
         TelegramParseMode, TelegramResponse, TelegramUpdate, edit_message_reply_markup_body,
-        edit_message_text_body, edit_rich_message_body, send_message_draft_body,
-        send_rich_message_body, send_rich_message_draft_body,
+        edit_message_text_body, edit_rich_message_body, send_chat_action_body,
+        send_rich_message_body,
     };
 
     fn api_error(
@@ -930,53 +896,12 @@ mod tests {
     }
 
     #[test]
-    fn builds_streaming_draft_payload() {
+    fn builds_send_chat_action_payload() {
         assert_eq!(
-            send_message_draft_body(42, 9, "partial reply"),
+            send_chat_action_body("42", "typing"),
             serde_json::json!({
-                "chat_id": 42,
-                "draft_id": 9,
-                "text": "partial reply",
-            })
-        );
-    }
-
-    #[test]
-    fn builds_empty_draft_cleanup_payload() {
-        assert_eq!(
-            send_message_draft_body(42, 9, ""),
-            serde_json::json!({
-                "chat_id": 42,
-                "draft_id": 9,
-                "text": "",
-            })
-        );
-    }
-
-    #[test]
-    fn builds_rich_streaming_draft_payload() {
-        assert_eq!(
-            send_rich_message_draft_body(
-                42,
-                9,
-                &TelegramInputRichMessage::markdown("**partial reply**"),
-            ),
-            serde_json::json!({
-                "chat_id": 42,
-                "draft_id": 9,
-                "rich_message": {"markdown": "**partial reply**"},
-            })
-        );
-    }
-
-    #[test]
-    fn builds_empty_rich_draft_cleanup_payload() {
-        assert_eq!(
-            send_rich_message_draft_body(42, 9, &TelegramInputRichMessage::markdown("")),
-            serde_json::json!({
-                "chat_id": 42,
-                "draft_id": 9,
-                "rich_message": {"markdown": ""},
+                "chat_id": "42",
+                "action": "typing",
             })
         );
     }
@@ -1066,15 +991,6 @@ mod tests {
         assert!(
             api_error("sendRichMessage", StatusCode::NOT_FOUND, 404, "Not Found",)
                 .should_fallback_from_rich_message()
-        );
-        assert!(
-            api_error(
-                "sendRichMessageDraft",
-                StatusCode::NOT_FOUND,
-                404,
-                "Not Found",
-            )
-            .should_fallback_from_rich_message()
         );
         assert!(
             api_error(

@@ -205,6 +205,20 @@ impl ImText {
         }
     }
 
+    pub(crate) fn telegram_commentary_earlier(self, count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("较早进展 · {count} 条"),
+            ImLocale::EnUs => format!("Earlier updates · {count}"),
+        }
+    }
+
+    pub(crate) fn telegram_commentary_omitted(self, count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("… 另外 {count} 条较早进展已省略"),
+            ImLocale::EnUs => format!("… {count} earlier updates omitted"),
+        }
+    }
+
     pub(crate) fn telegram_command_progress_error_summary(self) -> &'static str {
         self.choose("错误摘要：", "Error summary:")
     }
