@@ -23,6 +23,13 @@ final class APIContractTests: XCTestCase {
         )
     }
 
+    func testManualUpdateVersionComparisonHandlesTagsAndUnevenComponents() {
+        XCTAssertTrue(isNewerVersion("v0.5.1", than: "0.5.0"))
+        XCTAssertTrue(isNewerVersion("0.6", than: "0.5.9"))
+        XCTAssertFalse(isNewerVersion("v0.5.0", than: "0.5"))
+        XCTAssertFalse(isNewerVersion("0.4.9", than: "0.5.0"))
+    }
+
     func testSingleInstanceGuardRejectsSecondOwner() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -1083,6 +1090,184 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(directory.path, "/current/logs")
     }
 
+    func testCodexAndSessionManagementUseProtectedVersionedRoutes() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            switch request.url?.path {
+            case "/api/v1/manage/codex/status":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"codexHome":"/fixture/.codex","configured":true,"configOk":true,"authOk":true,"providerOk":true,"configError":null,"authError":null,"guiConfigured":true,"guiError":null,"remoteControlSupported":true,"remoteControlConfigured":true,"remoteControlError":null,"providers":[{"name":"ai-gateway","baseUrl":"http://127.0.0.1:3847/backend-api","secretSet":true,"supportsWebsockets":true}],"imageGenerationEnabled":true,"connectionMode":"standard"}"#
+                )
+            case "/api/v1/manage/codex/enhanced/preflight":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"status":{"running":false}}"#
+                )
+            case "/api/v1/manage/sessions":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"threads":[{"id":"thread-1","preview":"修复登录","modelProvider":"openai","updatedAt":1754000120000,"path":"/fixture/rollout.jsonl","name":null},{"id":"legacy-thread"}],"providers":["openai"],"total":2}"#
+                )
+            case "/api/v1/manage/sessions/provider":
+                let body = Self.jsonBody(from: request)
+                XCTAssertEqual(body?["threadId"] as? String, "thread-1")
+                XCTAssertEqual(body?["targetProvider"] as? String, "openai")
+                XCTAssertNil(body?["rolloutPath"])
+                return MockResponse(statusCode: 200, json: #"{"ok":true}"#)
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        let status = try await client.codexStatus()
+        XCTAssertTrue(status.configured)
+        XCTAssertTrue(status.providers[0].secretSet)
+        XCTAssertEqual(status.providers[0].name, "ai-gateway")
+
+        let preflight = try await client.codexEnhancedPreflight()
+        XCTAssertFalse(preflight.status.running)
+
+        let sessions = try await client.codexSessions()
+        XCTAssertEqual(sessions.total, 2)
+        XCTAssertEqual(sessions.threads[0].displayName, "修复登录")
+        XCTAssertEqual(sessions.threads[1].displayName, "未命名会话")
+        XCTAssertEqual(sessions.threads[1].modelProvider, "openai")
+        XCTAssertEqual(sessions.threads[1].updatedAt, 0)
+        _ = try await client.moveCodexSession(
+            threadId: "thread-1",
+            targetProvider: "openai"
+        )
+    }
+
+    func testGatewayProviderMutationKeepsAPIKeyWriteOnly() async throws {
+        let responseJSON = #"{"ok":true,"gateway":{"enabled":true,"filterImageGenerationTool":false,"requestLoggingEnabled":true,"requestLogDetailsEnabled":false,"codexVisibleModels":["model-a"],"providers":[{"name":"primary","enabled":true,"providerType":"open_ai_responses","compatibility":null,"baseUrl":"https://provider.example/v1","modelsUrl":null,"models":["model-a"],"modelAliases":{},"promptCacheRetention":null,"weight":100,"timeoutSecs":60,"secretSet":true}]}}"#
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/gateway/provider")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["apiKey"] as? String, "write-only-key")
+            XCTAssertEqual(body?["providerType"] as? String, "open_ai_responses")
+            return MockResponse(statusCode: 200, json: responseJSON)
+        }
+        let provider = ManageGatewayProvider(
+            name: "primary",
+            enabled: true,
+            providerType: "open_ai_responses",
+            compatibility: nil,
+            baseUrl: "https://provider.example/v1",
+            modelsUrl: nil,
+            models: ["model-a"],
+            modelAliases: [:],
+            promptCacheRetention: nil,
+            weight: 100,
+            timeoutSecs: 60,
+            secretSet: false
+        )
+
+        let gateway = try await client.upsertGatewayProvider(
+            originalName: nil,
+            provider: provider,
+            apiKey: "write-only-key"
+        )
+
+        XCTAssertTrue(gateway.providers[0].secretSet)
+        XCTAssertEqual(gateway.providers[0].models, ["model-a"])
+    }
+
+    func testGatewayMutationRejectsAStaleDiscoveredDaemonBeforePOST() async {
+        let client = makeClient(credentialCandidatesLoader: {
+            [.init(token: "fixture-token", expectedInstanceId: "stale-instance")]
+        }) { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/status")
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"replacement-instance","pid":123,"startedAtMs":456}"#
+            )
+        }
+        let provider = ManageGatewayProvider(
+            name: "primary",
+            enabled: true,
+            providerType: "open_ai_responses",
+            compatibility: nil,
+            baseUrl: "https://provider.example/v1",
+            modelsUrl: nil,
+            models: ["model-a"],
+            modelAliases: [:],
+            promptCacheRetention: nil,
+            weight: 100,
+            timeoutSecs: 60,
+            secretSet: false
+        )
+
+        do {
+            _ = try await client.upsertGatewayProvider(
+                originalName: nil,
+                provider: provider,
+                apiKey: "write-only-key"
+            )
+            XCTFail("Expected stale daemon identity to be rejected")
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, .unauthorized)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testSettingsAndRequestLogsDecodeRealManagementPayloads() async throws {
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/api/v1/manage/settings":
+                if request.httpMethod == "POST" {
+                    let body = Self.jsonBody(from: request)
+                    XCTAssertEqual(body?["outboundProxyMode"] as? String, "direct")
+                    return MockResponse(
+                        statusCode: 200,
+                        json: #"{"ok":true,"settings":{"language":"zh-CN","theme":"dark","localConnectionMode":"standard","bind":"127.0.0.1:3847","outboundProxy":{"mode":"direct","url":"<none>","credentialSet":false}}}"#
+                    )
+                }
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"language":"zh-CN","theme":"system","localConnectionMode":"standard","bind":"127.0.0.1:3847","outboundProxy":{"mode":"system","url":"<none>","credentialSet":false}}"#
+                )
+            case "/api/v1/manage/request-logs":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"logs":[{"id":7,"requestId":"req-7","modelId":"model-a","stream":true,"channel":"primary","providerType":"openai_responses","status":"success","inputTokens":10,"outputTokens":20,"totalTokens":30,"readCacheTokens":null,"readCacheHitRate":null,"writeCacheTokens":null,"costUsd":0.01,"latencyMs":1200,"ttftMs":300,"createdAtMs":1754000120000,"createdAt":"2026-08-13T00:00:00Z","errorMessage":null,"upstreamRequestBodyBytes":128}]}"#
+                )
+            case "/api/v1/manage/request-logs/7":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"log":{"id":7,"requestId":"req-7","modelId":"model-a","stream":true,"channel":"primary","providerType":"openai_responses","status":"success","inputTokens":10,"outputTokens":20,"totalTokens":30,"readCacheTokens":null,"readCacheHitRate":null,"writeCacheTokens":null,"costUsd":0.01,"latencyMs":1200,"ttftMs":300,"createdAtMs":1754000120000,"createdAt":"2026-08-13T00:00:00Z","errorMessage":null,"upstreamRequestBodyBytes":128,"requestHeadersJson":"{\"authorization\":\"<redacted>\"}","requestJson":"{\"model\":\"model-a\"}","upstreamRequestHeadersJson":null,"upstreamRequestJson":null,"upstreamResponseSse":null,"responseJson":"{\"ok\":true}"}}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        let settings = try await client.settings()
+        XCTAssertEqual(settings.outboundProxy.mode, "system")
+        let saved = try await client.updateSettings(
+            language: "zh-CN",
+            theme: "dark",
+            localConnectionMode: "standard",
+            outboundProxyMode: "direct",
+            outboundProxyURL: nil
+        )
+        XCTAssertEqual(saved.theme, "dark")
+
+        let logs = try await client.requestLogs()
+        XCTAssertEqual(logs[0].totalTokens, 30)
+        let detail = try await client.requestLogDetail(id: 7)
+        XCTAssertEqual(detail.requestHeadersJson, #"{"authorization":"<redacted>"}"#)
+    }
+
     @MainActor
     func testAppModelLoadsVersionedDashboard() async {
         let client = makeClient { request in
@@ -1353,11 +1538,607 @@ final class APIContractTests: XCTestCase {
         XCTAssertNotNil(model.dashboard)
     }
 
+    @MainActor
+    func testForcedSectionReloadKeepsNewestResponseAndLoadingState() async {
+        let calls = IntCounter()
+        let client = makeClient { request in
+            guard request.url?.path == "/api/v1/manage/sessions" else {
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+            let call = calls.next()
+            if call == 1 {
+                Thread.sleep(forTimeInterval: 0.15)
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"threads":[{"id":"older","preview":"older","modelProvider":"openai","updatedAt":1}],"providers":["openai"],"total":1}"#
+                )
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"threads":[{"id":"newer","preview":"newer","modelProvider":"ai-gateway","updatedAt":2}],"providers":["ai-gateway"],"total":1}"#
+            )
+        }
+        let model = AppModel(apiClient: client)
+
+        let olderLoad = Task { await model.loadSection(.sessions, force: true) }
+        try? await Task.sleep(for: .milliseconds(25))
+        let newerLoad = Task { await model.loadSection(.sessions, force: true) }
+        let newerSucceeded = await newerLoad.value
+        let olderSucceeded = await olderLoad.value
+
+        XCTAssertTrue(newerSucceeded)
+        XCTAssertFalse(olderSucceeded)
+        XCTAssertEqual(model.codexSessions.map(\.id), ["newer"])
+        XCTAssertEqual(model.codexSessionProviders, ["ai-gateway", "openai"])
+        XCTAssertFalse(model.isLoading(.sessions))
+    }
+
+    @MainActor
+    func testManagementActionReportsPostMutationRefreshFailure() async {
+        let listCalls = IntCounter()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/v1/manage/request-logs"):
+                if listCalls.next() == 1 {
+                    return MockResponse(
+                        statusCode: 200,
+                        json: #"{"logs":[{"id":7,"requestId":"req-7","modelId":"model-a","stream":true,"channel":"primary","providerType":"openai_responses","status":"success","inputTokens":10,"outputTokens":20,"totalTokens":30,"readCacheTokens":null,"readCacheHitRate":null,"writeCacheTokens":null,"costUsd":0.01,"latencyMs":1200,"ttftMs":300,"createdAtMs":1754000120000,"createdAt":"2026-08-13T00:00:00Z","errorMessage":null,"upstreamRequestBodyBytes":128}]}"#
+                    )
+                }
+                return MockResponse(
+                    statusCode: 500,
+                    json: #"{"error":"refresh unavailable"}"#
+                )
+            case ("POST", "/api/v1/manage/request-logs/clear"):
+                return MockResponse(statusCode: 200, json: #"{"ok":true,"deleted":1}"#)
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+        let initialLoadSucceeded = await model.loadSection(.requestLogs)
+        XCTAssertTrue(initialLoadSucceeded)
+        XCTAssertEqual(model.requestLogs.count, 1)
+
+        let succeeded = await model.clearRequestLogs()
+
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(model.requestLogs.count, 1)
+        XCTAssertNotNil(model.sectionErrors[.requestLogs])
+        XCTAssertNotNil(model.managementOperationError)
+    }
+
+    func testProviderTemplatesUseProtectedRouteAndDecodeOmittedOptionalKeys() async throws {
+        let paths = RequestRecorder()
+        let headers = StringRecorder()
+        let client = makeClient { request in
+            paths.record(request.url?.path)
+            headers.record(request.value(forHTTPHeaderField: "Authorization") ?? "")
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"templates":[{"id":"openai","displayName":"OpenAI","providerType":"open_ai_responses","baseUrl":"https://api.openai.com/v1","models":[]},{"id":"glm","displayName":"GLM","providerType":"anthropic_messages","compatibility":"glm_anthropic","baseUrl":"https://open.bigmodel.cn/api/anthropic","modelsUrl":"https://open.bigmodel.cn/api/paas/v4/models","models":["glm-5"]}]}"#
+            )
+        }
+
+        let templates = try await client.gatewayProviderTemplates()
+
+        XCTAssertEqual(paths.paths, ["/api/v1/manage/gateway/provider-templates"])
+        XCTAssertEqual(headers.values, ["Bearer fixture-token"])
+        XCTAssertEqual(templates.count, 2)
+        // Optional keys are omitted from the payload when absent.
+        XCTAssertEqual(templates[0].id, "openai")
+        XCTAssertNil(templates[0].compatibility)
+        XCTAssertNil(templates[0].modelsUrl)
+        XCTAssertEqual(templates[0].models, [])
+        XCTAssertEqual(templates[1].id, "glm")
+        XCTAssertEqual(templates[1].providerType, "anthropic_messages")
+        XCTAssertEqual(templates[1].compatibility, "glm_anthropic")
+        XCTAssertEqual(templates[1].modelsUrl, "https://open.bigmodel.cn/api/paas/v4/models")
+        XCTAssertEqual(templates[1].models, ["glm-5"])
+    }
+
+    func testCodexModelCatalogUsesProtectedRouteAndDecodesEntries() async throws {
+        let paths = RequestRecorder()
+        let headers = StringRecorder()
+        let client = makeClient { request in
+            paths.record(request.url?.path)
+            headers.record(request.value(forHTTPHeaderField: "Authorization") ?? "")
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"models":[{"id":"gpt-5.5","displayName":"GPT-5.5"},{"id":"gpt-5.5-codex","displayName":"GPT-5.5 Codex"}]}"#
+            )
+        }
+
+        let models = try await client.codexModelCatalog()
+
+        XCTAssertEqual(paths.paths, ["/api/v1/manage/codex/models/catalog"])
+        XCTAssertEqual(headers.values, ["Bearer fixture-token"])
+        XCTAssertEqual(models.map(\.id), ["gpt-5.5", "gpt-5.5-codex"])
+        XCTAssertEqual(models.map(\.displayName), ["GPT-5.5", "GPT-5.5 Codex"])
+    }
+
+    func testClearRequestLogsUsesExtendedTimeoutAndReturnsDeletedCount() async throws {
+        let timeouts = StringRecorder()
+        let client = makeClient { request in
+            guard request.url?.path == "/api/v1/manage/request-logs/clear" else {
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+            timeouts.record("\(request.timeoutInterval)")
+            return MockResponse(statusCode: 200, json: #"{"ok":true,"deleted":137}"#)
+        }
+
+        let deleted = try await client.clearRequestLogs()
+
+        XCTAssertEqual(deleted, 137)
+        // Clearing runs DELETE + VACUUM in the daemon; the default 10-second
+        // mutation timeout would misreport long clears as failures.
+        XCTAssertEqual(timeouts.values, ["300.0"])
+    }
+
+    func testClearOldRequestLogsPostsDaysWithExtendedTimeout() async throws {
+        let timeouts = StringRecorder()
+        let client = makeClient { request in
+            guard request.url?.path == "/api/v1/manage/request-logs/clear-old" else {
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+            XCTAssertEqual(request.httpMethod, "POST")
+            timeouts.record("\(request.timeoutInterval)")
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["days"] as? Int, 3)
+            return MockResponse(statusCode: 200, json: #"{"ok":true,"deleted":42}"#)
+        }
+
+        let deleted = try await client.clearOldRequestLogs()
+
+        XCTAssertEqual(deleted, 42)
+        XCTAssertEqual(timeouts.values, ["300.0"])
+    }
+
+    @MainActor
+    func testAppModelClearOldRequestLogsPublishesDeletedCountAndRefreshes() async {
+        let listCalls = IntCounter()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/v1/manage/request-logs"):
+                _ = listCalls.next()
+                return MockResponse(statusCode: 200, json: Self.requestLogsJSON)
+            case ("POST", "/api/v1/manage/request-logs/clear-old"):
+                let body = Self.jsonBody(from: request)
+                XCTAssertEqual(body?["days"] as? Int, 3)
+                return MockResponse(statusCode: 200, json: #"{"ok":true,"deleted":137}"#)
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+        let initialLoad = await model.loadSection(.requestLogs)
+        XCTAssertTrue(initialLoad)
+
+        let succeeded = await model.clearOldRequestLogs()
+
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(model.actionFeedback?.message, "已清理 137 条旧日志")
+        XCTAssertNil(model.managementOperationError)
+        // The list is re-fetched after the clear (initial load + refresh).
+        XCTAssertEqual(listCalls.next(), 3)
+    }
+
+    func testRequestLogAndDetailDecodeCacheFieldsIncludingTTLSplit() async throws {
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/api/v1/manage/request-logs":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"logs":[{"id":9,"requestId":"req-9","modelId":"claude-opus-4-8","stream":true,"channel":"anthropic","providerType":"anthropic_messages","status":"success","inputTokens":1500,"outputTokens":200,"totalTokens":1700,"readCacheTokens":1200,"readCacheHitRate":0.8,"writeCacheTokens":3000,"writeCache5mTokens":2000,"writeCache1hTokens":1000,"costUsd":0.0125,"latencyMs":900,"ttftMs":120,"createdAtMs":1754000120000,"createdAt":"2026-08-13T00:00:00Z","errorMessage":null,"upstreamRequestBodyBytes":2048}]}"#
+                )
+            case "/api/v1/manage/request-logs/9":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"log":{"id":9,"requestId":"req-9","modelId":"claude-opus-4-8","stream":true,"channel":"anthropic","providerType":"anthropic_messages","status":"success","inputTokens":1500,"outputTokens":200,"totalTokens":1700,"readCacheTokens":1200,"readCacheHitRate":0.8,"writeCacheTokens":3000,"writeCache5mTokens":2000,"writeCache1hTokens":1000,"costUsd":0.0125,"latencyMs":900,"ttftMs":120,"createdAtMs":1754000120000,"createdAt":"2026-08-13T00:00:00Z","errorMessage":null,"upstreamRequestBodyBytes":2048,"requestHeadersJson":null,"requestJson":null,"upstreamRequestHeadersJson":null,"upstreamRequestJson":null,"upstreamResponseSse":null,"responseJson":null}}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        let logs = try await client.requestLogs()
+        XCTAssertEqual(logs[0].readCacheTokens, 1200)
+        XCTAssertEqual(logs[0].readCacheHitRate, 0.8)
+        XCTAssertEqual(logs[0].writeCacheTokens, 3000)
+        XCTAssertEqual(logs[0].writeCache5mTokens, 2000)
+        XCTAssertEqual(logs[0].writeCache1hTokens, 1000)
+
+        let detail = try await client.requestLogDetail(id: 9)
+        XCTAssertEqual(detail.readCacheTokens, 1200)
+        XCTAssertEqual(detail.readCacheHitRate, 0.8)
+        XCTAssertEqual(detail.writeCacheTokens, 3000)
+        XCTAssertEqual(detail.writeCache5mTokens, 2000)
+        XCTAssertEqual(detail.writeCache1hTokens, 1000)
+    }
+
+    /// The daemon omits the TTL-split keys entirely when the upstream did
+    /// not report them; decoding must not require their presence.
+    func testRequestLogDecodesWhenTTLSplitKeysAreOmitted() async throws {
+        let client = makeClient { _ in
+            MockResponse(statusCode: 200, json: Self.requestLogsJSON)
+        }
+
+        let logs = try await client.requestLogs()
+
+        XCTAssertNil(logs[0].readCacheTokens)
+        XCTAssertNil(logs[0].writeCache5mTokens)
+        XCTAssertNil(logs[0].writeCache1hTokens)
+    }
+
+    func testRequestLogSummaryFormattersAlignWithLegacyGUI() {
+        XCTAssertEqual(formatGroupedInt(0), "0")
+        XCTAssertEqual(formatGroupedInt(999), "999")
+        XCTAssertEqual(formatGroupedInt(1_234_567), "1,234,567")
+        XCTAssertEqual(formatGroupedInt(-1_234), "-1,234")
+
+        XCTAssertEqual(formatByteCount(512), "512 B")
+        XCTAssertEqual(formatByteCount(1_536), "1.5 KB")
+        XCTAssertEqual(formatByteCount(3_670_016), "3.50 MB")
+
+        XCTAssertEqual(readCacheSummary(tokens: 1_200, hitRate: 0.833), "1,200 tokens(83.3%)")
+        XCTAssertEqual(readCacheSummary(tokens: 1_200, hitRate: nil), "1,200 tokens")
+        XCTAssertEqual(readCacheSummary(tokens: nil, hitRate: 0.8), "未记录")
+
+        XCTAssertEqual(
+            writeCacheSummary(tokens: 3_000, fiveMinuteTokens: 2_000, oneHourTokens: 1_000),
+            "3,000 tokens [5m 2,000, 1h 1,000]"
+        )
+        XCTAssertEqual(
+            writeCacheSummary(tokens: 3_000, fiveMinuteTokens: nil, oneHourTokens: nil),
+            "3,000 tokens"
+        )
+        XCTAssertEqual(
+            writeCacheSummary(tokens: nil, fiveMinuteTokens: 5, oneHourTokens: nil),
+            "未记录"
+        )
+    }
+
+    func testFetchProviderModelsSendsCamelCaseBodyAndOmitsEmptyOptionals() async throws {
+        let timeouts = StringRecorder()
+        let client = makeClient { request in
+            guard request.url?.path == "/api/v1/manage/gateway/provider/models/fetch" else {
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+            XCTAssertEqual(request.httpMethod, "POST")
+            timeouts.record("\(request.timeoutInterval)")
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["providerName"] as? String, "glm")
+            XCTAssertEqual(body?["baseUrl"] as? String, "https://open.bigmodel.cn/api/anthropic")
+            XCTAssertEqual(body?["modelsUrl"] as? String, "https://open.bigmodel.cn/api/paas/v4/models")
+            XCTAssertEqual(body?["providerType"] as? String, "anthropic_messages")
+            // The stored key should be reused when the user typed nothing.
+            XCTAssertNil(body?["apiKey"])
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"models":["glm-5","glm-5-air"],"attempts":[{"url":"https://open.bigmodel.cn/api/paas/v4/models","status":200,"error":null,"preview":null}]}"#
+            )
+        }
+
+        let response = try await client.fetchGatewayProviderModels(
+            providerName: "glm",
+            baseUrl: "https://open.bigmodel.cn/api/anthropic",
+            modelsUrl: "https://open.bigmodel.cn/api/paas/v4/models",
+            providerType: "anthropic_messages",
+            apiKey: nil
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.models, ["glm-5", "glm-5-air"])
+        XCTAssertEqual(response.attempts.first?.status, 200)
+        XCTAssertEqual(timeouts.values, ["60.0"])
+    }
+
+    func testFetchProviderModelsDecodesFailureAttempts() async throws {
+        let client = makeClient { _ in
+            MockResponse(
+                statusCode: 200,
+                json: #"{"ok":false,"models":[],"attempts":[{"url":"https://a.example/v1/models","status":401,"error":null,"preview":"{\"error\":\"unauthorized\"}"},{"url":"https://b.example/models","status":null,"error":"连接超时","preview":null}]}"#
+            )
+        }
+
+        let response = try await client.fetchGatewayProviderModels(
+            providerName: nil,
+            baseUrl: "https://a.example",
+            modelsUrl: nil,
+            providerType: "open_ai_responses",
+            apiKey: "new-key"
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.attempts.count, 2)
+        XCTAssertEqual(response.attempts[0].status, 401)
+        XCTAssertEqual(response.attempts[1].error, "连接超时")
+    }
+
+    func testMergedModelLinesKeepOrderDedupeAndAppend() {
+        XCTAssertEqual(
+            mergedModelLines(
+                existing: "glm-5\n\nglm-5-air\nglm-5",
+                fetched: ["glm-5", "glm-5-flash", " glm-5-air ", "glm-5v"]
+            ),
+            "glm-5\nglm-5-air\nglm-5-flash\nglm-5v"
+        )
+        XCTAssertEqual(mergedModelLines(existing: "", fetched: ["a", "b"]), "a\nb")
+        XCTAssertEqual(mergedModelLines(existing: "a,b", fetched: []), "a\nb")
+    }
+
+    func testProviderFetchAttemptLinesTruncatePreviewAndCapCount() {
+        let longPreview = String(repeating: "x", count: 200)
+        let attempts = (1...6).map { index in
+            ManageProviderModelsFetchResponse.Attempt(
+                url: "https://example.test/\(index)",
+                status: index == 1 ? 500 : nil,
+                error: index == 1 ? nil : "连接失败",
+                preview: index == 1 ? longPreview : nil
+            )
+        }
+
+        let lines = providerFetchAttemptLines(attempts)
+
+        XCTAssertEqual(lines.count, 4)
+        XCTAssertTrue(lines[0].hasPrefix("https://example.test/1 — HTTP 500 — "))
+        XCTAssertEqual(lines[0].count, "https://example.test/1 — HTTP 500 — ".count + 120)
+        XCTAssertEqual(lines[1], "https://example.test/2 — 连接失败")
+    }
+
+    func testInferredClaudeModelAliasesMatchLegacyRules() {
+        let aliases = inferredModelAliases(models: [
+            " Claude-Opus-4-8 ",
+            "claude-sonnet-4-6",
+            "glm-5",
+        ])
+
+        XCTAssertEqual(aliases["opus-4.8"], " Claude-Opus-4-8 ")
+        XCTAssertEqual(aliases["sonnet-4.6"], "claude-sonnet-4-6")
+        XCTAssertEqual(aliases.count, 2)
+    }
+
+    func testInferredAliasSkippedWhenModelListAlreadyContainsAliasName() {
+        let aliases = inferredModelAliases(models: [
+            "claude-opus-4-8",
+            "opus-4.8",
+        ])
+
+        XCTAssertTrue(aliases.isEmpty)
+    }
+
+    func testMergedModelAliasesKeepExplicitMappingPriority() {
+        let merged = mergedModelAliases(
+            models: ["claude-opus-4-8", "claude-sonnet-4-6"],
+            explicit: ["opus-4.8": "my-custom-target"]
+        )
+
+        XCTAssertEqual(merged["opus-4.8"], "my-custom-target")
+        XCTAssertEqual(merged["sonnet-4.6"], "claude-sonnet-4-6")
+        XCTAssertEqual(merged.count, 2)
+    }
+
+    func testDaemonAutoRestartReadyRequiresThresholdAndCooldown() {
+        let now = Date(timeIntervalSince1970: 100)
+        XCTAssertFalse(AppModel.daemonAutoRestartReady(failures: 2, now: now, notBefore: nil))
+        XCTAssertFalse(
+            AppModel.daemonAutoRestartReady(
+                failures: 3,
+                now: now,
+                notBefore: now.addingTimeInterval(1)
+            )
+        )
+        XCTAssertTrue(AppModel.daemonAutoRestartReady(failures: 3, now: now, notBefore: now))
+        XCTAssertTrue(AppModel.daemonAutoRestartReady(failures: 3, now: now, notBefore: nil))
+    }
+
+    @MainActor
+    func testAppModelAutoRestartsDaemonAfterThreeFailuresAndHonorsCooldown() async {
+        let client = makeClient { _ in
+            MockResponse(statusCode: 503, json: #"{"error":"temporarily unavailable"}"#)
+        }
+        let launcher = RecordingDaemonLauncher()
+        let model = AppModel(apiClient: client, daemonLauncher: launcher)
+
+        await model.refresh()
+        await model.refresh()
+        XCTAssertEqual(launcher.startCount, 0)
+
+        await model.refresh()
+        await waitForDaemonLaunches(launcher, count: 1)
+        XCTAssertEqual(launcher.startCount, 1)
+
+        // Additional failures inside the 60-second cooldown never trigger a
+        // second automatic restart.
+        await model.refresh()
+        await model.refresh()
+        await model.refresh()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(launcher.startCount, 1)
+    }
+
+    @MainActor
+    func testAppModelResetsDaemonFailureCountAfterSuccessfulProbe() async {
+        let healthResponses = MockResponseSequence([
+            MockResponse(statusCode: 503, json: #"{"error":"down"}"#),
+            MockResponse(statusCode: 503, json: #"{"error":"down"}"#),
+            MockResponse(statusCode: 200, json: Self.healthJSON),
+            MockResponse(statusCode: 503, json: #"{"error":"down"}"#),
+        ])
+        let client = makeClient { request in
+            if request.url?.path == "/healthz" {
+                return healthResponses.next()
+            }
+            return MockResponse(statusCode: 503, json: #"{"error":"down"}"#)
+        }
+        let launcher = RecordingDaemonLauncher()
+        let model = AppModel(apiClient: client, daemonLauncher: launcher)
+
+        // fail, fail, success: the success resets the consecutive counter.
+        await model.refresh()
+        await model.refresh()
+        await model.refresh()
+        // fail, fail: only two consecutive failures after the reset.
+        await model.refresh()
+        await model.refresh()
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(launcher.startCount, 0)
+
+        // The third consecutive failure triggers the restart.
+        await model.refresh()
+        await waitForDaemonLaunches(launcher, count: 1)
+        XCTAssertEqual(launcher.startCount, 1)
+    }
+
+    func testGitHubReleaseDecodesAndValidatesDownloadPage() throws {
+        let release = try JSONDecoder().decode(
+            GitHubRelease.self,
+            from: Data(
+                #"{"tag_name":"v0.5.1","html_url":"https://github.com/mps233/threadrelay/releases/tag/v0.5.1","body":"发布说明"}"#.utf8
+            )
+        )
+        XCTAssertEqual(release.tagName, "v0.5.1")
+        XCTAssertEqual(release.body, "发布说明")
+        XCTAssertEqual(
+            release.validatedURL,
+            URL(string: "https://github.com/mps233/threadrelay/releases/tag/v0.5.1")
+        )
+
+        func validatedURL(_ htmlURL: String) throws -> URL? {
+            try JSONDecoder().decode(
+                GitHubRelease.self,
+                from: Data(#"{"tag_name":"v1","html_url":"\#(htmlURL)"}"#.utf8)
+            ).validatedURL
+        }
+
+        XCTAssertNil(try validatedURL("http://github.com/mps233/threadrelay/releases/tag/v1"))
+        XCTAssertNil(try validatedURL("https://evil.example/mps233/threadrelay/releases/tag/v1"))
+        XCTAssertNil(try validatedURL("https://github.com/other/repo/releases/tag/v1"))
+    }
+
+    func testUpdateCheckerComparesVersionsAndKeepsSilentFailures() async {
+        MockURLProtocol.install { request in
+            XCTAssertEqual(request.url?.host, "api.github.com")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Accept"),
+                "application/vnd.github+json"
+            )
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"tag_name":"v0.6.0","html_url":"https://github.com/mps233/threadrelay/releases/tag/v0.6.0","body":null}"#
+            )
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        let update = await UpdateChecker.availableUpdate(session: session, currentVersion: "0.5.0")
+        XCTAssertEqual(
+            update,
+            AvailableUpdate(
+                version: "v0.6.0",
+                url: URL(string: "https://github.com/mps233/threadrelay/releases/tag/v0.6.0")!
+            )
+        )
+
+        let current = await UpdateChecker.availableUpdate(session: session, currentVersion: "0.6.0")
+        XCTAssertNil(current)
+
+        MockURLProtocol.install { _ in
+            MockResponse(statusCode: 500, json: #"{"error":"boom"}"#)
+        }
+        let failed = await UpdateChecker.availableUpdate(session: session, currentVersion: "0.5.0")
+        XCTAssertNil(failed)
+    }
+
+    func testUpdateCheckerRejectsReleaseWithForeignDownloadPage() async {
+        MockURLProtocol.install { _ in
+            MockResponse(
+                statusCode: 200,
+                json: #"{"tag_name":"v0.6.0","html_url":"https://evil.example/download","body":null}"#
+            )
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        do {
+            _ = try await UpdateChecker.fetchLatestRelease(session: session, currentVersion: "0.5.0")
+            XCTFail("Expected the unvalidated release URL to be rejected")
+        } catch {
+            XCTAssertEqual((error as? URLError)?.code, .unsupportedURL)
+        }
+        let update = await UpdateChecker.availableUpdate(session: session, currentVersion: "0.5.0")
+        XCTAssertNil(update)
+    }
+
+    @MainActor
+    func testBatchSessionMoveReportsPartialFailureAndKeepsFailedIds() async {
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/v1/manage/sessions/provider"):
+                let threadId = Self.jsonBody(from: request)?["threadId"] as? String
+                if threadId == "thread-a" {
+                    return MockResponse(statusCode: 200, json: #"{"ok":true,"deleted":null}"#)
+                }
+                return MockResponse(statusCode: 500, json: #"{"error":"move failed"}"#)
+            case ("GET", "/api/v1/manage/sessions"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"threads":[],"providers":["openai"],"total":0}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+
+        let result = await model.moveCodexSessions(ids: ["thread-a", "thread-b"], to: "openai")
+
+        XCTAssertEqual(result.movedIds, ["thread-a"])
+        XCTAssertEqual(result.failedIds, ["thread-b"])
+        XCTAssertNil(model.actionFeedback)
+        let message = model.managementOperationError
+        XCTAssertNotNil(message)
+        XCTAssertTrue(message?.contains("成功 1") == true)
+        XCTAssertTrue(message?.contains("失败 1") == true)
+        XCTAssertEqual(model.sectionErrors[.sessions], message)
+    }
+
+    @MainActor
+    func testBatchSessionMoveSuccessPublishesUnifiedFeedback() async {
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/v1/manage/sessions/provider"):
+                return MockResponse(statusCode: 200, json: #"{"ok":true,"deleted":null}"#)
+            case ("GET", "/api/v1/manage/sessions"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"threads":[],"providers":["openai"],"total":0}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+
+        let result = await model.moveCodexSessions(ids: ["thread-a", "thread-b"], to: nil)
+
+        XCTAssertEqual(result.movedIds, ["thread-a", "thread-b"])
+        XCTAssertTrue(result.failedIds.isEmpty)
+        XCTAssertNil(model.managementOperationError)
+        XCTAssertEqual(model.actionFeedback?.message, "已移动 2 个会话")
+    }
+
     private static let healthJSON = #"{"service":"threadrelay","apiMajor":1,"ready":true}"#
     private static let dashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"bridgeRunning":true,"remoteControlConnected":true,"remoteControlHealthy":true,"executionClients":{"codexApp":{"configured":true,"connected":true},"vscode":{"configured":true,"connected":true},"cli":{"configured":false,"connected":false}},"messageChannels":{"telegram":{"accountCount":2,"connectedAccountCount":1},"feishu":{"accountCount":1,"connectedAccountCount":1},"wechat":{"accountCount":1,"connectedAccountCount":1},"wecom":{"accountCount":0,"connectedAccountCount":0}},"aiGatewayEnabled":true,"aiGatewayProviderCount":2,"requestLoggingEnabled":true}"#
     private static let imAccountsJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"accounts":[{"platform":"telegram","accountId":"telegram-main","displayName":"主 Telegram","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":true,"connected":true,"lastError":null,"lastEventAtMs":1754000120000,"lastInboundAtMs":1754000100000},{"platform":"wecom","accountId":"wecom-offline","displayName":"企业微信","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":false,"connected":false,"lastError":"连接失败","lastEventAtMs":null,"lastInboundAtMs":null}]}"#
     private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
     private static let originalV1DashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"legacy-instance","pid":456,"startedAtMs":789},"bridgeRunning":true,"remoteControlConnected":false,"remoteControlHealthy":false,"codexAppConfigured":true,"imAccountCount":5,"connectedImAccountCount":3,"aiGatewayEnabled":false,"aiGatewayProviderCount":1,"requestLoggingEnabled":true}"#
+    // Mirrors the daemon payload where the Anthropic TTL-split keys are
+    // omitted entirely when unreported (serde skip_serializing_if).
+    private static let requestLogsJSON = #"{"logs":[{"id":7,"requestId":"req-7","modelId":"model-a","stream":true,"channel":"primary","providerType":"openai_responses","status":"success","inputTokens":10,"outputTokens":20,"totalTokens":30,"readCacheTokens":null,"readCacheHitRate":null,"writeCacheTokens":null,"costUsd":0.01,"latencyMs":1200,"ttftMs":300,"createdAtMs":1754000120000,"createdAt":"2026-08-13T00:00:00Z","errorMessage":null,"upstreamRequestBodyBytes":128}]}"#
 
     private static func jsonBody(from request: URLRequest) -> [String: Any]? {
         let data: Data?
@@ -1511,6 +2292,35 @@ final class APIContractTests: XCTestCase {
             XCTFail("Expected APIClientError, received \(error)", file: file, line: line)
         }
     }
+
+    /// The automatic restart is spawned as a task; poll briefly until the
+    /// launcher records the expected number of start attempts.
+    private func waitForDaemonLaunches(
+        _ launcher: RecordingDaemonLauncher,
+        count: Int,
+        timeoutMs: Int = 2_000
+    ) async {
+        for _ in 0..<(timeoutMs / 10) {
+            if launcher.startCount >= count { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+    }
+}
+
+/// DaemonLaunching mock that records start attempts. It throws a launch
+/// error so the recovery path returns quickly instead of polling readiness.
+private final class RecordingDaemonLauncher: DaemonLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var startCount: Int {
+        lock.withLock { count }
+    }
+
+    func startIfNeeded() async throws {
+        lock.withLock { count += 1 }
+        throw DaemonLaunchError.helperMissing
+    }
 }
 
 private struct MockResponse: Sendable {
@@ -1553,6 +2363,18 @@ private final class StringSequence: @unchecked Sendable {
         lock.withLock {
             guard values.count > 1 else { return values.first }
             return values.removeFirst()
+        }
+    }
+}
+
+private final class IntCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func next() -> Int {
+        lock.withLock {
+            value += 1
+            return value
         }
     }
 }

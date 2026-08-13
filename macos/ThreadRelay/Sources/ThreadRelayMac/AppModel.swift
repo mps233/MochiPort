@@ -1,5 +1,18 @@
 import Foundation
 
+/// A transient success message shown in the shared feedback capsule. The
+/// identifier restarts the auto-dismiss timer when a new message arrives.
+struct ActionFeedback: Equatable, Identifiable {
+    let id = UUID()
+    let message: String
+}
+
+/// Result of a batch session move; failed sessions stay selected in the UI.
+struct SessionBatchMoveResult: Equatable {
+    let movedIds: [String]
+    let failedIds: [String]
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selection: AppSection? = .overview
@@ -9,8 +22,24 @@ final class AppModel: ObservableObject {
     @Published private(set) var lifecycle: ManageLifecycle?
     @Published private(set) var imAccounts: [ManageIMAccount] = []
     @Published private(set) var imAccountsAvailability: MessagingAccountsAvailability = .loading
+    @Published private(set) var codexStatus: ManageCodexStatus?
+    @Published private(set) var codexPreflight: ManageCodexPreflightResponse?
+    @Published private(set) var codexSessions: [ManageCodexSession] = []
+    @Published private(set) var codexSessionProviders: [String] = []
+    @Published private(set) var gateway: ManageGateway?
+    @Published private(set) var settings: ManageSettings?
+    @Published private(set) var requestLogs: [ManageRequestLog] = []
+    @Published private(set) var requestLogDetail: ManageRequestLogDetail?
+    @Published private(set) var loadingSections: Set<AppSection> = []
+    @Published private(set) var sectionErrors: [AppSection: String] = [:]
     @Published private(set) var dashboardState: DashboardState = .loading
     @Published var accountOperationError: String?
+    @Published var managementOperationError: String?
+    @Published var actionFeedback: ActionFeedback?
+    @Published private(set) var daemonRecoveryInProgress = false
+    @Published var daemonRecoveryError: String?
+    @Published private(set) var availableUpdate: AvailableUpdate?
+    @Published var updateNoticeDismissed = false
 
     private let apiClient: APIClient
     private let daemonLauncher: any DaemonLaunching
@@ -20,6 +49,27 @@ final class AppModel: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var autoRefreshStarted = false
     private var windowVisible = true
+    private var sectionLoadGenerations: [AppSection: Int] = [:]
+    private var sectionActivityCounts: [AppSection: Int] = [:]
+    private var daemonHealthFailureCount = 0
+    private var daemonAutoRestartNotBefore: Date?
+    private var startupUpdateCheckScheduled = false
+
+    /// Mirrors the legacy GUI's unhealthy-daemon recovery policy: three
+    /// consecutive probe failures trigger a restart, then a cooldown blocks
+    /// the next automatic attempt.
+    nonisolated static let daemonAutoRestartFailureThreshold = 3
+    nonisolated static let daemonAutoRestartCooldown: TimeInterval = 60
+
+    nonisolated static func daemonAutoRestartReady(
+        failures: Int,
+        now: Date,
+        notBefore: Date?
+    ) -> Bool {
+        guard failures >= daemonAutoRestartFailureThreshold else { return false }
+        guard let notBefore else { return true }
+        return now >= notBefore
+    }
 
     init(
         apiClient: APIClient = APIClient(),
@@ -69,6 +119,10 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Read by page-local refresh loops (for example the request-log list)
+    /// so they can pause while the window is hidden.
+    var isWindowVisible: Bool { windowVisible }
+
     func refresh() async {
         guard !refreshInFlight else { return }
         refreshInFlight = true
@@ -91,13 +145,38 @@ final class AppModel: ObservableObject {
         let probeResult = await probeOrStartDaemon()
         switch probeResult {
         case let .success(probe):
+            daemonHealthFailureCount = 0
             await loadServiceStatus(probe: probe)
         case let .failure(error):
             serviceStatus = .unavailable(userFacingMessage(for: error))
             imAccountsAvailability = .unavailable(userFacingMessage(for: error))
             dashboardState = dashboard == nil ? .offline : .stale
+            registerDaemonProbeFailure()
         }
         lastCheckedAt = Date()
+    }
+
+    /// Counts consecutive probe failures and, mirroring the legacy GUI,
+    /// automatically restarts the daemon after three of them, with a
+    /// 60-second cooldown between automatic attempts. Failures surface
+    /// through the existing overview error display; no dialog is shown.
+    private func registerDaemonProbeFailure() {
+        daemonHealthFailureCount += 1
+        guard fixtureStatus == nil,
+              !daemonRecoveryInProgress,
+              Self.daemonAutoRestartReady(
+                  failures: daemonHealthFailureCount,
+                  now: Date(),
+                  notBefore: daemonAutoRestartNotBefore
+              )
+        else { return }
+        daemonAutoRestartNotBefore = Date().addingTimeInterval(Self.daemonAutoRestartCooldown)
+        daemonHealthFailureCount = 0
+        // Spawned instead of awaited: the recovery path re-runs refresh()
+        // once the daemon answers, which must not nest inside this refresh.
+        Task { [weak self] in
+            await self?.startDaemonManually()
+        }
     }
 
     private func probeOrStartDaemon() async -> Result<ServiceProbe, Error> {
@@ -145,6 +224,7 @@ final class AppModel: ObservableObject {
             do {
                 dashboard = try await apiClient.dashboard()
                 lifecycle = try? await apiClient.lifecycle()
+                settings = try? await apiClient.settings()
                 // Account details were added after the first versioned
                 // dashboard. Keep the dashboard usable when an older daemon
                 // is still running, but expose the missing capability instead
@@ -157,6 +237,7 @@ final class AppModel: ObservableObject {
                     lifecycle = nil
                     imAccounts = []
                     imAccountsAvailability = .unauthorized
+                    clearManagementPages()
                 }
                 dashboardState = dashboardState(for: error)
             } catch {
@@ -168,7 +249,44 @@ final class AppModel: ObservableObject {
             lifecycle = nil
             imAccounts = []
             imAccountsAvailability = .needsUpdate
+            clearManagementPages()
             dashboardState = .legacy
+        }
+    }
+
+    private func clearManagementPages() {
+        for section in AppSection.allCases {
+            sectionLoadGenerations[section, default: 0] += 1
+        }
+        codexStatus = nil
+        codexPreflight = nil
+        codexSessions = []
+        codexSessionProviders = []
+        gateway = nil
+        settings = nil
+        requestLogs = []
+        requestLogDetail = nil
+        sectionErrors = [:]
+    }
+
+    private func clearSectionData(_ section: AppSection) {
+        switch section {
+        case .overview:
+            dashboard = nil
+            lifecycle = nil
+        case .codex:
+            codexStatus = nil
+            codexPreflight = nil
+        case .sessions:
+            codexSessions = []
+            codexSessionProviders = []
+        case .messaging:
+            imAccounts = []
+        case .gateway:
+            gateway = nil
+        case .requestLogs:
+            requestLogs = []
+            requestLogDetail = nil
         }
     }
 
@@ -195,6 +313,436 @@ final class AppModel: ObservableObject {
     func logDirectory() async -> URL? {
         guard fixtureStatus == nil else { return nil }
         return try? await apiClient.logDirectory()
+    }
+
+    @discardableResult
+    func loadSection(_ section: AppSection, force: Bool = false) async -> Bool {
+        guard fixtureStatus == nil else { return true }
+        guard force || sectionActivityCounts[section, default: 0] == 0 else { return false }
+        let generation = sectionLoadGenerations[section, default: 0] + 1
+        sectionLoadGenerations[section] = generation
+        beginSectionActivity(section)
+        sectionErrors[section] = nil
+        defer { endSectionActivity(section) }
+
+        do {
+            switch section {
+            case .overview:
+                await refresh()
+            case .codex:
+                let status = try await apiClient.codexStatus()
+                let preflight = try? await apiClient.codexEnhancedPreflight()
+                guard isCurrentLoad(section, generation: generation) else { return false }
+                codexStatus = status
+                codexPreflight = preflight
+            case .sessions:
+                let response = try await apiClient.codexSessions()
+                guard isCurrentLoad(section, generation: generation) else { return false }
+                codexSessions = response.threads
+                var providers = response.providers + response.threads.map(\.modelProvider)
+                providers.append("openai")
+                codexSessionProviders = Array(
+                    Set(
+                        providers
+                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                            .filter { !$0.isEmpty }
+                    )
+                )
+                .sorted()
+            case .messaging:
+                await loadIMAccounts()
+            case .gateway:
+                let response = try await apiClient.gateway()
+                guard isCurrentLoad(section, generation: generation) else { return false }
+                gateway = response
+            case .requestLogs:
+                let response = try await apiClient.requestLogs()
+                guard isCurrentLoad(section, generation: generation) else { return false }
+                requestLogs = response
+            }
+            guard isCurrentLoad(section, generation: generation) else { return false }
+            return true
+        } catch {
+            guard isCurrentLoad(section, generation: generation) else { return false }
+            if let apiError = error as? APIClientError,
+               apiError == .featureUnavailable || apiError == .unauthorized {
+                clearSectionData(section)
+            }
+            sectionErrors[section] = userFacingMessage(for: error)
+            return false
+        }
+    }
+
+    func isLoading(_ section: AppSection) -> Bool {
+        loadingSections.contains(section)
+    }
+
+    private func isCurrentLoad(_ section: AppSection, generation: Int) -> Bool {
+        !Task.isCancelled && sectionLoadGenerations[section] == generation
+    }
+
+    private func beginSectionActivity(_ section: AppSection) {
+        sectionActivityCounts[section, default: 0] += 1
+        loadingSections.insert(section)
+    }
+
+    private func endSectionActivity(_ section: AppSection) {
+        let remaining = max(sectionActivityCounts[section, default: 1] - 1, 0)
+        if remaining == 0 {
+            sectionActivityCounts[section] = nil
+            loadingSections.remove(section)
+        } else {
+            sectionActivityCounts[section] = remaining
+        }
+    }
+
+    @discardableResult
+    func configureCodex() async -> Bool {
+        await performManagementAction(section: .codex) {
+            _ = try await self.apiClient.configureCodex()
+            try await self.requireSectionRefresh(.codex)
+            return "已写入 Codex 配置"
+        }
+    }
+
+    @discardableResult
+    func repairCodex() async -> Bool {
+        await performManagementAction(section: .codex) {
+            _ = try await self.apiClient.repairCodex()
+            try await self.requireSectionRefresh(.codex)
+            return "已修复 GUI 环境"
+        }
+    }
+
+    @discardableResult
+    func uninstallCodex() async -> Bool {
+        await performManagementAction(section: .codex) {
+            _ = try await self.apiClient.uninstallCodex()
+            try await self.requireSectionRefresh(.codex)
+            return "已卸载 Codex 接入"
+        }
+    }
+
+    @discardableResult
+    func refreshCodexModels() async -> Bool {
+        await performManagementAction(section: .codex) {
+            _ = try await self.apiClient.refreshCodexModels()
+            try await self.requireSectionRefresh(.codex)
+            return "已刷新模型列表"
+        }
+    }
+
+    @discardableResult
+    func launchCodexEnhanced() async -> Bool {
+        await performManagementAction(section: .codex) {
+            _ = try await self.apiClient.launchCodexEnhanced()
+            try await self.requireSectionRefresh(.codex)
+            return "增强启动已完成"
+        }
+    }
+
+    /// Re-reads the enhanced-launch preflight and returns whether Codex App
+    /// is currently running. `nil` means the check itself failed.
+    func checkCodexAppRunning() async -> Bool? {
+        guard fixtureStatus == nil else { return false }
+        guard let preflight = try? await apiClient.codexEnhancedPreflight() else { return nil }
+        codexPreflight = preflight
+        return preflight.status.running
+    }
+
+    @discardableResult
+    func moveCodexSession(_ session: ManageCodexSession, to provider: String?) async -> Bool {
+        await performManagementAction(section: .sessions) {
+            _ = try await self.apiClient.moveCodexSession(
+                threadId: session.id,
+                targetProvider: provider
+            )
+            try await self.requireSectionRefresh(.sessions)
+            return "已移动 1 个会话"
+        }
+    }
+
+    /// Moves each session in order and reports a partial-failure summary.
+    /// Successful ids are returned so the view can deselect them while
+    /// keeping failed ones selected.
+    func moveCodexSessions(ids: [String], to provider: String?) async -> SessionBatchMoveResult {
+        guard fixtureStatus == nil, !ids.isEmpty else {
+            return SessionBatchMoveResult(movedIds: [], failedIds: [])
+        }
+        guard sectionActivityCounts[.sessions, default: 0] == 0 else {
+            return SessionBatchMoveResult(movedIds: [], failedIds: ids)
+        }
+        beginSectionActivity(.sessions)
+        defer { endSectionActivity(.sessions) }
+        managementOperationError = nil
+
+        var movedIds: [String] = []
+        var failedIds: [String] = []
+        var firstErrorMessage: String?
+        for id in ids {
+            do {
+                _ = try await apiClient.moveCodexSession(threadId: id, targetProvider: provider)
+                movedIds.append(id)
+            } catch {
+                failedIds.append(id)
+                if firstErrorMessage == nil {
+                    firstErrorMessage = userFacingMessage(for: error)
+                }
+            }
+        }
+        _ = await loadSection(.sessions, force: true)
+        if failedIds.isEmpty {
+            sectionErrors[.sessions] = nil
+            actionFeedback = ActionFeedback(message: "已移动 \(movedIds.count) 个会话")
+        } else {
+            var message = "移动完成：成功 \(movedIds.count) 条、失败 \(failedIds.count) 条。"
+            if let firstErrorMessage {
+                message += firstErrorMessage
+            }
+            managementOperationError = message
+            sectionErrors[.sessions] = message
+        }
+        return SessionBatchMoveResult(movedIds: movedIds, failedIds: failedIds)
+    }
+
+    @discardableResult
+    func saveGatewaySettings(
+        enabled: Bool,
+        filterImageGenerationTool: Bool,
+        requestLoggingEnabled: Bool,
+        requestLogDetailsEnabled: Bool,
+        codexVisibleModels: [String]
+    ) async -> Bool {
+        await performManagementAction(section: .gateway) {
+            self.gateway = try await self.apiClient.updateGateway(
+                enabled: enabled,
+                filterImageGenerationTool: filterImageGenerationTool,
+                requestLoggingEnabled: requestLoggingEnabled,
+                requestLogDetailsEnabled: requestLogDetailsEnabled,
+                codexVisibleModels: codexVisibleModels
+            )
+            return "已保存网关设置"
+        }
+    }
+
+    @discardableResult
+    func saveGatewayProvider(
+        originalName: String?,
+        provider: ManageGatewayProvider,
+        apiKey: String?,
+        clearAPIKey: Bool = false
+    ) async -> Bool {
+        await performManagementAction(section: .gateway) {
+            self.gateway = try await self.apiClient.upsertGatewayProvider(
+                originalName: originalName,
+                provider: provider,
+                apiKey: apiKey,
+                clearAPIKey: clearAPIKey
+            )
+            return "已保存 Provider「\(provider.name)」"
+        }
+    }
+
+    @discardableResult
+    func deleteGatewayProvider(_ provider: ManageGatewayProvider) async -> Bool {
+        await performManagementAction(section: .gateway) {
+            self.gateway = try await self.apiClient.deleteGatewayProvider(name: provider.name)
+            return "已删除 Provider「\(provider.name)」"
+        }
+    }
+
+    @discardableResult
+    func saveSettings(
+        language: String?,
+        theme: String?,
+        localConnectionMode: String,
+        outboundProxyMode: String,
+        outboundProxyURL: String?
+    ) async -> Bool {
+        await performManagementAction(section: .overview) {
+            self.settings = try await self.apiClient.updateSettings(
+                language: language,
+                theme: theme,
+                localConnectionMode: localConnectionMode,
+                outboundProxyMode: outboundProxyMode,
+                outboundProxyURL: outboundProxyURL
+            )
+            return "已保存设置"
+        }
+    }
+
+    func loadSettings() async {
+        guard fixtureStatus == nil else { return }
+        do {
+            settings = try await apiClient.settings()
+            managementOperationError = nil
+        } catch {
+            managementOperationError = userFacingMessage(for: error)
+        }
+    }
+
+    func loadRequestLogDetail(id: Int64) async {
+        guard fixtureStatus == nil else { return }
+        do {
+            let detail = try await apiClient.requestLogDetail(id: id)
+            guard !Task.isCancelled else { return }
+            requestLogDetail = detail
+            managementOperationError = nil
+            sectionErrors[.requestLogs] = nil
+        } catch {
+            let message = userFacingMessage(for: error)
+            managementOperationError = message
+            sectionErrors[.requestLogs] = message
+        }
+    }
+
+    func clearRequestLogDetail() {
+        requestLogDetail = nil
+    }
+
+    @discardableResult
+    func clearRequestLogs() async -> Bool {
+        await performManagementAction(section: .requestLogs) {
+            let deleted = try await self.apiClient.clearRequestLogs()
+            self.requestLogDetail = nil
+            try await self.requireSectionRefresh(.requestLogs)
+            return "已清空 \(deleted) 条日志"
+        }
+    }
+
+    /// Deletes logs older than `days` while keeping the recent window. The
+    /// loaded detail stays untouched; the view clears its selection only
+    /// when the selected row disappears from the refreshed list.
+    @discardableResult
+    func clearOldRequestLogs(days: Int = 3) async -> Bool {
+        await performManagementAction(section: .requestLogs) {
+            let deleted = try await self.apiClient.clearOldRequestLogs(days: days)
+            try await self.requireSectionRefresh(.requestLogs)
+            return "已清理 \(deleted) 条旧日志"
+        }
+    }
+
+    /// Asks the daemon to list models from an upstream provider. Throws so
+    /// the editor sheet can render inline success or attempt summaries
+    /// instead of the page-level feedback.
+    func fetchGatewayProviderModels(
+        providerName: String?,
+        baseUrl: String,
+        modelsUrl: String?,
+        providerType: String,
+        apiKey: String?
+    ) async throws -> ManageProviderModelsFetchResponse {
+        guard fixtureStatus == nil else {
+            return ManageProviderModelsFetchResponse(ok: false, models: [], attempts: [])
+        }
+        return try await apiClient.fetchGatewayProviderModels(
+            providerName: providerName,
+            baseUrl: baseUrl,
+            modelsUrl: modelsUrl,
+            providerType: providerType,
+            apiKey: apiKey
+        )
+    }
+
+    /// Provider templates for the editor. Returns `nil` when the daemon does
+    /// not support the endpoint yet (or the call fails); callers hide the
+    /// template UI silently in that case.
+    func loadGatewayProviderTemplates() async -> [ManageProviderTemplate]? {
+        guard fixtureStatus == nil else { return nil }
+        return try? await apiClient.gatewayProviderTemplates()
+    }
+
+    /// Built-in Codex model catalog for the visible-models checklist. `nil`
+    /// means the UI falls back to the plain text editor.
+    func loadCodexModelCatalog() async -> [ManageCodexCatalogModel]? {
+        guard fixtureStatus == nil else { return nil }
+        return try? await apiClient.codexModelCatalog()
+    }
+
+    /// Loads a log detail for the standalone detail window without touching
+    /// the main pane's `requestLogDetail` state.
+    func fetchRequestLogDetailStandalone(id: Int64) async throws -> ManageRequestLogDetail {
+        try await apiClient.requestLogDetail(id: id)
+    }
+
+    /// Manually (re)starts the local daemon. Unlike the automatic launch path
+    /// this is not limited to a single attempt per app lifetime.
+    func startDaemonManually() async {
+        guard fixtureStatus == nil, !daemonRecoveryInProgress else { return }
+        daemonRecoveryInProgress = true
+        defer { daemonRecoveryInProgress = false }
+        daemonRecoveryError = nil
+        do {
+            try await daemonLauncher.startIfNeeded()
+            launchAttempted = true
+            dashboardState = dashboard == nil ? .starting : dashboardState
+            serviceStatus = .checking
+            await waitForDaemonReadiness()
+            await refresh()
+            if serviceStatus == .available {
+                actionFeedback = ActionFeedback(message: "本地服务已启动")
+            }
+        } catch let error as DaemonLaunchError {
+            daemonRecoveryError = error.localizedDescription
+        } catch {
+            daemonRecoveryError = userFacingMessage(for: error)
+        }
+    }
+
+    /// Silently checks GitHub for a newer release once per app launch. The
+    /// delay keeps the check away from the startup network burst; every
+    /// failure path stays silent.
+    func scheduleStartupUpdateCheck(delay: Duration = .seconds(5)) {
+        guard fixtureStatus == nil, !startupUpdateCheckScheduled else { return }
+        startupUpdateCheckScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled else { return }
+            let currentVersion = Bundle.main.object(
+                forInfoDictionaryKey: "CFBundleShortVersionString"
+            ) as? String ?? "0.0.0"
+            guard let update = await UpdateChecker.availableUpdate(
+                currentVersion: currentVersion
+            ) else { return }
+            self.availableUpdate = update
+        }
+    }
+
+    private func requireSectionRefresh(_ section: AppSection) async throws {
+        guard await loadSection(section, force: true) else {
+            throw ManagementRefreshError(
+                message: sectionErrors[section] ?? "操作已经完成，但刷新页面数据失败。"
+            )
+        }
+    }
+
+    /// Runs a mutation and publishes a transient success message (returned by
+    /// the operation) through the shared feedback capsule.
+    private func performManagementAction(
+        section: AppSection,
+        operation: () async throws -> String?
+    ) async -> Bool {
+        guard sectionActivityCounts[section, default: 0] == 0 else { return false }
+        beginSectionActivity(section)
+        defer { endSectionActivity(section) }
+        managementOperationError = nil
+        do {
+            let successMessage = try await operation()
+            sectionErrors[section] = nil
+            if let successMessage {
+                actionFeedback = ActionFeedback(message: successMessage)
+            }
+            return true
+        } catch {
+            let message = userFacingMessage(for: error)
+            managementOperationError = message
+            sectionErrors[section] = message
+            return false
+        }
+    }
+
+    func dismissSectionError(_ section: AppSection) {
+        sectionErrors[section] = nil
     }
 
     /// Returns whether the daemon acknowledged the change so the caller can
@@ -649,6 +1197,12 @@ final class AppModel: ObservableObject {
         }
         return "本地服务不可用。"
     }
+}
+
+private struct ManagementRefreshError: LocalizedError {
+    let message: String
+
+    var errorDescription: String? { message }
 }
 
 enum DashboardState: Equatable {

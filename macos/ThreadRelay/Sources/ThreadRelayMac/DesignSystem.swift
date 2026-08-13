@@ -12,6 +12,43 @@ enum ThreadRelayRadius {
     static let overlay: CGFloat = 16
 }
 
+/// Shared success capsule shown at the bottom of the detail column after a
+/// management action completes. Auto-dismisses after three seconds; the timer
+/// restarts whenever a new feedback message replaces the current one.
+struct ActionFeedbackCapsule: View {
+    let feedback: ActionFeedback
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(feedback.message, systemImage: "checkmark.circle.fill")
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("关闭提示")
+            .accessibilityLabel("关闭提示")
+        }
+        .font(.callout)
+        .foregroundStyle(.green)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .background(.regularMaterial, in: Capsule())
+        .overlay {
+            Capsule().stroke(Color.green.opacity(0.25), lineWidth: 1)
+        }
+        .accessibilityIdentifier("feedback.capsule")
+        .task(id: feedback.id) {
+            try? await Task.sleep(for: .seconds(3))
+            guard !Task.isCancelled else { return }
+            dismiss()
+        }
+    }
+}
+
 struct FloatingControlSurface<Content: View>: View {
     @ViewBuilder let content: Content
 

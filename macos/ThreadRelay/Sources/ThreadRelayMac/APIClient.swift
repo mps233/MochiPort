@@ -101,6 +101,252 @@ struct ManageWecomOnboardingPoll: Decodable, Equatable {
     let error: String?
 }
 
+struct ManageCodexStatus: Decodable, Equatable {
+    struct Provider: Decodable, Equatable, Identifiable {
+        let name: String
+        let baseUrl: String?
+        let secretSet: Bool
+        let supportsWebsockets: Bool
+
+        var id: String { name }
+    }
+
+    let codexHome: String
+    let configured: Bool
+    let configOk: Bool
+    let authOk: Bool
+    let providerOk: Bool
+    let configError: String?
+    let authError: String?
+    let guiConfigured: Bool
+    let guiError: String?
+    let remoteControlSupported: Bool
+    let remoteControlConfigured: Bool
+    let remoteControlError: String?
+    let providers: [Provider]
+    let imageGenerationEnabled: Bool
+    let connectionMode: String
+}
+
+struct ManageCodexSessionsResponse: Decodable, Equatable {
+    let ok: Bool
+    let threads: [ManageCodexSession]
+    let providers: [String]
+    let total: Int
+}
+
+struct ManageCodexSession: Decodable, Equatable, Identifiable {
+    let id: String
+    let preview: String
+    let modelProvider: String
+    let updatedAt: Int64
+    let path: String?
+    let name: String?
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case preview
+        case modelProvider
+        case updatedAt
+        case path
+        case name
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        preview = try container.decodeIfPresent(String.self, forKey: .preview) ?? ""
+        modelProvider =
+            try container.decodeIfPresent(String.self, forKey: .modelProvider) ?? "openai"
+        updatedAt = try container.decodeIfPresent(Int64.self, forKey: .updatedAt) ?? 0
+        path = try container.decodeIfPresent(String.self, forKey: .path)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+    }
+
+    var displayName: String {
+        let preferred = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !preferred.isEmpty { return preferred }
+        let fallback = preview.trimmingCharacters(in: .whitespacesAndNewlines)
+        return fallback.isEmpty ? "未命名会话" : fallback
+    }
+}
+
+struct ManageGateway: Decodable, Equatable {
+    let enabled: Bool
+    let filterImageGenerationTool: Bool
+    let requestLoggingEnabled: Bool
+    let requestLogDetailsEnabled: Bool
+    let codexVisibleModels: [String]
+    let providers: [ManageGatewayProvider]
+}
+
+struct ManageGatewayProvider: Codable, Equatable, Identifiable {
+    let name: String
+    let enabled: Bool
+    let providerType: String
+    let compatibility: String?
+    let baseUrl: String
+    let modelsUrl: String?
+    let models: [String]
+    let modelAliases: [String: String]
+    let promptCacheRetention: String?
+    let weight: Int
+    let timeoutSecs: Int
+    let secretSet: Bool
+
+    var id: String { name }
+}
+
+struct ManageProviderTemplatesResponse: Decodable, Equatable {
+    let templates: [ManageProviderTemplate]
+}
+
+/// Built-in provider template served by the daemon; `id` doubles as the
+/// suggested default provider name. `compatibility` and `modelsUrl` are
+/// omitted from the payload when absent.
+struct ManageProviderTemplate: Decodable, Equatable, Identifiable {
+    let id: String
+    let displayName: String
+    let providerType: String
+    let compatibility: String?
+    let baseUrl: String
+    let modelsUrl: String?
+    let models: [String]
+}
+
+struct ManageCodexModelCatalogResponse: Decodable, Equatable {
+    let models: [ManageCodexCatalogModel]
+}
+
+/// Entry of the built-in Codex model catalog; `id` is the exact value that
+/// goes back into `codexVisibleModels`.
+struct ManageCodexCatalogModel: Decodable, Equatable, Identifiable {
+    let id: String
+    let displayName: String
+}
+
+struct ManageSettings: Decodable, Equatable {
+    struct OutboundProxy: Decodable, Equatable {
+        let mode: String
+        let url: String
+        let credentialSet: Bool
+    }
+
+    let language: String?
+    let theme: String?
+    let localConnectionMode: String
+    let bind: String
+    let outboundProxy: OutboundProxy
+}
+
+struct ManageRequestLogsResponse: Decodable, Equatable {
+    let logs: [ManageRequestLog]
+}
+
+struct ManageRequestLog: Decodable, Equatable, Identifiable {
+    let id: Int64
+    let requestId: String
+    let modelId: String
+    let stream: Bool
+    let channel: String
+    let providerType: String
+    let status: String
+    let inputTokens: Int64?
+    let outputTokens: Int64?
+    let totalTokens: Int64?
+    let readCacheTokens: Int64?
+    /// Fraction in the 0...1 range; multiply by 100 for display.
+    let readCacheHitRate: Double?
+    let writeCacheTokens: Int64?
+    // Anthropic splits cache writes into TTL tiers; the daemon omits the
+    // keys entirely when the upstream did not report the breakdown.
+    let writeCache5mTokens: Int64?
+    let writeCache1hTokens: Int64?
+    let costUsd: Double?
+    let latencyMs: Int64?
+    let ttftMs: Int64?
+    let createdAtMs: Int64
+    let createdAt: String
+    let errorMessage: String?
+    let upstreamRequestBodyBytes: Int64?
+}
+
+struct ManageRequestLogDetailResponse: Decodable, Equatable {
+    let log: ManageRequestLogDetail
+}
+
+struct ManageRequestLogDetail: Decodable, Equatable, Identifiable {
+    let id: Int64
+    let requestId: String
+    let modelId: String
+    let stream: Bool
+    let channel: String
+    let providerType: String
+    let status: String
+    let inputTokens: Int64?
+    let outputTokens: Int64?
+    let totalTokens: Int64?
+    let readCacheTokens: Int64?
+    /// Fraction in the 0...1 range; multiply by 100 for display.
+    let readCacheHitRate: Double?
+    let writeCacheTokens: Int64?
+    let writeCache5mTokens: Int64?
+    let writeCache1hTokens: Int64?
+    let costUsd: Double?
+    let latencyMs: Int64?
+    let ttftMs: Int64?
+    let createdAtMs: Int64
+    let createdAt: String
+    let errorMessage: String?
+    let upstreamRequestBodyBytes: Int64?
+    let requestHeadersJson: String?
+    let requestJson: String?
+    let upstreamRequestHeadersJson: String?
+    let upstreamRequestJson: String?
+    let upstreamResponseSse: String?
+    let responseJson: String?
+}
+
+struct ManageActionResponse: Decodable, Equatable {
+    let ok: Bool
+    let deleted: Int?
+}
+
+/// Result of asking the daemon to list models from an upstream provider.
+/// `attempts` records every URL the daemon tried so failures can show a
+/// per-attempt summary.
+struct ManageProviderModelsFetchResponse: Decodable, Equatable {
+    struct Attempt: Decodable, Equatable {
+        let url: String
+        let status: Int?
+        let error: String?
+        let preview: String?
+    }
+
+    let ok: Bool
+    let models: [String]
+    let attempts: [Attempt]
+}
+
+struct ManageCodexPreflightResponse: Decodable, Equatable {
+    struct Status: Decodable, Equatable {
+        let running: Bool
+    }
+
+    let ok: Bool
+    let status: Status
+}
+
+struct ManageGatewayMutationResponse: Decodable, Equatable {
+    let ok: Bool
+    let gateway: ManageGateway
+}
+
+struct ManageSettingsMutationResponse: Decodable, Equatable {
+    let ok: Bool
+    let settings: ManageSettings
+}
+
 struct ManageLifecycle: Decodable, Equatable {
     struct Service: Decodable, Equatable {
         let service: String
@@ -809,6 +1055,227 @@ struct APIClient {
         )
     }
 
+    func codexStatus() async throws -> ManageCodexStatus {
+        try await performManageGET(path: "api/v1/manage/codex/status")
+    }
+
+    func configureCodex() async throws -> ManageActionResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/codex/configure",
+            body: EmptyRequestBody()
+        )
+    }
+
+    func repairCodex() async throws -> ManageActionResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/codex/repair",
+            body: EmptyRequestBody()
+        )
+    }
+
+    func uninstallCodex() async throws -> ManageActionResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/codex/uninstall",
+            body: EmptyRequestBody()
+        )
+    }
+
+    func refreshCodexModels() async throws -> ManageActionResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/codex/models/refresh",
+            body: EmptyRequestBody()
+        )
+    }
+
+    func codexEnhancedPreflight() async throws -> ManageCodexPreflightResponse {
+        try await performManageGET(path: "api/v1/manage/codex/enhanced/preflight")
+    }
+
+    func launchCodexEnhanced() async throws -> ManageActionResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/codex/enhanced/launch",
+            body: EmptyRequestBody(),
+            timeout: 90
+        )
+    }
+
+    func codexSessions() async throws -> ManageCodexSessionsResponse {
+        try await performManageGET(path: "api/v1/manage/sessions", timeout: 20)
+    }
+
+    func moveCodexSession(
+        threadId: String,
+        targetProvider: String?
+    ) async throws -> ManageActionResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/sessions/provider",
+            body: MoveCodexSessionRequest(
+                threadId: threadId,
+                targetProvider: targetProvider
+            )
+        )
+    }
+
+    func gateway() async throws -> ManageGateway {
+        try await performManageGET(path: "api/v1/manage/gateway")
+    }
+
+    func updateGateway(
+        enabled: Bool,
+        filterImageGenerationTool: Bool,
+        requestLoggingEnabled: Bool,
+        requestLogDetailsEnabled: Bool,
+        codexVisibleModels: [String]
+    ) async throws -> ManageGateway {
+        let response: ManageGatewayMutationResponse = try await performManagePOST(
+            path: "api/v1/manage/gateway/settings",
+            body: UpdateGatewayRequest(
+                enabled: enabled,
+                filterImageGenerationTool: filterImageGenerationTool,
+                requestLoggingEnabled: requestLoggingEnabled,
+                requestLogDetailsEnabled: requestLogDetailsEnabled,
+                codexVisibleModels: codexVisibleModels
+            )
+        )
+        return response.gateway
+    }
+
+    func upsertGatewayProvider(
+        originalName: String?,
+        provider: ManageGatewayProvider,
+        apiKey: String?,
+        clearAPIKey: Bool = false
+    ) async throws -> ManageGateway {
+        let response: ManageGatewayMutationResponse = try await performManagePOST(
+            path: "api/v1/manage/gateway/provider",
+            body: UpsertGatewayProviderRequest(
+                originalName: originalName,
+                name: provider.name,
+                enabled: provider.enabled,
+                providerType: provider.providerType,
+                compatibility: provider.compatibility,
+                baseUrl: provider.baseUrl,
+                modelsUrl: provider.modelsUrl,
+                models: provider.models,
+                modelAliases: provider.modelAliases,
+                promptCacheRetention: provider.promptCacheRetention,
+                weight: provider.weight,
+                timeoutSecs: provider.timeoutSecs,
+                apiKey: apiKey,
+                clearApiKey: clearAPIKey
+            )
+        )
+        return response.gateway
+    }
+
+    func deleteGatewayProvider(name: String) async throws -> ManageGateway {
+        let response: ManageGatewayMutationResponse = try await performManagePOST(
+            path: "api/v1/manage/gateway/provider/delete",
+            body: DeleteGatewayProviderRequest(name: name)
+        )
+        return response.gateway
+    }
+
+    func gatewayProviderTemplates() async throws -> [ManageProviderTemplate] {
+        let response: ManageProviderTemplatesResponse = try await performManageGET(
+            path: "api/v1/manage/gateway/provider-templates"
+        )
+        return response.templates
+    }
+
+    func codexModelCatalog() async throws -> [ManageCodexCatalogModel] {
+        let response: ManageCodexModelCatalogResponse = try await performManageGET(
+            path: "api/v1/manage/codex/models/catalog"
+        )
+        return response.models
+    }
+
+    func settings() async throws -> ManageSettings {
+        try await performManageGET(path: "api/v1/manage/settings")
+    }
+
+    func updateSettings(
+        language: String?,
+        theme: String?,
+        localConnectionMode: String,
+        outboundProxyMode: String,
+        outboundProxyURL: String?
+    ) async throws -> ManageSettings {
+        let response: ManageSettingsMutationResponse = try await performManagePOST(
+            path: "api/v1/manage/settings",
+            body: UpdateSettingsRequest(
+                language: language,
+                theme: theme,
+                localConnectionMode: localConnectionMode,
+                outboundProxyMode: outboundProxyMode,
+                outboundProxyUrl: outboundProxyURL
+            )
+        )
+        return response.settings
+    }
+
+    func requestLogs() async throws -> [ManageRequestLog] {
+        let response: ManageRequestLogsResponse = try await performManageGET(
+            path: "api/v1/manage/request-logs",
+            timeout: 10
+        )
+        return response.logs
+    }
+
+    func requestLogDetail(id: Int64) async throws -> ManageRequestLogDetail {
+        let response: ManageRequestLogDetailResponse = try await performManageGET(
+            path: "api/v1/manage/request-logs/\(id)",
+            timeout: 10
+        )
+        return response.log
+    }
+
+    func clearRequestLogs() async throws -> Int {
+        // Clearing a large log store runs DELETE + VACUUM in the daemon and
+        // can take minutes; the default 10-second mutation timeout would
+        // misreport a successful clear as a failure.
+        let response: ManageActionResponse = try await performManagePOST(
+            path: "api/v1/manage/request-logs/clear",
+            body: EmptyRequestBody(),
+            timeout: 300
+        )
+        return response.deleted ?? 0
+    }
+
+    /// Deletes request logs older than `days`, keeping recent entries. Shares
+    /// the large clear timeout because the daemon may VACUUM afterwards.
+    func clearOldRequestLogs(days: Int = 3) async throws -> Int {
+        let response: ManageActionResponse = try await performManagePOST(
+            path: "api/v1/manage/request-logs/clear-old",
+            body: ClearOldRequestLogsRequest(days: days),
+            timeout: 300
+        )
+        return response.deleted ?? 0
+    }
+
+    /// Asks the daemon to fetch the model list from an upstream provider.
+    /// `providerName` lets the daemon reuse the stored API key when the user
+    /// did not enter a new one; optional fields are omitted from the body.
+    func fetchGatewayProviderModels(
+        providerName: String?,
+        baseUrl: String,
+        modelsUrl: String?,
+        providerType: String,
+        apiKey: String?
+    ) async throws -> ManageProviderModelsFetchResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/gateway/provider/models/fetch",
+            body: FetchProviderModelsRequest(
+                providerName: providerName,
+                baseUrl: baseUrl,
+                modelsUrl: modelsUrl,
+                providerType: providerType,
+                apiKey: apiKey
+            ),
+            timeout: 60
+        )
+    }
+
     private struct IMAccountEnabledRequest: Encodable {
         let platform: String
         let accountId: String
@@ -841,6 +1308,60 @@ struct APIClient {
 
     private struct WecomOnboardingPollRequest: Encodable {
         let sessionKey: String
+    }
+
+    private struct MoveCodexSessionRequest: Encodable {
+        let threadId: String
+        let targetProvider: String?
+    }
+
+    private struct UpdateGatewayRequest: Encodable {
+        let enabled: Bool
+        let filterImageGenerationTool: Bool
+        let requestLoggingEnabled: Bool
+        let requestLogDetailsEnabled: Bool
+        let codexVisibleModels: [String]
+    }
+
+    private struct UpsertGatewayProviderRequest: Encodable {
+        let originalName: String?
+        let name: String
+        let enabled: Bool
+        let providerType: String
+        let compatibility: String?
+        let baseUrl: String
+        let modelsUrl: String?
+        let models: [String]
+        let modelAliases: [String: String]
+        let promptCacheRetention: String?
+        let weight: Int
+        let timeoutSecs: Int
+        let apiKey: String?
+        let clearApiKey: Bool
+    }
+
+    private struct DeleteGatewayProviderRequest: Encodable {
+        let name: String
+    }
+
+    private struct ClearOldRequestLogsRequest: Encodable {
+        let days: Int
+    }
+
+    private struct FetchProviderModelsRequest: Encodable {
+        let providerName: String?
+        let baseUrl: String
+        let modelsUrl: String?
+        let providerType: String
+        let apiKey: String?
+    }
+
+    private struct UpdateSettingsRequest: Encodable {
+        let language: String?
+        let theme: String?
+        let localConnectionMode: String
+        let outboundProxyMode: String
+        let outboundProxyUrl: String?
     }
 
     private struct EmptyRequestBody: Encodable {}
@@ -971,36 +1492,35 @@ struct APIClient {
         return result
     }
 
-    private func performManagePOST<Body: Encodable, Response: Decodable>(
+    private func performManageGET<Response: Decodable>(
         path: String,
-        body: Body
+        timeout: TimeInterval = 5
     ) async throws -> Response {
         let connection = connectionLoader()
         let candidates = connection.credentials()
         guard !candidates.isEmpty else { throw APIClientError.unauthorized }
-        let encodedBody = try JSONEncoder().encode(body)
 
         for candidate in candidates {
             do {
+                guard try await managementCandidateMatches(
+                    candidate,
+                    baseURL: connection.baseURL
+                ) else {
+                    continue
+                }
                 let (data, response) = try await request(
                     baseURL: connection.baseURL,
                     path: path,
-                    method: "POST",
-                    body: encodedBody,
-                    bearerToken: candidate.token
+                    bearerToken: candidate.token,
+                    timeoutInterval: timeout
                 )
                 guard let httpResponse = response as? HTTPURLResponse else {
                     throw APIClientError.invalidResponse
                 }
                 guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
-                if httpResponse.statusCode == 404 {
-                    // A current daemon uses 404 for a missing account and
-                    // includes a stable JSON error. An older daemon has no
-                    // versioned route and normally returns an empty/plain 404.
-                    // Keep those cases distinct so the UI can offer an update
-                    // only when the feature itself is absent.
+                guard httpResponse.statusCode != 404 else {
                     let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data)
-                    if payload?.error == "IM account not found" {
+                    if payload?.error?.isEmpty == false {
                         throw operationError(from: data, statusCode: httpResponse.statusCode)
                     }
                     throw APIClientError.featureUnavailable
@@ -1018,6 +1538,89 @@ struct APIClient {
             }
         }
         throw APIClientError.unauthorized
+    }
+
+    private func performManagePOST<Body: Encodable, Response: Decodable>(
+        path: String,
+        body: Body,
+        timeout: TimeInterval = 10
+    ) async throws -> Response {
+        let connection = connectionLoader()
+        let candidates = connection.credentials()
+        guard !candidates.isEmpty else { throw APIClientError.unauthorized }
+        let encodedBody = try JSONEncoder().encode(body)
+
+        for candidate in candidates {
+            do {
+                guard try await managementCandidateMatches(
+                    candidate,
+                    baseURL: connection.baseURL
+                ) else {
+                    continue
+                }
+                let (data, response) = try await request(
+                    baseURL: connection.baseURL,
+                    path: path,
+                    method: "POST",
+                    body: encodedBody,
+                    bearerToken: candidate.token,
+                    timeoutInterval: timeout
+                )
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw APIClientError.invalidResponse
+                }
+                guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
+                if httpResponse.statusCode == 404 {
+                    // Current routes include a stable JSON error for a missing
+                    // resource. Older daemons normally return an empty/plain
+                    // 404 because the versioned route itself does not exist.
+                    let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data)
+                    if payload?.error?.isEmpty == false {
+                        throw operationError(from: data, statusCode: httpResponse.statusCode)
+                    }
+                    throw APIClientError.featureUnavailable
+                }
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    throw operationError(from: data, statusCode: httpResponse.statusCode)
+                }
+                do {
+                    return try JSONDecoder().decode(Response.self, from: data)
+                } catch {
+                    throw APIClientError.invalidResponse
+                }
+            } catch APIClientError.unauthorized {
+                continue
+            }
+        }
+        throw APIClientError.unauthorized
+    }
+
+    private func managementCandidateMatches(
+        _ candidate: ManagementCredentialCandidate,
+        baseURL: URL
+    ) async throws -> Bool {
+        guard let expectedInstanceId = candidate.expectedInstanceId else {
+            return true
+        }
+        let (data, response) = try await request(
+            baseURL: baseURL,
+            path: "api/v1/manage/status",
+            bearerToken: candidate.token
+        )
+        guard let response = response as? HTTPURLResponse else {
+            throw APIClientError.invalidResponse
+        }
+        guard response.statusCode != 401 else {
+            throw APIClientError.unauthorized
+        }
+        guard response.statusCode == 200,
+              let status = try? JSONDecoder().decode(ManageDashboard.Service.self, from: data),
+              status.service == "threadrelay",
+              status.apiMajor == 1
+        else {
+            throw APIClientError.invalidResponse
+        }
+        return status.instanceId == expectedInstanceId
     }
 
     private struct ErrorPayload: Decodable {
@@ -1042,7 +1645,7 @@ struct APIClient {
             // Validation failures carry a specific, already-sanitized reason
             // (for example a Telegram token rejection); show it as-is.
             message = raw
-        default: message = statusCode >= 500 ? "后台服务操作失败。" : "账号操作未完成。"
+        default: message = statusCode >= 500 ? "后台服务操作失败。" : "操作未完成。"
         }
         return .operationFailed(message)
     }
@@ -1052,7 +1655,8 @@ struct APIClient {
         path: String,
         method: String = "GET",
         body: Data? = nil,
-        bearerToken: String
+        bearerToken: String,
+        timeoutInterval: TimeInterval? = nil
     ) async throws -> (Data, URLResponse) {
         let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
@@ -1061,7 +1665,7 @@ struct APIClient {
         // Mutations persist config and may verify credentials upstream (for
         // example the daemon calls Telegram getMe with a 5-second budget), so
         // they get a larger timeout than cheap status reads.
-        request.timeoutInterval = method == "GET" ? 3 : 10
+        request.timeoutInterval = timeoutInterval ?? (method == "GET" ? 3 : 10)
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
         if let body {
             request.httpBody = body
