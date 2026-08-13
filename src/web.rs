@@ -14,10 +14,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    app_state::{FeishuWsState, ImAccountRuntimeState, SharedState, TelegramState, WechatState},
+    app_state::{
+        FeishuWsState, ImAccountRuntimeState, RemoteControlSourceKind, SharedState, TelegramState,
+        WechatState, im_account_key,
+    },
     chain_log, codex_app_config,
     config::AppConfig,
     manage_api, remote_control_backend,
+    types::ImPlatformKind,
 };
 
 mod codex_app;
@@ -38,6 +42,7 @@ pub fn router(state: SharedState) -> Router {
     let manage_routes = Router::new()
         .route("/status", get(manage_api::status))
         .route("/dashboard", get(manage_dashboard))
+        .route("/log-directory", get(manage_log_directory))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             manage_api::require_bearer,
@@ -278,12 +283,101 @@ struct ManageDashboardResponse {
     bridge_running: bool,
     remote_control_connected: bool,
     remote_control_healthy: bool,
+    // Keep the original v1 aggregate fields during the additive schema
+    // transition. Older clients ignore the newer nested sections, while
+    // existing clients continue to receive the fields they already decode.
     codex_app_configured: bool,
     im_account_count: usize,
     connected_im_account_count: usize,
+    execution_clients: ManageExecutionClients,
+    message_channels: ManageMessageChannels,
     ai_gateway_enabled: bool,
     ai_gateway_provider_count: usize,
     request_logging_enabled: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageExecutionClients {
+    codex_app: ManageExecutionClient,
+    vscode: ManageExecutionClient,
+    cli: ManageExecutionClient,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageExecutionClient {
+    configured: bool,
+    connected: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageMessageChannels {
+    telegram: ManageMessageChannel,
+    feishu: ManageMessageChannel,
+    wechat: ManageMessageChannel,
+    wecom: ManageMessageChannel,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageMessageChannel {
+    account_count: usize,
+    connected_account_count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageLogDirectoryResponse {
+    directory: String,
+    instance_id: String,
+}
+
+fn remote_source_status(
+    remote: &remote_control_backend::RemoteControlStatusResponse,
+    source_kind: RemoteControlSourceKind,
+) -> (bool, bool) {
+    remote_source_status_from(
+        remote
+            .connections
+            .iter()
+            .map(|connection| (connection.source_kind, connection.healthy)),
+        source_kind,
+    )
+}
+
+fn remote_source_status_from(
+    connections: impl IntoIterator<Item = (RemoteControlSourceKind, bool)>,
+    source_kind: RemoteControlSourceKind,
+) -> (bool, bool) {
+    let mut configured = false;
+    let mut connected = false;
+    for (connection_source, healthy) in connections {
+        if connection_source != source_kind {
+            continue;
+        }
+        configured = true;
+        connected |= healthy;
+    }
+    (configured, connected)
+}
+
+fn im_account_counts<T>(
+    platform: ImPlatformKind,
+    accounts: &[T],
+    account_id: impl Fn(&T) -> &str,
+    runtime: &std::collections::HashMap<String, ImAccountRuntimeState>,
+) -> (usize, usize) {
+    let connected = accounts
+        .iter()
+        .filter(|account| {
+            runtime
+                .get(&im_account_key(platform, account_id(account)))
+                .is_some_and(|state| state.connected)
+        })
+        .count();
+    (accounts.len(), connected)
 }
 
 async fn manage_dashboard(State(state): State<SharedState>) -> Json<ManageDashboardResponse> {
@@ -296,26 +390,104 @@ async fn manage_dashboard(State(state): State<SharedState>) -> Json<ManageDashbo
         .is_some_and(|handle| !handle.is_finished());
     let remote = remote_control_backend::status_snapshot(&state).await;
     let codex_app = codex_app::codex_app_status_snapshot(&state).await;
-    let im_accounts = state.im_accounts.lock().await;
-    let im_account_count = im_accounts.len();
-    let connected_im_account_count = im_accounts
-        .values()
-        .filter(|account| account.connected)
-        .count();
-    drop(im_accounts);
-    let config = state.config.lock().await;
-
+    let (_, codex_app_connected) = remote_source_status(&remote, RemoteControlSourceKind::CodexApp);
+    let (vscode_configured, vscode_connected) =
+        remote_source_status(&remote, RemoteControlSourceKind::Vscode);
+    let (cli_configured, cli_connected) =
+        remote_source_status(&remote, RemoteControlSourceKind::Cli);
+    let config = state.config.lock().await.clone();
+    let feishu_accounts = config.effective_feishu_accounts();
+    let telegram_accounts = config.effective_telegram_accounts();
+    let wechat_accounts = config.effective_wechat_accounts();
+    let wecom_accounts = config.effective_wecom_accounts();
+    let runtime = state.im_accounts.lock().await;
+    let (feishu_account_count, feishu_connected_account_count) = im_account_counts(
+        ImPlatformKind::Feishu,
+        &feishu_accounts,
+        |account| account.account_id.as_str(),
+        &runtime,
+    );
+    let (telegram_account_count, telegram_connected_account_count) = im_account_counts(
+        ImPlatformKind::Telegram,
+        &telegram_accounts,
+        |account| account.account_id.as_str(),
+        &runtime,
+    );
+    let (wechat_account_count, wechat_connected_account_count) = im_account_counts(
+        ImPlatformKind::Wechat,
+        &wechat_accounts,
+        |account| account.account_id.as_str(),
+        &runtime,
+    );
+    let (wecom_account_count, wecom_connected_account_count) = im_account_counts(
+        ImPlatformKind::Wecom,
+        &wecom_accounts,
+        |account| account.account_id.as_str(),
+        &runtime,
+    );
+    let legacy_im_account_count = runtime.len();
+    let legacy_connected_im_account_count =
+        runtime.values().filter(|account| account.connected).count();
+    drop(runtime);
     Json(ManageDashboardResponse {
         service,
         bridge_running,
         remote_control_connected: remote.connected,
         remote_control_healthy: remote.healthy,
         codex_app_configured: codex_app.configured,
-        im_account_count,
-        connected_im_account_count,
+        im_account_count: legacy_im_account_count,
+        connected_im_account_count: legacy_connected_im_account_count,
+        execution_clients: ManageExecutionClients {
+            codex_app: ManageExecutionClient {
+                configured: codex_app.configured,
+                connected: codex_app_connected,
+            },
+            vscode: ManageExecutionClient {
+                configured: vscode_configured,
+                connected: vscode_connected,
+            },
+            cli: ManageExecutionClient {
+                configured: cli_configured,
+                connected: cli_connected,
+            },
+        },
+        message_channels: ManageMessageChannels {
+            telegram: ManageMessageChannel {
+                account_count: telegram_account_count,
+                connected_account_count: telegram_connected_account_count,
+            },
+            feishu: ManageMessageChannel {
+                account_count: feishu_account_count,
+                connected_account_count: feishu_connected_account_count,
+            },
+            wechat: ManageMessageChannel {
+                account_count: wechat_account_count,
+                connected_account_count: wechat_connected_account_count,
+            },
+            wecom: ManageMessageChannel {
+                account_count: wecom_account_count,
+                connected_account_count: wecom_connected_account_count,
+            },
+        },
         ai_gateway_enabled: config.ai_gateway.enabled,
         ai_gateway_provider_count: config.ai_gateway.providers.len(),
         request_logging_enabled: config.ai_gateway.request_logging_enabled,
+    })
+}
+
+async fn manage_log_directory(
+    State(state): State<SharedState>,
+) -> Json<ManageLogDirectoryResponse> {
+    let config = state.config.lock().await;
+    let directory = config
+        .state_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("logs");
+    Json(ManageLogDirectoryResponse {
+        directory: directory.to_string_lossy().into_owned(),
+        instance_id: state.daemon_identity.instance_id.clone(),
     })
 }
 
@@ -464,11 +636,16 @@ mod tests {
         http::{Method, header::AUTHORIZATION},
     };
     use serde_json::Value;
+    use std::collections::HashMap;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
     use crate::{
-        ai_gateway::config::ProviderConfig, app_state::AppState, daemon_process::DaemonIdentity,
+        ai_gateway::config::ProviderConfig,
+        app_state::{AppState, ImAccountRuntimeState, RemoteControlServerConnection},
+        config::{FeishuConfig, TelegramConfig, WechatConfig, WecomConfig},
+        daemon_process::DaemonIdentity,
+        types::ImPlatformKind,
     };
 
     const CANARY_PROVIDER_KEY: &str = "canary-provider-key-must-not-leak";
@@ -477,11 +654,48 @@ mod tests {
     const CANARY_MODEL: &str = "canary-model-must-not-leak";
     const CANARY_STATE_PATH: &str = "canary-private-state-path-must-not-leak.json";
 
-    fn management_test_router() -> (Router, TempDir, String) {
+    fn management_test_state() -> (SharedState, TempDir, String) {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("user-domain/config.toml");
         let mut config = AppConfig::default();
         config.state_path = temp.path().join(CANARY_STATE_PATH);
+        config.feishu_accounts = vec![FeishuConfig {
+            account_id: "canary-feishu-account-must-not-leak".to_string(),
+            app_id: "canary-feishu-app-id-must-not-leak".to_string(),
+            app_secret: "canary-feishu-secret-must-not-leak".to_string(),
+            display_name: "canary-feishu-name-must-not-leak".to_string(),
+            ..FeishuConfig::default()
+        }];
+        config.telegram_accounts = vec![
+            TelegramConfig {
+                account_id: "canary-telegram-connected-must-not-leak".to_string(),
+                bot_token: "canary-telegram-token-one-must-not-leak".to_string(),
+                display_name: "canary-telegram-name-one-must-not-leak".to_string(),
+                ..TelegramConfig::default()
+            },
+            TelegramConfig {
+                account_id: "canary-telegram-offline-must-not-leak".to_string(),
+                bot_token: "canary-telegram-token-two-must-not-leak".to_string(),
+                display_name: "canary-telegram-name-two-must-not-leak".to_string(),
+                ..TelegramConfig::default()
+            },
+        ];
+        config.wechat_accounts = vec![WechatConfig {
+            account_id: "canary-wechat-account-must-not-leak".to_string(),
+            bot_token: "canary-wechat-token-must-not-leak".to_string(),
+            display_name: "canary-wechat-name-must-not-leak".to_string(),
+            base_url: "https://canary-wechat.invalid".to_string(),
+            user_id: "canary-wechat-user-must-not-leak".to_string(),
+            ..WechatConfig::default()
+        }];
+        config.wecom_accounts = vec![WecomConfig {
+            account_id: "canary-wecom-account-must-not-leak".to_string(),
+            bot_id: "canary-wecom-bot-id-must-not-leak".to_string(),
+            secret: "canary-wecom-secret-must-not-leak".to_string(),
+            display_name: "canary-wecom-name-must-not-leak".to_string(),
+            websocket_url: "wss://canary-wecom.invalid".to_string(),
+            ..WecomConfig::default()
+        }];
         config.ai_gateway.enabled = true;
         config.ai_gateway.request_logging_enabled = true;
         config.ai_gateway.providers = vec![ProviderConfig {
@@ -493,7 +707,7 @@ mod tests {
             ..ProviderConfig::default()
         }];
         let state = AppState::new(config_path.clone(), config, None, None);
-        let app = router(state);
+        manage_api::ensure_management_token(&config_path).expect("create management control file");
         let control: Value = serde_json::from_slice(
             &std::fs::read(manage_api::control_file_path(&config_path))
                 .expect("read management control file"),
@@ -504,7 +718,12 @@ mod tests {
             .and_then(Value::as_str)
             .expect("management token")
             .to_string();
-        (app, temp, token)
+        (state, temp, token)
+    }
+
+    fn management_test_router() -> (Router, TempDir, String) {
+        let (state, temp, token) = management_test_state();
+        (router(state), temp, token)
     }
 
     async fn route_response(
@@ -565,7 +784,67 @@ mod tests {
 
     #[tokio::test]
     async fn manage_dashboard_exposes_only_aggregate_non_secret_state() {
-        let (app, temp, token) = management_test_router();
+        let (state, temp, token) = management_test_state();
+        {
+            let mut runtime = state.im_accounts.lock().await;
+            let mut telegram = ImAccountRuntimeState::new(
+                ImPlatformKind::Telegram,
+                "canary-telegram-connected-must-not-leak",
+            );
+            telegram.connected = true;
+            runtime.insert(
+                im_account_key(
+                    ImPlatformKind::Telegram,
+                    "canary-telegram-connected-must-not-leak",
+                ),
+                telegram,
+            );
+            let mut wechat = ImAccountRuntimeState::new(
+                ImPlatformKind::Wechat,
+                "canary-wechat-account-must-not-leak",
+            );
+            wechat.connected = true;
+            runtime.insert(
+                im_account_key(
+                    ImPlatformKind::Wechat,
+                    "canary-wechat-account-must-not-leak",
+                ),
+                wechat,
+            );
+            let mut orphan = ImAccountRuntimeState::new(
+                ImPlatformKind::Wecom,
+                "canary-orphan-runtime-must-not-leak",
+            );
+            orphan.connected = true;
+            runtime.insert(
+                im_account_key(ImPlatformKind::Wecom, "canary-orphan-runtime-must-not-leak"),
+                orphan,
+            );
+        }
+        {
+            let mut remote = state.remote_control.inner.lock().await;
+            let (vscode_tx, _vscode_rx) = tokio::sync::mpsc::unbounded_channel();
+            remote.connections.insert(
+                "canary-vscode-connection-must-not-leak".to_string(),
+                test_remote_connection(
+                    "canary-vscode-connection-must-not-leak",
+                    RemoteControlSourceKind::Vscode,
+                    true,
+                    Some(vscode_tx),
+                ),
+            );
+            let (cli_tx, _cli_rx) = tokio::sync::mpsc::unbounded_channel();
+            remote.connections.insert(
+                "canary-cli-connection-must-not-leak".to_string(),
+                test_remote_connection(
+                    "canary-cli-connection-must-not-leak",
+                    RemoteControlSourceKind::Cli,
+                    false,
+                    Some(cli_tx),
+                ),
+            );
+        }
+        let app = router(state);
         let response = route_response(app, "/api/v1/manage/dashboard", Some(&token)).await;
         assert_eq!(response.status(), StatusCode::OK);
         let dashboard = response_json(response).await;
@@ -581,7 +860,9 @@ mod tests {
                 "bridgeRunning",
                 "codexAppConfigured",
                 "connectedImAccountCount",
+                "executionClients",
                 "imAccountCount",
+                "messageChannels",
                 "remoteControlConnected",
                 "remoteControlHealthy",
                 "requestLoggingEnabled",
@@ -589,22 +870,69 @@ mod tests {
             ]
         );
 
+        let execution_clients = object
+            .get("executionClients")
+            .and_then(Value::as_object)
+            .expect("execution clients object");
+        assert_exact_keys(execution_clients, &["cli", "codexApp", "vscode"]);
+        for client in ["cli", "codexApp", "vscode"] {
+            let status = execution_clients[client]
+                .as_object()
+                .expect("execution client status object");
+            assert_exact_keys(status, &["configured", "connected"]);
+        }
+        assert_eq!(execution_clients["codexApp"]["connected"], json!(false));
+        assert_eq!(execution_clients["vscode"]["configured"], json!(true));
+        assert_eq!(execution_clients["vscode"]["connected"], json!(true));
+        assert_eq!(execution_clients["cli"]["configured"], json!(true));
+        assert_eq!(execution_clients["cli"]["connected"], json!(false));
+        assert_eq!(object["codexAppConfigured"], json!(true));
+        assert_eq!(object["imAccountCount"], json!(3));
+        assert_eq!(object["connectedImAccountCount"], json!(3));
+
+        let message_channels = object
+            .get("messageChannels")
+            .and_then(Value::as_object)
+            .expect("message channels object");
+        assert_exact_keys(message_channels, &["feishu", "telegram", "wechat", "wecom"]);
+        for platform in ["feishu", "telegram", "wechat", "wecom"] {
+            let status = message_channels[platform]
+                .as_object()
+                .expect("message channel status object");
+            assert_exact_keys(status, &["accountCount", "connectedAccountCount"]);
+        }
+        assert_eq!(message_channels["feishu"]["accountCount"], json!(1));
+        assert_eq!(
+            message_channels["feishu"]["connectedAccountCount"],
+            json!(0)
+        );
+        assert_eq!(message_channels["telegram"]["accountCount"], json!(2));
+        assert_eq!(
+            message_channels["telegram"]["connectedAccountCount"],
+            json!(1)
+        );
+        assert_eq!(message_channels["wechat"]["accountCount"], json!(1));
+        assert_eq!(
+            message_channels["wechat"]["connectedAccountCount"],
+            json!(1)
+        );
+        assert_eq!(message_channels["wecom"]["accountCount"], json!(1));
+        assert_eq!(message_channels["wecom"]["connectedAccountCount"], json!(0));
+
         let service = object
             .get("service")
             .and_then(Value::as_object)
             .expect("service status object");
-        let mut service_keys = service.keys().map(String::as_str).collect::<Vec<_>>();
-        service_keys.sort_unstable();
-        assert_eq!(
-            service_keys,
-            vec![
+        assert_exact_keys(
+            service,
+            &[
                 "apiMajor",
                 "instanceId",
                 "pid",
                 "ready",
                 "service",
                 "startedAtMs",
-            ]
+            ],
         );
 
         let encoded = serde_json::to_string(&dashboard).expect("serialize dashboard");
@@ -615,6 +943,13 @@ mod tests {
             CANARY_MODEL,
             CANARY_STATE_PATH,
             "canary-provider-name-must-not-leak",
+            "canary-feishu",
+            "canary-telegram",
+            "canary-wechat",
+            "canary-wecom",
+            "canary-orphan",
+            "canary-vscode",
+            "canary-cli",
         ] {
             assert!(!encoded.contains(secret), "dashboard leaked {secret}");
         }
@@ -641,12 +976,122 @@ mod tests {
             "configPath",
             "config",
             "providers",
+            "accountId",
+            "displayName",
+            "appId",
+            "appSecret",
+            "botId",
+            "botToken",
+            "secret",
+            "websocketUrl",
+            "userId",
+            "allowedOpenIds",
+            "allowedChatIds",
+            "allowedUserIds",
+            "lastError",
         ] {
             assert!(
                 !contains_json_key(&dashboard, forbidden_field),
                 "dashboard exposed field {forbidden_field}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn manage_log_directory_follows_the_normalized_state_path() {
+        let (state, temp, token) = management_test_state();
+        let expected = state
+            .config
+            .lock()
+            .await
+            .state_path
+            .parent()
+            .expect("state directory")
+            .join("logs")
+            .to_string_lossy()
+            .into_owned();
+        let instance_id = state.daemon_identity.instance_id.clone();
+        let app = router(state);
+
+        let unauthorized = route_response(app.clone(), "/api/v1/manage/log-directory", None).await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = route_response(app, "/api/v1/manage/log-directory", Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            json!({
+                "directory": expected,
+                "instanceId": instance_id,
+            })
+        );
+        drop(temp);
+    }
+
+    fn assert_exact_keys(object: &serde_json::Map<String, Value>, expected: &[&str]) {
+        let mut keys = object.keys().map(String::as_str).collect::<Vec<_>>();
+        keys.sort_unstable();
+        let mut expected = expected.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys, expected);
+    }
+
+    fn test_remote_connection(
+        id: &str,
+        source_kind: RemoteControlSourceKind,
+        initialized: bool,
+        outbound_tx: Option<
+            tokio::sync::mpsc::UnboundedSender<crate::remote_control_backend::OutboundWsMessage>,
+        >,
+    ) -> RemoteControlServerConnection {
+        RemoteControlServerConnection {
+            connection_id: id.to_string(),
+            connection_epoch: 1,
+            default_client_key: "default".to_string(),
+            connected: true,
+            initialized,
+            source_kind,
+            user_agent: Some(format!("canary-user-agent-{id}-must-not-leak")),
+            server_id: Some(format!("canary-server-{id}-must-not-leak")),
+            environment_id: None,
+            server_name: None,
+            installation_id: None,
+            account_id: None,
+            subscribe_cursor: None,
+            outbound_tx,
+            connected_at_ms: Some(1),
+            last_ws_inbound_at_ms: Some(1),
+            last_ws_ping_at_ms: None,
+            last_ws_pong_at_ms: None,
+            last_error: Some(format!("canary-error-{id}-must-not-leak")),
+            clients: HashMap::new(),
+            stream_diagnostics: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn execution_client_status_separates_discovery_from_healthy_connection() {
+        assert_eq!(
+            remote_source_status_from([], RemoteControlSourceKind::Vscode),
+            (false, false)
+        );
+        assert_eq!(
+            remote_source_status_from(
+                [(RemoteControlSourceKind::Vscode, false)],
+                RemoteControlSourceKind::Vscode,
+            ),
+            (true, false)
+        );
+        assert_eq!(
+            remote_source_status_from(
+                [
+                    (RemoteControlSourceKind::CodexApp, true),
+                    (RemoteControlSourceKind::Vscode, true),
+                ],
+                RemoteControlSourceKind::Vscode,
+            ),
+            (true, true)
+        );
     }
 
     fn collect_json_strings<'a>(value: &'a Value, output: &mut Vec<&'a str>) {

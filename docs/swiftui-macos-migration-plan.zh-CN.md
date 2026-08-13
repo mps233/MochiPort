@@ -4,7 +4,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Phase 0 基础已落地，准备进入只读总览实现 |
+| 状态 | Phase 1 只读总览功能已落地，等待启动副作用隔离与 24 小时长稳验证 |
 | 最近核验 | 2026-08-13；Rust/SwiftPM/Xcode 构建与测试通过 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
@@ -366,13 +366,15 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 交付物：
 
-- [ ] 对接 `/healthz` 与 `/api/v1/manage/dashboard`；旧 `/api/status`、`/api/gui/dashboard` 仅用于桥接兼容测试。
-- [ ] 展示 daemon、Codex App、VS Code、CLI、remote-control、Telegram、飞书、微信、企业微信和 AI Gateway 状态，完整对应第 7.3 节总览的四个 section。
-- [ ] 支持加载、空、离线、部分失败和陈旧数据状态。
-- [ ] 支持手动刷新和统一自动刷新，窗口不可见时降低刷新频率。
-- [ ] 建立诊断信息复制和打开日志目录入口。
+- [x] 对接 `/healthz` 与 `/api/v1/manage/dashboard`；旧 `/api/status`、`/api/gui/dashboard` 仅用于桥接兼容测试。
+- [x] 展示 daemon、Codex App、VS Code、CLI、remote-control、Telegram、飞书、微信、企业微信和 AI Gateway 状态，完整对应第 7.3 节总览的四个 section。
+- [x] 支持加载、空、离线、部分失败和陈旧数据状态。
+- [x] 支持手动刷新和统一自动刷新，窗口不可见时降低刷新频率。
+- [x] 建立脱敏诊断摘要复制和打开日志目录入口。
 
 验收：使用固定 fixture 时 SwiftUI 与 wxDragon 对 daemon 状态的分类结果全部一致；连续运行只读预览版 24 小时，不产生第二个 daemon、不写业务配置、不触发 daemon 重启，由预览版主动终止的受保护工作项数为 0。
+
+当前验证边界：fixture、API 契约、SwiftPM、Xcode 与 Rust 测试已通过；真实 daemon 的 24 小时长稳验证仍未勾选。隔离端口冒烟发现 Rust daemon 启动会同步 Codex App 环境，因此在 Phase 2 拆分“只读探测”和“受管启动”前，不把启动隔离实例计为 Phase 1 只读验收完成。
 
 ### Phase 2：daemon 生命周期与菜单栏
 

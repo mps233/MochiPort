@@ -236,6 +236,16 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         .with_context(|| format!("invalid bind address `{bind}`"))?;
     tracing::info!(target: "threadrelay::startup", addr = %addr, "binding local service");
     let listener = TcpListener::bind(addr).await?;
+    let advertised_addr = if addr.ip().is_unspecified() {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port())
+    } else {
+        addr
+    };
+    let _active_daemon_locator = manage_api::publish_active_daemon_locator(
+        &state.config_path,
+        &state.daemon_identity,
+        &format!("http://{advertised_addr}"),
+    )?;
     println!("threadrelay web: http://{addr}");
     tracing::info!(target: "threadrelay::startup", addr = %addr, "local service listener ready");
 

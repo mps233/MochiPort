@@ -27,10 +27,13 @@ struct ThreadRelayApp: App {
     }
 
     var body: some Scene {
-        WindowGroup(id: "main") {
+        Window("ThreadRelay", id: "main") {
             RootView()
                 .environmentObject(model)
                 .frame(minWidth: 760, minHeight: 540)
+                .background(WindowVisibilityObserver { visible in
+                    model.setWindowVisible(visible)
+                })
         }
         .defaultSize(width: 1040, height: 700)
         .commands {
@@ -71,6 +74,101 @@ struct ThreadRelayApp: App {
             .credits: NSAttributedString(string: "Local-first bridge for controlling coding agents from chat."),
         ])
         NSApplication.shared.activate(ignoringOtherApps: true)
+    }
+}
+
+private struct WindowVisibilityObserver: NSViewRepresentable {
+    let onChange: @MainActor (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onChange: onChange)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.attach(to: view)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.attach(to: view)
+    }
+
+    @MainActor
+    final class Coordinator: @unchecked Sendable {
+        private let onChange: @MainActor (Bool) -> Void
+        private var observations: [NSObjectProtocol] = []
+        private weak var window: NSWindow?
+
+        init(onChange: @escaping @MainActor (Bool) -> Void) {
+            self.onChange = onChange
+        }
+
+        func attach(to view: NSView) {
+            Task { @MainActor [weak self, weak view] in
+                guard let self, let window = view?.window, self.window !== window else { return }
+                self.clearObservations()
+                self.window = window
+                let center = NotificationCenter.default
+                for name in [
+                    NSWindow.didChangeOcclusionStateNotification,
+                    NSWindow.didMiniaturizeNotification,
+                    NSWindow.didDeminiaturizeNotification,
+                ] {
+                    self.observations.append(center.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                        Task { @MainActor in
+                            self?.publishVisibility()
+                        }
+                    })
+                }
+                self.observations.append(
+                    center.addObserver(
+                        forName: NSWindow.willCloseNotification,
+                        object: window,
+                        queue: .main
+                    ) { [weak self] _ in
+                        Task { @MainActor in
+                            self?.onChange(false)
+                        }
+                    }
+                )
+                for name in [
+                    NSApplication.didBecomeActiveNotification,
+                    NSApplication.didResignActiveNotification,
+                ] {
+                    self.observations.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                        Task { @MainActor in
+                            self?.publishVisibility()
+                        }
+                    })
+                }
+                self.publishVisibility()
+            }
+        }
+
+        func dismantle() {
+            onChange(false)
+            clearObservations()
+            window = nil
+        }
+
+        private func clearObservations() {
+            observations.forEach(NotificationCenter.default.removeObserver)
+            observations.removeAll()
+        }
+
+        private func publishVisibility() {
+            guard let window else { return }
+            let visible = window.isVisible
+                && !window.isMiniaturized
+                && window.occlusionState.contains(.visible)
+                && NSApplication.shared.isActive
+            onChange(visible)
+        }
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.dismantle()
     }
 }
 

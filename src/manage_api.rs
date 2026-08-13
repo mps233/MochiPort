@@ -29,10 +29,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::app_state::SharedState;
+use crate::{app_state::SharedState, daemon_process::DaemonIdentity};
 
 pub const API_MAJOR: u16 = 1;
 const CONTROL_FILE_NAME: &str = "threadrelay-control.json";
+const ACTIVE_DAEMON_FILE_NAME: &str = "threadrelay-active-daemon.json";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -59,12 +60,31 @@ struct ControlFile {
     management_token: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveDaemonLocator {
+    pub service: String,
+    pub api_major: u16,
+    pub instance_id: String,
+    pub pid: u32,
+    pub started_at_ms: u64,
+    pub base_url: String,
+    pub control_file: String,
+}
+
+pub struct ActiveDaemonLocatorGuard {
+    path: PathBuf,
+    instance_id: String,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error("failed to prepare management control file")]
     Io(#[source] std::io::Error),
     #[error("management control file is invalid")]
     InvalidControlFile,
+    #[error("active daemon discovery file is invalid")]
+    InvalidDiscoveryFile,
 }
 
 /// Return the control-plane file for the user-data domain containing the
@@ -84,6 +104,115 @@ pub fn ensure_management_token(config_path: &Path) -> Result<(), AuthError> {
     let path = control_file_path(config_path);
     let _ = load_or_create_management_token(&path)?;
     Ok(())
+}
+
+pub fn active_daemon_locator_path() -> Result<PathBuf, AuthError> {
+    #[cfg(target_os = "windows")]
+    let base = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("APPDATA"))
+        .map(PathBuf::from);
+
+    #[cfg(target_os = "macos")]
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support"));
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join(".local/state"))
+        });
+
+    base.map(|base| base.join("ThreadRelay").join(ACTIVE_DAEMON_FILE_NAME))
+        .ok_or_else(|| {
+            AuthError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "user data directory is unavailable",
+            ))
+        })
+}
+
+pub fn publish_active_daemon_locator(
+    config_path: &Path,
+    identity: &DaemonIdentity,
+    base_url: &str,
+) -> Result<ActiveDaemonLocatorGuard, AuthError> {
+    let path = active_daemon_locator_path()?;
+    publish_active_daemon_locator_at(&path, config_path, identity, base_url)
+}
+
+fn publish_active_daemon_locator_at(
+    path: &Path,
+    config_path: &Path,
+    identity: &DaemonIdentity,
+    base_url: &str,
+) -> Result<ActiveDaemonLocatorGuard, AuthError> {
+    let locator = ActiveDaemonLocator {
+        service: identity.service.clone(),
+        api_major: API_MAJOR,
+        instance_id: identity.instance_id.clone(),
+        pid: identity.pid,
+        started_at_ms: identity.started_at_ms,
+        base_url: base_url.to_string(),
+        control_file: control_file_path(config_path)
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let contents = serde_json::to_vec(&locator).map_err(|_| AuthError::InvalidDiscoveryFile)?;
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| AuthError::InvalidDiscoveryFile)?;
+    fs::create_dir_all(parent).map_err(AuthError::Io)?;
+
+    let temporary = parent.join(format!(
+        ".{ACTIVE_DAEMON_FILE_NAME}.{}.{}.tmp",
+        std::process::id(),
+        Uuid::new_v4().simple()
+    ));
+    let write_result = (|| {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary).map_err(AuthError::Io)?;
+        file.write_all(&contents).map_err(AuthError::Io)?;
+        file.write_all(b"\n").map_err(AuthError::Io)?;
+        file.sync_all().map_err(AuthError::Io)?;
+        if let Err(error) = fs::rename(&temporary, path) {
+            if path.exists() {
+                fs::remove_file(path).map_err(AuthError::Io)?;
+                fs::rename(&temporary, path).map_err(AuthError::Io)?;
+            } else {
+                return Err(AuthError::Io(error));
+            }
+        }
+        enforce_private_permissions(path).map_err(AuthError::Io)
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result?;
+
+    Ok(ActiveDaemonLocatorGuard {
+        path: path.to_path_buf(),
+        instance_id: identity.instance_id.clone(),
+    })
+}
+
+impl Drop for ActiveDaemonLocatorGuard {
+    fn drop(&mut self) {
+        let belongs_to_this_instance = fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ActiveDaemonLocator>(&bytes).ok())
+            .is_some_and(|locator| locator.instance_id == self.instance_id);
+        if belongs_to_this_instance {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 pub async fn healthz() -> Json<HealthResponse> {
@@ -295,5 +424,66 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn active_daemon_locator_is_private_and_instance_guarded() {
+        let temp = tempdir().expect("tempdir");
+        let locator_path = temp.path().join(ACTIVE_DAEMON_FILE_NAME);
+        let config_path = temp.path().join("custom-domain/config.toml");
+        let identity = DaemonIdentity {
+            service: "threadrelay".to_string(),
+            pid: 42,
+            instance_id: "active-instance".to_string(),
+            started_at_ms: 123,
+        };
+        let guard = publish_active_daemon_locator_at(
+            &locator_path,
+            &config_path,
+            &identity,
+            "http://127.0.0.1:3847",
+        )
+        .expect("publish locator");
+        let locator: ActiveDaemonLocator =
+            serde_json::from_slice(&fs::read(&locator_path).expect("read locator"))
+                .expect("decode locator");
+        assert_eq!(
+            locator,
+            ActiveDaemonLocator {
+                service: "threadrelay".to_string(),
+                api_major: API_MAJOR,
+                instance_id: "active-instance".to_string(),
+                pid: 42,
+                started_at_ms: 123,
+                base_url: "http://127.0.0.1:3847".to_string(),
+                control_file: control_file_path(&config_path)
+                    .to_string_lossy()
+                    .into_owned(),
+            }
+        );
+        assert!(
+            !String::from_utf8_lossy(&fs::read(&locator_path).unwrap()).contains("managementToken")
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&locator_path)
+                .expect("locator metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let replacement = ActiveDaemonLocator {
+            instance_id: "replacement-instance".to_string(),
+            ..locator
+        };
+        fs::write(
+            &locator_path,
+            serde_json::to_vec(&replacement).expect("encode replacement"),
+        )
+        .expect("write replacement");
+        drop(guard);
+        assert!(locator_path.exists(), "old guard removed newer locator");
     }
 }
