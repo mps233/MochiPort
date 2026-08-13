@@ -19,8 +19,8 @@ use crate::{
     types::{ImPlatformKind, now_ms},
 };
 
-const EXPECTED_BUNDLE_IDENTIFIER: &str = "com.codexhub.app";
-const EXPECTED_BUNDLE_EXECUTABLE: &str = "CodexHub";
+const EXPECTED_BUNDLE_IDENTIFIER: &str = "io.github.mps233.threadrelay";
+const EXPECTED_BUNDLE_EXECUTABLE: &str = "ThreadRelay";
 const MAX_PENDING_AGE: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_HELPER_START_DELAY_MS: u64 = 350;
 const DEFAULT_HELPER_SHUTDOWN_MODE: SafeRelaunchShutdownMode = SafeRelaunchShutdownMode::Guarded;
@@ -177,7 +177,7 @@ async fn register_request(
     }
     if expected_bundle_identifier != EXPECTED_BUNDLE_IDENTIFIER {
         return Err(RegisterError::bad_request(
-            "unexpected CodexHub bundle identifier",
+            "unexpected ThreadRelay bundle identifier",
         ));
     }
 
@@ -408,7 +408,7 @@ async fn spawn_relaunch_helper(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("logs")
-        .join("codexhub-safe-relaunch.log");
+        .join("threadrelay-safe-relaunch.log");
 
     let mut command = Command::new(&executable);
     command
@@ -461,7 +461,7 @@ fn gui_pid_for_helper(executable: &Path, daemon_pid: u32) -> Result<Option<u32>,
             .map_err(|_| "managed GUI pid is invalid".to_string())?;
         if gui_pid <= 1 || gui_pid == daemon_pid || !process_matches_executable(gui_pid, executable)
         {
-            return Err("managed GUI pid does not match the running CodexHub app".to_string());
+            return Err("managed GUI pid does not match the running ThreadRelay app".to_string());
         }
         return Ok(Some(gui_pid));
     }
@@ -530,7 +530,7 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         }
         if process_is_alive(gui_pid) {
             log_line(&log_path, "old_gui_still_active");
-            anyhow::bail!("old CodexHub GUI did not stop in time");
+            anyhow::bail!("old ThreadRelay GUI did not stop in time");
         }
     }
 
@@ -546,7 +546,7 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         return fail_with_rollback(
             &old_bundle,
             &log_path,
-            "old CodexHub process or local bind address did not stop in time",
+            "old ThreadRelay process or local bind address did not stop in time",
         );
     }
 
@@ -561,7 +561,7 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         &log_path,
         &format!("bundle_launched={}", candidate.display()),
     );
-    let expected_new_executable = candidate.join("Contents/MacOS/CodexHub");
+    let expected_new_executable = candidate.join("Contents/MacOS/ThreadRelay");
     if !wait_for_new_daemon(
         &args.config_path,
         &args.daemon_instance_id,
@@ -573,7 +573,7 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         return fail_with_rollback(
             &old_bundle,
             &log_path,
-            "new CodexHub daemon did not become ready in time",
+            "new ThreadRelay daemon did not become ready in time",
         );
     }
     log_line(&log_path, "new_daemon_verified");
@@ -805,7 +805,10 @@ fn daemon_status_matches(
     serde_json::from_str::<Value>(body).is_ok_and(|value| {
         value.get("pid").and_then(Value::as_u64) == Some(u64::from(expected_pid))
             && value.get("instanceId").and_then(Value::as_str) == Some(expected_instance_id)
-            && value.get("service").and_then(Value::as_str) == Some("codexhub")
+            && matches!(
+                value.get("service").and_then(Value::as_str),
+                Some("threadrelay" | "codexhub")
+            )
     })
 }
 
@@ -1007,9 +1010,11 @@ fn validate_candidate_bundle_against(
         return Err("bundle path is not a directory".to_string());
     }
     let info_path = canonical.join("Contents/Info.plist");
-    let executable_path = canonical.join("Contents/MacOS/CodexHub");
+    let executable_path = canonical.join("Contents/MacOS/ThreadRelay");
     if !info_path.is_file() || !executable_path.is_file() {
-        return Err("bundle is missing Contents/Info.plist or Contents/MacOS/CodexHub".to_string());
+        return Err(
+            "bundle is missing Contents/Info.plist or Contents/MacOS/ThreadRelay".to_string(),
+        );
     }
     if path_contains_symlink(&info_path) || path_contains_symlink(&executable_path) {
         return Err("bundle contents may not contain symlinks".to_string());
@@ -1043,13 +1048,13 @@ fn validate_candidate_bundle_against(
         ));
     }
     if actual.executable != EXPECTED_BUNDLE_EXECUTABLE {
-        return Err("bundle executable is not CodexHub".to_string());
+        return Err("bundle executable is not ThreadRelay".to_string());
     }
     if actual.package_type != "APPL" {
         return Err("bundle package type is not APPL".to_string());
     }
     if actual.bundle_identifier != EXPECTED_BUNDLE_IDENTIFIER {
-        return Err("bundle identifier is not com.codexhub.app".to_string());
+        return Err("bundle identifier is not io.github.mps233.threadrelay".to_string());
     }
     let candidate_build = actual
         .build
@@ -1168,9 +1173,9 @@ mod tests {
 
     fn pending(thread_id: &str, requested_at_ms: u128) -> PendingSafeRelaunch {
         PendingSafeRelaunch {
-            bundle_path: PathBuf::from("/tmp/CodexHub-build330.app"),
+            bundle_path: PathBuf::from("/tmp/ThreadRelay-build330.app"),
             metadata: BundleMetadata {
-                bundle_path: "/tmp/CodexHub-build330.app".to_string(),
+                bundle_path: "/tmp/ThreadRelay-build330.app".to_string(),
                 bundle_identifier: EXPECTED_BUNDLE_IDENTIFIER.to_string(),
                 executable: EXPECTED_BUNDLE_EXECUTABLE.to_string(),
                 package_type: "APPL".to_string(),
@@ -1185,10 +1190,10 @@ mod tests {
 
     #[test]
     fn bundle_root_is_found_from_macos_executable_layout() {
-        let path = Path::new("/tmp/CodexHub-build330.app/Contents/MacOS/CodexHub");
+        let path = Path::new("/tmp/ThreadRelay-build330.app/Contents/MacOS/ThreadRelay");
         assert_eq!(
             bundle_root_from_executable(path),
-            Some(PathBuf::from("/tmp/CodexHub-build330.app"))
+            Some(PathBuf::from("/tmp/ThreadRelay-build330.app"))
         );
     }
 
@@ -1206,7 +1211,7 @@ mod tests {
 
     #[test]
     fn helper_request_is_sent_without_shell_interpolation() {
-        let path = Path::new("/tmp/CodexHub build 330.app");
+        let path = Path::new("/tmp/ThreadRelay build 330.app");
         assert_eq!(
             path.extension().and_then(|value| value.to_str()),
             Some("app")
@@ -1344,7 +1349,7 @@ mod tests {
                 let instance_id = route_instance_id.clone();
                 async move {
                     Json(json!({
-                        "service": "codexhub",
+                        "service": "threadrelay",
                         "pid": expected_pid,
                         "instanceId": instance_id,
                     }))
@@ -1429,7 +1434,7 @@ mod tests {
             .and_then(|path| path.canonicalize())
             .expect("current executable");
         let mut args = SafeRelaunchHelperArgs {
-            bundle_path: PathBuf::from("/tmp/CodexHub-build330.app"),
+            bundle_path: PathBuf::from("/tmp/ThreadRelay-build330.app"),
             expected_bundle_identifier: EXPECTED_BUNDLE_IDENTIFIER.to_string(),
             expected_version: "0.4.20".to_string(),
             expected_build: "330".to_string(),
@@ -1498,8 +1503,8 @@ mod tests {
     fn candidate_bundle_must_be_newer_and_next_to_running_bundle() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().canonicalize().expect("canonical tempdir");
-        let current = root.join("CodexHub-build329.app");
-        let candidate = root.join("CodexHub build 330.app");
+        let current = root.join("ThreadRelay-build329.app");
+        let candidate = root.join("ThreadRelay build 330.app");
         write_test_bundle(&current, EXPECTED_BUNDLE_IDENTIFIER, "329");
         write_test_bundle(&candidate, EXPECTED_BUNDLE_IDENTIFIER, "330");
 
@@ -1530,9 +1535,9 @@ mod tests {
     fn candidate_bundle_rejects_wrong_identity_and_untrusted_parent() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().canonicalize().expect("canonical tempdir");
-        let current = root.join("trusted/CodexHub-build329.app");
-        let wrong_id = root.join("trusted/CodexHub-build330.app");
-        let outside = root.join("other/CodexHub-build331.app");
+        let current = root.join("trusted/ThreadRelay-build329.app");
+        let wrong_id = root.join("trusted/ThreadRelay-build330.app");
+        let outside = root.join("other/ThreadRelay-build331.app");
         write_test_bundle(&current, EXPECTED_BUNDLE_IDENTIFIER, "329");
         write_test_bundle(&wrong_id, "com.example.other", "330");
         write_test_bundle(&outside, EXPECTED_BUNDLE_IDENTIFIER, "331");

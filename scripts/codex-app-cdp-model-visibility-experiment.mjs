@@ -395,9 +395,9 @@ async function runOfflineStatsigReload(session, useLocalPayload) {
       headers: { "content-type": "application/json" },
       body: "{}",
     });
-    if (!response.ok) throw new Error(`CodexHub Statsig bootstrap returned HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`ThreadRelay Statsig bootstrap returned HTTP ${response.status}`);
     const envelope = await response.json();
-    if (typeof envelope.statsigPayload !== "string") throw new Error("CodexHub Statsig bootstrap payload is missing");
+    if (typeof envelope.statsigPayload !== "string") throw new Error("ThreadRelay Statsig bootstrap payload is missing");
     responseBody = envelope.statsigPayload;
   } else {
     const values = await session.evaluate("window.__STATSIG__?.firstInstance?._store?.getValues?.() ?? null");

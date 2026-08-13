@@ -97,13 +97,13 @@ impl Cli {
             Some("uninstall-codex-app") => parse_uninstall_codex_app(&remaining[1..])?,
             Some("safe-relaunch-helper") => parse_safe_relaunch_helper(&remaining[1..])?,
             Some("install-shim") | Some("uninstall-shim") | Some("shim") => anyhow::bail!(
-                "CLI shim support has been removed. Use `codexhub configure-codex-app` and Codex App remote-control instead."
+                "CLI shim support has been removed. Use `threadrelay configure-codex-app` and Codex App remote-control instead."
             ),
             Some("-h") | Some("--help") | Some("help") => {
                 print_help();
                 std::process::exit(0);
             }
-            Some(other) => anyhow::bail!("unknown command `{other}`. Run `codexhub help`."),
+            Some(other) => anyhow::bail!("unknown command `{other}`. Run `threadrelay help`."),
         };
 
         Ok(Self {
@@ -304,16 +304,16 @@ fn parse_positive_u32(name: &str, value: &str) -> anyhow::Result<u32> {
 
 pub fn print_help() {
     println!(
-        r#"codexhub
+        r#"threadrelay
 
 Usage:
-  codexhub [--config PATH] gui
-  codexhub [--config PATH] daemon
-  codexhub [--config PATH] on
-  codexhub [--config PATH] off
-  codexhub [--config PATH] status
-  codexhub [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
-  codexhub [--config PATH] uninstall-codex-app [--codex-home PATH]
+  threadrelay [--config PATH] gui
+  threadrelay [--config PATH] daemon
+  threadrelay [--config PATH] on
+  threadrelay [--config PATH] off
+  threadrelay [--config PATH] status
+  threadrelay [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
+  threadrelay [--config PATH] uninstall-codex-app [--codex-home PATH]
 
 Default command is gui when built with the gui feature, otherwise daemon.
 "#
@@ -327,9 +327,9 @@ mod tests {
     fn safe_relaunch_helper_args(shutdown_mode: Option<&str>) -> Vec<String> {
         let mut args = vec![
             "--bundle-path",
-            "/tmp/CodexHub build 330.app",
+            "/tmp/ThreadRelay build 330.app",
             "--expected-bundle-identifier",
-            "com.codexhub.app",
+            "io.github.mps233.threadrelay",
             "--expected-version",
             "0.4.20",
             "--expected-build",
@@ -339,15 +339,15 @@ mod tests {
             "--daemon-instance-id",
             "instance-a",
             "--old-executable-path",
-            "/tmp/CodexHub old.app/Contents/MacOS/CodexHub",
+            "/tmp/ThreadRelay old.app/Contents/MacOS/ThreadRelay",
             "--gui-pid",
             "100",
             "--bind-address",
             "127.0.0.1:3847",
             "--log-path",
-            "/tmp/CodexHub logs/relaunch.log",
+            "/tmp/ThreadRelay logs/relaunch.log",
             "--config-path",
-            "/tmp/CodexHub config/config.toml",
+            "/tmp/ThreadRelay config/config.toml",
             "--start-delay-ms",
             "350",
         ]
@@ -380,17 +380,20 @@ mod tests {
         else {
             panic!("expected safe relaunch helper")
         };
-        assert_eq!(bundle_path, PathBuf::from("/tmp/CodexHub build 330.app"));
+        assert_eq!(bundle_path, PathBuf::from("/tmp/ThreadRelay build 330.app"));
         assert_eq!(
             old_executable_path,
-            PathBuf::from("/tmp/CodexHub old.app/Contents/MacOS/CodexHub")
+            PathBuf::from("/tmp/ThreadRelay old.app/Contents/MacOS/ThreadRelay")
         );
         assert_eq!(gui_pid, Some(100));
         assert_eq!(bind_addr, "127.0.0.1:3847".parse().expect("bind address"));
-        assert_eq!(log_path, PathBuf::from("/tmp/CodexHub logs/relaunch.log"));
+        assert_eq!(
+            log_path,
+            PathBuf::from("/tmp/ThreadRelay logs/relaunch.log")
+        );
         assert_eq!(
             config_path,
-            PathBuf::from("/tmp/CodexHub config/config.toml")
+            PathBuf::from("/tmp/ThreadRelay config/config.toml")
         );
         assert_eq!(start_delay_ms, 350);
         assert_eq!(shutdown_mode, SafeRelaunchShutdownMode::Guarded);

@@ -6,7 +6,7 @@ Use this before publishing the repository or creating a release.
 
 - [ ] Choose and add a license file.
 - [ ] Confirm `config.toml` is not tracked.
-- [ ] Confirm `codexhub-state.json` is not tracked.
+- [ ] Confirm `threadrelay-state.json` is not tracked.
 - [ ] Confirm logs are not tracked.
 - [ ] Confirm build outputs are not tracked.
 - [ ] Remove private screenshots, local paths, tokens, open ids, and chat ids from docs.
@@ -16,7 +16,7 @@ Use this before publishing the repository or creating a release.
 ```powershell
 cargo fmt
 cargo test
-cargo build --release --features gui --bin codexhub
+cargo build --release --features gui --bin threadrelay
 ```
 
 ## Clean Local Artifacts
@@ -29,10 +29,10 @@ Remove-Item *.log -ErrorAction SilentlyContinue
 
 ## Functional Smoke Test
 
-- [ ] Start daemon with a clean config.
+- [ ] Start the ThreadRelay daemon with a clean config.
 - [ ] Confirm `GET http://127.0.0.1:3847/api/status` returns service status.
 - [ ] Complete Feishu onboarding or enter app credentials.
-- [ ] Configure Codex App from the desktop GUI, or run `codexhub --config config.toml configure-codex-app`.
+- [ ] Configure Codex App from the desktop GUI, or run `threadrelay --config config.toml configure-codex-app`.
 - [ ] Open Codex App by double-clicking it.
 - [ ] Enable remote control in Codex App.
 - [ ] Confirm remote-control status shows connected and initialized.
@@ -53,4 +53,5 @@ rust
 websocket
 json-rpc
 developer-tools
+threadrelay
 ```

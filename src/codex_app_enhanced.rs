@@ -1114,7 +1114,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     let gates = serde_json::to_string(SUPPORTED_FEATURE_GATES)?;
     let legacy_gates = serde_json::to_string(LEGACY_CODEXHUB_FEATURE_GATES)?;
     let mut local_initialize_url =
-        Url::parse(backend_url).context("解析 CodexHub 本地后端地址失败")?;
+        Url::parse(backend_url).context("解析 ThreadRelay 本地后端地址失败")?;
     local_initialize_url.set_path("/codex-app/statsig/v1/initialize");
     local_initialize_url.set_query(None);
     local_initialize_url.set_fragment(None);

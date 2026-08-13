@@ -38,7 +38,7 @@ pub(super) fn install(
     let taskbar = TaskBarIcon::builder()
         .with_icon_type(icon_type)
         .with_icon(app_icon_bitmap(32))
-        .with_tooltip("CodexHub")
+        .with_tooltip("ThreadRelay")
         .build();
 
     let menu = Rc::new(RefCell::new(

@@ -298,7 +298,7 @@ pub(in crate::remote_control_backend) fn build_client_message_envelopes(
                 message_summary(&message)
             ));
             warn!(
-                target: "codexhub::remote_control",
+                target: "threadrelay::remote_control",
                 event = "remote_control_client_segmented",
                 client_id,
                 stream_id,

@@ -963,7 +963,7 @@ fn log_feishu_api_response(
 
     if status.is_success() && code == 0 {
         info!(
-            target: "codexhub::feishu",
+            target: "threadrelay::feishu",
             event = "feishu_api_ok",
             operation,
             http_status = status.as_u16(),
@@ -975,7 +975,7 @@ fn log_feishu_api_response(
         );
     } else {
         warn!(
-            target: "codexhub::feishu",
+            target: "threadrelay::feishu",
             event = "feishu_api_failed",
             operation,
             http_status = status.as_u16(),

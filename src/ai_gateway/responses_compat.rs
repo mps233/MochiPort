@@ -11,7 +11,7 @@ use super::encrypted_content::{EncryptedContentScope, encode_response_object};
 use super::tool_names::{ToolCallKind, ToolNameMap};
 
 /// Applies narrow, idempotent compatibility rules to a Responses payload while
-/// preserving fields that CodexHub does not know about yet.
+/// preserving fields that ThreadRelay does not know about yet.
 #[cfg(test)]
 pub(crate) fn normalize_response_value(value: &mut Value) -> bool {
     normalize_response_value_with_scope(value, None)

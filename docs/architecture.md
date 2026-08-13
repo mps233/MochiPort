@@ -1,6 +1,6 @@
 ﻿# Architecture
 
-`codexhub` bridges three systems:
+ThreadRelay bridges three systems:
 
 - Codex App / official Codex app-server remote-control protocol
 - A local ChatGPT backend-shaped base URL
@@ -16,7 +16,7 @@ It is not a Codex client replacement. It implements the remote-control backend t
 The design target is strict:
 
 - Codex owns threads, turns, cwd, approvals, tools, and execution semantics.
-- `codexhub` owns only bridge-local transport state.
+- ThreadRelay owns only bridge-local transport state.
 - IM channels are remote interaction surfaces attached to selected Codex threads, not a second source of truth.
 
 ## Process Model
@@ -36,7 +36,7 @@ official Codex app-server
   | GET /backend-api/wham/remote/control/server
   | outbound websocket
   v
-codexhub daemon
+threadrelay daemon
   |
   | Feishu websocket listener
   | Feishu message/card APIs
@@ -49,7 +49,7 @@ IM channel
 The daemon runs separately:
 
 ```text
-codexhub daemon
+threadrelay daemon
 ```
 
 It owns:
@@ -80,14 +80,14 @@ and remote control is enabled.
 Protocol notes:
 
 - Codex sends `ServerEnvelope` values: `server_message`, `server_message_chunk`, `ack`, `pong`.
-- `codexhub` sends `ClientEnvelope` values: `client_message`, `client_message_chunk`, `ack`, `ping`.
-- The first client message is JSON-RPC `initialize`; after the initialize response, `codexhub` sends `initialized`.
+- ThreadRelay sends `ClientEnvelope` values: `client_message`, `client_message_chunk`, `ack`, `ping`.
+- The first client message is JSON-RPC `initialize`; after the initialize response, ThreadRelay sends `initialized`.
 - Server envelopes are acknowledged by `seq_id`; chunk acknowledgements include `segment_id`.
 - Large outbound client JSON-RPC messages are segmented with the same 100 KiB target used by official Codex.
 
 ## Local Auth Shape
 
-Remote-control startup is gated by Codex auth, before the websocket reaches `codexhub`. API-key-only auth is rejected by official Codex app-server.
+Remote-control startup is gated by Codex auth, before the websocket reaches ThreadRelay. API-key-only auth is rejected by official Codex app-server.
 
 For this project, the local identity shape is `chatgptAuthTokens`:
 
@@ -119,6 +119,8 @@ The JWT only needs the ChatGPT-shaped claims Codex reads locally, especially:
   }
 }
 ```
+
+The `codexhub` strings in this local identity are compatibility identifiers used by existing Codex configuration and migration logic. They are intentionally unchanged and are not the current product name.
 
 The third-party model key is separate. It belongs in the Codex model provider configuration and is used for model calls, not remote-control enrollment.
 
@@ -176,14 +178,14 @@ Behavior:
 1. An IM user sends a message.
 2. If that IM conversation is already bound to a live thread, the bridge calls `turn/start`.
 3. If it is not bound, the bridge asks the user to create or resume a thread instead of guessing.
-4. After the user selects a thread, `codexhub` calls `thread/resume { excludeTurns: true }`.
+4. After the user selects a thread, ThreadRelay calls `thread/resume { excludeTurns: true }`.
 5. Future notifications for that thread are then eligible for IM rendering.
 
 This keeps the implementation aligned with the official remote-control model instead of inventing a parallel thread store.
 
 ## Codex App Runtime
 
-`codexhub` is intentionally scoped to Codex App remote-control. Codex App is launched normally by the user, reads `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`, and opens the remote-control websocket back to the local daemon. The project does not install a CLI wrapper or start Codex processes on the user's behalf.
+ThreadRelay is intentionally scoped to Codex App remote-control. Codex App is launched normally by the user, reads `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`, and opens the remote-control websocket back to the local daemon. The project does not install a CLI wrapper or start Codex processes on the user's behalf.
 
 ## Approval Handling
 
@@ -213,7 +215,7 @@ The desktop GUI is the maintained user interface; the previous web console is no
 
 ## State Boundaries
 
-`codexhub` owns only bridge-local state:
+ThreadRelay owns only bridge-local state:
 
 - config path
 - IM channel credentials

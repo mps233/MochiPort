@@ -132,7 +132,7 @@ impl Default for AppConfig {
             outbound_proxy: OutboundProxyConfig::default(),
             language: None,
             theme: None,
-            state_path: PathBuf::from("codexhub-state.json"),
+            state_path: PathBuf::from("threadrelay-state.json"),
             logging: LoggingConfig::default(),
             feishu: FeishuConfig::default(),
             telegram: TelegramConfig::default(),

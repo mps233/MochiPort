@@ -36,7 +36,7 @@ pub fn export_connection_diagnostics(
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     let path = output_dir.join(format!(
-        "codexhub-connection-diagnostics-{}.zip",
+        "threadrelay-connection-diagnostics-{}.zip",
         timestamp_for_filename()
     ));
     export_connection_diagnostics_to_path(input, &path)
@@ -118,7 +118,7 @@ pub fn connection_status_snapshot(path: &str, result: Result<Value, String>) -> 
 
 fn diagnostics_summary(input: &ConnectionDiagnosticsInput) -> Value {
     json!({
-        "kind": "codexhub_connection_diagnostics",
+        "kind": "threadrelay_connection_diagnostics",
         "exportedAtMs": timestamp_ms(),
         "appVersion": input.app_version,
         "baseUrl": input.base_url,
@@ -244,7 +244,7 @@ fn read_log_tail(path: &Path, len: u64) -> Result<String> {
     let contents = String::from_utf8_lossy(&bytes);
     if start > 0 {
         Ok(format!(
-            "[codexhub diagnostics] log truncated; showing last {} bytes of {} bytes\n{}",
+            "[threadrelay diagnostics] log truncated; showing last {} bytes of {} bytes\n{}",
             bytes.len(),
             len,
             contents
@@ -267,7 +267,7 @@ fn is_codexhub_connection_log(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .is_some_and(|name| {
             let lower = name.to_ascii_lowercase();
-            lower.starts_with("codexhub")
+            (lower.starts_with("threadrelay") || lower.starts_with("codexhub"))
                 && lower.contains(".log")
                 && !lower.contains("ai-gateway")
                 && !lower.contains("ai_gateway")
@@ -625,12 +625,12 @@ mod tests {
         let logs = root.join("logs");
         std::fs::create_dir_all(&logs).expect("create logs dir");
         std::fs::write(
-            logs.join("codexhub-chain.log"),
+            logs.join("threadrelay-chain.log"),
             "connected\napi_key=sk-secret\nAuthorization: Bearer abc\n",
         )
         .expect("write chain log");
         std::fs::write(
-            logs.join("codexhub-daemon-startup.log"),
+            logs.join("threadrelay-daemon-startup.log"),
             "daemon failed before chain log\napi_key=sk-secret\n",
         )
         .expect("write daemon startup log");
@@ -671,8 +671,8 @@ mod tests {
         assert!(names.contains(&"summary.json".to_string()));
         assert!(names.contains(&"remote-control-status.json".to_string()));
         assert!(names.contains(&"codex-app-status.json".to_string()));
-        assert!(names.contains(&"logs/codexhub-chain.log".to_string()));
-        assert!(names.contains(&"logs/codexhub-daemon-startup.log".to_string()));
+        assert!(names.contains(&"logs/threadrelay-chain.log".to_string()));
+        assert!(names.contains(&"logs/threadrelay-daemon-startup.log".to_string()));
         assert!(!names.iter().any(|name| name.contains("ai-gateway")));
 
         let mut remote = String::new();
@@ -687,7 +687,7 @@ mod tests {
 
         let mut log = String::new();
         archive
-            .by_name("logs/codexhub-chain.log")
+            .by_name("logs/threadrelay-chain.log")
             .unwrap()
             .read_to_string(&mut log)
             .unwrap();
@@ -699,7 +699,7 @@ mod tests {
 
         let mut startup_log = String::new();
         archive
-            .by_name("logs/codexhub-daemon-startup.log")
+            .by_name("logs/threadrelay-daemon-startup.log")
             .unwrap()
             .read_to_string(&mut startup_log)
             .unwrap();
@@ -723,7 +723,7 @@ mod tests {
         let logs = root.join("logs");
         std::fs::create_dir_all(&logs).expect("create logs dir");
         std::fs::write(
-            logs.join("codexhub-chain.log"),
+            logs.join("threadrelay-chain.log"),
             [
                 "[remote_control] event=ws_open client_id=codexhub-feishu stream_id=stream-secret installation_id=install-secret source_kind=codex_app",
                 "[remote_control] event=request_send client_key=im:feishu:bf166bbba9dc50bf method=turn/start thread=thread-abc123",
@@ -792,7 +792,7 @@ mod tests {
         let summary = zip_entry_to_string(&mut archive, "summary.json");
         let remote = zip_entry_to_string(&mut archive, "remote-control-status.json");
         let service = zip_entry_to_string(&mut archive, "service-status.json");
-        let log = zip_entry_to_string(&mut archive, "logs/codexhub-chain.log");
+        let log = zip_entry_to_string(&mut archive, "logs/threadrelay-chain.log");
         let combined = format!("{summary}\n{remote}\n{service}\n{log}").to_ascii_lowercase();
 
         assert!(summary.contains("\"imRuntimeStateIncluded\": false"));
@@ -896,7 +896,7 @@ mod tests {
             std::fs::write(logs.join(format!("codexhub-{index}.log")), "small log\n")
                 .expect("write log");
         }
-        let large_log = logs.join("codexhub-chain.log");
+        let large_log = logs.join("threadrelay-chain.log");
         let large_contents = format!(
             "unique-head-marker\n{}tail-marker\nkey=secret\n",
             "padding\n".repeat((MAX_LOG_BYTES_PER_FILE as usize / 8) + 32)
@@ -926,7 +926,7 @@ mod tests {
 
         let mut log = String::new();
         archive
-            .by_name("logs/codexhub-chain.log")
+            .by_name("logs/threadrelay-chain.log")
             .unwrap()
             .read_to_string(&mut log)
             .unwrap();

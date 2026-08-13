@@ -1,4 +1,4 @@
-name: release-windows
+name: ThreadRelay Windows release
 
 on:
   workflow_dispatch:
@@ -60,8 +60,8 @@ jobs:
 
           "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "PRODUCT_VERSION=$productVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "WINDOWS_ZIP_NAME=CodexHub-$appVersion-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "WINDOWS_MSI_NAME=CodexHub-$appVersion-windows-x64.msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_ZIP_NAME=ThreadRelay-$appVersion-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_MSI_NAME=ThreadRelay-$appVersion-windows-x64.msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Reset wxWidgets CMake Cache
         shell: pwsh
@@ -74,7 +74,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cargo build --release --features gui --bin codexhub
+          cargo build --locked --release --features gui --bin threadrelay
 
       - name: Sign Binaries
         if: env.HAS_WINDOWS_CODESIGN == 'true'
@@ -96,7 +96,7 @@ jobs:
           }
 
           $files = @(
-            "target\release\codexhub.exe"
+            "target\release\threadrelay.exe"
           )
           foreach ($file in $files) {
             & $signtool.FullName sign `
@@ -114,24 +114,40 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $distRoot = "target\dist"
-          $zipDist = Join-Path $distRoot "CodexHub Windows x64"
+          $zipDist = Join-Path $distRoot "ThreadRelay Windows x64"
           $msiSource = "target\msi-source"
           Remove-Item -Recurse -Force $distRoot -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force $msiSource -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force $zipDist | Out-Null
           New-Item -ItemType Directory -Force $msiSource | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $zipDist "brand\providers") | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $msiSource "brand\providers") | Out-Null
 
-          Copy-Item "target\release\codexhub.exe" (Join-Path $zipDist "CodexHub.exe")
+          python "packaging\generate-third-party-licenses.py" (Join-Path $distRoot "THIRD_PARTY_LICENSES.txt")
+
+          Copy-Item "target\release\threadrelay.exe" (Join-Path $zipDist "ThreadRelay.exe")
           Copy-Item "README.md" $zipDist
           Copy-Item "README.en.md" $zipDist
+          Copy-Item "LICENSE" $zipDist
+          Copy-Item "NOTICE" $zipDist
+          Copy-Item (Join-Path $distRoot "THIRD_PARTY_LICENSES.txt") $zipDist
+          Copy-Item "packaging\brand\LICENSE.lucide-icons" (Join-Path $zipDist "brand")
+          Copy-Item "packaging\brand\providers\LICENSE.lobehub-icons" (Join-Path $zipDist "brand\providers")
+          Copy-Item "packaging\brand\providers\SOURCES.md" (Join-Path $zipDist "brand\providers")
           if (Test-Path "config.example.toml") {
             Copy-Item "config.example.toml" $zipDist
           }
 
-          Copy-Item "target\release\codexhub.exe" (Join-Path $msiSource "CodexHub.exe")
+          Copy-Item "target\release\threadrelay.exe" (Join-Path $msiSource "ThreadRelay.exe")
           Copy-Item "README.md" $msiSource
           Copy-Item "README.en.md" $msiSource
           Copy-Item "config.example.toml" $msiSource
+          Copy-Item "LICENSE" $msiSource
+          Copy-Item "NOTICE" $msiSource
+          Copy-Item (Join-Path $distRoot "THIRD_PARTY_LICENSES.txt") $msiSource
+          Copy-Item "packaging\brand\LICENSE.lucide-icons" (Join-Path $msiSource "brand")
+          Copy-Item "packaging\brand\providers\LICENSE.lobehub-icons" (Join-Path $msiSource "brand\providers")
+          Copy-Item "packaging\brand\providers\SOURCES.md" (Join-Path $msiSource "brand\providers")
           Copy-Item "packaging\icons\AppIcon.ico" $msiSource
 
           $zip = Join-Path $distRoot $env:WINDOWS_ZIP_NAME
@@ -159,7 +175,7 @@ jobs:
           }
           $sourceDir = (Resolve-Path "target\msi-source").Path
           $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
-          & $wix build "packaging\windows\CodexHub.wxs" `
+          & $wix build "packaging\windows\ThreadRelay.wxs" `
             -acceptEula wix7 `
             -arch x64 `
             -d "ProductVersion=$env:PRODUCT_VERSION" `
@@ -245,11 +261,11 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
             <channel>
-              <title>CodexHub Windows Updates</title>
+              <title>ThreadRelay Windows Updates</title>
               <link>$xmlReleaseUrl</link>
-              <description>CodexHub Windows update feed</description>
+              <description>ThreadRelay Windows update feed</description>
               <item>
-                <title>CodexHub $xmlShortVersion</title>
+                <title>ThreadRelay $xmlShortVersion</title>
                 <link>$xmlReleaseUrl</link>
                 <pubDate>$pubDate</pubDate>
                 <sparkle:releaseNotesLink>$xmlReleaseUrl</sparkle:releaseNotesLink>
@@ -268,10 +284,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexHub-Windows
+          name: ThreadRelay-Windows
           path: |
-            target/dist/CodexHub-*-windows-x64.zip
-            target/dist/CodexHub-*-windows-x64.msi
+            target/dist/ThreadRelay-*-windows-x64.zip
+            target/dist/ThreadRelay-*-windows-x64.msi
             target/dist/latest-windows.json
             target/dist/appcast-windows.xml
 
@@ -284,7 +300,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub-*-windows-x64.zip
-            target/dist/CodexHub-*-windows-x64.msi
+            target/dist/ThreadRelay-*-windows-x64.zip
+            target/dist/ThreadRelay-*-windows-x64.msi
             target/dist/latest-windows.json
             target/dist/appcast-windows.xml

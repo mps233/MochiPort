@@ -1,6 +1,10 @@
-# codexhub
+# ThreadRelay
 
 [English](README.en.md)
+
+ThreadRelay 是一个本地优先的 Agent 会话中继：把本机 Codex App、Codex VS Code 插件和 Codex CLI 的会话接入 Telegram、飞书、微信与企业微信，同时提供会话管理和 AI Gateway。
+
+本项目由 [`happy-loki/codexhub`](https://github.com/happy-loki/codexhub) 派生，现由 ThreadRelay 维护者独立演进。ThreadRelay 与上游作者及 OpenAI 均无官方隶属或背书关系。
 
 ## 产品预览
 
@@ -13,7 +17,7 @@
 | 内置 AI Gateway | 让 Codex App 继续使用原生 Responses 入口，同时可以在本地 GUI 中接入 OpenAI、DeepSeek、Anthropic/Claude、智谱 GLM 等模型渠道。 |
 
 <p align="center">
-  <img src="docs/assets/product/main.png" alt="CodexHub GUI 状态和配置界面" width="900">
+  <img src="docs/assets/product/main.png" alt="ThreadRelay GUI 状态和配置界面" width="900">
 </p>
 <p align="center">
   <img src="docs/assets/product/codex-app-chat.png" alt="Codex App 会话同步和图片结果" width="900">
@@ -22,7 +26,7 @@
   <img src="docs/assets/product/deepseek.jpg" alt="Codex App 通过 AI Gateway 使用 DeepSeek 模型" width="900">
 </p>
 
-AI Gateway 是 `codexhub` 内置的本地模型入口。Codex App 仍然按它熟悉的方式发送请求，`codexhub` 在本地把请求转到你配置的模型渠道，并把返回结果整理回 Codex 能消费的格式。渠道、模型列表、模型映射、请求日志和生图工具过滤都可以在 GUI 里完成。
+AI Gateway 是 `threadrelay` 内置的本地模型入口。Codex App 仍然按它熟悉的方式发送请求，`threadrelay` 在本地把请求转到你配置的模型渠道，并把返回结果整理回 Codex 能消费的格式。渠道、模型列表、模型映射、请求日志和生图工具过滤都可以在 GUI 里完成。
 
 <p align="center">
   <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="360">
@@ -47,15 +51,15 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 
 ### 1. 安装
 
-从 GitHub Releases 下载 `CodexHub.dmg`，拖到 Applications 后打开。Linux 下载 `CodexHub Linux x86_64.AppImage` 后赋予执行权限即可双击运行。
+从 [ThreadRelay Releases](https://github.com/mps233/threadrelay/releases) 下载 `ThreadRelay.dmg`，拖到 Applications 后打开。Linux 下载 `ThreadRelay Linux x86_64.AppImage` 后赋予执行权限即可双击运行。
 
-第一次打开时，如果 macOS 提示来自互联网，按系统提示确认即可。Windows 直接运行 release 包里的 `codexhub.exe`。Linux 如果桌面环境没有自动赋权，可以先执行 `chmod +x "CodexHub Linux x86_64.AppImage"`。这个 App 不会安装开机启动项，也不会自动常驻后台。
+第一次打开时，如果 macOS 提示来自互联网，按系统提示确认即可。Windows 直接运行 release 包里的 `ThreadRelay.exe`。Linux 如果桌面环境没有自动赋权，可以先执行 `chmod +x "ThreadRelay Linux x86_64.AppImage"`。这个 App 不会安装开机启动项，也不会自动常驻后台。
 
 后续可以在菜单 `Help -> Check for Updates` 手动检查 GitHub Releases 是否有新版本。当前 MVP 只引导打开下载页，不会静默替换本机程序。
 
 ### 2. 打开应用
 
-打开 `CodexHub`。GUI 会自动启动本地 backend，并在退出时关闭本次启动的 backend。
+打开 `ThreadRelay`。GUI 会自动启动本地 backend，并在退出时关闭本次启动的 backend。
 
 状态概览显示本地服务运行后继续下一步。
 
@@ -86,7 +90,7 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 
 ### 5. 写入 Codex 配置
 
-在 “Codex 接入” 页面点击“写入 Codex 配置”。这一步会让 Codex App 和 Codex VS Code 插件连接到本机 `codexhub`，并把模型请求交给本地 AI Gateway。
+在 “Codex 接入” 页面点击“写入 Codex 配置”。这一步会让 Codex App 和 Codex VS Code 插件连接到本机 `threadrelay`，并把模型请求交给本地 AI Gateway。
 
 写入后如果想回到原来的 Codex 连接方式，点击“恢复 Codex 原有配置”即可。GUI 只在已经写入过配置时显示恢复入口，避免第一次使用时误操作。
 
@@ -94,17 +98,17 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 
 正常启动 Codex App 或 Codex VS Code 插件，并打开 remote-control / 控制这台电脑。
 
-连接成功后，`CodexHub` 里会看到 Codex 控制通道变为已连接。
+连接成功后，`ThreadRelay` 里会看到 Codex 控制通道变为已连接。
 
-不需要在 Codex App 的“连接”设置页里看到远程连接设备列表。这个项目走的是本地 backend + IM bridge，只要 `CodexHub` 的状态概览都正常，就可以直接在已接入的 IM 里使用。
+不需要在 Codex App 的“连接”设置页里看到远程连接设备列表。这个项目走的是本地 backend + IM bridge，只要 `ThreadRelay` 的状态概览都正常，就可以直接在已接入的 IM 里使用。
 
-如果 Codex App、Codex VS Code 插件和 Codex CLI 同时连接到 `CodexHub`，IM 端新建或恢复会话时会按固定优先级选择执行端：Codex App > Codex VS Code 插件 > Codex CLI。会话绑定后，后续消息会继续发给当时选中的执行端，直到该 IM 会话退出或重新绑定。
+如果 Codex App、Codex VS Code 插件和 Codex CLI 同时连接到 `ThreadRelay`，IM 端新建或恢复会话时会按固定优先级选择执行端：Codex App > Codex VS Code 插件 > Codex CLI。会话绑定后，后续消息会继续发给当时选中的执行端，直到该 IM 会话退出或重新绑定。
 
 ### 7. 使用 Codex CLI
 
 如果希望 Codex CLI 和飞书 / Telegram / 微信交互，不需要替换 `codex` 命令，也不需要安装包装脚本。macOS、Windows 和 Linux 都按下面三步操作。
 
-1. 打开 `CodexHub` 桌面程序，完成 IM 通道和 Codex 接入，并保持程序运行。
+1. 打开 `ThreadRelay` 桌面程序，完成 IM 通道和 Codex 接入，并保持程序运行。
 
 2. 在要操作的项目目录打开终端，启动 Codex app-server：
 
@@ -130,15 +134,15 @@ codex --remote ws://127.0.0.1:3849
 
 ## 网络与代理
 
-CodexHub 的“网络”菜单提供三种出站模式：跟随系统代理、强制直连、自定义 HTTP/SOCKS5 代理。该设置只影响 CodexHub 访问模型服务、微信、Telegram、飞书 HTTP API 和更新地址，不会修改 macOS `launchctl`、Windows 用户环境变量或其它应用的网络设置。
+ThreadRelay 的“网络”菜单提供三种出站模式：跟随系统代理、强制直连、自定义 HTTP/SOCKS5 代理。该设置只影响 ThreadRelay 访问模型服务、微信、Telegram、飞书 HTTP API 和更新地址，不会修改 macOS `launchctl`、Windows 用户环境变量或其它应用的网络设置。
 
-使用 Clash、V2Ray 等本地代理时，可以选择“自定义 HTTP/SOCKS5 代理”，填写 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`。daemon 正在运行时设置会立即生效。本地 GUI、Codex App、VS Code 与 CodexHub 之间的回环通信不会使用这个出站代理。
+使用 Clash、V2Ray 等本地代理时，可以选择“自定义 HTTP/SOCKS5 代理”，填写 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`。daemon 正在运行时设置会立即生效。本地 GUI、Codex App、VS Code 与 ThreadRelay 之间的回环通信不会使用这个出站代理。
 
 TUN / Network Extension 类型的 VPN 工作在 HTTP 代理层以下。如果它拦截回环流量，仍需要在 VPN 软件中排除 `localhost`、`127.0.0.1` 和 `::1`。
 
 ## AI Gateway
 
-AI Gateway 解决的是“Codex 只认原生模型入口，但用户想用更多模型渠道”的问题。你在 GUI 里配置渠道后，Codex App 看到的仍然是普通模型列表；真正的上游请求由 `codexhub` 负责转发和转换。
+AI Gateway 解决的是“Codex 只认原生模型入口，但用户想用更多模型渠道”的问题。你在 GUI 里配置渠道后，Codex App 看到的仍然是普通模型列表；真正的上游请求由 `threadrelay` 负责转发和转换。
 
 当前重点能力：
 
@@ -156,9 +160,7 @@ AI Gateway 解决的是“Codex 只认原生模型入口，但用户想用更多
 
 ## 交流与支持
 
-有问题可以提 GitHub issue，也可以关注公众号后直接发消息给我。
-
-<img src="docs/assets/wechat-public-account.jpg" alt="微信公众号" width="220">
+有问题可以到 [ThreadRelay Issues](https://github.com/mps233/threadrelay/issues) 提交反馈。
 
 ## IM 命令  一个/q 命令就够了. 其它按照提示操作
 
@@ -176,7 +178,7 @@ GUI 里点击“恢复 Codex 原有配置”即可恢复写入前的 Codex 连�
 
 ## 项目边界
 
-`codexhub` 只支持干净的 Codex remote-control 路径。
+`threadrelay` 只支持干净的 Codex remote-control 路径。
 
 它不会：
 
@@ -203,7 +205,7 @@ Codex App / Codex VS Code 插件 / Codex CLI app-server
   |
   | outbound remote-control websocket
   v
-codexhub 本地 backend
+threadrelay 本地 backend
   |
   | 飞书 websocket 事件 / 消息卡片 API
   | Telegram long polling / Bot API
@@ -235,7 +237,7 @@ Thread 绑定模型：
 ```powershell
 cargo fmt
 cargo test
-cargo build --release --features gui --bin codexhub
+cargo build --release --features gui --bin threadrelay
 ```
 
 daemon 运行时常用状态接口：
@@ -262,6 +264,12 @@ GET http://127.0.0.1:3847/api/events
 - [认证说明](docs/auth-notes.zh-CN.md)
 - [排障](docs/troubleshooting.md)
 
+## 独立维护与兼容
+
+- 新安装默认使用 `ThreadRelay` 名称、独立应用标识和 `threadrelay` 命令。
+- 已有 CodexHub 用户会继续读取旧配置目录和 `CODEXHUB_HOME`，避免丢失 IM 凭据、会话绑定与模型配置。
+- 独立发布后的更新只从 [`mps233/threadrelay`](https://github.com/mps233/threadrelay) 获取；上游更新仍可由维护者选择性合并。
+
 ## License
 
-Apache-2.0
+Apache-2.0。上游归属和修改声明见 [NOTICE](NOTICE)，第三方资产说明见 [packaging/THIRD_PARTY_LICENSES.txt](packaging/THIRD_PARTY_LICENSES.txt)。

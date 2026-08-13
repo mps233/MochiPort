@@ -1,10 +1,14 @@
 /target
 /target-verify
 /outputs
+/macos/ThreadRelay/.build
+/macos/ThreadRelay/.swiftpm
 .DS_Store
 config.toml
 codexhub-state.json
+threadrelay-state.json
 *.log
+ai-gateway-request-logs.sqlite
 .im/
 .claude/
 typescript

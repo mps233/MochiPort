@@ -23,7 +23,7 @@ pub fn init(config: &OutboundProxyConfig, local_port: Option<u16>) -> Result<()>
     }
 
     tracing::info!(
-        target: "codexhub::network",
+        target: "threadrelay::network",
         mode = ?config.mode,
         proxy = %masked_proxy_url(config),
         "outbound HTTP client initialized"
@@ -73,9 +73,9 @@ pub fn apply_async_proxy(
         OutboundProxyMode::System => {
             if local_port.is_some_and(system_proxy_points_to_local_server) {
                 tracing::warn!(
-                    target: "codexhub::network",
+                    target: "threadrelay::network",
                     local_port,
-                    "system proxy points to CodexHub; disabling it to avoid proxy recursion"
+                    "system proxy points to ThreadRelay; disabling it to avoid proxy recursion"
                 );
                 Ok(builder.no_proxy())
             } else {
@@ -135,7 +135,7 @@ fn reject_local_proxy_recursion(
 ) -> Result<()> {
     if local_port.is_some_and(|port| proxy_points_to_loopback_port(config.url.trim(), port)) {
         return Err(anyhow!(
-            "custom outbound proxy points to CodexHub's own local port"
+            "custom outbound proxy points to ThreadRelay's own local port"
         ));
     }
     Ok(())

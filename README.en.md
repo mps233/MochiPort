@@ -1,6 +1,10 @@
-# codexhub
+# ThreadRelay
 
 [中文说明](README.md)
+
+ThreadRelay is a local-first agent session relay. It connects local Codex App, the Codex VS Code extension, and Codex CLI sessions to Telegram, Feishu, WeChat, and WeCom while providing session management and an AI Gateway.
+
+This project is derived from [`happy-loki/codexhub`](https://github.com/happy-loki/codexhub) and is now independently maintained by the ThreadRelay maintainers. ThreadRelay is not affiliated with or endorsed by the upstream authors or OpenAI.
 
 ## Product Preview
 
@@ -13,7 +17,7 @@
 | Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
 
 <p align="center">
-  <img src="docs/assets/product/main.png" alt="CodexHub GUI status and config UI" width="900">
+  <img src="docs/assets/product/main.png" alt="ThreadRelay GUI status and config UI" width="900">
 </p>
 <p align="center">
   <img src="docs/assets/product/codex-app-chat.png" alt="Codex App session sync and image result" width="900">
@@ -22,7 +26,7 @@
   <img src="docs/assets/product/deepseek.jpg" alt="Codex App using DeepSeek through AI Gateway" width="900">
 </p>
 
-AI Gateway is a local model entry built into `codexhub`. Codex App keeps sending normal Responses-style requests, while `codexhub` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
+AI Gateway is a local model entry built into `threadrelay`. Codex App keeps sending normal Responses-style requests, while `threadrelay` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
 
 <p align="center">
   <img src="docs/assets/product/feishu-mobile-image.jpg" alt="Feishu mobile Codex image result" width="360">
@@ -46,15 +50,15 @@ For Codex App and the VS Code extension, the usual flow is: download the app -> 
 
 ### 1. Install
 
-Download `CodexHub.dmg` from GitHub Releases, drag it to Applications, then open it. On Windows, run `codexhub.exe` from the release package. On Linux, download `CodexHub Linux x86_64.AppImage`, make it executable, then double-click it.
+Download `ThreadRelay.dmg` from [ThreadRelay Releases](https://github.com/mps233/threadrelay/releases), drag it to Applications, then open it. On Windows, run `ThreadRelay.exe` from the release package. On Linux, download `ThreadRelay Linux x86_64.AppImage`, make it executable, then double-click it.
 
-If macOS warns that the app was downloaded from the internet, confirm the system prompt. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x "CodexHub Linux x86_64.AppImage"` once. The app does not install startup items and does not run in the background automatically.
+If macOS warns that the app was downloaded from the internet, confirm the system prompt. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x "ThreadRelay Linux x86_64.AppImage"` once. The app does not install startup items and does not run in the background automatically.
 
 Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The MVP only opens the download page; it does not silently replace the local app.
 
 ### 2. Open The App
 
-Open `CodexHub`. The GUI starts the local backend automatically and stops the backend it started when the GUI exits.
+Open `ThreadRelay`. The GUI starts the local backend automatically and stops the backend it started when the GUI exits.
 
 Continue when the status overview shows the local service is running.
 
@@ -85,7 +89,7 @@ If a provider rejects Codex's image generation tool, enable `Filter image genera
 
 ### 5. Write Codex Config
 
-Click `Write Codex Config` on the `Codex 接入` page. This points Codex App and the Codex VS Code extension at the local `codexhub` service and routes model requests through the local AI Gateway.
+Click `Write Codex Config` on the `Codex 接入` page. This points Codex App and the Codex VS Code extension at the local `threadrelay` service and routes model requests through the local AI Gateway.
 
 To go back to the previous Codex connection, click `Restore Codex Config`. The restore action is shown only after Codex config has been written.
 
@@ -93,17 +97,17 @@ To go back to the previous Codex connection, click `Restore Codex Config`. The r
 
 Open Codex App or the Codex VS Code extension normally, then enable remote-control / control this computer.
 
-When connected, `CodexHub` shows the Codex control channel as connected.
+When connected, `ThreadRelay` shows the Codex control channel as connected.
 
-You do not need to see a remote device list in Codex App's connection settings. This project uses a local backend plus IM bridge. If the `CodexHub` status overview is normal, you can use it directly from the connected IM channel.
+You do not need to see a remote device list in Codex App's connection settings. This project uses a local backend plus IM bridge. If the `ThreadRelay` status overview is normal, you can use it directly from the connected IM channel.
 
-If Codex App, the Codex VS Code extension, and Codex CLI are connected to `CodexHub` at the same time, new or resumed IM sessions choose the execution endpoint by fixed priority: Codex App > Codex VS Code extension > Codex CLI. After a session is bound, later messages keep using the selected endpoint until the IM session exits or binds again.
+If Codex App, the Codex VS Code extension, and Codex CLI are connected to `ThreadRelay` at the same time, new or resumed IM sessions choose the execution endpoint by fixed priority: Codex App > Codex VS Code extension > Codex CLI. After a session is bound, later messages keep using the selected endpoint until the IM session exits or binds again.
 
 ### 7. Use Codex CLI
 
 If you want Codex CLI to work with Feishu / Telegram / WeChat, you do not need to replace the `codex` command or install a wrapper. Use the same three-step flow on macOS, Windows, and Linux.
 
-1. Open the `CodexHub` desktop app, finish IM channel setup and Codex access, and keep it running.
+1. Open the `ThreadRelay` desktop app, finish IM channel setup and Codex access, and keep it running.
 
 2. Open a terminal in the project directory and start Codex app-server:
 
@@ -129,15 +133,15 @@ The WeChat path depends on a context token issued by the WeChat client. During l
 
 ## Network and Proxy
 
-The Network menu provides three outbound modes: use the system proxy, connect directly, or use a custom HTTP/SOCKS5 proxy. This setting only affects requests CodexHub sends to model providers, WeChat, Telegram, Feishu HTTP APIs, and update endpoints. It does not modify macOS `launchctl`, Windows user environment variables, or networking for other applications.
+The Network menu provides three outbound modes: use the system proxy, connect directly, or use a custom HTTP/SOCKS5 proxy. This setting only affects requests ThreadRelay sends to model providers, WeChat, Telegram, Feishu HTTP APIs, and update endpoints. It does not modify macOS `launchctl`, Windows user environment variables, or networking for other applications.
 
-For a local Clash or V2Ray proxy, select the custom proxy option and enter `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`. The setting applies immediately while the daemon is running. Loopback communication between the GUI, Codex App, VS Code, and CodexHub does not use this outbound proxy.
+For a local Clash or V2Ray proxy, select the custom proxy option and enter `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`. The setting applies immediately while the daemon is running. Loopback communication between the GUI, Codex App, VS Code, and ThreadRelay does not use this outbound proxy.
 
 TUN and Network Extension VPNs operate below the HTTP proxy layer. If such a VPN intercepts loopback traffic, exclude `localhost`, `127.0.0.1`, and `::1` in the VPN application.
 
 ## AI Gateway
 
-AI Gateway solves one practical problem: Codex expects its native model entry, but users often want to use more model providers. After providers are configured in the GUI, Codex App still sees a normal model list; `codexhub` handles provider routing and protocol conversion locally.
+AI Gateway solves one practical problem: Codex expects its native model entry, but users often want to use more model providers. After providers are configured in the GUI, Codex App still sees a normal model list; `threadrelay` handles provider routing and protocol conversion locally.
 
 Current highlights:
 
@@ -155,13 +159,7 @@ All of this is configured from the GUI. Users do not need to hand-edit config fi
 
 ## Community And Support
 
-For questions or feedback, open a GitHub issue or message me through the WeChat public account.
-
-<img src="docs/assets/wechat-public-account.jpg" alt="WeChat public account" width="220">
-
-The WeChat group is for issue feedback, usage discussion, and feature suggestions.
-
-<img src="docs/assets/wechat-group.png" alt="AI-Agent technical discussion group" width="260">
+For questions or feedback, open an issue in [ThreadRelay Issues](https://github.com/mps233/threadrelay/issues).
 
 ## IM Commands
 
@@ -181,7 +179,7 @@ This does not uninstall Codex and does not delete Codex session history.
 
 ## Project Boundary
 
-`codexhub` only supports the clean official Codex remote-control path.
+`threadrelay` only supports the clean official Codex remote-control path.
 
 It does not:
 
@@ -208,7 +206,7 @@ official Codex app-server
   |
   | outbound remote-control websocket
   v
-codexhub local backend
+threadrelay local backend
   |
   | Feishu websocket events
   | Feishu message/card APIs
@@ -243,7 +241,7 @@ Thread binding model:
 ```powershell
 cargo fmt
 cargo test
-cargo build --release --features gui --bin codexhub
+cargo build --release --features gui --bin threadrelay
 ```
 
 Useful status endpoints while the daemon is running:
@@ -270,6 +268,12 @@ GET http://127.0.0.1:3847/api/events
 - [Auth notes](docs/auth-notes.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
+## Independent Maintenance And Compatibility
+
+- New installations use the ThreadRelay name, independent application identifiers, and the `threadrelay` command.
+- Existing CodexHub users continue to load the legacy config directory and `CODEXHUB_HOME`, preserving IM credentials, session bindings, and provider configuration.
+- Independent releases update only from [`mps233/threadrelay`](https://github.com/mps233/threadrelay); maintainers can still selectively merge upstream changes.
+
 ## License
 
-Apache-2.0
+Apache-2.0. See [NOTICE](NOTICE) for upstream attribution and modification notices, and [packaging/THIRD_PARTY_LICENSES.txt](packaging/THIRD_PARTY_LICENSES.txt) for third-party assets.

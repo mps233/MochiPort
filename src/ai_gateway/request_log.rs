@@ -517,24 +517,46 @@ fn legacy_database_path(config: &AppConfig) -> PathBuf {
 
 #[cfg(not(test))]
 fn app_data_dir() -> Option<PathBuf> {
+    if let Some(base) = std::env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
+        return Some(base);
+    }
     if let Some(base) = std::env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
         return Some(base);
     }
 
     #[cfg(target_os = "windows")]
     {
-        std::env::var_os("LOCALAPPDATA")
+        let base = std::env::var_os("LOCALAPPDATA")
             .or_else(|| std::env::var_os("APPDATA"))
-            .map(PathBuf::from)
-            .map(|base| base.join("CodexHub"))
+            .map(PathBuf::from)?;
+        Some(prefer_existing_legacy_app_dir(
+            base.join("ThreadRelay"),
+            &[base.join("CodexHub")],
+        ))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .map(|home| home.join("Library/Application Support/CodexHub"))
+        let base = std::env::var_os("HOME")
+            .map(PathBuf::from)?
+            .join("Library/Application Support");
+        Some(prefer_existing_legacy_app_dir(
+            base.join("ThreadRelay"),
+            &[base.join("CodexHub")],
+        ))
     }
+}
+
+#[cfg(not(test))]
+fn prefer_existing_legacy_app_dir(new_dir: PathBuf, legacy_dirs: &[PathBuf]) -> PathBuf {
+    if new_dir.join("config.toml").exists() {
+        return new_dir;
+    }
+    legacy_dirs
+        .iter()
+        .find(|dir| dir.join("config.toml").exists())
+        .cloned()
+        .unwrap_or(new_dir)
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {

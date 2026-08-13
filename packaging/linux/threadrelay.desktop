@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=ThreadRelay
+Comment=Control coding agents from Feishu, WeChat, WeCom, and Telegram
+Exec=threadrelay
+Icon=threadrelay
+Terminal=false
+Categories=Development;Utility;

@@ -48,12 +48,13 @@ const CODEX_APP_INSTALLATION_ID: &str = "installation_id";
 const CODEX_APP_SERVER_DAEMON_DIR: &str = "app-server-daemon";
 const CODEX_APP_SERVER_DAEMON_SETTINGS: &str = "settings.json";
 const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
-const CODEX_APP_REMOTE_CONTROL_SERVER_NAME: &str = "CodexHub";
+const CODEX_APP_REMOTE_CONTROL_SERVER_NAME: &str = "ThreadRelay";
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const CODEX_CONNECTOR_DIRECTORY_CACHE_DIR: &str = "cache/codex_app_directory";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
 const CODEXHUB_HOME_ENV: &str = "CODEXHUB_HOME";
+const THREADRELAY_HOME_ENV: &str = "THREADRELAY_HOME";
 const OPENAI_BUNDLED_MARKETPLACE_NAME: &str = "openai-bundled";
 const OPENAI_CURATED_MARKETPLACE_NAME: &str = "openai-curated";
 const CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
@@ -1302,7 +1303,7 @@ fn gui_unsetenv_many(names: &[&str]) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn broadcast_windows_environment_change() {
     let started = Instant::now();
-    tracing::info!(target: "codexhub::startup", "broadcasting Windows environment change");
+    tracing::info!(target: "threadrelay::startup", "broadcasting Windows environment change");
     let message: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
     let mut result = 0usize;
     unsafe {
@@ -1317,7 +1318,7 @@ fn broadcast_windows_environment_change() {
         );
     }
     tracing::info!(
-        target: "codexhub::startup",
+        target: "threadrelay::startup",
         elapsed_ms = started.elapsed().as_millis() as u64,
         result,
         "Windows environment change broadcast finished"
@@ -2936,6 +2937,9 @@ fn codex_home_backup_id(codex_home: &Path) -> String {
 }
 
 fn codexhub_app_support_dir() -> PathBuf {
+    if let Some(base) = std::env::var_os(THREADRELAY_HOME_ENV).map(PathBuf::from) {
+        return base;
+    }
     if let Some(base) = std::env::var_os(CODEXHUB_HOME_ENV).map(PathBuf::from) {
         return base;
     }
@@ -2944,26 +2948,39 @@ fn codexhub_app_support_dir() -> PathBuf {
 
 #[cfg(test)]
 fn platform_codexhub_app_support_dir() -> PathBuf {
-    std::env::temp_dir().join("codexhub-managed-backups-tests")
+    std::env::temp_dir().join("threadrelay-managed-backups-tests")
 }
 
 #[cfg(all(target_os = "windows", not(test)))]
 fn platform_codexhub_app_support_dir() -> PathBuf {
-    std::env::var_os("LOCALAPPDATA")
+    let base = std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("APPDATA"))
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("CodexHub")
+        .unwrap_or_else(|| PathBuf::from("."));
+    prefer_existing_legacy_app_dir(base.join("ThreadRelay"), &[base.join("CodexHub")])
 }
 
 #[cfg(all(not(target_os = "windows"), not(test)))]
 fn platform_codexhub_app_support_dir() -> PathBuf {
-    std::env::var_os("HOME")
+    let base = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/CodexHub"))
+        .map(|home| home.join("Library/Application Support"))
         .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."))
+        .unwrap_or_else(|| PathBuf::from("."));
+    prefer_existing_legacy_app_dir(base.join("ThreadRelay"), &[base.join("CodexHub")])
+}
+
+#[cfg(not(test))]
+fn prefer_existing_legacy_app_dir(new_dir: PathBuf, legacy_dirs: &[PathBuf]) -> PathBuf {
+    if new_dir.join("config.toml").exists() {
+        return new_dir;
+    }
+    legacy_dirs
+        .iter()
+        .find(|dir| dir.join("config.toml").exists())
+        .cloned()
+        .unwrap_or(new_dir)
 }
 
 fn is_codexhub_auth_file(path: &Path) -> Result<bool> {
@@ -3093,7 +3110,7 @@ fn local_chatgpt_jwt(identity: &LocalAuthIdentity) -> Result<String> {
                 "id": identity.account_id,
                 "is_default": true,
                 "role": "owner",
-                "title": "CodexHub Local",
+                "title": "ThreadRelay Local",
             }]
         },
         "scp": [

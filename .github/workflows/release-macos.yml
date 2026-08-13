@@ -1,4 +1,4 @@
-﻿name: release-macos
+name: ThreadRelay macOS release
 
 on:
   workflow_dispatch:
@@ -23,6 +23,7 @@ jobs:
             manifest_name: latest-macos.json
             intel_manifest_name: latest-macos-intel.json
     env:
+      HAS_MACOS_CODESIGN: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.KEYCHAIN_PASSWORD != '' && secrets.APPLE_CODESIGN_IDENTITY != '' && (secrets.NOTARY_KEYCHAIN_PROFILE != '' || (secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY_P8 != '') || (secrets.APPLE_ID != '' && secrets.APPLE_TEAM_ID != '' && secrets.APPLE_APP_SPECIFIC_PASSWORD != '')) }}
       MACOS_FILE_SLUG: ${{ matrix.file_slug }}
       MACOS_ASSET_KEY: ${{ matrix.asset_key }}
       MACOS_SPARKLE_KEY: ${{ matrix.sparkle_key }}
@@ -48,6 +49,7 @@ jobs:
           rm -rf target/release/wxdragon_sys_cmake_build
 
       - name: Import Developer ID Certificate
+        if: env.HAS_MACOS_CODESIGN == 'true'
         env:
           APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -67,7 +69,7 @@ jobs:
       - name: Build App Bundle
         run: |
           set -euo pipefail
-          APP_NAME="CodexHub"
+          APP_NAME="ThreadRelay"
           APP="target/dist/$APP_NAME.app"
           CONTENTS="$APP/Contents"
           MACOS="$CONTENTS/MacOS"
@@ -78,17 +80,17 @@ jobs:
 
           # Build wxWidgets as universal (arm64 + x86_64) and compile for native arch
           export WX_OSX_ARCHITECTURES="arm64;x86_64"
-          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codexhub --target aarch64-apple-darwin
+          PATH="$(brew --prefix)/bin:$PATH" cargo build --locked --release --features gui --bin threadrelay --target aarch64-apple-darwin
 
           # Compile for Intel (wxWidgets libs are already fat, no rebuild needed)
-          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codexhub --target x86_64-apple-darwin
+          PATH="$(brew --prefix)/bin:$PATH" cargo build --locked --release --features gui --bin threadrelay --target x86_64-apple-darwin
 
           # Create universal binary
           mkdir -p target/release
           lipo -create \
-            target/aarch64-apple-darwin/release/codexhub \
-            target/x86_64-apple-darwin/release/codexhub \
-            -output target/release/codexhub
+            target/aarch64-apple-darwin/release/threadrelay \
+            target/x86_64-apple-darwin/release/threadrelay \
+            -output target/release/threadrelay
 
           CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           if [ -z "$CARGO_VERSION" ]; then
@@ -102,21 +104,26 @@ jobs:
           fi
           {
             echo "APP_VERSION=$APP_VERSION"
-            echo "MACOS_DMG_NAME=CodexHub-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
-            echo "MACOS_APP_ZIP_NAME=CodexHub-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
+            echo "MACOS_DMG_NAME=ThreadRelay-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
+            echo "MACOS_APP_ZIP_NAME=ThreadRelay-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
           } >> "$GITHUB_ENV"
 
           rm -rf "$APP"
-          mkdir -p "$MACOS" "$RESOURCES/brand"
+          mkdir -p "$MACOS" "$RESOURCES/brand/providers"
           cp "packaging/macos/Info.plist" "$CONTENTS/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${CARGO_VERSION%%[-+]*}" "$CONTENTS/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER:-1}" "$CONTENTS/Info.plist"
           cp "packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
           cp packaging/brand/*.png "$RESOURCES/brand/"
-          cp "target/release/codexhub" "$MACOS/$APP_NAME"
+          python3 packaging/generate-third-party-licenses.py "$RESOURCES/THIRD_PARTY_LICENSES.txt"
+          cp LICENSE NOTICE "$RESOURCES/"
+          cp packaging/brand/LICENSE.lucide-icons "$RESOURCES/brand/"
+          cp packaging/brand/providers/LICENSE.lobehub-icons packaging/brand/providers/SOURCES.md "$RESOURCES/brand/providers/"
+          cp "target/release/threadrelay" "$MACOS/$APP_NAME"
           chmod +x "$MACOS/$APP_NAME"
 
       - name: Sign And Notarize
+        if: env.HAS_MACOS_CODESIGN == 'true'
         timeout-minutes: 75
         env:
           APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
@@ -129,11 +136,11 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
-          APP="target/dist/CodexHub.app"
-          DMG="target/dist/CodexHub.dmg"
+          APP="target/dist/ThreadRelay.app"
+          DMG="target/dist/ThreadRelay.dmg"
           DMG_STAGING="target/dist/dmg"
           ZIP="target/dist/${MACOS_APP_ZIP_NAME}"
-          NOTARY_ZIP="target/dist/CodexHub-notary.zip"
+          NOTARY_ZIP="target/dist/ThreadRelay-notary.zip"
           ENTITLEMENTS="packaging/macos/entitlements.plist"
 
           if [ -n "${APPLE_API_KEY_P8:-}" ]; then
@@ -226,10 +233,10 @@ jobs:
 
           rm -rf "$DMG_STAGING"
           mkdir -p "$DMG_STAGING"
-          ditto "$APP" "$DMG_STAGING/CodexHub.app"
+          ditto "$APP" "$DMG_STAGING/ThreadRelay.app"
           ln -s /Applications "$DMG_STAGING/Applications"
 
-          hdiutil create -volname "CodexHub" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+          hdiutil create -volname "ThreadRelay" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
           codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$DMG"
           notary_submit "$DMG"
           xcrun stapler staple "$DMG"
@@ -241,11 +248,30 @@ jobs:
           spctl --assess --type execute --verbose=4 "$APP"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
 
+      - name: Package Unsigned App
+        if: env.HAS_MACOS_CODESIGN != 'true'
+        run: |
+          set -euo pipefail
+          APP="target/dist/ThreadRelay.app"
+          DMG="target/dist/ThreadRelay.dmg"
+          DMG_STAGING="target/dist/dmg"
+          ZIP="target/dist/${MACOS_APP_ZIP_NAME}"
+
+          ditto -c -k --keepParent "$APP" "$ZIP"
+          rm -rf "$DMG_STAGING"
+          mkdir -p "$DMG_STAGING"
+          ditto "$APP" "$DMG_STAGING/ThreadRelay.app"
+          ln -s /Applications "$DMG_STAGING/Applications"
+          hdiutil create -volname "ThreadRelay" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+          mv "$DMG" "target/dist/${MACOS_DMG_NAME}"
+          echo "macOS artifact is unsigned because complete signing and notarization secrets were not configured." >&2
+
       - name: Write macOS Update Metadata
         if: startsWith(github.ref, 'refs/tags/')
         env:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_REPOSITORY: ${{ github.repository }}
+          MACOS_SIGNED: ${{ env.HAS_MACOS_CODESIGN }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -265,6 +291,7 @@ jobs:
           app_zip_path = dist / app_zip_name
           release_tag = os.environ["RELEASE_TAG"]
           repository = os.environ["RELEASE_REPOSITORY"]
+          signed = os.environ["MACOS_SIGNED"] == "true"
           release_url = f"https://github.com/{repository}/releases/tag/{release_tag}"
           download_base_url = f"https://github.com/{repository}/releases/download/{release_tag}"
 
@@ -285,16 +312,16 @@ jobs:
                       "url": f"{download_base_url}/{dmg_name}",
                       "sha256": sha256(dmg_path),
                       "size": dmg_path.stat().st_size,
-                      "signed": True,
-                      "notarized": True,
+                      "signed": signed,
+                      "notarized": signed,
                   },
                   sparkle_key: {
                       "type": "app-zip",
                       "url": f"{download_base_url}/{app_zip_name}",
                       "sha256": sha256(app_zip_path),
                       "size": app_zip_path.stat().st_size,
-                      "signed": True,
-                      "notarized": True,
+                      "signed": signed,
+                      "notarized": signed,
                   },
               },
           }
@@ -320,10 +347,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexHub-macOS-${{ matrix.file_slug }}
+          name: ThreadRelay-macOS-${{ matrix.file_slug }}
           path: |
-            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
-            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
+            target/dist/ThreadRelay-*-macos-${{ matrix.file_slug }}.dmg
+            target/dist/ThreadRelay-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
             target/dist/${{ matrix.intel_manifest_name }}
 
@@ -336,7 +363,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
-            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
+            target/dist/ThreadRelay-*-macos-${{ matrix.file_slug }}.dmg
+            target/dist/ThreadRelay-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
             target/dist/${{ matrix.intel_manifest_name }}

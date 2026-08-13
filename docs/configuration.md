@@ -2,24 +2,24 @@
 
 There are two separate config surfaces:
 
-- `codexhub` config, usually this repository's `config.toml`
+- ThreadRelay config, usually this repository's `config.toml`
 - Codex App config, usually `~/.codex/config.toml`
 
-Do not mix them. `codexhub` stores IM channel and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
+Do not mix them. ThreadRelay stores IM channel and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
 
-## `codexhub` Config
+## ThreadRelay Config
 
 Use an explicit config path for predictable behavior:
 
 ```powershell
-codexhub --config D:\path\to\config.toml daemon
+threadrelay --config D:\path\to\config.toml daemon
 ```
 
 Example:
 
 ```toml
 bind = "127.0.0.1:3847"
-statePath = "codexhub-state.json"
+statePath = "threadrelay-state.json"
 
 [outboundProxy]
 mode = "system"
@@ -66,7 +66,7 @@ Keep this on localhost. Do not expose it directly to a network.
 
 ### `outboundProxy`
 
-Controls only requests that CodexHub sends to external services such as model providers,
+Controls only requests that ThreadRelay sends to external services such as model providers,
 WeChat, Telegram, Feishu HTTP APIs, and update endpoints. It does not change the operating
 system proxy or the environment of other applications.
 
@@ -77,7 +77,7 @@ url = ""
 ```
 
 - `system` follows the operating system proxy and proxy environment variables.
-- `direct` disables proxy discovery for CodexHub HTTP requests.
+- `direct` disables proxy discovery for ThreadRelay HTTP requests.
 - `custom` uses `url` as an explicit HTTP, HTTPS, SOCKS5, or SOCKS5H proxy.
 
 Example for a local Clash mixed port:
@@ -153,7 +153,7 @@ Existing configs may still contain `mentionOnly`; it is kept for compatibility b
 
 Allowlist of Telegram private chat ids as strings.
 
-Empty means "bind the first private chat". After the first private Telegram message is accepted, `codexhub` writes that chat id into `allowedChatIds` and rejects other private chats.
+Empty means "bind the first private chat". After the first private Telegram message is accepted, ThreadRelay writes that chat id into `allowedChatIds` and rejects other private chats.
 
 For stricter setup, prefill this list before starting the bridge:
 
@@ -215,7 +215,7 @@ allowedUserIds = []
 allowedChatIds = []
 ```
 
-The GUI QR flow normally writes `botId` and `secret`. CodexHub then subscribes to the official WeCom AI Bot WebSocket and supports direct/group text, streaming and final replies, initial/history thread routing cards, image/file input and output, and interactive approval template cards. Empty allowlists accept all users and chats. Keep `secret` private.
+The GUI QR flow normally writes `botId` and `secret`. ThreadRelay then subscribes to the official WeCom AI Bot WebSocket and supports direct/group text, streaming and final replies, initial/history thread routing cards, image/file input and output, and interactive approval template cards. Empty allowlists accept all users and chats. Keep `secret` private.
 
 ## Bridge
 
@@ -278,9 +278,9 @@ experimental_bearer_token = "your-third-party-key"
 ```
 
 `chatgpt_base_url` is not the model API base URL. It is the ChatGPT backend-shaped URL used by Codex App features such as remote-control enrollment.
-`codexhub` does not manage Codex App runtime settings such as `[features]`, `[windows]`, `[desktop]`, `[mcp_servers]`, or per-plugin `enabled` flags.
+ThreadRelay does not manage Codex App runtime settings such as `[features]`, `[windows]`, `[desktop]`, `[mcp_servers]`, or per-plugin `enabled` flags.
 
-When CodexHub injects its default local AI Gateway provider, it keeps ChatGPT-shaped authentication enabled so Codex App retains its account-backed model catalog and Remote Control state:
+When ThreadRelay injects its default local AI Gateway provider, it keeps ChatGPT-shaped authentication enabled so Codex App retains its account-backed model catalog and Remote Control state:
 
 ```toml
 web_search = "live"
@@ -295,7 +295,7 @@ experimental_bearer_token = "dummy-token"
 
 The provider identity remains `ai-gateway`, so `provider.is_openai()` is false and OpenAI-only remote compaction, request compression, and private metadata behavior stay disabled. The managed provider intentionally does not use Actor Authorization by default.
 
-Actor Authorization requires `requires_openai_auth = false`, which makes the provider account API return no account. In Codex App 26.707.8479 this also causes the frontend to apply the official Statsig `available_models` allowlist; custom CodexHub models then disappear even though `/ai-gateway/v1/models` returns them. For that reason the native `web.run` provider gate remains disabled in the default configuration, and GPT-5.6 uses CodexHub's hosted `web_search` compatibility path instead. The `/alpha/search` proxy remains available for future Codex versions or explicit experimental configurations.
+Actor Authorization requires `requires_openai_auth = false`, which makes the provider account API return no account. In Codex App 26.707.8479 this also causes the frontend to apply the official Statsig `available_models` allowlist; custom ThreadRelay models then disappear even though `/ai-gateway/v1/models` returns them. For that reason the native `web.run` provider gate remains disabled in the default configuration, and GPT-5.6 uses ThreadRelay's hosted `web_search` compatibility path instead. The `/alpha/search` proxy remains available for future Codex versions or explicit experimental configurations.
 
 ## Codex App Auth
 
@@ -334,18 +334,20 @@ The local JWT needs to parse as a JWT and include the ChatGPT-shaped auth metada
 
 This identity is local bridge identity only. The model provider key controls the actual model provider.
 
+The `codexhub` strings in this identity are retained compatibility values for existing Codex configuration and migration logic. Do not rename them manually.
+
 The desktop GUI provides Codex App configuration controls that write the local Codex App config for you.
 
 The CLI equivalent is:
 
 ```powershell
-codexhub --config config.toml configure-codex-app
+threadrelay --config config.toml configure-codex-app
 ```
 
 Optional provider fields:
 
 ```powershell
-codexhub --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
+threadrelay --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
 ```
 
 When provider fields are supplied without `--provider-name`, `llmx` is used as the provider name.
@@ -377,7 +379,7 @@ These should stay ignored:
 
 ```text
 config.toml
-codexhub-state.json
+threadrelay-state.json
 *.log
 .im/
 target/

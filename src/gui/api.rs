@@ -65,7 +65,7 @@ impl ApiClient {
         identity
             .is_codexhub()
             .then_some(identity)
-            .ok_or_else(|| "local service identity does not match CodexHub".to_string())
+            .ok_or_else(|| "local service identity does not match ThreadRelay".to_string())
     }
 
     pub(super) fn get_quick_json(&self, path: &str) -> Result<Value, String> {

@@ -1,3 +1,20 @@
+ThreadRelay v0.5.0
+
+本次版本标志项目从 CodexHub fork 独立为 ThreadRelay。既有 CodexHub 发行记录保留在下方，作为项目演进历史。
+
+## 项目独立化
+
+- 产品、桌面应用、安装包和公开命令统一使用 ThreadRelay / `threadrelay`。
+- GitHub 仓库、Issue 与后续发布渠道切换到 ThreadRelay，由 ThreadRelay 维护者独立演进。
+- 默认配置目录改为 `ThreadRelay`，默认状态文件和日志改为 `threadrelay-state.json`、`threadrelay-chain.log` 与 `threadrelay-daemon-startup.log`。
+- 启动时兼容读取既有 CodexHub 配置目录及 `CODEXHUB_*` 环境变量，避免现有用户升级后丢失配置。
+- 更新应用元数据、安装资源、发布工作流、用户文档、许可证与第三方声明，清理面向用户的旧品牌。
+
+## 兼容性
+
+- Codex 本地鉴权、历史配置识别和数据迁移所需的内部 `codexhub` 标识继续保留；这些标识不代表当前产品品牌。
+- 本版本不改写下方 CodexHub 历史发行记录。
+
 CodexHub v0.4.21
 
 本次版本重点完善 Telegram 远程任务体验，并修复 DeepSeek Responses 会话中工具调用历史不完整导致的请求失败。

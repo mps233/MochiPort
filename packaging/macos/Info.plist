@@ -5,21 +5,21 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>CodexHub</string>
+  <string>ThreadRelay</string>
   <key>CFBundleExecutable</key>
-  <string>CodexHub</string>
+  <string>ThreadRelay</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>com.codexhub.app</string>
+  <string>io.github.mps233.threadrelay</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>CodexHub</string>
+  <string>ThreadRelay</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.3.15</string>
+  <string>0.5.0</string>
   <key>CFBundleVersion</key>
   <string>15</string>
   <key>LSMinimumSystemVersion</key>

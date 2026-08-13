@@ -62,8 +62,8 @@ impl GuiText {
 
     pub(super) fn close_window_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "隐藏窗口，CodexHub 会继续在托盘运行",
-            GuiLocale::EnUs => "Hide this window and keep CodexHub running in the tray",
+            GuiLocale::ZhCn => "隐藏窗口，ThreadRelay 会继续在托盘运行",
+            GuiLocale::EnUs => "Hide this window and keep ThreadRelay running in the tray",
         }
     }
 
@@ -83,22 +83,22 @@ impl GuiText {
 
     pub(super) fn quit(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "退出 CodexHub\tCtrl+Q",
-            GuiLocale::EnUs => "&Quit CodexHub\tCtrl+Q",
+            GuiLocale::ZhCn => "退出 ThreadRelay\tCtrl+Q",
+            GuiLocale::EnUs => "&Quit ThreadRelay\tCtrl+Q",
         }
     }
 
     pub(super) fn quit_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "退出 CodexHub 并停止本地服务",
-            GuiLocale::EnUs => "Quit CodexHub and stop the local service",
+            GuiLocale::ZhCn => "退出 ThreadRelay 并停止本地服务",
+            GuiLocale::EnUs => "Quit ThreadRelay and stop the local service",
         }
     }
 
     pub(super) fn tray_open(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "打开 CodexHub",
-            GuiLocale::EnUs => "Open CodexHub",
+            GuiLocale::ZhCn => "打开 ThreadRelay",
+            GuiLocale::EnUs => "Open ThreadRelay",
         }
     }
 
@@ -112,10 +112,10 @@ impl GuiText {
     pub(super) fn tray_still_running_message(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "CodexHub 已隐藏到托盘，本地服务会继续运行。需要退出时请使用托盘菜单里的“退出 CodexHub”。"
+                "ThreadRelay 已隐藏到托盘，本地服务会继续运行。需要退出时请使用托盘菜单里的“退出 ThreadRelay”。"
             }
             GuiLocale::EnUs => {
-                "CodexHub is hidden in the tray and the local service keeps running. Use Quit CodexHub from the tray menu to exit."
+                "ThreadRelay is hidden in the tray and the local service keeps running. Use Quit ThreadRelay from the tray menu to exit."
             }
         }
     }
@@ -134,8 +134,8 @@ impl GuiText {
 
     pub(super) fn language_restart_message(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "语言设置已保存，重启 CodexHub 后生效。",
-            GuiLocale::EnUs => "Language saved. Restart CodexHub to apply it.",
+            GuiLocale::ZhCn => "语言设置已保存，重启 ThreadRelay 后生效。",
+            GuiLocale::EnUs => "Language saved. Restart ThreadRelay to apply it.",
         }
     }
 
@@ -176,8 +176,8 @@ impl GuiText {
 
     pub(super) fn theme_restart_message(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "主题设置已保存，重启 CodexHub 后生效。",
-            GuiLocale::EnUs => "Theme saved. Restart CodexHub to apply it.",
+            GuiLocale::ZhCn => "主题设置已保存，重启 ThreadRelay 后生效。",
+            GuiLocale::EnUs => "Theme saved. Restart ThreadRelay to apply it.",
         }
     }
 
@@ -204,8 +204,8 @@ impl GuiText {
 
     pub(super) fn outbound_proxy_system_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "CodexHub 访问外部 API 时跟随系统代理设置",
-            GuiLocale::EnUs => "Use the system proxy for CodexHub external API requests",
+            GuiLocale::ZhCn => "ThreadRelay 访问外部 API 时跟随系统代理设置",
+            GuiLocale::EnUs => "Use the system proxy for ThreadRelay external API requests",
         }
     }
 
@@ -218,8 +218,8 @@ impl GuiText {
 
     pub(super) fn outbound_proxy_direct_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "CodexHub 访问外部 API 时不使用任何代理",
-            GuiLocale::EnUs => "Do not use a proxy for CodexHub external API requests",
+            GuiLocale::ZhCn => "ThreadRelay 访问外部 API 时不使用任何代理",
+            GuiLocale::EnUs => "Do not use a proxy for ThreadRelay external API requests",
         }
     }
 
@@ -232,8 +232,8 @@ impl GuiText {
 
     pub(super) fn outbound_proxy_custom_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "指定 CodexHub 自身使用的出站代理",
-            GuiLocale::EnUs => "Set an explicit outbound proxy for CodexHub",
+            GuiLocale::ZhCn => "指定 ThreadRelay 自身使用的出站代理",
+            GuiLocale::EnUs => "Set an explicit outbound proxy for ThreadRelay",
         }
     }
 
@@ -250,8 +250,8 @@ impl GuiText {
 
     pub(super) fn outbound_proxy_restart_message(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "出站代理设置已保存，重启 CodexHub 后生效。",
-            GuiLocale::EnUs => "Outbound proxy saved. Restart CodexHub to apply it.",
+            GuiLocale::ZhCn => "出站代理设置已保存，重启 ThreadRelay 后生效。",
+            GuiLocale::EnUs => "Outbound proxy saved. Restart ThreadRelay to apply it.",
         }
     }
 
@@ -286,7 +286,7 @@ impl GuiText {
     pub(super) fn check_updates_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "检查 GitHub Releases 是否有新版本",
-            GuiLocale::EnUs => "Check GitHub Releases for a newer CodexHub version",
+            GuiLocale::EnUs => "Check GitHub Releases for a newer ThreadRelay version",
         }
     }
 
@@ -310,8 +310,8 @@ impl GuiText {
 
     pub(super) fn about(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "关于 CodexHub",
-            GuiLocale::EnUs => "&About CodexHub",
+            GuiLocale::ZhCn => "关于 ThreadRelay",
+            GuiLocale::EnUs => "&About ThreadRelay",
         }
     }
 
@@ -401,18 +401,18 @@ impl GuiText {
 
     pub(super) fn local_connection_switch_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "切换后需要重启 CodexHub，之后再重新初始化 Codex 配置。",
+            GuiLocale::ZhCn => "切换后需要重启 ThreadRelay，之后再重新初始化 Codex 配置。",
             GuiLocale::EnUs => {
-                "Restart CodexHub after switching, then initialize Codex config again."
+                "Restart ThreadRelay after switching, then initialize Codex config again."
             }
         }
     }
 
     pub(super) fn local_connection_restart_message(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "连接模式已更新。请重启 CodexHub，之后再重新初始化 Codex 配置。",
+            GuiLocale::ZhCn => "连接模式已更新。请重启 ThreadRelay，之后再重新初始化 Codex 配置。",
             GuiLocale::EnUs => {
-                "Connection mode updated. Restart CodexHub, then initialize Codex config again."
+                "Connection mode updated. Restart ThreadRelay, then initialize Codex config again."
             }
         }
     }
@@ -434,10 +434,10 @@ impl GuiText {
     pub(super) fn local_connection_detected_message(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "检测到当前网络环境可能影响本地连接，建议切换到 VPN 兼容连接。切换后需要重启 CodexHub。"
+                "检测到当前网络环境可能影响本地连接，建议切换到 VPN 兼容连接。切换后需要重启 ThreadRelay。"
             }
             GuiLocale::EnUs => {
-                "The current network environment may affect local connections. Switch to VPN-compatible connection, then restart CodexHub."
+                "The current network environment may affect local connections. Switch to VPN-compatible connection, then restart ThreadRelay."
             }
         }
     }
@@ -603,10 +603,10 @@ impl GuiText {
     pub(super) fn codex_local_config_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "初始化 CodexHub 所需配置，可随时恢复到初始化前状态，包括 ChatGPT 登录状态。"
+                "初始化 ThreadRelay 所需配置，可随时恢复到初始化前状态，包括 ChatGPT 登录状态。"
             }
             GuiLocale::EnUs => {
-                "Set up CodexHub integration. You can restore the pre-setup state anytime, including ChatGPT sign-in."
+                "Set up ThreadRelay integration. You can restore the pre-setup state anytime, including ChatGPT sign-in."
             }
         }
     }
@@ -885,10 +885,10 @@ impl GuiText {
     pub(super) fn codex_enhanced_launch_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "使用 CodexHub 当前模型列表启动 Codex，并同步 Codex 前端模型选项。Codex App 正在运行时，需要先完全退出。"
+                "使用 ThreadRelay 当前模型列表启动 Codex，并同步 Codex 前端模型选项。Codex App 正在运行时，需要先完全退出。"
             }
             GuiLocale::EnUs => {
-                "Launch Codex with the current CodexHub model list and sync the model picker. Exit Codex App first if it is already running."
+                "Launch Codex with the current ThreadRelay model list and sync the model picker. Exit Codex App first if it is already running."
             }
         }
     }
@@ -951,10 +951,10 @@ impl GuiText {
     pub(super) fn codex_enhanced_launch_check_failed_detail(self, detail: &str) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!(
-                "暂时无法检测 Codex App 状态。请稍后重试；如果反复出现，请完全退出并重新打开 CodexHub。\n检测详情：{detail}"
+                "暂时无法检测 Codex App 状态。请稍后重试；如果反复出现，请完全退出并重新打开 ThreadRelay。\n检测详情：{detail}"
             ),
             GuiLocale::EnUs => format!(
-                "Could not check Codex App status. Please try again. If it keeps happening, fully exit and reopen CodexHub.\nDetails: {detail}"
+                "Could not check Codex App status. Please try again. If it keeps happening, fully exit and reopen ThreadRelay.\nDetails: {detail}"
             ),
         }
     }
@@ -1548,11 +1548,11 @@ impl GuiText {
     pub(super) fn local_service_offline_detail(self, mode: LocalConnectionMode) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!(
-                "{} · GUI 会自动启动本地服务；如果一直未运行，请重启 CodexHub。",
+                "{} · GUI 会自动启动本地服务；如果一直未运行，请重启 ThreadRelay。",
                 self.local_connection_label(mode)
             ),
             GuiLocale::EnUs => format!(
-                "{} · The GUI starts the local service automatically. Restart CodexHub if it stays offline.",
+                "{} · The GUI starts the local service automatically. Restart ThreadRelay if it stays offline.",
                 self.local_connection_label(mode)
             ),
         }
@@ -1885,10 +1885,10 @@ impl GuiText {
     pub(super) fn service_not_ready_retry(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "本地服务还没有启动完成，请稍后再试。如果一直未运行，请重启 CodexHub。"
+                "本地服务还没有启动完成，请稍后再试。如果一直未运行，请重启 ThreadRelay。"
             }
             GuiLocale::EnUs => {
-                "The local service is not ready yet. Try again shortly. Restart CodexHub if it stays offline."
+                "The local service is not ready yet. Try again shortly. Restart ThreadRelay if it stays offline."
             }
         }
     }
@@ -1923,8 +1923,8 @@ impl GuiText {
 
     pub(super) fn update_dialog_title(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "CodexHub 更新",
-            GuiLocale::EnUs => "CodexHub Update",
+            GuiLocale::ZhCn => "ThreadRelay 更新",
+            GuiLocale::EnUs => "ThreadRelay Update",
         }
     }
 
@@ -2161,9 +2161,9 @@ impl GuiText {
     #[cfg(target_os = "windows")]
     pub(super) fn update_installer_started(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "更新包已下载。CodexHub 将退出以继续安装。",
+            GuiLocale::ZhCn => "更新包已下载。ThreadRelay 将退出以继续安装。",
             GuiLocale::EnUs => {
-                "The update was downloaded. CodexHub will exit to continue installation."
+                "The update was downloaded. ThreadRelay will exit to continue installation."
             }
         }
     }
@@ -2172,10 +2172,10 @@ impl GuiText {
     pub(super) fn update_installer_started(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "更新包已下载并打开。请将 CodexHub 拖到 Applications 覆盖安装，然后重新打开。"
+                "更新包已下载并打开。请将 ThreadRelay 拖到 Applications 覆盖安装，然后重新打开。"
             }
             GuiLocale::EnUs => {
-                "The update was downloaded and opened. Drag CodexHub to Applications to replace the old app, then reopen it."
+                "The update was downloaded and opened. Drag ThreadRelay to Applications to replace the old app, then reopen it."
             }
         }
     }
@@ -2631,10 +2631,10 @@ impl GuiText {
     pub(super) fn daemon_start_timeout(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "本地服务已启动，但 10 秒内没有响应。请检查 logs/codexhub-chain.log。"
+                "本地服务已启动，但 10 秒内没有响应。请检查 logs/threadrelay-chain.log。"
             }
             GuiLocale::EnUs => {
-                "The local service started, but did not respond within 10 seconds. Check logs/codexhub-chain.log."
+                "The local service started, but did not respond within 10 seconds. Check logs/threadrelay-chain.log."
             }
         }
     }
@@ -2642,10 +2642,10 @@ impl GuiText {
     pub(super) fn daemon_watchdog_timeout(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "本地服务启动超过 30 秒仍未完成。请检查旧进程占用或 logs/codexhub-chain.log。"
+                "本地服务启动超过 30 秒仍未完成。请检查旧进程占用或 logs/threadrelay-chain.log。"
             }
             GuiLocale::EnUs => {
-                "The local service has not finished starting after 30 seconds. Check for an old process or logs/codexhub-chain.log."
+                "The local service has not finished starting after 30 seconds. Check for an old process or logs/threadrelay-chain.log."
             }
         }
     }
@@ -2667,10 +2667,10 @@ impl GuiText {
     pub(super) fn daemon_port_conflict(self, port: u16, owner: &str) -> String {
         match self.locale {
             GuiLocale::ZhCn => {
-                format!("端口 {port} 被非 CodexHub 进程占用，已停止自动启动以避免误杀：{owner}")
+                format!("端口 {port} 被非 ThreadRelay 进程占用，已停止自动启动以避免误杀：{owner}")
             }
             GuiLocale::EnUs => format!(
-                "Port {port} is owned by a non-CodexHub process. Automatic startup was stopped to avoid terminating it: {owner}"
+                "Port {port} is owned by a non-ThreadRelay process. Automatic startup was stopped to avoid terminating it: {owner}"
             ),
         }
     }
@@ -2678,10 +2678,12 @@ impl GuiText {
     pub(super) fn daemon_stop_failed(self, port: u16, pids: &str) -> String {
         match self.locale {
             GuiLocale::ZhCn => {
-                format!("无法停止占用端口 {port} 的旧 CodexHub 进程（PID：{pids}）")
+                format!("无法停止占用端口 {port} 的旧 ThreadRelay/CodexHub 进程（PID：{pids}）")
             }
             GuiLocale::EnUs => {
-                format!("Failed to stop the old CodexHub process on port {port} (PID: {pids})")
+                format!(
+                    "Failed to stop the old ThreadRelay/CodexHub process on port {port} (PID: {pids})"
+                )
             }
         }
     }

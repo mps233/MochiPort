@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=CodexHub
-Comment=Remote-control Codex from Feishu, WeChat, and Telegram
-Exec=codexhub
-Icon=codexhub
-Terminal=false
-Categories=Development;Utility;

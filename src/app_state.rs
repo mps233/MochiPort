@@ -383,19 +383,19 @@ impl AppState {
         ));
         match level {
             "error" => tracing::error!(
-                target: "codexhub::event",
+                target: "threadrelay::event",
                 event_kind = kind,
                 message = %message,
                 "app event"
             ),
             "warn" => tracing::warn!(
-                target: "codexhub::event",
+                target: "threadrelay::event",
                 event_kind = kind,
                 message = %message,
                 "app event"
             ),
             _ => tracing::info!(
-                target: "codexhub::event",
+                target: "threadrelay::event",
                 event_kind = kind,
                 message = %message,
                 "app event"

@@ -395,7 +395,9 @@ fn fallback_port_is_available(port: u16) -> bool {
 fn command_is_codexhub(command: &str) -> bool {
     let command = command.trim().replace('\\', "/");
     let executable = command.rsplit('/').next().unwrap_or_default();
-    executable.eq_ignore_ascii_case("codexhub") || executable.eq_ignore_ascii_case("codexhub.exe")
+    ["threadrelay", "threadrelay.exe", "codexhub", "codexhub.exe"]
+        .iter()
+        .any(|name| executable.eq_ignore_ascii_case(name))
 }
 
 #[cfg(unix)]
@@ -587,13 +589,17 @@ pub(super) fn append_daemon_args(command: &mut Command) {
 }
 
 pub(super) fn daemon_config_path() -> Option<PathBuf> {
-    if env::var_os("CODEXHUB_HOME").is_some() {
+    let threadrelay_home_is_set = env::var_os("THREADRELAY_HOME").is_some();
+    let threadrelay_repo_config_is_set = env::var_os("THREADRELAY_USE_REPO_CONFIG").is_some();
+    if threadrelay_home_is_set
+        || (!threadrelay_repo_config_is_set && env::var_os("CODEXHUB_HOME").is_some())
+    {
         return Some(app_support_config_path());
     }
     if let Some(path) = adjacent_config_from_current_exe() {
         return Some(path);
     }
-    if env::var_os("CODEXHUB_USE_REPO_CONFIG").is_some() {
+    if threadrelay_repo_config_is_set || env::var_os("CODEXHUB_USE_REPO_CONFIG").is_some() {
         return std::env::current_dir()
             .ok()
             .map(|cwd| cwd.join("config.toml"))
@@ -608,6 +614,9 @@ pub(super) fn daemon_config_path() -> Option<PathBuf> {
 }
 
 pub(super) fn app_support_config_path() -> PathBuf {
+    if let Some(base) = env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
+        return base.join("config.toml");
+    }
     if let Some(base) = env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
         return base.join("config.toml");
     }
@@ -677,39 +686,53 @@ fn daemon_startup_log_path_for_config_path(config_path: &Path) -> PathBuf {
                 config.state_path
             }
         })
-        .unwrap_or_else(|| base.join("codexhub-state.json"));
+        .unwrap_or_else(|| base.join("threadrelay-state.json"));
     state_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or(base)
         .join("logs")
-        .join("codexhub-daemon-startup.log")
+        .join("threadrelay-daemon-startup.log")
 }
 
 #[cfg(target_os = "windows")]
 pub(super) fn platform_app_support_config_path() -> PathBuf {
-    let legacy = env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
-    if let Some(path) = legacy.filter(|path| path.exists()) {
-        return path;
-    }
     let base = env::var_os("LOCALAPPDATA")
         .or_else(|| env::var_os("APPDATA"))
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("CodexHub").join("config.toml")
+    let new_path = base.join("ThreadRelay").join("config.toml");
+    let legacy_macos_path = env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
+    let mut legacy_paths = vec![base.join("CodexHub").join("config.toml")];
+    legacy_paths.extend(legacy_macos_path);
+    prefer_existing_legacy_config(new_path, &legacy_paths)
 }
 
 #[cfg(not(target_os = "windows"))]
 pub(super) fn platform_app_support_config_path() -> PathBuf {
     let base = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/CodexHub"))
+        .map(|home| home.join("Library/Application Support"))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("config.toml")
+    prefer_existing_legacy_config(
+        base.join("ThreadRelay").join("config.toml"),
+        &[base.join("CodexHub").join("config.toml")],
+    )
+}
+
+fn prefer_existing_legacy_config(new_path: PathBuf, legacy_paths: &[PathBuf]) -> PathBuf {
+    if new_path.exists() {
+        return new_path;
+    }
+    legacy_paths
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .unwrap_or(new_path)
 }
 
 pub(super) fn repo_root_from_target_exe() -> Option<PathBuf> {
@@ -731,7 +754,7 @@ pub(super) fn adjacent_config_from_current_exe() -> Option<PathBuf> {
         .filter(|path| {
             // Only use the exe-adjacent config when its directory is writable.
             // Installed builds under protected locations such as
-            // `C:\\Program Files\\CodexHub` ship a default `config.toml` next to
+            // Installed builds may ship a default `config.toml` next to
             // the exe, but the directory is read-only for normal-privilege
             // processes, so saving config there fails with HTTP 500. In that
             // case fall through to the per-user app-support path instead.
@@ -748,7 +771,7 @@ fn config_directory_is_writable(dir: &Path) -> bool {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or(0);
-    let probe = dir.join(format!(".codexhub-write-probe-{nanos}"));
+    let probe = dir.join(format!(".threadrelay-write-probe-{nanos}"));
     match std::fs::File::create(&probe) {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
@@ -775,6 +798,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn app_support_path_uses_legacy_config_until_new_config_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "threadrelay-gui-config-path-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let new_path = root.join("ThreadRelay/config.toml");
+        let legacy_path = root.join("CodexHub/config.toml");
+
+        assert_eq!(
+            prefer_existing_legacy_config(new_path.clone(), std::slice::from_ref(&legacy_path)),
+            new_path
+        );
+
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "").unwrap();
+
+        assert_eq!(
+            prefer_existing_legacy_config(new_path.clone(), std::slice::from_ref(&legacy_path)),
+            legacy_path
+        );
+
+        std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+        std::fs::write(&new_path, "").unwrap();
+        assert_eq!(
+            prefer_existing_legacy_config(new_path.clone(), &[root.join("CodexHub/config.toml")]),
+            new_path
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn daemon_startup_log_follows_relative_state_path() {
         let root = std::env::temp_dir().join(format!("codexhub-daemon-log-test-{}", now_ms()));
         let config_path = root.join("config.toml");
@@ -786,7 +842,7 @@ mod tests {
             daemon_startup_log_path_for_config_path(&config_path),
             root.join("state")
                 .join("logs")
-                .join("codexhub-daemon-startup.log")
+                .join("threadrelay-daemon-startup.log")
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -809,6 +865,13 @@ mod tests {
         );
         assert!(command_is_codexhub("CodexHub"));
         assert!(command_is_codexhub("codexhub"));
+        assert!(command_is_codexhub("ThreadRelay"));
+        assert!(command_is_codexhub(
+            "/Applications/ThreadRelay.app/Contents/MacOS/threadrelay"
+        ));
+        assert!(command_is_codexhub(
+            "C:\\Program Files\\ThreadRelay\\threadrelay.exe"
+        ));
         assert!(command_is_codexhub(
             "C:\\Program Files\\CodexHub\\codexhub.exe"
         ));

@@ -11,9 +11,13 @@ use uuid::Uuid;
 
 use crate::types::now_ms;
 
-pub const DAEMON_INSTANCE_ENV: &str = "CODEXHUB_DAEMON_INSTANCE_ID";
+pub const DAEMON_INSTANCE_ENV: &str = "THREADRELAY_DAEMON_INSTANCE_ID";
+const LEGACY_DAEMON_INSTANCE_ENV: &str = "CODEXHUB_DAEMON_INSTANCE_ID";
+// Keep the GUI PID variable stable because relaunch helpers may outlive the
+// executable that spawned them during an in-place upgrade.
 pub const CODEXHUB_GUI_PID_ENV: &str = "CODEXHUB_GUI_PID";
-pub const DAEMON_SERVICE_NAME: &str = "codexhub";
+pub const DAEMON_SERVICE_NAME: &str = "threadrelay";
+const LEGACY_DAEMON_SERVICE_NAME: &str = "codexhub";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +31,7 @@ pub struct DaemonIdentity {
 impl DaemonIdentity {
     pub fn new() -> Self {
         let instance_id = std::env::var(DAEMON_INSTANCE_ENV)
+            .or_else(|_| std::env::var(LEGACY_DAEMON_INSTANCE_ENV))
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -40,7 +45,11 @@ impl DaemonIdentity {
     }
 
     pub fn is_codexhub(&self) -> bool {
-        self.service == DAEMON_SERVICE_NAME && self.pid > 0 && !self.instance_id.trim().is_empty()
+        matches!(
+            self.service.as_str(),
+            DAEMON_SERVICE_NAME | LEGACY_DAEMON_SERVICE_NAME
+        ) && self.pid > 0
+            && !self.instance_id.trim().is_empty()
     }
 }
 
@@ -54,7 +63,7 @@ pub struct DaemonMetadata {
 }
 
 pub struct DaemonInstanceLock {
-    file: File,
+    files: Vec<File>,
     metadata_path: PathBuf,
 }
 
@@ -69,25 +78,31 @@ impl DaemonInstanceLock {
                 )
             })?;
         }
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .open(&path)
-            .with_context(|| format!("failed to open daemon lock `{}`", path.display()))?;
-        if let Err(err) = FileExt::try_lock_exclusive(&file) {
-            let owner = read_daemon_metadata(config_path)
-                .map(|metadata| {
-                    format!(
-                        "pid={} instance_id={}",
-                        metadata.identity.pid, metadata.identity.instance_id
-                    )
-                })
-                .unwrap_or_else(|| "owner=unknown".to_string());
-            return Err(anyhow!(
-                "another CodexHub daemon holds `{}` ({owner}): {err}",
-                path.display()
-            ));
+        // Hold the legacy lock as well as the new lock. This prevents an older
+        // CodexHub build and ThreadRelay from starting daemons side by side.
+        let mut files = Vec::with_capacity(2);
+        for lock_path in [legacy_daemon_lock_path(config_path), path.clone()] {
+            let file = OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .with_context(|| format!("failed to open daemon lock `{}`", lock_path.display()))?;
+            if let Err(err) = FileExt::try_lock_exclusive(&file) {
+                let owner = read_daemon_metadata(config_path)
+                    .map(|metadata| {
+                        format!(
+                            "pid={} instance_id={}",
+                            metadata.identity.pid, metadata.identity.instance_id
+                        )
+                    })
+                    .unwrap_or_else(|| "owner=unknown".to_string());
+                return Err(anyhow!(
+                    "another ThreadRelay or CodexHub daemon holds `{}` ({owner}): {err}",
+                    lock_path.display()
+                ));
+            }
+            files.push(file);
         }
 
         let metadata = DaemonMetadata {
@@ -113,7 +128,7 @@ impl DaemonInstanceLock {
         metadata_file.write_all(b"\n")?;
         metadata_file.sync_data()?;
         Ok(Self {
-            file,
+            files,
             metadata_path,
         })
     }
@@ -122,7 +137,9 @@ impl DaemonInstanceLock {
 impl Drop for DaemonInstanceLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.metadata_path);
-        let _ = FileExt::unlock(&self.file);
+        for file in &self.files {
+            let _ = FileExt::unlock(file);
+        }
     }
 }
 
@@ -132,7 +149,7 @@ pub fn daemon_lock_path(config_path: &Path) -> PathBuf {
         .filter(|path| !path.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("codexhub-daemon.lock")
+        .join("threadrelay-daemon.lock")
 }
 
 pub fn daemon_metadata_path(config_path: &Path) -> PathBuf {
@@ -141,30 +158,68 @@ pub fn daemon_metadata_path(config_path: &Path) -> PathBuf {
         .filter(|path| !path.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("codexhub-daemon.json")
+        .join("threadrelay-daemon.json")
 }
 
 pub fn read_daemon_metadata(config_path: &Path) -> Option<DaemonMetadata> {
-    let bytes = std::fs::read(daemon_metadata_path(config_path))
-        .or_else(|_| std::fs::read(daemon_lock_path(config_path)))
-        .ok()?;
-    serde_json::from_slice(&bytes).ok()
+    daemon_file_pairs(config_path)
+        .into_iter()
+        .find_map(|(lock_path, metadata_path)| {
+            let bytes = std::fs::read(metadata_path)
+                .or_else(|_| std::fs::read(lock_path))
+                .ok()?;
+            serde_json::from_slice(&bytes).ok()
+        })
 }
 
 pub fn read_active_daemon_metadata(config_path: &Path) -> Option<DaemonMetadata> {
-    let metadata = read_daemon_metadata(config_path)?;
-    let lock_file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(daemon_lock_path(config_path))
-        .ok()?;
-    match FileExt::try_lock_exclusive(&lock_file) {
-        Ok(()) => {
-            let _ = FileExt::unlock(&lock_file);
-            None
+    for (lock_path, metadata_path) in daemon_file_pairs(config_path) {
+        let Ok(bytes) = std::fs::read(metadata_path).or_else(|_| std::fs::read(&lock_path)) else {
+            continue;
+        };
+        let Ok(metadata) = serde_json::from_slice::<DaemonMetadata>(&bytes) else {
+            continue;
+        };
+        let Ok(lock_file) = OpenOptions::new().read(true).write(true).open(lock_path) else {
+            continue;
+        };
+        match FileExt::try_lock_exclusive(&lock_file) {
+            Ok(()) => {
+                let _ = FileExt::unlock(&lock_file);
+            }
+            Err(_) => return Some(metadata),
         }
-        Err(_) => Some(metadata),
     }
+    None
+}
+
+fn legacy_daemon_lock_path(config_path: &Path) -> PathBuf {
+    config_directory(config_path).join("codexhub-daemon.lock")
+}
+
+fn legacy_daemon_metadata_path(config_path: &Path) -> PathBuf {
+    config_directory(config_path).join("codexhub-daemon.json")
+}
+
+fn config_directory(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn daemon_file_pairs(config_path: &Path) -> [(PathBuf, PathBuf); 2] {
+    [
+        (
+            daemon_lock_path(config_path),
+            daemon_metadata_path(config_path),
+        ),
+        (
+            legacy_daemon_lock_path(config_path),
+            legacy_daemon_metadata_path(config_path),
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -176,17 +231,23 @@ mod tests {
         let config = PathBuf::from("root").join("config.toml");
         assert_eq!(
             daemon_lock_path(&config),
-            PathBuf::from("root").join("codexhub-daemon.lock")
+            PathBuf::from("root").join("threadrelay-daemon.lock")
         );
         assert_eq!(
             daemon_metadata_path(&config),
-            PathBuf::from("root").join("codexhub-daemon.json")
+            PathBuf::from("root").join("threadrelay-daemon.json")
+        );
+        assert_eq!(
+            legacy_daemon_lock_path(&config),
+            PathBuf::from("root").join("codexhub-daemon.lock")
         );
     }
 
     #[test]
     fn daemon_identity_requires_codexhub_service_and_instance() {
         let mut identity = DaemonIdentity::new();
+        assert!(identity.is_codexhub());
+        identity.service = LEGACY_DAEMON_SERVICE_NAME.to_string();
         assert!(identity.is_codexhub());
         identity.service = "other".to_string();
         assert!(!identity.is_codexhub());
@@ -226,6 +287,46 @@ mod tests {
             .expect("write stale daemon metadata");
         assert!(read_daemon_metadata(&config_path).is_some());
         assert!(read_active_daemon_metadata(&config_path).is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn active_legacy_daemon_metadata_remains_visible() {
+        let root =
+            std::env::temp_dir().join(format!("threadrelay-legacy-lock-test-{}", Uuid::new_v4()));
+        let config_path = root.join("config.toml");
+        std::fs::create_dir_all(&root).expect("create temp directory");
+        let identity = DaemonIdentity {
+            service: LEGACY_DAEMON_SERVICE_NAME.to_string(),
+            pid: std::process::id(),
+            instance_id: Uuid::new_v4().to_string(),
+            started_at_ms: 1,
+        };
+        let metadata = DaemonMetadata {
+            identity: identity.clone(),
+            executable: "codexhub".to_string(),
+            config_path: config_path.display().to_string(),
+        };
+        let legacy_lock_path = legacy_daemon_lock_path(&config_path);
+        let legacy_lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&legacy_lock_path)
+            .expect("open legacy lock");
+        FileExt::try_lock_exclusive(&legacy_lock).expect("lock legacy daemon file");
+        std::fs::write(
+            legacy_daemon_metadata_path(&config_path),
+            serde_json::to_vec(&metadata).unwrap(),
+        )
+        .expect("write legacy metadata");
+
+        let active = read_active_daemon_metadata(&config_path).expect("find legacy daemon");
+        assert_eq!(active.identity.instance_id, identity.instance_id);
+        assert!(DaemonInstanceLock::acquire(&config_path, &DaemonIdentity::new()).is_err());
+
+        FileExt::unlock(&legacy_lock).unwrap();
+        drop(legacy_lock);
         let _ = std::fs::remove_dir_all(root);
     }
 }

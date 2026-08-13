@@ -163,7 +163,7 @@ pub(crate) fn prepare_responses_request(
     scope: &EncryptedContentScope,
 ) -> EncryptedContentStats {
     // New Responses state is never scoped. Decode markers written by older
-    // CodexHub versions, while preserving all native unmarked state verbatim.
+    // older ThreadRelay/CodexHub versions, while preserving all native unmarked state verbatim.
     prepare_input(value, scope, false, false)
 }
 

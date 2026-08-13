@@ -42,7 +42,7 @@ class ApplicationActivationManager
 {
 }
 
-public static class CodexHubMsixLauncher
+public static class ThreadRelayMsixLauncher
 {
     public static uint Launch(string appId, string arguments)
     {
@@ -55,13 +55,13 @@ public static class CodexHubMsixLauncher
 }
 '@
 
-if (-not ('CodexHubMsixLauncher' -as [type])) {
+if (-not ('ThreadRelayMsixLauncher' -as [type])) {
     Add-Type -TypeDefinition $source
 }
 
 $appUserModelId = "$($package.PackageFamilyName)!App"
 $arguments = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=$Port"
-$processId = [CodexHubMsixLauncher]::Launch($appUserModelId, $arguments)
+$processId = [ThreadRelayMsixLauncher]::Launch($appUserModelId, $arguments)
 
 $deadline = (Get-Date).AddSeconds(30)
 do {

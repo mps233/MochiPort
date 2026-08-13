@@ -36,7 +36,7 @@ If `connected=false`, check the Codex App side:
 
 1. Codex App config contains `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`.
 2. Codex App auth is local `chatgptAuthTokens`, not API-key-only auth.
-3. The `codexhub daemon` process is running before remote control is enabled.
+3. The `threadrelay daemon` process is running before remote control is enabled.
 4. Remote control is enabled in Codex App.
 
 ## API Key Auth Error
@@ -107,7 +107,7 @@ If clicking an old card says "please handle current approval first", the bridge 
 To disable bridge mode:
 
 ```powershell
-codexhub --config config.toml off
+threadrelay --config config.toml off
 ```
 
 ## Manual Protocol Debugging
@@ -115,7 +115,7 @@ codexhub --config config.toml off
 Use matching app-server and TUI ports:
 
 ```powershell
-codexhub --config config.toml daemon
+threadrelay --config config.toml daemon
 codex -c 'chatgpt_base_url="http://127.0.0.1:3847/backend-api"' app-server --listen ws://127.0.0.1:3849 --remote-control
 codex --remote ws://127.0.0.1:3849 -C D:\path\to\project
 ```
@@ -140,4 +140,4 @@ Warnings such as:
 Failed to create shell snapshot for powershell
 ```
 
-come from Codex shell snapshot support and are not caused by `codexhub`.
+come from Codex shell snapshot support and are not caused by ThreadRelay.

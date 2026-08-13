@@ -1,8 +1,10 @@
 [package]
-name = "codexhub"
-version = "0.4.21"
+name = "threadrelay"
+version = "0.5.0"
 edition = "2024"
 license = "Apache-2.0"
+description = "Local-first bridge for controlling coding agents from chat"
+repository = "https://github.com/mps233/threadrelay"
 build = "build.rs"
 autobins = false
 
@@ -51,6 +53,9 @@ winreg = "0.55"
 [build-dependencies]
 embed-resource = "3.0.6"
 
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+
 [features]
 gui = ["dep:image", "dep:wxdragon", "wxdragon/stc", "reqwest/blocking"]
 
@@ -60,5 +65,5 @@ wxdragon-sys = { path = "vendor/wxdragon/rust/wxdragon-sys" }
 wxdragon-macros = { path = "vendor/wxdragon/rust/wxdragon-macros" }
 
 [[bin]]
-name = "codexhub"
+name = "threadrelay"
 path = "src/main.rs"

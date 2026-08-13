@@ -1,0 +1,41 @@
+ThreadRelay Third-Party Notices
+================================
+
+ThreadRelay includes third-party open-source software and visual assets.
+The dependency inventory and exact versions are recorded in Cargo.lock.
+
+Rust dependencies
+-----------------
+
+The Rust dependencies are distributed under their respective licenses. Release
+workflows append the dependency inventory and license texts discovered from the
+Cargo.lock-resolved source packages to this file.
+
+wxDragon
+--------
+
+The vendored wxDragon Rust bindings are licensed under either the MIT License
+or the Apache License, Version 2.0, at your option.
+
+Lucide Icons and Feather-derived icons
+--------------------------------------
+
+The complete ISC and MIT license texts for the Lucide assets distributed with
+ThreadRelay are included in:
+
+  brand/LICENSE.lucide-icons
+
+LobeHub Icons
+-------------
+
+The complete MIT license text for the LobeHub icon assets distributed with
+ThreadRelay is included in:
+
+  brand/providers/LICENSE.lobehub-icons
+
+Additional brand assets and their sources are documented in:
+
+  brand/providers/SOURCES.md
+
+Product names and logos may be trademarks of their respective owners. Their
+inclusion identifies compatible services and does not imply endorsement.

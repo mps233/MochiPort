@@ -1,4 +1,4 @@
-﻿name: release-linux
+name: ThreadRelay Linux release
 
 on:
   workflow_dispatch:
@@ -58,33 +58,57 @@ jobs:
       - name: Build Release
         run: |
           set -euo pipefail
-          cargo build --release --features gui --bin codexhub
-          strip target/release/codexhub
+          cargo build --locked --release --features gui --bin threadrelay
+          strip target/release/threadrelay
+
+      - name: Prepare Release Metadata
+        run: |
+          set -euo pipefail
+          CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$CARGO_VERSION" ]; then
+            echo "Could not read package version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            APP_VERSION="$GITHUB_REF_NAME"
+          else
+            APP_VERSION="v$CARGO_VERSION"
+          fi
+          {
+            echo "APP_VERSION=$APP_VERSION"
+            echo "LINUX_TARBALL_NAME=ThreadRelay-$APP_VERSION-linux-x86_64.tar.gz"
+            echo "LINUX_APPIMAGE_NAME=ThreadRelay-$APP_VERSION-linux-x86_64.AppImage"
+          } >> "$GITHUB_ENV"
 
       - name: Package Tarball
         run: |
           set -euo pipefail
           DIST_ROOT="target/dist"
-          PACKAGE_DIR="$DIST_ROOT/CodexHub Linux x86_64"
+          PACKAGE_NAME="ThreadRelay Linux x86_64"
+          PACKAGE_DIR="$DIST_ROOT/$PACKAGE_NAME"
           rm -rf "$DIST_ROOT"
           mkdir -p \
             "$PACKAGE_DIR/bin" \
             "$PACKAGE_DIR/share/applications" \
-            "$PACKAGE_DIR/share/icons/hicolor/256x256/apps"
+            "$PACKAGE_DIR/share/icons/hicolor/256x256/apps" \
+            "$PACKAGE_DIR/brand/providers"
 
-          cp target/release/codexhub "$PACKAGE_DIR/bin/codexhub"
-          cp packaging/linux/codexhub.desktop "$PACKAGE_DIR/share/applications/codexhub.desktop"
-          cp packaging/icons/dolphin-rounded-256.png "$PACKAGE_DIR/share/icons/hicolor/256x256/apps/codexhub.png"
-          cp README.md README.en.md "$PACKAGE_DIR/"
+          python3 packaging/generate-third-party-licenses.py "$DIST_ROOT/THIRD_PARTY_LICENSES.txt"
+          cp target/release/threadrelay "$PACKAGE_DIR/bin/threadrelay"
+          cp packaging/linux/threadrelay.desktop "$PACKAGE_DIR/share/applications/threadrelay.desktop"
+          cp packaging/icons/dolphin-rounded-256.png "$PACKAGE_DIR/share/icons/hicolor/256x256/apps/threadrelay.png"
+          cp README.md README.en.md LICENSE NOTICE "$DIST_ROOT/THIRD_PARTY_LICENSES.txt" "$PACKAGE_DIR/"
+          cp packaging/brand/LICENSE.lucide-icons "$PACKAGE_DIR/brand/"
+          cp packaging/brand/providers/LICENSE.lobehub-icons packaging/brand/providers/SOURCES.md "$PACKAGE_DIR/brand/providers/"
           if [ -f config.example.toml ]; then
             cp config.example.toml "$PACKAGE_DIR/"
           fi
 
-          tar -C "$DIST_ROOT" -czf "$DIST_ROOT/CodexHub Linux x86_64.tar.gz" "CodexHub Linux x86_64"
+          tar -C "$DIST_ROOT" -czf "$DIST_ROOT/$LINUX_TARBALL_NAME" "$PACKAGE_NAME"
 
       - name: Build AppImage
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ env.APP_VERSION }}
         run: |
           set -euo pipefail
           DIST_ROOT="target/dist"
@@ -93,12 +117,16 @@ jobs:
           mkdir -p \
             "$APPDIR/usr/bin" \
             "$APPDIR/usr/share/applications" \
-            "$APPDIR/usr/share/icons/hicolor/256x256/apps"
+            "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
+            "$APPDIR/usr/share/doc/threadrelay/brand/providers"
 
-          cp target/release/codexhub "$APPDIR/usr/bin/codexhub"
-          cp packaging/linux/codexhub.desktop "$APPDIR/usr/share/applications/codexhub.desktop"
-          cp packaging/icons/dolphin-rounded-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/codexhub.png"
-          desktop-file-validate "$APPDIR/usr/share/applications/codexhub.desktop"
+          cp target/release/threadrelay "$APPDIR/usr/bin/threadrelay"
+          cp packaging/linux/threadrelay.desktop "$APPDIR/usr/share/applications/threadrelay.desktop"
+          cp packaging/icons/dolphin-rounded-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/threadrelay.png"
+          cp LICENSE NOTICE "$DIST_ROOT/THIRD_PARTY_LICENSES.txt" "$APPDIR/usr/share/doc/threadrelay/"
+          cp packaging/brand/LICENSE.lucide-icons "$APPDIR/usr/share/doc/threadrelay/brand/"
+          cp packaging/brand/providers/LICENSE.lobehub-icons packaging/brand/providers/SOURCES.md "$APPDIR/usr/share/doc/threadrelay/brand/providers/"
+          desktop-file-validate "$APPDIR/usr/share/applications/threadrelay.desktop"
 
           wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
           wget -q "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
@@ -107,24 +135,70 @@ jobs:
           export LINUXDEPLOY_OUTPUT_VERSION="${VERSION#v}"
           ./linuxdeploy-x86_64.AppImage \
             --appdir "$APPDIR" \
-            --executable "$APPDIR/usr/bin/codexhub" \
-            --desktop-file "$APPDIR/usr/share/applications/codexhub.desktop" \
-            --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/codexhub.png" \
+            --executable "$APPDIR/usr/bin/threadrelay" \
+            --desktop-file "$APPDIR/usr/share/applications/threadrelay.desktop" \
+            --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/threadrelay.png" \
             --plugin gtk \
             --output appimage
 
           rm -f linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
           APPIMAGE="$(find . -maxdepth 1 -name '*.AppImage' -print -quit)"
           test -n "$APPIMAGE"
-          mv "$APPIMAGE" "$DIST_ROOT/CodexHub Linux x86_64.AppImage"
+          mv "$APPIMAGE" "$DIST_ROOT/$LINUX_APPIMAGE_NAME"
+
+      - name: Write Linux Update Metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          dist = Path("target/dist")
+          release_tag = os.environ["RELEASE_TAG"]
+          repository = os.environ["RELEASE_REPOSITORY"]
+          tarball_name = os.environ["LINUX_TARBALL_NAME"]
+          appimage_name = os.environ["LINUX_APPIMAGE_NAME"]
+          release_url = f"https://github.com/{repository}/releases/tag/{release_tag}"
+          download_base = f"https://github.com/{repository}/releases/download/{release_tag}"
+
+          def asset(name: str, asset_type: str) -> dict[str, object]:
+              path = dist / name
+              return {
+                  "type": asset_type,
+                  "url": f"{download_base}/{name}",
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                  "size": path.stat().st_size,
+              }
+
+          manifest = {
+              "version": release_tag,
+              "releaseUrl": release_url,
+              "notes": "",
+              "assets": {
+                  "linux-x86_64": asset(tarball_name, "tar.gz"),
+                  "linux-appimage-x86_64": asset(appimage_name, "appimage"),
+              },
+          }
+          (dist / "latest-linux.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexHub-Linux
+          name: ThreadRelay-Linux
           path: |
-            target/dist/CodexHub Linux x86_64.AppImage
-            target/dist/CodexHub Linux x86_64.tar.gz
+            target/dist/ThreadRelay-*-linux-x86_64.AppImage
+            target/dist/ThreadRelay-*-linux-x86_64.tar.gz
+            target/dist/latest-linux.json
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -135,5 +209,6 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub Linux x86_64.AppImage
-            target/dist/CodexHub Linux x86_64.tar.gz
+            target/dist/ThreadRelay-*-linux-x86_64.AppImage
+            target/dist/ThreadRelay-*-linux-x86_64.tar.gz
+            target/dist/latest-linux.json

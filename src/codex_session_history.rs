@@ -333,26 +333,41 @@ fn open_state_db_write(path: &Path) -> Result<Connection> {
 }
 
 fn codexhub_app_support_dir() -> PathBuf {
+    if let Some(base) = std::env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
+        return base;
+    }
     if let Some(base) = std::env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
         return base;
     }
     #[cfg(target_os = "windows")]
     {
-        std::env::var_os("LOCALAPPDATA")
+        let base = std::env::var_os("LOCALAPPDATA")
             .or_else(|| std::env::var_os("APPDATA"))
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("CodexHub")
+            .unwrap_or_else(|| PathBuf::from("."));
+        prefer_existing_legacy_app_dir(base.join("ThreadRelay"), &[base.join("CodexHub")])
     }
     #[cfg(not(target_os = "windows"))]
     {
-        std::env::var_os("HOME")
+        let base = std::env::var_os("HOME")
             .map(PathBuf::from)
-            .map(|home| home.join("Library/Application Support/CodexHub"))
+            .map(|home| home.join("Library/Application Support"))
             .or_else(|| std::env::current_dir().ok())
-            .unwrap_or_else(|| PathBuf::from("."))
+            .unwrap_or_else(|| PathBuf::from("."));
+        prefer_existing_legacy_app_dir(base.join("ThreadRelay"), &[base.join("CodexHub")])
     }
+}
+
+fn prefer_existing_legacy_app_dir(new_dir: PathBuf, legacy_dirs: &[PathBuf]) -> PathBuf {
+    if new_dir.join("config.toml").exists() {
+        return new_dir;
+    }
+    legacy_dirs
+        .iter()
+        .find(|dir| dir.join("config.toml").exists())
+        .cloned()
+        .unwrap_or(new_dir)
 }
 
 fn codex_home_id(codex_home: &Path) -> String {

@@ -16,6 +16,7 @@ mod diagnostics_export;
 mod gui;
 mod im;
 mod im_runtime;
+mod manage_api;
 mod outbound_http;
 mod remote_control_backend;
 mod safe_relaunch;
@@ -99,9 +100,9 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
     normalize_config_paths(&mut config, &config_path);
     let log_path = init_logging(&config)?;
     tracing::info!(
-        target: "codexhub::logging",
+        target: "threadrelay::logging",
         path = %log_path.display(),
-        "codexhub chain log initialized"
+        "ThreadRelay chain log initialized"
     );
     if should_save_config {
         config.save(&config_path)?;
@@ -190,7 +191,7 @@ fn run_gui_command() -> anyhow::Result<()> {
 
     #[cfg(not(feature = "gui"))]
     {
-        anyhow::bail!("this codexhub build does not include GUI support")
+        anyhow::bail!("this ThreadRelay build does not include GUI support")
     }
 }
 
@@ -233,10 +234,10 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid bind address `{bind}`"))?;
-    tracing::info!(target: "codexhub::startup", addr = %addr, "binding local service");
+    tracing::info!(target: "threadrelay::startup", addr = %addr, "binding local service");
     let listener = TcpListener::bind(addr).await?;
-    println!("codexhub web: http://{addr}");
-    tracing::info!(target: "codexhub::startup", addr = %addr, "local service listener ready");
+    println!("threadrelay web: http://{addr}");
+    tracing::info!(target: "threadrelay::startup", addr = %addr, "local service listener ready");
 
     // Environment-variable updates can synchronously broadcast WM_SETTINGCHANGE
     // to every desktop window on Windows. Keep that work out of the service's
@@ -245,9 +246,9 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     let backend_url = state.config.lock().await.remote_control_base_url();
     let environment_state = state.clone();
     tokio::spawn(async move {
-        tracing::info!(target: "codexhub::startup", "starting Codex App environment synchronization");
+        tracing::info!(target: "threadrelay::startup", "starting Codex App environment synchronization");
         let result = tokio::task::spawn_blocking(move || {
-            tracing::info!(target: "codexhub::startup", "Codex App environment synchronization entered blocking worker");
+            tracing::info!(target: "threadrelay::startup", "Codex App environment synchronization entered blocking worker");
             let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
             let proxy_cleanup = codex_app_config::cleanup_legacy_app_server_proxy_environment();
             (gui_api_base, proxy_cleanup)
@@ -257,7 +258,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         match result {
             Ok((gui_api_base, proxy_cleanup)) => {
                 tracing::info!(
-                    target: "codexhub::startup",
+                    target: "threadrelay::startup",
                     configured = gui_api_base.configured,
                     proxy_cleanup_ok = proxy_cleanup.is_ok(),
                     "Codex App environment synchronization finished"
@@ -290,7 +291,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
                     .await;
             }
             Err(error) => {
-                tracing::warn!(target: "codexhub::startup", error = %error, "Codex App environment synchronization worker failed");
+                tracing::warn!(target: "threadrelay::startup", error = %error, "Codex App environment synchronization worker failed");
                 environment_state
                     .push_event(
                         "warn",
@@ -308,7 +309,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     if let Some(companion_addr) = companion {
         match TcpListener::bind(companion_addr).await {
             Ok(companion_listener) => {
-                println!("codexhub web: http://{companion_addr}");
+                println!("threadrelay web: http://{companion_addr}");
                 companion_tasks.push(tokio::spawn(serve_http(
                     companion_listener,
                     app.clone(),
@@ -317,7 +318,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             }
             Err(err) => {
                 tracing::warn!(
-                    target: "codexhub::server",
+                    target: "threadrelay::server",
                     addr = %companion_addr,
                     error = %err,
                     "compatible loopback listener unavailable"
@@ -338,14 +339,14 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 tracing::warn!(
-                    target: "codexhub::server",
+                    target: "threadrelay::server",
                     error = %err,
                     "compatible loopback server stopped with error"
                 );
             }
             Err(err) => {
                 tracing::warn!(
-                    target: "codexhub::server",
+                    target: "threadrelay::server",
                     error = %err,
                     "compatible loopback server task failed"
                 );
@@ -356,7 +357,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     match vscode_extension_patch::restore_remote_control() {
         Ok(report) => {
             tracing::info!(
-                target: "codexhub::vscode_extension_patch",
+                target: "threadrelay::vscode_extension_patch",
                 action = %report.action,
                 extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
                 message = %report.message,
@@ -365,7 +366,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         }
         Err(err) => {
             tracing::warn!(
-                target: "codexhub::vscode_extension_patch",
+                target: "threadrelay::vscode_extension_patch",
                 error = %err,
                 "VS Code Codex extension restore failed"
             );
@@ -447,7 +448,11 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
         return absolutize(path);
     }
 
-    if env::var_os("CODEXHUB_HOME").is_some() {
+    let threadrelay_home_is_set = env::var_os("THREADRELAY_HOME").is_some();
+    let threadrelay_repo_config_is_set = env::var_os("THREADRELAY_USE_REPO_CONFIG").is_some();
+    if threadrelay_home_is_set
+        || (!threadrelay_repo_config_is_set && env::var_os("CODEXHUB_HOME").is_some())
+    {
         return app_support_config_path();
     }
 
@@ -455,7 +460,7 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
         return path;
     }
 
-    if env::var_os("CODEXHUB_USE_REPO_CONFIG").is_none() {
+    if !threadrelay_repo_config_is_set && env::var_os("CODEXHUB_USE_REPO_CONFIG").is_none() {
         return app_support_config_path();
     }
 
@@ -470,6 +475,9 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
 }
 
 fn app_support_config_path() -> PathBuf {
+    if let Some(base) = env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
+        return base.join("config.toml");
+    }
     if let Some(base) = env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
         return base.join("config.toml");
     }
@@ -478,28 +486,42 @@ fn app_support_config_path() -> PathBuf {
 
 #[cfg(target_os = "windows")]
 fn platform_app_support_config_path() -> PathBuf {
-    let legacy = env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
-    if let Some(path) = legacy.filter(|path| path.exists()) {
-        return path;
-    }
     let base = env::var_os("LOCALAPPDATA")
         .or_else(|| env::var_os("APPDATA"))
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("CodexHub").join("config.toml")
+    let new_path = base.join("ThreadRelay").join("config.toml");
+    let legacy_macos_path = env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
+    let mut legacy_paths = vec![base.join("CodexHub").join("config.toml")];
+    legacy_paths.extend(legacy_macos_path);
+    prefer_existing_legacy_config(new_path, &legacy_paths)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn platform_app_support_config_path() -> PathBuf {
     let base = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/CodexHub"))
+        .map(|home| home.join("Library/Application Support"))
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("config.toml")
+    prefer_existing_legacy_config(
+        base.join("ThreadRelay").join("config.toml"),
+        &[base.join("CodexHub").join("config.toml")],
+    )
+}
+
+fn prefer_existing_legacy_config(new_path: PathBuf, legacy_paths: &[PathBuf]) -> PathBuf {
+    if new_path.exists() {
+        return new_path;
+    }
+    legacy_paths
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
+        .unwrap_or(new_path)
 }
 
 fn inferred_repo_config_from_target_exe() -> Option<PathBuf> {
@@ -525,7 +547,7 @@ fn adjacent_config_from_current_exe() -> Option<PathBuf> {
         .filter(|path| {
             // Only use the exe-adjacent config when its directory is actually
             // writable. Installed builds under protected locations such as
-            // `C:\\Program Files\\CodexHub` ship a default `config.toml` next to
+            // Installed builds may ship a default `config.toml` next to
             // the exe, but the directory is read-only for normal-privilege
             // processes, so saving config there fails. In that case fall through
             // to the per-user app-support path instead.
@@ -542,7 +564,7 @@ fn config_directory_is_writable(dir: &Path) -> bool {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or(0);
-    let probe = dir.join(format!(".codexhub-write-probe-{nanos}"));
+    let probe = dir.join(format!(".threadrelay-write-probe-{nanos}"));
     match std::fs::File::create(&probe) {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
@@ -574,7 +596,11 @@ fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
     )?;
 
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("codexhub=info".parse()?))
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("threadrelay=info".parse()?)
+                .add_directive("codexhub=info".parse()?),
+        )
         .with_ansi(false)
         .init();
     Ok(path)
@@ -585,7 +611,7 @@ fn effective_chain_log_diagnostic(config: &AppConfig) -> bool {
 }
 
 fn chain_log_path(config: &AppConfig) -> PathBuf {
-    log_dir_from_config(config).join("codexhub-chain.log")
+    log_dir_from_config(config).join("threadrelay-chain.log")
 }
 
 fn log_dir_from_config(config: &AppConfig) -> PathBuf {
@@ -603,7 +629,7 @@ async fn set_bridge_enabled(config_path: &Path, enabled: bool) -> anyhow::Result
     config.save(&config_path.to_path_buf())?;
     let _ = notify_daemon_bridge(&config, enabled).await;
     println!(
-        "codexhub Feishu bridge {}",
+        "ThreadRelay Feishu bridge {}",
         if enabled { "enabled" } else { "disabled" }
     );
     Ok(())
@@ -698,6 +724,39 @@ fn absolutize(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_support_path_uses_legacy_config_until_new_config_exists() {
+        let root = std::env::temp_dir().join(format!(
+            "threadrelay-config-path-test-{}-{}",
+            std::process::id(),
+            crate::types::now_ms()
+        ));
+        let new_path = root.join("ThreadRelay/config.toml");
+        let legacy_path = root.join("CodexHub/config.toml");
+
+        assert_eq!(
+            prefer_existing_legacy_config(new_path.clone(), std::slice::from_ref(&legacy_path)),
+            new_path
+        );
+
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, "").unwrap();
+
+        assert_eq!(
+            prefer_existing_legacy_config(new_path.clone(), std::slice::from_ref(&legacy_path)),
+            legacy_path
+        );
+
+        std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+        std::fs::write(&new_path, "").unwrap();
+        assert_eq!(
+            prefer_existing_legacy_config(new_path.clone(), &[root.join("CodexHub/config.toml")]),
+            new_path
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn compatible_loopback_addr_pairs_ipv4_and_ipv6_localhost() {
