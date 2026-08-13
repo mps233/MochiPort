@@ -37,6 +37,14 @@ use super::router::{resolve_provider_with_state, resolve_provider_with_state_for
 static AI_GATEWAY_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 const MAX_DECOMPRESSED_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
 
+/// Number of gateway requests that are currently holding the in-flight guard.
+///
+/// The lifecycle management API uses this read-only value when deciding
+/// whether a future drain operation would still be blocked by model work.
+pub(crate) fn in_flight_count() -> usize {
+    AI_GATEWAY_IN_FLIGHT.load(Ordering::Acquire)
+}
+
 /// POST /ai-gateway/v1/alpha/search
 pub async fn handle_alpha_search(
     State(state): State<SharedState>,

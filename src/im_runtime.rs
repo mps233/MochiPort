@@ -368,6 +368,32 @@ pub struct WecomStreamState {
 }
 
 impl RuntimeState {
+    /// Return the counts that make a daemon lifecycle operation unsafe to
+    /// commit immediately.  The maps themselves stay private so the
+    /// management API cannot accidentally mutate bridge state while taking a
+    /// snapshot.
+    pub fn protected_work_item_counts(&self) -> (usize, usize, usize) {
+        let codex_turns = self
+            .current_turn_by_thread
+            .keys()
+            .chain(self.starting_turn_by_thread.iter())
+            .collect::<HashSet<_>>()
+            .len();
+        let im_streams = self.feishu_streaming_cards_by_item.len()
+            + self
+                .telegram_typing_by_item
+                .values()
+                .filter(|typing| !typing.finished)
+                .count()
+            + self
+                .wecom_streams_by_thread
+                .values()
+                .filter(|stream| !stream.finished || !stream.delivered)
+                .count();
+        let pending_approvals = self.pending_approval_request_keys.len();
+        (codex_turns, im_streams, pending_approvals)
+    }
+
     pub fn start_bridge_generation(&mut self) -> u64 {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();

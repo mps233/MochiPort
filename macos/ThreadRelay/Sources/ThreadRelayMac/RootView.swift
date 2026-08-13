@@ -88,10 +88,26 @@ private struct OverviewView: View {
                     DashboardSection(title: "Local service", symbol: "server.rack") {
                         StatusRow(
                             title: "Daemon",
-                            detail: model.serviceStatus.title,
+                            detail: daemonDetail,
                             symbol: model.serviceStatus.symbol,
                             tint: model.serviceStatus.tint
                         )
+                        if let lifecycle = model.lifecycle {
+                            RowDivider()
+                            StatusRow(
+                                title: "Runtime",
+                                detail: "v\(lifecycle.runtime.productVersion) · \(lifecycle.management.mode)",
+                                symbol: "shippingbox",
+                                tint: lifecycle.management.canControl ? .positive : .secondary
+                            )
+                            RowDivider()
+                            StatusRow(
+                                title: "Protected work",
+                                detail: protectedWorkDetail(lifecycle.protectedWorkItems),
+                                symbol: "pause.circle",
+                                tint: lifecycle.protectedWorkItems.total == 0 ? .positive : .caution
+                            )
+                        }
                         HStack(spacing: 12) {
                             Button("Copy Diagnostics") {
                                 copyDiagnostics()
@@ -188,6 +204,16 @@ private struct OverviewView: View {
     private var remoteDetail: String {
         guard let dashboard = model.dashboard else { return unavailableDetail }
         return dashboard.remoteControlHealthy ? "Healthy" : dashboard.remoteControlConnected ? "Connected" : "Offline"
+    }
+
+    private var daemonDetail: String {
+        guard let lifecycle = model.lifecycle else { return model.serviceStatus.title }
+        return lifecycle.management.canControl ? "Managed · \(lifecycle.runtime.state)" : "Available · read-only"
+    }
+
+    private func protectedWorkDetail(_ items: ManageLifecycle.ProtectedWorkItems) -> String {
+        guard items.total > 0 else { return "None" }
+        return "\(items.total) active"
     }
 
     private var remoteTint: StatusTint {

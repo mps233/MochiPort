@@ -513,6 +513,39 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(directory.path, "/fixture/custom-state/logs")
     }
 
+    func testFetchLifecycleDecodesReadOnlyRuntimeSnapshot() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/lifecycle")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":1,"codexTurns":2,"imStreams":3,"pendingApprovals":1,"remoteControlRequests":4,"total":11},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+            )
+        }
+
+        let lifecycle = try await client.fetchLifecycle(bearerToken: "fixture-token")
+
+        XCTAssertEqual(lifecycle.service.instanceId, "fixture-instance")
+        XCTAssertEqual(lifecycle.runtime.productVersion, "0.5.0")
+        XCTAssertEqual(lifecycle.protectedWorkItems.total, 11)
+        XCTAssertEqual(lifecycle.management.mode, "readOnly")
+        XCTAssertFalse(lifecycle.management.canControl)
+    }
+
+    func testFetchLifecycleRejectsUnsupportedRuntimeAPIMajor() async {
+        let client = makeClient { _ in
+            MockResponse(
+                statusCode: 200,
+                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":2},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+            )
+        }
+
+        await assertLifecycleError(.unsupportedAPIMajor(2), from: client)
+    }
+
     func testLogDirectoryRejectsLocatorResponseFromReplacedDaemon() async throws {
         let client = makeClient(credentialCandidatesLoader: {
             [
@@ -546,6 +579,8 @@ final class APIContractTests: XCTestCase {
                 MockResponse(statusCode: 200, json: Self.healthJSON)
             case "/api/v1/manage/dashboard":
                 MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case "/api/v1/manage/lifecycle":
+                MockResponse(statusCode: 200, json: Self.lifecycleJSON)
             default:
                 MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
             }
@@ -722,6 +757,7 @@ final class APIContractTests: XCTestCase {
 
     private static let healthJSON = #"{"service":"threadrelay","apiMajor":1,"ready":true}"#
     private static let dashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"bridgeRunning":true,"remoteControlConnected":true,"remoteControlHealthy":true,"executionClients":{"codexApp":{"configured":true,"connected":true},"vscode":{"configured":true,"connected":true},"cli":{"configured":false,"connected":false}},"messageChannels":{"telegram":{"accountCount":2,"connectedAccountCount":1},"feishu":{"accountCount":1,"connectedAccountCount":1},"wechat":{"accountCount":1,"connectedAccountCount":1},"wecom":{"accountCount":0,"connectedAccountCount":0}},"aiGatewayEnabled":true,"aiGatewayProviderCount":2,"requestLoggingEnabled":true}"#
+    private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
     private static let originalV1DashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"legacy-instance","pid":456,"startedAtMs":789},"bridgeRunning":true,"remoteControlConnected":false,"remoteControlHealthy":false,"codexAppConfigured":true,"imAccountCount":5,"connectedImAccountCount":3,"aiGatewayEnabled":false,"aiGatewayProviderCount":1,"requestLoggingEnabled":true}"#
 
     private func makeClient(
@@ -804,6 +840,22 @@ final class APIContractTests: XCTestCase {
         do {
             _ = try await client.fetchDashboard(bearerToken: "fixture-token")
             XCTFail("Expected dashboard request to fail", file: file, line: line)
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, expectedError, file: file, line: line)
+        } catch {
+            XCTFail("Expected APIClientError, received \(error)", file: file, line: line)
+        }
+    }
+
+    private func assertLifecycleError(
+        _ expectedError: APIClientError,
+        from client: APIClient,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        do {
+            _ = try await client.fetchLifecycle(bearerToken: "fixture-token")
+            XCTFail("Expected lifecycle request to fail", file: file, line: line)
         } catch let error as APIClientError {
             XCTAssertEqual(error, expectedError, file: file, line: line)
         } catch {

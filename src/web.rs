@@ -41,6 +41,7 @@ pub fn router(state: SharedState) -> Router {
     let _ = manage_api::ensure_management_token(&state.config_path);
     let manage_routes = Router::new()
         .route("/status", get(manage_api::status))
+        .route("/lifecycle", get(manage_lifecycle))
         .route("/dashboard", get(manage_dashboard))
         .route("/log-directory", get(manage_log_directory))
         .route_layer(middleware::from_fn_with_state(
@@ -157,6 +158,10 @@ pub fn router(state: SharedState) -> Router {
         .nest("/ai-gateway", crate::ai_gateway::router())
         .layer(middleware::from_fn(access_log))
         .with_state(state)
+}
+
+async fn manage_lifecycle(State(state): State<SharedState>) -> Json<manage_api::LifecycleResponse> {
+    Json(manage_api::lifecycle_snapshot(&state).await)
 }
 
 async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
@@ -1026,6 +1031,153 @@ mod tests {
             })
         );
         drop(temp);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_route_is_authenticated_and_reports_read_only_snapshot() {
+        let (state, temp, token) = management_test_state();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime
+                .starting_turn_by_thread
+                .insert("thread-starting".to_string());
+            runtime
+                .current_turn_by_thread
+                .insert("thread-running".to_string(), "turn-1".to_string());
+            runtime
+                .pending_approval_request_keys
+                .insert("approval-1".to_string());
+        }
+        {
+            let mut remote = state.remote_control.inner.lock().await;
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut connection = test_remote_connection(
+                "lifecycle-connection",
+                RemoteControlSourceKind::CodexApp,
+                true,
+                Some(tx),
+            );
+            connection.clients.insert(
+                "client".to_string(),
+                crate::app_state::RemoteControlClientState {
+                    client_id: "client".to_string(),
+                    stream_id: "stream".to_string(),
+                    initialized: true,
+                    next_seq_id: 1,
+                    pending: std::collections::HashMap::from([(
+                        "request".to_string(),
+                        crate::app_state::PendingRemoteRequest {
+                            connection_epoch: 1,
+                            method: "turn/start".to_string(),
+                            thread_id: None,
+                            track_thread_active: true,
+                            response_tx: tokio::sync::oneshot::channel().0,
+                            message: json!({}),
+                            envelopes: Vec::new(),
+                        },
+                    )]),
+                    current_thread_id: None,
+                    current_turn_id: None,
+                    last_app_ping_at_ms: None,
+                    last_app_pong_at_ms: None,
+                    last_app_pong_status: None,
+                    last_initialize_sent_at_ms: None,
+                    recovery_attempt: 0,
+                    recovery_started_at_ms: None,
+                },
+            );
+            remote
+                .connections
+                .insert(connection.connection_id.clone(), connection);
+        }
+
+        let app = router(state.clone());
+        let unauthorized = route_response(app.clone(), "/api/v1/manage/lifecycle", None).await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = route_response(app, "/api/v1/manage/lifecycle", Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let lifecycle = response_json(response).await;
+        assert_exact_keys(
+            lifecycle.as_object().expect("lifecycle object"),
+            &[
+                "bind",
+                "configPath",
+                "executable",
+                "management",
+                "protectedWorkItems",
+                "runtime",
+                "service",
+            ],
+        );
+        assert_eq!(lifecycle["service"]["service"], json!("threadrelay"));
+        assert_eq!(lifecycle["service"]["apiMajor"], json!(1));
+        assert_eq!(lifecycle["runtime"]["state"], json!("active"));
+        assert_eq!(
+            lifecycle["runtime"]["productVersion"],
+            json!(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(lifecycle["management"]["state"], json!("unmanaged"));
+        assert_eq!(lifecycle["management"]["mode"], json!("readOnly"));
+        assert_eq!(lifecycle["management"]["canControl"], json!(false));
+        assert_eq!(lifecycle["protectedWorkItems"]["codexTurns"], json!(2));
+        assert_eq!(
+            lifecycle["protectedWorkItems"]["pendingApprovals"],
+            json!(1)
+        );
+        assert_eq!(
+            lifecycle["protectedWorkItems"]["remoteControlRequests"],
+            json!(1)
+        );
+        assert_eq!(lifecycle["protectedWorkItems"]["total"], json!(4),);
+        assert_eq!(
+            lifecycle["configPath"],
+            json!(
+                temp.path()
+                    .join("user-domain/config.toml")
+                    .to_string_lossy()
+            ),
+        );
+        assert!(
+            lifecycle["executable"]
+                .as_str()
+                .is_some_and(|path| !path.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_route_reports_an_empty_protected_work_set() {
+        let (state, _temp, token) = management_test_state();
+        let app = router(state);
+
+        let response = route_response(app, "/api/v1/manage/lifecycle", Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let lifecycle = response_json(response).await;
+        let protected = lifecycle["protectedWorkItems"]
+            .as_object()
+            .expect("protected work item object");
+        assert_exact_keys(
+            protected,
+            &[
+                "aiGatewayRequests",
+                "codexTurns",
+                "imStreams",
+                "pendingApprovals",
+                "remoteControlRequests",
+                "total",
+            ],
+        );
+        assert_eq!(
+            lifecycle["protectedWorkItems"],
+            json!({
+                "aiGatewayRequests": 0,
+                "codexTurns": 0,
+                "imStreams": 0,
+                "pendingApprovals": 0,
+                "remoteControlRequests": 0,
+                "total": 0,
+            })
+        );
     }
 
     fn assert_exact_keys(object: &serde_json::Map<String, Value>, expected: &[&str]) {

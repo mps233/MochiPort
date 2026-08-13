@@ -1,8 +1,8 @@
 # ThreadRelay for macOS
 
-Phase 1 SwiftUI preview for the native ThreadRelay client. It targets macOS 13
-and shows a read-only overview from the existing Rust daemon over the versioned
-loopback management API.
+Phase 1/2 SwiftUI preview for the native ThreadRelay client. It targets macOS 13
+and shows a read-only overview plus daemon lifecycle diagnostics from the
+existing Rust daemon over the versioned loopback management API.
 
 ```sh
 swift build --package-path macos/ThreadRelay
@@ -10,10 +10,11 @@ swift test --package-path macos/ThreadRelay
 swift run --package-path macos/ThreadRelay ThreadRelayMac
 ```
 
-The preview probes `GET /healthz` and reads `GET /api/v1/manage/dashboard`
-with the shared management credential. It does not start, stop, or modify the
-daemon. The installed app bundle and signing workflow remain separate until
-the lifecycle and packaging phases.
+The preview probes `GET /healthz` and reads the authenticated
+`GET /api/v1/manage/dashboard` and `GET /api/v1/manage/lifecycle` endpoints
+with the shared management credential. It does not start, stop, acquire a lease,
+or modify the daemon. The installed app bundle and signing workflow remain
+separate until the lifecycle and packaging phases.
 
 For a deterministic visual review that never contacts the real daemon, open
 the shared `ThreadRelayPreview` scheme in Xcode and run it. The scheme sets

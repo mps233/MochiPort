@@ -182,6 +182,16 @@ private struct MenuBarStatusView: View {
         Label(model.serviceStatus.title, systemImage: model.serviceStatus.symbol)
         Text(model.serviceStatus.detail)
             .foregroundStyle(.secondary)
+        if let lifecycle = model.lifecycle {
+            Divider()
+            Label(
+                lifecycle.management.canControl ? "Managed daemon" : "Read-only daemon",
+                systemImage: lifecycle.management.canControl ? "lock.open" : "eye"
+            )
+            Text("v\(lifecycle.runtime.productVersion) · \(lifecycle.protectedWorkItems.total) protected work item(s)")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
         Divider()
         Button("Open ThreadRelay") {
             openWindow(id: "main")

@@ -11,6 +11,49 @@ struct ManageLogDirectory: Decodable, Equatable {
     let instanceId: String
 }
 
+struct ManageLifecycle: Decodable, Equatable {
+    struct Service: Decodable, Equatable {
+        let service: String
+        let apiMajor: Int
+        let ready: Bool
+        let instanceId: String
+        let pid: Int
+        let startedAtMs: Int64
+    }
+
+    struct Runtime: Decodable, Equatable {
+        let state: String
+        let productVersion: String
+        let apiMajor: Int
+    }
+
+    struct ProtectedWorkItems: Decodable, Equatable {
+        let aiGatewayRequests: Int
+        let codexTurns: Int
+        let imStreams: Int
+        let pendingApprovals: Int
+        let remoteControlRequests: Int
+        let total: Int
+    }
+
+    struct Management: Decodable, Equatable {
+        let state: String
+        let mode: String
+        let canControl: Bool
+        let installationId: String?
+        let leaseGeneration: Int64?
+        let leaseExpiresAtMs: Int64?
+    }
+
+    let service: Service
+    let executable: String
+    let configPath: String
+    let bind: String
+    let runtime: Runtime
+    let protectedWorkItems: ProtectedWorkItems
+    let management: Management
+}
+
 struct ManageDashboard: Decodable, Equatable {
     struct Service: Codable, Equatable {
         let service: String
@@ -464,6 +507,13 @@ struct APIClient {
         ).validatedURL()
     }
 
+    func fetchLifecycle(bearerToken: String) async throws -> ManageLifecycle {
+        try await fetchLifecycle(
+            baseURL: connectionLoader().baseURL,
+            bearerToken: bearerToken
+        )
+    }
+
     func dashboard() async throws -> ManageDashboard {
         let connection = connectionLoader()
         let baseURL = connection.baseURL
@@ -505,6 +555,30 @@ struct APIClient {
                     continue
                 }
                 return try payload.validatedURL()
+            } catch APIClientError.unauthorized {
+                continue
+            }
+        }
+        throw APIClientError.unauthorized
+    }
+
+    func lifecycle() async throws -> ManageLifecycle {
+        let connection = connectionLoader()
+        let baseURL = connection.baseURL
+        let candidates = connection.credentials()
+        guard !candidates.isEmpty else { throw APIClientError.unauthorized }
+
+        for candidate in candidates {
+            do {
+                let lifecycle = try await fetchLifecycle(
+                    baseURL: baseURL,
+                    bearerToken: candidate.token
+                )
+                if let expectedInstanceId = candidate.expectedInstanceId,
+                   lifecycle.service.instanceId != expectedInstanceId {
+                    continue
+                }
+                return lifecycle
             } catch APIClientError.unauthorized {
                 continue
             }
@@ -558,6 +632,39 @@ struct APIClient {
         guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
         do {
             return try JSONDecoder().decode(ManageLogDirectory.self, from: data)
+        } catch {
+            throw APIClientError.invalidResponse
+        }
+    }
+
+    private func fetchLifecycle(
+        baseURL: URL,
+        bearerToken: String
+    ) async throws -> ManageLifecycle {
+        let (data, response) = try await request(
+            baseURL: baseURL,
+            path: "api/v1/manage/lifecycle",
+            bearerToken: bearerToken
+        )
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIClientError.invalidResponse
+        }
+        guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
+        guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
+        do {
+            let lifecycle = try JSONDecoder().decode(ManageLifecycle.self, from: data)
+            guard lifecycle.service.service == "threadrelay" else {
+                throw APIClientError.incompatibleService
+            }
+            guard lifecycle.service.apiMajor == 1 else {
+                throw APIClientError.unsupportedAPIMajor(lifecycle.service.apiMajor)
+            }
+            guard lifecycle.runtime.apiMajor == 1 else {
+                throw APIClientError.unsupportedAPIMajor(lifecycle.runtime.apiMajor)
+            }
+            return lifecycle
+        } catch let error as APIClientError {
+            throw error
         } catch {
             throw APIClientError.invalidResponse
         }

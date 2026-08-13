@@ -6,6 +6,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var serviceStatus: ServiceStatus = .checking
     @Published private(set) var lastCheckedAt: Date?
     @Published private(set) var dashboard: ManageDashboard?
+    @Published private(set) var lifecycle: ManageLifecycle?
     @Published private(set) var dashboardState: DashboardState = .loading
 
     private let apiClient: APIClient
@@ -68,6 +69,7 @@ final class AppModel: ObservableObject {
         if let fixtureStatus {
             serviceStatus = fixtureStatus
             dashboard = fixtureDashboard(for: fixtureStatus)
+            lifecycle = fixtureLifecycle(for: fixtureStatus)
             dashboardState = fixtureDashboardState(for: fixtureStatus)
             lastCheckedAt = Date()
             return
@@ -85,10 +87,12 @@ final class AppModel: ObservableObject {
                 }
                 do {
                     dashboard = try await apiClient.dashboard()
+                    lifecycle = try? await apiClient.lifecycle()
                     dashboardState = .loaded
                 } catch let error as APIClientError {
                     if error == .unauthorized {
                         dashboard = nil
+                        lifecycle = nil
                     }
                     dashboardState = dashboardState(for: error)
                 } catch {
@@ -97,6 +101,7 @@ final class AppModel: ObservableObject {
             case .legacy:
                 serviceStatus = .bridgeAvailable
                 dashboard = nil
+                lifecycle = nil
                 dashboardState = .legacy
             }
         } catch {
@@ -139,6 +144,40 @@ final class AppModel: ObservableObject {
             aiGatewayEnabled: true,
             aiGatewayProviderCount: 2,
             requestLoggingEnabled: true
+        )
+    }
+
+    private func fixtureLifecycle(for status: ServiceStatus) -> ManageLifecycle? {
+        guard status == .available else { return nil }
+        return ManageLifecycle(
+            service: .init(
+                service: "threadrelay",
+                apiMajor: 1,
+                ready: true,
+                instanceId: "preview-instance",
+                pid: 0,
+                startedAtMs: 0
+            ),
+            executable: "/Preview/ThreadRelay",
+            configPath: "/Preview/config.toml",
+            bind: "127.0.0.1:3847",
+            runtime: .init(state: "active", productVersion: "0.5.0", apiMajor: 1),
+            protectedWorkItems: .init(
+                aiGatewayRequests: 0,
+                codexTurns: 0,
+                imStreams: 0,
+                pendingApprovals: 0,
+                remoteControlRequests: 0,
+                total: 0
+            ),
+            management: .init(
+                state: "unmanaged",
+                mode: "readOnly",
+                canControl: false,
+                installationId: nil,
+                leaseGeneration: nil,
+                leaseExpiresAtMs: nil
+            )
         )
     }
 

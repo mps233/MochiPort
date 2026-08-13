@@ -54,6 +54,61 @@ pub struct ManageStatusResponse {
     pub started_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleServiceIdentity {
+    pub service: String,
+    pub api_major: u16,
+    pub ready: bool,
+    pub instance_id: String,
+    pub pid: u32,
+    pub started_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleRuntimeStatus {
+    pub state: &'static str,
+    pub product_version: &'static str,
+    pub api_major: u16,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleProtectedWorkItems {
+    pub ai_gateway_requests: usize,
+    pub codex_turns: usize,
+    pub im_streams: usize,
+    pub pending_approvals: usize,
+    pub remote_control_requests: usize,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleManagementOwnership {
+    /// Phase 2's read-only endpoint must not imply that this process owns a
+    /// lifecycle lease before the lease protocol is implemented.
+    pub state: &'static str,
+    pub mode: &'static str,
+    pub can_control: bool,
+    pub installation_id: Option<String>,
+    pub lease_generation: Option<u64>,
+    pub lease_expires_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleResponse {
+    pub service: LifecycleServiceIdentity,
+    pub executable: String,
+    pub config_path: String,
+    pub bind: String,
+    pub runtime: LifecycleRuntimeStatus,
+    pub protected_work_items: LifecycleProtectedWorkItems,
+    pub management: LifecycleManagementOwnership,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ControlFile {
@@ -235,6 +290,83 @@ pub fn status_snapshot(state: &SharedState) -> ManageStatusResponse {
         instance_id: state.daemon_identity.instance_id.clone(),
         pid: state.daemon_identity.pid,
         started_at_ms: state.daemon_identity.started_at_ms,
+    }
+}
+
+/// Build a side-effect-free lifecycle snapshot for the authenticated
+/// management API.  Control-plane ownership is deliberately reported as
+/// unmanaged until the lease protocol lands; a read endpoint must never grant
+/// or renew a lease as a hidden side effect.
+pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
+    let config = state.config.lock().await;
+    let bind = config.bind.clone();
+    let config_path = state.config_path.to_string_lossy().into_owned();
+    drop(config);
+
+    let (codex_turns, im_streams, pending_approvals) = {
+        let runtime = state.runtime.lock().await;
+        runtime.protected_work_item_counts()
+    };
+    let ai_gateway_requests = crate::ai_gateway::handler::in_flight_count();
+    let remote_control_requests = {
+        let remote = state.remote_control.inner.lock().await;
+        if remote.connections.is_empty() {
+            remote
+                .clients
+                .values()
+                .map(|client| client.pending.len())
+                .sum()
+        } else {
+            remote
+                .connections
+                .values()
+                .flat_map(|connection| connection.clients.values())
+                .map(|client| client.pending.len())
+                .sum()
+        }
+    };
+    let total = ai_gateway_requests
+        .saturating_add(codex_turns)
+        .saturating_add(im_streams)
+        .saturating_add(pending_approvals)
+        .saturating_add(remote_control_requests);
+    let executable = std::env::current_exe()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default();
+
+    LifecycleResponse {
+        service: LifecycleServiceIdentity {
+            service: state.daemon_identity.service.clone(),
+            api_major: API_MAJOR,
+            ready: true,
+            instance_id: state.daemon_identity.instance_id.clone(),
+            pid: state.daemon_identity.pid,
+            started_at_ms: state.daemon_identity.started_at_ms,
+        },
+        executable,
+        config_path,
+        bind,
+        runtime: LifecycleRuntimeStatus {
+            state: "active",
+            product_version: env!("CARGO_PKG_VERSION"),
+            api_major: API_MAJOR,
+        },
+        protected_work_items: LifecycleProtectedWorkItems {
+            ai_gateway_requests,
+            codex_turns,
+            im_streams,
+            pending_approvals,
+            remote_control_requests,
+            total,
+        },
+        management: LifecycleManagementOwnership {
+            state: "unmanaged",
+            mode: "readOnly",
+            can_control: false,
+            installation_id: None,
+            lease_generation: None,
+            lease_expires_at_ms: None,
+        },
     }
 }
 
