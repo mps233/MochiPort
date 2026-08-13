@@ -46,13 +46,60 @@ pub(super) struct MoveCodexAppSessionProviderRequest {
     target_provider: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct MoveManagedCodexAppSessionProviderRequest {
+    thread_id: String,
+    target_provider: Option<String>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CodexAppSessionsResponse {
     ok: bool,
-    threads: Vec<serde_json::Value>,
+    threads: Vec<ManageCodexSession>,
     providers: Vec<String>,
     total: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageCodexSession {
+    id: String,
+    preview: String,
+    model_provider: String,
+    updated_at: i64,
+    path: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ManageCodexAppStatus {
+    codex_home: String,
+    configured: bool,
+    config_ok: bool,
+    auth_ok: bool,
+    provider_ok: bool,
+    config_error: Option<String>,
+    auth_error: Option<String>,
+    gui_configured: bool,
+    gui_error: Option<String>,
+    remote_control_supported: bool,
+    remote_control_configured: bool,
+    remote_control_error: Option<String>,
+    providers: Vec<ManageCodexAppProviderStatus>,
+    image_generation_enabled: bool,
+    connection_mode: LocalConnectionMode,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageCodexAppProviderStatus {
+    name: String,
+    base_url: Option<String>,
+    secret_set: bool,
+    supports_websockets: bool,
 }
 
 pub(super) async fn configure_codex_app(
@@ -402,7 +449,7 @@ pub(super) async fn codex_app_enhanced_preflight() -> impl IntoResponse {
 pub(super) async fn codex_app_sessions(State(state): State<SharedState>) -> impl IntoResponse {
     const PAGE_LIMIT: u32 = 100;
     const MAX_PAGES: usize = 20;
-    let threads = match remote_control_backend::session_history_threads(
+    let raw_threads = match remote_control_backend::session_history_threads(
         &state,
         remote_control_backend::default_remote_client_key(),
         PAGE_LIMIT,
@@ -420,11 +467,23 @@ pub(super) async fn codex_app_sessions(State(state): State<SharedState>) -> impl
         }
     };
 
+    let threads = raw_threads
+        .into_iter()
+        .filter_map(normalize_managed_session)
+        .collect::<Vec<_>>();
     let mut providers = threads
         .iter()
-        .filter_map(|thread| thread.get("modelProvider").and_then(|value| value.as_str()))
-        .map(str::to_string)
+        .map(|thread| thread.model_provider.clone())
         .collect::<Vec<_>>();
+    providers.extend(
+        codex_app_status_snapshot(&state)
+            .await
+            .providers
+            .into_iter()
+            .map(|provider| provider.name),
+    );
+    providers.push("openai".to_string());
+    providers.retain(|provider| !provider.trim().is_empty());
     providers.sort();
     providers.dedup();
 
@@ -439,6 +498,45 @@ pub(super) async fn codex_app_sessions(State(state): State<SharedState>) -> impl
     )
 }
 
+fn normalize_managed_session(thread: serde_json::Value) -> Option<ManageCodexSession> {
+    let id = first_session_string(&thread, &["id", "threadId"])?;
+    let preview = first_session_string(&thread, &["preview"]).unwrap_or_default();
+    let model_provider = first_session_string(&thread, &["modelProvider", "model_provider"])
+        .unwrap_or_else(|| "openai".to_string());
+    let updated_at = first_session_i64(&thread, &["updatedAt", "updated_at"]).unwrap_or_default();
+    let path = first_session_string(&thread, &["path", "rolloutPath", "rollout_path"]);
+    let name = first_session_string(&thread, &["name", "title"]);
+    Some(ManageCodexSession {
+        id,
+        preview,
+        model_provider,
+        updated_at,
+        path,
+        name,
+    })
+}
+
+fn first_session_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        value
+            .get(*key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn first_session_i64(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
+    keys.iter().find_map(|key| {
+        let value = value.get(*key)?;
+        value
+            .as_i64()
+            .or_else(|| value.as_u64().and_then(|value| i64::try_from(value).ok()))
+            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+    })
+}
+
 pub(super) async fn move_codex_app_session_provider(
     Json(request): Json<MoveCodexAppSessionProviderRequest>,
 ) -> impl IntoResponse {
@@ -448,23 +546,36 @@ pub(super) async fn move_codex_app_session_provider(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from);
-    let target_provider = request
-        .target_provider
+    move_session_provider(request.thread_id, request.target_provider, rollout_path)
+}
+
+pub(super) async fn move_managed_codex_app_session_provider(
+    Json(request): Json<MoveManagedCodexAppSessionProviderRequest>,
+) -> impl IntoResponse {
+    // The authenticated management API resolves the rollout from the thread ID.
+    // Never trust a GUI-supplied local path for a file mutation.
+    move_session_provider(request.thread_id, request.target_provider, None)
+}
+
+fn move_session_provider(
+    thread_id: String,
+    target_provider: Option<String>,
+    rollout_path: Option<std::path::PathBuf>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let target_provider = target_provider
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
     let result = match target_provider {
         Some(provider) => codex_session_history::move_thread_to_provider(
             None,
-            request.thread_id.as_str(),
+            thread_id.as_str(),
             rollout_path,
             provider,
         ),
-        None => codex_session_history::move_thread_to_ai_gateway(
-            None,
-            request.thread_id.as_str(),
-            rollout_path,
-        ),
+        None => {
+            codex_session_history::move_thread_to_ai_gateway(None, thread_id.as_str(), rollout_path)
+        }
     };
     match result {
         Ok(report) => (
@@ -490,7 +601,6 @@ pub(super) async fn repair_codex_app_gui_environment(
             Json(json!({
                 "ok": false,
                 "error": "Codex App local config is not ready; write config first",
-                "status": status,
             })),
         );
     }
@@ -507,7 +617,6 @@ pub(super) async fn repair_codex_app_gui_environment(
                     Json(json!({
                         "ok": false,
                         "error": err.to_string(),
-                        "status": status,
                     })),
                 );
             }
@@ -544,6 +653,70 @@ pub(super) async fn codex_app_status(
     Json(codex_app_status_snapshot(&state).await)
 }
 
+pub(super) async fn manage_codex_app_status(
+    State(state): State<SharedState>,
+) -> Json<ManageCodexAppStatus> {
+    let status = codex_app_status_snapshot(&state).await;
+    Json(ManageCodexAppStatus {
+        codex_home: status.codex_home.to_string_lossy().into_owned(),
+        configured: status.configured,
+        config_ok: status.config_ok,
+        auth_ok: status.auth_ok,
+        provider_ok: status.provider_ok,
+        config_error: status
+            .config_error
+            .map(|_| "Codex configuration is invalid".to_string()),
+        auth_error: status
+            .auth_error
+            .map(|_| "Codex authentication is not ready".to_string()),
+        gui_configured: status.gui_api_base.configured
+            && status.gui_api_base.login_issuer_configured,
+        gui_error: status
+            .gui_api_base
+            .error
+            .map(|_| "Codex GUI environment is not ready".to_string()),
+        remote_control_supported: status.remote_control_switch.supported,
+        remote_control_configured: status.remote_control_switch.configured,
+        remote_control_error: status
+            .remote_control_switch
+            .error
+            .map(|_| "Codex remote control is not ready".to_string()),
+        providers: status
+            .providers
+            .into_iter()
+            .map(|provider| ManageCodexAppProviderStatus {
+                name: provider.name,
+                base_url: provider.base_url.map(masked_provider_url),
+                secret_set: provider
+                    .key
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty()),
+                supports_websockets: provider.supports_websockets,
+            })
+            .collect(),
+        image_generation_enabled: status.image_generation_enabled,
+        connection_mode: status.connection_mode,
+    })
+}
+
+fn masked_provider_url(value: String) -> String {
+    let Ok(mut parsed) = url::Url::parse(value.trim()) else {
+        return "<invalid>".to_string();
+    };
+    if parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
+        return value.trim().trim_end_matches('/').to_string();
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.as_str().trim_end_matches('/').to_string()
+}
+
 pub(super) async fn codex_app_status_snapshot(
     state: &SharedState,
 ) -> codex_app_config::CodexAppConfigStatus {
@@ -553,4 +726,36 @@ pub(super) async fn codex_app_status_snapshot(
         &config.remote_control_base_url(),
         true,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_sessions_supply_defaults_for_legacy_thread_shapes() {
+        let session =
+            normalize_managed_session(json!({ "id": "legacy-thread" })).expect("legacy session");
+
+        assert_eq!(session.id, "legacy-thread");
+        assert_eq!(session.preview, "");
+        assert_eq!(session.model_provider, "openai");
+        assert_eq!(session.updated_at, 0);
+        assert_eq!(session.path, None);
+        assert_eq!(session.name, None);
+    }
+
+    #[test]
+    fn provider_url_masking_never_returns_unparseable_input() {
+        assert_eq!(
+            masked_provider_url("https://broken url?api_key=canary".to_string()),
+            "<invalid>"
+        );
+        assert_eq!(
+            masked_provider_url(
+                "https://user:password@provider.example/v1?api_key=canary".to_string()
+            ),
+            "https://provider.example/v1"
+        );
+    }
 }

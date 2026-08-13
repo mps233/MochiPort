@@ -604,13 +604,7 @@ pub fn elapsed_ms(started_at: Instant) -> i64 {
 }
 
 pub fn headers_to_json(headers: &HeaderMap) -> Option<String> {
-    headers_to_json_with(headers, |name, value| {
-        if name.eq_ignore_ascii_case("x-openai-actor-authorization") {
-            "<redacted>".to_string()
-        } else {
-            value
-        }
-    })
+    headers_to_redacted_json(headers)
 }
 
 pub fn headers_to_redacted_json(headers: &HeaderMap) -> Option<String> {
@@ -649,18 +643,159 @@ fn headers_to_json_with(
 }
 
 fn is_sensitive_header(name: &str) -> bool {
+    is_sensitive_name(name)
+}
+
+pub(crate) fn redact_value(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if is_sensitive_key(key) {
+                    *value = Value::String("<redacted>".to_string());
+                } else if let Value::String(text) = value {
+                    *text = if is_unstructured_error_key(key) {
+                        redact_unstructured_text(text)
+                    } else {
+                        redact_embedded_json(text)
+                    };
+                } else {
+                    redact_value(value);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                redact_value(value);
+            }
+        }
+        Value::String(text) => *text = redact_unstructured_text(text),
+        _ => {}
+    }
+}
+
+fn redact_embedded_json(text: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<Value>(text) {
+        let original = value.clone();
+        redact_value(&mut value);
+        if value == original {
+            return text.to_string();
+        }
+        return serde_json::to_string(&value).unwrap_or_else(|_| "<redacted>".to_string());
+    }
+    let mut changed = false;
+    let lines = text
+        .lines()
+        .map(|line| {
+            let Some(payload) = line.strip_prefix("data:") else {
+                return line.to_string();
+            };
+            let Ok(mut value) = serde_json::from_str::<Value>(payload.trim()) else {
+                return line.to_string();
+            };
+            redact_value(&mut value);
+            changed = true;
+            format!(
+                "data: {}",
+                serde_json::to_string(&value).unwrap_or_else(|_| payload.trim().to_string())
+            )
+        })
+        .collect::<Vec<_>>();
+    if changed {
+        redact_unstructured_text(&lines.join("\n"))
+    } else {
+        redact_unstructured_text(text)
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    is_sensitive_name(key)
+}
+
+fn is_sensitive_name(name: &str) -> bool {
+    let normalized = normalized_sensitive_name(name);
     matches!(
-        name.to_ascii_lowercase().as_str(),
+        normalized.as_str(),
         "authorization"
-            | "proxy-authorization"
+            | "proxyauthorization"
             | "cookie"
-            | "set-cookie"
-            | "api-key"
-            | "x-api-key"
-            | "x-api-secret"
-            | "x-api-token"
-            | "x-openai-actor-authorization"
+            | "setcookie"
+            | "password"
+            | "secret"
+            | "token"
+    ) || normalized.contains("authorization")
+        || normalized.contains("apikey")
+        || normalized.ends_with("cookie")
+        || normalized.ends_with("token")
+        || normalized.ends_with("secret")
+        || normalized.ends_with("password")
+        || normalized.ends_with("credential")
+        || (normalized.ends_with("key")
+            && [
+                "access",
+                "api",
+                "auth",
+                "client",
+                "credential",
+                "provider",
+                "secret",
+                "subscription",
+            ]
+            .iter()
+            .any(|marker| normalized.contains(marker)))
+}
+
+fn normalized_sensitive_name(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_unstructured_error_key(key: &str) -> bool {
+    matches!(
+        normalized_sensitive_name(key).as_str(),
+        "detail" | "error" | "errordetail" | "errormessage" | "message"
     )
+}
+
+fn redact_unstructured_text(text: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let contains_credential_marker = [
+        "authorization",
+        "bearer ",
+        "api key",
+        "api-key",
+        "api_key",
+        "apikey",
+        "credential",
+        "password",
+        "secret",
+        "token=",
+        "token:",
+        "x-api-key",
+        "x-auth-token",
+        "x-client-secret",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || lower
+            .split(|character: char| {
+                character.is_whitespace()
+                    || matches!(character, '"' | '\'' | ',' | ';' | '(' | ')' | '[' | ']')
+            })
+            .any(|word| {
+                word.starts_with("sk-")
+                    || word.starts_with("ghp_")
+                    || word.starts_with("github_pat_")
+                    || word.starts_with("xoxb-")
+                    || word.starts_with("xoxp-")
+            });
+    if contains_credential_marker {
+        "<redacted>".to_string()
+    } else {
+        text.to_string()
+    }
 }
 
 pub fn json_body_size_bytes(value: &Value) -> Option<i64> {
@@ -692,6 +827,28 @@ fn insert_record_with_optional_id(
     id: Option<i64>,
     record: &RequestLogRecord,
 ) -> rusqlite::Result<i64> {
+    let error_message = record
+        .error_message
+        .as_deref()
+        .map(redact_unstructured_text);
+    let request_headers_json = record
+        .request_headers_json
+        .as_deref()
+        .map(redact_embedded_json);
+    let request_json = record.request_json.as_deref().map(redact_embedded_json);
+    let upstream_request_headers_json = record
+        .upstream_request_headers_json
+        .as_deref()
+        .map(redact_embedded_json);
+    let upstream_request_json = record
+        .upstream_request_json
+        .as_deref()
+        .map(redact_embedded_json);
+    let upstream_response_sse = record
+        .upstream_response_sse
+        .as_deref()
+        .map(redact_embedded_json);
+    let response_json = record.response_json.as_deref().map(redact_embedded_json);
     conn.execute(
         "INSERT INTO ai_gateway_request_logs (
             id, request_id, model_id, stream, channel, provider_type, status,
@@ -720,14 +877,14 @@ fn insert_record_with_optional_id(
             record.latency_ms,
             record.ttft_ms,
             record.created_at_ms,
-            &record.error_message,
-            &record.request_headers_json,
-            &record.request_json,
+            &error_message,
+            &request_headers_json,
+            &request_json,
             record.upstream_request_body_bytes,
-            &record.upstream_request_headers_json,
-            &record.upstream_request_json,
-            &record.upstream_response_sse,
-            &record.response_json,
+            &upstream_request_headers_json,
+            &upstream_request_json,
+            &upstream_response_sse,
+            &response_json,
             record.usage.write_cache_5m_tokens,
             record.usage.write_cache_1h_tokens,
         ],
@@ -794,6 +951,31 @@ fn update_record_with_conn(
         write_cache_5m_tokens: existing.16,
         write_cache_1h_tokens: existing.17,
     });
+    let error_message = update
+        .error_message
+        .as_deref()
+        .or(existing.10.as_deref())
+        .map(redact_unstructured_text);
+    let upstream_request_headers_json = update
+        .upstream_request_headers_json
+        .as_deref()
+        .or(existing.12.as_deref())
+        .map(redact_embedded_json);
+    let upstream_request_json = update
+        .upstream_request_json
+        .as_deref()
+        .or(existing.13.as_deref())
+        .map(redact_embedded_json);
+    let upstream_response_sse = update
+        .upstream_response_sse
+        .as_deref()
+        .or(existing.14.as_deref())
+        .map(redact_embedded_json);
+    let response_json = update
+        .response_json
+        .as_deref()
+        .or(existing.15.as_deref())
+        .map(redact_embedded_json);
 
     conn.execute(
         "UPDATE ai_gateway_request_logs SET
@@ -827,12 +1009,12 @@ fn update_record_with_conn(
             update.cost_usd.or(existing.7),
             update.latency_ms.or(existing.8),
             update.ttft_ms.or(existing.9),
-            update.error_message.clone().or(existing.10),
+            error_message,
             update.upstream_request_body_bytes.or(existing.11),
-            update.upstream_request_headers_json.clone().or(existing.12),
-            update.upstream_request_json.clone().or(existing.13),
-            update.upstream_response_sse.clone().or(existing.14),
-            update.response_json.clone().or(existing.15),
+            upstream_request_headers_json,
+            upstream_request_json,
+            upstream_response_sse,
+            response_json,
             id,
             usage.write_cache_5m_tokens,
             usage.write_cache_1h_tokens,
@@ -884,7 +1066,9 @@ fn list_recent_with_conn(
             ttft_ms: row.get(15)?,
             created_at_ms: row.get(16)?,
             created_at: row.get(17)?,
-            error_message: row.get(18)?,
+            error_message: row
+                .get::<_, Option<String>>(18)?
+                .map(|message| redact_unstructured_text(&message)),
             upstream_request_body_bytes: row.get(19)?,
             write_cache_5m_tokens: row.get(20)?,
             write_cache_1h_tokens: row.get(21)?,
@@ -986,7 +1170,9 @@ fn get_detail_with_conn(conn: &Connection, id: i64) -> rusqlite::Result<Option<R
                     ttft_ms: row.get(15)?,
                     created_at_ms: row.get(16)?,
                     created_at: row.get(17)?,
-                    error_message: row.get(18)?,
+                    error_message: row
+                        .get::<_, Option<String>>(18)?
+                        .map(|message| redact_unstructured_text(&message)),
                     upstream_request_body_bytes: row.get(21)?,
                     write_cache_5m_tokens: row.get(26)?,
                     write_cache_1h_tokens: row.get(27)?,
@@ -1696,7 +1882,7 @@ mod tests {
     }
 
     #[test]
-    fn headers_to_json_preserves_values() {
+    fn headers_to_json_preserves_non_secret_values() {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "Bearer local-key".parse().unwrap());
         headers.insert(
@@ -1707,7 +1893,7 @@ mod tests {
         headers.append("x-debug", "two".parse().unwrap());
 
         let value: Value = serde_json::from_str(&headers_to_json(&headers).unwrap()).unwrap();
-        assert_eq!(value["authorization"], "Bearer local-key");
+        assert_eq!(value["authorization"], "<redacted>");
         assert_eq!(value["x-openai-actor-authorization"], "<redacted>");
         assert_eq!(value["x-debug"], json!(["one", "two"]));
     }
@@ -1729,6 +1915,50 @@ mod tests {
         assert_eq!(value["x-api-key"], "<redacted>");
         assert_eq!(value["x-openai-actor-authorization"], "<redacted>");
         assert_eq!(value["x-debug"], "visible");
+    }
+
+    #[test]
+    fn header_redaction_covers_vendor_and_client_secret_names() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-goog-api-key", "google-canary".parse().unwrap());
+        headers.insert("x-auth-token", "auth-canary".parse().unwrap());
+        headers.insert("x-client-secret", "client-canary".parse().unwrap());
+        headers.insert("x-request-id", "visible-request".parse().unwrap());
+
+        let value: Value = serde_json::from_str(&headers_to_json(&headers).unwrap()).unwrap();
+        assert_eq!(value["x-goog-api-key"], "<redacted>");
+        assert_eq!(value["x-auth-token"], "<redacted>");
+        assert_eq!(value["x-client-secret"], "<redacted>");
+        assert_eq!(value["x-request-id"], "visible-request");
+    }
+
+    #[test]
+    fn request_log_storage_redacts_plain_errors_and_nested_response_secrets() {
+        let db_path = temp_db_path();
+        let context = insert_running_test_log(&db_path, "req-redaction");
+        context
+            .store
+            .update_record(
+                context.log_id,
+                &RequestLogUpdate {
+                    status: Some("failed".to_string()),
+                    error_message: Some(
+                        "upstream rejected api key canary-error-secret".to_string(),
+                    ),
+                    response_json: Some(
+                        r#"{"error":{"message":"Bearer canary-response-secret"}}"#.to_string(),
+                    ),
+                    ..RequestLogUpdate::default()
+                },
+            )
+            .unwrap();
+
+        let detail = context.store.get_detail(context.log_id).unwrap().unwrap();
+        assert_eq!(detail.summary.error_message.as_deref(), Some("<redacted>"));
+        let response = detail.response_json.unwrap();
+        assert!(!response.contains("canary-response-secret"));
+        assert!(response.contains("<redacted>"));
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[test]
@@ -1875,7 +2105,7 @@ mod tests {
         );
         assert_eq!(
             detail.upstream_request_headers_json.as_deref(),
-            Some(r#"{"authorization":"Bearer provider-key"}"#)
+            Some(r#"{"authorization":"<redacted>"}"#)
         );
         assert_eq!(
             detail.upstream_request_json.as_deref(),

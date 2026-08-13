@@ -19,6 +19,19 @@ pub struct GatewayError {
 }
 
 impl GatewayError {
+    pub fn disabled() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            error_type: "service_unavailable_error".to_string(),
+            code: "gateway_disabled".to_string(),
+            message: "AI Gateway is disabled".to_string(),
+            provider: None,
+            upstream_status: None,
+            upstream_error_type: None,
+            upstream_code: None,
+        }
+    }
+
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::BAD_REQUEST,

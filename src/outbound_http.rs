@@ -14,21 +14,32 @@ static GLOBAL_CLIENT: OnceLock<RwLock<Client>> = OnceLock::new();
 
 pub fn init(config: &OutboundProxyConfig, local_port: Option<u16>) -> Result<()> {
     let client = build_client(config, local_port)?;
+    install(client, config);
+    Ok(())
+}
+
+pub fn install(client: Client, config: &OutboundProxyConfig) {
     if let Some(lock) = GLOBAL_CLIENT.get() {
         *lock
             .write()
-            .map_err(|_| anyhow!("outbound HTTP client lock is poisoned"))? = client;
-    } else {
-        let _ = GLOBAL_CLIENT.set(RwLock::new(client));
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
+    } else if let Err(lock) = GLOBAL_CLIENT.set(RwLock::new(client)) {
+        // Another thread initialized the singleton between get() and set().
+        let client = lock
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(global) = GLOBAL_CLIENT.get() {
+            *global
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
+        }
     }
-
     tracing::info!(
         target: "threadrelay::network",
         mode = ?config.mode,
         proxy = %masked_proxy_url(config),
         "outbound HTTP client initialized"
     );
-    Ok(())
 }
 
 pub fn get() -> Client {

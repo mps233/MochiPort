@@ -60,6 +60,9 @@ pub async fn handle_alpha_search(
     };
     let config = state.config.lock().await;
     let gateway_config = config.ai_gateway.clone();
+    if !gateway_config.enabled {
+        return GatewayError::disabled().into_response();
+    }
     let request_logging_enabled = gateway_config.request_logging_enabled;
     let request_log_details_enabled = gateway_config.request_log_details_enabled;
     drop(config);
@@ -196,6 +199,9 @@ async fn handle_image_request(
     let created_at_ms = request_log::now_ms();
     let config = state.config.lock().await;
     let gateway_config = config.ai_gateway.clone();
+    if !gateway_config.enabled {
+        return GatewayError::disabled().into_response();
+    }
     let request_logging_enabled = gateway_config.request_logging_enabled;
     let request_log_details_enabled = gateway_config.request_log_details_enabled;
     drop(config);
@@ -311,6 +317,9 @@ pub async fn handle_responses_compact(
     let created_at_ms = request_log::now_ms();
     let config = state.config.lock().await;
     let gw_config = config.ai_gateway.clone();
+    if !gw_config.enabled {
+        return GatewayError::disabled().into_response();
+    }
     let request_logging_enabled = gw_config.request_logging_enabled;
     let request_log_details_enabled = gw_config.request_log_details_enabled;
     let models_etag = configured_models_etag(&gw_config);
@@ -444,6 +453,9 @@ pub async fn handle_responses(
     let created_at_ms = request_log::now_ms();
     let config = state.config.lock().await;
     let gw_config = config.ai_gateway.clone();
+    if !gw_config.enabled {
+        return GatewayError::disabled().into_response();
+    }
     let filter_image_generation_tool = gw_config.filter_image_generation_tool;
     let request_logging_enabled = gw_config.request_logging_enabled;
     let request_log_details_enabled = gw_config.request_log_details_enabled;
@@ -1048,7 +1060,11 @@ pub async fn handle_request_log_detail(
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
     match state.ai_gateway_request_logs.get_detail(id) {
-        Ok(Some(log)) => Json(json!({ "log": log })).into_response(),
+        Ok(Some(log)) => {
+            let mut value = serde_json::to_value(log).unwrap_or(serde_json::Value::Null);
+            request_log::redact_value(&mut value);
+            Json(json!({ "log": value })).into_response()
+        }
         Ok(None) => (
             axum::http::StatusCode::NOT_FOUND,
             Json(json!({ "error": "request log not found" })),

@@ -1,0 +1,769 @@
+use std::collections::{BTreeMap, HashSet};
+
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::{
+    ai_gateway::{
+        catalog,
+        config::{ProviderConfig, ProviderType},
+        model_fetch, request_log,
+        templates::{self, ProviderTemplate},
+    },
+    app_state::SharedState,
+    config::{LocalConnectionMode, OutboundProxyConfig, OutboundProxyMode},
+};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageGatewayResponse {
+    enabled: bool,
+    filter_image_generation_tool: bool,
+    request_logging_enabled: bool,
+    request_log_details_enabled: bool,
+    codex_visible_models: Vec<String>,
+    providers: Vec<ManageProviderResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageProviderResponse {
+    name: String,
+    enabled: bool,
+    provider_type: ProviderType,
+    compatibility: Option<String>,
+    base_url: String,
+    models_url: Option<String>,
+    models: Vec<String>,
+    model_aliases: BTreeMap<String, String>,
+    prompt_cache_retention: Option<String>,
+    weight: u32,
+    timeout_secs: u64,
+    secret_set: bool,
+}
+
+impl From<&ProviderConfig> for ManageProviderResponse {
+    fn from(provider: &ProviderConfig) -> Self {
+        Self {
+            name: provider.name.clone(),
+            enabled: provider.enabled,
+            provider_type: provider.provider_type.clone(),
+            compatibility: provider.compatibility.clone(),
+            base_url: masked_remote_url(&provider.base_url),
+            models_url: provider.models_url.as_deref().map(masked_remote_url),
+            models: provider.models.clone(),
+            model_aliases: provider.model_aliases.clone(),
+            prompt_cache_retention: provider.prompt_cache_retention.clone(),
+            weight: provider.weight,
+            timeout_secs: provider.timeout_secs,
+            secret_set: !provider.api_key.trim().is_empty(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdateGatewayRequest {
+    enabled: bool,
+    filter_image_generation_tool: bool,
+    request_logging_enabled: bool,
+    request_log_details_enabled: bool,
+    #[serde(default)]
+    codex_visible_models: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpsertProviderRequest {
+    original_name: Option<String>,
+    name: String,
+    enabled: bool,
+    provider_type: ProviderType,
+    compatibility: Option<String>,
+    base_url: String,
+    models_url: Option<String>,
+    #[serde(default)]
+    models: Vec<String>,
+    #[serde(default)]
+    model_aliases: BTreeMap<String, String>,
+    prompt_cache_retention: Option<String>,
+    weight: u32,
+    timeout_secs: u64,
+    api_key: Option<String>,
+    #[serde(default)]
+    clear_api_key: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct DeleteProviderRequest {
+    name: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageSettingsResponse {
+    language: Option<String>,
+    theme: Option<String>,
+    local_connection_mode: LocalConnectionMode,
+    bind: String,
+    outbound_proxy: ManageOutboundProxyResponse,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageOutboundProxyResponse {
+    mode: OutboundProxyMode,
+    url: String,
+    credential_set: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdateSettingsRequest {
+    language: Option<String>,
+    theme: Option<String>,
+    local_connection_mode: LocalConnectionMode,
+    outbound_proxy_mode: OutboundProxyMode,
+    outbound_proxy_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct RequestLogsQuery {
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ClearOldRequestLogsRequest {
+    days: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FetchProviderModelsRequest {
+    provider_name: Option<String>,
+    base_url: String,
+    models_url: Option<String>,
+    provider_type: ProviderType,
+    api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderTemplatesResponse {
+    templates: Vec<ProviderTemplateResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProviderTemplateResponse {
+    id: &'static str,
+    display_name: &'static str,
+    provider_type: ProviderType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compatibility: Option<&'static str>,
+    base_url: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    models_url: Option<&'static str>,
+    models: &'static [&'static str],
+}
+
+impl From<&'static ProviderTemplate> for ProviderTemplateResponse {
+    fn from(template: &'static ProviderTemplate) -> Self {
+        Self {
+            id: template.id,
+            display_name: template.display_name,
+            provider_type: template.provider_type.clone(),
+            compatibility: template.compatibility,
+            base_url: template.base_url,
+            models_url: template.models_url,
+            models: template.models,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexModelCatalogResponse {
+    models: Vec<CodexCatalogModelResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCatalogModelResponse {
+    id: String,
+    display_name: String,
+}
+
+/// 内置服务商模板：纯静态数据，与用户已配置的 provider 完全无关。
+pub(super) async fn provider_templates() -> impl IntoResponse {
+    Json(ProviderTemplatesResponse {
+        templates: templates::provider_templates()
+            .iter()
+            .map(ProviderTemplateResponse::from)
+            .collect(),
+    })
+}
+
+/// 内置 Codex 模型目录中对 API 可见（可列出）的模型。
+pub(super) async fn codex_models_catalog() -> impl IntoResponse {
+    Json(CodexModelCatalogResponse {
+        models: catalog::visible_catalog_model_options()
+            .into_iter()
+            .map(|option| CodexCatalogModelResponse {
+                id: option.slug,
+                display_name: option.display_name,
+            })
+            .collect(),
+    })
+}
+
+pub(super) async fn gateway(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    Json(gateway_snapshot(&config.ai_gateway))
+}
+
+pub(super) async fn update_gateway(
+    State(state): State<SharedState>,
+    Json(request): Json<UpdateGatewayRequest>,
+) -> impl IntoResponse {
+    let mut config = state.config.lock().await;
+    let mut next = config.clone();
+    next.ai_gateway.enabled = request.enabled;
+    next.ai_gateway.filter_image_generation_tool = request.filter_image_generation_tool;
+    next.ai_gateway.request_logging_enabled = request.request_logging_enabled;
+    next.ai_gateway.request_log_details_enabled = request.request_log_details_enabled;
+    next.ai_gateway.codex_visible_models = normalized_values(request.codex_visible_models);
+
+    if let Err(error) = next.save(&state.config_path) {
+        return operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    *config = next;
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "gateway": gateway_snapshot(&config.ai_gateway) })),
+    )
+}
+
+pub(super) async fn upsert_provider(
+    State(state): State<SharedState>,
+    Json(request): Json<UpsertProviderRequest>,
+) -> impl IntoResponse {
+    let name = request.name.trim();
+    if name.is_empty() || name.len() > 64 {
+        return operation_error(StatusCode::BAD_REQUEST, "provider name is required");
+    }
+    if request.weight == 0 || request.timeout_secs == 0 {
+        return operation_error(
+            StatusCode::BAD_REQUEST,
+            "weight and timeoutSecs must be positive",
+        );
+    }
+
+    let original_name = non_empty(request.original_name.as_deref()).unwrap_or(name);
+    let mut config = state.config.lock().await;
+    let mut next = config.clone();
+    let existing_index = next
+        .ai_gateway
+        .providers
+        .iter()
+        .position(|provider| provider.name == original_name);
+    if next
+        .ai_gateway
+        .providers
+        .iter()
+        .enumerate()
+        .any(|(index, provider)| provider.name == name && Some(index) != existing_index)
+    {
+        return operation_error(StatusCode::CONFLICT, "provider name already exists");
+    }
+
+    let existing_provider = existing_index.map(|index| next.ai_gateway.providers[index].clone());
+    let submitted_base_url = normalized_remote_url_text(&request.base_url);
+    let base_url = match existing_provider.as_ref() {
+        Some(existing) if displayed_remote_url_matches(&existing.base_url, &submitted_base_url) => {
+            existing.base_url.clone()
+        }
+        _ => {
+            if let Err(error) = validate_remote_url(&submitted_base_url, "baseUrl") {
+                return operation_error(StatusCode::BAD_REQUEST, error);
+            }
+            submitted_base_url
+        }
+    };
+    let submitted_models_url =
+        non_empty_owned(request.models_url).map(|value| normalized_remote_url_text(&value));
+    let models_url = match submitted_models_url {
+        Some(value)
+            if existing_provider
+                .as_ref()
+                .and_then(|provider| provider.models_url.as_deref())
+                .is_some_and(|stored| displayed_remote_url_matches(stored, &value)) =>
+        {
+            existing_provider
+                .as_ref()
+                .and_then(|provider| provider.models_url.clone())
+        }
+        Some(value) => {
+            if let Err(error) = validate_remote_url(&value, "modelsUrl") {
+                return operation_error(StatusCode::BAD_REQUEST, error);
+            }
+            Some(value)
+        }
+        None => None,
+    };
+
+    let mut provider = existing_index
+        .map(|index| next.ai_gateway.providers[index].clone())
+        .unwrap_or_default();
+    provider.name = name.to_string();
+    provider.enabled = request.enabled;
+    provider.provider_type = request.provider_type;
+    provider.compatibility = non_empty_owned(request.compatibility);
+    provider.base_url = base_url;
+    provider.models_url = models_url;
+    provider.models = normalized_values(request.models);
+    provider.model_aliases = request
+        .model_aliases
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = key.trim().to_string();
+            let value = value.trim().to_string();
+            (!key.is_empty() && !value.is_empty()).then_some((key, value))
+        })
+        .collect();
+    provider.prompt_cache_retention = non_empty_owned(request.prompt_cache_retention);
+    provider.weight = request.weight;
+    provider.timeout_secs = request.timeout_secs;
+    if request.clear_api_key {
+        provider.api_key.clear();
+    } else if let Some(api_key) = non_empty_owned(request.api_key) {
+        provider.api_key = api_key;
+    }
+
+    if let Some(index) = existing_index {
+        next.ai_gateway.providers[index] = provider;
+    } else {
+        next.ai_gateway.providers.push(provider);
+    }
+    if let Err(error) = next.save(&state.config_path) {
+        return operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    *config = next;
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "gateway": gateway_snapshot(&config.ai_gateway) })),
+    )
+}
+
+pub(super) async fn delete_provider(
+    State(state): State<SharedState>,
+    Json(request): Json<DeleteProviderRequest>,
+) -> impl IntoResponse {
+    let name = request.name.trim();
+    if name.is_empty() {
+        return operation_error(StatusCode::BAD_REQUEST, "provider name is required");
+    }
+    let mut config = state.config.lock().await;
+    let mut next = config.clone();
+    let before = next.ai_gateway.providers.len();
+    next.ai_gateway
+        .providers
+        .retain(|provider| provider.name != name);
+    if next.ai_gateway.providers.len() == before {
+        return operation_error(StatusCode::NOT_FOUND, "provider not found");
+    }
+    if let Err(error) = next.save(&state.config_path) {
+        return operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    *config = next;
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "gateway": gateway_snapshot(&config.ai_gateway) })),
+    )
+}
+
+pub(super) async fn settings(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    Json(settings_snapshot(&config))
+}
+
+pub(super) async fn update_settings(
+    State(state): State<SharedState>,
+    Json(request): Json<UpdateSettingsRequest>,
+) -> impl IntoResponse {
+    let language = normalized_language(request.language);
+    let theme = normalized_theme(request.theme);
+    if language.is_err() || theme.is_err() {
+        return operation_error(StatusCode::BAD_REQUEST, "unsupported language or theme");
+    }
+
+    let mut config = state.config.lock().await;
+    let mut next = config.clone();
+    next.language = language.unwrap();
+    next.theme = theme.unwrap();
+    next.local_connection_mode = request.local_connection_mode;
+    next.outbound_proxy.mode = request.outbound_proxy_mode;
+    if let Some(url) = request.outbound_proxy_url {
+        next.outbound_proxy.url = url.trim().to_string();
+    }
+    let outbound_client =
+        match crate::outbound_http::build_client(&next.outbound_proxy, next.local_listen_port()) {
+            Ok(client) => client,
+            Err(error) => return operation_error(StatusCode::BAD_REQUEST, error.to_string()),
+        };
+    if let Err(error) = next.save(&state.config_path) {
+        return operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    crate::outbound_http::install(outbound_client, &next.outbound_proxy);
+    *config = next;
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": true, "settings": settings_snapshot(&config) })),
+    )
+}
+
+pub(super) async fn request_logs(
+    State(state): State<SharedState>,
+    Query(query): Query<RequestLogsQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(200).clamp(1, 1_000);
+    match state.ai_gateway_request_logs.list_recent(limit) {
+        Ok(logs) => {
+            let mut value = serde_json::to_value(logs).unwrap_or(Value::Null);
+            request_log::redact_value(&mut value);
+            (StatusCode::OK, Json(json!({ "logs": value })))
+        }
+        Err(error) => operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+pub(super) async fn request_log_detail(
+    State(state): State<SharedState>,
+    Path(id): Path<i64>,
+) -> impl IntoResponse {
+    match state.ai_gateway_request_logs.get_detail(id) {
+        Ok(Some(log)) => {
+            let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
+            request_log::redact_value(&mut value);
+            (StatusCode::OK, Json(json!({ "log": value })))
+        }
+        Ok(None) => operation_error(StatusCode::NOT_FOUND, "request log not found"),
+        Err(error) => operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+    }
+}
+
+pub(super) async fn clear_request_logs(State(state): State<SharedState>) -> impl IntoResponse {
+    let store = state.ai_gateway_request_logs.clone();
+    match tokio::task::spawn_blocking(move || store.delete_all()).await {
+        Ok(Ok(deleted)) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "deleted": deleted })),
+        ),
+        Ok(Err(error)) => operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        Err(error) => operation_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("request log cleanup task failed: {error}"),
+        ),
+    }
+}
+
+/// 清理早于 `days` 天的请求日志。旧 GUI `DELETE /ai-gateway/request-logs/old?days=3`
+/// 在版本化管理 API 中的对等物；`days` 缺省 3，clamp 到 1..=365。
+pub(super) async fn clear_old_request_logs(
+    State(state): State<SharedState>,
+    request: Option<Json<ClearOldRequestLogsRequest>>,
+) -> impl IntoResponse {
+    let days = request
+        .and_then(|Json(request)| request.days)
+        .unwrap_or(3)
+        .clamp(1, 365);
+    let cutoff_ms = request_log::now_ms().saturating_sub(days as i64 * 86_400_000);
+    let store = state.ai_gateway_request_logs.clone();
+    match tokio::task::spawn_blocking(move || store.delete_older_than(cutoff_ms)).await {
+        Ok(Ok(deleted)) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "deleted": deleted })),
+        ),
+        Ok(Err(error)) => operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
+        Err(error) => operation_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("request log cleanup task failed: {error}"),
+        ),
+    }
+}
+
+/// 代理端从上游拉取模型列表，语义对齐旧 GUI 的「获取模型」按钮
+/// （`src/gui.rs` 的 `fetch_remote_models` 调用链，纯逻辑在
+/// `crate::ai_gateway::model_fetch` 中共享）。
+///
+/// API key 选用顺序：请求里的 `apiKey` → `providerName` 命中现有 provider 时
+/// 的已存 key → 无鉴权头。响应对每个候选 URL 记录尝试详情，不回显鉴权信息。
+pub(super) async fn fetch_provider_models(
+    State(state): State<SharedState>,
+    Json(request): Json<FetchProviderModelsRequest>,
+) -> impl IntoResponse {
+    let base_url = request.base_url.trim().to_string();
+    if base_url.is_empty() {
+        return operation_error(StatusCode::BAD_REQUEST, "baseUrl is required");
+    }
+
+    let provider_name = non_empty(request.provider_name.as_deref());
+    let (stored_api_key, stored_compatibility) = {
+        let config = state.config.lock().await;
+        let existing = provider_name.and_then(|name| {
+            config
+                .ai_gateway
+                .providers
+                .iter()
+                .find(|provider| provider.name == name)
+        });
+        (
+            existing
+                .map(|provider| provider.api_key.trim().to_string())
+                .filter(|key| !key.is_empty()),
+            existing.and_then(|provider| provider.compatibility.clone()),
+        )
+    };
+    let api_key = non_empty(request.api_key.as_deref())
+        .map(str::to_string)
+        .or(stored_api_key)
+        .unwrap_or_default();
+
+    let fallback_models_url = model_fetch::known_models_url(
+        provider_name,
+        &request.provider_type,
+        stored_compatibility.as_deref(),
+        &base_url,
+    );
+    let candidates = model_fetch::model_list_candidates(
+        &base_url,
+        request.models_url.as_deref(),
+        fallback_models_url.as_deref(),
+    );
+
+    let client = crate::outbound_http::get();
+    let outcome = model_fetch::fetch_models(
+        &client,
+        &candidates,
+        &api_key,
+        model_fetch::MODEL_LIST_FETCH_TIMEOUT,
+    )
+    .await;
+
+    let (ok, models) = match outcome.models {
+        Some(models) => (
+            true,
+            model_fetch::filter_fetched_models_for_provider(&request.provider_type, models),
+        ),
+        None => (false, Vec::new()),
+    };
+    (
+        StatusCode::OK,
+        Json(json!({ "ok": ok, "models": models, "attempts": outcome.attempts })),
+    )
+}
+
+fn gateway_snapshot(config: &crate::ai_gateway::config::AiGatewayConfig) -> ManageGatewayResponse {
+    ManageGatewayResponse {
+        enabled: config.enabled,
+        filter_image_generation_tool: config.filter_image_generation_tool,
+        request_logging_enabled: config.request_logging_enabled,
+        request_log_details_enabled: config.request_log_details_enabled,
+        codex_visible_models: config.codex_visible_models.clone(),
+        providers: config
+            .providers
+            .iter()
+            .map(ManageProviderResponse::from)
+            .collect(),
+    }
+}
+
+fn settings_snapshot(config: &crate::config::AppConfig) -> ManageSettingsResponse {
+    let proxy = &config.outbound_proxy;
+    ManageSettingsResponse {
+        language: normalized_language(config.language.clone())
+            .ok()
+            .flatten()
+            .or_else(|| config.language.clone()),
+        theme: normalized_theme(config.theme.clone())
+            .ok()
+            .flatten()
+            .or_else(|| config.theme.clone()),
+        local_connection_mode: config.local_connection_mode,
+        bind: config.bind.clone(),
+        outbound_proxy: ManageOutboundProxyResponse {
+            mode: proxy.mode,
+            url: crate::outbound_http::masked_proxy_url(proxy),
+            credential_set: proxy_has_credentials(proxy),
+        },
+    }
+}
+
+fn normalized_values(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn normalized_theme(value: Option<String>) -> Result<Option<String>, ()> {
+    let Some(value) = non_empty_owned(value) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "system" | "auto" => Ok(Some("system".to_string())),
+        "light" => Ok(Some("light".to_string())),
+        "dark" => Ok(Some("dark".to_string())),
+        _ => Err(()),
+    }
+}
+
+fn normalized_language(value: Option<String>) -> Result<Option<String>, ()> {
+    let Some(value) = non_empty_owned(value) else {
+        return Ok(None);
+    };
+    match value.to_ascii_lowercase().replace('_', "-").as_str() {
+        "zh" | "zh-cn" | "cn" => Ok(Some("zh-CN".to_string())),
+        "en" | "en-us" => Ok(Some("en-US".to_string())),
+        _ => Err(()),
+    }
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn non_empty_owned(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_remote_url(value: &str, field: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(value.trim()).map_err(|_| format!("invalid {field}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(format!("invalid {field}"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!("{field} must not contain credentials"));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!("{field} must not contain a query or fragment"));
+    }
+    Ok(())
+}
+
+fn normalized_remote_url_text(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_string()
+}
+
+fn displayed_remote_url_matches(stored: &str, submitted: &str) -> bool {
+    normalized_remote_url_text(&masked_remote_url(stored)) == normalized_remote_url_text(submitted)
+}
+
+fn masked_remote_url(value: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(value.trim()) else {
+        return "<invalid>".to_string();
+    };
+    if parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
+        return normalized_remote_url_text(value);
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    normalized_remote_url_text(parsed.as_str())
+}
+
+fn proxy_has_credentials(config: &OutboundProxyConfig) -> bool {
+    url::Url::parse(config.url.trim()).is_ok_and(|url| {
+        !url.username().is_empty() || url.password().is_some_and(|value| !value.is_empty())
+    })
+}
+
+fn operation_error(status: StatusCode, error: impl Into<String>) -> (StatusCode, Json<Value>) {
+    (status, Json(json!({ "ok": false, "error": error.into() })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_log_redaction_covers_nested_json_and_sse_payloads() {
+        let mut value = json!({
+            "requestHeadersJson": "{\"authorization\":\"Bearer canary\",\"x-debug\":\"ok\"}",
+            "requestJson": "{\"input\":\"hello\",\"apiKey\":\"canary-key\"}",
+            "upstreamResponseSse": "event: message\ndata: {\"token\":\"canary-token\",\"text\":\"ok\"}\n",
+        });
+
+        request_log::redact_value(&mut value);
+        let serialized = value.to_string();
+        assert!(!serialized.contains("Bearer canary"));
+        assert!(!serialized.contains("canary-key"));
+        assert!(!serialized.contains("canary-token"));
+        assert!(serialized.contains("<redacted>"));
+        assert!(serialized.contains("hello"));
+        assert!(serialized.contains("ok"));
+    }
+
+    #[test]
+    fn provider_urls_never_return_embedded_credentials_or_query_tokens() {
+        assert_eq!(
+            masked_remote_url(
+                "https://provider-user:provider-secret@provider.example/v1?api_key=canary"
+            ),
+            "https://provider.example/v1"
+        );
+        assert!(
+            validate_remote_url(
+                "https://provider-user:provider-secret@provider.example/v1",
+                "baseUrl"
+            )
+            .is_err()
+        );
+        assert!(
+            validate_remote_url("https://provider.example/v1?api_key=canary", "baseUrl").is_err()
+        );
+        assert_eq!(
+            masked_remote_url("https://broken url?api_key=canary"),
+            "<invalid>"
+        );
+        assert!(displayed_remote_url_matches(
+            "https://provider-user:provider-secret@provider.example/v1?api_key=canary",
+            "https://provider.example/v1"
+        ));
+    }
+
+    #[test]
+    fn settings_language_aliases_are_saved_in_legacy_compatible_form() {
+        assert_eq!(
+            normalized_language(Some("en".to_string())),
+            Ok(Some("en-US".to_string()))
+        );
+        assert_eq!(
+            normalized_language(Some("zh_cn".to_string())),
+            Ok(Some("zh-CN".to_string()))
+        );
+        assert!(normalized_language(Some("fr".to_string())).is_err());
+        assert_eq!(
+            normalized_theme(Some("auto".to_string())),
+            Ok(Some("system".to_string()))
+        );
+    }
+}

@@ -26,6 +26,7 @@ use crate::{
 
 mod codex_app;
 mod im_api;
+mod manage_workspace;
 mod oauth;
 mod onboarding;
 pub(crate) mod plugins;
@@ -44,6 +45,64 @@ pub fn router(state: SharedState) -> Router {
         .route("/lifecycle", get(manage_lifecycle))
         .route("/dashboard", get(manage_dashboard))
         .route("/log-directory", get(manage_log_directory))
+        .route("/codex/status", get(codex_app::manage_codex_app_status))
+        .route("/codex/configure", post(codex_app::configure_codex_app))
+        .route(
+            "/codex/repair",
+            post(codex_app::repair_codex_app_gui_environment),
+        )
+        .route("/codex/uninstall", post(codex_app::uninstall_codex_app))
+        .route(
+            "/codex/models/refresh",
+            post(codex_app::refresh_codex_app_models),
+        )
+        .route(
+            "/codex/models/catalog",
+            get(manage_workspace::codex_models_catalog),
+        )
+        .route(
+            "/codex/enhanced/preflight",
+            get(codex_app::codex_app_enhanced_preflight),
+        )
+        .route(
+            "/codex/enhanced/launch",
+            post(codex_app::launch_codex_app_enhanced),
+        )
+        .route("/sessions", get(codex_app::codex_app_sessions))
+        .route(
+            "/sessions/provider",
+            post(codex_app::move_managed_codex_app_session_provider),
+        )
+        .route("/gateway", get(manage_workspace::gateway))
+        .route("/gateway/settings", post(manage_workspace::update_gateway))
+        .route("/gateway/provider", post(manage_workspace::upsert_provider))
+        .route(
+            "/gateway/provider/delete",
+            post(manage_workspace::delete_provider),
+        )
+        .route(
+            "/gateway/provider/models/fetch",
+            post(manage_workspace::fetch_provider_models),
+        )
+        .route(
+            "/gateway/provider-templates",
+            get(manage_workspace::provider_templates),
+        )
+        .route("/settings", get(manage_workspace::settings))
+        .route("/settings", post(manage_workspace::update_settings))
+        .route("/request-logs", get(manage_workspace::request_logs))
+        .route(
+            "/request-logs/clear",
+            post(manage_workspace::clear_request_logs),
+        )
+        .route(
+            "/request-logs/clear-old",
+            post(manage_workspace::clear_old_request_logs),
+        )
+        .route(
+            "/request-logs/{id}",
+            get(manage_workspace::request_log_detail),
+        )
         // IM account management is exposed under the authenticated, versioned
         // namespace.  Keep the legacy /api/im/* routes below during the
         // migration window, but make new clients use this surface.
@@ -831,6 +890,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disabled_ai_gateway_rejects_model_requests_before_routing() {
+        let (state, _temp, _token) = management_state_with_config(AppConfig::default());
+        let app = router(state);
+        let response = request_response(
+            app,
+            Method::POST,
+            "/ai-gateway/v1/responses",
+            None,
+            Some(r#"{"model":"unconfigured-model","input":[]}"#),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response_json(response).await;
+        assert_eq!(body["error"]["code"], "gateway_disabled");
+    }
+
+    #[tokio::test]
     async fn manage_route_requires_the_shared_bearer_credential() {
         let (app, _temp, token) = management_test_router();
 
@@ -847,6 +924,499 @@ mod tests {
 
         let valid = route_response(app, "/api/v1/manage/status", Some(&token)).await;
         assert_eq!(valid.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn manage_workspace_routes_require_the_shared_bearer_credential() {
+        let (app, _temp, _token) = management_test_router();
+        for path in [
+            "/api/v1/manage/codex/status",
+            "/api/v1/manage/sessions",
+            "/api/v1/manage/gateway",
+            "/api/v1/manage/settings",
+            "/api/v1/manage/request-logs",
+        ] {
+            let response = route_response(app.clone(), path, None).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "path={path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_session_move_rejects_gui_supplied_rollout_paths() {
+        let (app, _temp, token) = management_test_router();
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/sessions/provider",
+            Some(&token),
+            Some(
+                r#"{"threadId":"thread-canary","rolloutPath":"/tmp/canary.jsonl","targetProvider":"openai"}"#,
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn manage_gateway_and_settings_expose_state_without_secrets() {
+        let mut config = AppConfig::default();
+        config.outbound_proxy = crate::config::OutboundProxyConfig {
+            mode: crate::config::OutboundProxyMode::Custom,
+            url: "http://proxy-user:proxy-secret@127.0.0.1:7890".to_string(),
+        };
+        config.ai_gateway.providers = vec![ProviderConfig {
+            name: "primary".to_string(),
+            base_url: "https://provider-user:provider-password@provider.example/v1".to_string(),
+            api_key: CANARY_PROVIDER_KEY.to_string(),
+            models: vec!["model-a".to_string()],
+            ..ProviderConfig::default()
+        }];
+        let (state, _temp, token) = management_state_with_config(config);
+        let app = router(state);
+
+        let gateway = route_response(app.clone(), "/api/v1/manage/gateway", Some(&token)).await;
+        assert_eq!(gateway.status(), StatusCode::OK);
+        let gateway = response_json(gateway).await;
+        let gateway_text = gateway.to_string();
+        assert_eq!(gateway["providers"][0]["name"], "primary");
+        assert_eq!(gateway["providers"][0]["secretSet"], true);
+        assert!(!gateway_text.contains(CANARY_PROVIDER_KEY));
+        assert!(!gateway_text.contains("provider-password"));
+        assert!(!gateway_text.contains("provider-user"));
+        assert!(!gateway_text.contains("\"apiKey\""));
+
+        let settings = route_response(app, "/api/v1/manage/settings", Some(&token)).await;
+        assert_eq!(settings.status(), StatusCode::OK);
+        let settings = response_json(settings).await;
+        assert_eq!(settings["outboundProxy"]["url"], "http://127.0.0.1:7890");
+        assert_eq!(settings["outboundProxy"]["credentialSet"], true);
+        assert!(!settings.to_string().contains("proxy-secret"));
+    }
+
+    #[tokio::test]
+    async fn manage_gateway_mutations_persist_and_keep_api_keys_write_only() {
+        let (state, _temp, token) = management_state_with_config(AppConfig::default());
+        let app = router(state);
+        let key = "write-only-provider-key";
+        let body = json!({
+            "name": "primary",
+            "enabled": true,
+            "providerType": "open_ai_responses",
+            "baseUrl": "https://provider.example/v1",
+            "models": ["model-a", "model-a", " model-b "],
+            "modelAliases": {},
+            "weight": 100,
+            "timeoutSecs": 60,
+            "apiKey": key,
+        })
+        .to_string();
+        let response = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/gateway/provider",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = response_json(response).await;
+        assert_eq!(response["gateway"]["providers"][0]["secretSet"], true);
+        assert_eq!(
+            response["gateway"]["providers"][0]["models"],
+            json!(["model-a", "model-b"])
+        );
+        assert!(!response.to_string().contains(key));
+
+        let gateway = route_response(app, "/api/v1/manage/gateway", Some(&token)).await;
+        let gateway = response_json(gateway).await;
+        assert_eq!(gateway["providers"][0]["secretSet"], true);
+        assert!(!gateway.to_string().contains(key));
+    }
+
+    #[tokio::test]
+    async fn manage_gateway_edit_preserves_masked_legacy_provider_urls() {
+        let legacy_base =
+            "https://provider-user:provider-password@provider.example/v1?api_key=canary";
+        let legacy_models =
+            "https://models-user:models-password@provider.example/v1/models?token=canary";
+        let mut config = AppConfig::default();
+        config.ai_gateway.providers = vec![ProviderConfig {
+            name: "primary".to_string(),
+            base_url: legacy_base.to_string(),
+            models_url: Some(legacy_models.to_string()),
+            models: vec!["model-a".to_string()],
+            ..ProviderConfig::default()
+        }];
+        let (state, _temp, token) = management_state_with_config(config);
+        let inspect_state = state.clone();
+        let app = router(state);
+        let body = json!({
+            "originalName": "primary",
+            "name": "primary",
+            "enabled": true,
+            "providerType": "open_ai_responses",
+            "baseUrl": "https://provider.example/v1",
+            "modelsUrl": "https://provider.example/v1/models",
+            "models": ["model-a"],
+            "modelAliases": {},
+            "weight": 200,
+            "timeoutSecs": 60,
+        })
+        .to_string();
+
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/gateway/provider",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let config = inspect_state.config.lock().await;
+        let provider = &config.ai_gateway.providers[0];
+        assert_eq!(provider.base_url, legacy_base);
+        assert_eq!(provider.models_url.as_deref(), Some(legacy_models));
+        assert_eq!(provider.weight, 200);
+    }
+
+    #[tokio::test]
+    async fn manage_provider_templates_route_serves_static_camel_case_templates() {
+        let (app, _temp, token) = management_test_router();
+
+        let missing = route_response(
+            app.clone(),
+            "/api/v1/manage/gateway/provider-templates",
+            None,
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let response = route_response(
+            app,
+            "/api/v1/manage/gateway/provider-templates",
+            Some(&token),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_exact_keys(
+            payload.as_object().expect("templates response object"),
+            &["templates"],
+        );
+        let templates = payload["templates"].as_array().expect("templates array");
+        assert!(!templates.is_empty());
+        for template in templates {
+            let object = template.as_object().expect("template object");
+            for key in ["id", "displayName", "providerType", "baseUrl", "models"] {
+                assert!(object.contains_key(key), "template missing {key}");
+            }
+            assert!(
+                object.keys().all(|key| !key.contains('_')),
+                "template keys must be camelCase: {template}"
+            );
+        }
+
+        let template_by_id = |id: &str| {
+            templates
+                .iter()
+                .find(|template| template["id"] == id)
+                .unwrap_or_else(|| panic!("missing template {id}"))
+        };
+        let openai = template_by_id("openai");
+        assert_eq!(openai["displayName"], "OpenAI");
+        assert_eq!(openai["providerType"], "open_ai_responses");
+        assert_eq!(openai["baseUrl"], "https://api.openai.com/v1");
+        assert_eq!(openai["models"], json!([]));
+
+        let anthropic = template_by_id("anthropic");
+        assert_eq!(anthropic["providerType"], "anthropic_messages");
+        assert_eq!(anthropic["compatibility"], "anthropic");
+        assert_eq!(anthropic["baseUrl"], "https://api.anthropic.com/v1");
+
+        let deepseek_responses = template_by_id("deepseek-responses");
+        assert_eq!(deepseek_responses["providerType"], "deepseek_responses");
+        assert_eq!(deepseek_responses["models"], json!(["deepseek-v4-flash"]));
+
+        let glm = template_by_id("glm");
+        assert_eq!(glm["providerType"], "anthropic_messages");
+        assert_eq!(glm["compatibility"], "glm_anthropic");
+        assert_eq!(glm["baseUrl"], "https://open.bigmodel.cn/api/anthropic");
+        assert_eq!(
+            glm["modelsUrl"],
+            "https://open.bigmodel.cn/api/paas/v4/models"
+        );
+
+        // 模板是静态数据：用户已配置的 canary provider、模型与密钥绝不能混入。
+        let encoded = payload.to_string();
+        for canary in [
+            CANARY_PROVIDER_KEY,
+            CANARY_PROVIDER_URL,
+            CANARY_MODELS_URL,
+            CANARY_MODEL,
+            "canary-provider-name-must-not-leak",
+        ] {
+            assert!(!encoded.contains(canary), "templates leaked {canary}");
+        }
+        for forbidden_field in ["apiKey", "secretSet", "enabled", "weight", "timeoutSecs"] {
+            assert!(
+                !contains_json_key(&payload, forbidden_field),
+                "templates exposed field {forbidden_field}"
+            );
+        }
+    }
+
+    fn seed_request_log(state: &SharedState, request_id: &str, created_at_ms: i64) {
+        use crate::ai_gateway::request_log::{LogUsage, RequestLogRecord};
+        state
+            .ai_gateway_request_logs
+            .insert_record(&RequestLogRecord {
+                request_id: request_id.to_string(),
+                model_id: "test-model".to_string(),
+                stream: false,
+                channel: "test".to_string(),
+                provider_type: "open_ai_responses".to_string(),
+                status: "completed".to_string(),
+                usage: LogUsage::default(),
+                cost_usd: None,
+                latency_ms: None,
+                ttft_ms: None,
+                created_at_ms,
+                error_message: None,
+                request_headers_json: None,
+                request_json: None,
+                upstream_request_body_bytes: None,
+                upstream_request_headers_json: None,
+                upstream_request_json: None,
+                upstream_response_sse: None,
+                response_json: None,
+            })
+            .expect("seed request log");
+    }
+
+    #[tokio::test]
+    async fn manage_request_logs_clear_old_deletes_only_expired_logs() {
+        let (state, _temp, token) = management_test_state();
+        let now = crate::ai_gateway::request_log::now_ms();
+        seed_request_log(&state, "ten-day-old-log", now - 10 * 86_400_000);
+        seed_request_log(&state, "recent-log", now);
+        let app = router(state.clone());
+
+        let unauthorized = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/request-logs/clear-old",
+            None,
+            Some(r#"{"days":3}"#),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        // 无请求体时 days 缺省为 3：删除 10 天前的日志。
+        let response = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/request-logs/clear-old",
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            json!({ "ok": true, "deleted": 1 })
+        );
+
+        // 显式 days=1 只清理超过 1 天的日志，近期日志保留。
+        seed_request_log(&state, "two-day-old-log", now - 2 * 86_400_000);
+        let response = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/request-logs/clear-old",
+            Some(&token),
+            Some(r#"{"days":1}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            json!({ "ok": true, "deleted": 1 })
+        );
+
+        let logs = route_response(app, "/api/v1/manage/request-logs", Some(&token)).await;
+        let logs = response_json(logs).await;
+        let logs = logs["logs"].as_array().expect("logs array");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["requestId"], "recent-log");
+    }
+
+    #[tokio::test]
+    async fn manage_provider_models_fetch_uses_stored_key_and_parses_models() {
+        use std::sync::{Arc, Mutex};
+
+        let recorded_auth: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let mock_auth = recorded_auth.clone();
+        let mock = Router::new().route(
+            "/v1/models",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let recorded = mock_auth.clone();
+                async move {
+                    recorded.lock().expect("record auth header").push(
+                        headers
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    Json(json!({
+                        "data": [
+                            { "id": "model-b" },
+                            { "id": "model-a" },
+                            { "id": "model-b" }
+                        ]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock models server");
+        let address = listener.local_addr().expect("mock models server address");
+        tokio::spawn(async move {
+            axum::serve(listener, mock)
+                .await
+                .expect("serve mock models endpoint");
+        });
+
+        let (app, _temp, token) = management_test_router();
+        let body = json!({
+            "providerName": "canary-provider-name-must-not-leak",
+            "baseUrl": format!("http://{address}/v1"),
+            "providerType": "open_ai_responses",
+        })
+        .to_string();
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/gateway/provider/models/fetch",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["ok"], json!(true));
+        assert_eq!(payload["models"], json!(["model-b", "model-a"]));
+        assert_eq!(
+            payload["attempts"],
+            json!([{ "url": format!("http://{address}/v1/models"), "status": 200 }])
+        );
+
+        // providerName 命中现有 provider 时使用已存 key，但响应绝不回显它。
+        assert_eq!(
+            recorded_auth.lock().expect("read recorded auth").as_slice(),
+            [format!("Bearer {CANARY_PROVIDER_KEY}")]
+        );
+        assert!(!payload.to_string().contains(CANARY_PROVIDER_KEY));
+    }
+
+    #[tokio::test]
+    async fn manage_provider_models_fetch_reports_every_failed_attempt() {
+        let mock = Router::new().fallback(|| async { (StatusCode::NOT_FOUND, "e".repeat(600)) });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind failing models server");
+        let address = listener
+            .local_addr()
+            .expect("failing models server address");
+        tokio::spawn(async move {
+            axum::serve(listener, mock)
+                .await
+                .expect("serve failing models endpoint");
+        });
+
+        let (app, _temp, token) = management_test_router();
+
+        let unauthorized = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/gateway/provider/models/fetch",
+            None,
+            Some(r#"{"baseUrl":"https://api.example.com/v1","providerType":"open_ai_responses"}"#),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let body = json!({
+            "baseUrl": format!("http://{address}/api"),
+            "providerType": "deepseek_responses",
+        })
+        .to_string();
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/gateway/provider/models/fetch",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["ok"], json!(false));
+        assert_eq!(payload["models"], json!([]));
+        let attempts = payload["attempts"].as_array().expect("attempts array");
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0]["url"], format!("http://{address}/api/models"));
+        assert_eq!(
+            attempts[1]["url"],
+            format!("http://{address}/api/v1/models")
+        );
+        for attempt in attempts {
+            assert_eq!(attempt["status"], json!(404));
+            let preview = attempt["preview"].as_str().expect("attempt preview");
+            assert_eq!(preview.chars().count(), 240);
+            assert!(preview.chars().all(|ch| ch == 'e'));
+            assert!(attempt.get("error").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn manage_codex_models_catalog_lists_visible_catalog_models() {
+        let (app, _temp, token) = management_test_router();
+
+        let missing =
+            route_response(app.clone(), "/api/v1/manage/codex/models/catalog", None).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let response =
+            route_response(app, "/api/v1/manage/codex/models/catalog", Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_exact_keys(
+            payload.as_object().expect("catalog response object"),
+            &["models"],
+        );
+        let models = payload["models"].as_array().expect("models array");
+        assert!(!models.is_empty());
+        for model in models {
+            let object = model.as_object().expect("catalog model object");
+            assert_exact_keys(object, &["displayName", "id"]);
+            assert!(model["id"].as_str().is_some_and(|id| !id.is_empty()));
+            assert!(
+                model["displayName"]
+                    .as_str()
+                    .is_some_and(|name| !name.is_empty())
+            );
+        }
+        let ids = models
+            .iter()
+            .filter_map(|model| model["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"gpt-5.5"), "catalog missing gpt-5.5: {ids:?}");
+        // catalog 是内置静态目录，用户配置的 canary 模型不能出现。
+        assert!(!payload.to_string().contains(CANARY_MODEL));
     }
 
     #[tokio::test]
@@ -1346,7 +1916,10 @@ mod tests {
         assert_eq!(execution_clients["vscode"]["connected"], json!(true));
         assert_eq!(execution_clients["cli"]["configured"], json!(true));
         assert_eq!(execution_clients["cli"]["connected"], json!(false));
-        assert_eq!(object["codexAppConfigured"], json!(true));
+        assert!(
+            object["codexAppConfigured"].is_boolean(),
+            "Codex configuration status must stay aggregate-only"
+        );
         assert_eq!(object["imAccountCount"], json!(3));
         assert_eq!(object["connectedImAccountCount"], json!(3));
 

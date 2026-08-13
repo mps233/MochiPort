@@ -3492,50 +3492,11 @@ fn bind_locked_ai_gw_service_radio(
 }
 
 fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig {
-    match provider_type {
-        ProviderType::OpenAiResponses => ProviderConfig {
-            name: "openai".to_string(),
-            provider_type: ProviderType::OpenAiResponses,
-            base_url: "https://api.openai.com/v1".to_string(),
-            ..Default::default()
-        },
-        ProviderType::GrokResponses => ProviderConfig {
-            name: "grok".to_string(),
-            provider_type: ProviderType::GrokResponses,
-            base_url: "https://api.x.ai/v1".to_string(),
-            ..Default::default()
-        },
-        ProviderType::DeepSeekResponses => ProviderConfig {
-            name: "deepseek-responses".to_string(),
-            provider_type: ProviderType::DeepSeekResponses,
-            base_url: "https://api.deepseek.com/v1".to_string(),
-            models: vec!["deepseek-v4-flash".to_string()],
-            ..Default::default()
-        },
-        ProviderType::ChatCompletions => ProviderConfig {
-            name: "deepseek".to_string(),
-            provider_type: ProviderType::ChatCompletions,
-            base_url: "https://api.deepseek.com/v1".to_string(),
-            ..Default::default()
-        },
-        ProviderType::AnthropicMessages => ProviderConfig {
-            name: "anthropic".to_string(),
-            provider_type: ProviderType::AnthropicMessages,
-            compatibility: Some("anthropic".to_string()),
-            base_url: "https://api.anthropic.com/v1".to_string(),
-            ..Default::default()
-        },
-    }
+    crate::ai_gateway::templates::default_template_for(&provider_type).to_provider_config()
 }
 
 fn default_ai_gw_glm_service_provider() -> ProviderConfig {
-    ProviderConfig {
-        name: "glm".to_string(),
-        provider_type: ProviderType::AnthropicMessages,
-        compatibility: Some("glm_anthropic".to_string()),
-        base_url: "https://open.bigmodel.cn/api/anthropic".to_string(),
-        ..Default::default()
-    }
+    crate::ai_gateway::templates::glm_template().to_provider_config()
 }
 
 fn normalize_provider_models_url(mut provider: ProviderConfig) -> ProviderConfig {
@@ -3566,7 +3527,9 @@ fn known_models_url_for_provider(provider: &ProviderConfig) -> Option<String> {
         || provider_name.eq_ignore_ascii_case("zhipu"))
         && base_url.contains("open.bigmodel.cn")
     {
-        return Some("https://open.bigmodel.cn/api/paas/v4/models".to_string());
+        return crate::ai_gateway::templates::glm_template()
+            .models_url
+            .map(str::to_string);
     }
 
     None

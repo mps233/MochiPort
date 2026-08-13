@@ -10,12 +10,14 @@ pub mod handler;
 #[allow(dead_code)]
 pub mod ir;
 pub mod model;
+pub mod model_fetch;
 pub mod providers;
 pub mod request_log;
 pub mod responses_compat;
 pub mod responses_lite_tools;
 pub mod router;
 pub mod routing_state;
+pub mod templates;
 pub mod tool_names;
 pub mod transform;
 
