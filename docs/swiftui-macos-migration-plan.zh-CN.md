@@ -4,8 +4,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Phase 1 只读总览功能已落地，等待启动副作用隔离与 24 小时长稳验证 |
-| 最近核验 | 2026-08-13；Rust/SwiftPM/Xcode 构建与测试通过 |
+| 状态 | Phase 3 四平台账号管理与 Onboarding 已落地；Universal 本地验证包 build 365 已产出，当前运行实例仍保留旧 daemon，等待安全窗口切换 |
+| 最近核验 | 2026-08-13；Swift/Xcode 60 项、Rust 795 项（1 项忽略）、Universal Release build 365 通过；内嵌 daemon 0.5.0 的隔离启动、运行路径和 `/healthz` 已验证 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
 | 主前端 | SwiftUI |
@@ -320,7 +320,7 @@ Sidebar、toolbar、search、sheet、popover、Inspector 和菜单栏瞬时界�
 
 API 按页面渐进准备：公共安全与版本骨架在 Phase 0 完成；每个页面的端点和 fixture 在该页面实现前完成。
 
-- [ ] 固化版本化 API 约定；按 Phase 1-6 依次完成 Dashboard、生命周期、账号、Codex/会话、Provider/日志和设置接口，并为 Swift 准备脱敏 fixture。
+- [x] 固化已实现页面的版本化 API 约定；Dashboard、生命周期和 IM 账号接口已有脱敏 fixture，后续页面继续按 Phase 4-6 补齐。
 - [ ] 将新增写操作收敛为窄 DTO；凭据只写，读取只返回是否已设置；所有写操作定义校验、幂等性和统一错误格式。
 - [ ] 将管理 API 与 Codex/AI Gateway 协议分区，完成本地鉴权、浏览器跨站防护和统一脱敏。
 - [ ] 返回 API 版本、能力和状态 revision，让 GUI 能识别不兼容 daemon 并避免多页面竞态。
@@ -341,7 +341,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 - [x] 固化 stable/preview Bundle ID、Cargo 版本来源、构建号和 Debug/Release scheme。
 - [ ] 补齐图标、签名能力和正式包签名验证。
 - [x] 使用 Swift 并发、`@MainActor` 和 `ObservableObject` 建立 `APIClient`、错误模型、依赖注入和只读 fixture 加载能力。
-- [ ] 建立 Rust helper 的包内复制、嵌套签名和版本一致性校验。
+- [x] 建立 Rust helper 的包内复制、嵌套签名和版本一致性校验。
 - [x] 记录 App Sandbox 暂缓、Universal 构建、凭据兼容和 API 认证四项架构决策。
 - [ ] 冻结并测试控制平面 ADR：共享凭据的发现与轮换、唯一管理租约、stable/preview/桥接版仲裁、接管、并发写和崩溃恢复。
 - [x] 实现共享管理凭据、唯一匿名 `/healthz` 和受鉴权 API v1 骨架；已用路由测试验证 bearer 校验和脱敏 dashboard。
@@ -394,15 +394,21 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 ### Phase 3：IM 账号与 Onboarding
 
+当前状态：账号列表、基础管理，以及 Telegram、飞书、微信和企业微信的新增 Onboarding 已接入 SwiftUI。
+
 交付物：
 
-- [ ] 迁移账号列表、平台筛选、启停和删除。
-- [ ] 迁移 Telegram Token 配置。
-- [ ] 迁移飞书扫码或凭据引导。
-- [ ] 迁移微信扫码、验证码和过期处理。
-- [ ] 迁移企业微信引导。
-- [ ] 通过 daemon 的受保护窄写接口提交新凭据；界面不回显已保存密钥，首版不迁移到 Keychain。
-- [ ] 对连接中、轮询中、已连接、未配置和错误状态使用统一语义。
+- [x] 迁移账号列表、平台筛选、启停和删除。
+- [x] 迁移 Telegram Token 配置。
+- [x] 迁移飞书扫码或凭据引导。
+- [x] 迁移微信扫码、验证码和过期处理。
+- [x] 迁移企业微信引导。
+- [x] 通过 daemon 的受保护窄写接口提交账号启停、删除和新增凭据；界面不回显已保存密钥，首版不迁移到 Keychain。
+- [x] 对连接中、轮询中、已连接、未配置和错误状态使用统一语义。
+
+本阶段实现范围：账号读取、启停、删除、Telegram/飞书凭据和三种扫码流程全部位于要求 bearer 鉴权的 `/api/v1/manage/im/*` 命名空间；旧 daemon 缺少接口时，界面明确显示“后台服务需要更新”。删除不存在账号不会触发旧配置迁移副作用，未知平台返回 400；legacy 单例账号在迁移前后保持同一账号 ID，删除后不会因单例残留而复活。
+
+共享 Onboarding sheet 采用“选择平台 → 提供凭据或扫码 → 等待验证 → 完成”骨架：Telegram Token 由 daemon 通过 getMe 校验；飞书支持设备码扫码和 App ID/App Secret 手动验证，版本化轮询响应不回显包含 App Secret 的原始注册载荷；微信扫码可插入验证码步骤，并在二维码过期或验证码受限时原地重试；企业微信使用扫码轮询。所有密钥均只写不回显，验证失败留在当前步骤，二维码过期原地刷新，账号启停失败回滚界面开关状态。
 
 验收：四个平台的新增、启停、删除、失败重试和重启恢复均通过，旧配置无需重新录入。
 
