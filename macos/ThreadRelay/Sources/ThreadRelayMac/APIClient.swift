@@ -11,6 +11,96 @@ struct ManageLogDirectory: Decodable, Equatable {
     let instanceId: String
 }
 
+struct ManageIMAccount: Decodable, Equatable, Identifiable {
+    let platform: String
+    let accountId: String
+    let displayName: String?
+    let enabled: Bool
+    let configured: Bool
+    let secretSet: Bool
+    let connecting: Bool
+    let polling: Bool
+    let connected: Bool
+    let lastError: String?
+    let lastEventAtMs: Int64?
+    let lastInboundAtMs: Int64?
+
+    var id: String { "\(platform):\(accountId)" }
+}
+
+struct ManageIMAccountsResponse: Decodable, Equatable {
+    let service: ManageDashboard.Service
+    let accounts: [ManageIMAccount]
+}
+
+/// Common shape of authenticated account mutation responses so one request
+/// path can decode and acknowledge every mutation variant.
+protocol ManageMutationResponse: Decodable {
+    var ok: Bool { get }
+}
+
+struct ManageIMAccountMutationResponse: Decodable, Equatable, ManageMutationResponse {
+    let ok: Bool
+    let platform: String
+    let accountId: String
+    let enabled: Bool?
+}
+
+struct ManageIMAccountConfigureResponse: Decodable, Equatable, ManageMutationResponse {
+    let ok: Bool
+    let platform: String
+    let accountId: String
+    let displayName: String?
+}
+
+struct ManageFeishuOnboardingStart: Decodable, Equatable {
+    let verificationUri: String
+    let verificationUriComplete: String
+    let deviceCode: String
+    let expiresIn: Int
+    let interval: Int
+    let qrSvg: String
+}
+
+struct ManageFeishuOnboardingPoll: Decodable, Equatable {
+    let done: Bool
+    let appId: String?
+    let displayName: String?
+    let error: String?
+    let errorDescription: String?
+}
+
+struct ManageWechatOnboardingStart: Decodable, Equatable {
+    let sessionKey: String
+    let qrcodeUrl: String
+    let qrSvg: String
+    let expiresIn: Int
+}
+
+struct ManageWechatOnboardingPoll: Decodable, Equatable {
+    let done: Bool
+    let status: String?
+    let needVerifyCode: Bool?
+    let accountId: String?
+    let alreadyConnected: Bool?
+    let error: String?
+}
+
+struct ManageWecomOnboardingStart: Decodable, Equatable {
+    let sessionKey: String
+    let qrcodeUrl: String
+    let qrSvg: String
+    let expiresIn: Int
+    let interval: Int
+}
+
+struct ManageWecomOnboardingPoll: Decodable, Equatable {
+    let done: Bool
+    let status: String?
+    let accountId: String?
+    let error: String?
+}
+
 struct ManageLifecycle: Decodable, Equatable {
     struct Service: Decodable, Equatable {
         let service: String
@@ -419,14 +509,18 @@ enum APIClientError: LocalizedError, Equatable {
     case incompatibleService
     case unsupportedAPIMajor(Int)
     case unauthorized
+    case featureUnavailable
+    case operationFailed(String)
 
     var errorDescription: String? {
         switch self {
-        case .invalidResponse: "The local service returned an invalid response."
-        case .incompatibleService: "Another service is using the ThreadRelay port."
+        case .invalidResponse: "本地服务返回了无效响应。"
+        case .incompatibleService: "ThreadRelay 端口正被其他服务占用。"
         case let .unsupportedAPIMajor(apiMajor):
-            "This ThreadRelay service uses unsupported management API version \(apiMajor)."
-        case .unauthorized: "The local service rejected the management credential."
+            "当前 ThreadRelay 使用了不受支持的管理 API 版本 \(apiMajor)。"
+        case .unauthorized: "本地服务拒绝了管理凭据。"
+        case .featureUnavailable: "当前后台服务尚未支持此管理功能。"
+        case let .operationFailed(message): message
         }
     }
 }
@@ -514,6 +608,13 @@ struct APIClient {
         )
     }
 
+    func fetchIMAccounts(bearerToken: String) async throws -> ManageIMAccountsResponse {
+        try await fetchIMAccounts(
+            baseURL: connectionLoader().baseURL,
+            bearerToken: bearerToken
+        )
+    }
+
     func dashboard() async throws -> ManageDashboard {
         let connection = connectionLoader()
         let baseURL = connection.baseURL
@@ -585,6 +686,164 @@ struct APIClient {
         }
         throw APIClientError.unauthorized
     }
+
+    func imAccounts() async throws -> [ManageIMAccount] {
+        let connection = connectionLoader()
+        let candidates = connection.credentials()
+        guard !candidates.isEmpty else { throw APIClientError.unauthorized }
+
+        for candidate in candidates {
+            do {
+                let response = try await fetchIMAccounts(
+                    baseURL: connection.baseURL,
+                    bearerToken: candidate.token
+                )
+                if let expectedInstanceId = candidate.expectedInstanceId,
+                   response.service.instanceId != expectedInstanceId {
+                    continue
+                }
+                return response.accounts
+            } catch APIClientError.unauthorized {
+                continue
+            }
+        }
+        throw APIClientError.unauthorized
+    }
+
+    func setIMAccountEnabled(
+        platform: String,
+        accountId: String,
+        enabled: Bool
+    ) async throws -> ManageIMAccountMutationResponse {
+        let body = IMAccountEnabledRequest(
+            platform: platform,
+            accountId: accountId,
+            enabled: enabled
+        )
+        return try await performIMMutation(
+            path: "api/v1/manage/im/account/enabled",
+            body: body
+        )
+    }
+
+    func deleteIMAccount(
+        platform: String,
+        accountId: String
+    ) async throws -> ManageIMAccountMutationResponse {
+        let body = IMAccountDeleteRequest(platform: platform, accountId: accountId)
+        return try await performIMMutation(
+            path: "api/v1/manage/im/account/delete",
+            body: body
+        )
+    }
+
+    /// Submit a Telegram bot token for verification and persistence. The
+    /// credential is write-only; the response never echoes it back.
+    func configureTelegramAccount(
+        botToken: String,
+        mentionOnly: Bool
+    ) async throws -> ManageIMAccountConfigureResponse {
+        let body = TelegramConfigureRequest(botToken: botToken, mentionOnly: mentionOnly)
+        return try await performIMMutation(
+            path: "api/v1/manage/im/account/telegram",
+            body: body
+        )
+    }
+
+    /// Submit manually entered Feishu app credentials. The daemon validates
+    /// them against the Feishu open platform before persisting; the response
+    /// never echoes the secret.
+    func configureFeishuAccount(
+        appId: String,
+        appSecret: String
+    ) async throws -> ManageIMAccountConfigureResponse {
+        let body = FeishuConfigureRequest(appId: appId, appSecret: appSecret)
+        return try await performIMMutation(
+            path: "api/v1/manage/im/account/feishu",
+            body: body
+        )
+    }
+
+    func startFeishuOnboarding() async throws -> ManageFeishuOnboardingStart {
+        try await performManagePOST(
+            path: "api/v1/manage/im/onboarding/feishu/start",
+            body: EmptyRequestBody()
+        )
+    }
+
+    func pollFeishuOnboarding(deviceCode: String) async throws -> ManageFeishuOnboardingPoll {
+        try await performManagePOST(
+            path: "api/v1/manage/im/onboarding/feishu/poll",
+            body: FeishuOnboardingPollRequest(deviceCode: deviceCode)
+        )
+    }
+
+    func startWechatOnboarding() async throws -> ManageWechatOnboardingStart {
+        try await performManagePOST(
+            path: "api/v1/manage/im/onboarding/wechat/start",
+            body: EmptyRequestBody()
+        )
+    }
+
+    func pollWechatOnboarding(
+        sessionKey: String,
+        verifyCode: String? = nil
+    ) async throws -> ManageWechatOnboardingPoll {
+        try await performManagePOST(
+            path: "api/v1/manage/im/onboarding/wechat/poll",
+            body: WechatOnboardingPollRequest(sessionKey: sessionKey, verifyCode: verifyCode)
+        )
+    }
+
+    func startWecomOnboarding() async throws -> ManageWecomOnboardingStart {
+        try await performManagePOST(
+            path: "api/v1/manage/im/onboarding/wecom/start",
+            body: EmptyRequestBody()
+        )
+    }
+
+    func pollWecomOnboarding(sessionKey: String) async throws -> ManageWecomOnboardingPoll {
+        try await performManagePOST(
+            path: "api/v1/manage/im/onboarding/wecom/poll",
+            body: WecomOnboardingPollRequest(sessionKey: sessionKey)
+        )
+    }
+
+    private struct IMAccountEnabledRequest: Encodable {
+        let platform: String
+        let accountId: String
+        let enabled: Bool
+    }
+
+    private struct IMAccountDeleteRequest: Encodable {
+        let platform: String
+        let accountId: String
+    }
+
+    private struct TelegramConfigureRequest: Encodable {
+        let botToken: String
+        let mentionOnly: Bool
+    }
+
+    private struct FeishuConfigureRequest: Encodable {
+        let appId: String
+        let appSecret: String
+    }
+
+    private struct FeishuOnboardingPollRequest: Encodable {
+        let deviceCode: String
+    }
+
+    private struct WechatOnboardingPollRequest: Encodable {
+        let sessionKey: String
+        let verifyCode: String?
+    }
+
+    private struct WecomOnboardingPollRequest: Encodable {
+        let sessionKey: String
+    }
+
+    private struct EmptyRequestBody: Encodable {}
 
     private func fetchDashboard(
         baseURL: URL,
@@ -670,16 +929,144 @@ struct APIClient {
         }
     }
 
+    private func fetchIMAccounts(
+        baseURL: URL,
+        bearerToken: String
+    ) async throws -> ManageIMAccountsResponse {
+        let (data, response) = try await request(
+            baseURL: baseURL,
+            path: "api/v1/manage/im/accounts",
+            bearerToken: bearerToken
+        )
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIClientError.invalidResponse
+        }
+        guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
+        guard httpResponse.statusCode != 404 else { throw APIClientError.featureUnavailable }
+        guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
+        do {
+            let accounts = try JSONDecoder().decode(ManageIMAccountsResponse.self, from: data)
+            guard accounts.service.service == "threadrelay" else {
+                throw APIClientError.incompatibleService
+            }
+            guard accounts.service.apiMajor == 1 else {
+                throw APIClientError.unsupportedAPIMajor(accounts.service.apiMajor)
+            }
+            return accounts
+        } catch let error as APIClientError {
+            throw error
+        } catch {
+            throw APIClientError.invalidResponse
+        }
+    }
+
+    private func performIMMutation<Body: Encodable, Response: ManageMutationResponse>(
+        path: String,
+        body: Body
+    ) async throws -> Response {
+        let result: Response = try await performManagePOST(path: path, body: body)
+        guard result.ok else {
+            throw APIClientError.operationFailed("后台服务未完成账号操作。")
+        }
+        return result
+    }
+
+    private func performManagePOST<Body: Encodable, Response: Decodable>(
+        path: String,
+        body: Body
+    ) async throws -> Response {
+        let connection = connectionLoader()
+        let candidates = connection.credentials()
+        guard !candidates.isEmpty else { throw APIClientError.unauthorized }
+        let encodedBody = try JSONEncoder().encode(body)
+
+        for candidate in candidates {
+            do {
+                let (data, response) = try await request(
+                    baseURL: connection.baseURL,
+                    path: path,
+                    method: "POST",
+                    body: encodedBody,
+                    bearerToken: candidate.token
+                )
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw APIClientError.invalidResponse
+                }
+                guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
+                if httpResponse.statusCode == 404 {
+                    // A current daemon uses 404 for a missing account and
+                    // includes a stable JSON error. An older daemon has no
+                    // versioned route and normally returns an empty/plain 404.
+                    // Keep those cases distinct so the UI can offer an update
+                    // only when the feature itself is absent.
+                    let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data)
+                    if payload?.error == "IM account not found" {
+                        throw operationError(from: data, statusCode: httpResponse.statusCode)
+                    }
+                    throw APIClientError.featureUnavailable
+                }
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    throw operationError(from: data, statusCode: httpResponse.statusCode)
+                }
+                do {
+                    return try JSONDecoder().decode(Response.self, from: data)
+                } catch {
+                    throw APIClientError.invalidResponse
+                }
+            } catch APIClientError.unauthorized {
+                continue
+            }
+        }
+        throw APIClientError.unauthorized
+    }
+
+    private struct ErrorPayload: Decodable {
+        let error: String?
+    }
+
+    private func operationError(from data: Data, statusCode: Int) -> APIClientError {
+        let raw = (try? JSONDecoder().decode(ErrorPayload.self, from: data))?.error?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let message: String
+        switch raw {
+        // Values matched here are stable API contract strings; see
+        // IM_ACCOUNT_NOT_FOUND_ERROR in src/web/im_api.rs.
+        case "IM account not found": message = "找不到该消息账号。"
+        case "missing accountId": message = "缺少账号标识。"
+        case "unknown IM platform": message = "不支持的消息平台。"
+        case "missing botToken": message = "请先填写机器人 Token。"
+        case "missing appId": message = "请先填写 App ID。"
+        case "missing appSecret": message = "请先填写 App Secret。"
+        case "missing_session", "invalid_session": message = "扫码会话已失效，请重新获取二维码。"
+        case let raw? where statusCode < 500 && !raw.isEmpty:
+            // Validation failures carry a specific, already-sanitized reason
+            // (for example a Telegram token rejection); show it as-is.
+            message = raw
+        default: message = statusCode >= 500 ? "后台服务操作失败。" : "账号操作未完成。"
+        }
+        return .operationFailed(message)
+    }
+
     private func request(
         baseURL: URL,
         path: String,
+        method: String = "GET",
+        body: Data? = nil,
         bearerToken: String
     ) async throws -> (Data, URLResponse) {
         let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
+        request.httpMethod = method
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 3
+        // Mutations persist config and may verify credentials upstream (for
+        // example the daemon calls Telegram getMe with a 5-second budget), so
+        // they get a larger timeout than cheap status reads.
+        request.timeoutInterval = method == "GET" ? 3 : 10
         request.setValue("Bearer \(bearerToken)", forHTTPHeaderField: "Authorization")
+        if let body {
+            request.httpBody = body
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         return try await session.data(for: request)
     }
 

@@ -14,6 +14,10 @@
 		A10000000000000000000007 /* DesignSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* DesignSystem.swift */; };
 		A10000000000000000000008 /* VisualBaselines.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* VisualBaselines.swift */; };
 		A10000000000000000000009 /* APIContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000009 /* APIContractTests.swift */; };
+		A1000000000000000000000A /* DaemonLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000A /* DaemonLauncher.swift */; };
+		A1000000000000000000000B /* ConnectionTopologyView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000B /* ConnectionTopologyView.swift */; };
+		A1000000000000000000000D /* MessagingAccountsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000D /* MessagingAccountsView.swift */; };
+		A1000000000000000000000E /* MessagingOnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000000000000000000000E /* MessagingOnboardingView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +32,11 @@
 		A20000000000000000000008 /* VisualBaselines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualBaselines.swift; sourceTree = "<group>"; };
 		A20000000000000000000009 /* APIContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIContractTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000010 /* ThreadRelayMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.xctest; includeInIndex = 0; path = ThreadRelayMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A2000000000000000000000A /* DaemonLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonLauncher.swift; sourceTree = "<group>"; };
+		A2000000000000000000000B /* ConnectionTopologyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionTopologyView.swift; sourceTree = "<group>"; };
+		A2000000000000000000000C /* ThreadRelay-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "ThreadRelay-Info.plist"; sourceTree = "<group>"; };
+		A2000000000000000000000D /* MessagingAccountsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagingAccountsView.swift; sourceTree = "<group>"; };
+		A2000000000000000000000E /* MessagingOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagingOnboardingView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,13 +75,20 @@
 				A20000000000000000000005 /* SettingsView.swift */,
 				A20000000000000000000007 /* DesignSystem.swift */,
 				A20000000000000000000008 /* VisualBaselines.swift */,
+				A2000000000000000000000A /* DaemonLauncher.swift */,
+				A2000000000000000000000B /* ConnectionTopologyView.swift */,
+				A2000000000000000000000D /* MessagingAccountsView.swift */,
+				A2000000000000000000000E /* MessagingOnboardingView.swift */,
 			);
 			path = Sources/ThreadRelayMac;
 			sourceTree = SOURCE_ROOT;
 		};
 		A40000000000000000000002 /* Config */ = {
 			isa = PBXGroup;
-			children = (A20000000000000000000006 /* Version.xcconfig */);
+			children = (
+				A20000000000000000000006 /* Version.xcconfig */,
+				A2000000000000000000000C /* ThreadRelay-Info.plist */,
+			);
 			path = Config;
 			sourceTree = SOURCE_ROOT;
 		};
@@ -140,9 +156,9 @@
 			};
 			buildConfigurationList = A90000000000000000000001 /* Build configuration list for PBXProject */;
 			compatibilityVersion = "Xcode 14.0";
-			developmentRegion = en;
+			developmentRegion = "zh-Hans";
 			hasScannedForEncodings = 0;
-			knownRegions = (en, Base);
+			knownRegions = ("zh-Hans", Base);
 			mainGroup = A40000000000000000000000;
 			productRefGroup = A40000000000000000000003 /* Products */;
 			projectDirPath = "";
@@ -189,6 +205,10 @@
 				A10000000000000000000005 /* SettingsView.swift in Sources */,
 				A10000000000000000000007 /* DesignSystem.swift in Sources */,
 				A10000000000000000000008 /* VisualBaselines.swift in Sources */,
+				A1000000000000000000000A /* DaemonLauncher.swift in Sources */,
+				A1000000000000000000000B /* ConnectionTopologyView.swift in Sources */,
+				A1000000000000000000000D /* MessagingAccountsView.swift in Sources */,
+				A1000000000000000000000E /* MessagingOnboardingView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			};
@@ -211,10 +231,9 @@
 					COMBINE_HIDPI_IMAGES = YES;
 					DEFINES_MODULE = YES;
 					ENABLE_TESTABILITY = YES;
-					GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = "ThreadRelay Preview";
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_NSHighResolutionCapable = YES;
+					GENERATE_INFOPLIST_FILE = NO;
+					INFOPLIST_FILE = Config/ThreadRelay-Info.plist;
+					THREADRELAY_DISPLAY_NAME = "ThreadRelay Preview";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay.preview;
@@ -231,10 +250,9 @@
 			buildSettings = {
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
-				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_CFBundleDisplayName = ThreadRelay;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
-				INFOPLIST_KEY_NSHighResolutionCapable = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/ThreadRelay-Info.plist;
+				THREADRELAY_DISPLAY_NAME = ThreadRelay;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay;

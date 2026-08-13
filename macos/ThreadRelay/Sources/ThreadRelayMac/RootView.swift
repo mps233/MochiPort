@@ -3,7 +3,7 @@ import SwiftUI
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var showsOnboardingBaseline = false
+    @State private var showsAccountOnboarding = false
 
     var body: some View {
         NavigationSplitView {
@@ -20,6 +20,8 @@ struct RootView: View {
             }
             .navigationTitle("ThreadRelay")
             .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 260)
+            .scrollContentBackground(.hidden)
+            .background(Color(nsColor: .windowBackgroundColor))
         } detail: {
             Group {
                 switch model.selection ?? .overview {
@@ -27,38 +29,102 @@ struct RootView: View {
                     OverviewView()
                 case .requestLogs:
                     RequestLogsBaselineView()
+                case .messaging:
+                    MessagingAccountsView(
+                        accounts: model.imAccounts.map(MessagingAccountSummary.init),
+                        availability: model.imAccountsAvailability,
+                        onAdd: { showsAccountOnboarding = true },
+                        onToggle: { account, enabled in
+                            let live = model.imAccounts.first {
+                                $0.platform == account.platform.rawValue && $0.accountId == account.accountID
+                            }
+                            guard let live else { return false }
+                            return await model.setIMAccountEnabled(live, enabled: enabled)
+                        },
+                        onDelete: { account in
+                            let live = model.imAccounts.first {
+                                $0.platform == account.platform.rawValue && $0.accountId == account.accountID
+                            }
+                            guard let live else { return }
+                            Task { await model.deleteIMAccount(live) }
+                        }
+                    )
+                    .overlay(alignment: .bottom) {
+                        if let error = model.accountOperationError {
+                            HStack(spacing: 10) {
+                                Label(error, systemImage: "exclamationmark.triangle")
+                                Button {
+                                    model.accountOperationError = nil
+                                } label: {
+                                    Image(systemName: "xmark")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .help("关闭提示")
+                            }
+                            .font(.callout)
+                            .foregroundStyle(.red)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 9)
+                            .background(.regularMaterial, in: Capsule())
+                            .padding(.bottom, 14)
+                        }
+                    }
                 case let section:
                     PlaceholderView(section: section)
                 }
             }
             .navigationTitle((model.selection ?? .overview).title)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
         }
         .task {
             await model.refresh()
             model.startAutoRefresh()
         }
         .toolbar {
-            if model.selection == .messaging {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        showsOnboardingBaseline = true
-                    } label: {
-                        Label("Add Account", systemImage: "plus")
-                    }
-                }
-            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     Task { await model.refresh() }
                 } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
+                    Label("刷新", systemImage: "arrow.clockwise")
                 }
                 .disabled(model.dashboardState == .loading || model.dashboardState == .refreshing)
-                .help("Refresh")
+                .help("刷新")
             }
         }
-        .sheet(isPresented: $showsOnboardingBaseline) {
-            OnboardingBaselineView()
+        .sheet(isPresented: $showsAccountOnboarding) {
+            MessagingOnboardingView(
+                actions: MessagingOnboardingActions(
+                    configureTelegram: { botToken, mentionOnly in
+                        try await model.configureTelegramAccount(
+                            botToken: botToken,
+                            mentionOnly: mentionOnly
+                        )
+                    },
+                    configureFeishu: { appId, appSecret in
+                        try await model.configureFeishuAccount(
+                            appId: appId,
+                            appSecret: appSecret
+                        )
+                    },
+                    startFeishuScan: { try await model.startFeishuOnboarding() },
+                    pollFeishuScan: { deviceCode in
+                        try await model.pollFeishuOnboarding(deviceCode: deviceCode)
+                    },
+                    startWechatScan: { try await model.startWechatOnboarding() },
+                    pollWechatScan: { sessionKey, verifyCode in
+                        try await model.pollWechatOnboarding(
+                            sessionKey: sessionKey,
+                            verifyCode: verifyCode
+                        )
+                    },
+                    startWecomScan: { try await model.startWecomOnboarding() },
+                    pollWecomScan: { sessionKey in
+                        try await model.pollWecomOnboarding(sessionKey: sessionKey)
+                    }
+                )
+            )
         }
     }
 
@@ -84,10 +150,12 @@ private struct OverviewView: View {
                     lastCheckedAt: model.lastCheckedAt
                 )
 
+                ConnectionTopologyView()
+
                 VStack(alignment: .leading, spacing: 0) {
-                    DashboardSection(title: "Local service", symbol: "server.rack") {
+                    DashboardSection(title: "本地服务", symbol: "server.rack") {
                         StatusRow(
-                            title: "Daemon",
+                            title: "后台服务",
                             detail: daemonDetail,
                             symbol: model.serviceStatus.symbol,
                             tint: model.serviceStatus.tint
@@ -95,24 +163,24 @@ private struct OverviewView: View {
                         if let lifecycle = model.lifecycle {
                             RowDivider()
                             StatusRow(
-                                title: "Runtime",
-                                detail: "v\(lifecycle.runtime.productVersion) · \(lifecycle.management.mode)",
+                                title: "运行时",
+                                detail: "v\(lifecycle.runtime.productVersion) · \(managementMode(lifecycle.management))",
                                 symbol: "shippingbox",
                                 tint: lifecycle.management.canControl ? .positive : .secondary
                             )
                             RowDivider()
                             StatusRow(
-                                title: "Protected work",
+                                title: "受保护任务",
                                 detail: protectedWorkDetail(lifecycle.protectedWorkItems),
                                 symbol: "pause.circle",
                                 tint: lifecycle.protectedWorkItems.total == 0 ? .positive : .caution
                             )
                         }
                         HStack(spacing: 12) {
-                            Button("Copy Diagnostics") {
+                            Button("复制诊断信息") {
                                 copyDiagnostics()
                             }
-                            Button("Open Logs") {
+                            Button("打开日志") {
                                 Task { await openLogDirectory() }
                             }
                         }
@@ -121,79 +189,22 @@ private struct OverviewView: View {
                         .padding(.bottom, 12)
                     }
                     SectionDivider()
-                    DashboardSection(title: "Execution clients", symbol: "desktopcomputer") {
+                    DashboardSection(title: "AI 网关", symbol: "point.3.connected.trianglepath.dotted") {
                         StatusRow(
-                            title: "Codex App",
-                            detail: endpointDetail(model.dashboard?.executionClients.codexApp),
-                            symbol: "chevron.left.forwardslash.chevron.right",
-                            tint: endpointTint(model.dashboard?.executionClients.codexApp)
-                        )
-                        RowDivider()
-                        StatusRow(
-                            title: "VS Code",
-                            detail: sessionEndpointDetail(model.dashboard?.executionClients.vscode),
-                            symbol: "chevron.left.forwardslash.chevron.right",
-                            tint: sessionEndpointTint(model.dashboard?.executionClients.vscode)
-                        )
-                        RowDivider()
-                        StatusRow(
-                            title: "CLI",
-                            detail: sessionEndpointDetail(model.dashboard?.executionClients.cli),
-                            symbol: "terminal",
-                            tint: sessionEndpointTint(model.dashboard?.executionClients.cli)
-                        )
-                        RowDivider()
-                        StatusRow(
-                            title: "Remote control",
-                            detail: remoteDetail,
-                            symbol: "arrow.triangle.2.circlepath",
-                            tint: remoteTint
-                        )
-                    }
-                    SectionDivider()
-                    DashboardSection(title: "Messaging channels", symbol: "bubble.left.and.bubble.right") {
-                        if let legacy = model.dashboard?.messageChannels.legacyUnattributed,
-                           legacy.accountCount > 0 {
-                            channelRow(
-                                "Messaging accounts",
-                                legacy,
-                                symbol: "bubble.left.and.bubble.right.fill"
-                            )
-                        } else {
-                            channelRow("Telegram", model.dashboard?.messageChannels.telegram, symbol: "paperplane")
-                            RowDivider()
-                            channelRow("Feishu", model.dashboard?.messageChannels.feishu, symbol: "bubble.left.and.text.bubble.right")
-                            RowDivider()
-                            channelRow("WeChat", model.dashboard?.messageChannels.wechat, symbol: "message")
-                            RowDivider()
-                            channelRow("WeCom", model.dashboard?.messageChannels.wecom, symbol: "person.2")
-                        }
-                        RowDivider()
-                        StatusRow(
-                            title: "Bridge",
-                            detail: dashboardDetail(model.dashboard?.bridgeRunning),
-                            symbol: "arrow.triangle.merge",
-                            tint: boolTint(model.dashboard?.bridgeRunning)
-                        )
-                    }
-                    SectionDivider()
-                    DashboardSection(title: "AI Gateway", symbol: "point.3.connected.trianglepath.dotted") {
-                        StatusRow(
-                            title: "Gateway",
+                            title: "网关",
                             detail: dashboardDetail(model.dashboard?.aiGatewayEnabled),
                             symbol: "point.3.connected.trianglepath.dotted",
                             tint: boolTint(model.dashboard?.aiGatewayEnabled)
                         )
                         RowDivider()
                         StatusRow(
-                            title: "Providers",
+                            title: "供应商",
                             detail: providerDetail,
                             symbol: "server.rack",
                             tint: model.dashboard == nil ? .secondary : .positive
                         )
                     }
                 }
-                .background(.background)
             }
             .frame(maxWidth: 720, alignment: .leading)
             .padding(28)
@@ -203,92 +214,51 @@ private struct OverviewView: View {
 
     private var remoteDetail: String {
         guard let dashboard = model.dashboard else { return unavailableDetail }
-        return dashboard.remoteControlHealthy ? "Healthy" : dashboard.remoteControlConnected ? "Connected" : "Offline"
+        return dashboard.remoteControlHealthy ? "状态正常" : dashboard.remoteControlConnected ? "已连接" : "离线"
     }
 
     private var daemonDetail: String {
         guard let lifecycle = model.lifecycle else { return model.serviceStatus.title }
-        return lifecycle.management.canControl ? "Managed · \(lifecycle.runtime.state)" : "Available · read-only"
+        return lifecycle.management.canControl ? "已托管 · \(runtimeState(lifecycle.runtime.state))" : "运行正常 · 只读"
+    }
+
+    private func runtimeState(_ state: String) -> String {
+        switch state {
+        case "active": "运行中"
+        default: "未知状态"
+        }
+    }
+
+    private func managementMode(_ management: ManageLifecycle.Management) -> String {
+        if management.canControl { return "可管理" }
+        return management.mode == "readOnly" ? "只读" : "未知模式"
     }
 
     private func protectedWorkDetail(_ items: ManageLifecycle.ProtectedWorkItems) -> String {
-        guard items.total > 0 else { return "None" }
-        return "\(items.total) active"
-    }
-
-    private var remoteTint: StatusTint {
-        guard let dashboard = model.dashboard else { return .secondary }
-        return dashboard.remoteControlHealthy ? .positive : dashboard.remoteControlConnected ? .caution : .negative
+        guard items.total > 0 else { return "无" }
+        return "\(items.total) 项进行中"
     }
 
     private var providerDetail: String {
         guard let dashboard = model.dashboard else { return unavailableDetail }
-        return "\(dashboard.aiGatewayProviderCount) configured"
+        return "已配置 \(dashboard.aiGatewayProviderCount) 个"
     }
 
     private var unavailableDetail: String {
         switch model.dashboardState {
-        case .legacy: "Update required"
-        case .unauthorized: "Authorization required"
-        case .unavailable: "Unavailable"
-        case .offline: "Unavailable"
-        case .stale: "Last known status"
-        case .starting: "Starting"
-        default: "Checking"
+        case .legacy: "需要更新"
+        case .unauthorized: "需要授权"
+        case .unavailable: "不可用"
+        case .offline: "不可用"
+        case .stale: "上次状态"
+        case .starting: "正在启动"
+        default: "检查中"
         }
     }
 
     private func dashboardDetail(_ value: Bool?) -> String {
         guard let value else { return unavailableDetail }
-        return value ? "Ready" : "Not configured"
-    }
-
-    @ViewBuilder
-    private func channelRow(
-        _ title: String,
-        _ channel: ManageDashboard.MessageChannel?,
-        symbol: String
-    ) -> some View {
-        StatusRow(
-            title: title,
-            detail: channelDetail(channel),
-            symbol: symbol,
-            tint: channelTint(channel)
-        )
-    }
-
-    private func channelDetail(_ channel: ManageDashboard.MessageChannel?) -> String {
-        guard let channel else { return unavailableDetail }
-        guard channel.accountCount > 0 else { return "Not configured" }
-        return "\(channel.connectedAccountCount) of \(channel.accountCount) connected"
-    }
-
-    private func channelTint(_ channel: ManageDashboard.MessageChannel?) -> StatusTint {
-        guard let channel else { return .secondary }
-        guard channel.accountCount > 0 else { return .secondary }
-        return channel.accountCount == channel.connectedAccountCount ? .positive : .caution
-    }
-
-    private func endpointDetail(_ endpoint: ManageDashboard.Endpoint?) -> String {
-        guard let endpoint else { return unavailableDetail }
-        if endpoint.connected { return "Connected" }
-        return endpoint.configured ? "Available" : "Not detected"
-    }
-
-    private func endpointTint(_ endpoint: ManageDashboard.Endpoint?) -> StatusTint {
-        guard let endpoint else { return .secondary }
-        if endpoint.connected { return .positive }
-        return endpoint.configured ? .caution : .secondary
-    }
-
-    private func sessionEndpointDetail(_ endpoint: ManageDashboard.Endpoint?) -> String {
-        guard let endpoint else { return unavailableDetail }
-        return endpoint.connected ? "Connected" : "No active session"
-    }
-
-    private func sessionEndpointTint(_ endpoint: ManageDashboard.Endpoint?) -> StatusTint {
-        guard let endpoint else { return .secondary }
-        return endpoint.connected ? .positive : .secondary
+        return value ? "已就绪" : "未配置"
     }
 
     private func boolTint(_ value: Bool?) -> StatusTint {
@@ -299,15 +269,20 @@ private struct OverviewView: View {
     private func copyDiagnostics() {
         let dashboard = model.dashboard
         let lines = [
-            "ThreadRelay status: \(model.serviceStatus.title)",
-            "Dashboard state: \(String(describing: model.dashboardState))",
-            "Service API: \(dashboard?.service.apiMajor.description ?? "unknown")",
-            "Service ready: \(dashboard?.service.ready.description ?? "unknown")",
-            "Remote control: \(remoteDetail)",
-            "AI Gateway: \(dashboardDetail(dashboard?.aiGatewayEnabled))",
+            "ThreadRelay 状态：\(model.serviceStatus.title)",
+            "仪表盘状态：\(model.dashboardState.title)",
+            "服务 API：\(dashboard?.service.apiMajor.description ?? "未知")",
+            "服务就绪：\(readyDescription(dashboard?.service.ready))",
+            "远程控制：\(remoteDetail)",
+            "AI 网关：\(dashboardDetail(dashboard?.aiGatewayEnabled))",
         ]
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+    }
+
+    private func readyDescription(_ ready: Bool?) -> String {
+        guard let ready else { return "未知" }
+        return ready ? "是" : "否"
     }
 
     private func openLogDirectory() async {
@@ -375,7 +350,7 @@ private struct OverviewHeader: View {
                     .padding(.top, 2)
             }
             if let lastCheckedAt {
-                Text("Last checked \(lastCheckedAt.formatted(date: .omitted, time: .shortened))")
+                Text("上次检查：\(lastCheckedAt.formatted(date: .omitted, time: .shortened))")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
             }
@@ -385,21 +360,21 @@ private struct OverviewHeader: View {
     private var notice: (text: String, symbol: String, color: Color)? {
         switch dashboardState {
         case .loading:
-            ("Loading service status…", "arrow.clockwise", .secondary)
+            ("正在加载服务状态…", "arrow.clockwise", .secondary)
         case .refreshing:
-            ("Refreshing…", "arrow.clockwise", .secondary)
+            ("正在刷新…", "arrow.clockwise", .secondary)
         case .starting:
-            ("The local service is still starting.", "clock", .orange)
+            ("本地服务仍在启动。", "clock", .orange)
         case .legacy:
-            ("Update the daemon to view the full dashboard.", "arrow.triangle.2.circlepath", .orange)
+            ("请更新后台服务以查看完整仪表盘。", "arrow.triangle.2.circlepath", .orange)
         case .unauthorized:
-            ("The management credential changed. Refresh after the control file is available.", "lock.trianglebadge.exclamationmark", .red)
+            ("管理凭据已变化，请在控制文件可用后刷新。", "lock.trianglebadge.exclamationmark", .red)
         case .unavailable:
-            ("The local service is ready, but its dashboard could not be loaded.", "exclamationmark.triangle", .red)
+            ("本地服务已就绪，但仪表盘无法加载。", "exclamationmark.triangle", .red)
         case .offline:
-            ("The local service could not be reached.", "network.slash", .red)
+            ("无法连接本地服务。", "network.slash", .red)
         case .stale:
-            ("Showing the last known status because refresh failed.", "clock.badge.exclamationmark", .orange)
+            ("刷新失败，当前显示上次获取的状态。", "clock.badge.exclamationmark", .orange)
         case .loaded:
             nil
         }
@@ -453,7 +428,7 @@ private struct PlaceholderView: View {
     var body: some View {
         EmptyStateView(
             title: section.title,
-            message: "This section will be connected in its migration phase.",
+            message: "该功能将在后续迁移阶段接入。",
             symbol: section.symbol
         )
     }

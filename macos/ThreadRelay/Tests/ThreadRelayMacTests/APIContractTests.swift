@@ -23,6 +23,44 @@ final class APIContractTests: XCTestCase {
         )
     }
 
+    func testSingleInstanceGuardRejectsSecondOwner() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let lockURL = root.appendingPathComponent("threadrelay.gui.lock")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        do {
+            let first = try SingleInstanceGuard.acquire(lockURL: lockURL)
+            XCTAssertThrowsError(try SingleInstanceGuard.acquire(lockURL: lockURL)) { error in
+                XCTAssertEqual(error as? SingleInstanceError, .alreadyRunning)
+            }
+            withExtendedLifetime(first) {}
+        }
+    }
+
+    func testSingleInstanceGuardReleasesLockOnDeallocation() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let lockURL = root.appendingPathComponent("threadrelay.gui.lock")
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        var first: SingleInstanceGuard? = try SingleInstanceGuard.acquire(lockURL: lockURL)
+        withExtendedLifetime(first) {}
+        first = nil
+        XCTAssertNoThrow(try SingleInstanceGuard.acquire(lockURL: lockURL))
+    }
+
+    func testSingleInstanceLockPathIsScopedToBundleIdentifier() {
+        let home = URL(fileURLWithPath: "/fixture/home", isDirectory: true)
+        XCTAssertEqual(
+            SingleInstanceGuard.defaultLockURL(
+                bundleIdentifier: "io.github.mps233.threadrelay.preview",
+                environment: ["HOME": home.path]
+            ).path,
+            "/fixture/home/Library/Application Support/ThreadRelay/io.github.mps233.threadrelay.preview.gui.lock"
+        )
+    }
+
     func testManagementCredentialPathsHonorBothHomeOverridesBeforeDefaults() {
         let applicationSupport = URL(fileURLWithPath: "/fixture/Application Support", isDirectory: true)
 
@@ -39,6 +77,143 @@ final class APIContractTests: XCTestCase {
                 "/fixture/codexhub/threadrelay-control.json",
                 "/fixture/Application Support/ThreadRelay/threadrelay-control.json",
                 "/fixture/Application Support/CodexHub/threadrelay-control.json",
+            ]
+        )
+    }
+
+    func testDaemonLaunchConfigurationUsesLegacyDataAndEmbeddedHelper() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = home.appendingPathComponent("Library/Application Support", isDirectory: true)
+        let legacyDirectory = appSupport.appendingPathComponent("CodexHub", isDirectory: true)
+        let bundle = root.appendingPathComponent("ThreadRelay.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
+        try Data().write(to: legacyDirectory.appendingPathComponent("config.toml"))
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let configuration = try DaemonLaunchConfiguration.current(
+            bundleURL: bundle,
+            environment: ["HOME": home.path],
+            fileManager: .default
+        )
+
+        XCTAssertEqual(
+            configuration.helperURL.path,
+            bundle.appendingPathComponent("Contents/Helpers/threadrelay-daemon").path
+        )
+        XCTAssertEqual(
+            configuration.configURL.path,
+            legacyDirectory.appendingPathComponent("config.toml").path
+        )
+        XCTAssertEqual(
+            configuration.launchAgentURL.path,
+            home.appendingPathComponent("Library/LaunchAgents/\(DaemonLaunchConfiguration.label).plist").path
+        )
+    }
+
+    func testDaemonLauncherWakesLoadedServiceWithoutForcingRestart() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments.first == "print" {
+                return CommandResult(
+                    exitCode: 0,
+                    output: """
+                    state = running
+                    program = \(fixture.configuration.helperURL.path)
+                    arguments = {
+                        \(fixture.configuration.helperURL.path)
+                        --config
+                        \(fixture.configuration.configURL.path)
+                        daemon
+                    }
+                    """
+                )
+            }
+            return CommandResult(exitCode: arguments.first == "kickstart" ? 0 : 1, output: "")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        try await launcher.startIfNeeded()
+
+        XCTAssertEqual(commands.arguments, [
+            ["print", "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"],
+            ["kickstart", "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"],
+        ])
+        XCTAssertFalse(commands.arguments.flatMap { $0 }.contains("-k"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.configuration.launchAgentURL.path))
+    }
+
+    func testDaemonLauncherRejectsLoadedServiceFromDifferentHelper() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let staleHelper = fixture.root.appendingPathComponent("OldThreadRelay.app/Contents/Helpers/threadrelay-daemon")
+        let commands = CommandInvocationRecorder { arguments in
+            guard arguments.first == "print" else {
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+            return CommandResult(
+                exitCode: 0,
+                output: """
+                state = running
+                program = \(staleHelper.path)
+                arguments = {
+                    \(staleHelper.path)
+                    --config
+                    \(fixture.configuration.configURL.path)
+                    daemon
+                }
+                """
+            )
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        do {
+            try await launcher.startIfNeeded()
+            XCTFail("Expected stale launch agent to be rejected")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(
+                error,
+                .loadedAgentMismatch(expected: fixture.configuration.helperURL.path, actual: staleHelper.path)
+            )
+        }
+        XCTAssertEqual(commands.arguments.map(\.first), ["print"])
+    }
+
+    func testDaemonLauncherBootstrapsMissingService() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let commands = CommandInvocationRecorder { arguments in
+            CommandResult(exitCode: arguments.first == "bootstrap" ? 0 : 1, output: "")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        try await launcher.startIfNeeded()
+
+        XCTAssertEqual(commands.arguments.map(\.first), ["print", "bootstrap"])
+        let plistData = try Data(contentsOf: fixture.configuration.launchAgentURL)
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)
+                as? [String: Any]
+        )
+        XCTAssertEqual(plist["Label"] as? String, DaemonLaunchConfiguration.label)
+        XCTAssertEqual(
+            plist["ProgramArguments"] as? [String],
+            [
+                fixture.configuration.helperURL.path,
+                "--config",
+                fixture.configuration.configURL.path,
+                "daemon",
             ]
         )
     }
@@ -196,7 +371,7 @@ final class APIContractTests: XCTestCase {
     func testNavigationContainsPhaseZeroSections() {
         XCTAssertEqual(
             AppSection.allCases.map(\.title),
-            ["Overview", "Codex", "Sessions", "Messaging Channels", "AI Gateway", "Request Logs"]
+            ["概览", "Codex 接入", "会话", "消息渠道", "AI 网关", "请求日志"]
         )
     }
 
@@ -284,7 +459,7 @@ final class APIContractTests: XCTestCase {
         await assertProbeError(.unsupportedAPIMajor(2), from: client)
         XCTAssertEqual(
             APIClientError.unsupportedAPIMajor(2).localizedDescription,
-            "This ThreadRelay service uses unsupported management API version 2."
+            "当前 ThreadRelay 使用了不受支持的管理 API 版本 2。"
         )
         XCTAssertNotEqual(
             APIClientError.unsupportedAPIMajor(2).localizedDescription,
@@ -354,6 +529,343 @@ final class APIContractTests: XCTestCase {
                 requestLoggingEnabled: true
             )
         )
+    }
+
+    func testFetchIMAccountsDecodesAccountStateAndSendsBearerHeader() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/im/accounts")
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer explicit-fixture-token"
+            )
+            return MockResponse(statusCode: 200, json: Self.imAccountsJSON)
+        }
+
+        let response = try await client.fetchIMAccounts(bearerToken: "explicit-fixture-token")
+
+        XCTAssertEqual(response.service.service, "threadrelay")
+        XCTAssertEqual(response.service.apiMajor, 1)
+        XCTAssertEqual(response.service.instanceId, "fixture-instance")
+        XCTAssertEqual(response.accounts.count, 2)
+        XCTAssertEqual(
+            response.accounts[0],
+            ManageIMAccount(
+                platform: "telegram",
+                accountId: "telegram-main",
+                displayName: "主 Telegram",
+                enabled: true,
+                configured: true,
+                secretSet: true,
+                connecting: false,
+                polling: true,
+                connected: true,
+                lastError: nil,
+                lastEventAtMs: 1_754_000_120_000,
+                lastInboundAtMs: 1_754_000_100_000
+            )
+        )
+        XCTAssertEqual(response.accounts[1].lastError, "连接失败")
+        XCTAssertFalse(response.accounts[1].connected)
+    }
+
+    func testFetchIMAccountsMapsNotFoundToFeatureUnavailable() async {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/im/accounts")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+        }
+
+        do {
+            _ = try await client.fetchIMAccounts(bearerToken: "fixture-token")
+            XCTFail("Expected account management feature to be unavailable")
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, .featureUnavailable)
+        } catch {
+            XCTFail("Expected APIClientError, received \(error)")
+        }
+    }
+
+    func testSetIMAccountEnabledSendsPOSTBodyAndBearerHeader() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/im/account/enabled")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Content-Type"),
+                "application/json"
+            )
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["platform"] as? String, "telegram")
+            XCTAssertEqual(body?["accountId"] as? String, "telegram-main")
+            XCTAssertEqual(body?["enabled"] as? Bool, false)
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"platform":"telegram","accountId":"telegram-main","enabled":false}"#
+            )
+        }
+
+        let response = try await client.setIMAccountEnabled(
+            platform: "telegram",
+            accountId: "telegram-main",
+            enabled: false
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.platform, "telegram")
+        XCTAssertEqual(response.accountId, "telegram-main")
+        XCTAssertEqual(response.enabled, false)
+    }
+
+    func testDeleteIMAccountSendsPOSTBodyAndMapsNotFoundError() async {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/im/account/delete")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["platform"] as? String, "telegram")
+            XCTAssertEqual(body?["accountId"] as? String, "telegram-main")
+            return MockResponse(
+                statusCode: 404,
+                json: #"{"ok":false,"error":"IM account not found"}"#
+            )
+        }
+
+        do {
+            _ = try await client.deleteIMAccount(
+                platform: "telegram",
+                accountId: "telegram-main"
+            )
+            XCTFail("Expected missing account error")
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, .operationFailed("找不到该消息账号。"))
+        } catch {
+            XCTFail("Expected APIClientError, received \(error)")
+        }
+    }
+
+    func testIMMutationMapsRouteMissingOnOlderDaemonToFeatureUnavailable() async {
+        let client = makeClient { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            return MockResponse(statusCode: 404, json: "Not Found")
+        }
+
+        do {
+            _ = try await client.setIMAccountEnabled(
+                platform: "telegram",
+                accountId: "telegram-main",
+                enabled: false
+            )
+            XCTFail("Expected feature-unavailable error")
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, .featureUnavailable)
+        } catch {
+            XCTFail("Expected APIClientError, received \(error)")
+        }
+    }
+
+    func testConfigureTelegramAccountSendsTokenAndDecodesDerivedIdentity() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/im/account/telegram")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["botToken"] as? String, "12345:fixture")
+            XCTAssertEqual(body?["mentionOnly"] as? Bool, true)
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"platform":"telegram","accountId":"tg_1000001","displayName":"Fixture Bot (@fixture_bot)"}"#
+            )
+        }
+
+        let response = try await client.configureTelegramAccount(
+            botToken: "12345:fixture",
+            mentionOnly: true
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.platform, "telegram")
+        XCTAssertEqual(response.accountId, "tg_1000001")
+        XCTAssertEqual(response.displayName, "Fixture Bot (@fixture_bot)")
+    }
+
+    func testConfigureTelegramAccountSurfacesDaemonValidationReason() async {
+        let client = makeClient { _ in
+            MockResponse(
+                statusCode: 400,
+                json: #"{"ok":false,"error":"telegram getMe failed: 401 Unauthorized"}"#
+            )
+        }
+
+        do {
+            _ = try await client.configureTelegramAccount(botToken: "bad", mentionOnly: false)
+            XCTFail("Expected validation failure")
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, .operationFailed("telegram getMe failed: 401 Unauthorized"))
+        } catch {
+            XCTFail("Expected APIClientError, received \(error)")
+        }
+    }
+
+    func testConfigureFeishuAccountSendsCredentialsAndDecodesIdentity() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/im/account/feishu")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["appId"] as? String, "cli-fixture-app")
+            XCTAssertEqual(body?["appSecret"] as? String, "fixture-secret")
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"platform":"feishu","accountId":"cli-fixture-app","displayName":"Fixture 应用"}"#
+            )
+        }
+
+        let response = try await client.configureFeishuAccount(
+            appId: "cli-fixture-app",
+            appSecret: "fixture-secret"
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.platform, "feishu")
+        XCTAssertEqual(response.accountId, "cli-fixture-app")
+        XCTAssertEqual(response.displayName, "Fixture 应用")
+    }
+
+    func testFeishuOnboardingStartAndPendingPollDecode() async throws {
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/api/v1/manage/im/onboarding/feishu/start":
+                XCTAssertEqual(request.httpMethod, "POST")
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"verificationUri":"https://f.example/v","verificationUriComplete":"https://f.example/v?code=1","deviceCode":"device-1","expiresIn":600,"interval":5,"qrSvg":"<svg/>"}"#
+                )
+            case "/api/v1/manage/im/onboarding/feishu/poll":
+                let body = Self.jsonBody(from: request)
+                XCTAssertEqual(body?["deviceCode"] as? String, "device-1")
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"done":false,"appId":null,"displayName":null,"error":"authorization_pending","errorDescription":null}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        let session = try await client.startFeishuOnboarding()
+        XCTAssertEqual(session.deviceCode, "device-1")
+        XCTAssertEqual(session.verificationUriComplete, "https://f.example/v?code=1")
+        XCTAssertEqual(session.interval, 5)
+
+        let poll = try await client.pollFeishuOnboarding(deviceCode: session.deviceCode)
+        XCTAssertFalse(poll.done)
+        XCTAssertEqual(poll.error, "authorization_pending")
+        XCTAssertNil(poll.appId)
+    }
+
+    func testWechatOnboardingPollSendsVerifyCodeAndDecodesStates() async throws {
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/api/v1/manage/im/onboarding/wechat/start":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"sessionKey":"wechat-onboard-1","qrcodeUrl":"https://w.example/qr","qrSvg":"<svg/>","expiresIn":300}"#
+                )
+            case "/api/v1/manage/im/onboarding/wechat/poll":
+                let body = Self.jsonBody(from: request)
+                XCTAssertEqual(body?["sessionKey"] as? String, "wechat-onboard-1")
+                if body?["verifyCode"] as? String == "246810" {
+                    return MockResponse(
+                        statusCode: 200,
+                        json: #"{"done":true,"status":"confirmed","accountId":"ilink-bot-1","userId":"user-1"}"#
+                    )
+                }
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"done":false,"status":"need_verifycode","needVerifyCode":true,"error":null}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        let session = try await client.startWechatOnboarding()
+        XCTAssertEqual(session.sessionKey, "wechat-onboard-1")
+        XCTAssertEqual(session.qrcodeUrl, "https://w.example/qr")
+
+        let pending = try await client.pollWechatOnboarding(sessionKey: session.sessionKey)
+        XCTAssertFalse(pending.done)
+        XCTAssertEqual(pending.needVerifyCode, true)
+
+        let confirmed = try await client.pollWechatOnboarding(
+            sessionKey: session.sessionKey,
+            verifyCode: "246810"
+        )
+        XCTAssertTrue(confirmed.done)
+        XCTAssertEqual(confirmed.accountId, "ilink-bot-1")
+    }
+
+    func testWecomOnboardingStartAndCompletionDecode() async throws {
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/api/v1/manage/im/onboarding/wecom/start":
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"sessionKey":"wecom-onboard-1","qrcodeUrl":"https://q.example/auth","qrSvg":"<svg/>","expiresIn":300,"interval":3}"#
+                )
+            case "/api/v1/manage/im/onboarding/wecom/poll":
+                let body = Self.jsonBody(from: request)
+                XCTAssertEqual(body?["sessionKey"] as? String, "wecom-onboard-1")
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"done":true,"status":"success","accountId":"wecom-bot-1"}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        let session = try await client.startWecomOnboarding()
+        XCTAssertEqual(session.sessionKey, "wecom-onboard-1")
+        XCTAssertEqual(session.interval, 3)
+
+        let poll = try await client.pollWecomOnboarding(sessionKey: session.sessionKey)
+        XCTAssertTrue(poll.done)
+        XCTAssertEqual(poll.accountId, "wecom-bot-1")
+    }
+
+    func testOnboardingSessionErrorsMapToFriendlyMessage() async {
+        let client = makeClient { _ in
+            MockResponse(
+                statusCode: 400,
+                json: #"{"done":false,"error":"missing_session"}"#
+            )
+        }
+
+        do {
+            _ = try await client.pollWecomOnboarding(sessionKey: "stale")
+            XCTFail("Expected session failure")
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, .operationFailed("扫码会话已失效，请重新获取二维码。"))
+        } catch {
+            XCTFail("Expected APIClientError, received \(error)")
+        }
     }
 
     func testFetchDashboardDecodesOriginalV1AggregatePayload() async throws {
@@ -596,6 +1108,92 @@ final class APIContractTests: XCTestCase {
     }
 
     @MainActor
+    func testAppModelShowsAccountManagementUpdateNoticeForOlderDaemon() async {
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/healthz":
+                MockResponse(statusCode: 200, json: Self.healthJSON)
+            case "/api/v1/manage/dashboard":
+                MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case "/api/v1/manage/lifecycle":
+                MockResponse(statusCode: 200, json: Self.lifecycleJSON)
+            case "/api/v1/manage/im/accounts":
+                MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            default:
+                MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+
+        await model.refresh()
+
+        XCTAssertEqual(model.dashboardState, .loaded)
+        XCTAssertEqual(model.imAccounts, [])
+        XCTAssertEqual(model.imAccountsAvailability, .needsUpdate)
+    }
+
+    @MainActor
+    func testAppModelReportsFailedAccountToggleWithoutDowngradingAvailability() async throws {
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/healthz":
+                MockResponse(statusCode: 200, json: Self.healthJSON)
+            case "/api/v1/manage/dashboard":
+                MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case "/api/v1/manage/lifecycle":
+                MockResponse(statusCode: 200, json: Self.lifecycleJSON)
+            case "/api/v1/manage/im/accounts":
+                MockResponse(statusCode: 200, json: Self.imAccountsJSON)
+            case "/api/v1/manage/im/account/enabled":
+                MockResponse(statusCode: 404, json: #"{"ok":false,"error":"IM account not found"}"#)
+            default:
+                MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+        await model.refresh()
+        XCTAssertEqual(model.imAccountsAvailability, .available)
+        let account = try XCTUnwrap(model.imAccounts.first)
+
+        let acknowledged = await model.setIMAccountEnabled(account, enabled: false)
+
+        XCTAssertFalse(acknowledged)
+        XCTAssertEqual(model.accountOperationError, "找不到该消息账号。")
+        XCTAssertEqual(model.imAccountsAvailability, .available)
+    }
+
+    @MainActor
+    func testAppModelAcknowledgesSuccessfulAccountToggle() async throws {
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/healthz":
+                MockResponse(statusCode: 200, json: Self.healthJSON)
+            case "/api/v1/manage/dashboard":
+                MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case "/api/v1/manage/lifecycle":
+                MockResponse(statusCode: 200, json: Self.lifecycleJSON)
+            case "/api/v1/manage/im/accounts":
+                MockResponse(statusCode: 200, json: Self.imAccountsJSON)
+            case "/api/v1/manage/im/account/enabled":
+                MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"platform":"telegram","accountId":"telegram-main","enabled":false}"#
+                )
+            default:
+                MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+        await model.refresh()
+        let account = try XCTUnwrap(model.imAccounts.first)
+
+        let acknowledged = await model.setIMAccountEnabled(account, enabled: false)
+
+        XCTAssertTrue(acknowledged)
+        XCTAssertNil(model.accountOperationError)
+    }
+
+    @MainActor
     func testAppModelClassifiesLegacyDaemon() async {
         let client = makeClient { request in
             switch request.url?.path {
@@ -757,8 +1355,31 @@ final class APIContractTests: XCTestCase {
 
     private static let healthJSON = #"{"service":"threadrelay","apiMajor":1,"ready":true}"#
     private static let dashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"bridgeRunning":true,"remoteControlConnected":true,"remoteControlHealthy":true,"executionClients":{"codexApp":{"configured":true,"connected":true},"vscode":{"configured":true,"connected":true},"cli":{"configured":false,"connected":false}},"messageChannels":{"telegram":{"accountCount":2,"connectedAccountCount":1},"feishu":{"accountCount":1,"connectedAccountCount":1},"wechat":{"accountCount":1,"connectedAccountCount":1},"wecom":{"accountCount":0,"connectedAccountCount":0}},"aiGatewayEnabled":true,"aiGatewayProviderCount":2,"requestLoggingEnabled":true}"#
+    private static let imAccountsJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"accounts":[{"platform":"telegram","accountId":"telegram-main","displayName":"主 Telegram","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":true,"connected":true,"lastError":null,"lastEventAtMs":1754000120000,"lastInboundAtMs":1754000100000},{"platform":"wecom","accountId":"wecom-offline","displayName":"企业微信","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":false,"connected":false,"lastError":"连接失败","lastEventAtMs":null,"lastInboundAtMs":null}]}"#
     private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
     private static let originalV1DashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"legacy-instance","pid":456,"startedAtMs":789},"bridgeRunning":true,"remoteControlConnected":false,"remoteControlHealthy":false,"codexAppConfigured":true,"imAccountCount":5,"connectedImAccountCount":3,"aiGatewayEnabled":false,"aiGatewayProviderCount":1,"requestLoggingEnabled":true}"#
+
+    private static func jsonBody(from request: URLRequest) -> [String: Any]? {
+        let data: Data?
+        if let httpBody = request.httpBody {
+            data = httpBody
+        } else if let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var result = Data()
+            var buffer = [UInt8](repeating: 0, count: 4_096)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                guard count > 0 else { break }
+                result.append(buffer, count: count)
+            }
+            data = result
+        } else {
+            data = nil
+        }
+        guard let data else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
 
     private func makeClient(
         baseURL: URL = URL(string: "https://threadrelay.test")!,
@@ -778,6 +1399,34 @@ final class APIContractTests: XCTestCase {
                     [.init(token: $0, expectedInstanceId: nil)]
                 } ?? []
             }
+        )
+    }
+
+    private func makeDaemonLauncherFixture() throws -> (
+        root: URL,
+        configuration: DaemonLaunchConfiguration
+    ) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let helper = root.appendingPathComponent("ThreadRelay.app/Contents/Helpers/threadrelay-daemon")
+        try FileManager.default.createDirectory(
+            at: helper.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(FileManager.default.createFile(atPath: helper.path, contents: Data()))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: helper.path
+        )
+        return (
+            root,
+            DaemonLaunchConfiguration(
+                helperURL: helper,
+                configURL: root.appendingPathComponent("data/config.toml"),
+                launchAgentURL: root.appendingPathComponent("home/Library/LaunchAgents/daemon.plist"),
+                logURL: root.appendingPathComponent("data/logs/daemon.log"),
+                homeURL: root.appendingPathComponent("home", isDirectory: true)
+            )
         )
     }
 
@@ -951,6 +1600,29 @@ private final class URLRecorder: @unchecked Sendable {
         lock.withLock {
             recordedURLs.append(url)
         }
+    }
+}
+
+private final class CommandInvocationRecorder: @unchecked Sendable {
+    typealias Handler = @Sendable ([String]) -> CommandResult
+
+    private let lock = NSLock()
+    private let handler: Handler
+    private var recordedArguments: [[String]] = []
+
+    init(handler: @escaping Handler) {
+        self.handler = handler
+    }
+
+    var arguments: [[String]] {
+        lock.withLock { recordedArguments }
+    }
+
+    func run(_: URL, arguments: [String]) -> CommandResult {
+        lock.withLock {
+            recordedArguments.append(arguments)
+        }
+        return handler(arguments)
     }
 }
 

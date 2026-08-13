@@ -6,27 +6,27 @@ struct SettingsView: View {
     var body: some View {
         TabView {
             Form {
-                Section("Window") {
-                    Picker("Closing the main window", selection: $closeBehavior) {
-                        Text("Hide to Menu Bar").tag("menuBar")
-                        Text("Quit the Interface").tag("quitGUI")
+                Section("窗口") {
+                    Picker("关闭主窗口时", selection: $closeBehavior) {
+                        Text("隐藏到菜单栏").tag("menuBar")
+                        Text("退出界面").tag("quitGUI")
                     }
-                    Text("The local service continues running in both modes.")
+                    Text("无论选择哪种方式，本地服务都会继续运行。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
             .padding(20)
-            .tabItem { Label("General", systemImage: "gearshape") }
+            .tabItem { Label("通用", systemImage: "gearshape") }
 
-            SettingsPlaceholder(title: "Network", symbol: "network")
-                .tabItem { Label("Network", systemImage: "network") }
+            SettingsPlaceholder(title: "网络", symbol: "network")
+                .tabItem { Label("网络", systemImage: "network") }
 
-            SettingsPlaceholder(title: "Local Service", symbol: "server.rack")
-                .tabItem { Label("Local Service", systemImage: "server.rack") }
+            SettingsPlaceholder(title: "本地服务", symbol: "server.rack")
+                .tabItem { Label("本地服务", systemImage: "server.rack") }
 
-            SettingsPlaceholder(title: "Update & Diagnostics", symbol: "stethoscope")
-                .tabItem { Label("Update & Diagnostics", systemImage: "stethoscope") }
+            SettingsPlaceholder(title: "更新与诊断", symbol: "stethoscope")
+                .tabItem { Label("更新与诊断", systemImage: "stethoscope") }
         }
         .frame(width: 620, height: 360)
     }
