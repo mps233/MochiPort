@@ -124,7 +124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        UserDefaults.standard.string(forKey: "closeBehavior") == "quitGUI"
     }
 
     private func activateExistingInstance() {
@@ -158,6 +158,7 @@ struct ThreadRelayApp: App {
         Window("ThreadRelay", id: "main") {
             RootView()
                 .environmentObject(model)
+                .preferredColorScheme(preferredColorScheme)
                 .frame(minWidth: 760, minHeight: 540)
                 .background(WindowVisibilityObserver { visible in
                     model.setWindowVisible(visible)
@@ -173,11 +174,27 @@ struct ThreadRelayApp: App {
             }
             CommandGroup(after: .sidebar) {
                 Button("刷新") {
-                    Task { await model.refresh() }
+                    Task {
+                        await model.refresh()
+                        if let selection = model.selection,
+                           selection != .overview,
+                           selection != .messaging {
+                            await model.loadSection(selection, force: true)
+                        }
+                    }
                 }
                 .keyboardShortcut("r", modifiers: .command)
             }
         }
+
+        WindowGroup("请求日志详情", for: Int64.self) { $logID in
+            if let logID {
+                RequestLogDetailWindow(logID: logID)
+                    .environmentObject(model)
+                    .preferredColorScheme(preferredColorScheme)
+            }
+        }
+        .defaultSize(width: 760, height: 620)
 
         MenuBarExtra {
             MenuBarStatusView()
@@ -191,6 +208,15 @@ struct ThreadRelayApp: App {
         Settings {
             SettingsView()
                 .environmentObject(model)
+                .preferredColorScheme(preferredColorScheme)
+        }
+    }
+
+    private var preferredColorScheme: ColorScheme? {
+        switch model.settings?.theme {
+        case "light": .light
+        case "dark": .dark
+        default: nil
         }
     }
 
@@ -303,6 +329,12 @@ private struct WindowVisibilityObserver: NSViewRepresentable {
 private struct MenuBarStatusView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.openURL) private var openURL
+
+    private var serviceUnavailable: Bool {
+        if case .unavailable = model.serviceStatus { return true }
+        return false
+    }
 
     var body: some View {
         Text("ThreadRelay")
@@ -326,6 +358,16 @@ private struct MenuBarStatusView: View {
         }
         Button("刷新") {
             Task { await model.refresh() }
+        }
+        Button(model.daemonRecoveryInProgress ? "正在启动本地服务…" : "启动本地服务") {
+            Task { await model.startDaemonManually() }
+        }
+        .disabled(!serviceUnavailable || model.daemonRecoveryInProgress)
+        if let update = model.availableUpdate {
+            Button("下载新版本 \(update.version)") {
+                openURL(update.url)
+            }
+            .accessibilityLabel("下载新版本 \(update.version)")
         }
         if #available(macOS 14, *) {
             SettingsLink {

@@ -86,8 +86,6 @@ struct ConnectionTopologyView: View {
                 serviceWidth: serviceWidth,
                 gap: gap,
                 layoutPadding: 8,
-                leftTint: remoteTint,
-                rightTint: bridgeTint,
                 leftBranchTints: leftNodes.map(\.tint),
                 rightBranchTints: rightNodes.map(\.tint)
             )
@@ -358,8 +356,6 @@ private struct TopologyConnectorCanvas: View {
     let serviceWidth: CGFloat
     let gap: CGFloat
     let layoutPadding: CGFloat
-    let leftTint: StatusTint
-    let rightTint: StatusTint
     let leftBranchTints: [StatusTint]
     let rightBranchTints: [StatusTint]
 
@@ -371,49 +367,31 @@ private struct TopologyConnectorCanvas: View {
             let serviceRight = serviceLeft + serviceWidth
             let leftNodeEdge = layoutPadding + sideWidth
             let rightNodeEdge = serviceRight + gap
-            let leftTrunk = leftNodeEdge + 8
-            let rightTrunk = serviceRight + gap - 8
             let middleY = size.height / 2
 
-            drawBranches(
-                context: &context,
-                centers: leftCenters,
-                nodeEdge: leftNodeEdge,
-                trunk: leftTrunk,
-                branchTints: leftBranchTints
-            )
-            drawTrunk(
-                context: &context,
-                x: leftTrunk,
-                centers: leftCenters,
-                tint: leftTint
-            )
-            drawMain(
-                context: &context,
-                from: CGPoint(x: leftTrunk, y: middleY),
-                to: CGPoint(x: serviceLeft, y: middleY),
-                tint: leftTint
-            )
-
-            drawBranches(
-                context: &context,
-                centers: rightCenters,
-                nodeEdge: rightNodeEdge,
-                trunk: rightTrunk,
-                branchTints: rightBranchTints
-            )
-            drawTrunk(
-                context: &context,
-                x: rightTrunk,
-                centers: rightCenters,
-                tint: rightTint
-            )
-            drawMain(
-                context: &context,
-                from: CGPoint(x: serviceRight, y: middleY),
-                to: CGPoint(x: rightTrunk, y: middleY),
-                tint: rightTint
-            )
+            // Inactive links first so live links always render above them.
+            for activePass in [false, true] {
+                for (index, center) in leftCenters.enumerated() {
+                    let tint = branchTint(leftBranchTints, index)
+                    guard (tint != .secondary) == activePass else { continue }
+                    drawLink(
+                        context: &context,
+                        from: CGPoint(x: leftNodeEdge, y: center),
+                        to: CGPoint(x: serviceLeft, y: middleY),
+                        tint: tint
+                    )
+                }
+                for (index, center) in rightCenters.enumerated() {
+                    let tint = branchTint(rightBranchTints, index)
+                    guard (tint != .secondary) == activePass else { continue }
+                    drawLink(
+                        context: &context,
+                        from: CGPoint(x: rightNodeEdge, y: center),
+                        to: CGPoint(x: serviceRight, y: middleY),
+                        tint: tint
+                    )
+                }
+            }
         }
         .allowsHitTesting(false)
     }
@@ -424,39 +402,13 @@ private struct TopologyConnectorCanvas: View {
         return (0..<count).map { top + CGFloat($0) * (nodeHeight + nodeSpacing) + nodeHeight / 2 }
     }
 
-    private func drawBranches(
-        context: inout GraphicsContext,
-        centers: [CGFloat],
-        nodeEdge: CGFloat,
-        trunk: CGFloat,
-        branchTints: [StatusTint]
-    ) {
-        for (index, center) in centers.enumerated() {
-            drawMain(
-                context: &context,
-                from: CGPoint(x: nodeEdge, y: center),
-                to: CGPoint(x: trunk, y: center),
-                tint: branchTints.indices.contains(index) ? branchTints[index] : .secondary
-            )
-        }
+    private func branchTint(_ tints: [StatusTint], _ index: Int) -> StatusTint {
+        tints.indices.contains(index) ? tints[index] : .secondary
     }
 
-    private func drawTrunk(
-        context: inout GraphicsContext,
-        x: CGFloat,
-        centers: [CGFloat],
-        tint: StatusTint
-    ) {
-        guard let first = centers.first, let last = centers.last else { return }
-        drawMain(
-            context: &context,
-            from: CGPoint(x: x, y: first),
-            to: CGPoint(x: x, y: last),
-            tint: tint
-        )
-    }
-
-    private func drawMain(
+    /// One smooth curve per node, colored by that node's own state, so an
+    /// unconnected endpoint never inherits the green of a shared trunk.
+    private func drawLink(
         context: inout GraphicsContext,
         from: CGPoint,
         to: CGPoint,
@@ -464,8 +416,44 @@ private struct TopologyConnectorCanvas: View {
     ) {
         var path = Path()
         path.move(to: from)
-        path.addLine(to: to)
-        context.stroke(path, with: .color(tint.color.opacity(0.82)), lineWidth: 1.5)
+        let midX = (from.x + to.x) / 2
+        path.addCurve(
+            to: to,
+            control1: CGPoint(x: midX, y: from.y),
+            control2: CGPoint(x: midX, y: to.y)
+        )
+
+        guard tint != .secondary else {
+            context.stroke(
+                path,
+                with: .color(Color.secondary.opacity(0.42)),
+                style: StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [0.5, 5])
+            )
+            return
+        }
+
+        // Soft glow beneath a gradient core reads as a live, powered link.
+        context.drawLayer { layer in
+            layer.addFilter(.blur(radius: 2.4))
+            layer.stroke(
+                path,
+                with: .color(tint.color.opacity(0.42)),
+                style: StrokeStyle(lineWidth: 3.4, lineCap: .round)
+            )
+        }
+        context.stroke(
+            path,
+            with: .linearGradient(
+                Gradient(colors: [tint.color.opacity(0.58), tint.color]),
+                startPoint: from,
+                endPoint: to
+            ),
+            style: StrokeStyle(lineWidth: 1.6, lineCap: .round)
+        )
+        for point in [from, to] {
+            let port = CGRect(x: point.x - 2.4, y: point.y - 2.4, width: 4.8, height: 4.8)
+            context.fill(Path(ellipseIn: port), with: .color(tint.color))
+        }
     }
 }
 

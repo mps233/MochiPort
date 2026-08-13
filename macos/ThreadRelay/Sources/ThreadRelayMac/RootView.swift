@@ -27,8 +27,12 @@ struct RootView: View {
                 switch model.selection ?? .overview {
                 case .overview:
                     OverviewView()
+                case .codex:
+                    CodexAccessView()
+                case .sessions:
+                    SessionsView()
                 case .requestLogs:
-                    RequestLogsBaselineView()
+                    RequestLogsView()
                 case .messaging:
                     MessagingAccountsView(
                         accounts: model.imAccounts.map(MessagingAccountSummary.init),
@@ -70,22 +74,46 @@ struct RootView: View {
                             .padding(.bottom, 14)
                         }
                     }
-                case let section:
-                    PlaceholderView(section: section)
+                case .gateway:
+                    GatewayView()
                 }
             }
             .navigationTitle((model.selection ?? .overview).title)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
+            .overlay(alignment: .bottom) {
+                if let feedback = model.actionFeedback {
+                    ActionFeedbackCapsule(feedback: feedback) {
+                        model.actionFeedback = nil
+                    }
+                    .padding(.bottom, 14)
+                    .transition(.opacity.combined(with: .move(edge: .bottom)))
+                }
+            }
+            .animation(.easeInOut(duration: 0.18), value: model.actionFeedback)
+            // Let the title bar draw no background of its own so the content
+            // color shows through. An opaque toolbar color would span the
+            // whole window width and cover the top of the sidebar.
+            .toolbarBackground(.hidden, for: .windowToolbar)
         }
         .task {
             await model.refresh()
             model.startAutoRefresh()
+            // Silent one-shot update check; delayed inside so it never
+            // competes with the startup refresh burst.
+            model.scheduleStartupUpdateCheck()
         }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button {
-                    Task { await model.refresh() }
+                    Task {
+                        await model.refresh()
+                        if let selection = model.selection,
+                           selection != .overview,
+                           selection != .messaging {
+                            await model.loadSection(selection, force: true)
+                        }
+                    }
                 } label: {
                     Label("刷新", systemImage: "arrow.clockwise")
                 }
@@ -140,75 +168,88 @@ struct RootView: View {
 
 private struct OverviewView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
+            VStack(alignment: .leading, spacing: 20) {
                 OverviewHeader(
                     status: model.serviceStatus,
                     dashboardState: model.dashboardState,
-                    lastCheckedAt: model.lastCheckedAt
+                    lastCheckedAt: model.lastCheckedAt,
+                    hasDashboard: model.dashboard != nil,
+                    recoveryInProgress: model.daemonRecoveryInProgress,
+                    recoveryError: model.daemonRecoveryError,
+                    onRecover: { Task { await model.startDaemonManually() } }
                 )
 
-                ConnectionTopologyView()
+                if let update = model.availableUpdate, !model.updateNoticeDismissed {
+                    UpdateNoticeCapsule(
+                        version: update.version,
+                        onOpen: { openURL(update.url) },
+                        onDismiss: { model.updateNoticeDismissed = true }
+                    )
+                }
 
-                VStack(alignment: .leading, spacing: 0) {
-                    DashboardSection(title: "本地服务", symbol: "server.rack") {
-                        StatusRow(
-                            title: "后台服务",
-                            detail: daemonDetail,
-                            symbol: model.serviceStatus.symbol,
-                            tint: model.serviceStatus.tint
+                OverviewCardSurface {
+                    ConnectionTopologyView()
+                }
+
+                ManagementCard(title: "本地服务", symbol: "server.rack") {
+                    OverviewStatusRow(
+                        title: "后台服务",
+                        detail: daemonDetail,
+                        symbol: model.serviceStatus.symbol,
+                        tint: model.serviceStatus.tint
+                    )
+                    if let lifecycle = model.lifecycle {
+                        Divider()
+                        OverviewStatusRow(
+                            title: "运行时",
+                            detail: "v\(lifecycle.runtime.productVersion) · \(managementMode(lifecycle.management))",
+                            symbol: "shippingbox",
+                            tint: lifecycle.management.canControl ? .positive : .secondary
                         )
-                        if let lifecycle = model.lifecycle {
-                            RowDivider()
-                            StatusRow(
-                                title: "运行时",
-                                detail: "v\(lifecycle.runtime.productVersion) · \(managementMode(lifecycle.management))",
-                                symbol: "shippingbox",
-                                tint: lifecycle.management.canControl ? .positive : .secondary
-                            )
-                            RowDivider()
-                            StatusRow(
-                                title: "受保护任务",
-                                detail: protectedWorkDetail(lifecycle.protectedWorkItems),
-                                symbol: "pause.circle",
-                                tint: lifecycle.protectedWorkItems.total == 0 ? .positive : .caution
-                            )
-                        }
-                        HStack(spacing: 12) {
-                            Button("复制诊断信息") {
-                                copyDiagnostics()
-                            }
-                            Button("打开日志") {
-                                Task { await openLogDirectory() }
-                            }
-                        }
-                        .buttonStyle(.link)
-                        .padding(.horizontal, 14)
-                        .padding(.bottom, 12)
-                    }
-                    SectionDivider()
-                    DashboardSection(title: "AI 网关", symbol: "point.3.connected.trianglepath.dotted") {
-                        StatusRow(
-                            title: "网关",
-                            detail: dashboardDetail(model.dashboard?.aiGatewayEnabled),
-                            symbol: "point.3.connected.trianglepath.dotted",
-                            tint: boolTint(model.dashboard?.aiGatewayEnabled)
-                        )
-                        RowDivider()
-                        StatusRow(
-                            title: "供应商",
-                            detail: providerDetail,
-                            symbol: "server.rack",
-                            tint: model.dashboard == nil ? .secondary : .positive
+                        Divider()
+                        OverviewStatusRow(
+                            title: "受保护任务",
+                            detail: protectedWorkDetail(lifecycle.protectedWorkItems),
+                            symbol: "pause.circle",
+                            tint: lifecycle.protectedWorkItems.total == 0 ? .positive : .caution
                         )
                     }
+                    Divider()
+                    HStack(spacing: 16) {
+                        Button("复制诊断信息") {
+                            copyDiagnostics()
+                        }
+                        Button("打开日志") {
+                            Task { await openLogDirectory() }
+                        }
+                    }
+                    .buttonStyle(.link)
+                }
+
+                ManagementCard(title: "AI 网关", symbol: "point.3.connected.trianglepath.dotted") {
+                    OverviewStatusRow(
+                        title: "网关",
+                        detail: dashboardDetail(model.dashboard?.aiGatewayEnabled),
+                        symbol: "point.3.connected.trianglepath.dotted",
+                        tint: boolTint(model.dashboard?.aiGatewayEnabled)
+                    )
+                    Divider()
+                    OverviewStatusRow(
+                        title: "供应商",
+                        detail: providerDetail,
+                        symbol: "server.rack",
+                        tint: model.dashboard == nil ? .secondary : .positive
+                    )
                 }
             }
-            .frame(maxWidth: 720, alignment: .leading)
-            .padding(28)
+            .frame(maxWidth: 860, alignment: .leading)
+            .padding(ThreadRelaySpacing.page)
         }
+        .scrollIndicators(.never)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
@@ -291,42 +332,63 @@ private struct OverviewView: View {
     }
 }
 
-private struct DashboardSection<Content: View>: View {
-    let title: String
-    let symbol: String
+/// Dismissible informational capsule shown at the top of the overview when
+/// a newer release is available. Dismissal only lasts for this app session.
+private struct UpdateNoticeCapsule: View {
+    let version: String
+    let onOpen: () -> Void
+    let onDismiss: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                onOpen()
+            } label: {
+                Label("发现新版本 \(version) — 打开下载页", systemImage: "arrow.down.circle")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.blue)
+            .help("打开发布下载页")
+            .accessibilityLabel("发现新版本 \(version)，打开下载页")
+            Button {
+                onDismiss()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("本次会话不再提示")
+            .accessibilityLabel("关闭新版本提示")
+        }
+        .font(.callout)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.blue.opacity(0.09), in: Capsule())
+        .accessibilityIdentifier("overview.update-notice")
+    }
+}
+
+/// Chrome-only card wrapper for overview content that carries its own title
+/// row (for example the connection topology), matching `ManagementCard`.
+private struct OverviewCardSurface<Content: View>: View {
     @ViewBuilder let content: Content
 
-    init(title: String, symbol: String, @ViewBuilder content: () -> Content) {
-        self.title = title
-        self.symbol = symbol
+    init(@ViewBuilder content: () -> Content) {
         self.content = content()
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Label(title, systemImage: symbol)
-                .font(.headline)
-                .foregroundStyle(.secondary)
-                .padding(.horizontal, 14)
-                .padding(.top, 16)
-            VStack(spacing: 0) {
-                content
+        content
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                Color(nsColor: .controlBackgroundColor),
+                in: RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
+                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
             }
-        }
-    }
-}
-
-private struct SectionDivider: View {
-    var body: some View {
-        Divider()
-            .padding(.vertical, 4)
-    }
-}
-
-private struct RowDivider: View {
-    var body: some View {
-        Divider()
-            .padding(.leading, 48)
     }
 }
 
@@ -334,35 +396,97 @@ private struct OverviewHeader: View {
     let status: ServiceStatus
     let dashboardState: DashboardState
     let lastCheckedAt: Date?
+    let hasDashboard: Bool
+    var recoveryInProgress = false
+    var recoveryError: String?
+    var onRecover: (() -> Void)?
+
+    private var showsRecovery: Bool {
+        if case .unavailable = status { return onRecover != nil }
+        return false
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(status.title, systemImage: status.symbol)
-                .font(.title.bold())
-                .symbolRenderingMode(.hierarchical)
-                .foregroundStyle(statusColor)
-            Text(status.detail)
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: ThreadRelaySpacing.standard) {
+            HStack(alignment: .center, spacing: 14) {
+                Image(systemName: status.symbol)
+                    .font(.system(size: 23, weight: .medium))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(status.tint.color)
+                    .frame(width: 42, height: 42)
+                    .background(status.tint.color.opacity(0.11), in: RoundedRectangle(cornerRadius: 11))
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(status.title)
+                        .font(.title2.weight(.semibold))
+                    Text(status.detail)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: ThreadRelaySpacing.standard)
+                if let lastCheckedAt {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        Text("上次检查")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                        HStack(spacing: 6) {
+                            // Kept in the layout at all times so periodic
+                            // refreshes never shift the page height.
+                            ProgressView()
+                                .controlSize(.small)
+                                .opacity(dashboardState.isRefreshing ? 1 : 0)
+                                .accessibilityHidden(!dashboardState.isRefreshing)
+                            Text(lastCheckedAt.formatted(date: .omitted, time: .shortened))
+                                .font(.callout.weight(.medium))
+                                .monospacedDigit()
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
             if let notice {
                 Label(notice.text, systemImage: notice.symbol)
                     .font(.callout)
                     .foregroundStyle(notice.color)
-                    .padding(.top, 2)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(notice.color.opacity(0.09), in: Capsule())
             }
-            if let lastCheckedAt {
-                Text("上次检查：\(lastCheckedAt.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
+            if showsRecovery {
+                HStack(spacing: 12) {
+                    Button {
+                        onRecover?()
+                    } label: {
+                        if recoveryInProgress {
+                            HStack(spacing: 7) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("正在启动…")
+                            }
+                        } else {
+                            Label("启动本地服务", systemImage: "play.circle.fill")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(recoveryInProgress)
+                    .accessibilityIdentifier("overview.recover-daemon")
+                    if let recoveryError {
+                        Text(recoveryError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .lineLimit(2)
+                    }
+                }
             }
         }
     }
 
+    /// Routine refreshes must not add or remove a banner row: `.refreshing`
+    /// never shows one, and `.loading` only does before any data exists.
     private var notice: (text: String, symbol: String, color: Color)? {
         switch dashboardState {
         case .loading:
-            ("正在加载服务状态…", "arrow.clockwise", .secondary)
+            hasDashboard ? nil : ("正在加载服务状态…", "arrow.clockwise", .secondary)
         case .refreshing:
-            ("正在刷新…", "arrow.clockwise", .secondary)
+            nil
         case .starting:
             ("本地服务仍在启动。", "clock", .orange)
         case .legacy:
@@ -379,58 +503,41 @@ private struct OverviewHeader: View {
             nil
         }
     }
-
-    private var statusColor: Color {
-        switch status.tint {
-        case .secondary: .secondary
-        case .positive: .green
-        case .caution: .orange
-        case .negative: .red
-        }
-    }
 }
 
-private struct StatusRow: View {
+private struct OverviewStatusRow: View {
     let title: String
     let detail: String
     let symbol: String
     var tint: StatusTint = .secondary
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: ThreadRelaySpacing.standard) {
             Image(systemName: symbol)
-                .foregroundStyle(color)
-                .frame(width: 20)
+                .font(.system(size: 13, weight: .semibold))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(tint.color)
+                .frame(width: 28, height: 28)
+                .background(tint.color.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
             Text(title)
-            Spacer()
+            Spacer(minLength: ThreadRelaySpacing.standard)
             Text(detail)
                 .foregroundStyle(.secondary)
+                .multilineTextAlignment(.trailing)
         }
-        .padding(.horizontal, 14)
-        .frame(minHeight: 48)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("overview.status.\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
     }
+}
 
-    private var color: Color {
-        switch tint {
+private extension StatusTint {
+    var color: Color {
+        switch self {
         case .secondary: .secondary
         case .positive: .green
         case .caution: .orange
         case .negative: .red
         }
-    }
-}
-
-private struct PlaceholderView: View {
-    let section: AppSection
-
-    var body: some View {
-        EmptyStateView(
-            title: section.title,
-            message: "该功能将在后续迁移阶段接入。",
-            symbol: section.symbol
-        )
     }
 }
 

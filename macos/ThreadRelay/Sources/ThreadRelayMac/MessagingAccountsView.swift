@@ -224,6 +224,7 @@ struct MessagingAccountsView: View {
     @State private var enabledOverrides: [String: Bool] = [:]
     @State private var expandedIDs: Set<String> = []
     @State private var pendingDeletion: MessagingAccountSummary?
+    @State private var hoveredAccountID: String?
 
     init(
         accounts: [MessagingAccountSummary],
@@ -241,15 +242,16 @@ struct MessagingAccountsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: ThreadRelaySpacing.section) {
+            VStack(alignment: .leading, spacing: 20) {
                 header
                 availabilityNotice
                 filterBar
                 accountPanel
             }
-            .frame(maxWidth: 760, alignment: .leading)
+            .frame(maxWidth: 860, alignment: .leading)
             .padding(ThreadRelaySpacing.page)
         }
+        .scrollIndicators(.never)
         .background(Color(nsColor: .windowBackgroundColor))
         .searchable(text: $searchText, prompt: "搜索账号")
         .onChange(of: accounts) { newAccounts in
@@ -338,14 +340,12 @@ struct MessagingAccountsView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .top, spacing: ThreadRelaySpacing.standard) {
-            VStack(alignment: .leading, spacing: ThreadRelaySpacing.compact) {
-                Text("消息渠道")
-                    .font(.title2.weight(.semibold))
-                Text(summaryText)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-            }
+        HStack(alignment: .center, spacing: ThreadRelaySpacing.standard) {
+            ManagementPageHeader(
+                title: "消息渠道",
+                subtitle: summaryText,
+                symbol: "bubble.left.and.bubble.right"
+            )
             Spacer(minLength: ThreadRelaySpacing.standard)
             if let onAdd {
                 Button(action: onAdd) {
@@ -359,28 +359,36 @@ struct MessagingAccountsView: View {
     }
 
     private var filterBar: some View {
-        ViewThatFits(in: .horizontal) {
-            Picker("渠道", selection: $filter) {
-                ForEach(MessagingAccountFilter.allCases) { item in
-                    Text(item.title).tag(item)
-                }
+        HStack(spacing: ThreadRelaySpacing.compact) {
+            ForEach(MessagingAccountFilter.allCases) { item in
+                filterChip(item)
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 560)
-
-            Menu {
-                Picker("渠道", selection: $filter) {
-                    ForEach(MessagingAccountFilter.allCases) { item in
-                        Text(item.title).tag(item)
-                    }
-                }
-            } label: {
-                Label("渠道：\(filter.title)", systemImage: "line.3.horizontal.decrease.circle")
-            }
-            .menuStyle(.borderlessButton)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("渠道筛选")
+    }
+
+    private func filterChip(_ item: MessagingAccountFilter) -> some View {
+        let selected = filter == item
+        return Button {
+            filter = item
+        } label: {
+            Text(item.title)
+                .font(.callout.weight(.medium))
+                .padding(.horizontal, 13)
+                .padding(.vertical, 6)
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .background(
+                    selected
+                        ? AnyShapeStyle(Color.accentColor)
+                        : AnyShapeStyle(Color.primary.opacity(0.07)),
+                    in: Capsule()
+                )
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private var accountPanel: some View {
@@ -399,12 +407,11 @@ struct MessagingAccountsView: View {
             }
         }
         .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: ThreadRelayRadius.overlay))
+        .clipShape(RoundedRectangle(cornerRadius: ThreadRelayRadius.content))
         .overlay {
-            RoundedRectangle(cornerRadius: ThreadRelayRadius.overlay)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
+                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
         }
-        .shadow(color: .black.opacity(0.05), radius: 8, y: 3)
     }
 
     private var emptyState: some View {
@@ -526,6 +533,21 @@ struct MessagingAccountsView: View {
                 .toggleStyle(.switch)
                 .controlSize(.small)
                 .help(isEnabled(account) ? "停用账号" : "启用账号")
+
+                if onDelete != nil {
+                    Button {
+                        pendingDeletion = account
+                    } label: {
+                        Image(systemName: "trash")
+                            .frame(width: 24, height: 24)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.red)
+                    .help("删除账号")
+                    .accessibilityLabel("删除账号")
+                    .padding(.leading, 4)
+                }
             }
             .padding(.horizontal, 16)
             .frame(minHeight: 68)
@@ -535,6 +557,16 @@ struct MessagingAccountsView: View {
                     .padding(.leading, 64)
                     .padding(.trailing, 16)
                     .padding(.bottom, 14)
+            }
+        }
+        .background(hoveredAccountID == account.id ? Color.primary.opacity(0.04) : Color.clear)
+        .onHover { hovering in
+            withAnimation(.easeInOut(duration: 0.12)) {
+                if hovering {
+                    hoveredAccountID = account.id
+                } else if hoveredAccountID == account.id {
+                    hoveredAccountID = nil
+                }
             }
         }
         .contextMenu {
@@ -561,7 +593,7 @@ struct MessagingAccountsView: View {
     }
 
     private func accountDetails(_ account: MessagingAccountSummary) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: ThreadRelaySpacing.compact) {
             HStack(spacing: 18) {
                 detailItem("配置", value: account.configured ? "完整" : "不完整")
                 detailItem("凭据", value: account.secretSet ? "已设置" : "未设置")
