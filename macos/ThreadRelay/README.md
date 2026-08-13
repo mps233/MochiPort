@@ -1,8 +1,9 @@
 # ThreadRelay for macOS
 
-Phase 3 SwiftUI client for macOS 13 and newer. It includes the overview, daemon
-lifecycle diagnostics, and messaging-account management over the versioned
-loopback management API.
+SwiftUI preview client for macOS 13 and newer. It now includes the overview,
+Codex integration, session movement, messaging accounts, AI Gateway providers,
+request logs, and native Settings over the authenticated versioned loopback
+management API.
 
 ```sh
 swift build --package-path macos/ThreadRelay
@@ -11,15 +12,15 @@ swift run --package-path macos/ThreadRelay ThreadRelayMac
 ```
 
 The app probes `GET /healthz` and reads the authenticated
-`GET /api/v1/manage/dashboard`, `GET /api/v1/manage/lifecycle`, and
-`GET /api/v1/manage/im/accounts` endpoints with the shared management
-credential. Account enable/disable, delete, and Telegram token onboarding use
-authenticated POST endpoints under `/api/v1/manage/im/*`; Feishu credential
-and scan onboarding, WeChat scan/verification-code onboarding, and WeCom scan
-onboarding use the same protected namespace. When no service is reachable, the
-stable bundle installs a per-user LaunchAgent for its embedded Rust helper and
-starts it. An already-running service is never restarted by normal app launch,
-and closing the GUI leaves the LaunchAgent-managed daemon running.
+`/api/v1/manage/*` endpoints with the shared management credential. In addition
+to dashboard, lifecycle, and IM routes, the protected surface exposes sanitized
+Codex status/actions, sessions, AI Gateway configuration, request-log summaries
+and on-demand details, and non-secret Settings state. Provider keys and existing
+proxy credentials are write-only; request-log details are redacted again before
+they leave the management API. When no service is reachable, the stable bundle
+installs a per-user LaunchAgent for its embedded Rust helper and starts it. An
+already-running service is never restarted by normal app launch, and closing
+the GUI leaves the LaunchAgent-managed daemon running.
 
 The account screen currently supports Telegram, Feishu, WeChat, and WeCom
 status, filtering, search, enable/disable, expansion, and deletion. A shared
@@ -30,6 +31,16 @@ GUI; QR expiry and validation failures stay in the current step for retry,
 and a rejected enable/disable rolls the switch back. Older daemons that do
 not expose the versioned account routes are shown as requiring a backend
 update; the running daemon is not restarted automatically.
+
+The Codex screen can configure, repair, uninstall, refresh models, and perform
+an enhanced launch after preflight. Sessions can be searched and moved between
+their original provider and AI Gateway. The Gateway screen reads and writes
+provider protocol, URL, model list, priority, timeout, enablement, logging, and
+visible-model settings. Request logs support local search, destructive-clear
+confirmation, and lazy request/upstream/SSE/response detail loading. Settings
+controls the service-message language, app appearance, local connection mode,
+outbound proxy, daemon diagnostics, log directory, and a manual GitHub release
+check.
 
 For a deterministic visual review that never contacts the real daemon, open
 the shared `ThreadRelayPreview` scheme in Xcode and run it. The scheme sets
