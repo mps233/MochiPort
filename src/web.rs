@@ -44,6 +44,48 @@ pub fn router(state: SharedState) -> Router {
         .route("/lifecycle", get(manage_lifecycle))
         .route("/dashboard", get(manage_dashboard))
         .route("/log-directory", get(manage_log_directory))
+        // IM account management is exposed under the authenticated, versioned
+        // namespace.  Keep the legacy /api/im/* routes below during the
+        // migration window, but make new clients use this surface.
+        .route("/im/accounts", get(im_api::manage_im_accounts))
+        .route("/im/account/enabled", post(im_api::set_im_account_enabled))
+        .route("/im/account/delete", post(im_api::delete_im_account))
+        .route(
+            "/im/account/telegram",
+            post(im_api::manage_configure_telegram_account),
+        )
+        .route(
+            "/im/account/feishu",
+            post(onboarding::manage_configure_feishu_account),
+        )
+        // Scan-based onboarding shares the legacy handlers wherever their
+        // responses are already secret-free; only the Feishu poll needs the
+        // sanitized manage variant because the legacy response echoes the raw
+        // registration payload (including the issued app secret).
+        .route(
+            "/im/onboarding/feishu/start",
+            post(onboarding::feishu_onboard_start),
+        )
+        .route(
+            "/im/onboarding/feishu/poll",
+            post(onboarding::manage_feishu_onboard_poll),
+        )
+        .route(
+            "/im/onboarding/wechat/start",
+            post(onboarding::wechat_onboard_start),
+        )
+        .route(
+            "/im/onboarding/wechat/poll",
+            post(onboarding::wechat_onboard_poll),
+        )
+        .route(
+            "/im/onboarding/wecom/start",
+            post(onboarding::wecom_onboard_start),
+        )
+        .route(
+            "/im/onboarding/wecom/poll",
+            post(onboarding::wecom_onboard_poll),
+        )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             manage_api::require_bearer,
@@ -659,11 +701,27 @@ mod tests {
     const CANARY_MODEL: &str = "canary-model-must-not-leak";
     const CANARY_STATE_PATH: &str = "canary-private-state-path-must-not-leak.json";
 
-    fn management_test_state() -> (SharedState, TempDir, String) {
+    fn management_state_with_config(mut config: AppConfig) -> (SharedState, TempDir, String) {
         let temp = tempfile::tempdir().expect("tempdir");
         let config_path = temp.path().join("user-domain/config.toml");
-        let mut config = AppConfig::default();
         config.state_path = temp.path().join(CANARY_STATE_PATH);
+        let state = AppState::new(config_path.clone(), config, None, None);
+        manage_api::ensure_management_token(&config_path).expect("create management control file");
+        let control: Value = serde_json::from_slice(
+            &std::fs::read(manage_api::control_file_path(&config_path))
+                .expect("read management control file"),
+        )
+        .expect("parse management control file");
+        let token = control
+            .get("managementToken")
+            .and_then(Value::as_str)
+            .expect("management token")
+            .to_string();
+        (state, temp, token)
+    }
+
+    fn management_test_state() -> (SharedState, TempDir, String) {
+        let mut config = AppConfig::default();
         config.feishu_accounts = vec![FeishuConfig {
             account_id: "canary-feishu-account-must-not-leak".to_string(),
             app_id: "canary-feishu-app-id-must-not-leak".to_string(),
@@ -711,19 +769,7 @@ mod tests {
             models: vec![CANARY_MODEL.to_string()],
             ..ProviderConfig::default()
         }];
-        let state = AppState::new(config_path.clone(), config, None, None);
-        manage_api::ensure_management_token(&config_path).expect("create management control file");
-        let control: Value = serde_json::from_slice(
-            &std::fs::read(manage_api::control_file_path(&config_path))
-                .expect("read management control file"),
-        )
-        .expect("parse management control file");
-        let token = control
-            .get("managementToken")
-            .and_then(Value::as_str)
-            .expect("management token")
-            .to_string();
-        (state, temp, token)
+        management_state_with_config(config)
     }
 
     fn management_test_router() -> (Router, TempDir, String) {
@@ -736,11 +782,27 @@ mod tests {
         path: &str,
         bearer: Option<&str>,
     ) -> axum::response::Response {
-        let mut builder = Request::builder().method(Method::GET).uri(path);
+        request_response(app, Method::GET, path, bearer, None).await
+    }
+
+    async fn request_response(
+        app: Router,
+        method: Method,
+        path: &str,
+        bearer: Option<&str>,
+        body: Option<&str>,
+    ) -> axum::response::Response {
+        let mut builder = Request::builder().method(method).uri(path);
         if let Some(token) = bearer {
             builder = builder.header(AUTHORIZATION, format!("Bearer {token}"));
         }
-        app.oneshot(builder.body(Body::empty()).expect("request"))
+        let body = if let Some(body) = body {
+            builder = builder.header("content-type", "application/json");
+            Body::from(body.to_string())
+        } else {
+            Body::empty()
+        };
+        app.oneshot(builder.body(body).expect("request"))
             .await
             .expect("route response")
     }
@@ -785,6 +847,399 @@ mod tests {
 
         let valid = route_response(app, "/api/v1/manage/status", Some(&token)).await;
         assert_eq!(valid.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn manage_im_accounts_route_is_authenticated_and_exposes_no_secrets() {
+        let (app, temp, token) = management_test_router();
+
+        let missing = route_response(app.clone(), "/api/v1/manage/im/accounts", None).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let response = route_response(app, "/api/v1/manage/im/accounts", Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        let object = payload.as_object().expect("accounts response object");
+        assert_exact_keys(object, &["accounts", "service"]);
+
+        let service = object
+            .get("service")
+            .and_then(Value::as_object)
+            .expect("service object");
+        assert_exact_keys(
+            service,
+            &[
+                "apiMajor",
+                "instanceId",
+                "pid",
+                "ready",
+                "service",
+                "startedAtMs",
+            ],
+        );
+
+        let accounts = object
+            .get("accounts")
+            .and_then(Value::as_array)
+            .expect("accounts array");
+        assert_eq!(accounts.len(), 5);
+        for account in accounts {
+            let account = account.as_object().expect("account object");
+            assert_exact_keys(
+                account,
+                &[
+                    "accountId",
+                    "configured",
+                    "connected",
+                    "connecting",
+                    "displayName",
+                    "enabled",
+                    "lastError",
+                    "lastEventAtMs",
+                    "lastInboundAtMs",
+                    "platform",
+                    "polling",
+                    "secretSet",
+                ],
+            );
+        }
+
+        let encoded = serde_json::to_string(&payload).expect("serialize accounts response");
+        for secret in [
+            "canary-feishu-secret-must-not-leak",
+            "canary-telegram-token-one-must-not-leak",
+            "canary-telegram-token-two-must-not-leak",
+            "canary-wechat-token-must-not-leak",
+            "canary-wecom-secret-must-not-leak",
+        ] {
+            assert!(
+                !encoded.contains(secret),
+                "accounts response leaked {secret}"
+            );
+        }
+        drop(temp);
+    }
+
+    #[tokio::test]
+    async fn manage_im_mutation_routes_require_the_shared_bearer_credential() {
+        let (app, _temp, token) = management_test_router();
+        let body = r#"{"platform":"telegram","accountId":"missing","enabled":false}"#;
+
+        let missing_enabled = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/enabled",
+            None,
+            Some(body),
+        )
+        .await;
+        assert_eq!(missing_enabled.status(), StatusCode::UNAUTHORIZED);
+
+        let missing_delete = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/delete",
+            None,
+            Some(r#"{"platform":"telegram","accountId":"missing"}"#),
+        )
+        .await;
+        assert_eq!(missing_delete.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong_enabled = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/enabled",
+            Some("wrong-management-token"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(wrong_enabled.status(), StatusCode::UNAUTHORIZED);
+
+        let authorized_missing = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/im/account/enabled",
+            Some(&token),
+            Some(body),
+        )
+        .await;
+        assert_eq!(authorized_missing.status(), StatusCode::NOT_FOUND);
+
+        let (unknown_app, _unknown_temp, unknown_token) = management_test_router();
+        let unknown_platform = request_response(
+            unknown_app,
+            Method::POST,
+            "/api/v1/manage/im/account/delete",
+            Some(&unknown_token),
+            Some(r#"{"platform":"matrix","accountId":"x"}"#),
+        )
+        .await;
+        assert_eq!(unknown_platform.status(), StatusCode::BAD_REQUEST);
+
+        let (legacy_app, legacy_temp, legacy_token) = management_test_router();
+        let legacy_body = r#"{"platform":"telegram","accountId":"legacy-missing"}"#;
+        let legacy_missing = request_response(
+            legacy_app,
+            Method::POST,
+            "/api/v1/manage/im/account/delete",
+            Some(&legacy_token),
+            Some(legacy_body),
+        )
+        .await;
+        assert_eq!(legacy_missing.status(), StatusCode::NOT_FOUND);
+        let persisted = std::fs::read_to_string(legacy_temp.path().join("user-domain/config.toml"));
+        assert!(
+            persisted.is_err(),
+            "failed delete should not persist migration"
+        );
+    }
+
+    #[tokio::test]
+    async fn manage_im_mutations_reach_legacy_singletons_and_do_not_resurrect_them() {
+        // A feishu legacy singleton synthesizes its account id from the legacy
+        // bridge account id; that id must stay usable across migration.
+        let mut feishu_config = AppConfig::default();
+        feishu_config.feishu.app_id = "legacy-feishu-app".to_string();
+        feishu_config.feishu.app_secret = "legacy-feishu-secret".to_string();
+        feishu_config.bridge.account_id = "legacy-bridge-id".to_string();
+        let (feishu_state, _feishu_temp, feishu_token) =
+            management_state_with_config(feishu_config);
+        let feishu_app = router(feishu_state);
+
+        let toggled = request_response(
+            feishu_app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/enabled",
+            Some(&feishu_token),
+            Some(r#"{"platform":"feishu","accountId":"legacy-bridge-id","enabled":false}"#),
+        )
+        .await;
+        assert_eq!(toggled.status(), StatusCode::OK);
+        let accounts = response_json(
+            route_response(
+                feishu_app,
+                "/api/v1/manage/im/accounts",
+                Some(&feishu_token),
+            )
+            .await,
+        )
+        .await;
+        let accounts = accounts["accounts"].as_array().expect("accounts array");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0]["platform"], "feishu");
+        assert_eq!(accounts[0]["accountId"], "legacy-bridge-id");
+        assert_eq!(accounts[0]["enabled"], false);
+
+        // Deleting a legacy wechat/wecom singleton must clear the singleton
+        // fields too, otherwise the effective view resurrects the account on
+        // the next read.
+        let mut wechat_config = AppConfig::default();
+        wechat_config.wechat.bot_token = "legacy-wechat-token".to_string();
+        let (wechat_state, _wechat_temp, wechat_token) =
+            management_state_with_config(wechat_config);
+        let wechat_app = router(wechat_state);
+
+        let deleted = request_response(
+            wechat_app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/delete",
+            Some(&wechat_token),
+            Some(r#"{"platform":"wechat","accountId":"wechat"}"#),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let accounts = response_json(
+            route_response(
+                wechat_app,
+                "/api/v1/manage/im/accounts",
+                Some(&wechat_token),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(
+            accounts["accounts"]
+                .as_array()
+                .expect("accounts array")
+                .len(),
+            0,
+            "deleted legacy wechat singleton must not resurrect"
+        );
+
+        let mut wecom_config = AppConfig::default();
+        wecom_config.wecom.bot_id = "legacy-wecom-bot".to_string();
+        wecom_config.wecom.secret = "legacy-wecom-secret".to_string();
+        let (wecom_state, _wecom_temp, wecom_token) = management_state_with_config(wecom_config);
+        let wecom_app = router(wecom_state);
+
+        let deleted = request_response(
+            wecom_app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/delete",
+            Some(&wecom_token),
+            Some(r#"{"platform":"wecom","accountId":"wecom"}"#),
+        )
+        .await;
+        assert_eq!(deleted.status(), StatusCode::OK);
+        let accounts = response_json(
+            route_response(wecom_app, "/api/v1/manage/im/accounts", Some(&wecom_token)).await,
+        )
+        .await;
+        assert_eq!(
+            accounts["accounts"]
+                .as_array()
+                .expect("accounts array")
+                .len(),
+            0,
+            "deleted legacy wecom singleton must not resurrect"
+        );
+    }
+
+    #[tokio::test]
+    async fn manage_im_onboarding_routes_require_bearer_and_validate_input_before_network() {
+        let (app, _temp, token) = management_test_router();
+
+        // Every onboarding route is inside the bearer layer; unauthenticated
+        // requests are rejected by the middleware before any handler runs.
+        for (path, body) in [
+            (
+                "/api/v1/manage/im/account/feishu",
+                r#"{"appId":"a","appSecret":"b"}"#,
+            ),
+            ("/api/v1/manage/im/onboarding/feishu/start", "{}"),
+            (
+                "/api/v1/manage/im/onboarding/feishu/poll",
+                r#"{"deviceCode":"x"}"#,
+            ),
+            ("/api/v1/manage/im/onboarding/wechat/start", "{}"),
+            (
+                "/api/v1/manage/im/onboarding/wechat/poll",
+                r#"{"sessionKey":"x"}"#,
+            ),
+            ("/api/v1/manage/im/onboarding/wecom/start", "{}"),
+            (
+                "/api/v1/manage/im/onboarding/wecom/poll",
+                r#"{"sessionKey":"x"}"#,
+            ),
+        ] {
+            let response =
+                request_response(app.clone(), Method::POST, path, None, Some(body)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "expected 401 for {path}"
+            );
+        }
+
+        // Input validation runs before any upstream network call, so these
+        // authorized failure paths stay hermetic.
+        let missing_secret = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/feishu",
+            Some(&token),
+            Some(r#"{"appId":"cli-app"}"#),
+        )
+        .await;
+        assert_eq!(missing_secret.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(missing_secret).await,
+            json!({ "ok": false, "error": "missing appSecret" })
+        );
+
+        let masked_secret = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/feishu",
+            Some(&token),
+            Some(r#"{"appId":"cli-app","appSecret":"******"}"#),
+        )
+        .await;
+        assert_eq!(masked_secret.status(), StatusCode::BAD_REQUEST);
+
+        let missing_device_code = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/onboarding/feishu/poll",
+            Some(&token),
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(missing_device_code.status(), StatusCode::BAD_REQUEST);
+
+        let stale_wechat_session = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/onboarding/wechat/poll",
+            Some(&token),
+            Some(r#"{"sessionKey":"wechat-onboard-unknown"}"#),
+        )
+        .await;
+        assert_eq!(stale_wechat_session.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(stale_wechat_session).await,
+            json!({ "done": false, "error": "missing_session" })
+        );
+
+        let stale_wecom_session = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/im/onboarding/wecom/poll",
+            Some(&token),
+            Some(r#"{"sessionKey":"wecom-onboard-unknown"}"#),
+        )
+        .await;
+        assert_eq!(stale_wecom_session.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(stale_wecom_session).await,
+            json!({ "done": false, "error": "missing_session" })
+        );
+    }
+
+    #[tokio::test]
+    async fn manage_im_telegram_route_requires_bearer_and_validates_the_token_shape() {
+        let (app, _temp, token) = management_test_router();
+        let body = r#"{"botToken":"12345:fixture-token"}"#;
+
+        let missing = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/telegram",
+            None,
+            Some(body),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let empty_token = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/im/account/telegram",
+            Some(&token),
+            Some(r#"{"botToken":"   "}"#),
+        )
+        .await;
+        assert_eq!(empty_token.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(empty_token).await,
+            json!({ "ok": false, "error": "missing botToken" })
+        );
+
+        // Masked placeholder values from status screens must never be
+        // accepted as a real credential.
+        let masked_token = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/im/account/telegram",
+            Some(&token),
+            Some(r#"{"botToken":"********"}"#),
+        )
+        .await;
+        assert_eq!(masked_token.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            response_json(masked_token).await,
+            json!({ "ok": false, "error": "missing botToken" })
+        );
     }
 
     #[tokio::test]

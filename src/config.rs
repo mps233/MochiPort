@@ -302,6 +302,8 @@ impl AppConfig {
         if self.feishu_accounts.is_empty() && self.feishu.is_configured() {
             let mut account = self.feishu.clone();
             if account.account_id.trim().is_empty() {
+                // Must stay identical to effective_feishu_accounts; see the
+                // comment there before changing this priority order.
                 account.account_id = non_empty(&self.bridge.account_id)
                     .or_else(|| non_empty(&account.app_id))
                     .unwrap_or_else(|| "default".to_string());
@@ -343,8 +345,13 @@ impl AppConfig {
         .into_iter()
         .map(|mut account| {
             if account.account_id.trim().is_empty() {
-                account.account_id =
-                    non_empty(&account.app_id).unwrap_or_else(|| "default".to_string());
+                // Must stay identical to migrate_legacy_im_accounts: the id
+                // shown and accepted by management routes before migration has
+                // to survive migration, otherwise toggling or deleting a
+                // legacy singleton dead-ends on a 404.
+                account.account_id = non_empty(&self.bridge.account_id)
+                    .or_else(|| non_empty(&account.app_id))
+                    .unwrap_or_else(|| "default".to_string());
             }
             account
         })
@@ -415,6 +422,36 @@ impl AppConfig {
         find_account(&self.effective_wecom_accounts(), account_id, |account| {
             account.account_id.as_str()
         })
+    }
+
+    /// Check an account through the effective (legacy-compatible) view
+    /// without mutating the configuration. Management mutations use this
+    /// before migrating legacy singleton fields so rejected requests remain
+    /// side-effect free.
+    pub fn has_im_account(&self, platform: &str, account_id: &str) -> bool {
+        let account_id = account_id.trim();
+        if account_id.is_empty() {
+            return false;
+        }
+        match platform.trim().to_ascii_lowercase().as_str() {
+            "feishu" => self
+                .effective_feishu_accounts()
+                .iter()
+                .any(|account| account.account_id.trim() == account_id),
+            "telegram" => self
+                .effective_telegram_accounts()
+                .iter()
+                .any(|account| account.account_id.trim() == account_id),
+            "wechat" => self
+                .effective_wechat_accounts()
+                .iter()
+                .any(|account| account.account_id.trim() == account_id),
+            "wecom" => self
+                .effective_wecom_accounts()
+                .iter()
+                .any(|account| account.account_id.trim() == account_id),
+            _ => false,
+        }
     }
 
     pub fn upsert_feishu_account(&mut self, account: FeishuConfig) {
@@ -751,5 +788,23 @@ mod tests {
         let account = config.wecom_account("wecom").expect("wecom account");
         assert_eq!(account.bot_id, "bot-1");
         assert!(account.is_active());
+    }
+
+    #[test]
+    fn feishu_legacy_account_keeps_the_same_id_before_and_after_migration() {
+        let mut config = AppConfig::default();
+        config.feishu.app_id = "cli-app".to_string();
+        config.feishu.app_secret = "secret".to_string();
+        config.bridge.account_id = "legacy-bridge".to_string();
+
+        let effective = config.effective_feishu_accounts();
+        assert_eq!(effective.len(), 1);
+        assert_eq!(effective[0].account_id, "legacy-bridge");
+        assert!(config.has_im_account("feishu", "legacy-bridge"));
+
+        assert!(config.migrate_legacy_im_accounts());
+        assert!(config.has_im_account("feishu", "legacy-bridge"));
+        assert!(config.set_im_account_enabled("feishu", "legacy-bridge", false));
+        assert!(config.remove_im_account("feishu", "legacy-bridge"));
     }
 }

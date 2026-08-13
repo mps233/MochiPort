@@ -83,6 +83,142 @@ pub(super) async fn feishu_onboard_start(State(state): State<SharedState>) -> im
     }
 }
 
+struct FeishuPollOutcome {
+    done: bool,
+    app_id: Option<String>,
+    open_id: Option<String>,
+    display_name: Option<String>,
+    raw: serde_json::Value,
+}
+
+/// Poll the Feishu device-code registration once and persist the account on
+/// success. Shared by the legacy poll route and the sanitized manage route.
+async fn poll_feishu_registration(
+    state: &SharedState,
+    device_code: &str,
+) -> Result<FeishuPollOutcome, (StatusCode, Json<serde_json::Value>)> {
+    let settings = {
+        let config = state.config.lock().await;
+        FeishuSettings::from_app_config(&config.feishu)
+    };
+    let api = FeishuApi::new(settings);
+    let result = api
+        .poll_app_registration(device_code)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+        })?;
+    let app_id = result
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let app_secret = result
+        .get("client_secret")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let open_id = result
+        .get("user_info")
+        .and_then(|v| v.get("open_id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let done = app_id.is_some() && app_secret.is_some();
+    let mut display_name = None;
+    if let (Some(app_id), Some(app_secret)) = (app_id.clone(), app_secret) {
+        display_name =
+            persist_feishu_registration(state, &app_id, &app_secret, open_id.as_deref(), None)
+                .await?;
+    }
+    Ok(FeishuPollOutcome {
+        done,
+        app_id,
+        open_id,
+        display_name,
+        raw: result,
+    })
+}
+
+/// Persist verified Feishu credentials as an account, refresh the display
+/// name, and restart the bridge. Pass `display_name` when the caller already
+/// verified the credentials by fetching it, to skip the second lookup.
+async fn persist_feishu_registration(
+    state: &SharedState,
+    app_id: &str,
+    app_secret: &str,
+    open_id: Option<&str>,
+    display_name: Option<String>,
+) -> Result<Option<String>, (StatusCode, Json<serde_json::Value>)> {
+    let feishu_config = {
+        let mut config = state.config.lock().await;
+        config.migrate_legacy_im_accounts();
+        config.feishu_accounts.retain(|account| {
+            account.account_id.trim() == app_id || account.app_id.trim() != app_id
+        });
+        let mut account = config.feishu_account(app_id).unwrap_or_default();
+        account.enabled = true;
+        account.account_id = app_id.to_string();
+        account.app_id = app_id.to_string();
+        account.app_secret = app_secret.to_string();
+        if let Some(open_id) = open_id
+            && !account
+                .allowed_open_ids
+                .iter()
+                .any(|existing| existing == open_id)
+        {
+            account.allowed_open_ids.push(open_id.to_string());
+        }
+        config.upsert_feishu_account(account.clone());
+        let saved_account = account.clone();
+        if !config.feishu.is_configured() || config.feishu.app_id == app_id {
+            config.feishu = account;
+        }
+        config.bridge.enabled = true;
+        if let Err(err) = config.save(&state.config_path) {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            ));
+        }
+        saved_account
+    };
+    let mut display_name = display_name;
+    if display_name.is_none() {
+        let api = FeishuApi::new(FeishuSettings::from_app_config(&feishu_config));
+        display_name = api
+            .get_application_display_name(app_id)
+            .await
+            .ok()
+            .flatten();
+    }
+    if let Some(name) = display_name.clone() {
+        let mut config = state.config.lock().await;
+        if let Some(mut account) = config.feishu_account(app_id) {
+            account.display_name = name;
+            config.upsert_feishu_account(account.clone());
+            if config.feishu.app_id == app_id {
+                config.feishu = account;
+            }
+            let _ = config.save(&state.config_path);
+        }
+    }
+    state
+        .push_event(
+            "info",
+            "feishu_onboard_completed",
+            format!("app_id={app_id} open_id={}", open_id.unwrap_or_default()),
+        )
+        .await;
+    im_api::start_bridge_task(
+        state,
+        im_api::BridgeStartMode::Restart,
+        "bridge restarted after Feishu onboarding",
+    )
+    .await;
+    Ok(display_name)
+}
+
 pub(super) async fn feishu_onboard_poll(
     State(state): State<SharedState>,
     Json(payload): Json<serde_json::Value>,
@@ -93,110 +229,135 @@ pub(super) async fn feishu_onboard_poll(
             Json(json!({ "error": "missing deviceCode" })),
         );
     };
-    let settings = {
-        let config = state.config.lock().await;
-        FeishuSettings::from_app_config(&config.feishu)
-    };
-    let api = FeishuApi::new(settings);
-    match api.poll_app_registration(device_code).await {
-        Ok(result) => {
-            let app_id = result
-                .get("client_id")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let app_secret = result
-                .get("client_secret")
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let open_id = result
-                .get("user_info")
-                .and_then(|v| v.get("open_id"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let done = app_id.is_some() && app_secret.is_some();
-            let mut display_name = None;
-            if let (Some(app_id), Some(app_secret)) = (app_id.clone(), app_secret.clone()) {
-                let feishu_config = {
-                    let mut config = state.config.lock().await;
-                    config.migrate_legacy_im_accounts();
-                    config.feishu_accounts.retain(|account| {
-                        account.account_id.trim() == app_id || account.app_id.trim() != app_id
-                    });
-                    let mut account = config.feishu_account(&app_id).unwrap_or_default();
-                    account.enabled = true;
-                    account.account_id = app_id.clone();
-                    account.app_id = app_id.clone();
-                    account.app_secret = app_secret;
-                    if let Some(open_id) = open_id.clone()
-                        && !account.allowed_open_ids.contains(&open_id)
-                    {
-                        account.allowed_open_ids.push(open_id);
-                    }
-                    config.upsert_feishu_account(account.clone());
-                    let saved_account = account.clone();
-                    if !config.feishu.is_configured() || config.feishu.app_id == app_id {
-                        config.feishu = account.clone();
-                    }
-                    config.bridge.enabled = true;
-                    if let Err(err) = config.save(&state.config_path) {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(json!({ "error": err.to_string() })),
-                        );
-                    }
-                    saved_account
-                };
-                let api = FeishuApi::new(FeishuSettings::from_app_config(&feishu_config));
-                display_name = api
-                    .get_application_display_name(&app_id)
-                    .await
-                    .ok()
-                    .flatten();
-                if let Some(name) = display_name.clone() {
-                    let mut config = state.config.lock().await;
-                    if let Some(mut account) = config.feishu_account(&app_id) {
-                        account.display_name = name.clone();
-                        config.upsert_feishu_account(account.clone());
-                        if config.feishu.app_id == app_id {
-                            config.feishu = account;
-                        }
-                        let _ = config.save(&state.config_path);
-                    }
-                }
-                state
-                    .push_event(
-                        "info",
-                        "feishu_onboard_completed",
-                        format!(
-                            "app_id={app_id} open_id={}",
-                            open_id.clone().unwrap_or_default()
-                        ),
-                    )
-                    .await;
-                im_api::start_bridge_task(
-                    &state,
-                    im_api::BridgeStartMode::Restart,
-                    "bridge restarted after Feishu onboarding",
-                )
-                .await;
-            }
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "done": done,
-                    "appId": app_id,
-                    "openId": open_id,
-                    "displayName": display_name,
-                    "error": result.get("error").cloned(),
-                    "errorDescription": result.get("error_description").cloned(),
-                    "raw": result,
-                })),
-            )
-        }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
+    match poll_feishu_registration(&state, device_code).await {
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(json!({
+                "done": outcome.done,
+                "appId": outcome.app_id,
+                "openId": outcome.open_id,
+                "displayName": outcome.display_name,
+                "error": outcome.raw.get("error").cloned(),
+                "errorDescription": outcome.raw.get("error_description").cloned(),
+                "raw": outcome.raw,
+            })),
         ),
+        Err(response) => response,
+    }
+}
+
+/// Sanitized variant of the Feishu poll for the versioned management API.
+/// Unlike the legacy route it never echoes the raw registration payload,
+/// which contains the freshly issued app secret.
+pub(super) async fn manage_feishu_onboard_poll(
+    State(state): State<SharedState>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(device_code) = payload.get("deviceCode").and_then(|v| v.as_str()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "missing deviceCode" })),
+        );
+    };
+    match poll_feishu_registration(&state, device_code).await {
+        Ok(outcome) => (
+            StatusCode::OK,
+            Json(json!({
+                "done": outcome.done,
+                "appId": outcome.app_id,
+                "displayName": outcome.display_name,
+                "error": outcome
+                    .raw
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+                "errorDescription": outcome
+                    .raw
+                    .get("error_description")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
+            })),
+        ),
+        Err(response) => response,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ConfigureFeishuAccountRequest {
+    app_id: Option<String>,
+    app_secret: Option<String>,
+}
+
+/// Manual credential onboarding for Feishu on the versioned management API.
+/// Credentials are validated against the Feishu open platform before they
+/// are persisted; the response never echoes the secret.
+pub(super) async fn manage_configure_feishu_account(
+    State(state): State<SharedState>,
+    Json(request): Json<ConfigureFeishuAccountRequest>,
+) -> impl IntoResponse {
+    let Some(app_id) = request
+        .app_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing appId" })),
+        );
+    };
+    let Some(app_secret) = request
+        .app_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !im_api::is_masked_secret(value))
+        .map(str::to_string)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing appSecret" })),
+        );
+    };
+    let candidate = crate::config::FeishuConfig {
+        enabled: true,
+        app_id: app_id.clone(),
+        app_secret: app_secret.clone(),
+        ..Default::default()
+    };
+    let api = FeishuApi::new(FeishuSettings::from_app_config(&candidate));
+    let display_name = match tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        api.get_application_display_name(&app_id),
+    )
+    .await
+    {
+        Ok(Ok(name)) => name,
+        Ok(Err(err)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            );
+        }
+        Err(_) => {
+            return (
+                StatusCode::REQUEST_TIMEOUT,
+                Json(json!({ "ok": false, "error": "feishu credential check timeout" })),
+            );
+        }
+    };
+    match persist_feishu_registration(&state, &app_id, &app_secret, None, display_name).await {
+        Ok(display_name) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "platform": "feishu",
+                "accountId": app_id,
+                "displayName": display_name,
+            })),
+        ),
+        Err(response) => response,
     }
 }
 

@@ -157,7 +157,7 @@ pub(super) async fn set_im_channel_enabled(
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ImAccountItem {
+pub(super) struct ImAccountItem {
     platform: String,
     account_id: String,
     display_name: Option<String>,
@@ -178,8 +178,25 @@ pub(super) struct ImAccountsResponse {
     accounts: Vec<ImAccountItem>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ManageImAccountsResponse {
+    service: crate::manage_api::ManageStatusResponse,
+    accounts: Vec<ImAccountItem>,
+}
+
 pub(super) async fn im_accounts(State(state): State<SharedState>) -> Json<ImAccountsResponse> {
     Json(im_accounts_snapshot(&state).await)
+}
+
+pub(super) async fn manage_im_accounts(
+    State(state): State<SharedState>,
+) -> Json<ManageImAccountsResponse> {
+    let accounts = im_accounts_snapshot(&state).await;
+    Json(ManageImAccountsResponse {
+        service: crate::manage_api::status_snapshot(&state),
+        accounts: accounts.accounts,
+    })
 }
 
 pub(super) async fn im_accounts_snapshot(state: &SharedState) -> ImAccountsResponse {
@@ -189,6 +206,12 @@ pub(super) async fn im_accounts_snapshot(state: &SharedState) -> ImAccountsRespo
         accounts: im_account_items(&config, &runtime),
     }
 }
+
+/// API contract with the SwiftUI client: `APIClient.performIMMutation`
+/// matches this exact string to tell "the account does not exist" apart from
+/// "an older daemon has no versioned account routes" (both are 404).
+/// Do not reword without updating the Swift client and its tests.
+pub(super) const IM_ACCOUNT_NOT_FOUND_ERROR: &str = "IM account not found";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -210,13 +233,27 @@ pub(super) async fn set_im_account_enabled(
             Json(json!({ "ok": false, "error": "missing accountId" })),
         );
     }
+    if !is_supported_im_platform(&platform) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "unknown IM platform" })),
+        );
+    }
     let should_run = {
         let mut config = state.config.lock().await;
+        // Check the effective view before migration so a failed request does
+        // not leave a legacy singleton copied into the in-memory account list.
+        if !config.has_im_account(&platform, &account_id) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
+            );
+        }
         config.migrate_legacy_im_accounts();
         if !config.set_im_account_enabled(&platform, &account_id, request.enabled) {
             return (
                 StatusCode::NOT_FOUND,
-                Json(json!({ "ok": false, "error": "IM account not found" })),
+                Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
             );
         }
         set_legacy_im_account_enabled(&mut config, &platform, &account_id, request.enabled);
@@ -266,17 +303,31 @@ pub(super) async fn delete_im_account(
             Json(json!({ "ok": false, "error": "missing accountId" })),
         );
     }
+    if !is_supported_im_platform(&platform) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "unknown IM platform" })),
+        );
+    }
     let should_run = {
         let mut config = state.config.lock().await;
+        // Avoid migration and legacy cleanup for a request that cannot remove
+        // an account. This keeps a failed delete side-effect free.
+        if !config.has_im_account(&platform, &account_id) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
+            );
+        }
         config.migrate_legacy_im_accounts();
         let removed = config.remove_im_account(&platform, &account_id);
-        clear_legacy_im_account(&mut config, &platform, &account_id);
         if !removed {
             return (
                 StatusCode::NOT_FOUND,
-                Json(json!({ "ok": false, "error": "IM account not found" })),
+                Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
             );
         }
+        clear_legacy_im_account(&mut config, &platform, &account_id);
         config.bridge.enabled = im_bridge_configured(&config);
         if let Err(err) = config.save(&state.config_path) {
             return (
@@ -570,19 +621,35 @@ fn set_legacy_im_account_enabled(
         "feishu"
             if config.feishu.account_id.trim() == account_id
                 || (config.feishu.account_id.trim().is_empty()
-                    && config.bridge.account_id.trim() == account_id) =>
+                    && (config.feishu.app_id.trim() == account_id
+                        || config.bridge.account_id.trim() == account_id)) =>
         {
             config.feishu.enabled = enabled
         }
-        "telegram" if config.telegram.account_id.trim() == account_id => {
+        "telegram"
+            if config.telegram.account_id.trim() == account_id
+                || (config.telegram.account_id.trim().is_empty() && account_id == "telegram") =>
+        {
             config.telegram.enabled = enabled
         }
-        "wechat" if config.wechat.account_id.trim() == account_id => {
+        "wechat"
+            if config.wechat.account_id.trim() == account_id
+                || (config.wechat.account_id.trim().is_empty() && account_id == "wechat") =>
+        {
             config.wechat.enabled = enabled
         }
-        "wecom" if config.wecom.account_id.trim() == account_id => config.wecom.enabled = enabled,
+        "wecom"
+            if config.wecom.account_id.trim() == account_id
+                || (config.wecom.account_id.trim().is_empty() && account_id == "wecom") =>
+        {
+            config.wecom.enabled = enabled
+        }
         _ => {}
     }
+}
+
+fn is_supported_im_platform(platform: &str) -> bool {
+    matches!(platform, "feishu" | "telegram" | "wechat" | "wecom")
 }
 
 fn clear_legacy_im_account(config: &mut AppConfig, platform: &str, account_id: &str) {
@@ -601,10 +668,16 @@ fn clear_legacy_im_account(config: &mut AppConfig, platform: &str, account_id: &
         {
             config.telegram = Default::default();
         }
-        "wechat" if config.wechat.account_id.trim() == account_id => {
+        "wechat"
+            if config.wechat.account_id.trim() == account_id
+                || (config.wechat.account_id.trim().is_empty() && account_id == "wechat") =>
+        {
             config.wechat = Default::default();
         }
-        "wecom" if config.wecom.account_id.trim() == account_id => {
+        "wecom"
+            if config.wecom.account_id.trim() == account_id
+                || (config.wecom.account_id.trim().is_empty() && account_id == "wecom") =>
+        {
             config.wecom = Default::default();
         }
         _ => {}
@@ -858,23 +931,24 @@ pub(super) struct ConfigureTelegramBotRequest {
     mention_only: Option<bool>,
 }
 
-pub(super) async fn configure_telegram_bot(
-    State(state): State<SharedState>,
-    Json(request): Json<ConfigureTelegramBotRequest>,
-) -> impl IntoResponse {
-    let Some(token) = request
-        .bot_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && !is_masked_secret(value))
-        .map(str::to_string)
-    else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "ok": false, "error": "missing botToken" })),
-        );
-    };
-    let mention_only = request.mention_only.unwrap_or(false);
+impl ConfigureTelegramBotRequest {
+    fn validated_token(&self) -> Option<String> {
+        self.bot_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !is_masked_secret(value))
+            .map(str::to_string)
+    }
+}
+
+/// Verify a Telegram bot token against getMe, persist the derived account,
+/// and restart the bridge. Shared by the legacy `/api/telegram/configure`
+/// route and the versioned `/api/v1/manage/im/account/telegram` route.
+async fn apply_telegram_token(
+    state: &SharedState,
+    token: String,
+    mention_only: bool,
+) -> Result<crate::config::TelegramConfig, (StatusCode, Json<serde_json::Value>)> {
     let mut telegram_config = crate::config::TelegramConfig {
         enabled: true,
         account_id: String::new(),
@@ -887,16 +961,16 @@ pub(super) async fn configure_telegram_bot(
     let user = match tokio::time::timeout(std::time::Duration::from_secs(5), api.get_me()).await {
         Ok(Ok(user)) => user,
         Ok(Err(err)) => {
-            return (
+            return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "ok": false, "error": err.to_string() })),
-            );
+            ));
         }
         Err(_) => {
-            return (
+            return Err((
                 StatusCode::REQUEST_TIMEOUT,
                 Json(json!({ "ok": false, "error": "telegram getMe timeout" })),
-            );
+            ));
         }
     };
     telegram_config.account_id = format!("tg_{}", user.id);
@@ -922,25 +996,68 @@ pub(super) async fn configure_telegram_bot(
         }
         config.bridge.enabled = true;
         if let Err(err) = config.save(&state.config_path) {
-            return (
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "ok": false, "error": err.to_string() })),
-            );
+            ));
         }
     }
     start_bridge_task(
-        &state,
+        state,
         BridgeStartMode::Restart,
         "bridge restarted after Telegram configuration",
     )
     .await;
-    (
-        StatusCode::OK,
-        Json(json!({ "ok": true, "configured": true, "accountId": telegram_config.account_id })),
-    )
+    Ok(telegram_config)
 }
 
-fn is_masked_secret(value: &str) -> bool {
+pub(super) async fn configure_telegram_bot(
+    State(state): State<SharedState>,
+    Json(request): Json<ConfigureTelegramBotRequest>,
+) -> impl IntoResponse {
+    let Some(token) = request.validated_token() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing botToken" })),
+        );
+    };
+    match apply_telegram_token(&state, token, request.mention_only.unwrap_or(false)).await {
+        Ok(account) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "configured": true, "accountId": account.account_id })),
+        ),
+        Err(response) => response,
+    }
+}
+
+/// Versioned management variant of the Telegram token onboarding. The token
+/// is write-only: the response only confirms the derived account identity and
+/// never echoes the credential.
+pub(super) async fn manage_configure_telegram_account(
+    State(state): State<SharedState>,
+    Json(request): Json<ConfigureTelegramBotRequest>,
+) -> impl IntoResponse {
+    let Some(token) = request.validated_token() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing botToken" })),
+        );
+    };
+    match apply_telegram_token(&state, token, request.mention_only.unwrap_or(false)).await {
+        Ok(account) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "platform": "telegram",
+                "accountId": account.account_id,
+                "displayName": account.display_name,
+            })),
+        ),
+        Err(response) => response,
+    }
+}
+
+pub(super) fn is_masked_secret(value: &str) -> bool {
     let trimmed = value.trim();
     !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '*')
 }
