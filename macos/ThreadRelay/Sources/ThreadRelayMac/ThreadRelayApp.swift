@@ -1,10 +1,138 @@
 import SwiftUI
 import AppKit
+import Darwin
+
+enum SingleInstanceError: LocalizedError, Equatable {
+    case alreadyRunning
+    case directoryUnavailable(String)
+    case openFailed(Int32)
+    case lockFailed(Int32)
+
+    var errorDescription: String? {
+        switch self {
+        case .alreadyRunning:
+            "ThreadRelay 已在运行。"
+        case let .directoryUnavailable(path):
+            "无法准备 ThreadRelay 单实例锁目录：\(path)"
+        case let .openFailed(error):
+            "无法打开 ThreadRelay 单实例锁（错误码 \(error)）。"
+        case let .lockFailed(error):
+            "无法获取 ThreadRelay 单实例锁（错误码 \(error)）。"
+        }
+    }
+}
+
+/// An advisory lock held for the lifetime of the GUI process.  Launch Services
+/// prevents normal double-click launches, while this guard also covers direct
+/// executable launches and two launches racing before Launch Services settles.
+final class SingleInstanceGuard: @unchecked Sendable {
+    private let descriptor: Int32
+
+    private init(descriptor: Int32) {
+        self.descriptor = descriptor
+    }
+
+    deinit {
+        _ = flock(descriptor, LOCK_UN)
+        _ = close(descriptor)
+    }
+
+    static func acquire(
+        lockURL: URL,
+        fileManager: FileManager = .default
+    ) throws -> SingleInstanceGuard {
+        let directory = lockURL.deletingLastPathComponent()
+        do {
+            try fileManager.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true,
+                attributes: [FileAttributeKey.posixPermissions: 0o700]
+            )
+        } catch {
+            throw SingleInstanceError.directoryUnavailable(directory.path)
+        }
+
+        let descriptor = Darwin.open(
+            lockURL.path,
+            O_CREAT | O_RDWR,
+            mode_t(0o600)
+        )
+        guard descriptor >= 0 else {
+            throw SingleInstanceError.openFailed(errno)
+        }
+
+        guard flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            let error = errno
+            _ = close(descriptor)
+            if error == EWOULDBLOCK || error == EAGAIN {
+                throw SingleInstanceError.alreadyRunning
+            }
+            throw SingleInstanceError.lockFailed(error)
+        }
+
+        // Keep the lock file private even when an old file was created with
+        // broader permissions by a previous build.
+        _ = Darwin.fchmod(descriptor, mode_t(0o600))
+        return SingleInstanceGuard(descriptor: descriptor)
+    }
+
+    static func defaultLockURL(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) -> URL {
+        if let override = environment["THREADRELAY_GUI_LOCK_PATH"], !override.isEmpty {
+            return URL(fileURLWithPath: override)
+        }
+
+        let home = environment["HOME"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? fileManager.homeDirectoryForCurrentUser
+        let identifier = (bundleIdentifier ?? "io.github.mps233.threadrelay")
+            .replacingOccurrences(of: "/", with: "-")
+        return home
+            .appendingPathComponent("Library/Application Support/ThreadRelay", isDirectory: true)
+            .appendingPathComponent("\(identifier).gui.lock")
+    }
+}
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var instanceGuard: SingleInstanceGuard?
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        do {
+            instanceGuard = try SingleInstanceGuard.acquire(
+                lockURL: SingleInstanceGuard.defaultLockURL()
+            )
+        } catch SingleInstanceError.alreadyRunning {
+            activateExistingInstance()
+            NSApplication.shared.terminate(nil)
+        } catch {
+            // Fail closed: running without the lock can create duplicate
+            // refresh loops and conflicting window state. Without a visible
+            // alert the failure would look like the app silently not opening.
+            NSLog("ThreadRelay GUI 单实例保护不可用：%@", error.localizedDescription)
+            let alert = NSAlert()
+            alert.alertStyle = .critical
+            alert.messageText = "ThreadRelay 无法启动"
+            alert.informativeText = error.localizedDescription
+            alert.addButton(withTitle: "退出")
+            alert.runModal()
+            NSApplication.shared.terminate(nil)
+        }
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    private func activateExistingInstance() {
+        guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let existing = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            .first { $0.processIdentifier != currentPID }
+        existing?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
     }
 }
 
@@ -21,7 +149,7 @@ struct ThreadRelayApp: App {
         switch ProcessInfo.processInfo.environment["THREADRELAY_PREVIEW_FIXTURE"] {
         case "available": .available
         case "bridge": .bridgeAvailable
-        case "unavailable": .unavailable("Fixture: daemon is offline")
+        case "unavailable": .unavailable("预览：后台服务已离线")
         default: nil
         }
     }
@@ -39,12 +167,12 @@ struct ThreadRelayApp: App {
         .commands {
             SidebarCommands()
             CommandGroup(replacing: .appInfo) {
-                Button("About ThreadRelay") {
+                Button("关于 ThreadRelay") {
                     openAboutWindow()
                 }
             }
             CommandGroup(after: .sidebar) {
-                Button("Refresh") {
+                Button("刷新") {
                     Task { await model.refresh() }
                 }
                 .keyboardShortcut("r", modifiers: .command)
@@ -69,9 +197,9 @@ struct ThreadRelayApp: App {
     private func openAboutWindow() {
         NSApplication.shared.orderFrontStandardAboutPanel(options: [
             .applicationName: "ThreadRelay",
-            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Development",
-            .version: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Local",
-            .credits: NSAttributedString(string: "Local-first bridge for controlling coding agents from chat."),
+            .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版",
+            .version: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "本地构建",
+            .credits: NSAttributedString(string: "通过聊天远程控制编程智能体的本地优先桥接工具。"),
         ])
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
@@ -185,26 +313,26 @@ private struct MenuBarStatusView: View {
         if let lifecycle = model.lifecycle {
             Divider()
             Label(
-                lifecycle.management.canControl ? "Managed daemon" : "Read-only daemon",
+                lifecycle.management.canControl ? "已托管后台服务" : "只读后台服务",
                 systemImage: lifecycle.management.canControl ? "lock.open" : "eye"
             )
-            Text("v\(lifecycle.runtime.productVersion) · \(lifecycle.protectedWorkItems.total) protected work item(s)")
+            Text("v\(lifecycle.runtime.productVersion) · \(lifecycle.protectedWorkItems.total) 项受保护任务")
                 .foregroundStyle(.secondary)
                 .font(.caption)
         }
         Divider()
-        Button("Open ThreadRelay") {
+        Button("打开 ThreadRelay") {
             openWindow(id: "main")
         }
-        Button("Refresh") {
+        Button("刷新") {
             Task { await model.refresh() }
         }
         if #available(macOS 14, *) {
             SettingsLink {
-                Text("Settings…")
+                Text("设置…")
             }
         } else {
-            Button("Settings…") {
+            Button("设置…") {
                 NSApplication.shared.sendAction(
                     Selector(("showSettingsWindow:")),
                     to: nil,
@@ -213,7 +341,7 @@ private struct MenuBarStatusView: View {
             }
         }
         Divider()
-        Button("Quit ThreadRelay") {
+        Button("退出 ThreadRelay") {
             NSApplication.shared.terminate(nil)
         }
         .keyboardShortcut("q")

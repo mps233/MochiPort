@@ -47,6 +47,10 @@ use crate::{
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
+    if matches!(cli.command, Command::Version) {
+        println!("threadrelay {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     if let Command::SafeRelaunchHelper {
         bundle_path,
         expected_bundle_identifier,
@@ -178,6 +182,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Command::SafeRelaunchHelper { .. } => {
             unreachable!("safe relaunch helper is handled before runtime creation")
         }
+        Command::Version => unreachable!("version command is handled before runtime creation"),
         Command::Gui => unreachable!("GUI command is handled before config loading"),
     }
 }

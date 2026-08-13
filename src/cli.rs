@@ -25,6 +25,7 @@ impl SafeRelaunchShutdownMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    Version,
     Gui,
     Daemon,
     On,
@@ -88,6 +89,7 @@ impl Cli {
 
         let command = match remaining.first().map(String::as_str) {
             None => default_command(),
+            Some("-V") | Some("--version") | Some("version") => Command::Version,
             Some("gui") => Command::Gui,
             Some("daemon") | Some("run") => Command::Daemon,
             Some("on") => Command::On,
@@ -307,6 +309,7 @@ pub fn print_help() {
         r#"threadrelay
 
 Usage:
+  threadrelay --version
   threadrelay [--config PATH] gui
   threadrelay [--config PATH] daemon
   threadrelay [--config PATH] on
