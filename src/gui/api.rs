@@ -43,7 +43,10 @@ impl ApiClient {
     }
 
     pub(super) fn get_quick<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        let body = self.request_text(self.http.get(self.url(path)).timeout(GUI_STATUS_TIMEOUT))?;
+        let body = self.request_text(
+            path,
+            self.http.get(self.url(path)).timeout(GUI_STATUS_TIMEOUT),
+        )?;
         self.parse_response(path, &body)
     }
 
@@ -52,7 +55,7 @@ impl ApiClient {
         path: &str,
         timeout: Duration,
     ) -> Result<T, String> {
-        let body = self.request_text(self.http.get(self.url(path)).timeout(timeout))?;
+        let body = self.request_text(path, self.http.get(self.url(path)).timeout(timeout))?;
         self.parse_response(path, &body)
     }
 
@@ -81,7 +84,7 @@ impl ApiClient {
         path: &str,
         timeout: Duration,
     ) -> Result<T, String> {
-        let body = self.request_text(self.http.post(self.url(path)).timeout(timeout))?;
+        let body = self.request_text(path, self.http.post(self.url(path)).timeout(timeout))?;
         self.parse_response(path, &body)
     }
 
@@ -99,7 +102,10 @@ impl ApiClient {
         body: &B,
         timeout: Duration,
     ) -> Result<T, String> {
-        let body = self.request_text(self.http.post(self.url(path)).json(body).timeout(timeout))?;
+        let body = self.request_text(
+            path,
+            self.http.post(self.url(path)).json(body).timeout(timeout),
+        )?;
         self.parse_response(path, &body)
     }
 
@@ -108,14 +114,26 @@ impl ApiClient {
         path: &str,
         timeout: Duration,
     ) -> Result<T, String> {
-        let body = self.request_text(self.http.delete(self.url(path)).timeout(timeout))?;
+        let body = self.request_text(path, self.http.delete(self.url(path)).timeout(timeout))?;
         self.parse_response(path, &body)
     }
 
     pub(super) fn request_text(
         &self,
-        request: reqwest::blocking::RequestBuilder,
+        path: &str,
+        mut request: reqwest::blocking::RequestBuilder,
     ) -> Result<String, String> {
+        if Self::requires_management_bearer(path) {
+            if self.local_port().is_none() {
+                return Err("management requests require a loopback daemon".to_string());
+            }
+            self.daemon_identity()?;
+            let config_path =
+                super::daemon_config_path().unwrap_or_else(super::app_support_config_path);
+            let token =
+                crate::manage_api::management_token(&config_path).map_err(|err| err.to_string())?;
+            request = request.bearer_auth(token);
+        }
         let response = request.send().map_err(|err| {
             let err_text = err.to_string();
             if err.is_timeout() {
@@ -148,6 +166,26 @@ impl ApiClient {
         let url = reqwest::Url::parse(&self.base_url).ok()?;
         let host = url.host_str()?;
         matches!(host, "127.0.0.1" | "localhost" | "::1").then_some(url.port_or_known_default()?)
+    }
+
+    fn requires_management_bearer(path: &str) -> bool {
+        path == "/api/v1/manage"
+            || path.starts_with("/api/v1/manage/")
+            || matches!(
+                path,
+                "/api/bridge/start"
+                    | "/api/bridge/stop"
+                    | "/api/im-channel/enabled"
+                    | "/api/im/account/enabled"
+                    | "/api/im/account/delete"
+                    | "/api/feishu/onboard/start"
+                    | "/api/feishu/onboard/poll"
+                    | "/api/telegram/configure"
+                    | "/api/wechat/onboard/start"
+                    | "/api/wechat/onboard/poll"
+                    | "/api/wecom/onboard/start"
+                    | "/api/wecom/onboard/poll"
+            )
     }
 
     pub(super) fn dashboard(&self) -> DashboardSnapshot {
@@ -610,6 +648,20 @@ mod tests {
         assert!(snapshot.codex_app.is_some());
         assert!(snapshot.im_accounts.is_none());
         assert!(snapshot.ai_gateway.is_none());
+    }
+
+    #[test]
+    fn management_bearer_is_limited_to_protected_routes() {
+        assert!(ApiClient::requires_management_bearer(
+            "/api/im/account/enabled"
+        ));
+        assert!(ApiClient::requires_management_bearer(
+            "/api/v1/manage/dashboard"
+        ));
+        assert!(!ApiClient::requires_management_bearer("/api/status"));
+        assert!(!ApiClient::requires_management_bearer(
+            "/api/ai-gateway/request-logs"
+        ));
     }
 }
 

@@ -150,9 +150,59 @@ pub fn router(state: SharedState) -> Router {
             manage_api::require_bearer,
         ));
 
+    // Legacy GUI paths remain available during migration, but write-capable
+    // IM operations share the same management credential as the versioned
+    // API. This prevents the compatibility surface from bypassing bearer
+    // authentication while the Rust GUI transitions to `/api/v1/manage/*`.
+    let legacy_im_manage_routes = Router::new()
+        .route("/api/bridge/start", post(im_api::start_bridge))
+        .route("/api/bridge/stop", post(im_api::stop_bridge))
+        .route(
+            "/api/im-channel/enabled",
+            post(im_api::set_im_channel_enabled),
+        )
+        .route(
+            "/api/im/account/enabled",
+            post(im_api::set_im_account_enabled),
+        )
+        .route("/api/im/account/delete", post(im_api::delete_im_account))
+        .route(
+            "/api/feishu/onboard/start",
+            post(onboarding::feishu_onboard_start),
+        )
+        .route(
+            "/api/feishu/onboard/poll",
+            post(onboarding::feishu_onboard_poll),
+        )
+        .route(
+            "/api/telegram/configure",
+            post(im_api::configure_telegram_bot),
+        )
+        .route(
+            "/api/wechat/onboard/start",
+            post(onboarding::wechat_onboard_start),
+        )
+        .route(
+            "/api/wechat/onboard/poll",
+            post(onboarding::wechat_onboard_poll),
+        )
+        .route(
+            "/api/wecom/onboard/start",
+            post(onboarding::wecom_onboard_start),
+        )
+        .route(
+            "/api/wecom/onboard/poll",
+            post(onboarding::wecom_onboard_poll),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            manage_api::require_bearer,
+        ));
+
     Router::new()
         .route("/healthz", get(manage_api::healthz))
         .nest("/api/v1/manage", manage_routes)
+        .merge(legacy_im_manage_routes)
         .route("/oauth/authorize", get(oauth::oauth_authorize))
         .route("/oauth/token", post(oauth::oauth_token))
         .route("/api/status", get(status))
@@ -205,53 +255,14 @@ pub fn router(state: SharedState) -> Router {
             "/api/codex-app/session/provider",
             post(codex_app::move_codex_app_session_provider),
         )
-        .route("/api/bridge/start", post(im_api::start_bridge))
-        .route("/api/bridge/stop", post(im_api::stop_bridge))
-        .route(
-            "/api/im-channel/enabled",
-            post(im_api::set_im_channel_enabled),
-        )
         .route("/api/im/accounts", get(im_api::im_accounts))
-        .route(
-            "/api/im/account/enabled",
-            post(im_api::set_im_account_enabled),
-        )
-        .route("/api/im/account/delete", post(im_api::delete_im_account))
         .route(
             "/api/remote-control/backend-status",
             get(remote_control_backend_status),
         )
-        .route(
-            "/api/feishu/onboard/start",
-            post(onboarding::feishu_onboard_start),
-        )
-        .route(
-            "/api/feishu/onboard/poll",
-            post(onboarding::feishu_onboard_poll),
-        )
         .route("/api/feishu/bot", get(im_api::feishu_bot_status))
         .route("/api/telegram/bot", get(im_api::telegram_bot_status))
-        .route(
-            "/api/telegram/configure",
-            post(im_api::configure_telegram_bot),
-        )
-        .route(
-            "/api/wechat/onboard/start",
-            post(onboarding::wechat_onboard_start),
-        )
-        .route(
-            "/api/wechat/onboard/poll",
-            post(onboarding::wechat_onboard_poll),
-        )
         .route("/api/wechat/bot", get(im_api::wechat_bot_status))
-        .route(
-            "/api/wecom/onboard/start",
-            post(onboarding::wecom_onboard_start),
-        )
-        .route(
-            "/api/wecom/onboard/poll",
-            post(onboarding::wecom_onboard_poll),
-        )
         .route("/api/wecom/bot", get(im_api::wecom_bot_status))
         .route("/api/events", get(events))
         .merge(plugins::router())
@@ -1764,6 +1775,40 @@ mod tests {
             response_json(stale_wecom_session).await,
             json!({ "done": false, "error": "missing_session" })
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_im_mutation_routes_cannot_bypass_management_bearer() {
+        let (app, _temp, _token) = management_test_router();
+
+        for (path, body) in [
+            ("/api/bridge/start", "{}"),
+            ("/api/bridge/stop", "{}"),
+            ("/api/im-channel/enabled", r#"{"enabled":true}"#),
+            (
+                "/api/im/account/enabled",
+                r#"{"platform":"telegram","accountId":"tg","enabled":false}"#,
+            ),
+            (
+                "/api/im/account/delete",
+                r#"{"platform":"telegram","accountId":"tg"}"#,
+            ),
+            ("/api/feishu/onboard/start", "{}"),
+            ("/api/feishu/onboard/poll", r#"{"deviceCode":"x"}"#),
+            ("/api/telegram/configure", r#"{"botToken":"x"}"#),
+            ("/api/wechat/onboard/start", "{}"),
+            ("/api/wechat/onboard/poll", r#"{"sessionKey":"x"}"#),
+            ("/api/wecom/onboard/start", "{}"),
+            ("/api/wecom/onboard/poll", r#"{"sessionKey":"x"}"#),
+        ] {
+            let response =
+                request_response(app.clone(), Method::POST, path, None, Some(body)).await;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "expected 401 for legacy route {path}"
+            );
+        }
     }
 
     #[tokio::test]

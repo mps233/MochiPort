@@ -161,6 +161,12 @@ pub fn ensure_management_token(config_path: &Path) -> Result<(), AuthError> {
     Ok(())
 }
 
+/// Load the user-domain management credential for a trusted local client.
+/// Callers must keep the returned token out of logs and serialized responses.
+pub fn management_token(config_path: &Path) -> Result<String, AuthError> {
+    load_or_create_management_token(&control_file_path(config_path))
+}
+
 pub fn active_daemon_locator_path() -> Result<PathBuf, AuthError> {
     #[cfg(target_os = "windows")]
     let base = std::env::var_os("LOCALAPPDATA")
