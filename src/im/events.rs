@@ -24,20 +24,18 @@ use crate::{
         telegram::{
             adapter::TelegramAdapter, api::TelegramApiError,
             collab_progress as telegram_collab_progress, commentary as telegram_commentary,
-            progress as telegram_progress, search as telegram_search,
+            progress as telegram_progress, search as telegram_search, typing as telegram_typing,
         },
         wechat::adapter::WechatAdapter,
     },
     im_runtime::{
-        PendingApproval, RouteTarget, TelegramCommandProgressSnapshot, TelegramTypingSendAction,
+        PendingApproval, RouteTarget, TelegramCommandProgressSnapshot,
         TelegramWebSearchProgressEntry, TurnOrigin,
     },
     types::ImPlatformKind,
 };
 
 const COMMAND_OUTPUT_PREVIEW_CHARS: usize = 2400;
-const TELEGRAM_TYPING_RETRY_THROTTLE_MS: u128 = 300;
-const TELEGRAM_TYPING_RENEWAL_MS: u128 = 4_000;
 const TURN_ERROR_SUMMARY_MAX_CHARS: usize = 600;
 const TERMINAL_STATUS_FALLBACK_DELAY_MS: u64 = 60_000;
 
@@ -688,6 +686,16 @@ pub(crate) async fn send_turn_reply(
             (true, effective_turn_id)
         }
     };
+    if route.platform == ImPlatformKind::Telegram
+        && is_final_answer
+        && let Some(turn_id) = effective_turn_id.as_deref()
+    {
+        if let Some(api) = api_registry.telegram_for_route(route) {
+            telegram_typing::finish_turn(state, api, thread_id, turn_id, route).await;
+        } else {
+            log_missing_api(state, route, "turn_reply_typing").await;
+        }
+    }
     if !should_send {
         let event_kind = format!("{}_turn_reply_skipped", route.platform.key());
         state
@@ -970,21 +978,30 @@ async fn start_telegram_agent_typing(
     state: &SharedState,
     api_registry: &ImApiRegistry,
     thread_id: &str,
+    turn_id: Option<&str>,
     item_id: &str,
     route: &RouteTarget,
 ) {
+    let current_turn_id = state
+        .runtime
+        .lock()
+        .await
+        .current_turn_id(thread_id)
+        .map(str::to_string);
+    let Some(current_turn_id) = current_turn_id else {
+        return;
+    };
+    if turn_id.is_some_and(|turn_id| turn_id != current_turn_id) {
+        return;
+    }
+    if telegram_typing::turn_is_active(state, thread_id, &current_turn_id).await {
+        return;
+    }
     let Some(api) = api_registry.telegram_for_route(route) else {
         log_missing_api(state, route, "agent_typing").await;
         return;
     };
-    let generation = state
-        .runtime
-        .lock()
-        .await
-        .start_telegram_typing(thread_id, item_id);
-    if let Some(generation) = generation {
-        spawn_telegram_typing_driver(state, api, thread_id, item_id, route, generation);
-    }
+    telegram_typing::start(state, api, thread_id, item_id, route).await;
 }
 
 async fn finish_telegram_agent_typing(
@@ -998,156 +1015,7 @@ async fn finish_telegram_agent_typing(
         log_missing_api(state, route, "agent_typing_final").await;
         return;
     };
-    let typing = state
-        .runtime
-        .lock()
-        .await
-        .finish_telegram_typing(thread_id, item_id);
-    let Some((generation, should_start, completed)) = typing else {
-        return;
-    };
-    if should_start {
-        spawn_telegram_typing_driver(state, api, thread_id, item_id, route, generation);
-    }
-    completed.notified().await;
-}
-
-fn spawn_telegram_typing_driver(
-    state: &SharedState,
-    api: crate::im::telegram::api::TelegramApi,
-    thread_id: &str,
-    item_id: &str,
-    route: &RouteTarget,
-    generation: i64,
-) {
-    let state = state.clone();
-    let thread_id = thread_id.to_string();
-    let item_id = item_id.to_string();
-    let route = route.clone();
-    tokio::spawn(async move {
-        telegram_typing_driver(state, api, thread_id, item_id, route, generation).await;
-    });
-}
-
-async fn telegram_typing_driver(
-    state: SharedState,
-    api: crate::im::telegram::api::TelegramApi,
-    thread_id: String,
-    item_id: String,
-    route: RouteTarget,
-    generation: i64,
-) {
-    let adapter = TelegramAdapter::new(api);
-    loop {
-        let now_ms = crate::types::now_ms();
-        let (send_delay_ms, wait_for_update) = {
-            let runtime = state.runtime.lock().await;
-            if let Some(delay_ms) = runtime.telegram_typing_send_delay_ms(
-                &thread_id,
-                &item_id,
-                generation,
-                now_ms,
-                TELEGRAM_TYPING_RETRY_THROTTLE_MS,
-            ) {
-                (Some(delay_ms), None)
-            } else if let Some(wait) = runtime.telegram_typing_wait_for_update(
-                &thread_id,
-                &item_id,
-                generation,
-                now_ms,
-                TELEGRAM_TYPING_RENEWAL_MS,
-            ) {
-                (None, Some(wait))
-            } else {
-                return;
-            }
-        };
-
-        if let Some((wake_driver, heartbeat_delay_ms)) = wait_for_update {
-            tokio::select! {
-                _ = wake_driver.notified() => {}
-                _ = tokio::time::sleep(Duration::from_millis(heartbeat_delay_ms)) => {
-                    if !state.runtime.lock().await.mark_telegram_typing_renewal_due(
-                        &thread_id,
-                        &item_id,
-                        generation,
-                    ) {
-                        return;
-                    }
-                }
-            }
-            continue;
-        }
-
-        if let Some(delay_ms) = send_delay_ms
-            && delay_ms > 0
-        {
-            let wake_driver = {
-                let runtime = state.runtime.lock().await;
-                runtime.telegram_typing_wake_driver(&thread_id, &item_id, generation)
-            };
-            if let Some(wake_driver) = wake_driver {
-                tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_millis(delay_ms)) => {}
-                    _ = wake_driver.notified() => {}
-                }
-            } else {
-                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-            }
-        }
-        let snapshot = state.runtime.lock().await.take_telegram_typing_snapshot(
-            &thread_id,
-            &item_id,
-            generation,
-            crate::types::now_ms(),
-        );
-        let Some((finished, revision)) = snapshot else {
-            return;
-        };
-        let result = if finished {
-            Ok(())
-        } else {
-            adapter.send_typing_action(&route.chat_id).await
-        };
-        if !finished {
-            match &result {
-                Ok(()) => {
-                    state
-                        .push_event(
-                            "info",
-                            "telegram_typing_sent",
-                            format!(
-                                "thread={thread_id} item={item_id} chat={} generation={generation}",
-                                route.chat_id
-                            ),
-                        )
-                        .await;
-                }
-                Err(err) => {
-                    state
-                        .push_event(
-                            "warn",
-                            "telegram_typing_failed",
-                            format!(
-                                "thread={thread_id} item={item_id} chat={} generation={generation} err={err}",
-                                route.chat_id
-                            ),
-                        )
-                        .await;
-                }
-            }
-        }
-        let action = state.runtime.lock().await.complete_telegram_typing_send(
-            &thread_id,
-            &item_id,
-            generation,
-            revision,
-            result.is_ok(),
-        );
-        if action == TelegramTypingSendAction::Stop {
-            return;
-        }
-    }
+    telegram_typing::finish(state, api, thread_id, item_id, route).await;
 }
 
 fn turn_reply_dedupe_key(
@@ -1588,6 +1456,13 @@ async fn schedule_terminal_status_fallback(
             deliver_telegram_command_progress(&state, &api_registry, &thread_id, &route, snapshot)
                 .await;
         }
+        if route.platform == ImPlatformKind::Telegram {
+            if let Some(api) = api_registry.telegram_for_route(&route) {
+                telegram_typing::finish_turn(&state, api, &thread_id, &turn_id, &route).await;
+            } else {
+                log_missing_api(&state, &route, "terminal_fallback_typing").await;
+            }
+        }
         if !state
             .runtime
             .lock()
@@ -1711,17 +1586,17 @@ pub(crate) async fn handle_codex_notification(
             };
             if route.platform == ImPlatformKind::Telegram
                 && let Some(turn_id) = turn_id.as_deref()
-                && let Some(api) = api_registry.telegram_for_route(&route)
             {
-                finish_telegram_command_progress_with_api_and_outcome(
-                    &state,
-                    api.clone(),
-                    thread_id,
-                    &route,
-                    turn_id,
-                    true,
-                )
-                .await;
+                if let Some(api) = api_registry.telegram_for_route(&route) {
+                    telegram_typing::finish_turn(&state, api.clone(), thread_id, turn_id, &route)
+                        .await;
+                    finish_telegram_command_progress_with_api_and_outcome(
+                        &state, api, thread_id, &route, turn_id, true,
+                    )
+                    .await;
+                } else {
+                    log_missing_api(&state, &route, "error_typing").await;
+                }
             }
             state
                 .runtime
@@ -1902,8 +1777,15 @@ pub(crate) async fn handle_codex_notification(
                 return;
             }
             if route.platform == ImPlatformKind::Telegram {
-                start_telegram_agent_typing(&state, &api_registry, thread_id, item_id, &route)
-                    .await;
+                start_telegram_agent_typing(
+                    &state,
+                    &api_registry,
+                    thread_id,
+                    params.get("turnId").and_then(|value| value.as_str()),
+                    item_id,
+                    &route,
+                )
+                .await;
                 return;
             }
             if route.platform != ImPlatformKind::Feishu {
@@ -2535,6 +2417,13 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
+                if let Some(turn_id) = effective_turn_id.as_deref() {
+                    if let Some(api) = api_registry.telegram_for_route(&route) {
+                        telegram_typing::finish_turn(&state, api, thread_id, turn_id, &route).await;
+                    } else {
+                        log_missing_api(&state, &route, "turn_typing_final").await;
+                    }
+                }
                 finish_telegram_command_progress(
                     &state,
                     &api_registry,

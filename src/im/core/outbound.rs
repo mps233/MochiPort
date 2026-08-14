@@ -10,7 +10,7 @@ use crate::{
         core::accounts::ImApiRegistry,
         core::i18n::im_text_for_state,
         feishu::{FeishuAdapter, FeishuApi},
-        telegram::{adapter::TelegramAdapter, api::TelegramApi},
+        telegram::{adapter::TelegramAdapter, api::TelegramApi, typing as telegram_typing},
         wechat::{
             adapter::{WECHAT_TEXT_CHUNK_CHARS, WechatAdapter},
             api::WechatApi,
@@ -356,6 +356,18 @@ async fn send_telegram_outbound(
     telegram_api: &TelegramApi,
     message: ImOutboundMessage,
 ) {
+    if message.kind == ImOutboundKind::Approval
+        && let Some(turn_id) = message.turn_id.as_deref()
+    {
+        telegram_typing::finish_turn(
+            state,
+            telegram_api.clone(),
+            &message.thread_id,
+            turn_id,
+            &message.route,
+        )
+        .await;
+    }
     let adapter = TelegramAdapter::new(telegram_api.clone());
     match &message.payload {
         ImOutboundPayload::Text(text) => {

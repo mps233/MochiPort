@@ -31,6 +31,7 @@ use crate::{
         adapter::{TelegramAdapter, TelegramThreadListEntry},
         api::TelegramApi,
         types::TelegramSettings,
+        typing as telegram_typing,
     },
     im_runtime::{ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
     remote_control_backend,
@@ -286,6 +287,7 @@ pub(crate) async fn handle_inbound(
                 Some(&turn_id),
             )
             .await;
+            telegram_typing::finish_turn(&state, api.clone(), &thread_id, &turn_id, &route).await;
             events::finish_telegram_command_progress_with_api(
                 &state,
                 api.clone(),
@@ -327,6 +329,8 @@ pub(crate) async fn handle_inbound(
                     Some(&thread_id),
                 )
                 .await;
+                telegram_typing::finish_turn(&state, api.clone(), &thread_id, &turn_id, &route)
+                    .await;
                 events::finish_telegram_command_progress_with_api(
                     &state,
                     api.clone(),
@@ -449,6 +453,7 @@ pub(crate) async fn handle_inbound(
 
     match outcome {
         TurnStartOutcome::Started { thread_id, turn_id } => {
+            telegram_typing::start_turn(&state, api.clone(), &thread_id, &turn_id, &route).await;
             state
                 .push_event(
                     "info",
