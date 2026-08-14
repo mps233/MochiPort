@@ -13,7 +13,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "ThreadRelayMac",
-            path: "Sources/ThreadRelayMac"
+            path: "Sources/ThreadRelayMac",
+            resources: [
+                .copy("Resources/ProviderLogos"),
+            ]
         ),
         .testTarget(
             name: "ThreadRelayMacTests",

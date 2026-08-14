@@ -10,6 +10,9 @@ Brand SVGs are copied from `@lobehub/icons` version `5.8.0` when the package con
 - Anthropic: `references/lobehub-icons/es/Anthropic/components/Mono.js`
 - Zhipu: `references/lobehub-icons/es/Zhipu/components/Color.js`
 
+The SwiftUI client bundles monochrome copies of these provider marks under
+`macos/ThreadRelay/Sources/ThreadRelayMac/Resources/ProviderLogos/`.
+
 Lucide UI icons are copied from Lucide Icons and covered by `packaging/brand/LICENSE.lucide-icons`.
 
 - Codex CLI terminal: Lucide `terminal` -> `packaging/brand/codex-cli.svg`

@@ -2293,8 +2293,7 @@ final class APIContractTests: XCTestCase {
         }
     }
 
-    /// The automatic restart is spawned as a task; poll briefly until the
-    /// launcher records the expected number of start attempts.
+    @MainActor
     private func waitForDaemonLaunches(
         _ launcher: RecordingDaemonLauncher,
         count: Int,
