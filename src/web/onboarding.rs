@@ -1,7 +1,10 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use qrcode::{QrCode, render::svg};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::{
     app_state::{SharedState, WechatOnboardSession, WecomOnboardSession},
@@ -152,6 +155,7 @@ async fn persist_feishu_registration(
 ) -> Result<Option<String>, (StatusCode, Json<serde_json::Value>)> {
     let feishu_config = {
         let mut config = state.config.lock().await;
+        let previous_config = config.clone();
         config.migrate_legacy_im_accounts();
         config.feishu_accounts.retain(|account| {
             account.account_id.trim() == app_id || account.app_id.trim() != app_id
@@ -176,6 +180,7 @@ async fn persist_feishu_registration(
         }
         config.bridge.enabled = true;
         if let Err(err) = config.save(&state.config_path) {
+            *config = previous_config;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": err.to_string() })),
@@ -194,13 +199,16 @@ async fn persist_feishu_registration(
     }
     if let Some(name) = display_name.clone() {
         let mut config = state.config.lock().await;
+        let previous_config = config.clone();
         if let Some(mut account) = config.feishu_account(app_id) {
             account.display_name = name;
             config.upsert_feishu_account(account.clone());
             if config.feishu.app_id == app_id {
                 config.feishu = account;
             }
-            let _ = config.save(&state.config_path);
+            if config.save(&state.config_path).is_err() {
+                *config = previous_config;
+            }
         }
     }
     state
@@ -363,6 +371,183 @@ pub(super) async fn manage_configure_feishu_account(
 
 const WECHAT_ONBOARD_TTL_MS: u128 = 5 * 60_000;
 const WECOM_ONBOARD_TTL_MS: u128 = 5 * 60_000;
+static ONBOARD_START_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+trait OnboardSessionSnapshot {
+    fn generation(&self) -> u64;
+    fn session_key(&self) -> &str;
+    fn matches_snapshot(&self, expected: &Self) -> bool;
+}
+
+impl OnboardSessionSnapshot for WechatOnboardSession {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn session_key(&self) -> &str {
+        &self.session_key
+    }
+
+    fn matches_snapshot(&self, expected: &Self) -> bool {
+        self.generation == expected.generation
+            && self.session_key == expected.session_key
+            && self.qrcode == expected.qrcode
+            && self.started_at_ms == expected.started_at_ms
+            && self.current_api_base_url == expected.current_api_base_url
+    }
+}
+
+impl OnboardSessionSnapshot for WecomOnboardSession {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn session_key(&self) -> &str {
+        &self.session_key
+    }
+
+    fn matches_snapshot(&self, expected: &Self) -> bool {
+        self.generation == expected.generation
+            && self.session_key == expected.session_key
+            && self.scode == expected.scode
+            && self.started_at_ms == expected.started_at_ms
+    }
+}
+
+fn next_onboard_generation() -> u64 {
+    ONBOARD_START_GENERATION.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+fn reserve_newer_session<T: OnboardSessionSnapshot>(slot: &mut Option<T>, candidate: T) -> bool {
+    if slot
+        .as_ref()
+        .is_some_and(|current| current.generation() > candidate.generation())
+    {
+        return false;
+    }
+    *slot = Some(candidate);
+    true
+}
+
+fn compare_set_session<T: OnboardSessionSnapshot>(
+    slot: &mut Option<T>,
+    expected: &T,
+    replacement: T,
+) -> bool {
+    if replacement.generation() != expected.generation()
+        || replacement.session_key() != expected.session_key()
+        || !slot
+            .as_ref()
+            .is_some_and(|current| current.matches_snapshot(expected))
+    {
+        return false;
+    }
+    *slot = Some(replacement);
+    true
+}
+
+fn compare_clear_session<T: OnboardSessionSnapshot>(slot: &mut Option<T>, expected: &T) -> bool {
+    if !slot
+        .as_ref()
+        .is_some_and(|current| current.matches_snapshot(expected))
+    {
+        return false;
+    }
+    *slot = None;
+    true
+}
+
+fn restore_session_if_empty<T>(slot: &mut Option<T>, session: T) -> bool {
+    if slot.is_some() {
+        return false;
+    }
+    *slot = Some(session);
+    true
+}
+
+fn invalid_session_response() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "done": false, "error": "invalid_session" })),
+    )
+}
+
+fn superseded_start_response() -> (StatusCode, Json<serde_json::Value>) {
+    (StatusCode::CONFLICT, Json(json!({ "error": "superseded" })))
+}
+
+async fn persist_wechat_onboard_account(
+    state: &SharedState,
+    account_id: &str,
+    bot_token: &str,
+    base_url: &str,
+    user_id: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let mut config = state.config.lock().await;
+    let previous_config = config.clone();
+    config.migrate_legacy_im_accounts();
+    let token = bot_token.trim().to_string();
+    config.wechat_accounts.retain(|account| {
+        account.account_id.trim() == account_id || account.bot_token.trim() != token
+    });
+    let mut account = config.wechat_account(account_id).unwrap_or_default();
+    account.enabled = true;
+    account.account_id = account_id.to_string();
+    account.bot_token = bot_token.to_string();
+    if account.display_name.trim().is_empty() {
+        account.display_name = "微信机器人".to_string();
+    }
+    account.base_url = normalize_wechat_base_url(base_url);
+    account.user_id = user_id.to_string();
+    if !user_id.trim().is_empty() && !account.allowed_user_ids.iter().any(|item| item == user_id) {
+        account.allowed_user_ids.push(user_id.to_string());
+    }
+    config.upsert_wechat_account(account.clone());
+    if !config.wechat.is_configured() || config.wechat.account_id == account_id {
+        config.wechat = account;
+    }
+    config.bridge.enabled = true;
+    if let Err(err) = config.save(&state.config_path) {
+        *config = previous_config;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "done": false, "error": err.to_string() })),
+        ));
+    }
+    Ok(())
+}
+
+async fn persist_wecom_onboard_account(
+    state: &SharedState,
+    account_id: &str,
+    bot_id: &str,
+    secret: &str,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let mut config = state.config.lock().await;
+    let previous_config = config.clone();
+    config.migrate_legacy_im_accounts();
+    let mut account = config.wecom_account(account_id).unwrap_or_default();
+    account.enabled = true;
+    account.account_id = account_id.to_string();
+    account.bot_id = bot_id.to_string();
+    account.secret = secret.to_string();
+    if account.display_name.trim().is_empty() {
+        account.display_name = "企业微信机器人".to_string();
+    }
+    config.upsert_wecom_account(account.clone());
+    if !config.wecom.is_configured() || config.wecom.account_id == account_id {
+        config.wecom = account;
+    }
+    config.bridge.enabled = true;
+    if let Err(err) = config.save(&state.config_path) {
+        *config = previous_config;
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "done": false, "error": err.to_string() })),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -381,20 +566,42 @@ pub(super) struct WechatOnboardPollRequest {
 }
 
 pub(super) async fn wechat_onboard_start(State(state): State<SharedState>) -> impl IntoResponse {
+    let generation = next_onboard_generation();
+    let session_key = format!("wechat-onboard-{}", Uuid::new_v4().simple());
+    let reserved_session = WechatOnboardSession {
+        generation,
+        session_key: session_key.clone(),
+        qrcode: String::new(),
+        started_at_ms: unix_now_millis(),
+        current_api_base_url: DEFAULT_WECHAT_API_BASE.to_string(),
+    };
+    let reserved = {
+        let mut onboard = state.wechat_onboard.lock().await;
+        reserve_newer_session(&mut onboard, reserved_session.clone())
+    };
+    if !reserved {
+        return superseded_start_response();
+    }
     let config = state.config.lock().await.clone();
     let api = WechatApi::new(WechatSettings::from_app_config(&config.wechat));
     let local_tokens = wechat_store::local_bot_tokens(&state).await;
     match api.start_qr_login(&local_tokens).await {
         Ok(payload) => {
-            let session_key = format!("wechat-onboard-{}", unix_now_millis());
             let qr_svg = build_qr_svg(&payload.qrcode_img_content).unwrap_or_default();
             let session = WechatOnboardSession {
+                generation,
                 session_key: session_key.clone(),
                 qrcode: payload.qrcode,
-                started_at_ms: unix_now_millis(),
+                started_at_ms: reserved_session.started_at_ms,
                 current_api_base_url: DEFAULT_WECHAT_API_BASE.to_string(),
             };
-            *state.wechat_onboard.lock().await = Some(session);
+            let installed = {
+                let mut onboard = state.wechat_onboard.lock().await;
+                compare_set_session(&mut onboard, &reserved_session, session)
+            };
+            if !installed {
+                return superseded_start_response();
+            }
             state
                 .push_event("info", "wechat_onboard_started", "scan flow started")
                 .await;
@@ -408,10 +615,14 @@ pub(super) async fn wechat_onboard_start(State(state): State<SharedState>) -> im
                 })),
             )
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
-        ),
+        Err(err) => {
+            let mut onboard = state.wechat_onboard.lock().await;
+            compare_clear_session(&mut onboard, &reserved_session);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+        }
     }
 }
 
@@ -423,20 +634,23 @@ pub(super) async fn wechat_onboard_poll(
         let onboard = state.wechat_onboard.lock().await;
         onboard.clone()
     };
-    let Some(mut session) = session else {
+    let Some(session) = session else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "done": false, "error": "missing_session" })),
         );
     };
     if session.session_key != request.session_key {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "done": false, "error": "invalid_session" })),
-        );
+        return invalid_session_response();
     }
     if unix_now_millis().saturating_sub(session.started_at_ms) > WECHAT_ONBOARD_TTL_MS {
-        *state.wechat_onboard.lock().await = None;
+        let cleared = {
+            let mut onboard = state.wechat_onboard.lock().await;
+            compare_clear_session(&mut onboard, &session)
+        };
+        if !cleared {
+            return invalid_session_response();
+        }
         state
             .push_event(
                 "warn",
@@ -476,8 +690,15 @@ pub(super) async fn wechat_onboard_poll(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            session.current_api_base_url = normalize_wechat_base_url(redirect_host);
-            *state.wechat_onboard.lock().await = Some(session);
+            let mut redirected_session = session.clone();
+            redirected_session.current_api_base_url = normalize_wechat_base_url(redirect_host);
+            let updated = {
+                let mut onboard = state.wechat_onboard.lock().await;
+                compare_set_session(&mut onboard, &session, redirected_session)
+            };
+            if !updated {
+                return invalid_session_response();
+            }
         }
         return (
             StatusCode::OK,
@@ -515,46 +736,31 @@ pub(super) async fn wechat_onboard_poll(
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| session.current_api_base_url.clone());
         let user_id = result.ilink_user_id.clone().unwrap_or_default();
-        {
-            let mut config = state.config.lock().await;
-            config.migrate_legacy_im_accounts();
-            let token = bot_token.trim().to_string();
-            let resolved_account_id = if account_id.trim().is_empty() {
-                "wechat".to_string()
-            } else {
-                account_id.clone()
-            };
-            config.wechat_accounts.retain(|account| {
-                account.account_id.trim() == resolved_account_id
-                    || account.bot_token.trim() != token
-            });
-            let mut account = config
-                .wechat_account(&resolved_account_id)
-                .unwrap_or_default();
-            account.enabled = true;
-            account.account_id = resolved_account_id.clone();
-            account.bot_token = bot_token;
-            if account.display_name.trim().is_empty() {
-                account.display_name = "微信机器人".to_string();
-            }
-            account.base_url = normalize_wechat_base_url(&base_url);
-            account.user_id = user_id.clone();
-            if !user_id.trim().is_empty() && !account.allowed_user_ids.contains(&user_id) {
-                account.allowed_user_ids.push(user_id.clone());
-            }
-            config.upsert_wechat_account(account.clone());
-            if !config.wechat.is_configured() || config.wechat.account_id == resolved_account_id {
-                config.wechat = account;
-            }
-            config.bridge.enabled = true;
-            if let Err(err) = config.save(&state.config_path) {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "done": false, "error": err.to_string() })),
-                );
-            }
+        let claimed = {
+            let mut onboard = state.wechat_onboard.lock().await;
+            compare_clear_session(&mut onboard, &session)
+        };
+        if !claimed {
+            return invalid_session_response();
         }
-        *state.wechat_onboard.lock().await = None;
+        let resolved_account_id = if account_id.trim().is_empty() {
+            "wechat".to_string()
+        } else {
+            account_id.clone()
+        };
+        if let Err(response) = persist_wechat_onboard_account(
+            &state,
+            &resolved_account_id,
+            &bot_token,
+            &base_url,
+            &user_id,
+        )
+        .await
+        {
+            let mut onboard = state.wechat_onboard.lock().await;
+            restore_session_if_empty(&mut onboard, session);
+            return response;
+        }
         state
             .push_event(
                 "info",
@@ -580,7 +786,13 @@ pub(super) async fn wechat_onboard_poll(
     }
 
     if result.status == "binded_redirect" {
-        *state.wechat_onboard.lock().await = None;
+        let cleared = {
+            let mut onboard = state.wechat_onboard.lock().await;
+            compare_clear_session(&mut onboard, &session)
+        };
+        if !cleared {
+            return invalid_session_response();
+        }
         state
             .push_event(
                 "info",
@@ -599,6 +811,13 @@ pub(super) async fn wechat_onboard_poll(
     }
 
     if result.status == "expired" {
+        let cleared = {
+            let mut onboard = state.wechat_onboard.lock().await;
+            compare_clear_session(&mut onboard, &session)
+        };
+        if !cleared {
+            return invalid_session_response();
+        }
         state
             .push_event(
                 "warn",
@@ -640,16 +859,38 @@ pub(super) struct WecomOnboardPollRequest {
 }
 
 pub(super) async fn wecom_onboard_start(State(state): State<SharedState>) -> impl IntoResponse {
+    let generation = next_onboard_generation();
+    let session_key = format!("wecom-onboard-{}", Uuid::new_v4().simple());
+    let reserved_session = WecomOnboardSession {
+        generation,
+        session_key: session_key.clone(),
+        scode: String::new(),
+        started_at_ms: unix_now_millis(),
+    };
+    let reserved = {
+        let mut onboard = state.wecom_onboard.lock().await;
+        reserve_newer_session(&mut onboard, reserved_session.clone())
+    };
+    if !reserved {
+        return superseded_start_response();
+    }
     let http_client = crate::outbound_http::get();
     match wecom_onboarding::start(&http_client).await {
         Ok(qr) => {
-            let session_key = format!("wecom-onboard-{}", unix_now_millis());
             let qr_svg = build_qr_svg(&qr.auth_url).unwrap_or_default();
-            *state.wecom_onboard.lock().await = Some(WecomOnboardSession {
+            let session = WecomOnboardSession {
+                generation,
                 session_key: session_key.clone(),
                 scode: qr.scode,
-                started_at_ms: unix_now_millis(),
-            });
+                started_at_ms: reserved_session.started_at_ms,
+            };
+            let installed = {
+                let mut onboard = state.wecom_onboard.lock().await;
+                compare_set_session(&mut onboard, &reserved_session, session)
+            };
+            if !installed {
+                return superseded_start_response();
+            }
             state
                 .push_event("info", "wecom_onboard_started", "scan flow started")
                 .await;
@@ -664,10 +905,14 @@ pub(super) async fn wecom_onboard_start(State(state): State<SharedState>) -> imp
                 })),
             )
         }
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
-        ),
+        Err(err) => {
+            let mut onboard = state.wecom_onboard.lock().await;
+            compare_clear_session(&mut onboard, &reserved_session);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+        }
     }
 }
 
@@ -682,13 +927,16 @@ pub(super) async fn wecom_onboard_poll(
         );
     };
     if session.session_key != request.session_key {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "done": false, "error": "invalid_session" })),
-        );
+        return invalid_session_response();
     }
     if unix_now_millis().saturating_sub(session.started_at_ms) > WECOM_ONBOARD_TTL_MS {
-        *state.wecom_onboard.lock().await = None;
+        let cleared = {
+            let mut onboard = state.wecom_onboard.lock().await;
+            compare_clear_session(&mut onboard, &session)
+        };
+        if !cleared {
+            return invalid_session_response();
+        }
         return (
             StatusCode::OK,
             Json(json!({ "done": false, "status": "expired", "error": "expired" })),
@@ -697,36 +945,37 @@ pub(super) async fn wecom_onboard_poll(
 
     let http_client = crate::outbound_http::get();
     match wecom_onboarding::poll(&http_client, &session.scode).await {
-        Ok(QrPoll::Pending(status)) => (
-            StatusCode::OK,
-            Json(json!({ "done": false, "status": status })),
-        ),
-        Ok(QrPoll::Success { bot_id, secret }) => {
-            let account_id = bot_id.clone();
-            {
-                let mut config = state.config.lock().await;
-                config.migrate_legacy_im_accounts();
-                let mut account = config.wecom_account(&account_id).unwrap_or_default();
-                account.enabled = true;
-                account.account_id = account_id.clone();
-                account.bot_id = bot_id;
-                account.secret = secret;
-                if account.display_name.trim().is_empty() {
-                    account.display_name = "企业微信机器人".to_string();
-                }
-                config.upsert_wecom_account(account.clone());
-                if !config.wecom.is_configured() || config.wecom.account_id == account_id {
-                    config.wecom = account;
-                }
-                config.bridge.enabled = true;
-                if let Err(err) = config.save(&state.config_path) {
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "done": false, "error": err.to_string() })),
-                    );
+        Ok(QrPoll::Pending(status)) => {
+            if status == "expired" {
+                let cleared = {
+                    let mut onboard = state.wecom_onboard.lock().await;
+                    compare_clear_session(&mut onboard, &session)
+                };
+                if !cleared {
+                    return invalid_session_response();
                 }
             }
-            *state.wecom_onboard.lock().await = None;
+            (
+                StatusCode::OK,
+                Json(json!({ "done": false, "status": status })),
+            )
+        }
+        Ok(QrPoll::Success { bot_id, secret }) => {
+            let account_id = bot_id.clone();
+            let claimed = {
+                let mut onboard = state.wecom_onboard.lock().await;
+                compare_clear_session(&mut onboard, &session)
+            };
+            if !claimed {
+                return invalid_session_response();
+            }
+            if let Err(response) =
+                persist_wecom_onboard_account(&state, &account_id, &bot_id, &secret).await
+            {
+                let mut onboard = state.wecom_onboard.lock().await;
+                restore_session_if_empty(&mut onboard, session);
+                return response;
+            }
             state
                 .push_event(
                     "info",
@@ -778,5 +1027,208 @@ fn normalize_wechat_base_url(value: &str) -> String {
         value.trim_end_matches('/').to_string()
     } else {
         format!("https://{}", value.trim_end_matches('/'))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{app_state::AppState, config::AppConfig};
+    use tempfile::TempDir;
+
+    fn wechat_session(key: &str, qrcode: &str, base_url: &str) -> WechatOnboardSession {
+        wechat_session_with_generation(1, key, qrcode, base_url)
+    }
+
+    fn wechat_session_with_generation(
+        generation: u64,
+        key: &str,
+        qrcode: &str,
+        base_url: &str,
+    ) -> WechatOnboardSession {
+        WechatOnboardSession {
+            generation,
+            session_key: key.to_string(),
+            qrcode: qrcode.to_string(),
+            started_at_ms: 1,
+            current_api_base_url: base_url.to_string(),
+        }
+    }
+
+    fn wecom_session(key: &str, scode: &str) -> WecomOnboardSession {
+        wecom_session_with_generation(1, key, scode)
+    }
+
+    fn wecom_session_with_generation(
+        generation: u64,
+        key: &str,
+        scode: &str,
+    ) -> WecomOnboardSession {
+        WecomOnboardSession {
+            generation,
+            session_key: key.to_string(),
+            scode: scode.to_string(),
+            started_at_ms: 1,
+        }
+    }
+
+    fn state_with_unwritable_config() -> (SharedState, TempDir) {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config_path = temp.path().join("config-directory");
+        std::fs::create_dir(&config_path).expect("create config directory");
+        let mut config = AppConfig::default();
+        config.state_path = temp.path().join("state.json");
+        config.bridge.enabled = false;
+        (AppState::new(config_path, config, None, None), temp)
+    }
+
+    #[test]
+    fn in_flight_wechat_poll_cannot_replace_or_clear_a_new_session() {
+        let s1 = wechat_session("s1", "qr-1", "https://api-1.example");
+        let s2 = wechat_session("s2", "qr-2", "https://api-2.example");
+        let stale_result = wechat_session("s1", "qr-1", "https://redirect.example");
+        let mut slot = Some(s1);
+        let in_flight_s1 = slot.clone().expect("S1 should be active");
+
+        slot = Some(s2.clone());
+
+        assert!(!compare_set_session(&mut slot, &in_flight_s1, stale_result));
+        assert!(!compare_clear_session(&mut slot, &in_flight_s1));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|current| current.matches_snapshot(&s2))
+        );
+    }
+
+    #[test]
+    fn slower_wechat_start_cannot_replace_a_newer_qr_session() {
+        let older = wechat_session_with_generation(1, "older", "", "https://api.example");
+        let newer = wechat_session_with_generation(2, "newer", "qr-new", "https://api.example");
+        let older_result =
+            wechat_session_with_generation(1, "older", "qr-old", "https://api.example");
+        let mut slot = Some(newer.clone());
+
+        assert!(!reserve_newer_session(&mut slot, older.clone()));
+        assert!(!compare_set_session(&mut slot, &older, older_result));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|current| current.matches_snapshot(&newer))
+        );
+    }
+
+    #[test]
+    fn older_poll_for_same_wechat_session_cannot_overwrite_newer_snapshot() {
+        let in_flight_snapshot = wechat_session("s1", "qr-1", "https://api.example");
+        let newer_snapshot = wechat_session("s1", "qr-1", "https://new.example");
+        let stale_result = wechat_session("s1", "qr-1", "https://old.example");
+        let mut slot = Some(newer_snapshot.clone());
+
+        assert!(!compare_set_session(
+            &mut slot,
+            &in_flight_snapshot,
+            stale_result
+        ));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|current| current.matches_snapshot(&newer_snapshot))
+        );
+    }
+
+    #[test]
+    fn in_flight_wecom_poll_cannot_clear_a_new_session() {
+        let s1 = wecom_session("s1", "scode-1");
+        let s2 = wecom_session("s2", "scode-2");
+        let mut slot = Some(s1);
+        let in_flight_s1 = slot.clone().expect("S1 should be active");
+
+        slot = Some(s2.clone());
+
+        assert!(!compare_clear_session(&mut slot, &in_flight_s1));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|current| current.matches_snapshot(&s2))
+        );
+    }
+
+    #[test]
+    fn slower_wecom_start_cannot_replace_a_newer_qr_session() {
+        let older = wecom_session_with_generation(1, "older", "");
+        let newer = wecom_session_with_generation(2, "newer", "scode-new");
+        let older_result = wecom_session_with_generation(1, "older", "scode-old");
+        let mut slot = Some(newer.clone());
+
+        assert!(!reserve_newer_session(&mut slot, older.clone()));
+        assert!(!compare_set_session(&mut slot, &older, older_result));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|current| current.matches_snapshot(&newer))
+        );
+    }
+
+    #[test]
+    fn failed_persistence_restore_does_not_replace_a_new_session() {
+        let s1 = wechat_session("s1", "qr-1", "https://api-1.example");
+        let s2 = wechat_session("s2", "qr-2", "https://api-2.example");
+        let mut slot = Some(s2.clone());
+
+        assert!(!restore_session_if_empty(&mut slot, s1));
+        assert!(
+            slot.as_ref()
+                .is_some_and(|current| current.matches_snapshot(&s2))
+        );
+    }
+
+    #[tokio::test]
+    async fn feishu_persistence_rolls_back_in_memory_config_when_save_fails() {
+        let (state, _temp) = state_with_unwritable_config();
+
+        let result = persist_feishu_registration(
+            &state,
+            "app-id",
+            "app-secret",
+            Some("open-id"),
+            Some("Feishu bot".to_string()),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let config = state.config.lock().await;
+        assert!(config.feishu_accounts.is_empty());
+        assert!(!config.feishu.is_configured());
+        assert!(!config.bridge.enabled);
+    }
+
+    #[tokio::test]
+    async fn wechat_persistence_rolls_back_in_memory_config_when_save_fails() {
+        let (state, _temp) = state_with_unwritable_config();
+
+        let result = persist_wechat_onboard_account(
+            &state,
+            "wechat-account",
+            "bot-token",
+            "https://wechat.example",
+            "user-id",
+        )
+        .await;
+
+        assert!(result.is_err());
+        let config = state.config.lock().await;
+        assert!(config.wechat_accounts.is_empty());
+        assert!(!config.wechat.is_configured());
+        assert!(!config.bridge.enabled);
+    }
+
+    #[tokio::test]
+    async fn wecom_persistence_rolls_back_in_memory_config_when_save_fails() {
+        let (state, _temp) = state_with_unwritable_config();
+
+        let result =
+            persist_wecom_onboard_account(&state, "wecom-account", "bot-id", "secret").await;
+
+        assert!(result.is_err());
+        let config = state.config.lock().await;
+        assert!(config.wecom_accounts.is_empty());
+        assert!(!config.wecom.is_configured());
+        assert!(!config.bridge.enabled);
     }
 }

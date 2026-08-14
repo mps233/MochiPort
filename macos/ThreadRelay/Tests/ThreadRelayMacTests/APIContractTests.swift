@@ -875,6 +875,21 @@ final class APIContractTests: XCTestCase {
         }
     }
 
+    func testSupersededOnboardingStartMapsToFriendlyMessage() async {
+        let client = makeClient { _ in
+            MockResponse(statusCode: 409, json: #"{"error":"superseded"}"#)
+        }
+
+        do {
+            _ = try await client.startWecomOnboarding()
+            XCTFail("Expected superseded start failure")
+        } catch let error as APIClientError {
+            XCTAssertEqual(error, .operationFailed("当前扫码请求已被新的二维码替代。"))
+        } catch {
+            XCTFail("Expected APIClientError, received \(error)")
+        }
+    }
+
     func testFetchDashboardDecodesOriginalV1AggregatePayload() async throws {
         let client = makeClient { _ in
             MockResponse(statusCode: 200, json: Self.originalV1DashboardJSON)

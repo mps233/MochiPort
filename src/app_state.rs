@@ -320,6 +320,7 @@ impl ImAccountRuntimeState {
 
 #[derive(Debug, Clone)]
 pub struct WechatOnboardSession {
+    pub generation: u64,
     pub session_key: String,
     pub qrcode: String,
     pub started_at_ms: u128,
@@ -328,6 +329,7 @@ pub struct WechatOnboardSession {
 
 #[derive(Debug, Clone)]
 pub struct WecomOnboardSession {
+    pub generation: u64,
     pub session_key: String,
     pub scode: String,
     pub started_at_ms: u128,

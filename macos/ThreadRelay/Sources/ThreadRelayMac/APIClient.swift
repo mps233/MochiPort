@@ -1641,6 +1641,7 @@ struct APIClient {
         case "missing appId": message = "请先填写 App ID。"
         case "missing appSecret": message = "请先填写 App Secret。"
         case "missing_session", "invalid_session": message = "扫码会话已失效，请重新获取二维码。"
+        case "superseded": message = "当前扫码请求已被新的二维码替代。"
         case let raw? where statusCode < 500 && !raw.isEmpty:
             // Validation failures carry a specific, already-sanitized reason
             // (for example a Telegram token rejection); show it as-is.
