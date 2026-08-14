@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | Phase 3 已完成；Phase 4-6 的 Codex、会话、AI Gateway、请求日志和设置主页面已接入真实版本化管理 API，性能、诊断导出和发布级无障碍收尾仍待完成 |
-| 最近核验 | 2026-08-14；Swift/Xcode 72 项、Rust 814 项通过（1 项忽略）；Universal Release build 378 已完成打包与运行验证（daemon 已重建并重启） |
+| 最近核验 | 2026-08-14；Swift/Xcode 93 项、Rust 837 项通过（1 项忽略）；Universal Release build 379 已完成隔离组装与签名验证，当前运行实例未重启 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
 | 主前端 | SwiftUI |
