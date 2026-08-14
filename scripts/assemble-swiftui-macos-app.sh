@@ -12,7 +12,7 @@ DAEMON_BINARY=$3
 OUTPUT_APP=$4
 
 case "$BUILD" in
-  ''|*[!0-9]*)
+  ''|0|*[!0-9]*)
     echo "build must be a positive integer" >&2
     exit 2
     ;;
@@ -27,12 +27,115 @@ if [ ! -x "$DAEMON_BINARY" ]; then
   exit 1
 fi
 
-rm -rf "$OUTPUT_APP"
-cp -R "$XCODE_APP" "$OUTPUT_APP"
-mkdir -p "$OUTPUT_APP/Contents/Helpers"
-cp "$DAEMON_BINARY" "$OUTPUT_APP/Contents/Helpers/threadrelay-daemon"
-chmod 755 "$OUTPUT_APP/Contents/Helpers/threadrelay-daemon"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$OUTPUT_APP/Contents/Info.plist"
+case "$OUTPUT_APP" in
+  *.app) ;;
+  *)
+    echo "output must be an .app bundle" >&2
+    exit 2
+    ;;
+esac
 
-codesign --force --deep --sign - "$OUTPUT_APP"
-codesign --verify --deep --strict "$OUTPUT_APP"
+OUTPUT_PARENT=$(dirname "$OUTPUT_APP")
+OUTPUT_NAME=$(basename "$OUTPUT_APP")
+if [ ! -d "$OUTPUT_PARENT" ]; then
+  echo "output parent directory is unavailable" >&2
+  exit 1
+fi
+OUTPUT_PARENT=$(cd "$OUTPUT_PARENT" && pwd -P)
+OUTPUT_APP="$OUTPUT_PARENT/$OUTPUT_NAME"
+XCODE_APP=$(cd "$XCODE_APP" && pwd -P)
+
+if [ "$OUTPUT_APP" = "$XCODE_APP" ] || { [ -e "$OUTPUT_APP" ] && [ "$OUTPUT_APP" -ef "$XCODE_APP" ]; }; then
+  echo "output app must differ from the Xcode build product" >&2
+  exit 2
+fi
+if [ -e "$OUTPUT_APP" ] && [ ! -d "$OUTPUT_APP" ]; then
+  echo "existing output is not an app bundle directory" >&2
+  exit 1
+fi
+if [ -L "$OUTPUT_APP" ]; then
+  echo "existing output app must not be a symbolic link" >&2
+  exit 1
+fi
+
+case "$OUTPUT_APP/" in
+  "$XCODE_APP/"*)
+    echo "output app must not be inside the Xcode build product" >&2
+    exit 2
+    ;;
+esac
+case "$XCODE_APP/" in
+  "$OUTPUT_APP/"*)
+    echo "Xcode build product must not be inside the output app" >&2
+    exit 2
+    ;;
+esac
+
+DAEMON_VERSION=$("$DAEMON_BINARY" --version 2>/dev/null || true)
+case "$DAEMON_VERSION" in
+  threadrelay\ *) ;;
+  *)
+    echo "daemon binary does not identify as ThreadRelay" >&2
+    exit 1
+    ;;
+esac
+
+GUI_ARCHS=$(lipo -archs "$XCODE_APP/Contents/MacOS/ThreadRelay")
+DAEMON_ARCHS=$(lipo -archs "$DAEMON_BINARY")
+for ARCH in $GUI_ARCHS; do
+  case " $DAEMON_ARCHS " in
+    *" $ARCH "*) ;;
+    *)
+      echo "daemon binary is missing GUI architecture $ARCH" >&2
+      exit 1
+      ;;
+  esac
+done
+for ARCH in $DAEMON_ARCHS; do
+  case " $GUI_ARCHS " in
+    *" $ARCH "*) ;;
+    *)
+      echo "GUI is missing daemon architecture $ARCH" >&2
+      exit 1
+      ;;
+  esac
+done
+
+STAGING_ROOT=$(mktemp -d "$OUTPUT_PARENT/.threadrelay-assemble.XXXXXX")
+STAGED_APP="$STAGING_ROOT/$OUTPUT_NAME"
+BACKUP_APP="$STAGING_ROOT/previous.app"
+cleanup() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ -e "$BACKUP_APP" ] && [ ! -e "$OUTPUT_APP" ]; then
+    if ! mv "$BACKUP_APP" "$OUTPUT_APP"; then
+      echo "failed to restore previous app; backup kept at $BACKUP_APP" >&2
+      exit 1
+    fi
+  fi
+  rm -rf "$STAGING_ROOT"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+/usr/bin/ditto "$XCODE_APP" "$STAGED_APP"
+mkdir -p "$STAGED_APP/Contents/Helpers"
+cp "$DAEMON_BINARY" "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
+chmod 755 "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$STAGED_APP/Contents/Info.plist"
+
+codesign --force --deep --sign - "$STAGED_APP"
+codesign --verify --deep --strict "$STAGED_APP"
+codesign --verify --strict "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
+
+if [ -e "$OUTPUT_APP" ]; then
+  mv "$OUTPUT_APP" "$BACKUP_APP"
+fi
+if ! mv "$STAGED_APP" "$OUTPUT_APP"; then
+  if [ -e "$BACKUP_APP" ]; then
+    mv "$BACKUP_APP" "$OUTPUT_APP"
+  fi
+  echo "failed to install assembled app" >&2
+  exit 1
+fi

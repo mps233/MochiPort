@@ -2,6 +2,7 @@
 /target-verify
 /outputs
 /macos/ThreadRelay/.build
+/macos/ThreadRelay/.derived-data
 /macos/ThreadRelay/.swiftpm
 .DS_Store
 config.toml
