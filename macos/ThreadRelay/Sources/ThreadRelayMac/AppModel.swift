@@ -1281,7 +1281,7 @@ enum ServiceStatus: Equatable {
 
     var symbol: String {
         switch self {
-        case .checking: "arrow.trianglehead.2.clockwise.rotate.90"
+        case .checking: "arrow.2.circlepath"
         case .available: "checkmark.circle.fill"
         case .bridgeAvailable: "arrow.triangle.2.circlepath.circle.fill"
         case .unavailable: "exclamationmark.triangle.fill"

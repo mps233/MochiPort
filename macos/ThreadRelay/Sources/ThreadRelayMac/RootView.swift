@@ -35,7 +35,7 @@ struct RootView: View {
                     RequestLogsView()
                 case .messaging:
                     MessagingAccountsView(
-                        accounts: model.imAccounts.map(MessagingAccountSummary.init),
+                        accounts: model.imAccounts.compactMap(MessagingAccountSummary.init),
                         availability: model.imAccountsAvailability,
                         onAdd: { showsAccountOnboarding = true },
                         onToggle: { account, enabled in

@@ -25,7 +25,7 @@ struct MessagingAccountSummary: Identifiable, Equatable {
 
         var symbol: String {
             switch self {
-            case .feishu: "bubble.left.and.text.bubble.right"
+            case .feishu: "bubble.left.and.bubble.right"
             case .telegram: "paperplane"
             case .wechat: "message"
             case .wecom: "person.2"
@@ -85,9 +85,12 @@ struct MessagingAccountSummary: Identifiable, Equatable {
         self.lastInboundAt = lastInboundAt
     }
 
-    init(_ account: ManageIMAccount) {
+    init?(_ account: ManageIMAccount) {
+        guard let platform = Platform(rawValue: account.platform) else {
+            return nil
+        }
         self.init(
-            platform: Platform(rawValue: account.platform) ?? .feishu,
+            platform: platform,
             accountID: account.accountId,
             displayName: account.displayName,
             enabled: account.enabled,
@@ -164,7 +167,7 @@ private enum MessagingAccountState: Equatable {
         switch self {
         case .disabled: "pause.circle"
         case .connected: "checkmark.circle.fill"
-        case .connecting: "arrow.trianglehead.2.clockwise.rotate.90"
+        case .connecting: "arrow.2.circlepath"
         case .error: "exclamationmark.triangle.fill"
         case .incomplete: "circle.dotted"
         case .offline: "minus.circle"
@@ -222,6 +225,7 @@ struct MessagingAccountsView: View {
     @State private var searchText = ""
     @State private var filter: MessagingAccountFilter = .all
     @State private var enabledOverrides: [String: Bool] = [:]
+    @State private var pendingToggleIDs: Set<String> = []
     @State private var expandedIDs: Set<String> = []
     @State private var pendingDeletion: MessagingAccountSummary?
     @State private var hoveredAccountID: String?
@@ -353,6 +357,7 @@ struct MessagingAccountsView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .disabled(availability != .available)
                 .help("添加消息渠道账号")
             }
         }
@@ -462,6 +467,8 @@ struct MessagingAccountsView: View {
 
     private func accountRow(_ account: MessagingAccountSummary) -> some View {
         let isExpanded = expandedIDs.contains(account.id)
+        let mutationsEnabled = availability == .available
+        let togglePending = pendingToggleIDs.contains(account.id)
         return VStack(spacing: 0) {
             HStack(spacing: ThreadRelaySpacing.standard) {
                 Button {
@@ -516,8 +523,10 @@ struct MessagingAccountsView: View {
                     isOn: Binding(
                         get: { isEnabled(account) },
                         set: { newValue in
+                            guard mutationsEnabled, !togglePending else { return }
                             enabledOverrides[account.id] = newValue
                             guard let onToggle else { return }
+                            pendingToggleIDs.insert(account.id)
                             Task {
                                 let acknowledged = await onToggle(account, newValue)
                                 if !acknowledged {
@@ -525,6 +534,7 @@ struct MessagingAccountsView: View {
                                         _ = enabledOverrides.removeValue(forKey: account.id)
                                     }
                                 }
+                                pendingToggleIDs.remove(account.id)
                             }
                         }
                     )
@@ -532,9 +542,11 @@ struct MessagingAccountsView: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
+                .disabled(!mutationsEnabled || togglePending || onToggle == nil)
+                .accessibilityLabel(isEnabled(account) ? "停用账号" : "启用账号")
                 .help(isEnabled(account) ? "停用账号" : "启用账号")
 
-                if onDelete != nil {
+                if onDelete != nil, mutationsEnabled {
                     Button {
                         pendingDeletion = account
                     } label: {
@@ -570,7 +582,7 @@ struct MessagingAccountsView: View {
             }
         }
         .contextMenu {
-            if onDelete != nil {
+            if onDelete != nil, mutationsEnabled {
                 Button("删除账号", role: .destructive) {
                     pendingDeletion = account
                 }
@@ -615,7 +627,7 @@ struct MessagingAccountsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            if onDelete != nil {
+            if onDelete != nil, availability == .available {
                 Button("删除账号", role: .destructive) {
                     pendingDeletion = account
                 }
@@ -661,8 +673,8 @@ struct MessagingAccountsView: View {
     private func state(for account: MessagingAccountSummary) -> MessagingAccountState {
         guard isEnabled(account) else { return .disabled }
         if account.connected { return .connected }
-        if account.connecting || account.polling { return .connecting }
         if account.lastError?.trimmedNonEmpty != nil { return .error }
+        if account.connecting || account.polling { return .connecting }
         if !account.configured || !account.secretSet { return .incomplete }
         return .offline
     }
