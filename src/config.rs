@@ -1,4 +1,8 @@
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    io::Write,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -288,13 +292,26 @@ impl AppConfig {
 
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
         let raw = toml::to_string_pretty(self)?;
-        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create config directory {}", parent.display())
-            })?;
-        }
-        std::fs::write(path, raw)
-            .with_context(|| format!("failed to write config {}", path.display()))
+        let parent = path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory {}", parent.display()))?;
+
+        let mut temporary = tempfile::Builder::new()
+            .prefix(".threadrelay-config.")
+            .tempfile_in(parent)
+            .with_context(|| format!("failed to prepare config file {}", path.display()))?;
+        temporary
+            .write_all(raw.as_bytes())
+            .and_then(|_| temporary.as_file().sync_all())
+            .with_context(|| format!("failed to write config {}", path.display()))?;
+        temporary
+            .persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("failed to replace config {}", path.display()))?;
+        Ok(())
     }
 
     pub fn migrate_legacy_im_accounts(&mut self) -> bool {
@@ -720,6 +737,33 @@ fn non_empty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{AppConfig, OutboundProxyMode, TelegramChatAllowResult, TelegramConfig};
+
+    #[test]
+    fn save_atomically_replaces_an_existing_config() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("config.toml");
+        let mut original = AppConfig::default();
+        original.language = Some("en-US".to_string());
+        original.save(&path).expect("save original config");
+
+        let mut replacement = original.clone();
+        replacement.language = Some("zh-CN".to_string());
+        replacement.save(&path).expect("replace config");
+
+        let loaded = AppConfig::load_or_default(&path).expect("load replacement config");
+        assert_eq!(loaded.language.as_deref(), Some("zh-CN"));
+        let temporary_files = std::fs::read_dir(temp.path())
+            .expect("read config directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".threadrelay-config.")
+            })
+            .count();
+        assert_eq!(temporary_files, 0);
+    }
 
     #[test]
     fn missing_outbound_proxy_config_defaults_to_system() {
