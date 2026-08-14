@@ -119,7 +119,7 @@ final class APIContractTests: XCTestCase {
         )
     }
 
-    func testDaemonLauncherWakesLoadedServiceWithoutForcingRestart() async throws {
+    func testDaemonLauncherUpdatesLoadedServiceWithoutForcingRestart() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let commands = CommandInvocationRecorder { arguments in
@@ -152,7 +152,16 @@ final class APIContractTests: XCTestCase {
             ["kickstart", "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"],
         ])
         XCTAssertFalse(commands.arguments.flatMap { $0 }.contains("-k"))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.configuration.launchAgentURL.path))
+        let plistData = try Data(contentsOf: fixture.configuration.launchAgentURL)
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)
+                as? [String: Any]
+        )
+        let environment = try XCTUnwrap(plist["EnvironmentVariables"] as? [String: String])
+        XCTAssertEqual(
+            environment["THREADRELAY_HOME"],
+            fixture.configuration.configURL.deletingLastPathComponent().path
+        )
     }
 
     func testDaemonLauncherRejectsLoadedServiceFromDifferentHelper() async throws {
@@ -222,6 +231,11 @@ final class APIContractTests: XCTestCase {
                 fixture.configuration.configURL.path,
                 "daemon",
             ]
+        )
+        let environment = try XCTUnwrap(plist["EnvironmentVariables"] as? [String: String])
+        XCTAssertEqual(
+            environment["THREADRELAY_HOME"],
+            fixture.configuration.configURL.deletingLastPathComponent().path
         )
     }
 
@@ -1949,9 +1963,27 @@ final class APIContractTests: XCTestCase {
     }
 
     @MainActor
-    func testAppModelAutoRestartsDaemonAfterThreeFailuresAndHonorsCooldown() async {
+    func testAppModelDoesNotAutoRestartDaemonForHTTPServiceErrors() async {
         let client = makeClient { _ in
             MockResponse(statusCode: 503, json: #"{"error":"temporarily unavailable"}"#)
+        }
+        let launcher = RecordingDaemonLauncher()
+        let model = AppModel(apiClient: client, daemonLauncher: launcher)
+
+        await model.refresh()
+        await model.refresh()
+        await model.refresh()
+        await model.refresh()
+        await model.refresh()
+        await model.refresh()
+
+        XCTAssertEqual(launcher.startCount, 0)
+    }
+
+    @MainActor
+    func testAppModelAutoRestartsAfterThreeConnectionLossesAndHonorsCooldown() async {
+        let client = makeClient { _ in
+            MockResponse(error: URLError(.networkConnectionLost))
         }
         let launcher = RecordingDaemonLauncher()
         let model = AppModel(apiClient: client, daemonLauncher: launcher)
@@ -1964,8 +1996,6 @@ final class APIContractTests: XCTestCase {
         await waitForDaemonLaunches(launcher, count: 1)
         XCTAssertEqual(launcher.startCount, 1)
 
-        // Additional failures inside the 60-second cooldown never trigger a
-        // second automatic restart.
         await model.refresh()
         await model.refresh()
         await model.refresh()
@@ -1974,12 +2004,14 @@ final class APIContractTests: XCTestCase {
     }
 
     @MainActor
-    func testAppModelResetsDaemonFailureCountAfterSuccessfulProbe() async {
+    func testAppModelSuccessfulProbeResetsConnectionLossCount() async {
         let healthResponses = MockResponseSequence([
-            MockResponse(statusCode: 503, json: #"{"error":"down"}"#),
-            MockResponse(statusCode: 503, json: #"{"error":"down"}"#),
+            MockResponse(error: URLError(.networkConnectionLost)),
+            MockResponse(error: URLError(.networkConnectionLost)),
             MockResponse(statusCode: 200, json: Self.healthJSON),
-            MockResponse(statusCode: 503, json: #"{"error":"down"}"#),
+            MockResponse(error: URLError(.networkConnectionLost)),
+            MockResponse(error: URLError(.networkConnectionLost)),
+            MockResponse(error: URLError(.networkConnectionLost)),
         ])
         let client = makeClient { request in
             if request.url?.path == "/healthz" {
@@ -1990,20 +2022,25 @@ final class APIContractTests: XCTestCase {
         let launcher = RecordingDaemonLauncher()
         let model = AppModel(apiClient: client, daemonLauncher: launcher)
 
-        // fail, fail, success: the success resets the consecutive counter.
         await model.refresh()
         await model.refresh()
         await model.refresh()
-        // fail, fail: only two consecutive failures after the reset.
         await model.refresh()
         await model.refresh()
         try? await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(launcher.startCount, 0)
 
-        // The third consecutive failure triggers the restart.
         await model.refresh()
         await waitForDaemonLaunches(launcher, count: 1)
         XCTAssertEqual(launcher.startCount, 1)
+    }
+
+    func testDaemonAutoRestartOnlyCountsConnectionLosses() {
+        XCTAssertTrue(AppModel.daemonFailureAllowsAutoRestart(URLError(.cannotConnectToHost)))
+        XCTAssertTrue(AppModel.daemonFailureAllowsAutoRestart(URLError(.networkConnectionLost)))
+        XCTAssertFalse(AppModel.daemonFailureAllowsAutoRestart(URLError(.timedOut)))
+        XCTAssertFalse(AppModel.daemonFailureAllowsAutoRestart(APIClientError.invalidResponse))
+        XCTAssertFalse(AppModel.daemonFailureAllowsAutoRestart(APIClientError.incompatibleService))
     }
 
     func testGitHubReleaseDecodesAndValidatesDownloadPage() throws {
@@ -2319,6 +2356,7 @@ final class APIContractTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
     }
+
 }
 
 /// DaemonLaunching mock that records start attempts. It throws a launch
@@ -2340,10 +2378,18 @@ private final class RecordingDaemonLauncher: DaemonLaunching, @unchecked Sendabl
 private struct MockResponse: Sendable {
     let statusCode: Int
     let body: Data
+    let error: URLError?
 
     init(statusCode: Int, json: String) {
         self.statusCode = statusCode
         body = Data(json.utf8)
+        error = nil
+    }
+
+    init(error: URLError) {
+        statusCode = 0
+        body = Data()
+        self.error = error
     }
 }
 
@@ -2497,6 +2543,10 @@ private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
         }
 
         let mock = handler(request)
+        if let error = mock.error {
+            client?.urlProtocol(self, didFailWithError: error)
+            return
+        }
         guard let response = HTTPURLResponse(
                   url: url,
                   statusCode: mock.statusCode,

@@ -96,6 +96,7 @@ struct DaemonLaunchConfiguration: Equatable {
             "EnvironmentVariables": [
                 "HOME": homeURL.path,
                 "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "THREADRELAY_HOME": configURL.deletingLastPathComponent().path,
             ],
             "RunAtLoad": true,
             "KeepAlive": true,
@@ -179,6 +180,10 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                     actual: loadedProgram(from: printResult.output)
                 )
             }
+            // Keep the running daemon alive, but update the on-disk job so
+            // newly added environment values apply on the next explicit
+            // LaunchAgent reload or user login.
+            try writeLaunchAgent(configuration, fileManager: fileManager)
             result = try commandRunner(launchctl, ["kickstart", serviceTarget])
         } else {
             try writeLaunchAgent(configuration, fileManager: fileManager)

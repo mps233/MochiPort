@@ -71,6 +71,11 @@ final class AppModel: ObservableObject {
         return now >= notBefore
     }
 
+    nonisolated static func daemonFailureAllowsAutoRestart(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        return urlError.code == .cannotConnectToHost || urlError.code == .networkConnectionLost
+    }
+
     init(
         apiClient: APIClient = APIClient(),
         daemonLauncher: any DaemonLaunching = DaemonLauncher(),
@@ -151,16 +156,20 @@ final class AppModel: ObservableObject {
             serviceStatus = .unavailable(userFacingMessage(for: error))
             imAccountsAvailability = .unavailable(userFacingMessage(for: error))
             dashboardState = dashboard == nil ? .offline : .stale
-            registerDaemonProbeFailure()
+            registerDaemonProbeFailure(error)
         }
         lastCheckedAt = Date()
     }
 
-    /// Counts consecutive probe failures and, mirroring the legacy GUI,
-    /// automatically restarts the daemon after three of them, with a
-    /// 60-second cooldown between automatic attempts. Failures surface
-    /// through the existing overview error display; no dialog is shown.
-    private func registerDaemonProbeFailure() {
+    /// Counts consecutive loopback connection losses and automatically tries
+    /// recovery after three of them, with a 60-second cooldown. HTTP errors,
+    /// incompatible services, and unsupported API versions stay diagnostic
+    /// only so recovery cannot start a crash loop against an occupied port.
+    private func registerDaemonProbeFailure(_ error: Error) {
+        guard Self.daemonFailureAllowsAutoRestart(error) else {
+            daemonHealthFailureCount = 0
+            return
+        }
         daemonHealthFailureCount += 1
         guard fixtureStatus == nil,
               !daemonRecoveryInProgress,
