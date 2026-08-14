@@ -249,6 +249,7 @@ pub(super) async fn set_im_account_enabled(
                 Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
             );
         }
+        let previous_config = config.clone();
         config.migrate_legacy_im_accounts();
         if !config.set_im_account_enabled(&platform, &account_id, request.enabled) {
             return (
@@ -259,6 +260,7 @@ pub(super) async fn set_im_account_enabled(
         set_legacy_im_account_enabled(&mut config, &platform, &account_id, request.enabled);
         config.bridge.enabled = im_bridge_configured(&config);
         if let Err(err) = config.save(&state.config_path) {
+            *config = previous_config;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "ok": false, "error": err.to_string() })),
@@ -319,6 +321,7 @@ pub(super) async fn delete_im_account(
                 Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
             );
         }
+        let previous_config = config.clone();
         config.migrate_legacy_im_accounts();
         let removed = config.remove_im_account(&platform, &account_id);
         if !removed {
@@ -330,6 +333,7 @@ pub(super) async fn delete_im_account(
         clear_legacy_im_account(&mut config, &platform, &account_id);
         config.bridge.enabled = im_bridge_configured(&config);
         if let Err(err) = config.save(&state.config_path) {
+            *config = previous_config;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "ok": false, "error": err.to_string() })),
@@ -980,9 +984,31 @@ async fn apply_telegram_token(
             .map(|value| format!("@{}", value.trim_start_matches('@')))
             .unwrap_or_else(|| format!("Telegram {}", user.id))
     });
+    persist_telegram_account(state, &mut telegram_config).await?;
+    start_bridge_task(
+        state,
+        BridgeStartMode::Restart,
+        "bridge restarted after Telegram configuration",
+    )
+    .await;
+    Ok(telegram_config)
+}
+
+async fn persist_telegram_account(
+    state: &SharedState,
+    telegram_config: &mut crate::config::TelegramConfig,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     {
         let mut config = state.config.lock().await;
+        let previous_config = config.clone();
         config.migrate_legacy_im_accounts();
+        if let Some(existing) = config
+            .telegram_accounts
+            .iter()
+            .find(|account| account.account_id.trim() == telegram_config.account_id.trim())
+        {
+            telegram_config.allowed_chat_ids = existing.allowed_chat_ids.clone();
+        }
         let token = telegram_config.bot_token.trim().to_string();
         config.telegram_accounts.retain(|account| {
             account.account_id.trim() == telegram_config.account_id
@@ -996,19 +1022,14 @@ async fn apply_telegram_token(
         }
         config.bridge.enabled = true;
         if let Err(err) = config.save(&state.config_path) {
+            *config = previous_config;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "ok": false, "error": err.to_string() })),
             ));
         }
     }
-    start_bridge_task(
-        state,
-        BridgeStartMode::Restart,
-        "bridge restarted after Telegram configuration",
-    )
-    .await;
-    Ok(telegram_config)
+    Ok(())
 }
 
 pub(super) async fn configure_telegram_bot(
@@ -1176,6 +1197,156 @@ mod tests {
 
     use super::*;
     use crate::{app_state::AppState, im_runtime::RouteTarget, store::PersistedState};
+
+    fn telegram_account(
+        account_id: &str,
+        token: &str,
+        enabled: bool,
+        allowed_chat_ids: &[&str],
+    ) -> crate::config::TelegramConfig {
+        crate::config::TelegramConfig {
+            enabled,
+            account_id: account_id.to_string(),
+            bot_token: token.to_string(),
+            display_name: format!("Telegram {account_id}"),
+            mention_only: false,
+            allowed_chat_ids: allowed_chat_ids
+                .iter()
+                .map(|chat_id| (*chat_id).to_string())
+                .collect(),
+        }
+    }
+
+    fn state_with_config_path(config_path: std::path::PathBuf, config: AppConfig) -> SharedState {
+        AppState::new(config_path, config, None, None)
+    }
+
+    #[tokio::test]
+    async fn reconfiguring_telegram_account_preserves_allowed_chat_ids() {
+        let temp_dir = tempdir().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let existing = telegram_account("tg_42", "old-token", true, &["100", "200"]);
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        config.telegram = existing.clone();
+        config.telegram_accounts = vec![existing];
+        config.bridge.enabled = true;
+        let state = state_with_config_path(config_path.clone(), config);
+        let mut replacement = telegram_account("tg_42", "new-token", true, &[]);
+        replacement.display_name = "Updated bot".to_string();
+        replacement.mention_only = true;
+
+        persist_telegram_account(&state, &mut replacement)
+            .await
+            .expect("persist Telegram account");
+
+        assert_eq!(replacement.allowed_chat_ids, ["100", "200"]);
+        let in_memory = state.config.lock().await.clone();
+        assert_eq!(in_memory.telegram.allowed_chat_ids, ["100", "200"]);
+        assert_eq!(in_memory.telegram.bot_token, "new-token");
+        assert_eq!(in_memory.telegram_accounts.len(), 1);
+        assert_eq!(
+            in_memory.telegram_accounts[0].allowed_chat_ids,
+            ["100", "200"]
+        );
+        assert_eq!(in_memory.telegram_accounts[0].bot_token, "new-token");
+        let persisted = AppConfig::load_or_default(&config_path).expect("load persisted config");
+        assert_eq!(
+            persisted.telegram_accounts[0].allowed_chat_ids,
+            ["100", "200"]
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_configure_rolls_back_in_memory_config_when_save_fails() {
+        let temp_dir = tempdir().expect("temp dir");
+        let unwritable_config_path = temp_dir.path().join("config-directory");
+        std::fs::create_dir(&unwritable_config_path).expect("create config directory");
+        let existing = telegram_account("tg_42", "old-token", false, &["100"]);
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        config.telegram = existing.clone();
+        config.telegram_accounts = vec![existing];
+        config.bridge.enabled = false;
+        let state = state_with_config_path(unwritable_config_path, config);
+        let mut replacement = telegram_account("tg_42", "new-token", true, &[]);
+
+        let result = persist_telegram_account(&state, &mut replacement).await;
+
+        assert!(result.is_err());
+        let config = state.config.lock().await;
+        assert!(!config.bridge.enabled);
+        assert!(!config.telegram.enabled);
+        assert_eq!(config.telegram.bot_token, "old-token");
+        assert_eq!(config.telegram.allowed_chat_ids, ["100"]);
+        assert_eq!(config.telegram_accounts.len(), 1);
+        assert!(!config.telegram_accounts[0].enabled);
+        assert_eq!(config.telegram_accounts[0].bot_token, "old-token");
+        assert_eq!(config.telegram_accounts[0].allowed_chat_ids, ["100"]);
+    }
+
+    #[tokio::test]
+    async fn toggling_im_account_rolls_back_in_memory_config_when_save_fails() {
+        let temp_dir = tempdir().expect("temp dir");
+        let unwritable_config_path = temp_dir.path().join("config-directory");
+        std::fs::create_dir(&unwritable_config_path).expect("create config directory");
+        let existing = telegram_account("tg_42", "token", true, &["100"]);
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        config.telegram = existing.clone();
+        config.telegram_accounts = vec![existing];
+        config.bridge.enabled = true;
+        let state = state_with_config_path(unwritable_config_path, config);
+
+        let response = set_im_account_enabled(
+            State(state.clone()),
+            Json(SetImAccountEnabledRequest {
+                platform: "telegram".to_string(),
+                account_id: "tg_42".to_string(),
+                enabled: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let config = state.config.lock().await;
+        assert!(config.bridge.enabled);
+        assert!(config.telegram.enabled);
+        assert!(config.telegram_accounts[0].enabled);
+    }
+
+    #[tokio::test]
+    async fn deleting_im_account_rolls_back_in_memory_config_when_save_fails() {
+        let temp_dir = tempdir().expect("temp dir");
+        let unwritable_config_path = temp_dir.path().join("config-directory");
+        std::fs::create_dir(&unwritable_config_path).expect("create config directory");
+        let existing = telegram_account("tg_42", "token", true, &["100"]);
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        config.telegram = existing.clone();
+        config.telegram_accounts = vec![existing];
+        config.bridge.enabled = true;
+        let state = state_with_config_path(unwritable_config_path, config);
+
+        let response = delete_im_account(
+            State(state.clone()),
+            Json(DeleteImAccountRequest {
+                platform: "telegram".to_string(),
+                account_id: "tg_42".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let config = state.config.lock().await;
+        assert!(config.bridge.enabled);
+        assert!(config.telegram.is_configured());
+        assert_eq!(config.telegram.account_id, "tg_42");
+        assert_eq!(config.telegram_accounts.len(), 1);
+        assert_eq!(config.telegram_accounts[0].account_id, "tg_42");
+    }
 
     #[tokio::test]
     async fn deleting_telegram_account_clears_only_its_saved_bindings() {
