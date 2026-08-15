@@ -183,7 +183,7 @@ struct ManageGateway: Decodable, Equatable {
     let providers: [ManageGatewayProvider]
 }
 
-struct ManageGatewayProvider: Codable, Equatable, Identifiable {
+struct ManageGatewayProvider: Codable, Equatable, Identifiable, Sendable {
     let name: String
     let enabled: Bool
     let providerType: String
@@ -365,6 +365,94 @@ struct ManageProviderModelsFetchResponse: Decodable, Equatable {
     let ok: Bool
     let models: [String]
     let attempts: [Attempt]
+}
+
+/// Normalized balance and billing information for a saved Provider API key.
+/// The daemon owns all upstream-specific discovery and never returns the key.
+struct ManageProviderUsageResponse: Decodable, Equatable, Sendable {
+    struct Usage: Decodable, Equatable, Sendable {
+        let source: String
+        let balanceStatus: String
+        let billingStatus: String
+        let remaining: Double?
+        let unlimited: Bool
+        let unit: String?
+        let balanceMode: String?
+        let planName: String?
+        let accountValid: Bool?
+        let accountStatus: String?
+        let groupRateMultiplier: Double?
+        let userRateMultiplier: Double?
+        let resolvedRateMultiplier: Double?
+        let effectiveRateMultiplier: Double?
+        let peakRateEnabled: Bool?
+        let peakStart: String?
+        let peakEnd: String?
+        let peakRateMultiplier: Double?
+        let appliedPeakMultiplier: Double?
+        let timezone: String?
+        let observedAt: String?
+    }
+
+    let ok: Bool
+    let providerName: String
+    let usage: Usage
+}
+
+struct ManageSub2ApiAdmin: Decodable, Equatable, Sendable {
+    let configured: Bool
+    let baseUrl: String
+    let secretSet: Bool
+}
+
+struct ManageSub2ApiAdminMutationResponse: Decodable, Equatable, ManageMutationResponse {
+    let ok: Bool
+    let sub2api: ManageSub2ApiAdmin
+}
+
+struct ManageSub2ApiAccountPoolResponse: Decodable, Equatable, Sendable {
+    struct Pool: Decodable, Equatable, Sendable {
+        let source: String
+        let fetchedAtMs: Int64
+        let accounts: [Account]
+        let warnings: [String]?
+    }
+
+    struct Account: Decodable, Equatable, Identifiable, Sendable {
+        struct Billing: Decodable, Equatable, Sendable {
+            let state: String
+            let resolvedRateMultiplier: Double?
+            let effectiveRateMultiplier: Double?
+            let observedAt: String?
+            let freshUntil: String?
+            let stale: Bool
+        }
+
+        struct Balance: Decodable, Equatable, Sendable {
+            let state: String
+            let remaining: Double?
+            let unlimited: Bool
+            let unit: String?
+            let mode: String?
+            let planName: String?
+            let accountValid: Bool?
+            let accountStatus: String?
+            let observedAt: String?
+        }
+
+        let id: Int64
+        let name: String
+        let platform: String
+        let accountType: String
+        let status: String
+        let schedulable: Bool
+        let localRateMultiplier: Double?
+        let upstreamBilling: Billing
+        let upstreamBalance: Balance
+    }
+
+    let ok: Bool
+    let pool: Pool
 }
 
 struct ManageCodexPreflightResponse: Decodable, Equatable {
@@ -813,7 +901,7 @@ enum APIClientError: LocalizedError, Equatable {
     }
 }
 
-struct APIClient {
+struct APIClient: Sendable {
     var session: URLSession = .shared
     private var connectionLoader: @Sendable () -> ManagementConnection
 
@@ -1394,6 +1482,58 @@ struct APIClient {
         )
     }
 
+    /// Queries usage for the API key already stored by the daemon. Only the
+    /// Provider name crosses the management API; draft API-key text is never
+    /// included in this request.
+    func fetchGatewayProviderUsage(
+        providerName: String
+    ) async throws -> ManageProviderUsageResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/gateway/provider/usage",
+            body: FetchProviderUsageRequest(providerName: providerName),
+            timeout: 30
+        )
+    }
+
+    func sub2ApiAdmin() async throws -> ManageSub2ApiAdmin {
+        try await performManageGET(path: "api/v1/manage/gateway/sub2api")
+    }
+
+    func updateSub2ApiAdmin(
+        baseUrl: String,
+        adminApiKey: String?,
+        clearAdminApiKey: Bool = false
+    ) async throws -> ManageSub2ApiAdmin {
+        let response: ManageSub2ApiAdminMutationResponse = try await performManagePOST(
+            path: "api/v1/manage/gateway/sub2api/config",
+            body: UpdateSub2ApiAdminRequest(
+                baseUrl: baseUrl,
+                adminApiKey: adminApiKey,
+                clearAdminApiKey: clearAdminApiKey
+            ),
+            timeout: 30
+        )
+        return response.sub2api
+    }
+
+    func disconnectSub2ApiAdmin() async throws -> ManageSub2ApiAdmin {
+        let response: ManageSub2ApiAdminMutationResponse = try await performManagePOST(
+            path: "api/v1/manage/gateway/sub2api/disconnect",
+            body: EmptyRequestBody()
+        )
+        return response.sub2api
+    }
+
+    func fetchSub2ApiAccounts(
+        forceBillingRefresh: Bool
+    ) async throws -> ManageSub2ApiAccountPoolResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/gateway/sub2api/accounts",
+            body: FetchSub2ApiAccountsRequest(forceBillingRefresh: forceBillingRefresh),
+            timeout: 60
+        )
+    }
+
     private struct IMAccountEnabledRequest: Encodable {
         let platform: String
         let accountId: String
@@ -1472,6 +1612,20 @@ struct APIClient {
         let modelsUrl: String?
         let providerType: String
         let apiKey: String?
+    }
+
+    private struct FetchProviderUsageRequest: Encodable {
+        let providerName: String
+    }
+
+    private struct UpdateSub2ApiAdminRequest: Encodable {
+        let baseUrl: String
+        let adminApiKey: String?
+        let clearAdminApiKey: Bool
+    }
+
+    private struct FetchSub2ApiAccountsRequest: Encodable {
+        let forceBillingRefresh: Bool
     }
 
     private struct UpdateSettingsRequest: Encodable {
@@ -1774,6 +1928,13 @@ struct APIClient {
         case "missing appSecret": message = "请先填写 App Secret。"
         case "missing_session", "invalid_session": message = "扫码会话已失效，请重新获取二维码。"
         case "superseded": message = "当前扫码请求已被新的二维码替代。"
+        case "Sub2API 管理密钥无效",
+             "Sub2API 管理密钥没有账号读取权限",
+             "当前 Sub2API 版本不支持账号池接口",
+             "Sub2API 暂时不可用",
+             "Sub2API 返回了无法识别的数据",
+             "尚未连接 Sub2API 账号池":
+            message = raw ?? "Sub2API 账号池不可用。"
         case let raw? where statusCode < 500 && !raw.isEmpty:
             // Validation failures carry a specific, already-sanitized reason
             // (for example a Telegram token rejection); show it as-is.

@@ -27,6 +27,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var codexSessions: [ManageCodexSession] = []
     @Published private(set) var codexSessionProviders: [String] = []
     @Published private(set) var gateway: ManageGateway?
+    @Published private(set) var sub2ApiAdmin: ManageSub2ApiAdmin?
+    @Published private(set) var sub2ApiAccountPool: ManageSub2ApiAccountPoolResponse.Pool?
+    @Published private(set) var sub2ApiAccountPoolLoading = false
+    @Published private(set) var sub2ApiAccountPoolError: String?
     @Published private(set) var settings: ManageSettings?
     @Published private(set) var requestLogs: [ManageRequestLog] = []
     @Published private(set) var requestLogFilters = RequestLogFilters()
@@ -65,6 +69,9 @@ final class AppModel: ObservableObject {
     private var startupUpdateCheckScheduled = false
     private var lifecycleLeaseTask: Task<Void, Never>?
     private let installationId: String
+    private static let sub2ApiAccountPoolCacheLifetime: TimeInterval = 5 * 60
+    private var sub2ApiAccountPoolGeneration: UInt64 = 0
+    private var sub2ApiAccountPoolRefreshID: UUID?
 
     /// Mirrors the legacy GUI's unhealthy-daemon recovery policy: three
     /// consecutive probe failures trigger a restart, then a cooldown blocks
@@ -151,21 +158,32 @@ final class AppModel: ObservableObject {
     }
 
     var daemonUpgradeDetail: String {
-        guard let lifecycle,
-              let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+        Self.daemonUpgradeDetailText(
+            guiBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+            daemonBuild: lifecycle?.runtime.buildNumber,
+            prepared: daemonUpgradePrepared
+        )
+    }
+
+    nonisolated static func daemonUpgradeDetailText(
+        guiBuild: String?,
+        daemonBuild: Int?,
+        prepared: Bool
+    ) -> String {
+        guard let guiBuild,
               let guiBuildNumber = Int(guiBuild),
-              let daemonBuild = lifecycle.runtime.buildNumber
+              let daemonBuild
         else { return "后台版本未知" }
         if daemonBuild > guiBuildNumber {
-            return "后台构建 (daemonBuild) 高于界面 (guiBuildNumber)，不会自动降级"
+            return "后台构建 \(daemonBuild) 高于界面 \(guiBuildNumber)，不会自动降级"
         }
         if daemonBuild == guiBuildNumber {
             return "版本一致"
         }
-        if daemonUpgradePrepared {
-            return "已准备构建 (guiBuildNumber)，安全重启后生效"
+        if prepared {
+            return "已准备构建 \(guiBuildNumber)，安全重启后生效"
         }
-        return "发现构建 (guiBuildNumber)，正在准备运行版本"
+        return "发现构建 \(guiBuildNumber)，正在准备运行版本"
     }
 
     var ownsDaemonLease: Bool {
@@ -400,6 +418,8 @@ final class AppModel: ObservableObject {
         codexSessions = []
         codexSessionProviders = []
         gateway = nil
+        sub2ApiAdmin = nil
+        invalidateSub2ApiAccountPool()
         settings = nil
         resetRequestLogPagination(clearLogs: true)
         requestLogDetail = nil
@@ -441,6 +461,8 @@ final class AppModel: ObservableObject {
             imAccounts = []
         case .gateway:
             gateway = nil
+            sub2ApiAdmin = nil
+            invalidateSub2ApiAccountPool()
         case .requestLogs:
             resetRequestLogPagination(clearLogs: true)
             requestLogDetail = nil
@@ -572,9 +594,13 @@ final class AppModel: ObservableObject {
             case .messaging:
                 await loadIMAccounts()
             case .gateway:
-                let response = try await apiClient.gateway()
+                async let gatewayResponse = apiClient.gateway()
+                async let sub2ApiResponse = try? apiClient.sub2ApiAdmin()
+                let response = try await gatewayResponse
+                let admin = await sub2ApiResponse
                 guard isCurrentLoad(section, generation: generation) else { return false }
                 gateway = response
+                sub2ApiAdmin = admin
             case .requestLogs:
                 let filters = requestLogFilters
                 let dataGeneration = beginRequestLogFirstPageLoad()
@@ -992,6 +1018,109 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
+    func saveSub2ApiAdmin(baseUrl: String, adminApiKey: String?) async -> Bool {
+        await performManagementAction(section: .gateway) {
+            self.sub2ApiAdmin = try await self.apiClient.updateSub2ApiAdmin(
+                baseUrl: baseUrl,
+                adminApiKey: adminApiKey
+            )
+            self.invalidateSub2ApiAccountPool()
+            return "已连接 Sub2API 账号池"
+        }
+    }
+
+    @discardableResult
+    func disconnectSub2ApiAdmin() async -> Bool {
+        await performManagementAction(section: .gateway) {
+            self.sub2ApiAdmin = try await self.apiClient.disconnectSub2ApiAdmin()
+            self.invalidateSub2ApiAccountPool()
+            return "已断开 Sub2API 账号池"
+        }
+    }
+
+    func refreshSub2ApiAccountPool(
+        forceBillingRefresh: Bool = false,
+        now: Date = Date()
+    ) async {
+        guard !sub2ApiAccountPoolLoading else { return }
+        if !forceBillingRefresh,
+           let fetchedAtMs = sub2ApiAccountPool?.fetchedAtMs,
+           now.timeIntervalSince1970 - (Double(fetchedAtMs) / 1_000)
+               < Self.sub2ApiAccountPoolCacheLifetime
+        {
+            return
+        }
+
+        let refreshID = UUID()
+        let generation = sub2ApiAccountPoolGeneration
+        sub2ApiAccountPoolRefreshID = refreshID
+        sub2ApiAccountPoolLoading = true
+        sub2ApiAccountPoolError = nil
+        defer {
+            if sub2ApiAccountPoolRefreshID == refreshID,
+               sub2ApiAccountPoolGeneration == generation
+            {
+                sub2ApiAccountPoolRefreshID = nil
+                sub2ApiAccountPoolLoading = false
+            }
+        }
+
+        if sub2ApiAdmin == nil {
+            let admin = try? await apiClient.sub2ApiAdmin()
+            guard isCurrentSub2ApiAccountPoolRefresh(
+                id: refreshID,
+                generation: generation
+            ) else { return }
+            sub2ApiAdmin = admin
+        }
+        guard sub2ApiAdmin?.configured == true else {
+            sub2ApiAccountPool = nil
+            sub2ApiAccountPoolError = nil
+            return
+        }
+
+        do {
+            let response = try await apiClient.fetchSub2ApiAccounts(
+                forceBillingRefresh: forceBillingRefresh
+            )
+            guard isCurrentSub2ApiAccountPoolRefresh(
+                id: refreshID,
+                generation: generation
+            ) else { return }
+            sub2ApiAccountPool = response.pool
+        } catch {
+            guard isCurrentSub2ApiAccountPoolRefresh(
+                id: refreshID,
+                generation: generation
+            ) else { return }
+            sub2ApiAccountPoolError = userFacingMessage(for: error)
+        }
+    }
+
+    func cancelSub2ApiAccountPoolRefresh() {
+        sub2ApiAccountPoolGeneration &+= 1
+        sub2ApiAccountPoolRefreshID = nil
+        sub2ApiAccountPoolLoading = false
+    }
+
+    private func invalidateSub2ApiAccountPool() {
+        sub2ApiAccountPoolGeneration &+= 1
+        sub2ApiAccountPoolRefreshID = nil
+        sub2ApiAccountPool = nil
+        sub2ApiAccountPoolLoading = false
+        sub2ApiAccountPoolError = nil
+    }
+
+    private func isCurrentSub2ApiAccountPoolRefresh(
+        id: UUID,
+        generation: UInt64
+    ) -> Bool {
+        !Task.isCancelled
+            && sub2ApiAccountPoolRefreshID == id
+            && sub2ApiAccountPoolGeneration == generation
+    }
+
+    @discardableResult
     func saveSettings(
         language: String?,
         theme: String?,
@@ -1085,6 +1214,44 @@ final class AppModel: ObservableObject {
             providerType: providerType,
             apiKey: apiKey
         )
+    }
+
+    /// Queries normalized balance and rate information for a Provider's
+    /// already-saved API key. Callers own the transient result so usage checks
+    /// do not put the entire Gateway section into a loading state.
+    func fetchGatewayProviderUsage(
+        providerName: String
+    ) async throws -> ManageProviderUsageResponse {
+        guard fixtureStatus == nil else {
+            return ManageProviderUsageResponse(
+                ok: true,
+                providerName: providerName,
+                usage: ManageProviderUsageResponse.Usage(
+                    source: "fixture",
+                    balanceStatus: "available",
+                    billingStatus: "available",
+                    remaining: 42.50,
+                    unlimited: false,
+                    unit: "USD",
+                    balanceMode: "credit",
+                    planName: "Fixture",
+                    accountValid: true,
+                    accountStatus: "active",
+                    groupRateMultiplier: 1,
+                    userRateMultiplier: 1,
+                    resolvedRateMultiplier: 1,
+                    effectiveRateMultiplier: 1,
+                    peakRateEnabled: false,
+                    peakStart: nil,
+                    peakEnd: nil,
+                    peakRateMultiplier: nil,
+                    appliedPeakMultiplier: nil,
+                    timezone: nil,
+                    observedAt: nil
+                )
+            )
+        }
+        return try await apiClient.fetchGatewayProviderUsage(providerName: providerName)
     }
 
     /// Provider templates for the editor. Returns `nil` when the daemon does

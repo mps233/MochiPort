@@ -692,6 +692,11 @@ struct GatewayView: View {
     @State private var providerToDelete: ManageGatewayProvider?
     @State private var providerQuery = ""
     @State private var providerFilter: GatewayProviderFilter = .all
+    @State private var sub2ApiBaseURL = ""
+    @State private var sub2ApiAdminKey = ""
+    @State private var sub2ApiFormInitialized = false
+    @State private var sub2ApiSaving = false
+    @State private var confirmSub2ApiDisconnect = false
 
     var body: some View {
         ManagementScrollPage(
@@ -706,6 +711,7 @@ struct GatewayView: View {
             if let gateway = model.gateway {
                 gatewaySummary(gateway)
                 settingsCard
+                sub2ApiAccountPoolCard(gateway)
                 providersCard(gateway.providers)
             }
         }
@@ -715,9 +721,14 @@ struct GatewayView: View {
             // catalog keeps the plain text editor as the only input.
             modelCatalog = await model.loadCodexModelCatalog() ?? []
             synchronizeGateway(model.gateway)
+            synchronizeSub2ApiAdmin(model.sub2ApiAdmin, gateway: model.gateway)
         }
         .onChange(of: model.gateway) { gateway in
             synchronizeGateway(gateway)
+            synchronizeSub2ApiAdmin(model.sub2ApiAdmin, gateway: gateway)
+        }
+        .onChange(of: model.sub2ApiAdmin) { admin in
+            synchronizeSub2ApiAdmin(admin, gateway: model.gateway)
         }
         .sheet(item: $editor) { state in
             GatewayProviderEditor(state: state) { originalName, provider, apiKey, clearAPIKey in
@@ -748,6 +759,17 @@ struct GatewayView: View {
             }
         } message: {
             Text("删除后，该 Provider 将立即停止参与模型路由。")
+        }
+        .confirmationDialog(
+            "断开 Sub2API 账号池？",
+            isPresented: $confirmSub2ApiDisconnect
+        ) {
+            Button("断开连接", role: .destructive) {
+                Task { await disconnectSub2ApiAccountPool() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只会删除本机保存的管理连接，不会修改 Sub2API 中的账号。")
         }
     }
 
@@ -1070,6 +1092,127 @@ struct GatewayView: View {
                 .disabled(!settingsReady || !settingsDirty || model.isLoading(.gateway))
             }
         }
+    }
+
+    private func sub2ApiAccountPoolCard(_ gateway: ManageGateway) -> some View {
+        let admin = model.sub2ApiAdmin
+        let configured = admin?.configured == true
+        let hasSavedKey = admin?.secretSet == true
+        let trimmedURL = sub2ApiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedKey = sub2ApiAdminKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canSave = !trimmedURL.isEmpty
+            && (hasSavedKey || !trimmedKey.isEmpty)
+            && !sub2ApiSaving
+
+        return ManagementCard(title: "Sub2API 账号池", symbol: "person.3.sequence") {
+            HStack(spacing: 10) {
+                Image(systemName: configured ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(configured ? Color.green : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(configured ? "管理连接已就绪" : "连接账号管理接口")
+                        .font(.body.weight(.medium))
+                    Text(configured ? "概览会显示账号状态、倍率和上游余额。" : "使用 Sub2API Admin API Key 读取账号池。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                if configured {
+                    Button("断开", role: .destructive) {
+                        confirmSub2ApiDisconnect = true
+                    }
+                    .disabled(sub2ApiSaving)
+                }
+            }
+
+            Divider()
+
+            LabeledContent("管理地址") {
+                TextField("https://sub2api.example.com", text: $sub2ApiBaseURL)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 560)
+                    .accessibilityLabel("Sub2API 管理地址")
+            }
+
+            LabeledContent("Admin API Key") {
+                SecureField(
+                    hasSavedKey ? "留空以继续使用已保存的密钥" : "输入管理密钥",
+                    text: $sub2ApiAdminKey
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(maxWidth: 560)
+                .accessibilityLabel("Sub2API Admin API Key")
+            }
+
+            HStack(alignment: .center, spacing: 12) {
+                Label(
+                    hasSavedKey ? "管理密钥已保存在本机，界面不会回显。" : "需要只读账号权限的管理密钥。",
+                    systemImage: hasSavedKey ? "key.fill" : "key"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                Spacer(minLength: 12)
+                Button {
+                    Task { await saveSub2ApiAccountPool() }
+                } label: {
+                    if sub2ApiSaving {
+                        HStack(spacing: 7) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("验证中…")
+                        }
+                    } else {
+                        Label(configured ? "更新连接" : "连接", systemImage: "link")
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!canSave)
+            }
+        }
+    }
+
+    private func synchronizeSub2ApiAdmin(
+        _ admin: ManageSub2ApiAdmin?,
+        gateway: ManageGateway?
+    ) {
+        guard let admin else { return }
+        if admin.configured || !admin.baseUrl.isEmpty {
+            sub2ApiBaseURL = admin.baseUrl
+        } else if !sub2ApiFormInitialized, sub2ApiBaseURL.isEmpty {
+            sub2ApiBaseURL = suggestedSub2ApiBaseURL(gateway)
+        }
+        sub2ApiFormInitialized = true
+    }
+
+    private func suggestedSub2ApiBaseURL(_ gateway: ManageGateway?) -> String {
+        gateway?.providers.first(where: { provider in
+            provider.name.localizedCaseInsensitiveContains("sub2api")
+                || provider.baseUrl.localizedCaseInsensitiveContains("sub2api")
+        })?.baseUrl ?? ""
+    }
+
+    @MainActor
+    private func saveSub2ApiAccountPool() async {
+        guard !sub2ApiSaving else { return }
+        sub2ApiSaving = true
+        defer { sub2ApiSaving = false }
+        let key = sub2ApiAdminKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let saved = await model.saveSub2ApiAdmin(
+            baseUrl: sub2ApiBaseURL,
+            adminApiKey: key.isEmpty ? nil : key
+        )
+        if saved {
+            sub2ApiAdminKey = ""
+        }
+    }
+
+    @MainActor
+    private func disconnectSub2ApiAccountPool() async {
+        guard !sub2ApiSaving else { return }
+        sub2ApiSaving = true
+        defer { sub2ApiSaving = false }
+        guard await model.disconnectSub2ApiAdmin() else { return }
+        sub2ApiAdminKey = ""
+        sub2ApiBaseURL = suggestedSub2ApiBaseURL(model.gateway)
     }
 
     private func catalogBinding(_ id: String) -> Binding<Bool> {
@@ -1492,6 +1635,11 @@ private struct GatewayProviderEditor: View {
     @State private var fetchModelsNoticeIsPositive = true
     @State private var fetchModelsFailureLines: [String] = []
     @State private var fetchModelsAttemptDetailsExpanded = false
+    @State private var providerUsage: ManageProviderUsageResponse?
+    @State private var providerUsageError: String?
+    @State private var fetchingProviderUsage = false
+    @State private var providerUsageRequestGeneration = 0
+    @State private var providerUsageTask: Task<Void, Never>?
     @State private var manualModelsExpanded = false
     @State private var modelQuery = ""
     @State private var customModelInput = ""
@@ -1594,6 +1742,9 @@ private struct GatewayProviderEditor: View {
                 if state.provider?.secretSet == true {
                     Toggle("清除已保存的 API Key", isOn: $clearAPIKey)
                 }
+                if state.provider != nil {
+                    providerUsageSection
+                }
                 TextField("Prompt Cache Retention（可选）", text: $promptCacheRetention)
                 Stepper("权重：\(weight)", value: $weight, in: 1...10_000)
                 Stepper("超时：\(timeoutSecs) 秒", value: $timeoutSecs, in: 1...3_600)
@@ -1676,6 +1827,142 @@ private struct GatewayProviderEditor: View {
             guard state.provider == nil else { return }
             templates = await model.loadGatewayProviderTemplates() ?? []
         }
+        .onChange(of: name) { _ in invalidateProviderUsage() }
+        .onChange(of: enabled) { _ in invalidateProviderUsage() }
+        .onChange(of: providerType) { _ in invalidateProviderUsage() }
+        .onChange(of: compatibility) { _ in invalidateProviderUsage() }
+        .onChange(of: baseURL) { _ in invalidateProviderUsage() }
+        .onChange(of: modelsURL) { _ in invalidateProviderUsage() }
+        .onChange(of: models) { _ in invalidateProviderUsage() }
+        .onChange(of: promptCacheRetention) { _ in invalidateProviderUsage() }
+        .onChange(of: weight) { _ in invalidateProviderUsage() }
+        .onChange(of: timeoutSecs) { _ in invalidateProviderUsage() }
+        .onChange(of: apiKey) { _ in invalidateProviderUsage() }
+        .onChange(of: clearAPIKey) { _ in invalidateProviderUsage() }
+        .onChange(of: aliasEntries.map { "\($0.alias)\u{0}\($0.target)" }) { _ in
+            invalidateProviderUsage()
+        }
+        .onDisappear {
+            invalidateProviderUsage()
+        }
+    }
+
+    private var canFetchProviderUsage: Bool {
+        state.provider?.secretSet == true && !clearAPIKey && !fetchingProviderUsage
+    }
+
+    @ViewBuilder
+    private var providerUsageSection: some View {
+        Section("余额与倍率") {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("查询已保存 API Key 的余额和计费倍率。")
+                        .font(.body)
+                    Text("输入框中尚未保存的新 Key 不会参与查询。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                Button {
+                    fetchProviderUsage()
+                } label: {
+                    if fetchingProviderUsage {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("查询中…")
+                        }
+                    } else {
+                        Label(providerUsage == nil ? "查询" : "刷新", systemImage: "arrow.clockwise")
+                    }
+                }
+                .disabled(!canFetchProviderUsage)
+                .accessibilityLabel("查询 Provider 余额与倍率")
+            }
+
+            if state.provider?.secretSet != true {
+                Label("请先保存 API Key，再查询余额与倍率。", systemImage: "key.slash")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if clearAPIKey {
+                Label("已选择清除 API Key，无法查询。", systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
+            if let response = providerUsage {
+                providerUsageRows(response.usage)
+            }
+
+            if let providerUsageError {
+                Label(providerUsageError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func providerUsageRows(_ usage: ManageProviderUsageResponse.Usage) -> some View {
+        LabeledContent("余额") {
+            Text(providerUsageBalanceText(usage))
+                .font(.body.monospacedDigit().weight(.medium))
+        }
+
+        LabeledContent("当前倍率") {
+            Text(
+                providerUsageMultiplierText(
+                    usage.effectiveRateMultiplier ?? usage.resolvedRateMultiplier
+                ) ?? providerUsageStatusText(usage.billingStatus)
+            )
+            .font(.body.monospacedDigit().weight(.medium))
+        }
+
+        if let resolvedRateMultiplier = usage.resolvedRateMultiplier {
+            LabeledContent("基础倍率") {
+                Text(providerUsageMultiplierText(resolvedRateMultiplier) ?? "—")
+                    .font(.body.monospacedDigit())
+            }
+        }
+
+        if let components = providerUsageRateComponentsText(usage) {
+            LabeledContent("倍率构成", value: components)
+        }
+
+        if let planName = usage.planName.flatMap(nilIfEmpty) {
+            LabeledContent("套餐", value: planName)
+        }
+
+        if let accountWarning = providerUsageAccountWarning(usage.accountStatus) {
+            Label(accountWarning, systemImage: "exclamationmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        } else if usage.accountValid == false {
+            Label("API Key 当前不可用。", systemImage: "exclamationmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+
+        if usage.peakRateEnabled == true {
+            LabeledContent("峰时计费") {
+                Text(providerUsagePeakText(usage))
+                    .font(.body.monospacedDigit())
+                    .multilineTextAlignment(.trailing)
+            }
+        }
+
+        HStack(spacing: 5) {
+            Text("来源：\(usage.source)")
+            if let observedAt = usage.observedAt.flatMap(nilIfEmpty) {
+                Text("·")
+                Text(observedAt)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .truncationMode(.middle)
     }
 
     /// Fills the form with a template's defaults; every field stays editable
@@ -1969,6 +2256,61 @@ private struct GatewayProviderEditor: View {
             }
             fetchingModels = false
         }
+    }
+
+    private func fetchProviderUsage() {
+        guard canFetchProviderUsage, let providerName = state.originalName else { return }
+        providerUsageRequestGeneration += 1
+        let generation = providerUsageRequestGeneration
+        fetchingProviderUsage = true
+        providerUsage = nil
+        providerUsageError = nil
+
+        providerUsageTask = Task {
+            do {
+                let response = try await model.fetchGatewayProviderUsage(
+                    providerName: providerName
+                )
+                guard !Task.isCancelled,
+                      generation == providerUsageRequestGeneration
+                else { return }
+                providerUsage = response
+            } catch let error as APIClientError {
+                guard !Task.isCancelled,
+                      generation == providerUsageRequestGeneration
+                else { return }
+                providerUsageError = error.localizedDescription
+            } catch {
+                guard !Task.isCancelled,
+                      generation == providerUsageRequestGeneration
+                else { return }
+                providerUsageError = "无法连接本地服务。"
+            }
+
+            guard !Task.isCancelled,
+                  generation == providerUsageRequestGeneration
+            else { return }
+            fetchingProviderUsage = false
+            providerUsageTask = nil
+        }
+    }
+
+    /// Invalidates both finished and in-flight results. The generation check
+    /// prevents a response started for an older form revision from reappearing.
+    private func invalidateProviderUsage() {
+        guard providerUsage != nil
+                || providerUsageError != nil
+                || fetchingProviderUsage
+                || providerUsageTask != nil
+        else {
+            return
+        }
+        providerUsageTask?.cancel()
+        providerUsageTask = nil
+        providerUsageRequestGeneration += 1
+        providerUsage = nil
+        providerUsageError = nil
+        fetchingProviderUsage = false
     }
 
     private func save() {
@@ -3093,6 +3435,85 @@ func splitValues(_ value: String) -> [String] {
 private func nilIfEmpty(_ value: String) -> String? {
     let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
     return value.isEmpty ? nil : value
+}
+
+/// User-facing copy for the normalized balance and billing statuses returned
+/// by the daemon. Balance and billing render independently for partial results.
+func providerUsageStatusText(_ status: String) -> String {
+    switch status {
+    case "available": "可用"
+    case "unsupported": "服务商不支持查询"
+    case "unauthorized": "API Key 未授权"
+    case "forbidden": "无权查询"
+    case "temporarily_unavailable": "暂时不可用"
+    case "invalid_response": "响应格式异常"
+    default: "状态未知"
+    }
+}
+
+func providerUsageBalanceText(_ usage: ManageProviderUsageResponse.Usage) -> String {
+    if usage.unlimited { return "无限" }
+    if let remaining = usage.remaining, remaining.isFinite {
+        let value = providerUsageDecimalText(remaining)
+        guard let unit = usage.unit.flatMap(nilIfEmpty) else { return value }
+        return "\(value) \(unit)"
+    }
+    if usage.balanceStatus == "available" {
+        return "可用（未返回余额）"
+    }
+    return providerUsageStatusText(usage.balanceStatus)
+}
+
+func providerUsageAccountWarning(_ status: String?) -> String? {
+    switch status {
+    case "disabled": "API Key 已停用。"
+    case "inactive": "API Key 已停用。"
+    case "quota_exhausted": "API Key 额度已耗尽。"
+    case "expired": "API Key 已过期。"
+    default: nil
+    }
+}
+
+func providerUsageMultiplierText(_ value: Double?) -> String? {
+    guard let value, value.isFinite else { return nil }
+    return "×\(providerUsageDecimalText(value))"
+}
+
+func providerUsageRateComponentsText(_ usage: ManageProviderUsageResponse.Usage) -> String? {
+    var parts: [String] = []
+    if let group = providerUsageMultiplierText(usage.groupRateMultiplier) {
+        parts.append("分组 \(group)")
+    }
+    if let user = providerUsageMultiplierText(usage.userRateMultiplier) {
+        parts.append("用户 \(user)")
+    }
+    return parts.isEmpty ? nil : parts.joined(separator: " · ")
+}
+
+func providerUsagePeakText(_ usage: ManageProviderUsageResponse.Usage) -> String {
+    var parts: [String] = []
+    if let peak = providerUsageMultiplierText(usage.peakRateMultiplier) {
+        parts.append("峰时 \(peak)")
+    }
+    if let applied = providerUsageMultiplierText(usage.appliedPeakMultiplier) {
+        parts.append("当前 \(applied)")
+    }
+    if let start = usage.peakStart.flatMap(nilIfEmpty),
+       let end = usage.peakEnd.flatMap(nilIfEmpty)
+    {
+        parts.append("\(start)–\(end)")
+    }
+    if let timezone = usage.timezone.flatMap(nilIfEmpty) {
+        parts.append(timezone)
+    }
+    return parts.isEmpty ? "已启用" : parts.joined(separator: " · ")
+}
+
+private func providerUsageDecimalText(_ value: Double) -> String {
+    var text = String(format: "%.4f", value)
+    while text.last == "0" { text.removeLast() }
+    if text.last == "." { text.removeLast() }
+    return text
 }
 
 /// Thousands grouping aligned with the legacy GUI's `format_int`.

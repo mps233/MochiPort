@@ -2496,6 +2496,303 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(response.attempts[1].error, "连接超时")
     }
 
+    func testFetchProviderUsageSendsOnlyProviderNameAndDecodesNormalizedUsage() async throws {
+        let timeouts = StringRecorder()
+        let client = makeClient { request in
+            XCTAssertEqual(
+                request.url?.path,
+                "/api/v1/manage/gateway/provider/usage"
+            )
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            timeouts.record("\(request.timeoutInterval)")
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?.count, 1)
+            XCTAssertEqual(body?["providerName"] as? String, "primary")
+            XCTAssertNil(body?["apiKey"])
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"providerName":"primary","usage":{"source":"sub2api","balanceStatus":"available","billingStatus":"available","remaining":42.5,"unlimited":false,"unit":"USD","balanceMode":"credit","planName":"Pro","accountValid":true,"accountStatus":"active","groupRateMultiplier":1.2,"userRateMultiplier":0.8,"resolvedRateMultiplier":0.96,"effectiveRateMultiplier":1.44,"peakRateEnabled":true,"peakStart":"08:00","peakEnd":"10:00","peakRateMultiplier":1.5,"appliedPeakMultiplier":1.5,"timezone":"Asia/Shanghai","observedAt":"2026-08-15T12:00:00Z"}}"#
+            )
+        }
+
+        let response = try await client.fetchGatewayProviderUsage(providerName: "primary")
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.providerName, "primary")
+        XCTAssertEqual(response.usage.source, "sub2api")
+        XCTAssertEqual(response.usage.remaining, 42.5)
+        XCTAssertEqual(response.usage.unit, "USD")
+        XCTAssertEqual(response.usage.accountStatus, "active")
+        XCTAssertEqual(response.usage.resolvedRateMultiplier, 0.96)
+        XCTAssertEqual(response.usage.effectiveRateMultiplier, 1.44)
+        XCTAssertEqual(response.usage.appliedPeakMultiplier, 1.5)
+        XCTAssertEqual(timeouts.values, ["30.0"])
+    }
+
+    func testProviderUsageFormattingCoversPartialStatusesAndUnlimitedBalance() throws {
+        let statuses = [
+            "available": "可用",
+            "unsupported": "服务商不支持查询",
+            "unauthorized": "API Key 未授权",
+            "forbidden": "无权查询",
+            "temporarily_unavailable": "暂时不可用",
+            "invalid_response": "响应格式异常",
+        ]
+        for (status, expected) in statuses {
+            XCTAssertEqual(providerUsageStatusText(status), expected)
+        }
+        XCTAssertEqual(providerUsageStatusText("future_status"), "状态未知")
+        XCTAssertNil(providerUsageAccountWarning("active"))
+        XCTAssertEqual(providerUsageAccountWarning("disabled"), "API Key 已停用。")
+        XCTAssertEqual(providerUsageAccountWarning("inactive"), "API Key 已停用。")
+        XCTAssertEqual(providerUsageAccountWarning("quota_exhausted"), "API Key 额度已耗尽。")
+        XCTAssertEqual(providerUsageAccountWarning("expired"), "API Key 已过期。")
+
+        let data = Data(
+            #"{"ok":false,"providerName":"partial","usage":{"source":"custom","balanceStatus":"available","billingStatus":"unsupported","unlimited":true,"peakRateEnabled":true,"peakStart":"22:00","peakEnd":"06:00","peakRateMultiplier":1.25,"timezone":"Asia/Shanghai"}}"#.utf8
+        )
+        let usage = try JSONDecoder().decode(ManageProviderUsageResponse.self, from: data).usage
+
+        XCTAssertEqual(providerUsageBalanceText(usage), "无限")
+        XCTAssertNil(providerUsageMultiplierText(usage.effectiveRateMultiplier))
+        XCTAssertEqual(providerUsageStatusText(usage.billingStatus), "服务商不支持查询")
+        XCTAssertEqual(
+            providerUsagePeakText(usage),
+            "峰时 ×1.25 · 22:00–06:00 · Asia/Shanghai"
+        )
+    }
+
+    func testSub2ApiAdminConnectionIsWriteOnlyAndUsesExpectedRoutes() async throws {
+        let requests = StringRecorder()
+        let client = makeClient { request in
+            let method = request.httpMethod ?? ""
+            let path = request.url?.path ?? ""
+            requests.record("\(method) \(path)")
+            switch (method, path) {
+            case ("GET", "/api/v1/manage/gateway/sub2api"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"configured":false,"baseUrl":"","secretSet":false}"#
+                )
+            case ("POST", "/api/v1/manage/gateway/sub2api/config"):
+                let body = Self.jsonBody(from: request)
+                XCTAssertEqual(body?["baseUrl"] as? String, "https://sub2api.example/v1")
+                XCTAssertEqual(body?["adminApiKey"] as? String, "admin-secret")
+                XCTAssertEqual(body?["clearAdminApiKey"] as? Bool, false)
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"sub2api":{"configured":true,"baseUrl":"https://sub2api.example/v1","secretSet":true}}"#
+                )
+            case ("POST", "/api/v1/manage/gateway/sub2api/disconnect"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"sub2api":{"configured":false,"baseUrl":"","secretSet":false}}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        let empty = try await client.sub2ApiAdmin()
+        XCTAssertFalse(empty.configured)
+        XCTAssertFalse(empty.secretSet)
+
+        let connected = try await client.updateSub2ApiAdmin(
+            baseUrl: "https://sub2api.example/v1",
+            adminApiKey: "admin-secret"
+        )
+        XCTAssertTrue(connected.configured)
+        XCTAssertTrue(connected.secretSet)
+        XCTAssertEqual(connected.baseUrl, "https://sub2api.example/v1")
+
+        let disconnected = try await client.disconnectSub2ApiAdmin()
+        XCTAssertFalse(disconnected.configured)
+        XCTAssertEqual(
+            requests.values,
+            [
+                "GET /api/v1/manage/gateway/sub2api",
+                "POST /api/v1/manage/gateway/sub2api/config",
+                "POST /api/v1/manage/gateway/sub2api/disconnect",
+            ]
+        )
+    }
+
+    func testSub2ApiAccountPoolRequestAndDecodeKeepRatesSeparate() async throws {
+        let timeouts = StringRecorder()
+        let client = makeClient { request in
+            XCTAssertEqual(
+                request.url?.path,
+                "/api/v1/manage/gateway/sub2api/accounts"
+            )
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(
+                Self.jsonBody(from: request)?["forceBillingRefresh"] as? Bool,
+                true
+            )
+            timeouts.record("\(request.timeoutInterval)")
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"pool":{"source":"sub2api_admin","fetchedAtMs":1786752000000,"accounts":[{"id":2,"name":"primary","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"localRateMultiplier":1.0,"upstreamBilling":{"state":"available","resolvedRateMultiplier":0.06,"effectiveRateMultiplier":0.09,"observedAt":"2026-08-15T00:00:00Z","freshUntil":"2026-08-15T00:05:00Z","stale":false},"upstreamBalance":{"state":"available","remaining":16.9999,"unlimited":false,"unit":"USD","mode":"unrestricted","planName":"钱包余额","accountValid":true,"accountStatus":"active","observedAt":"2026-08-15T00:00:00Z"}},{"id":13,"name":"unsupported","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"localRateMultiplier":0.5,"upstreamBilling":{"state":"unsupported","stale":false},"upstreamBalance":{"state":"not_exposed","unlimited":false}}],"warnings":["usage_probe_not_exposed"]}}"#
+            )
+        }
+
+        let response = try await client.fetchSub2ApiAccounts(forceBillingRefresh: true)
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.pool.accounts.count, 2)
+        XCTAssertEqual(response.pool.accounts[0].localRateMultiplier, 1)
+        XCTAssertEqual(
+            response.pool.accounts[0].upstreamBilling.effectiveRateMultiplier,
+            0.09
+        )
+        XCTAssertEqual(response.pool.accounts[0].upstreamBalance.remaining, 16.9999)
+        XCTAssertEqual(response.pool.accounts[1].upstreamBilling.state, "unsupported")
+        XCTAssertEqual(response.pool.warnings, ["usage_probe_not_exposed"])
+        XCTAssertEqual(timeouts.values, ["60.0"])
+    }
+
+    func testSub2ApiUpstreamErrorsRemainActionable() async {
+        let client = makeClient { _ in
+            MockResponse(
+                statusCode: 502,
+                json: #"{"error":"Sub2API 管理密钥无效"}"#
+            )
+        }
+
+        do {
+            _ = try await client.fetchSub2ApiAccounts(forceBillingRefresh: false)
+            XCTFail("Expected the account-pool request to fail")
+        } catch let error as APIClientError {
+            XCTAssertEqual(
+                error,
+                .operationFailed("Sub2API 管理密钥无效")
+            )
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
+
+    func testSub2ApiOverviewFormattingCoversCapabilityStatesAndNegativeBalance() throws {
+        let states = [
+            "available": "可用",
+            "not_applicable": "不适用",
+            "not_exposed": "未提供",
+            "unsupported": "不支持",
+            "unauthorized": "未授权",
+            "forbidden": "无权限",
+            "temporarily_unavailable": "暂不可用",
+            "invalid_response": "响应异常",
+        ]
+        for (state, expected) in states {
+            XCTAssertEqual(sub2ApiCapabilityStateText(state), expected)
+        }
+        XCTAssertEqual(sub2ApiCapabilityStateText("future"), "未知")
+        XCTAssertEqual(sub2ApiMultiplierText(0.089), "×0.089")
+        XCTAssertEqual(sub2ApiMultiplierText(nil), "—")
+
+        func decodeBalance(_ json: String) throws
+            -> ManageSub2ApiAccountPoolResponse.Account.Balance
+        {
+            try JSONDecoder().decode(
+                ManageSub2ApiAccountPoolResponse.Account.Balance.self,
+                from: Data(json.utf8)
+            )
+        }
+
+        XCTAssertEqual(
+            sub2ApiBalanceText(
+                try decodeBalance(
+                    #"{"state":"available","remaining":16.9999,"unlimited":false,"unit":"USD"}"#
+                )
+            ),
+            "$17.00"
+        )
+        XCTAssertEqual(
+            sub2ApiBalanceText(
+                try decodeBalance(
+                    #"{"state":"available","remaining":-0.071,"unlimited":false,"unit":"USD"}"#
+                )
+            ),
+            "-$0.07"
+        )
+        XCTAssertEqual(
+            sub2ApiBalanceText(
+                try decodeBalance(
+                    #"{"state":"available","unlimited":true,"unit":"USD"}"#
+                )
+            ),
+            "无限"
+        )
+        XCTAssertEqual(
+            sub2ApiBalanceText(
+                try decodeBalance(
+                    #"{"state":"not_exposed","unlimited":false}"#
+                )
+            ),
+            "未提供"
+        )
+    }
+
+    @MainActor
+    func testSub2ApiAccountPoolCachesAndPreservesLastSuccessOnRefreshFailure() async {
+        let accountCalls = StringRecorder()
+        let accountResponses = MockResponseSequence([
+            MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"pool":{"source":"sub2api_admin","fetchedAtMs":1786752000000,"accounts":[{"id":2,"name":"primary","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"localRateMultiplier":1.0,"upstreamBilling":{"state":"available","effectiveRateMultiplier":0.09,"stale":false},"upstreamBalance":{"state":"available","remaining":17.0,"unlimited":false,"unit":"USD"}}]}}"#
+            ),
+            MockResponse(statusCode: 503, json: #"{"error":"temporarily unavailable"}"#),
+        ])
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/v1/manage/gateway/sub2api"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"configured":true,"baseUrl":"https://sub2api.example","secretSet":true}"#
+                )
+            case ("POST", "/api/v1/manage/gateway/sub2api/accounts"):
+                accountCalls.record("accounts")
+                return accountResponses.next()
+            case ("POST", "/api/v1/manage/gateway/sub2api/disconnect"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"sub2api":{"configured":false,"baseUrl":"","secretSet":false}}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+        let firstUpdate = Date(timeIntervalSince1970: 1_786_752_000)
+
+        await model.refreshSub2ApiAccountPool(now: firstUpdate)
+        XCTAssertEqual(model.sub2ApiAccountPool?.accounts.first?.name, "primary")
+        XCTAssertNil(model.sub2ApiAccountPoolError)
+        XCTAssertEqual(accountCalls.values.count, 1)
+
+        await model.refreshSub2ApiAccountPool(
+            now: firstUpdate.addingTimeInterval(60)
+        )
+        XCTAssertEqual(accountCalls.values.count, 1)
+
+        await model.refreshSub2ApiAccountPool(
+            forceBillingRefresh: true,
+            now: firstUpdate.addingTimeInterval(120)
+        )
+        XCTAssertEqual(model.sub2ApiAccountPool?.accounts.first?.name, "primary")
+        XCTAssertNotNil(model.sub2ApiAccountPoolError)
+        XCTAssertEqual(accountCalls.values.count, 2)
+
+        let disconnected = await model.disconnectSub2ApiAdmin()
+        XCTAssertTrue(disconnected)
+        XCTAssertNil(model.sub2ApiAccountPool)
+        XCTAssertNil(model.sub2ApiAccountPoolError)
+    }
+
     func testMergedModelLinesKeepOrderDedupeAndAppend() {
         XCTAssertEqual(
             mergedModelLines(
@@ -2660,6 +2957,33 @@ final class APIContractTests: XCTestCase {
         XCTAssertFalse(AppModel.buildNumbersMismatch(guiBuild: nil, daemonBuild: 387))
         XCTAssertFalse(AppModel.buildNumbersMismatch(guiBuild: "388", daemonBuild: nil))
         XCTAssertFalse(AppModel.buildNumbersMismatch(guiBuild: "development", daemonBuild: 387))
+    }
+
+    func testDaemonUpgradeDetailInterpolatesBuildNumbers() {
+        XCTAssertEqual(
+            AppModel.daemonUpgradeDetailText(
+                guiBuild: "407",
+                daemonBuild: 406,
+                prepared: true
+            ),
+            "已准备构建 407，安全重启后生效"
+        )
+        XCTAssertEqual(
+            AppModel.daemonUpgradeDetailText(
+                guiBuild: "407",
+                daemonBuild: 406,
+                prepared: false
+            ),
+            "发现构建 407，正在准备运行版本"
+        )
+        XCTAssertEqual(
+            AppModel.daemonUpgradeDetailText(
+                guiBuild: "407",
+                daemonBuild: 408,
+                prepared: false
+            ),
+            "后台构建 408 高于界面 407，不会自动降级"
+        )
     }
 
     func testDaemonUpgradeOnlyTargetsAnOlderRunningBuild() {

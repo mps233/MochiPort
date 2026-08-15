@@ -169,6 +169,7 @@ struct RootView: View {
 private struct OverviewView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openURL) private var openURL
+    @State private var manualSub2ApiRefreshTask: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
@@ -193,6 +194,38 @@ private struct OverviewView: View {
 
                 OverviewCardSurface {
                     ConnectionTopologyView()
+                }
+
+                ManagementCard(title: "AI 网关", symbol: "point.3.connected.trianglepath.dotted") {
+                    OverviewStatusRow(
+                        title: "网关",
+                        detail: dashboardDetail(model.dashboard?.aiGatewayEnabled),
+                        symbol: "point.3.connected.trianglepath.dotted",
+                        tint: boolTint(model.dashboard?.aiGatewayEnabled)
+                    )
+                    Divider()
+                    OverviewStatusRow(
+                        title: "供应商",
+                        detail: providerDetail,
+                        symbol: "server.rack",
+                        tint: model.dashboard == nil ? .secondary : .positive
+                    )
+                    Divider()
+                    OverviewSub2ApiAccountPoolSummary(
+                        admin: model.sub2ApiAdmin,
+                        pool: model.sub2ApiAccountPool,
+                        isLoading: model.sub2ApiAccountPoolLoading,
+                        loadError: model.sub2ApiAccountPoolError,
+                        onRefresh: {
+                            manualSub2ApiRefreshTask?.cancel()
+                            manualSub2ApiRefreshTask = Task {
+                                await model.refreshSub2ApiAccountPool(
+                                    forceBillingRefresh: true
+                                )
+                            }
+                        },
+                        onConnect: { model.selection = .gateway }
+                    )
                 }
 
                 ManagementCard(title: "本地服务", symbol: "server.rack") {
@@ -241,27 +274,20 @@ private struct OverviewView: View {
                     .buttonStyle(.link)
                 }
 
-                ManagementCard(title: "AI 网关", symbol: "point.3.connected.trianglepath.dotted") {
-                    OverviewStatusRow(
-                        title: "网关",
-                        detail: dashboardDetail(model.dashboard?.aiGatewayEnabled),
-                        symbol: "point.3.connected.trianglepath.dotted",
-                        tint: boolTint(model.dashboard?.aiGatewayEnabled)
-                    )
-                    Divider()
-                    OverviewStatusRow(
-                        title: "供应商",
-                        detail: providerDetail,
-                        symbol: "server.rack",
-                        tint: model.dashboard == nil ? .secondary : .positive
-                    )
-                }
             }
             .frame(maxWidth: 860, alignment: .leading)
             .padding(ThreadRelaySpacing.page)
         }
         .scrollIndicators(.never)
         .background(Color(nsColor: .windowBackgroundColor))
+        .task {
+            await model.refreshSub2ApiAccountPool()
+        }
+        .onDisappear {
+            manualSub2ApiRefreshTask?.cancel()
+            manualSub2ApiRefreshTask = nil
+            model.cancelSub2ApiAccountPoolRefresh()
+        }
     }
 
     private var remoteDetail: String {
@@ -560,6 +586,377 @@ private struct OverviewStatusRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("overview.status.\(title.lowercased().replacingOccurrences(of: " ", with: "-"))")
     }
+}
+
+private struct OverviewSub2ApiAccountPoolSummary: View {
+    let admin: ManageSub2ApiAdmin?
+    let pool: ManageSub2ApiAccountPoolResponse.Pool?
+    let isLoading: Bool
+    let loadError: String?
+    let onRefresh: () -> Void
+    let onConnect: () -> Void
+    @State private var showsAllAccounts = false
+
+    private var configured: Bool { admin?.configured == true }
+    private let collapsedAccountLimit = 6
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                Text("Sub2API 账号池")
+                    .font(.subheadline.weight(.medium))
+                if let accounts = pool?.accounts, !accounts.isEmpty {
+                    Text("\(accounts.count)")
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: ThreadRelaySpacing.standard)
+                if configured {
+                    Button(action: onRefresh) {
+                        ZStack {
+                            Image(systemName: "arrow.clockwise")
+                                .opacity(isLoading ? 0 : 1)
+                            ProgressView()
+                                .controlSize(.small)
+                                .opacity(isLoading ? 1 : 0)
+                        }
+                        .frame(width: 18, height: 18)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isLoading)
+                    .help("刷新账号余额与倍率")
+                    .accessibilityLabel("刷新 Sub2API 账号池")
+                }
+            }
+
+            if !configured {
+                HStack(spacing: 10) {
+                    Label("尚未连接账号管理接口", systemImage: "link.badge.plus")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Button("前往连接", action: onConnect)
+                }
+                .frame(minHeight: 36)
+            } else if pool?.accounts.isEmpty != false {
+                OverviewSub2ApiAccountPoolEmptyState(
+                    isLoading: isLoading,
+                    loadError: loadError
+                )
+            } else if let pool {
+                if let loadError {
+                    Label("刷新失败，正在显示上次结果", systemImage: "clock.badge.exclamationmark")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .help(loadError)
+                }
+                if let warnings = pool.warnings, !warnings.isEmpty {
+                    Label(
+                        sub2ApiWarningsText(warnings),
+                        systemImage: "exclamationmark.triangle"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+
+                OverviewSub2ApiAccountTable(
+                    accounts: showsAllAccounts
+                        ? pool.accounts
+                        : Array(pool.accounts.prefix(collapsedAccountLimit))
+                )
+
+                if pool.accounts.count > collapsedAccountLimit {
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
+                            showsAllAccounts.toggle()
+                        }
+                    } label: {
+                        Label(
+                            showsAllAccounts
+                                ? "收起账号"
+                                : "显示另外 \(pool.accounts.count - collapsedAccountLimit) 个账号",
+                            systemImage: showsAllAccounts ? "chevron.up" : "chevron.down"
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 6) {
+                    Text("更新于 \(sub2ApiFetchedTime(pool.fetchedAtMs))")
+                    Text("·")
+                    Text("余额按账号展示，多个账号可能共享同一钱包")
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+            }
+        }
+        .accessibilityIdentifier("overview.sub2api-account-pool")
+    }
+}
+
+private struct OverviewSub2ApiAccountPoolEmptyState: View {
+    let isLoading: Bool
+    let loadError: String?
+
+    var body: some View {
+        HStack(spacing: 9) {
+            if isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                Text("正在读取账号池…")
+            } else if loadError != nil {
+                Image(systemName: "exclamationmark.triangle")
+                Text("暂时无法读取账号池")
+            } else {
+                Image(systemName: "person.3")
+                Text("账号池中还没有账号")
+            }
+        }
+        .font(.callout)
+        .foregroundStyle(.secondary)
+        .frame(minHeight: 44, alignment: .leading)
+        .help(loadError ?? "")
+    }
+}
+
+private enum OverviewSub2ApiColumns {
+    static let status: CGFloat = 86
+    static let localRate: CGFloat = 72
+    static let upstreamRate: CGFloat = 82
+    static let balance: CGFloat = 118
+    static let spacing: CGFloat = 12
+}
+
+private struct OverviewSub2ApiAccountTable: View {
+    let accounts: [ManageSub2ApiAccountPoolResponse.Account]
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: OverviewSub2ApiColumns.spacing) {
+                OverviewSub2ApiHeader("账号")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                OverviewSub2ApiHeader("状态")
+                    .frame(width: OverviewSub2ApiColumns.status, alignment: .leading)
+                OverviewSub2ApiHeader("本地倍率")
+                    .frame(width: OverviewSub2ApiColumns.localRate, alignment: .trailing)
+                OverviewSub2ApiHeader("上游倍率")
+                    .frame(width: OverviewSub2ApiColumns.upstreamRate, alignment: .trailing)
+                OverviewSub2ApiHeader("余额 / 额度")
+                    .frame(width: OverviewSub2ApiColumns.balance, alignment: .trailing)
+            }
+            .padding(.vertical, 7)
+
+            Divider()
+
+            ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
+                OverviewSub2ApiAccountRow(account: account)
+                if index < accounts.count - 1 {
+                    Divider()
+                }
+            }
+        }
+    }
+}
+
+private struct OverviewSub2ApiHeader: View {
+    let title: String
+
+    init(_ title: String) {
+        self.title = title
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+    }
+}
+
+private struct OverviewSub2ApiAccountRow: View {
+    let account: ManageSub2ApiAccountPoolResponse.Account
+
+    private var accountTint: Color {
+        account.schedulable && account.status.lowercased() == "active" ? .green : .orange
+    }
+
+    private var balanceTint: Color {
+        guard account.upstreamBalance.state == "available" else { return .secondary }
+        if account.upstreamBalance.accountValid == false { return .orange }
+        if let remaining = account.upstreamBalance.remaining, remaining < 0 { return .red }
+        return .primary
+    }
+
+    var body: some View {
+        HStack(spacing: OverviewSub2ApiColumns.spacing) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(account.name)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                Text(sub2ApiAccountKindText(account))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(accountTint)
+                    .frame(width: 6, height: 6)
+                Text(sub2ApiAccountStatusText(account))
+                    .lineLimit(1)
+            }
+            .font(.caption)
+            .foregroundStyle(account.schedulable ? Color.secondary : Color.orange)
+            .frame(width: OverviewSub2ApiColumns.status, alignment: .leading)
+
+            Text(sub2ApiMultiplierText(account.localRateMultiplier))
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: OverviewSub2ApiColumns.localRate, alignment: .trailing)
+
+            HStack(spacing: 4) {
+                if account.upstreamBilling.stale {
+                    Image(systemName: "clock.badge.exclamationmark")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+                Text(sub2ApiUpstreamRateText(account.upstreamBilling))
+                    .font(.callout.monospacedDigit())
+                    .lineLimit(1)
+            }
+            .frame(width: OverviewSub2ApiColumns.upstreamRate, alignment: .trailing)
+            .help(sub2ApiCapabilityStateText(account.upstreamBilling.state))
+
+            Text(sub2ApiBalanceText(account.upstreamBalance))
+                .font(.callout.monospacedDigit().weight(.medium))
+                .foregroundStyle(balanceTint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .frame(width: OverviewSub2ApiColumns.balance, alignment: .trailing)
+                .help(sub2ApiBalanceHelp(account.upstreamBalance))
+        }
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(account.name)，\(sub2ApiAccountStatusText(account))，本地倍率 \(sub2ApiMultiplierText(account.localRateMultiplier))，上游倍率 \(sub2ApiUpstreamRateText(account.upstreamBilling))，余额 \(sub2ApiBalanceText(account.upstreamBalance))"
+        )
+    }
+}
+
+func sub2ApiCapabilityStateText(_ state: String) -> String {
+    switch state {
+    case "available": "可用"
+    case "not_applicable": "不适用"
+    case "not_exposed": "未提供"
+    case "unsupported": "不支持"
+    case "unauthorized": "未授权"
+    case "forbidden": "无权限"
+    case "temporarily_unavailable": "暂不可用"
+    case "invalid_response": "响应异常"
+    default: "未知"
+    }
+}
+
+func sub2ApiMultiplierText(_ value: Double?) -> String {
+    guard let value, value.isFinite else { return "—" }
+    return "×\(sub2ApiCompactDecimal(value, maximumFractionDigits: 4))"
+}
+
+func sub2ApiUpstreamRateText(
+    _ billing: ManageSub2ApiAccountPoolResponse.Account.Billing
+) -> String {
+    if let value = billing.effectiveRateMultiplier ?? billing.resolvedRateMultiplier {
+        return sub2ApiMultiplierText(value)
+    }
+    return sub2ApiCapabilityStateText(billing.state)
+}
+
+func sub2ApiBalanceText(
+    _ balance: ManageSub2ApiAccountPoolResponse.Account.Balance
+) -> String {
+    if balance.unlimited { return "无限" }
+    if let remaining = balance.remaining, remaining.isFinite {
+        let normalized = abs(remaining) < 0.005 ? 0 : remaining
+        let amount = sub2ApiCompactDecimal(normalized, maximumFractionDigits: 2, minimumFractionDigits: 2)
+        switch balance.unit?.uppercased() {
+        case "USD": return normalized < 0 ? "-$\(amount.dropFirst())" : "$\(amount)"
+        case let unit? where !unit.isEmpty: return "\(amount) \(unit)"
+        default: return amount
+        }
+    }
+    return sub2ApiCapabilityStateText(balance.state)
+}
+
+private func sub2ApiCompactDecimal(
+    _ value: Double,
+    maximumFractionDigits: Int,
+    minimumFractionDigits: Int = 0
+) -> String {
+    let formatter = NumberFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.numberStyle = .decimal
+    formatter.usesGroupingSeparator = true
+    formatter.minimumFractionDigits = minimumFractionDigits
+    formatter.maximumFractionDigits = maximumFractionDigits
+    formatter.roundingMode = .halfUp
+    return formatter.string(from: NSNumber(value: value))
+        ?? String(format: "%.*f", locale: formatter.locale, maximumFractionDigits, value)
+}
+
+private func sub2ApiAccountStatusText(
+    _ account: ManageSub2ApiAccountPoolResponse.Account
+) -> String {
+    guard account.schedulable else { return "不可调度" }
+    switch account.status.lowercased() {
+    case "active": return "可用"
+    case "inactive", "disabled": return "已停用"
+    case "error": return "异常"
+    case "cooldown": return "冷却中"
+    default: return account.status.isEmpty ? "未知" : account.status
+    }
+}
+
+private func sub2ApiAccountKindText(
+    _ account: ManageSub2ApiAccountPoolResponse.Account
+) -> String {
+    let parts = [account.platform, account.accountType]
+        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+    return parts.isEmpty ? "账号 \(account.id)" : parts.joined(separator: " · ")
+}
+
+private func sub2ApiBalanceHelp(
+    _ balance: ManageSub2ApiAccountPoolResponse.Account.Balance
+) -> String {
+    var parts = [sub2ApiCapabilityStateText(balance.state)]
+    if let plan = balance.planName, !plan.isEmpty { parts.append(plan) }
+    if let status = balance.accountStatus, !status.isEmpty { parts.append(status) }
+    return parts.joined(separator: " · ")
+}
+
+private func sub2ApiWarningsText(_ warnings: [String]) -> String {
+    warnings.map { warning in
+        switch warning {
+        case "billing_refresh_failed": "上游倍率刷新失败"
+        case "usage_probe_not_exposed": "当前 Sub2API 未提供余额探测"
+        case "usage_probe_failed": "上游余额刷新失败"
+        default: "部分账号数据不可用"
+        }
+    }
+    .reduce(into: [String]()) { result, value in
+        if !result.contains(value) { result.append(value) }
+    }
+    .joined(separator: " · ")
+}
+
+private func sub2ApiFetchedTime(_ milliseconds: Int64) -> String {
+    Date(timeIntervalSince1970: Double(milliseconds) / 1_000)
+        .formatted(date: .omitted, time: .shortened)
 }
 
 private extension StatusTint {
