@@ -527,7 +527,7 @@ private struct SessionRowContent: View {
                     .background(tintBackground, in: Capsule())
             }
             Spacer(minLength: ThreadRelaySpacing.standard)
-            Text(relativeDate(session.updatedAt))
+            Text(relativeDate(seconds: session.updatedAt))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .monospacedDigit()
@@ -1439,7 +1439,7 @@ private struct RequestLogRow: View {
                     .font(.caption2.monospaced())
                     .lineLimit(1)
                 Spacer()
-                Text(relativeDate(log.createdAtMs))
+                Text(relativeDate(milliseconds: log.createdAtMs))
                     .font(.caption2)
             }
             .foregroundStyle(.tertiary)
@@ -2262,8 +2262,15 @@ func providerFetchAttemptLines(
     }
 }
 
-private func relativeDate(_ milliseconds: Int64) -> String {
-    let date = Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000)
+private func relativeDate(seconds: Int64) -> String {
+    relativeDate(Date(timeIntervalSince1970: TimeInterval(seconds)))
+}
+
+private func relativeDate(milliseconds: Int64) -> String {
+    relativeDate(Date(timeIntervalSince1970: TimeInterval(milliseconds) / 1_000))
+}
+
+private func relativeDate(_ date: Date) -> String {
     return RelativeDateTimeFormatter().localizedString(for: date, relativeTo: Date())
 }
 
