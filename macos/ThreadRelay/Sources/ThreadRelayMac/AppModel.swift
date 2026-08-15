@@ -730,6 +730,7 @@ final class AppModel: ObservableObject {
             managementOperationError = nil
             sectionErrors[.requestLogs] = nil
         } catch {
+            guard !Task.isCancelled else { return }
             let message = userFacingMessage(for: error)
             managementOperationError = message
             sectionErrors[.requestLogs] = message
@@ -797,12 +798,6 @@ final class AppModel: ObservableObject {
     func loadCodexModelCatalog() async -> [ManageCodexCatalogModel]? {
         guard fixtureStatus == nil else { return nil }
         return try? await apiClient.codexModelCatalog()
-    }
-
-    /// Loads a log detail for the standalone detail window without touching
-    /// the main pane's `requestLogDetail` state.
-    func fetchRequestLogDetailStandalone(id: Int64) async throws -> ManageRequestLogDetail {
-        try await apiClient.requestLogDetail(id: id)
     }
 
     /// Manually (re)starts the local daemon. Unlike the automatic launch path

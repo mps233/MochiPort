@@ -2047,6 +2047,7 @@ struct RequestLogsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var query = ""
     @State private var selectedID: Int64?
+    @State private var activeDetailID: Int64?
     @State private var confirmsClear = false
     @State private var confirmsClearOld = false
     @State private var clearing = false
@@ -2064,60 +2065,60 @@ struct RequestLogsView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ManagementPageHeader(
-                title: "请求日志",
-                subtitle: "查看 AI Gateway 的真实请求摘要和按需加载的脱敏详情。",
-                symbol: "list.bullet.rectangle"
-            )
-            .padding(.horizontal, ThreadRelaySpacing.page)
-            .padding(.top, ThreadRelaySpacing.page)
-            .padding(.bottom, 20)
-
-            HStack(spacing: 10) {
-                TextField("搜索请求 ID、模型、Provider 或状态", text: $query)
-                    .textFieldStyle(.roundedBorder)
-                Button {
-                    Task { await model.loadSection(.requestLogs, force: true) }
-                } label: {
-                    Label("刷新", systemImage: "arrow.clockwise")
-                }
-                Menu {
-                    Button("清理 3 天前的日志…") {
-                        confirmsClearOld = true
-                    }
-                    Button("清空全部日志…", role: .destructive) {
-                        confirmsClear = true
-                    }
-                } label: {
-                    if clearing {
-                        HStack(spacing: 6) {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("正在清理…")
-                        }
-                    } else {
-                        Text("清理")
-                    }
-                }
-                .fixedSize()
-                .disabled(model.requestLogs.isEmpty || clearing)
-                .accessibilityLabel("清理请求日志")
-            }
-            .padding(.horizontal, 28)
-            .padding(.bottom, 16)
-
-            if let error = model.sectionErrors[.requestLogs] {
-                InlineManagementError(
-                    message: error,
-                    retry: { Task { await model.loadSection(.requestLogs, force: true) } },
-                    dismiss: { model.dismissSectionError(.requestLogs) }
+        ZStack {
+            VStack(alignment: .leading, spacing: 0) {
+                ManagementPageHeader(
+                    title: "请求日志",
+                    subtitle: "查看 AI Gateway 的真实请求摘要和按需加载的脱敏详情。",
+                    symbol: "list.bullet.rectangle"
                 )
-                .padding(.horizontal, 28)
-                .padding(.bottom, 12)
-            }
+                .padding(.horizontal, ThreadRelaySpacing.page)
+                .padding(.top, ThreadRelaySpacing.page)
+                .padding(.bottom, 20)
 
-            HSplitView {
+                HStack(spacing: 10) {
+                    TextField("搜索请求 ID、模型、Provider 或状态", text: $query)
+                        .textFieldStyle(.roundedBorder)
+                    Button {
+                        Task { await model.loadSection(.requestLogs, force: true) }
+                    } label: {
+                        Label("刷新", systemImage: "arrow.clockwise")
+                    }
+                    Menu {
+                        Button("清理 3 天前的日志…") {
+                            confirmsClearOld = true
+                        }
+                        Button("清空全部日志…", role: .destructive) {
+                            confirmsClear = true
+                        }
+                    } label: {
+                        if clearing {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                Text("正在清理…")
+                            }
+                        } else {
+                            Text("清理")
+                        }
+                    }
+                    .fixedSize()
+                    .disabled(model.requestLogs.isEmpty || clearing)
+                    .accessibilityLabel("清理请求日志")
+                }
+                .padding(.horizontal, 28)
+                .padding(.bottom, 16)
+
+                if let error = model.sectionErrors[.requestLogs] {
+                    InlineManagementError(
+                        message: error,
+                        retry: { Task { await model.loadSection(.requestLogs, force: true) } },
+                        dismiss: { model.dismissSectionError(.requestLogs) }
+                    )
+                    .padding(.horizontal, 28)
+                    .padding(.bottom, 12)
+                }
+
                 Group {
                     if filteredLogs.isEmpty, !model.isLoading(.requestLogs) {
                         ManagementEmptyState(
@@ -2132,20 +2133,34 @@ struct RequestLogsView: View {
                             ForEach(filteredLogs) { log in
                                 RequestLogRow(log: log)
                                     .tag(log.id)
+                                    // Keep the list on the page's neutral system
+                                    // surface instead of the default control tint.
+                                    .listRowBackground(Color.clear)
+                                    .contentShape(Rectangle())
+                                    .onTapGesture {
+                                        showDetail(id: log.id)
+                                    }
                             }
                         }
+                        .listStyle(.inset)
+                        .scrollContentBackground(.hidden)
+                        .background(Color(nsColor: .windowBackgroundColor))
                         .scrollIndicators(.never)
                     }
                 }
-                // Keep the pane minimums small enough that the app sidebar
-                // (190pt) plus both panes still fit the 760pt minimum window,
-                // otherwise the split view crushes the sidebar out of view.
-                .frame(minWidth: 250, idealWidth: 380)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            .opacity(activeDetailID == nil ? 1 : 0)
+            .allowsHitTesting(activeDetailID == nil)
+            .accessibilityHidden(activeDetailID != nil)
 
-                RequestLogDetailPane(detail: model.requestLogDetail)
-                    .frame(minWidth: 290, maxWidth: .infinity)
+            if let activeDetailID {
+                detailPage(logID: activeDetailID)
+                    .transition(.opacity)
             }
         }
+        .animation(.easeInOut(duration: 0.16), value: activeDetailID)
+        .background(Color(nsColor: .windowBackgroundColor))
         .task { await model.loadSection(.requestLogs) }
         // Mirrors the legacy GUI's 5-second list auto-refresh. Pauses while
         // the window is hidden or a clear/reload is already running; the
@@ -2163,20 +2178,17 @@ struct RequestLogsView: View {
             }
         }
         .onChange(of: model.requestLogs) { logs in
-            // Drop the selection (and its detail) only when the selected row
-            // vanished from the refreshed list; an in-flight detail load for
-            // a still-existing row keeps running.
+            if let id = activeDetailID, !logs.contains(where: { $0.id == id }) {
+                closeDetail()
+            }
             if let id = selectedID, !logs.contains(where: { $0.id == id }) {
                 selectedID = nil
             }
         }
         .onChange(of: selectedID) { id in
-            detailTask?.cancel()
-            model.clearRequestLogDetail()
-            guard let id else {
-                return
+            if let id, activeDetailID == nil {
+                showDetail(id: id)
             }
-            detailTask = Task { await model.loadRequestLogDetail(id: id) }
         }
         .onDisappear { detailTask?.cancel() }
         .alert("清空全部请求日志？", isPresented: $confirmsClear) {
@@ -2186,6 +2198,7 @@ struct RequestLogsView: View {
                     clearing = true
                     if await model.clearRequestLogs() {
                         selectedID = nil
+                        closeDetail()
                     }
                     clearing = false
                 }
@@ -2205,6 +2218,62 @@ struct RequestLogsView: View {
         } message: {
             Text("将保留最近 3 天的请求日志，删除更早的记录。清理大量日志可能需要几分钟，请耐心等待。")
         }
+    }
+
+    private func detailPage(logID: Int64) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Button {
+                    closeDetail()
+                } label: {
+                    Label("请求日志", systemImage: "chevron.left")
+                }
+                .help("返回请求日志")
+                Spacer()
+            }
+            .padding(.horizontal, ThreadRelaySpacing.page)
+            .padding(.vertical, 14)
+
+            Divider()
+
+            if let detail = model.requestLogDetail, detail.id == logID {
+                RequestLogDetailContent(detail: detail)
+            } else if let error = model.sectionErrors[.requestLogs] {
+                InlineManagementError(
+                    message: error,
+                    retry: { loadDetail(id: logID) }
+                )
+                .padding(ThreadRelaySpacing.page)
+                Spacer()
+            } else {
+                ProgressView("正在读取详情…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func showDetail(id: Int64) {
+        guard activeDetailID != id else { return }
+        activeDetailID = id
+        selectedID = id
+        loadDetail(id: id)
+    }
+
+    private func loadDetail(id: Int64) {
+        detailTask?.cancel()
+        model.clearRequestLogDetail()
+        model.dismissSectionError(.requestLogs)
+        detailTask = Task { await model.loadRequestLogDetail(id: id) }
+    }
+
+    private func closeDetail() {
+        detailTask?.cancel()
+        detailTask = nil
+        activeDetailID = nil
+        model.clearRequestLogDetail()
+        model.dismissSectionError(.requestLogs)
     }
 }
 
@@ -2256,30 +2325,8 @@ private struct RequestLogRow: View {
     }
 }
 
-private struct RequestLogDetailPane: View {
-    let detail: ManageRequestLogDetail?
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        if let detail {
-            RequestLogDetailContent(detail: detail) {
-                openWindow(value: detail.id)
-            }
-        } else {
-            ManagementEmptyState(
-                title: "选择一条请求",
-                message: "详情按需读取，并在返回界面前遮罩令牌、密钥和授权头。",
-                symbol: "doc.text.magnifyingglass"
-            )
-        }
-    }
-}
-
-/// Shared body of the request-log detail: used by the split-view pane and by
-/// the standalone detail window.
 struct RequestLogDetailContent: View {
     let detail: ManageRequestLogDetail
-    var onOpenWindow: (() -> Void)?
     @State private var section = DetailSection.summary
 
     private enum DetailSection: String, CaseIterable, Identifiable {
@@ -2313,14 +2360,6 @@ struct RequestLogDetailContent: View {
                     .font(.caption)
                 }
                 Spacer()
-                if let onOpenWindow {
-                    Button {
-                        onOpenWindow()
-                    } label: {
-                        Label("在独立窗口打开", systemImage: "macwindow.on.rectangle")
-                    }
-                    .accessibilityLabel("在独立窗口打开日志详情")
-                }
             }
 
             Picker("详情", selection: $section) {
@@ -2423,50 +2462,6 @@ struct RequestLogDetailContent: View {
         }
         let text = parts.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "\n\n")
         return text.isEmpty ? "当前请求没有记录这一部分。请确认“记录请求与响应详情”已开启。" : text
-    }
-}
-
-/// Standalone detail window content: loads its own copy of the log detail so
-/// it never races with the split-view pane's selection-driven state.
-struct RequestLogDetailWindow: View {
-    @EnvironmentObject private var model: AppModel
-    let logID: Int64
-    @State private var detail: ManageRequestLogDetail?
-    @State private var errorMessage: String?
-
-    var body: some View {
-        Group {
-            if let detail {
-                RequestLogDetailContent(detail: detail)
-            } else if let errorMessage {
-                VStack(spacing: 12) {
-                    Label(errorMessage, systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                    Button("重试") {
-                        Task { await load() }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ProgressView("正在读取详情…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .frame(minWidth: 560, minHeight: 480)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .navigationTitle("请求日志详情 #\(logID)")
-        .task { await load() }
-    }
-
-    private func load() async {
-        errorMessage = nil
-        do {
-            detail = try await model.fetchRequestLogDetailStandalone(id: logID)
-        } catch let error as APIClientError {
-            errorMessage = error.localizedDescription
-        } catch {
-            errorMessage = "本地服务不可用。"
-        }
     }
 }
 

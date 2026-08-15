@@ -247,15 +247,6 @@ struct ThreadRelayApp: App {
             }
         }
 
-        WindowGroup("请求日志详情", for: Int64.self) { $logID in
-            if let logID {
-                RequestLogDetailWindow(logID: logID)
-                    .environmentObject(model)
-                    .preferredColorScheme(preferredColorScheme)
-            }
-        }
-        .defaultSize(width: 760, height: 620)
-
         MenuBarExtra {
             MenuBarStatusView()
                 .environmentObject(model)
