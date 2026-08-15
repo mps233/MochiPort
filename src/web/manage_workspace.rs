@@ -6,6 +6,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -134,9 +135,27 @@ pub(super) struct UpdateSettingsRequest {
     outbound_proxy_url: Option<String>,
 }
 
+// Keep the pre-pagination behavior for older clients that omit `limit`.
+const REQUEST_LOG_DEFAULT_PAGE_SIZE: usize = 200;
+const REQUEST_LOG_MAX_PAGE_SIZE: usize = 500;
+
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct RequestLogsQuery {
     limit: Option<usize>,
+    cursor: Option<String>,
+    query: Option<String>,
+    status: Option<String>,
+    channel: Option<String>,
+    model_id: Option<String>,
+    sort: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RequestLogCursorPayload {
+    created_at_ms: i64,
+    id: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -434,15 +453,88 @@ pub(super) async fn request_logs(
     State(state): State<SharedState>,
     Query(query): Query<RequestLogsQuery>,
 ) -> impl IntoResponse {
-    let limit = query.limit.unwrap_or(200).clamp(1, 1_000);
-    match state.ai_gateway_request_logs.list_recent(limit) {
-        Ok(logs) => {
-            let mut value = serde_json::to_value(logs).unwrap_or(Value::Null);
+    let sort = match request_log_sort(query.sort.as_deref()) {
+        Ok(sort) => sort,
+        Err(message) => return operation_error(StatusCode::BAD_REQUEST, message),
+    };
+    let cursor = match query.cursor.as_deref().map(decode_request_log_cursor) {
+        Some(Ok(cursor)) => Some(cursor),
+        Some(Err(message)) => return operation_error(StatusCode::BAD_REQUEST, message),
+        None => None,
+    };
+    let request = request_log::RequestLogQuery {
+        limit: query
+            .limit
+            .unwrap_or(REQUEST_LOG_DEFAULT_PAGE_SIZE)
+            .clamp(1, REQUEST_LOG_MAX_PAGE_SIZE),
+        cursor,
+        query: non_empty_owned(query.query),
+        status: non_empty_owned(query.status),
+        channel: non_empty_owned(query.channel),
+        model_id: non_empty_owned(query.model_id),
+        sort,
+    };
+
+    match state.ai_gateway_request_logs.list_page(&request) {
+        Ok(page) => {
+            let next_cursor = match page.next_cursor.map(encode_request_log_cursor).transpose() {
+                Ok(cursor) => cursor,
+                Err(()) => {
+                    return operation_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "failed to encode request log cursor",
+                    );
+                }
+            };
+            let mut value = serde_json::to_value(page.logs).unwrap_or(Value::Null);
             request_log::redact_value(&mut value);
-            (StatusCode::OK, Json(json!({ "logs": value })))
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "logs": value,
+                    "nextCursor": next_cursor,
+                    "hasMore": page.has_more,
+                })),
+            )
         }
         Err(error) => operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
     }
+}
+
+fn request_log_sort(value: Option<&str>) -> Result<request_log::RequestLogSort, &'static str> {
+    match value.unwrap_or("newest") {
+        "newest" => Ok(request_log::RequestLogSort::Newest),
+        "oldest" => Ok(request_log::RequestLogSort::Oldest),
+        _ => Err("unsupported request log sort"),
+    }
+}
+
+fn decode_request_log_cursor(value: &str) -> Result<request_log::RequestLogCursor, &'static str> {
+    if value.is_empty() || value.len() > 256 {
+        return Err("invalid request log cursor");
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| "invalid request log cursor")?;
+    let payload: RequestLogCursorPayload =
+        serde_json::from_slice(&bytes).map_err(|_| "invalid request log cursor")?;
+    if payload.id <= 0 {
+        return Err("invalid request log cursor");
+    }
+    Ok(request_log::RequestLogCursor {
+        created_at_ms: payload.created_at_ms,
+        id: payload.id,
+    })
+}
+
+fn encode_request_log_cursor(cursor: request_log::RequestLogCursor) -> Result<String, ()> {
+    let payload = RequestLogCursorPayload {
+        created_at_ms: cursor.created_at_ms,
+        id: cursor.id,
+    };
+    serde_json::to_vec(&payload)
+        .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
+        .map_err(|_| ())
 }
 
 pub(super) async fn request_log_detail(

@@ -16,7 +16,7 @@ use std::{
 use axum::body::Bytes;
 use axum::http::HeaderMap;
 use futures_util::Stream;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value as SqlValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tracing::{debug, warn};
@@ -105,6 +105,51 @@ pub struct RequestLogEntry {
     pub created_at: String,
     pub error_message: Option<String>,
     pub upstream_request_body_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum RequestLogSort {
+    #[default]
+    Newest,
+    Oldest,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestLogCursor {
+    pub created_at_ms: i64,
+    pub id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestLogQuery {
+    pub limit: usize,
+    pub cursor: Option<RequestLogCursor>,
+    pub query: Option<String>,
+    pub status: Option<String>,
+    pub channel: Option<String>,
+    pub model_id: Option<String>,
+    pub sort: RequestLogSort,
+}
+
+impl Default for RequestLogQuery {
+    fn default() -> Self {
+        Self {
+            limit: 50,
+            cursor: None,
+            query: None,
+            status: None,
+            channel: None,
+            model_id: None,
+            sort: RequestLogSort::Newest,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RequestLogPage {
+    pub logs: Vec<RequestLogEntry>,
+    pub next_cursor: Option<RequestLogCursor>,
+    pub has_more: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,12 +291,20 @@ impl RequestLogStore {
     }
 
     pub fn list_recent(&self, limit: usize) -> rusqlite::Result<Vec<RequestLogEntry>> {
+        self.list_page(&RequestLogQuery {
+            limit,
+            ..RequestLogQuery::default()
+        })
+        .map(|page| page.logs)
+    }
+
+    pub fn list_page(&self, query: &RequestLogQuery) -> rusqlite::Result<RequestLogPage> {
         if self.inner.maintenance_active.load(Ordering::Acquire) {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let _maintenance = try_lock_maintenance(&self.inner.maintenance)?;
         self.flush_pending_writes()?;
-        self.with_conn(|conn| list_recent_with_conn(conn, limit))
+        self.with_conn(|conn| list_page_with_conn(conn, query))
     }
 
     pub fn delete_older_than(&self, cutoff_ms: i64) -> rusqlite::Result<usize> {
@@ -1026,14 +1079,37 @@ fn update_record_with_conn(
 #[cfg(test)]
 pub fn list_recent(db_path: &Path, limit: usize) -> rusqlite::Result<Vec<RequestLogEntry>> {
     let conn = open(db_path)?;
-    list_recent_with_conn(&conn, limit)
+    list_page_with_conn(
+        &conn,
+        &RequestLogQuery {
+            limit,
+            ..RequestLogQuery::default()
+        },
+    )
+    .map(|page| page.logs)
 }
 
-fn list_recent_with_conn(
+#[cfg(test)]
+fn list_page(db_path: &Path, query: &RequestLogQuery) -> rusqlite::Result<RequestLogPage> {
+    let conn = open(db_path)?;
+    list_page_with_conn(&conn, query)
+}
+
+fn list_page_with_conn(
     conn: &Connection,
-    limit: usize,
-) -> rusqlite::Result<Vec<RequestLogEntry>> {
-    let mut stmt = conn.prepare(
+    query: &RequestLogQuery,
+) -> rusqlite::Result<RequestLogPage> {
+    if query.limit == 0 {
+        return Ok(RequestLogPage {
+            logs: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+        });
+    }
+
+    let limit = query.limit.min(500);
+    let fetch_limit = limit.saturating_add(1);
+    let mut sql = String::from(
         "SELECT
             id, request_id, model_id, stream, channel, provider_type, status,
             input_tokens, output_tokens, total_tokens, read_cache_tokens,
@@ -1043,43 +1119,113 @@ fn list_recent_with_conn(
             error_message, upstream_request_body_bytes,
             write_cache_5m_tokens, write_cache_1h_tokens
          FROM ai_gateway_request_logs
-         ORDER BY created_at_ms DESC, id DESC
-         LIMIT ?1",
+         WHERE 1 = 1",
+    );
+    let mut bindings = Vec::<SqlValue>::new();
+
+    if let Some(cursor) = query.cursor {
+        match query.sort {
+            RequestLogSort::Newest => {
+                sql.push_str(" AND (created_at_ms, id) < (?, ?)");
+            }
+            RequestLogSort::Oldest => {
+                sql.push_str(" AND (created_at_ms, id) > (?, ?)");
+            }
+        }
+        bindings.push(SqlValue::Integer(cursor.created_at_ms));
+        bindings.push(SqlValue::Integer(cursor.id));
+    }
+    if let Some(status) = query.status.as_ref() {
+        sql.push_str(" AND status COLLATE NOCASE = ?");
+        bindings.push(SqlValue::Text(status.clone()));
+    }
+    if let Some(channel) = query.channel.as_ref() {
+        sql.push_str(" AND channel COLLATE NOCASE = ?");
+        bindings.push(SqlValue::Text(channel.clone()));
+    }
+    if let Some(model_id) = query.model_id.as_ref() {
+        sql.push_str(" AND model_id COLLATE NOCASE = ?");
+        bindings.push(SqlValue::Text(model_id.clone()));
+    }
+    if let Some(search) = query.query.as_ref() {
+        sql.push_str(
+            " AND (
+                instr(lower(request_id), lower(?)) > 0 OR
+                instr(lower(model_id), lower(?)) > 0 OR
+                instr(lower(channel), lower(?)) > 0 OR
+                instr(lower(status), lower(?)) > 0 OR
+                instr(lower(provider_type), lower(?)) > 0
+            )",
+        );
+        for _ in 0..5 {
+            bindings.push(SqlValue::Text(search.clone()));
+        }
+    }
+
+    match query.sort {
+        RequestLogSort::Newest => sql.push_str(" ORDER BY created_at_ms DESC, id DESC"),
+        RequestLogSort::Oldest => sql.push_str(" ORDER BY created_at_ms ASC, id ASC"),
+    }
+    sql.push_str(" LIMIT ?");
+    bindings.push(SqlValue::Integer(fetch_limit as i64));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params_from_iter(bindings.iter()),
+        request_log_entry_from_row,
     )?;
-    let rows = stmt.query_map(params![limit.min(500) as i64], |row| {
-        Ok(RequestLogEntry {
-            id: row.get(0)?,
-            request_id: row.get(1)?,
-            model_id: row.get(2)?,
-            stream: row.get::<_, i64>(3)? != 0,
-            channel: row.get(4)?,
-            provider_type: row.get(5)?,
-            status: row.get(6)?,
-            input_tokens: row.get(7)?,
-            output_tokens: row.get(8)?,
-            total_tokens: row.get(9)?,
-            read_cache_tokens: row.get(10)?,
-            read_cache_hit_rate: row.get(11)?,
-            write_cache_tokens: row.get(12)?,
-            cost_usd: row.get(13)?,
-            latency_ms: row.get(14)?,
-            ttft_ms: row.get(15)?,
-            created_at_ms: row.get(16)?,
-            created_at: row.get(17)?,
-            error_message: row
-                .get::<_, Option<String>>(18)?
-                .map(|message| redact_unstructured_text(&message)),
-            upstream_request_body_bytes: row.get(19)?,
-            write_cache_5m_tokens: row.get(20)?,
-            write_cache_1h_tokens: row.get(21)?,
-        })
-    })?;
 
     let mut logs = Vec::new();
     for row in rows {
         logs.push(row?);
     }
-    Ok(logs)
+    let has_more = logs.len() > limit;
+    if has_more {
+        logs.truncate(limit);
+    }
+    let next_cursor = has_more.then(|| {
+        let last = logs
+            .last()
+            .expect("non-empty page when a next cursor exists");
+        RequestLogCursor {
+            created_at_ms: last.created_at_ms,
+            id: last.id,
+        }
+    });
+    Ok(RequestLogPage {
+        logs,
+        next_cursor,
+        has_more,
+    })
+}
+
+fn request_log_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RequestLogEntry> {
+    Ok(RequestLogEntry {
+        id: row.get(0)?,
+        request_id: row.get(1)?,
+        model_id: row.get(2)?,
+        stream: row.get::<_, i64>(3)? != 0,
+        channel: row.get(4)?,
+        provider_type: row.get(5)?,
+        status: row.get(6)?,
+        input_tokens: row.get(7)?,
+        output_tokens: row.get(8)?,
+        total_tokens: row.get(9)?,
+        read_cache_tokens: row.get(10)?,
+        read_cache_hit_rate: row.get(11)?,
+        write_cache_tokens: row.get(12)?,
+        cost_usd: row.get(13)?,
+        latency_ms: row.get(14)?,
+        ttft_ms: row.get(15)?,
+        created_at_ms: row.get(16)?,
+        created_at: row.get(17)?,
+        error_message: row
+            .get::<_, Option<String>>(18)?
+            .map(|message| redact_unstructured_text(&message)),
+        upstream_request_body_bytes: row.get(19)?,
+        write_cache_5m_tokens: row.get(20)?,
+        write_cache_1h_tokens: row.get(21)?,
+    })
 }
 
 #[cfg(test)]
@@ -1748,6 +1894,37 @@ mod tests {
         RequestLogStore::new(db_path.to_path_buf())
     }
 
+    fn query_test_record(
+        request_id: &str,
+        model_id: &str,
+        channel: &str,
+        provider_type: &str,
+        status: &str,
+        created_at_ms: i64,
+    ) -> RequestLogRecord {
+        RequestLogRecord {
+            request_id: request_id.to_string(),
+            model_id: model_id.to_string(),
+            stream: false,
+            channel: channel.to_string(),
+            provider_type: provider_type.to_string(),
+            status: status.to_string(),
+            usage: LogUsage::default(),
+            cost_usd: None,
+            latency_ms: None,
+            ttft_ms: None,
+            created_at_ms,
+            error_message: None,
+            request_headers_json: None,
+            request_json: None,
+            upstream_request_body_bytes: None,
+            upstream_request_headers_json: None,
+            upstream_request_json: None,
+            upstream_response_sse: None,
+            response_json: None,
+        }
+    }
+
     fn insert_running_test_log(db_path: &Path, request_id: &str) -> RequestLogContext {
         insert_running_test_log_with_details(db_path, request_id, true)
     }
@@ -2120,6 +2297,179 @@ mod tests {
             Some(r#"{"status":"completed"}"#)
         );
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn request_log_keyset_pages_are_stable_in_both_sort_orders() {
+        let db_path = temp_db_path();
+        let created_at_ms = 1_754_000_000_000;
+        let inserted_ids = (0..5)
+            .map(|index| {
+                insert_record(
+                    &db_path,
+                    &query_test_record(
+                        &format!("same-time-{index}"),
+                        "model-a",
+                        "primary",
+                        "open_ai_responses",
+                        "completed",
+                        created_at_ms,
+                    ),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+
+        let mut cursor = None;
+        let mut newest_ids = Vec::new();
+        loop {
+            let page = list_page(
+                &db_path,
+                &RequestLogQuery {
+                    limit: 2,
+                    cursor,
+                    ..RequestLogQuery::default()
+                },
+            )
+            .unwrap();
+            newest_ids.extend(page.logs.iter().map(|log| log.id));
+            assert_eq!(page.has_more, page.next_cursor.is_some());
+            let Some(next_cursor) = page.next_cursor else {
+                break;
+            };
+            cursor = Some(next_cursor);
+        }
+
+        let mut expected_newest = inserted_ids.clone();
+        expected_newest.reverse();
+        assert_eq!(newest_ids, expected_newest);
+
+        let oldest = list_page(
+            &db_path,
+            &RequestLogQuery {
+                limit: 10,
+                sort: RequestLogSort::Oldest,
+                ..RequestLogQuery::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            oldest.logs.iter().map(|log| log.id).collect::<Vec<_>>(),
+            inserted_ids
+        );
+
+        // The pre-pagination helper keeps its descending, limit-based contract.
+        assert_eq!(
+            list_recent(&db_path, 2)
+                .unwrap()
+                .iter()
+                .map(|log| log.id)
+                .collect::<Vec<_>>(),
+            expected_newest[..2]
+        );
+        assert!(list_recent(&db_path, 0).unwrap().is_empty());
+        remove_legacy_database_files(&db_path);
+    }
+
+    #[test]
+    fn request_log_query_combines_filters_and_searches_literal_text() {
+        let db_path = temp_db_path();
+        let records = [
+            query_test_record(
+                "literal%_needle",
+                "Model-A",
+                "Primary",
+                "open_ai_responses",
+                "Completed",
+                100,
+            ),
+            query_test_record(
+                "literalXXneedle",
+                "Model-A",
+                "Primary",
+                "open_ai_responses",
+                "Completed",
+                101,
+            ),
+            query_test_record(
+                "needle-request",
+                "plain-model",
+                "plain-channel",
+                "plain-provider",
+                "plain-status",
+                102,
+            ),
+            query_test_record(
+                "plain-request",
+                "needle-model",
+                "plain-channel",
+                "plain-provider",
+                "plain-status",
+                103,
+            ),
+            query_test_record(
+                "plain-request",
+                "plain-model",
+                "needle-channel",
+                "plain-provider",
+                "plain-status",
+                104,
+            ),
+            query_test_record(
+                "plain-request",
+                "plain-model",
+                "plain-channel",
+                "needle-provider",
+                "plain-status",
+                105,
+            ),
+            query_test_record(
+                "plain-request",
+                "plain-model",
+                "plain-channel",
+                "plain-provider",
+                "needle-status",
+                106,
+            ),
+        ];
+        for record in records {
+            insert_record(&db_path, &record).unwrap();
+        }
+
+        let filtered = list_page(
+            &db_path,
+            &RequestLogQuery {
+                limit: 10,
+                query: Some("%_".to_string()),
+                status: Some("completed".to_string()),
+                channel: Some("PRIMARY".to_string()),
+                model_id: Some("model-a".to_string()),
+                ..RequestLogQuery::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(filtered.logs.len(), 1);
+        assert_eq!(filtered.logs[0].request_id, "literal%_needle");
+
+        for (query, expected_request_id) in [
+            ("NEEDLE-REQUEST", "needle-request"),
+            ("NEEDLE-MODEL", "plain-request"),
+            ("NEEDLE-CHANNEL", "plain-request"),
+            ("NEEDLE-PROVIDER", "plain-request"),
+            ("NEEDLE-STATUS", "plain-request"),
+        ] {
+            let page = list_page(
+                &db_path,
+                &RequestLogQuery {
+                    query: Some(query.to_string()),
+                    ..RequestLogQuery::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(page.logs.len(), 1, "query={query}");
+            assert_eq!(page.logs[0].request_id, expected_request_id);
+        }
+        remove_legacy_database_files(&db_path);
     }
 
     #[test]

@@ -1200,16 +1200,36 @@ mod tests {
     }
 
     fn seed_request_log(state: &SharedState, request_id: &str, created_at_ms: i64) {
+        seed_request_log_with_fields(
+            state,
+            request_id,
+            "test-model",
+            "test",
+            "open_ai_responses",
+            "completed",
+            created_at_ms,
+        );
+    }
+
+    fn seed_request_log_with_fields(
+        state: &SharedState,
+        request_id: &str,
+        model_id: &str,
+        channel: &str,
+        provider_type: &str,
+        status: &str,
+        created_at_ms: i64,
+    ) -> i64 {
         use crate::ai_gateway::request_log::{LogUsage, RequestLogRecord};
         state
             .ai_gateway_request_logs
             .insert_record(&RequestLogRecord {
                 request_id: request_id.to_string(),
-                model_id: "test-model".to_string(),
+                model_id: model_id.to_string(),
                 stream: false,
-                channel: "test".to_string(),
-                provider_type: "open_ai_responses".to_string(),
-                status: "completed".to_string(),
+                channel: channel.to_string(),
+                provider_type: provider_type.to_string(),
+                status: status.to_string(),
                 usage: LogUsage::default(),
                 cost_usd: None,
                 latency_ms: None,
@@ -1224,7 +1244,124 @@ mod tests {
                 upstream_response_sse: None,
                 response_json: None,
             })
-            .expect("seed request log");
+            .expect("seed request log")
+    }
+
+    #[tokio::test]
+    async fn manage_request_logs_supports_keyset_sort_filters_and_literal_search() {
+        let (state, _temp, token) = management_test_state();
+        let same_time = 1_754_000_000_000;
+        for request_id in ["same-a", "same-b", "same-c"] {
+            seed_request_log_with_fields(
+                &state,
+                request_id,
+                "Model-A",
+                "Primary",
+                "open_ai_responses",
+                "Completed",
+                same_time,
+            );
+        }
+        seed_request_log_with_fields(
+            &state,
+            "literal%_request",
+            "Model-X",
+            "Primary",
+            "anthropic_messages",
+            "Failed",
+            same_time + 1,
+        );
+        seed_request_log_with_fields(
+            &state,
+            "literalXXrequest",
+            "Model-X",
+            "Primary",
+            "anthropic_messages",
+            "Failed",
+            same_time + 2,
+        );
+        let app = router(state);
+
+        // The legacy `limit` query remains valid while the response gains page metadata.
+        let first = route_response(
+            app.clone(),
+            "/api/v1/manage/request-logs?limit=2&status=completed&channel=PRIMARY&modelId=model-a",
+            Some(&token),
+        )
+        .await;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first = response_json(first).await;
+        assert_eq!(first["logs"].as_array().unwrap().len(), 2);
+        assert_eq!(first["hasMore"], true);
+        let cursor = first["nextCursor"].as_str().expect("next cursor");
+        assert!(!cursor.contains('='));
+        let first_ids = first["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|log| log["id"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+
+        let second_path = format!(
+            "/api/v1/manage/request-logs?limit=2&status=COMPLETED&channel=primary&modelId=MODEL-A&cursor={cursor}"
+        );
+        let second = route_response(app.clone(), &second_path, Some(&token)).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        let second = response_json(second).await;
+        assert_eq!(second["logs"].as_array().unwrap().len(), 1);
+        assert_eq!(second["hasMore"], false);
+        assert!(second["nextCursor"].is_null());
+        let second_id = second["logs"][0]["id"].as_i64().unwrap();
+        assert!(!first_ids.contains(&second_id));
+
+        let oldest = route_response(
+            app.clone(),
+            "/api/v1/manage/request-logs?limit=3&status=completed&sort=oldest",
+            Some(&token),
+        )
+        .await;
+        assert_eq!(oldest.status(), StatusCode::OK);
+        let oldest = response_json(oldest).await;
+        let oldest_ids = oldest["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|log| log["id"].as_i64().unwrap())
+            .collect::<Vec<_>>();
+        assert!(oldest_ids.windows(2).all(|ids| ids[0] < ids[1]));
+
+        let literal = route_response(
+            app,
+            "/api/v1/manage/request-logs?query=%25_&status=failed&channel=PRIMARY&modelId=model-x",
+            Some(&token),
+        )
+        .await;
+        assert_eq!(literal.status(), StatusCode::OK);
+        let literal = response_json(literal).await;
+        assert_eq!(literal["logs"].as_array().unwrap().len(), 1);
+        assert_eq!(literal["logs"][0]["requestId"], "literal%_request");
+    }
+
+    #[tokio::test]
+    async fn manage_request_logs_rejects_invalid_cursor_and_sort_without_internal_details() {
+        let (app, _temp, token) = management_test_router();
+        for (path, expected_error) in [
+            (
+                "/api/v1/manage/request-logs?cursor=not-a-valid-cursor",
+                "invalid request log cursor",
+            ),
+            (
+                "/api/v1/manage/request-logs?sort=descending",
+                "unsupported request log sort",
+            ),
+        ] {
+            let response = route_response(app.clone(), path, Some(&token)).await;
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response_json(response).await,
+                json!({ "ok": false, "error": expected_error })
+            );
+        }
     }
 
     #[tokio::test]
