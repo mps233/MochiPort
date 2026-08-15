@@ -13,8 +13,8 @@ use serde_json::{Value, json};
 use crate::{
     ai_gateway::{
         catalog,
-        config::{ProviderConfig, ProviderType},
-        model_fetch, request_log,
+        config::{ProviderConfig, ProviderType, Sub2ApiAdminConfig},
+        model_fetch, provider_usage, request_log, sub2api_accounts,
         templates::{self, ProviderTemplate},
     },
     app_state::SharedState,
@@ -172,6 +172,36 @@ pub(super) struct FetchProviderModelsRequest {
     models_url: Option<String>,
     provider_type: ProviderType,
     api_key: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FetchProviderUsageRequest {
+    provider_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdateSub2ApiAdminRequest {
+    base_url: String,
+    admin_api_key: Option<String>,
+    #[serde(default)]
+    clear_admin_api_key: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct FetchSub2ApiAccountsRequest {
+    #[serde(default)]
+    force_billing_refresh: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ManageSub2ApiAdminResponse {
+    configured: bool,
+    base_url: String,
+    secret_set: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -433,15 +463,19 @@ pub(super) async fn update_settings(
     if let Some(url) = request.outbound_proxy_url {
         next.outbound_proxy.url = url.trim().to_string();
     }
-    let outbound_client =
-        match crate::outbound_http::build_client(&next.outbound_proxy, next.local_listen_port()) {
-            Ok(client) => client,
+    let (outbound_client, sensitive_client) =
+        match crate::outbound_http::build_clients(&next.outbound_proxy, next.local_listen_port()) {
+            Ok(clients) => clients,
             Err(error) => return operation_error(StatusCode::BAD_REQUEST, error.to_string()),
         };
     if let Err(error) = next.save(&state.config_path) {
         return operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
     }
-    crate::outbound_http::install(outbound_client, &next.outbound_proxy);
+    crate::outbound_http::install_with_sensitive(
+        outbound_client,
+        sensitive_client,
+        &next.outbound_proxy,
+    );
     *config = next;
     (
         StatusCode::OK,
@@ -663,6 +697,163 @@ pub(super) async fn fetch_provider_models(
     )
 }
 
+/// 查询已保存 Provider 当前 API Key 的余额与计费倍率。
+///
+/// API Key 只从 daemon 配置读取，既不接受客户端传入，也不会进入响应。
+/// Sub2API 的余额与倍率接口会并行探测，允许其中一个能力单独可用。
+pub(super) async fn fetch_provider_usage(
+    State(state): State<SharedState>,
+    Json(request): Json<FetchProviderUsageRequest>,
+) -> impl IntoResponse {
+    let requested_provider_name = request.provider_name.trim();
+    if requested_provider_name.is_empty() {
+        return operation_error(StatusCode::BAD_REQUEST, "providerName is required");
+    }
+
+    let provider = {
+        let config = state.config.lock().await;
+        config
+            .ai_gateway
+            .providers
+            .iter()
+            .find(|provider| provider.name == requested_provider_name)
+            .map(|provider| {
+                (
+                    provider.name.clone(),
+                    provider.base_url.clone(),
+                    provider.api_key.clone(),
+                )
+            })
+    };
+    let Some((provider_name, base_url, api_key)) = provider else {
+        return operation_error(StatusCode::NOT_FOUND, "provider not found");
+    };
+    if api_key.trim().is_empty() {
+        return operation_error(
+            StatusCode::BAD_REQUEST,
+            "provider API key is not configured",
+        );
+    }
+    if base_url.trim().is_empty() {
+        return operation_error(
+            StatusCode::BAD_REQUEST,
+            "provider base URL is not configured",
+        );
+    }
+
+    let snapshot =
+        provider_usage::fetch_provider_usage(&crate::outbound_http::get(), &base_url, &api_key)
+            .await;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": snapshot.any_available(),
+            "providerName": provider_name,
+            "usage": snapshot,
+        })),
+    )
+}
+
+pub(super) async fn sub2api_admin(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    Json(sub2api_admin_snapshot(&config.ai_gateway.sub2api_admin))
+}
+
+pub(super) async fn update_sub2api_admin(
+    State(state): State<SharedState>,
+    Json(request): Json<UpdateSub2ApiAdminRequest>,
+) -> impl IntoResponse {
+    let base_url = normalized_remote_url_text(&request.base_url);
+    if let Err(error) = validate_remote_url(&base_url, "baseUrl") {
+        return operation_error(StatusCode::BAD_REQUEST, error);
+    }
+    let existing_key = {
+        let config = state.config.lock().await;
+        config.ai_gateway.sub2api_admin.admin_api_key.clone()
+    };
+    let admin_api_key = if request.clear_admin_api_key {
+        String::new()
+    } else {
+        non_empty_owned(request.admin_api_key).unwrap_or(existing_key)
+    };
+    if admin_api_key.is_empty() {
+        return operation_error(StatusCode::BAD_REQUEST, "Sub2API 管理密钥不能为空");
+    }
+    if let Err(error) = sub2api_accounts::validate_admin_connection(
+        &crate::outbound_http::get_sensitive(),
+        &base_url,
+        &admin_api_key,
+    )
+    .await
+    {
+        return operation_error(StatusCode::BAD_GATEWAY, error.to_string());
+    }
+
+    let mut config = state.config.lock().await;
+    let mut next = config.clone();
+    next.ai_gateway.sub2api_admin = Sub2ApiAdminConfig {
+        base_url,
+        admin_api_key,
+    };
+    if let Err(error) = next.save(&state.config_path) {
+        return operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    *config = next;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "sub2api": sub2api_admin_snapshot(&config.ai_gateway.sub2api_admin),
+        })),
+    )
+}
+
+pub(super) async fn disconnect_sub2api_admin(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let mut config = state.config.lock().await;
+    let mut next = config.clone();
+    next.ai_gateway.sub2api_admin = Sub2ApiAdminConfig::default();
+    if let Err(error) = next.save(&state.config_path) {
+        return operation_error(StatusCode::INTERNAL_SERVER_ERROR, error.to_string());
+    }
+    *config = next;
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "sub2api": sub2api_admin_snapshot(&config.ai_gateway.sub2api_admin),
+        })),
+    )
+}
+
+pub(super) async fn fetch_sub2api_accounts(
+    State(state): State<SharedState>,
+    Json(request): Json<FetchSub2ApiAccountsRequest>,
+) -> impl IntoResponse {
+    let admin = {
+        let config = state.config.lock().await;
+        config.ai_gateway.sub2api_admin.clone()
+    };
+    if !admin.is_configured() {
+        return operation_error(StatusCode::BAD_REQUEST, "尚未连接 Sub2API 账号池");
+    }
+    match sub2api_accounts::fetch_account_pool(
+        &crate::outbound_http::get_sensitive(),
+        &admin.base_url,
+        &admin.admin_api_key,
+        request.force_billing_refresh,
+    )
+    .await
+    {
+        Ok(snapshot) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "pool": snapshot })),
+        ),
+        Err(error) => operation_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
 fn gateway_snapshot(config: &crate::ai_gateway::config::AiGatewayConfig) -> ManageGatewayResponse {
     ManageGatewayResponse {
         enabled: config.enabled,
@@ -675,6 +866,14 @@ fn gateway_snapshot(config: &crate::ai_gateway::config::AiGatewayConfig) -> Mana
             .iter()
             .map(ManageProviderResponse::from)
             .collect(),
+    }
+}
+
+fn sub2api_admin_snapshot(config: &Sub2ApiAdminConfig) -> ManageSub2ApiAdminResponse {
+    ManageSub2ApiAdminResponse {
+        configured: config.is_configured(),
+        base_url: masked_remote_url(&config.base_url),
+        secret_set: !config.admin_api_key.trim().is_empty(),
     }
 }
 

@@ -105,6 +105,23 @@ pub fn router(state: SharedState) -> Router {
             post(manage_workspace::fetch_provider_models),
         )
         .route(
+            "/gateway/provider/usage",
+            post(manage_workspace::fetch_provider_usage),
+        )
+        .route("/gateway/sub2api", get(manage_workspace::sub2api_admin))
+        .route(
+            "/gateway/sub2api/config",
+            post(manage_workspace::update_sub2api_admin),
+        )
+        .route(
+            "/gateway/sub2api/disconnect",
+            post(manage_workspace::disconnect_sub2api_admin),
+        )
+        .route(
+            "/gateway/sub2api/accounts",
+            post(manage_workspace::fetch_sub2api_accounts),
+        )
+        .route(
             "/gateway/provider-templates",
             get(manage_workspace::provider_templates),
         )
@@ -819,7 +836,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::{
-        ai_gateway::config::ProviderConfig,
+        ai_gateway::config::{ProviderConfig, Sub2ApiAdminConfig},
         app_state::{AppState, ImAccountRuntimeState, RemoteControlServerConnection},
         config::{FeishuConfig, TelegramConfig, WechatConfig, WecomConfig},
         daemon_process::DaemonIdentity,
@@ -943,6 +960,19 @@ mod tests {
             .await
             .expect("response body");
         serde_json::from_slice(&body).expect("JSON response")
+    }
+
+    async fn spawn_mock_server(app: Router) -> std::net::SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock server");
+        let address = listener.local_addr().expect("mock server address");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve mock endpoint");
+        });
+        address
     }
 
     #[tokio::test]
@@ -1126,6 +1156,343 @@ mod tests {
         let gateway = response_json(gateway).await;
         assert_eq!(gateway["providers"][0]["secretSet"], true);
         assert!(!gateway.to_string().contains(key));
+    }
+
+    #[tokio::test]
+    async fn manage_sub2api_routes_require_the_shared_bearer_credential() {
+        let (app, _temp, _token) = management_test_router();
+        for (method, path, body) in [
+            (Method::GET, "/api/v1/manage/gateway/sub2api", None),
+            (
+                Method::POST,
+                "/api/v1/manage/gateway/sub2api/config",
+                Some(r#"{"baseUrl":"https://sub2api.invalid","adminApiKey":"secret"}"#),
+            ),
+            (
+                Method::POST,
+                "/api/v1/manage/gateway/sub2api/disconnect",
+                Some("{}"),
+            ),
+            (
+                Method::POST,
+                "/api/v1/manage/gateway/sub2api/accounts",
+                Some("{}"),
+            ),
+        ] {
+            let response = request_response(app.clone(), method, path, None, body).await;
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "path={path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn manage_sub2api_config_is_write_only_and_disconnect_clears_it() {
+        use std::sync::{Arc, Mutex};
+
+        const ADMIN_KEY: &str = "sub2api-admin-key-must-not-leak";
+        let recorded_keys = Arc::new(Mutex::new(Vec::new()));
+        let mock_keys = recorded_keys.clone();
+        let mock = Router::new().route(
+            "/api/v1/admin/accounts",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let recorded = mock_keys.clone();
+                async move {
+                    recorded.lock().expect("record admin key").push(
+                        headers
+                            .get("x-api-key")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    Json(json!({
+                        "code": 0,
+                        "message": "",
+                        "data": { "items": [], "pages": 1 },
+                    }))
+                }
+            }),
+        );
+        let address = spawn_mock_server(mock).await;
+        let base_url = format!("http://{address}");
+
+        let (state, _temp, token) = management_state_with_config(AppConfig::default());
+        let inspect_state = state.clone();
+        let app = router(state);
+        let body = json!({
+            "baseUrl": base_url,
+            "adminApiKey": ADMIN_KEY,
+        })
+        .to_string();
+        let saved = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/gateway/sub2api/config",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        let saved = response_json(saved).await;
+        assert_eq!(saved["sub2api"]["configured"], true);
+        assert_eq!(saved["sub2api"]["secretSet"], true);
+        assert_eq!(saved["sub2api"]["baseUrl"], base_url);
+        assert!(!saved.to_string().contains(ADMIN_KEY));
+        assert!(!saved.to_string().contains("adminApiKey"));
+
+        let snapshot =
+            route_response(app.clone(), "/api/v1/manage/gateway/sub2api", Some(&token)).await;
+        assert_eq!(snapshot.status(), StatusCode::OK);
+        let snapshot = response_json(snapshot).await;
+        assert_eq!(snapshot["configured"], true);
+        assert_eq!(snapshot["secretSet"], true);
+        assert!(!snapshot.to_string().contains(ADMIN_KEY));
+        assert!(!snapshot.to_string().contains("adminApiKey"));
+        {
+            let config = inspect_state.config.lock().await;
+            assert_eq!(config.ai_gateway.sub2api_admin.admin_api_key, ADMIN_KEY);
+            assert_eq!(config.ai_gateway.sub2api_admin.base_url, base_url);
+        }
+
+        let disconnected = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/gateway/sub2api/disconnect",
+            Some(&token),
+            Some("{}"),
+        )
+        .await;
+        assert_eq!(disconnected.status(), StatusCode::OK);
+        let disconnected = response_json(disconnected).await;
+        assert_eq!(disconnected["sub2api"]["configured"], false);
+        assert_eq!(disconnected["sub2api"]["secretSet"], false);
+        assert!(!disconnected.to_string().contains(ADMIN_KEY));
+        let config = inspect_state.config.lock().await;
+        assert!(config.ai_gateway.sub2api_admin.is_empty());
+        assert_eq!(
+            recorded_keys.lock().expect("read admin keys").as_slice(),
+            [ADMIN_KEY]
+        );
+    }
+
+    #[tokio::test]
+    async fn manage_sub2api_accounts_chunks_probes_and_preserves_partial_results() {
+        use std::sync::{Arc, Mutex};
+
+        const ADMIN_KEY: &str = "sub2api-account-pool-key-must-not-leak";
+        let accounts = (1..=21)
+            .map(|id| {
+                json!({
+                    "id": id,
+                    "name": format!("account-{id}"),
+                    "platform": "openai",
+                    "type": "apikey",
+                    "status": "active",
+                    "schedulable": true,
+                    "rate_multiplier": 0.7,
+                    "extra": {},
+                })
+            })
+            .collect::<Vec<_>>();
+        let recorded_keys = Arc::new(Mutex::new(Vec::new()));
+        let batch_sizes = Arc::new(Mutex::new(Vec::new()));
+
+        let account_keys = recorded_keys.clone();
+        let account_items = accounts.clone();
+        let account_route = axum::routing::get(move |headers: axum::http::HeaderMap| {
+            let keys = account_keys.clone();
+            let items = account_items.clone();
+            async move {
+                keys.lock().expect("record account key").push(
+                    headers
+                        .get("x-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string(),
+                );
+                Json(json!({
+                    "code": 0,
+                    "message": "",
+                    "data": { "items": items, "pages": 1 },
+                }))
+            }
+        });
+
+        let billing_keys = recorded_keys.clone();
+        let billing_sizes = batch_sizes.clone();
+        let billing_route = axum::routing::post(
+            move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let keys = billing_keys.clone();
+                let sizes = billing_sizes.clone();
+                async move {
+                    keys.lock().expect("record billing key").push(
+                        headers
+                            .get("x-api-key")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    let ids = body["account_ids"].as_array().expect("billing account ids");
+                    sizes
+                        .lock()
+                        .expect("record billing batch")
+                        .push(("billing", ids.len()));
+                    let results = ids
+                        .iter()
+                        .map(|id| {
+                            let id = id.as_i64().expect("billing account id");
+                            if id == 2 {
+                                json!({
+                                    "account_id": id,
+                                    "snapshot": null,
+                                    "error": "probe timeout",
+                                })
+                            } else {
+                                json!({
+                                    "account_id": id,
+                                    "snapshot": {
+                                        "status": "ok",
+                                        "data": {
+                                            "resolved_rate_multiplier": 0.5,
+                                            "effective_rate_multiplier": 0.75,
+                                        },
+                                        "received_at": "2026-08-16T00:00:00Z",
+                                        "fresh_until": "2026-08-16T01:00:00Z",
+                                        "last_error": "",
+                                    },
+                                    "error": "",
+                                })
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    Json(json!({
+                        "code": 0,
+                        "message": "",
+                        "data": { "results": results },
+                    }))
+                }
+            },
+        );
+
+        let usage_keys = recorded_keys.clone();
+        let usage_sizes = batch_sizes.clone();
+        let usage_route = axum::routing::post(
+            move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                let keys = usage_keys.clone();
+                let sizes = usage_sizes.clone();
+                async move {
+                    keys.lock().expect("record usage key").push(
+                        headers
+                            .get("x-api-key")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    let ids = body["account_ids"].as_array().expect("usage account ids");
+                    sizes
+                        .lock()
+                        .expect("record usage batch")
+                        .push(("usage", ids.len()));
+                    let results = ids
+                        .iter()
+                        .map(|id| {
+                            let id = id.as_i64().expect("usage account id");
+                            if id == 3 {
+                                json!({
+                                    "account_id": id,
+                                    "snapshot": null,
+                                    "error": "probe timeout",
+                                })
+                            } else {
+                                let remaining = if id == 4 { -12.5 } else { 88.0 };
+                                json!({
+                                    "account_id": id,
+                                    "snapshot": {
+                                        "status": "ok",
+                                        "data": {
+                                            "remaining": remaining,
+                                            "unlimited": false,
+                                            "unit": "USD",
+                                        },
+                                        "received_at": "2026-08-16T00:00:00Z",
+                                        "fresh_until": null,
+                                        "last_error": "",
+                                    },
+                                    "error": "",
+                                })
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    Json(json!({
+                        "code": 0,
+                        "message": "",
+                        "data": { "results": results },
+                    }))
+                }
+            },
+        );
+
+        let mock = Router::new()
+            .route("/api/v1/admin/accounts", account_route)
+            .route(
+                "/api/v1/admin/accounts/upstream-billing-probe/batch",
+                billing_route,
+            )
+            .route(
+                "/api/v1/admin/accounts/upstream-usage-probe/batch",
+                usage_route,
+            );
+        let address = spawn_mock_server(mock).await;
+        let mut config = AppConfig::default();
+        config.ai_gateway.sub2api_admin = Sub2ApiAdminConfig {
+            base_url: format!("http://{address}"),
+            admin_api_key: ADMIN_KEY.to_string(),
+        };
+        let (state, _temp, token) = management_state_with_config(config);
+        let app = router(state);
+
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/gateway/sub2api/accounts",
+            Some(&token),
+            Some(r#"{"forceBillingRefresh":true}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        let pool = &payload["pool"];
+        assert_eq!(pool["accounts"].as_array().expect("accounts").len(), 21);
+        let account = |id: i64| {
+            pool["accounts"]
+                .as_array()
+                .expect("accounts")
+                .iter()
+                .find(|account| account["id"] == id)
+                .unwrap_or_else(|| panic!("missing account {id}"))
+        };
+        assert_eq!(account(1)["upstreamBilling"]["state"], "available");
+        assert_eq!(
+            account(2)["upstreamBilling"]["state"],
+            "temporarily_unavailable"
+        );
+        assert_eq!(
+            account(3)["upstreamBalance"]["state"],
+            "temporarily_unavailable"
+        );
+        assert_eq!(account(4)["upstreamBalance"]["state"], "available");
+        assert_eq!(account(4)["upstreamBalance"]["remaining"], -12.5);
+        assert!(!payload.to_string().contains(ADMIN_KEY));
+        assert_eq!(
+            batch_sizes.lock().expect("read batch sizes").as_slice(),
+            [("billing", 20), ("billing", 1), ("usage", 20), ("usage", 1)]
+        );
+        assert_eq!(recorded_keys.lock().expect("read admin keys").len(), 6);
+        assert!(
+            recorded_keys
+                .lock()
+                .expect("read admin keys")
+                .iter()
+                .all(|key| key == ADMIN_KEY)
+        );
     }
 
     #[tokio::test]
@@ -1551,6 +1918,282 @@ mod tests {
             [format!("Bearer {CANARY_PROVIDER_KEY}")]
         );
         assert!(!payload.to_string().contains(CANARY_PROVIDER_KEY));
+    }
+
+    #[tokio::test]
+    async fn manage_provider_usage_uses_stored_key_and_returns_balance_and_billing() {
+        use std::sync::{Arc, Mutex};
+
+        let recorded_auth: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let usage_auth = recorded_auth.clone();
+        let billing_auth = recorded_auth.clone();
+        let mock = Router::new()
+            .route(
+                "/v1/usage",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let recorded = usage_auth.clone();
+                    async move {
+                        recorded.lock().expect("record usage auth").push(
+                            headers
+                                .get(AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string(),
+                        );
+                        Json(json!({
+                            "mode": "unrestricted",
+                            "remaining": 42.17,
+                            "balance": 42.17,
+                            "unit": "USD",
+                            "planName": "钱包余额",
+                            "isValid": true,
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/v1/sub2api/billing",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let recorded = billing_auth.clone();
+                    async move {
+                        recorded.lock().expect("record billing auth").push(
+                            headers
+                                .get(AUTHORIZATION)
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string(),
+                        );
+                        Json(json!({
+                            "object": "sub2api.key_billing",
+                            "schema_version": 1,
+                            "billing_scope": "token",
+                            "group_rate_multiplier": 0.8,
+                            "user_rate_multiplier": 0.6,
+                            "resolved_rate_multiplier": 0.6,
+                            "peak_rate_enabled": true,
+                            "peak_start": "08:00",
+                            "peak_end": "12:00",
+                            "peak_rate_multiplier": 1.5,
+                            "applied_peak_multiplier": 1.5,
+                            "effective_rate_multiplier": 0.9,
+                            "timezone": "Asia/Shanghai",
+                            "observed_at": "2026-08-15T00:00:00Z",
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock usage server");
+        let address = listener.local_addr().expect("mock usage server address");
+        tokio::spawn(async move {
+            axum::serve(listener, mock)
+                .await
+                .expect("serve mock usage endpoints");
+        });
+
+        let mut config = AppConfig::default();
+        config.ai_gateway.providers = vec![ProviderConfig {
+            name: "primary".to_string(),
+            base_url: format!("http://{address}/v1"),
+            api_key: CANARY_PROVIDER_KEY.to_string(),
+            ..ProviderConfig::default()
+        }];
+        let (state, _temp, token) = management_state_with_config(config);
+        let app = router(state);
+
+        let unauthorized = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/gateway/provider/usage",
+            None,
+            Some(r#"{"providerName":"primary"}"#),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/gateway/provider/usage",
+            Some(&token),
+            Some(r#"{"providerName":"primary"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(axum::http::header::CACHE_CONTROL),
+            Some(&axum::http::HeaderValue::from_static(
+                "no-store, no-cache, max-age=0, must-revalidate"
+            ))
+        );
+        let payload = response_json(response).await;
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["providerName"], "primary");
+        assert_eq!(payload["usage"]["source"], "sub2api");
+        assert_eq!(payload["usage"]["balanceStatus"], "available");
+        assert_eq!(payload["usage"]["billingStatus"], "available");
+        assert_eq!(payload["usage"]["remaining"], 42.17);
+        assert_eq!(payload["usage"]["effectiveRateMultiplier"], 0.9);
+        assert_eq!(payload["usage"]["resolvedRateMultiplier"], 0.6);
+        assert_eq!(payload["usage"]["appliedPeakMultiplier"], 1.5);
+        assert!(!payload.to_string().contains(CANARY_PROVIDER_KEY));
+        assert!(!payload.to_string().contains(&address.to_string()));
+
+        let mut auth = recorded_auth.lock().expect("read recorded auth").clone();
+        auth.sort();
+        assert_eq!(
+            auth,
+            vec![
+                format!("Bearer {CANARY_PROVIDER_KEY}"),
+                format!("Bearer {CANARY_PROVIDER_KEY}"),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn manage_provider_usage_preserves_partial_results_without_upstream_body() {
+        let upstream_secret = "upstream-error-body-must-not-leak";
+        let mock = Router::new()
+            .route(
+                "/v1/usage",
+                axum::routing::get(|| async {
+                    Json(json!({
+                        "mode": "quota_limited",
+                        "isValid": true,
+                        "quota": { "remaining": 8.25, "unit": "USD" },
+                    }))
+                }),
+            )
+            .route(
+                "/v1/sub2api/billing",
+                axum::routing::get(move || async move { (StatusCode::NOT_FOUND, upstream_secret) }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind partial usage server");
+        let address = listener.local_addr().expect("partial usage server address");
+        tokio::spawn(async move {
+            axum::serve(listener, mock)
+                .await
+                .expect("serve partial usage endpoints");
+        });
+
+        let mut config = AppConfig::default();
+        config.ai_gateway.providers = vec![ProviderConfig {
+            name: "partial".to_string(),
+            base_url: format!("http://{address}/v1"),
+            api_key: CANARY_PROVIDER_KEY.to_string(),
+            ..ProviderConfig::default()
+        }];
+        let (state, _temp, token) = management_state_with_config(config);
+        let response = request_response(
+            router(state),
+            Method::POST,
+            "/api/v1/manage/gateway/provider/usage",
+            Some(&token),
+            Some(r#"{"providerName":"partial"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["usage"]["balanceStatus"], "available");
+        assert_eq!(payload["usage"]["billingStatus"], "unsupported");
+        assert_eq!(payload["usage"]["remaining"], 8.25);
+        assert!(payload["usage"].get("effectiveRateMultiplier").is_none());
+        assert!(!payload.to_string().contains(upstream_secret));
+        assert!(!payload.to_string().contains(CANARY_PROVIDER_KEY));
+    }
+
+    #[tokio::test]
+    async fn manage_provider_usage_rejects_oversized_upstream_responses() {
+        let body = format!(r#"{{"padding":"{}"}}"#, "x".repeat(300_000));
+        let usage_body = body.clone();
+        let billing_body = body;
+        let mock = Router::new()
+            .route(
+                "/v1/usage",
+                axum::routing::get(move || {
+                    let body = usage_body.clone();
+                    async move { body }
+                }),
+            )
+            .route(
+                "/v1/sub2api/billing",
+                axum::routing::get(move || {
+                    let body = billing_body.clone();
+                    async move { body }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind oversized usage server");
+        let address = listener
+            .local_addr()
+            .expect("oversized usage server address");
+        tokio::spawn(async move {
+            axum::serve(listener, mock)
+                .await
+                .expect("serve oversized usage endpoints");
+        });
+
+        let mut config = AppConfig::default();
+        config.ai_gateway.providers = vec![ProviderConfig {
+            name: "oversized".to_string(),
+            base_url: format!("http://{address}/v1"),
+            api_key: CANARY_PROVIDER_KEY.to_string(),
+            ..ProviderConfig::default()
+        }];
+        let (state, _temp, token) = management_state_with_config(config);
+        let response = request_response(
+            router(state),
+            Method::POST,
+            "/api/v1/manage/gateway/provider/usage",
+            Some(&token),
+            Some(r#"{"providerName":"oversized"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["ok"], false);
+        assert_eq!(payload["usage"]["balanceStatus"], "invalid_response");
+        assert_eq!(payload["usage"]["billingStatus"], "invalid_response");
+        assert!(payload.to_string().len() < 1_000);
+        assert!(!payload.to_string().contains(CANARY_PROVIDER_KEY));
+    }
+
+    #[tokio::test]
+    async fn manage_provider_usage_requires_an_existing_provider_with_a_key() {
+        let mut config = AppConfig::default();
+        config.ai_gateway.providers = vec![ProviderConfig {
+            name: "without-key".to_string(),
+            base_url: "https://provider.example/v1".to_string(),
+            api_key: String::new(),
+            ..ProviderConfig::default()
+        }];
+        let (state, _temp, token) = management_state_with_config(config);
+        let app = router(state);
+
+        let missing = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/gateway/provider/usage",
+            Some(&token),
+            Some(r#"{"providerName":"missing"}"#),
+        )
+        .await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+        let without_key = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/gateway/provider/usage",
+            Some(&token),
+            Some(r#"{"providerName":"without-key"}"#),
+        )
+        .await;
+        assert_eq!(without_key.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

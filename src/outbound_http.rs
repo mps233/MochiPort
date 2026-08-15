@@ -6,40 +6,69 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use reqwest::Client;
+use reqwest::{Client, redirect::Policy};
 
 use crate::config::{OutboundProxyConfig, OutboundProxyMode};
 
 static GLOBAL_CLIENT: OnceLock<RwLock<Client>> = OnceLock::new();
+static SENSITIVE_CLIENT: OnceLock<RwLock<Client>> = OnceLock::new();
 
 pub fn init(config: &OutboundProxyConfig, local_port: Option<u16>) -> Result<()> {
-    let client = build_client(config, local_port)?;
-    install(client, config);
+    let (client, sensitive_client) = build_clients(config, local_port)?;
+    install_with_sensitive(client, sensitive_client, config);
     Ok(())
 }
 
+/// Installs the regular client and derives a no-redirect client using the
+/// same proxy configuration. Kept as a compatibility wrapper for callers that
+/// do not have a local listener port available.
+#[allow(dead_code)]
 pub fn install(client: Client, config: &OutboundProxyConfig) {
-    if let Some(lock) = GLOBAL_CLIENT.get() {
+    let sensitive_client = match build_sensitive_client(config, None) {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(
+                target: "threadrelay::network",
+                %error,
+                "failed to apply proxy settings to compatibility sensitive client"
+            );
+            default_sensitive_client()
+        }
+    };
+    install_with_sensitive(client, sensitive_client, config);
+}
+
+pub fn install_with_sensitive(
+    client: Client,
+    sensitive_client: Client,
+    config: &OutboundProxyConfig,
+) {
+    replace_client(&GLOBAL_CLIENT, client);
+    replace_client(&SENSITIVE_CLIENT, sensitive_client);
+    tracing::info!(
+        target: "threadrelay::network",
+        mode = ?config.mode,
+        proxy = %masked_proxy_url(config),
+        "outbound HTTP clients initialized"
+    );
+}
+
+fn replace_client(slot: &'static OnceLock<RwLock<Client>>, client: Client) {
+    if let Some(lock) = slot.get() {
         *lock
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
-    } else if let Err(lock) = GLOBAL_CLIENT.set(RwLock::new(client)) {
+    } else if let Err(lock) = slot.set(RwLock::new(client)) {
         // Another thread initialized the singleton between get() and set().
         let client = lock
             .into_inner()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(global) = GLOBAL_CLIENT.get() {
+        if let Some(global) = slot.get() {
             *global
                 .write()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()) = client;
         }
     }
-    tracing::info!(
-        target: "threadrelay::network",
-        mode = ?config.mode,
-        proxy = %masked_proxy_url(config),
-        "outbound HTTP client initialized"
-    );
 }
 
 pub fn get() -> Client {
@@ -50,29 +79,69 @@ pub fn get() -> Client {
         .unwrap_or_else(Client::new)
 }
 
+/// Returns the outbound client for requests carrying credentials in custom
+/// headers. Redirects are disabled so those headers cannot cross origins.
+pub fn get_sensitive() -> Client {
+    SENSITIVE_CLIENT
+        .get()
+        .and_then(|lock| lock.read().ok())
+        .map(|client| client.clone())
+        .unwrap_or_else(default_sensitive_client)
+}
+
+fn default_sensitive_client() -> Client {
+    Client::builder()
+        .redirect(Policy::none())
+        .build()
+        .expect("static no-redirect HTTP client configuration must be valid")
+}
+
 #[cfg(test)]
 pub fn validate(config: &OutboundProxyConfig) -> Result<()> {
-    build_client(config, None).map(|_| ())
+    build_clients(config, None).map(|_| ())
 }
 
 pub fn validate_for_local_port(
     config: &OutboundProxyConfig,
     local_port: Option<u16>,
 ) -> Result<()> {
-    build_client(config, local_port).map(|_| ())
+    build_clients(config, local_port).map(|_| ())
+}
+
+pub fn build_clients(
+    config: &OutboundProxyConfig,
+    local_port: Option<u16>,
+) -> Result<(Client, Client)> {
+    Ok((
+        build_client(config, local_port)?,
+        build_sensitive_client(config, local_port)?,
+    ))
 }
 
 pub fn build_client(config: &OutboundProxyConfig, local_port: Option<u16>) -> Result<Client> {
+    apply_async_proxy(base_client_builder(), config, local_port)?
+        .build()
+        .context("failed to build outbound HTTP client")
+}
+
+pub fn build_sensitive_client(
+    config: &OutboundProxyConfig,
+    local_port: Option<u16>,
+) -> Result<Client> {
     apply_async_proxy(
-        Client::builder()
-            .pool_max_idle_per_host(10)
-            .tcp_keepalive(Duration::from_secs(60))
-            .connect_timeout(Duration::from_secs(30)),
+        base_client_builder().redirect(Policy::none()),
         config,
         local_port,
     )?
     .build()
-    .context("failed to build outbound HTTP client")
+    .context("failed to build no-redirect outbound HTTP client")
+}
+
+fn base_client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
+        .pool_max_idle_per_host(10)
+        .tcp_keepalive(Duration::from_secs(60))
+        .connect_timeout(Duration::from_secs(30))
 }
 
 pub fn apply_async_proxy(

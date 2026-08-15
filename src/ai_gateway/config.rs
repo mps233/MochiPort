@@ -32,6 +32,28 @@ pub struct AiGatewayConfig {
     /// 是否记录请求/响应/SSE 详情。关闭时仍保留摘要指标。
     #[serde(default = "default_false")]
     pub request_log_details_enabled: bool,
+    /// Optional read-only connection to a Sub2API administration API. This is
+    /// deliberately separate from provider API keys: it reads the upstream
+    /// account pool instead of authorizing model requests.
+    #[serde(default, skip_serializing_if = "Sub2ApiAdminConfig::is_empty")]
+    pub sub2api_admin: Sub2ApiAdminConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Sub2ApiAdminConfig {
+    pub base_url: String,
+    pub admin_api_key: String,
+}
+
+impl Sub2ApiAdminConfig {
+    pub fn is_empty(&self) -> bool {
+        self.base_url.trim().is_empty() && self.admin_api_key.trim().is_empty()
+    }
+
+    pub fn is_configured(&self) -> bool {
+        !self.base_url.trim().is_empty() && !self.admin_api_key.trim().is_empty()
+    }
 }
 
 fn default_false() -> bool {
@@ -49,6 +71,7 @@ impl Default for AiGatewayConfig {
             filter_image_generation_tool: false,
             request_logging_enabled: false,
             request_log_details_enabled: false,
+            sub2api_admin: Sub2ApiAdminConfig::default(),
         }
     }
 }
