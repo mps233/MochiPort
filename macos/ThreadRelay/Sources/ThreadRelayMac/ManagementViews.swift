@@ -278,11 +278,24 @@ private struct EnhancedLaunchFeatureRow: View {
     }
 }
 
+private struct SessionProjectGroup: Identifiable {
+    let id: String
+    let title: String
+    let path: String?
+    let sessions: [ManageCodexSession]
+
+    var latestUpdatedAt: Int64 {
+        sessions.map(\.updatedAt).max() ?? 0
+    }
+}
+
 struct SessionsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var query = ""
     @State private var selectedIDs = Set<String>()
     @State private var moveInFlight = false
+
+    private let unknownProjectKey = "__threadrelay_unknown_project__"
 
     private var filteredSessions: [ManageCodexSession] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -291,7 +304,33 @@ struct SessionsView: View {
             $0.displayName.lowercased().contains(needle)
                 || $0.modelProvider.lowercased().contains(needle)
                 || $0.id.lowercased().contains(needle)
+                || ($0.cwd?.lowercased().contains(needle) ?? false)
         }
+    }
+
+    private var sessionGroups: [SessionProjectGroup] {
+        Dictionary(grouping: filteredSessions, by: projectKey(for:))
+            .map { key, sessions in
+                let sortedSessions = sessions.sorted {
+                    if $0.updatedAt != $1.updatedAt {
+                        return $0.updatedAt > $1.updatedAt
+                    }
+                    return $0.id < $1.id
+                }
+                let path = key == unknownProjectKey ? nil : key
+                return SessionProjectGroup(
+                    id: key,
+                    title: projectTitle(for: path),
+                    path: path,
+                    sessions: sortedSessions
+                )
+            }
+            .sorted {
+                if $0.latestUpdatedAt != $1.latestUpdatedAt {
+                    return $0.latestUpdatedAt > $1.latestUpdatedAt
+                }
+                return $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
     }
 
     private var selectedSessions: [ManageCodexSession] {
@@ -304,7 +343,8 @@ struct SessionsView: View {
             return "查看真实 Codex 会话并在直连 Provider 与 AI Gateway 之间移动。"
         }
         let gatewayCount = sessions.filter { $0.modelProvider == "ai-gateway" }.count
-        return "\(sessions.count) 个会话 · 直连 \(sessions.count - gatewayCount) · 网关 \(gatewayCount)"
+        let projectCount = Set(sessions.compactMap { projectPath(for: $0) }).count
+        return "\(sessions.count) 个会话 · \(projectCount) 个项目 · 直连 \(sessions.count - gatewayCount) · 网关 \(gatewayCount)"
     }
 
     var body: some View {
@@ -319,8 +359,8 @@ struct SessionsView: View {
             .padding(.bottom, 20)
 
             HStack(spacing: 10) {
-                TextField("搜索标题、Provider 或会话 ID", text: $query)
-                    .textFieldStyle(.roundedBorder)
+                NativeSearchField("搜索标题、项目、Provider 或会话 ID", text: $query)
+                    .frame(minWidth: 240, maxWidth: .infinity)
                 if !selectedIDs.isEmpty {
                     Text("已选 \(selectedIDs.count) 项")
                         .font(.caption)
@@ -363,7 +403,7 @@ struct SessionsView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color(nsColor: .controlBackgroundColor))
+            .background(Color(nsColor: .windowBackgroundColor))
             .clipShape(RoundedRectangle(cornerRadius: ThreadRelayRadius.content))
             .overlay {
                 RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
@@ -383,29 +423,63 @@ struct SessionsView: View {
     @ViewBuilder
     private var sessionList: some View {
         let list = List(selection: $selectedIDs) {
-            ForEach(filteredSessions) { session in
-                SessionRow(session: session)
-                    .tag(session.id)
-                    .contextMenu {
-                        moveMenuEntries(for: session)
-                        Divider()
-                        Button("复制会话 ID") {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(session.id, forType: .string)
+            ForEach(sessionGroups) { group in
+                SessionProjectHeader(group: group)
+                    .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 4, trailing: 8))
+                    .listRowSeparator(.hidden)
+                    .listRowBackground(Color.clear)
+
+                ForEach(group.sessions) { session in
+                    SessionRow(session: session)
+                        .tag(session.id)
+                        .contextMenu {
+                            moveMenuEntries(for: session)
+                            Divider()
+                            Button("复制会话 ID") {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(session.id, forType: .string)
+                            }
                         }
-                    }
+                }
             }
         }
         if #available(macOS 14.0, *) {
             list
                 .listStyle(.inset)
-                .alternatingRowBackgrounds(.enabled)
+                .alternatingRowBackgrounds(.disabled)
+                .scrollContentBackground(.hidden)
+                .background(Color(nsColor: .windowBackgroundColor))
                 .scrollIndicators(.never)
         } else {
             list
-                .listStyle(.inset(alternatesRowBackgrounds: true))
+                .listStyle(.inset(alternatesRowBackgrounds: false))
+                .scrollContentBackground(.hidden)
+                .background(Color(nsColor: .windowBackgroundColor))
                 .scrollIndicators(.never)
         }
+    }
+
+    private func projectKey(for session: ManageCodexSession) -> String {
+        projectPath(for: session) ?? unknownProjectKey
+    }
+
+    private func projectPath(for session: ManageCodexSession) -> String? {
+        guard let cwd = session.cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty else {
+            return nil
+        }
+
+        if let url = URL(string: cwd), url.isFileURL {
+            return url.standardizedFileURL.path
+        }
+
+        let expanded = NSString(string: cwd).expandingTildeInPath
+        return URL(fileURLWithPath: expanded).standardizedFileURL.path
+    }
+
+    private func projectTitle(for path: String?) -> String {
+        guard let path, !path.isEmpty else { return "未指定项目" }
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        return name.isEmpty ? path : name
     }
 
     /// Context-menu entries act on the whole selection when the clicked row
@@ -465,6 +539,54 @@ struct SessionsView: View {
             selectedIDs.subtract(skipped)
             moveInFlight = false
         }
+    }
+}
+
+private struct SessionProjectHeader: View {
+    let group: SessionProjectGroup
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: group.path == nil ? "folder.badge.questionmark" : "folder.fill")
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(group.title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if let path = group.path {
+                    Text(path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                } else {
+                    Text("没有可用的工作目录")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 12)
+            Text("\(group.sessions.count) 个会话")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color(nsColor: .windowBackgroundColor))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.055))
+                }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(Color.primary.opacity(0.09), lineWidth: 1)
+        }
+        .textCase(nil)
     }
 }
 

@@ -142,6 +142,7 @@ struct ManageCodexSession: Decodable, Equatable, Identifiable {
     let updatedAt: Int64
     let path: String?
     let name: String?
+    let cwd: String?
 
     private enum CodingKeys: String, CodingKey {
         case id
@@ -150,6 +151,7 @@ struct ManageCodexSession: Decodable, Equatable, Identifiable {
         case updatedAt
         case path
         case name
+        case cwd
     }
 
     init(from decoder: Decoder) throws {
@@ -161,6 +163,7 @@ struct ManageCodexSession: Decodable, Equatable, Identifiable {
         updatedAt = try container.decodeIfPresent(Int64.self, forKey: .updatedAt) ?? 0
         path = try container.decodeIfPresent(String.self, forKey: .path)
         name = try container.decodeIfPresent(String.self, forKey: .name)
+        cwd = try container.decodeIfPresent(String.self, forKey: .cwd)
     }
 
     var displayName: String {

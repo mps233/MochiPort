@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 enum ThreadRelaySpacing {
@@ -10,6 +11,58 @@ enum ThreadRelaySpacing {
 enum ThreadRelayRadius {
     static let content: CGFloat = 12
     static let overlay: CGFloat = 16
+}
+
+/// AppKit owns the complete search-field geometry, appearance and interaction.
+struct NativeSearchField: NSViewRepresentable {
+    @Binding var text: String
+    let prompt: String
+
+    init(_ prompt: String, text: Binding<String>) {
+        self.prompt = prompt
+        _text = text
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    func makeNSView(context: Context) -> NSSearchField {
+        let field = NSSearchField()
+        field.controlSize = .large
+        field.placeholderString = prompt
+        field.sendsSearchStringImmediately = true
+        field.sendsWholeSearchString = false
+        field.delegate = context.coordinator
+        field.setAccessibilityLabel(prompt)
+        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSSearchField, context: Context) {
+        context.coordinator.text = $text
+        if field.stringValue != text {
+            field.stringValue = text
+        }
+        if field.placeholderString != prompt {
+            field.placeholderString = prompt
+            field.setAccessibilityLabel(prompt)
+        }
+    }
+
+    final class Coordinator: NSObject, NSSearchFieldDelegate {
+        var text: Binding<String>
+
+        init(text: Binding<String>) {
+            self.text = text
+        }
+
+        func controlTextDidChange(_ notification: Notification) {
+            guard let field = notification.object as? NSSearchField else { return }
+            text.wrappedValue = field.stringValue
+        }
+    }
 }
 
 /// Shared success capsule shown at the bottom of the detail column after a

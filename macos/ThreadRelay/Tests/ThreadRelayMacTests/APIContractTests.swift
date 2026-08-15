@@ -1341,7 +1341,7 @@ final class APIContractTests: XCTestCase {
             case "/api/v1/manage/sessions":
                 return MockResponse(
                     statusCode: 200,
-                    json: #"{"ok":true,"threads":[{"id":"thread-1","preview":"修复登录","modelProvider":"openai","updatedAt":1754000120000,"path":"/fixture/rollout.jsonl","name":null},{"id":"legacy-thread"}],"providers":["openai"],"total":2}"#
+                    json: #"{"ok":true,"threads":[{"id":"thread-1","preview":"修复登录","modelProvider":"openai","updatedAt":1754000120000,"path":"/fixture/rollout.jsonl","cwd":"/fixture/project","name":null},{"id":"legacy-thread"}],"providers":["openai"],"total":2}"#
                 )
             case "/api/v1/manage/sessions/provider":
                 let body = Self.jsonBody(from: request)
@@ -1365,6 +1365,7 @@ final class APIContractTests: XCTestCase {
         let sessions = try await client.codexSessions()
         XCTAssertEqual(sessions.total, 2)
         XCTAssertEqual(sessions.threads[0].displayName, "修复登录")
+        XCTAssertEqual(sessions.threads[0].cwd, "/fixture/project")
         XCTAssertEqual(sessions.threads[1].displayName, "未命名会话")
         XCTAssertEqual(sessions.threads[1].modelProvider, "openai")
         XCTAssertEqual(sessions.threads[1].updatedAt, 0)

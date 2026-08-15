@@ -1,6 +1,6 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     ai_gateway::catalog::configured_models_response_with_etag,
@@ -71,6 +71,7 @@ struct ManageCodexSession {
     updated_at: i64,
     path: Option<String>,
     name: Option<String>,
+    cwd: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -506,6 +507,7 @@ fn normalize_managed_session(thread: serde_json::Value) -> Option<ManageCodexSes
     let updated_at = first_session_i64(&thread, &["updatedAt", "updated_at"]).unwrap_or_default();
     let path = first_session_string(&thread, &["path", "rolloutPath", "rollout_path"]);
     let name = first_session_string(&thread, &["name", "title"]);
+    let cwd = thread.get("cwd").and_then(session_path_value);
     Some(ManageCodexSession {
         id,
         preview,
@@ -513,7 +515,26 @@ fn normalize_managed_session(thread: serde_json::Value) -> Option<ManageCodexSes
         updated_at,
         path,
         name,
+        cwd,
     })
+}
+
+fn session_path_value(value: &Value) -> Option<String> {
+    if let Some(path) = value.as_str() {
+        return non_empty_session_string(path);
+    }
+    if let Some(values) = value.as_array() {
+        return values.iter().find_map(session_path_value);
+    }
+    let object = value.as_object()?;
+    ["path", "value", "text", "uri"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(session_path_value))
+}
+
+fn non_empty_session_string(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 fn first_session_string(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -743,6 +764,25 @@ mod tests {
         assert_eq!(session.updated_at, 0);
         assert_eq!(session.path, None);
         assert_eq!(session.name, None);
+        assert_eq!(session.cwd, None);
+    }
+
+    #[test]
+    fn managed_sessions_normalize_workspace_shapes() {
+        let session = normalize_managed_session(json!({
+            "id": "workspace-thread",
+            "cwd": { "path": "/Users/me/Projects/codexhub" }
+        }))
+        .expect("workspace session");
+
+        assert_eq!(session.cwd.as_deref(), Some("/Users/me/Projects/codexhub"));
+
+        let session = normalize_managed_session(json!({
+            "id": "string-workspace-thread",
+            "cwd": "/Users/me/Projects/other"
+        }))
+        .expect("string workspace session");
+        assert_eq!(session.cwd.as_deref(), Some("/Users/me/Projects/other"));
     }
 
     #[test]
