@@ -2579,7 +2579,7 @@ mod tests {
             &mut ttft_recorded,
         );
 
-        let logs = list_recent(&db_path, 10).unwrap();
+        let logs = context.store.list_recent(10).unwrap();
         assert_eq!(logs.len(), 1);
         assert!(logs[0].ttft_ms.is_some());
         assert!(logs[0].latency_ms.is_some());
