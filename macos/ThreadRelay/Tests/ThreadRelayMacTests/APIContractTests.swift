@@ -2636,7 +2636,7 @@ final class APIContractTests: XCTestCase {
             timeouts.record("\(request.timeoutInterval)")
             return MockResponse(
                 statusCode: 200,
-                json: #"{"ok":true,"pool":{"source":"sub2api_admin","fetchedAtMs":1786752000000,"accounts":[{"id":2,"name":"primary","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"localRateMultiplier":1.0,"upstreamBilling":{"state":"available","resolvedRateMultiplier":0.06,"effectiveRateMultiplier":0.09,"observedAt":"2026-08-15T00:00:00Z","freshUntil":"2026-08-15T00:05:00Z","stale":false},"upstreamBalance":{"state":"available","remaining":16.9999,"unlimited":false,"unit":"USD","mode":"unrestricted","planName":"钱包余额","accountValid":true,"accountStatus":"active","observedAt":"2026-08-15T00:00:00Z"}},{"id":13,"name":"unsupported","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"localRateMultiplier":0.5,"upstreamBilling":{"state":"unsupported","stale":false},"upstreamBalance":{"state":"not_exposed","unlimited":false}}],"warnings":["usage_probe_not_exposed"]}}"#
+                json: #"{"ok":true,"pool":{"source":"sub2api_admin","fetchedAtMs":1786752000000,"accounts":[{"id":2,"name":"primary","siteUrl":"https://sub2api.example/v1","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"localRateMultiplier":1.0,"upstreamBilling":{"state":"available","resolvedRateMultiplier":0.06,"effectiveRateMultiplier":0.09,"observedAt":"2026-08-15T00:00:00Z","freshUntil":"2026-08-15T00:05:00Z","stale":false},"upstreamBalance":{"state":"available","remaining":16.9999,"unlimited":false,"unit":"USD","mode":"unrestricted","planName":"钱包余额","accountValid":true,"accountStatus":"active","observedAt":"2026-08-15T00:00:00Z"}},{"id":13,"name":"unsupported","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"localRateMultiplier":0.5,"upstreamBilling":{"state":"unsupported","stale":false},"upstreamBalance":{"state":"not_exposed","unlimited":false}}],"warnings":["usage_probe_not_exposed"]}}"#
             )
         }
 
@@ -2644,6 +2644,8 @@ final class APIContractTests: XCTestCase {
 
         XCTAssertTrue(response.ok)
         XCTAssertEqual(response.pool.accounts.count, 2)
+        XCTAssertEqual(response.pool.accounts[0].siteUrl, "https://sub2api.example/v1")
+        XCTAssertNil(response.pool.accounts[1].siteUrl)
         XCTAssertEqual(response.pool.accounts[0].localRateMultiplier, 1)
         XCTAssertEqual(
             response.pool.accounts[0].upstreamBilling.effectiveRateMultiplier,

@@ -54,6 +54,11 @@ pub struct AccountPoolSnapshot {
 pub struct AccountPoolAccount {
     pub id: i64,
     pub name: String,
+    /// Sanitized upstream base URL used to group channels in the GUI. It is
+    /// derived from Sub2API's non-sensitive credentials metadata; userinfo,
+    /// query strings, and fragments are removed before it crosses the API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_url: Option<String>,
     pub platform: String,
     pub account_type: String,
     pub status: String,
@@ -130,6 +135,8 @@ struct AdminAccount {
     #[serde(default = "default_true")]
     schedulable: bool,
     rate_multiplier: Option<f64>,
+    #[serde(default)]
+    credentials: Value,
     #[serde(default)]
     extra: Value,
 }
@@ -453,6 +460,7 @@ fn normalize_account(
     AccountPoolAccount {
         id: account.id,
         name: nonempty(account.name).unwrap_or_else(|| format!("账号 {}", account.id)),
+        site_url: sanitized_site_url(&account.credentials),
         platform: account.platform,
         account_type: account.account_type,
         status: account.status,
@@ -463,6 +471,27 @@ fn normalize_account(
         upstream_billing: normalize_billing(billing_result, is_api_key),
         upstream_balance: normalize_balance(usage_result, is_api_key, usage_not_exposed),
     }
+}
+
+/// Keep only a safe, stable URL for presentation/grouping. Sub2API redacts
+/// credential values, but a custom base URL can still contain userinfo or
+/// tracking components that should never be echoed by ThreadRelay.
+fn sanitized_site_url(credentials: &Value) -> Option<String> {
+    let raw = credentials
+        .get("base_url")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let mut parsed = url::Url::parse(raw).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    let normalized = parsed.as_str().trim_end_matches('/').to_string();
+    (!normalized.is_empty()).then_some(normalized)
 }
 
 fn normalize_billing(result: Option<&ProbeResult>, applicable: bool) -> AccountBillingSnapshot {
@@ -646,6 +675,9 @@ mod tests {
             status: "active".to_string(),
             schedulable: true,
             rate_multiplier: Some(1.0),
+            credentials: serde_json::json!({
+                "base_url": "https://relay.example.test/v1/?tracking=removed",
+            }),
             extra: Value::Null,
         };
         let billing = ProbeResult {
@@ -667,6 +699,10 @@ mod tests {
 
         assert_eq!(normalized.local_rate_multiplier, Some(1.0));
         assert_eq!(
+            normalized.site_url.as_deref(),
+            Some("https://relay.example.test/v1")
+        );
+        assert_eq!(
             normalized.upstream_billing.resolved_rate_multiplier,
             Some(0.06)
         );
@@ -675,6 +711,18 @@ mod tests {
             Some(0.09)
         );
         assert_eq!(normalized.upstream_balance.state, "not_exposed");
+    }
+
+    #[test]
+    fn site_url_removes_credentials_and_tracking_components() {
+        let credentials = serde_json::json!({
+            "base_url": "https://user:password@example.test/v1/?token=secret#fragment",
+        });
+        assert_eq!(
+            sanitized_site_url(&credentials).as_deref(),
+            Some("https://example.test/v1")
+        );
+        assert_eq!(sanitized_site_url(&serde_json::json!({})), None);
     }
 
     #[test]

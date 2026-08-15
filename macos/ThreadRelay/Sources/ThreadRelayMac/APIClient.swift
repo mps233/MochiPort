@@ -442,6 +442,7 @@ struct ManageSub2ApiAccountPoolResponse: Decodable, Equatable, Sendable {
 
         let id: Int64
         let name: String
+        let siteUrl: String?
         let platform: String
         let accountType: String
         let status: String

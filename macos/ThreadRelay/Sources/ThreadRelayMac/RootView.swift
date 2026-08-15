@@ -660,9 +660,8 @@ private struct OverviewSub2ApiAccountPoolSummary: View {
                 }
 
                 OverviewSub2ApiAccountTable(
-                    accounts: showsAllAccounts
-                        ? pool.accounts
-                        : Array(pool.accounts.prefix(collapsedAccountLimit))
+                    accounts: pool.accounts,
+                    accountLimit: showsAllAccounts ? nil : collapsedAccountLimit
                 )
 
                 if pool.accounts.count > collapsedAccountLimit {
@@ -674,7 +673,7 @@ private struct OverviewSub2ApiAccountPoolSummary: View {
                         Label(
                             showsAllAccounts
                                 ? "收起账号"
-                                : "显示另外 \(pool.accounts.count - collapsedAccountLimit) 个账号",
+                                : "展开全部 \(pool.accounts.count) 个账号",
                             systemImage: showsAllAccounts ? "chevron.up" : "chevron.down"
                         )
                     }
@@ -686,7 +685,7 @@ private struct OverviewSub2ApiAccountPoolSummary: View {
                 HStack(spacing: 6) {
                     Text("更新于 \(sub2ApiFetchedTime(pool.fetchedAtMs))")
                     Text("·")
-                    Text("余额按账号展示，多个账号可能共享同一钱包")
+                    Text("同站点渠道已合并，展开查看账号明细")
                 }
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -730,13 +729,56 @@ private enum OverviewSub2ApiColumns {
     static let spacing: CGFloat = 12
 }
 
+private struct OverviewSub2ApiAccountGroup: Identifiable {
+    let key: String
+    let siteUrl: String?
+    var accounts: [ManageSub2ApiAccountPoolResponse.Account]
+
+    var id: String { key }
+}
+
 private struct OverviewSub2ApiAccountTable: View {
     let accounts: [ManageSub2ApiAccountPoolResponse.Account]
+    let accountLimit: Int?
+    @State private var expandedGroupKeys = Set<String>()
+
+    private var groups: [OverviewSub2ApiAccountGroup] {
+        var result: [OverviewSub2ApiAccountGroup] = []
+        var indexByKey: [String: Int] = [:]
+        for account in accounts {
+            let key = sub2ApiAccountGroupKey(account)
+            if let index = indexByKey[key] {
+                result[index].accounts.append(account)
+            } else {
+                indexByKey[key] = result.count
+                result.append(
+                    OverviewSub2ApiAccountGroup(
+                        key: key,
+                        siteUrl: account.siteUrl,
+                        accounts: [account]
+                    )
+                )
+            }
+        }
+        return result
+    }
+
+    private var visibleGroups: [OverviewSub2ApiAccountGroup] {
+        guard let accountLimit else { return groups }
+        var result: [OverviewSub2ApiAccountGroup] = []
+        var visibleAccountCount = 0
+        for group in groups {
+            guard visibleAccountCount < accountLimit else { break }
+            result.append(group)
+            visibleAccountCount += group.accounts.count
+        }
+        return result
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: OverviewSub2ApiColumns.spacing) {
-                OverviewSub2ApiHeader("账号")
+                OverviewSub2ApiHeader("站点 / 渠道")
                     .frame(maxWidth: .infinity, alignment: .leading)
                 OverviewSub2ApiHeader("状态")
                     .frame(width: OverviewSub2ApiColumns.status, alignment: .leading)
@@ -751,13 +793,146 @@ private struct OverviewSub2ApiAccountTable: View {
 
             Divider()
 
-            ForEach(Array(accounts.enumerated()), id: \.element.id) { index, account in
-                OverviewSub2ApiAccountRow(account: account)
-                if index < accounts.count - 1 {
+            ForEach(Array(visibleGroups.enumerated()), id: \.element.id) { index, group in
+                OverviewSub2ApiAccountGroupRow(
+                    group: group,
+                    isExpanded: expansionBinding(for: group.key)
+                )
+                if index < visibleGroups.count - 1 {
                     Divider()
                 }
             }
         }
+    }
+
+    private func expansionBinding(for key: String) -> Binding<Bool> {
+        Binding(
+            get: { expandedGroupKeys.contains(key) },
+            set: { expanded in
+                if expanded {
+                    expandedGroupKeys.insert(key)
+                } else {
+                    expandedGroupKeys.remove(key)
+                }
+            }
+        )
+    }
+}
+
+private struct OverviewSub2ApiAccountGroupRow: View {
+    let group: OverviewSub2ApiAccountGroup
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        if group.accounts.count == 1, let account = group.accounts.first {
+            OverviewSub2ApiAccountRow(account: account)
+        } else {
+            DisclosureGroup(isExpanded: $isExpanded) {
+                VStack(spacing: 0) {
+                    ForEach(Array(group.accounts.enumerated()), id: \.element.id) { index, account in
+                        OverviewSub2ApiAccountRow(account: account, nested: true)
+                        if index < group.accounts.count - 1 {
+                            Divider()
+                                .padding(.leading, 18)
+                        }
+                    }
+                }
+            } label: {
+                OverviewSub2ApiAccountGroupSummary(group: group)
+            }
+            .tint(.secondary)
+        }
+    }
+}
+
+private struct OverviewSub2ApiAccountGroupSummary: View {
+    let group: OverviewSub2ApiAccountGroup
+
+    private var availableCount: Int {
+        group.accounts.count(where: { account in
+            account.schedulable && account.status.lowercased() == "active"
+        })
+    }
+
+    private var statusText: String {
+        if availableCount == group.accounts.count { return "全部可用" }
+        if availableCount == 0 { return "均不可用" }
+        return "\(availableCount)/\(group.accounts.count) 可用"
+    }
+
+    private var statusTint: Color {
+        availableCount == group.accounts.count ? .green : .orange
+    }
+
+    private var localRateText: String {
+        sub2ApiCommonText(group.accounts.map { sub2ApiMultiplierText($0.localRateMultiplier) })
+    }
+
+    private var upstreamRateText: String {
+        sub2ApiCommonText(group.accounts.map { sub2ApiUpstreamRateText($0.upstreamBilling) })
+    }
+
+    private var balanceText: String {
+        sub2ApiCommonText(group.accounts.map { sub2ApiBalanceText($0.upstreamBalance) })
+    }
+
+    private var balanceTint: Color {
+        guard Set(group.accounts.map { sub2ApiBalanceText($0.upstreamBalance) }).count == 1,
+              let balance = group.accounts.first?.upstreamBalance,
+              balance.state == "available"
+        else { return .secondary }
+        if balance.accountValid == false { return .orange }
+        if let remaining = balance.remaining, remaining < 0 { return .red }
+        return .primary
+    }
+
+    var body: some View {
+        HStack(spacing: OverviewSub2ApiColumns.spacing) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(sub2ApiSiteLabel(group.siteUrl))
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+                Text("\(group.accounts.count) 个渠道 · \(group.accounts.map(\.name).joined(separator: "、"))")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .help(group.siteUrl ?? "")
+
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(statusTint)
+                    .frame(width: 6, height: 6)
+                Text(statusText)
+                    .lineLimit(1)
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(width: OverviewSub2ApiColumns.status, alignment: .leading)
+
+            Text(localRateText)
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: OverviewSub2ApiColumns.localRate, alignment: .trailing)
+
+            Text(upstreamRateText)
+                .font(.callout.monospacedDigit())
+                .lineLimit(1)
+                .frame(width: OverviewSub2ApiColumns.upstreamRate, alignment: .trailing)
+
+            Text(balanceText)
+                .font(.callout.monospacedDigit().weight(.medium))
+                .foregroundStyle(balanceTint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .frame(width: OverviewSub2ApiColumns.balance, alignment: .trailing)
+        }
+        .padding(.vertical, 8)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(sub2ApiSiteLabel(group.siteUrl))，\(group.accounts.count) 个渠道，\(statusText)，本地倍率 \(localRateText)，上游倍率 \(upstreamRateText)，余额 \(balanceText)"
+        )
     }
 }
 
@@ -778,6 +953,15 @@ private struct OverviewSub2ApiHeader: View {
 
 private struct OverviewSub2ApiAccountRow: View {
     let account: ManageSub2ApiAccountPoolResponse.Account
+    let nested: Bool
+
+    init(
+        account: ManageSub2ApiAccountPoolResponse.Account,
+        nested: Bool = false
+    ) {
+        self.account = account
+        self.nested = nested
+    }
 
     private var accountTint: Color {
         account.schedulable && account.status.lowercased() == "active" ? .green : .orange
@@ -802,6 +986,7 @@ private struct OverviewSub2ApiAccountRow: View {
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.leading, nested ? 18 : 0)
 
             HStack(spacing: 5) {
                 Circle()
@@ -846,6 +1031,78 @@ private struct OverviewSub2ApiAccountRow: View {
             "\(account.name)，\(sub2ApiAccountStatusText(account))，本地倍率 \(sub2ApiMultiplierText(account.localRateMultiplier))，上游倍率 \(sub2ApiUpstreamRateText(account.upstreamBilling))，余额 \(sub2ApiBalanceText(account.upstreamBalance))"
         )
     }
+}
+
+private func sub2ApiAccountGroupKey(
+    _ account: ManageSub2ApiAccountPoolResponse.Account
+) -> String {
+    let platform = account.platform.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let accountType = account.accountType.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+    guard let siteUrl = account.siteUrl,
+          let components = sub2ApiSiteComponents(siteUrl),
+          let normalizedUrl = components.string,
+          !normalizedUrl.isEmpty
+    else {
+        // Accounts without a site URL must remain separate rather than being
+        // grouped under a shared placeholder.
+        return "account:\(account.id)"
+    }
+
+    return "site:\(normalizedUrl)|platform:\(platform)|type:\(accountType)"
+}
+
+private func sub2ApiCommonText(_ values: [String]) -> String {
+    var uniqueValues: [String] = []
+    for value in values where !uniqueValues.contains(value) {
+        uniqueValues.append(value)
+    }
+    guard uniqueValues.count > 1 else { return uniqueValues.first ?? "—" }
+    return "多值"
+}
+
+private func sub2ApiSiteLabel(_ siteUrl: String?) -> String {
+    guard let siteUrl,
+          let components = sub2ApiSiteComponents(siteUrl),
+          let host = components.host,
+          !host.isEmpty
+    else {
+        return "未标注站点"
+    }
+
+    let path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    let port = components.port.map { ":\($0)" } ?? ""
+    return path.isEmpty ? "\(host)\(port)" : "\(host)\(port)/\(path)"
+}
+
+private func sub2ApiSiteComponents(_ siteUrl: String) -> URLComponents? {
+    guard var components = URLComponents(string: siteUrl),
+          let scheme = components.scheme?.lowercased(),
+          (scheme == "http" || scheme == "https"),
+          let host = components.host?.lowercased(),
+          !host.isEmpty
+    else {
+        return nil
+    }
+
+    components.scheme = scheme
+    components.host = host
+    components.user = nil
+    components.password = nil
+    components.query = nil
+    components.fragment = nil
+    if (scheme == "http" && components.port == 80)
+        || (scheme == "https" && components.port == 443)
+    {
+        components.port = nil
+    }
+    components.path = components.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    if !components.path.isEmpty {
+        components.path = "/" + components.path
+    } else {
+        components.path = ""
+    }
+    return components
 }
 
 func sub2ApiCapabilityStateText(_ state: String) -> String {
