@@ -105,9 +105,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             instanceGuard = try SingleInstanceGuard.acquire(
                 lockURL: SingleInstanceGuard.defaultLockURL()
             )
+            do {
+                try GUIRecoveryLauncher().startIfNeeded()
+                clearNormalExitMarker()
+            } catch {
+                NSLog("ThreadRelay GUI 自动恢复注册失败：%@", error.localizedDescription)
+                // Keep the previous marker until launchd registration succeeds;
+                // otherwise a manual launch during a transient launchctl error
+                // could disable recovery for the next crash. Retry once while
+                // the app is already running.
+                Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(2))
+                    guard let self else { return }
+                    do {
+                        try GUIRecoveryLauncher().startIfNeeded()
+                        clearNormalExitMarker()
+                    } catch {
+                        NSLog("ThreadRelay GUI 自动恢复重试失败：%@", error.localizedDescription)
+                    }
+                }
+            }
         } catch SingleInstanceError.alreadyRunning {
             activateExistingInstance()
-            NSApplication.shared.terminate(nil)
+            Darwin.exit(73)
         } catch {
             // Fail closed: running without the lock can create duplicate
             // refresh loops and conflicting window state. Without a visible
@@ -125,6 +145,46 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         UserDefaults.standard.string(forKey: "closeBehavior") == "quitGUI"
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        do {
+            let configuration = try GUIRecoveryConfiguration.current()
+            let markerDirectory = configuration.dataDirectoryURL
+            try FileManager.default.createDirectory(
+                at: markerDirectory,
+                withIntermediateDirectories: true
+            )
+            let markerURL = markerDirectory.appendingPathComponent("gui-normal-exit.marker")
+            // The marker must not suppress recovery after an app update. The
+            // supervisor compares this value with the active bundle's
+            // CFBundleVersion before honoring a normal quit. Data.atomic also
+            // prevents a partially-written build number from being accepted.
+            try Data(currentBuildIdentifier().utf8).write(to: markerURL, options: .atomic)
+        } catch {
+            NSLog("ThreadRelay GUI 正常退出标记写入失败：%@", error.localizedDescription)
+        }
+        return .terminateNow
+    }
+
+    private func currentBuildIdentifier() -> String {
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        let trimmed = build?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? "unknown" : trimmed
+    }
+
+    private func clearNormalExitMarker() {
+        do {
+            let configuration = try GUIRecoveryConfiguration.current()
+            let markerURL = configuration.dataDirectoryURL
+                .appendingPathComponent("gui-normal-exit.marker")
+            try FileManager.default.removeItem(at: markerURL)
+        } catch CocoaError.fileNoSuchFile {
+            // A marker is only present after a normal quit; there is nothing
+            // to clear on the first launch or after an unexpected exit.
+        } catch {
+            NSLog("ThreadRelay 旧的正常退出标记清理失败：%@", error.localizedDescription)
+        }
     }
 
     private func activateExistingInstance() {
@@ -345,12 +405,20 @@ private struct MenuBarStatusView: View {
         if let lifecycle = model.lifecycle {
             Divider()
             Label(
-                lifecycle.management.canControl ? "已托管后台服务" : "只读后台服务",
-                systemImage: lifecycle.management.canControl ? "lock.open" : "eye"
+                model.ownsDaemonLease
+                    ? "已托管后台服务"
+                    : model.daemonLeaseConflict ? "其他安装已托管" : "仅查看后台服务",
+                systemImage: model.ownsDaemonLease ? "lock.open" : "eye"
             )
-            Text("v\(lifecycle.runtime.productVersion) · \(lifecycle.protectedWorkItems.total) 项受保护任务")
+            let build = lifecycle.runtime.buildNumber.map { " · 构建 \($0)" } ?? ""
+            Text("v\(lifecycle.runtime.productVersion)\(build) · \(lifecycle.protectedWorkItems.total) 项受保护任务")
                 .foregroundStyle(.secondary)
                 .font(.caption)
+            if model.daemonBuildMismatch {
+                Label("界面与后台服务构建不一致", systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .font(.caption)
+            }
         }
         Divider()
         Button("打开 ThreadRelay") {

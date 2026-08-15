@@ -1,0 +1,83 @@
+#!/bin/zsh
+
+set -u
+
+helpers_dir="${0:A:h}"
+contents_dir="${helpers_dir:h}"
+gui_executable="$contents_dir/MacOS/ThreadRelay"
+data_directory="${THREADRELAY_HOME:-$HOME/Library/Application Support/ThreadRelay}"
+normal_exit_marker="$data_directory/gui-normal-exit.marker"
+gui_lock_path="$data_directory/io.github.mps233.threadrelay.gui.lock"
+
+current_contents_dir() {
+    print -r -- "$contents_dir"
+}
+
+current_gui_executable() {
+    print -r -- "$contents_dir/MacOS/ThreadRelay"
+}
+
+current_bundle_build() {
+    local current_contents="$(current_contents_dir)"
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$current_contents/Info.plist" 2>/dev/null || true
+}
+
+gui_is_running() {
+    /usr/bin/pgrep -f '/Contents/MacOS/ThreadRelay$' >/dev/null 2>&1 && return 0
+    # A GUI from another bundle path can still own the shared data-domain
+    # lock. Treat that as running so the supervisor does not spin on exit 73.
+    ! /usr/bin/lockf -t 0 "$gui_lock_path" /usr/bin/true >/dev/null 2>&1
+}
+
+wait_for_gui_to_exit() {
+    while gui_is_running; do
+        /bin/sleep 0.5
+    done
+}
+
+normal_exit_marker_matches_bundle() {
+    local bundle_build="$(current_bundle_build)"
+    [[ -n "$bundle_build" && -f "$normal_exit_marker" ]] || return 1
+    local marker_build
+    marker_build="$(/bin/cat "$normal_exit_marker" 2>/dev/null || true)"
+    [[ "$marker_build" == "$bundle_build" ]]
+}
+
+/bin/mkdir -p "$data_directory"
+
+# The supervisor is started while a manually launched GUI may already own the
+# lock. Wait for that process instead of starting a duplicate that exits cleanly.
+wait_for_gui_to_exit
+
+if normal_exit_marker_matches_bundle; then
+    # Keep the marker until the next user-launched GUI clears it.  Launchd
+    # loads this agent again at login; deleting it here would turn a deliberate
+    # Quit into an automatic relaunch on the next login.
+    exit 0
+fi
+
+while true; do
+    gui_executable="$(current_gui_executable)"
+    if [[ ! -x "$gui_executable" ]]; then
+        /bin/sleep 1
+        continue
+    fi
+    "$gui_executable"
+    exit_code=$?
+
+    if [[ "$exit_code" -eq 73 ]]; then
+        wait_for_gui_to_exit
+        /bin/sleep 1
+        continue
+    fi
+
+    if normal_exit_marker_matches_bundle; then
+        # The GUI owns this marker.  Leaving it in place makes a normal Quit
+        # persist across login; the next successful GUI launch removes it.
+        exit 0
+    fi
+
+    # A successful exit without the marker is treated as an unexpected stop;
+    # this covers launch races where another GUI briefly owned the lock.
+    /bin/sleep 1
+done

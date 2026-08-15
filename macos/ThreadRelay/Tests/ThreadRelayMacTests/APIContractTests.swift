@@ -119,6 +119,48 @@ final class APIContractTests: XCTestCase {
         )
     }
 
+    func testGUIRecoveryConfigurationRestartsOnlyUnexpectedExit() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let appSupport = home.appendingPathComponent("Library/Application Support", isDirectory: true)
+        let legacyDirectory = appSupport.appendingPathComponent("CodexHub", isDirectory: true)
+        let bundle = root.appendingPathComponent("ThreadRelay.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
+        try Data().write(to: legacyDirectory.appendingPathComponent("config.toml"))
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let configuration = try GUIRecoveryConfiguration.current(
+            bundleURL: bundle,
+            environment: ["HOME": home.path],
+            fileManager: .default
+        )
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: configuration.propertyListData(),
+                options: [],
+                format: nil
+            ) as? [String: Any]
+        )
+
+        XCTAssertEqual(plist["Label"] as? String, GUIRecoveryConfiguration.label)
+        XCTAssertEqual(
+            plist["ProgramArguments"] as? [String],
+            [configuration.supervisorURL.path]
+        )
+        XCTAssertEqual(
+            (plist["KeepAlive"] as? [String: Bool])?["SuccessfulExit"],
+            false
+        )
+        XCTAssertEqual(plist["ProcessType"] as? String, "Interactive")
+        XCTAssertEqual(
+            configuration.launchAgentURL.path,
+            home.appendingPathComponent(
+                "Library/LaunchAgents/\(GUIRecoveryConfiguration.label).plist"
+            ).path
+        )
+    }
+
     func testDaemonLauncherUpdatesLoadedServiceWithoutForcingRestart() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -201,6 +243,113 @@ final class APIContractTests: XCTestCase {
             )
         }
         XCTAssertEqual(commands.arguments.map(\.first), ["print"])
+    }
+
+    func testDaemonLauncherReloadsSameHelperAfterStaleBundleBuild() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configuration = DaemonLaunchConfiguration(
+            helperURL: fixture.configuration.helperURL,
+            configURL: fixture.configuration.configURL,
+            launchAgentURL: fixture.configuration.launchAgentURL,
+            logURL: fixture.configuration.logURL,
+            homeURL: fixture.configuration.homeURL,
+            buildIdentifier: "389"
+        )
+        let printCount = IntCounter()
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments.first == "print" {
+                if printCount.next() == 1 {
+                    return CommandResult(
+                        exitCode: 0,
+                        output: """
+                        state = running
+                        program = \(configuration.helperURL.path)
+                        arguments = {
+                            \(configuration.helperURL.path)
+                            --config
+                            \(configuration.configURL.path)
+                            daemon
+                        }
+                        environment = {
+                            THREADRELAY_HOME => \(configuration.configURL.deletingLastPathComponent().path)
+                            THREADRELAY_BUNDLE_BUILD => 388
+                        }
+                        """
+                    )
+                }
+                return CommandResult(exitCode: 1, output: "service not found")
+            }
+            return CommandResult(exitCode: ["bootout", "bootstrap"].contains(arguments.first) ? 0 : 1, output: "")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { configuration },
+            commandRunner: commands.run
+        )
+
+        try await launcher.startIfNeeded()
+
+        XCTAssertEqual(commands.arguments.map(\.first), ["print", "bootout", "print", "bootstrap"])
+    }
+
+    func testGUIRecoveryLauncherReloadsSameSupervisorAfterStaleBundleBuild() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("ThreadRelay.app/Contents/MacOS/ThreadRelay")
+        let supervisor = root.appendingPathComponent("ThreadRelay.app/Contents/Helpers/threadrelay-gui-supervisor")
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: supervisor.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(FileManager.default.createFile(atPath: executable.path, contents: Data()))
+        XCTAssertTrue(FileManager.default.createFile(atPath: supervisor.path, contents: Data()))
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: supervisor.path)
+        let configuration = GUIRecoveryConfiguration(
+            executableURL: executable,
+            supervisorURL: supervisor,
+            launchAgentURL: root.appendingPathComponent("home/Library/LaunchAgents/gui.plist"),
+            logURL: root.appendingPathComponent("data/logs/gui.log"),
+            homeURL: root.appendingPathComponent("home"),
+            dataDirectoryURL: root.appendingPathComponent("data"),
+            buildIdentifier: "389"
+        )
+        let printCount = IntCounter()
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments.first == "print" {
+                if printCount.next() == 1 {
+                    return CommandResult(
+                        exitCode: 0,
+                        output: """
+                        state = running
+                        program = \(configuration.supervisorURL.path)
+                        arguments = {
+                            \(configuration.supervisorURL.path)
+                        }
+                        environment = {
+                            THREADRELAY_HOME => \(configuration.dataDirectoryURL.path)
+                            THREADRELAY_BUNDLE_BUILD => 388
+                        }
+                        """
+                    )
+                }
+                return CommandResult(exitCode: 1, output: "service not found")
+            }
+            return CommandResult(exitCode: ["bootout", "bootstrap"].contains(arguments.first) ? 0 : 1, output: "")
+        }
+        let launcher = GUIRecoveryLauncher(
+            configurationLoader: { configuration },
+            commandRunner: commands.run
+        )
+
+        try launcher.startIfNeeded()
+
+        XCTAssertEqual(commands.arguments.map(\.first), ["print", "bootout", "print", "bootstrap"])
     }
 
     func testDaemonLauncherBootstrapsMissingService() async throws {
@@ -1070,7 +1219,7 @@ final class APIContractTests: XCTestCase {
             )
             return MockResponse(
                 statusCode: 200,
-                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":1,"codexTurns":2,"imStreams":3,"pendingApprovals":1,"remoteControlRequests":4,"total":11},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":1,"codexTurns":2,"imStreams":3,"pendingApprovals":1,"remoteControlRequests":4,"total":11},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
             )
         }
 
@@ -1078,9 +1227,62 @@ final class APIContractTests: XCTestCase {
 
         XCTAssertEqual(lifecycle.service.instanceId, "fixture-instance")
         XCTAssertEqual(lifecycle.runtime.productVersion, "0.5.0")
+        XCTAssertEqual(lifecycle.runtime.buildNumber, 388)
         XCTAssertEqual(lifecycle.protectedWorkItems.total, 11)
         XCTAssertEqual(lifecycle.management.mode, "readOnly")
         XCTAssertFalse(lifecycle.management.canControl)
+    }
+
+    func testFetchLifecycleAcceptsOlderDaemonWithoutBuildNumber() async throws {
+        let client = makeClient { _ in
+            MockResponse(
+                statusCode: 200,
+                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.4.21","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+            )
+        }
+
+        let lifecycle = try await client.fetchLifecycle(bearerToken: "fixture-token")
+
+        XCTAssertNil(lifecycle.runtime.buildNumber)
+    }
+
+    func testLifecycleMutationEndpointsUseVersionedRoutesAndIdentity() async throws {
+        let client = makeClient { request in
+            let path = request.url?.path
+            let body = Self.jsonBody(from: request)
+            XCTAssertEqual(body?["installationId"] as? String, "installation-a")
+            XCTAssertEqual(body?["daemonInstanceId"] as? String, "fixture-instance")
+
+            switch path {
+            case "/api/v1/manage/lifecycle/lease/claim",
+                 "/api/v1/manage/lifecycle/lease/renew",
+                 "/api/v1/manage/lifecycle/lease/release":
+                return MockResponse(statusCode: 200, json: Self.lifecycleJSON)
+            case "/api/v1/manage/lifecycle/restart":
+                XCTAssertEqual(body?["force"] as? Bool, false)
+                return MockResponse(statusCode: 200, json: #"{"ok":true,"state":"restarting"}"#)
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        _ = try await client.claimLifecycleLease(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance"
+        )
+        _ = try await client.renewLifecycleLease(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance"
+        )
+        _ = try await client.releaseLifecycleLease(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance"
+        )
+        let restart = try await client.restartLifecycle(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance"
+        )
+        XCTAssertTrue(restart.ok)
     }
 
     func testFetchLifecycleRejectsUnsupportedRuntimeAPIMajor() async {
@@ -2043,6 +2245,41 @@ final class APIContractTests: XCTestCase {
         XCTAssertFalse(AppModel.daemonFailureAllowsAutoRestart(APIClientError.incompatibleService))
     }
 
+    func testBuildNumbersMismatchOnlyWhenBothBuildsAreKnown() {
+        XCTAssertFalse(AppModel.buildNumbersMismatch(guiBuild: "388", daemonBuild: 388))
+        XCTAssertTrue(AppModel.buildNumbersMismatch(guiBuild: "388", daemonBuild: 387))
+        XCTAssertFalse(AppModel.buildNumbersMismatch(guiBuild: nil, daemonBuild: 387))
+        XCTAssertFalse(AppModel.buildNumbersMismatch(guiBuild: "388", daemonBuild: nil))
+        XCTAssertFalse(AppModel.buildNumbersMismatch(guiBuild: "development", daemonBuild: 387))
+    }
+
+    func testLoadedDaemonAgentRejectsAStaleBundleBuild() {
+        let configuration = DaemonLaunchConfiguration(
+            helperURL: URL(fileURLWithPath: "/fixture/ThreadRelay.app/Contents/Helpers/threadrelay-daemon"),
+            configURL: URL(fileURLWithPath: "/fixture/data/config.toml"),
+            launchAgentURL: URL(fileURLWithPath: "/fixture/daemon.plist"),
+            logURL: URL(fileURLWithPath: "/fixture/data/logs/daemon.log"),
+            homeURL: URL(fileURLWithPath: "/fixture/home"),
+            buildIdentifier: "389"
+        )
+        let output = """
+        state = running
+        program = /fixture/ThreadRelay.app/Contents/Helpers/threadrelay-daemon
+        arguments = {
+            /fixture/ThreadRelay.app/Contents/Helpers/threadrelay-daemon
+            --config
+            /fixture/data/config.toml
+            daemon
+        }
+        environment = {
+            THREADRELAY_HOME => /fixture/data
+            THREADRELAY_BUNDLE_BUILD => 388
+        }
+        """
+
+        XCTAssertFalse(DaemonLauncher.loadedAgentMatches(output: output, configuration: configuration))
+    }
+
     func testGitHubReleaseDecodesAndValidatesDownloadPage() throws {
         let release = try JSONDecoder().decode(
             GitHubRelease.self,
@@ -2186,7 +2423,7 @@ final class APIContractTests: XCTestCase {
     private static let healthJSON = #"{"service":"threadrelay","apiMajor":1,"ready":true}"#
     private static let dashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"bridgeRunning":true,"remoteControlConnected":true,"remoteControlHealthy":true,"executionClients":{"codexApp":{"configured":true,"connected":true},"vscode":{"configured":true,"connected":true},"cli":{"configured":false,"connected":false}},"messageChannels":{"telegram":{"accountCount":2,"connectedAccountCount":1},"feishu":{"accountCount":1,"connectedAccountCount":1},"wechat":{"accountCount":1,"connectedAccountCount":1},"wecom":{"accountCount":0,"connectedAccountCount":0}},"aiGatewayEnabled":true,"aiGatewayProviderCount":2,"requestLoggingEnabled":true}"#
     private static let imAccountsJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"accounts":[{"platform":"telegram","accountId":"telegram-main","displayName":"主 Telegram","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":true,"connected":true,"lastError":null,"lastEventAtMs":1754000120000,"lastInboundAtMs":1754000100000},{"platform":"wecom","accountId":"wecom-offline","displayName":"企业微信","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":false,"connected":false,"lastError":"连接失败","lastEventAtMs":null,"lastInboundAtMs":null}]}"#
-    private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+    private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
     private static let originalV1DashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"legacy-instance","pid":456,"startedAtMs":789},"bridgeRunning":true,"remoteControlConnected":false,"remoteControlHealthy":false,"codexAppConfigured":true,"imAccountCount":5,"connectedImAccountCount":3,"aiGatewayEnabled":false,"aiGatewayProviderCount":1,"requestLoggingEnabled":true}"#
     // Mirrors the daemon payload where the Anthropic TTL-split keys are
     // omitted entirely when unreported (serde skip_serializing_if).
@@ -2258,7 +2495,8 @@ final class APIContractTests: XCTestCase {
                 configURL: root.appendingPathComponent("data/config.toml"),
                 launchAgentURL: root.appendingPathComponent("home/Library/LaunchAgents/daemon.plist"),
                 logURL: root.appendingPathComponent("data/logs/daemon.log"),
-                homeURL: root.appendingPathComponent("home", isDirectory: true)
+                homeURL: root.appendingPathComponent("home", isDirectory: true),
+                buildIdentifier: nil
             )
         )
     }

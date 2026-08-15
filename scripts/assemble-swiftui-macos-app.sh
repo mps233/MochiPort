@@ -10,6 +10,7 @@ BUILD=$1
 XCODE_APP=$2
 DAEMON_BINARY=$3
 OUTPUT_APP=$4
+GUI_SUPERVISOR=packaging/macos/threadrelay-gui-supervisor
 
 case "$BUILD" in
   ''|0|*[!0-9]*)
@@ -24,6 +25,10 @@ if [ ! -d "$XCODE_APP" ] || [ ! -x "$XCODE_APP/Contents/MacOS/ThreadRelay" ]; th
 fi
 if [ ! -x "$DAEMON_BINARY" ]; then
   echo "daemon binary is unavailable" >&2
+  exit 1
+fi
+if [ ! -f "$GUI_SUPERVISOR" ]; then
+  echo "GUI supervisor script is unavailable" >&2
   exit 1
 fi
 
@@ -79,6 +84,11 @@ case "$DAEMON_VERSION" in
     exit 1
     ;;
 esac
+DAEMON_BUILD=$(printf '%s\n' "$DAEMON_VERSION" | sed -n 's/.*(build \([^)]*\)).*/\1/p')
+if [ -z "$DAEMON_BUILD" ] || [ "$DAEMON_BUILD" != "$BUILD" ]; then
+  echo "daemon build mismatch: expected $BUILD, got ${DAEMON_BUILD:-unknown}" >&2
+  exit 1
+fi
 
 GUI_ARCHS=$(lipo -archs "$XCODE_APP/Contents/MacOS/ThreadRelay")
 DAEMON_ARCHS=$(lipo -archs "$DAEMON_BINARY")
@@ -123,6 +133,8 @@ trap 'exit 1' HUP INT TERM
 mkdir -p "$STAGED_APP/Contents/Helpers"
 cp "$DAEMON_BINARY" "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
 chmod 755 "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
+cp "$GUI_SUPERVISOR" "$STAGED_APP/Contents/Helpers/threadrelay-gui-supervisor"
+chmod 755 "$STAGED_APP/Contents/Helpers/threadrelay-gui-supervisor"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$STAGED_APP/Contents/Info.plist"
 
 codesign --force --deep --sign - "$STAGED_APP"

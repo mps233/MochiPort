@@ -28,6 +28,10 @@ const GUI_GRACE_PERIOD: Duration = Duration::from_secs(3);
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const NEW_DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(target_os = "macos")]
+const GUI_RECOVERY_LABEL: &str = "io.github.mps233.threadrelay.gui";
+#[cfg(target_os = "macos")]
+const GUI_RECOVERY_RETRY_COUNT: usize = 5;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -517,11 +521,20 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         anyhow::bail!("old daemon identity does not match the registered instance");
     }
 
-    if let Some(gui_pid) = args.gui_pid.filter(|pid| *pid > 1) {
+    // Validate the GUI identity before taking down its recovery service. If
+    // the PID has already changed, returning early must not leave launchd
+    // without the supervisor that keeps the current GUI alive.
+    let gui_pid = args.gui_pid.filter(|pid| *pid > 1);
+    if let Some(gui_pid) = gui_pid {
         if !process_matches_executable(gui_pid, &args.old_executable_path) {
             log_line(&log_path, "gui_identity_mismatch");
             anyhow::bail!("old GUI pid does not match the expected executable");
         }
+    }
+
+    stop_gui_recovery_agent(&log_path)?;
+
+    if let Some(gui_pid) = gui_pid {
         terminate_process(gui_pid, false);
         wait_for_process_exit(gui_pid, GUI_GRACE_PERIOD);
         if process_matches_executable(gui_pid, &args.old_executable_path) {
@@ -530,6 +543,15 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         }
         if process_is_alive(gui_pid) {
             log_line(&log_path, "old_gui_still_active");
+            // The supervisor was stopped above. Restore it before returning
+            // so a failed handoff does not strand the old GUI without
+            // recovery.
+            if let Err(restore_error) = start_gui_recovery_agent(&log_path) {
+                log_line(
+                    &log_path,
+                    &format!("gui_recovery_agent_restore_failed err={restore_error}"),
+                );
+            }
             anyhow::bail!("old ThreadRelay GUI did not stop in time");
         }
     }
@@ -578,6 +600,161 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
     }
     log_line(&log_path, "new_daemon_verified");
     Ok(())
+}
+
+fn stop_gui_recovery_agent(log_path: &Path) -> Result<(), anyhow::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        let uid = Command::new("/usr/bin/id")
+            .arg("-u")
+            .output()
+            .map_err(|error| anyhow::anyhow!("failed to resolve GUI launch agent uid: {error}"))?;
+        if !uid.status.success() {
+            return Err(anyhow::anyhow!(
+                "failed to resolve GUI launch agent uid: {}",
+                String::from_utf8_lossy(&uid.stderr).trim()
+            ));
+        }
+        let uid = String::from_utf8_lossy(&uid.stdout).trim().to_string();
+        if uid.is_empty() {
+            return Err(anyhow::anyhow!("GUI launch agent uid is empty"));
+        }
+        let target = format!("gui/{uid}/{GUI_RECOVERY_LABEL}");
+        let print = Command::new("/bin/launchctl")
+            .args(["print", &target])
+            .output()
+            .map_err(|error| anyhow::anyhow!("failed to inspect GUI recovery agent: {error}"))?;
+        if !print.status.success() {
+            log_line(log_path, "gui_recovery_agent_not_loaded");
+            return Ok(());
+        }
+        let bootout = Command::new("/bin/launchctl")
+            .args(["bootout", &target])
+            .output()
+            .map_err(|error| anyhow::anyhow!("failed to stop GUI recovery agent: {error}"))?;
+        if !bootout.status.success() {
+            let still_loaded = Command::new("/bin/launchctl")
+                .args(["print", &target])
+                .output()
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to verify GUI recovery agent shutdown: {error}")
+                })?;
+            if still_loaded.status.success() {
+                return Err(anyhow::anyhow!(
+                    "launchctl bootout failed: {}",
+                    String::from_utf8_lossy(&bootout.stderr).trim()
+                ));
+            }
+        }
+        if !wait_for_gui_recovery_agent_to_exit(&target) {
+            return Err(anyhow::anyhow!(
+                "GUI recovery agent did not finish stopping in time"
+            ));
+        }
+        log_line(log_path, "gui_recovery_agent_stopped");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = log_path;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn start_gui_recovery_agent(log_path: &Path) -> Result<(), anyhow::Error> {
+    let uid = Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .map_err(|error| anyhow::anyhow!("failed to resolve GUI launch agent uid: {error}"))?;
+    if !uid.status.success() {
+        return Err(anyhow::anyhow!(
+            "failed to resolve GUI launch agent uid: {}",
+            String::from_utf8_lossy(&uid.stderr).trim()
+        ));
+    }
+    let uid = String::from_utf8_lossy(&uid.stdout).trim().to_string();
+    if uid.is_empty() {
+        return Err(anyhow::anyhow!("GUI launch agent uid is empty"));
+    }
+
+    let target = format!("gui/{uid}/{GUI_RECOVERY_LABEL}");
+    let print = Command::new("/bin/launchctl")
+        .args(["print", &target])
+        .output()
+        .map_err(|error| anyhow::anyhow!("failed to inspect GUI recovery agent: {error}"))?;
+    if print.status.success() {
+        log_line(log_path, "gui_recovery_agent_already_loaded");
+        return Ok(());
+    }
+
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("HOME is unavailable for GUI recovery agent"))?;
+    let plist = home
+        .join("Library")
+        .join("LaunchAgents")
+        .join(format!("{GUI_RECOVERY_LABEL}.plist"));
+    if !plist.is_file() {
+        return Err(anyhow::anyhow!(
+            "GUI recovery launch agent plist is missing: {}",
+            plist.display()
+        ));
+    }
+
+    let domain = format!("gui/{uid}");
+    let mut last_error = String::new();
+    for attempt in 0..GUI_RECOVERY_RETRY_COUNT {
+        let bootstrap = Command::new("/bin/launchctl")
+            .args(["bootstrap", &domain, &plist.to_string_lossy()])
+            .output()
+            .map_err(|error| anyhow::anyhow!("failed to restore GUI recovery agent: {error}"))?;
+        if bootstrap.status.success() {
+            log_line(log_path, "gui_recovery_agent_restored");
+            return Ok(());
+        }
+        last_error = String::from_utf8_lossy(&bootstrap.stderr)
+            .trim()
+            .to_string();
+        let loaded = Command::new("/bin/launchctl")
+            .args(["print", &target])
+            .output()
+            .map_err(|error| {
+                anyhow::anyhow!("failed to verify GUI recovery agent restore: {error}")
+            })?;
+        if loaded.status.success() {
+            log_line(log_path, "gui_recovery_agent_already_loaded");
+            return Ok(());
+        }
+        if attempt + 1 < GUI_RECOVERY_RETRY_COUNT {
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+    Err(anyhow::anyhow!("launchctl bootstrap failed: {last_error}"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn start_gui_recovery_agent(log_path: &Path) -> Result<(), anyhow::Error> {
+    let _ = log_path;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_gui_recovery_agent_to_exit(target: &str) -> bool {
+    for attempt in 0..GUI_RECOVERY_RETRY_COUNT {
+        let Ok(result) = Command::new("/bin/launchctl")
+            .args(["print", target])
+            .output()
+        else {
+            return false;
+        };
+        if !result.status.success() {
+            return true;
+        }
+        if attempt + 1 < GUI_RECOVERY_RETRY_COUNT {
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+    false
 }
 
 fn active_daemon_matches(args: &SafeRelaunchHelperArgs) -> bool {
