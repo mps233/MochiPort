@@ -35,6 +35,13 @@ pub async fn start_bridge_if_ready(state: &SharedState, event_message: &'static 
     im_api::start_bridge_task(state, im_api::BridgeStartMode::KeepExisting, event_message).await
 }
 
+/// Stop message polling/streaming before a lifecycle restart is committed.
+/// Kept at the web boundary so the management API does not reach into the
+/// private IM route implementation directly.
+pub(crate) async fn stop_bridge_for_lifecycle_shutdown(state: &SharedState) {
+    im_api::stop_bridge_task(state).await;
+}
+
 pub fn router(state: SharedState) -> Router {
     // Initialize the shared user-domain credential before serving requests.
     // Errors are surfaced as a protected-route 500 without exposing secrets;
@@ -43,6 +50,19 @@ pub fn router(state: SharedState) -> Router {
     let manage_routes = Router::new()
         .route("/status", get(manage_api::status))
         .route("/lifecycle", get(manage_lifecycle))
+        .route(
+            "/lifecycle/lease/claim",
+            post(manage_api::claim_lifecycle_lease),
+        )
+        .route(
+            "/lifecycle/lease/renew",
+            post(manage_api::renew_lifecycle_lease),
+        )
+        .route(
+            "/lifecycle/lease/release",
+            post(manage_api::release_lifecycle_lease),
+        )
+        .route("/lifecycle/restart", post(manage_api::restart_lifecycle))
         .route("/dashboard", get(manage_dashboard))
         .route("/log-directory", get(manage_log_directory))
         .route("/codex/status", get(codex_app::manage_codex_app_status))
@@ -2190,6 +2210,10 @@ mod tests {
             lifecycle["runtime"]["productVersion"],
             json!(env!("CARGO_PKG_VERSION"))
         );
+        assert_eq!(
+            lifecycle["runtime"]["buildNumber"],
+            json!(crate::version::build_number())
+        );
         assert_eq!(lifecycle["management"]["state"], json!("unmanaged"));
         assert_eq!(lifecycle["management"]["mode"], json!("readOnly"));
         assert_eq!(lifecycle["management"]["canControl"], json!(false));
@@ -2251,6 +2275,67 @@ mod tests {
                 "total": 0,
             })
         );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_lease_claims_and_restart_respects_protected_work() {
+        let (state, _temp, token) = management_test_state();
+        let instance_id = state.daemon_identity.instance_id.clone();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime
+                .current_turn_by_thread
+                .insert("protected-thread".to_string(), "protected-turn".to_string());
+        }
+        let app = router(state.clone());
+        let body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": instance_id,
+        })
+        .to_string();
+
+        let before_claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/restart",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(before_claim.status(), StatusCode::CONFLICT);
+
+        let claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::OK);
+        let claimed = response_json(claim).await;
+        assert_eq!(claimed["management"]["state"], json!("managed"));
+        assert_eq!(
+            claimed["management"]["installationId"],
+            json!("swiftui-test-installation")
+        );
+
+        let restart = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/restart",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(restart.status(), StatusCode::CONFLICT);
+        let restart_payload = response_json(restart).await;
+        assert!(
+            restart_payload["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("受保护任务"))
+        );
+        assert_eq!(restart_payload["protectedWorkItems"]["total"], json!(1));
     }
 
     fn assert_exact_keys(object: &serde_json::Map<String, Value>, expected: &[&str]) {

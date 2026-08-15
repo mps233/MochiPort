@@ -5,7 +5,7 @@
 //! use the versioned routes defined in `web.rs`.
 
 use std::{
-    fs::{self, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
@@ -29,11 +29,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::{app_state::SharedState, daemon_process::DaemonIdentity};
+use crate::{app_state::SharedState, daemon_process::DaemonIdentity, types::now_ms, version};
 
 pub const API_MAJOR: u16 = 1;
 const CONTROL_FILE_NAME: &str = "threadrelay-control.json";
+const CONTROL_LOCK_FILE_NAME: &str = "threadrelay-control.lock";
 const ACTIVE_DAEMON_FILE_NAME: &str = "threadrelay-active-daemon.json";
+const MANAGEMENT_LEASE_DURATION_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +72,7 @@ pub struct LifecycleServiceIdentity {
 pub struct LifecycleRuntimeStatus {
     pub state: &'static str,
     pub product_version: &'static str,
+    pub build_number: Option<u64>,
     pub api_major: u16,
 }
 
@@ -87,8 +90,8 @@ pub struct LifecycleProtectedWorkItems {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LifecycleManagementOwnership {
-    /// Phase 2's read-only endpoint must not imply that this process owns a
-    /// lifecycle lease before the lease protocol is implemented.
+    /// The daemon reports an active lease without exposing the management
+    /// credential. Clients compare `installationId` with their own identity.
     pub state: &'static str,
     pub mode: &'static str,
     pub can_control: bool,
@@ -113,6 +116,71 @@ pub struct LifecycleResponse {
 #[serde(rename_all = "camelCase")]
 struct ControlFile {
     management_token: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lease: Option<ControlLease>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    lease_generation: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ControlLease {
+    installation_id: String,
+    daemon_instance_id: String,
+    generation: u64,
+    expires_at_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleLeaseRequest {
+    pub installation_id: String,
+    pub daemon_instance_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LifecycleControlRequest {
+    pub installation_id: String,
+    pub daemon_instance_id: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LeaseOperation {
+    Claim,
+    Renew,
+    Release,
+}
+
+#[derive(Debug)]
+struct LeaseError {
+    status: StatusCode,
+    message: String,
+}
+
+impl LeaseError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -299,10 +367,124 @@ pub fn status_snapshot(state: &SharedState) -> ManageStatusResponse {
     }
 }
 
-/// Build a side-effect-free lifecycle snapshot for the authenticated
-/// management API.  Control-plane ownership is deliberately reported as
-/// unmanaged until the lease protocol lands; a read endpoint must never grant
-/// or renew a lease as a hidden side effect.
+pub async fn claim_lifecycle_lease(
+    State(state): State<SharedState>,
+    Json(request): Json<LifecycleLeaseRequest>,
+) -> Response {
+    lifecycle_lease_operation(&state, request, LeaseOperation::Claim).await
+}
+
+pub async fn renew_lifecycle_lease(
+    State(state): State<SharedState>,
+    Json(request): Json<LifecycleLeaseRequest>,
+) -> Response {
+    lifecycle_lease_operation(&state, request, LeaseOperation::Renew).await
+}
+
+pub async fn release_lifecycle_lease(
+    State(state): State<SharedState>,
+    Json(request): Json<LifecycleLeaseRequest>,
+) -> Response {
+    lifecycle_lease_operation(&state, request, LeaseOperation::Release).await
+}
+
+pub async fn restart_lifecycle(
+    State(state): State<SharedState>,
+    Json(request): Json<LifecycleControlRequest>,
+) -> Response {
+    let installation_id = match normalized_installation_id(&request.installation_id) {
+        Ok(value) => value,
+        Err(error) => return lease_error_response(error),
+    };
+    if request.daemon_instance_id.trim() != state.daemon_identity.instance_id {
+        return lease_error_response(LeaseError::conflict("后台服务实例已变化，请刷新后重试。"));
+    }
+    // Keep lease ownership stable from validation through the shutdown
+    // request. Without this lock another installation could release/claim the
+    // lease after validation and still allow this restart to go through.
+    let lifecycle_lock = match acquire_lifecycle_lock(&state.config_path) {
+        Ok(lock) => lock,
+        Err(error) => return lease_error_response(error),
+    };
+    if let Err(error) = validate_active_lifecycle_lease(
+        &state.config_path,
+        &state.daemon_identity,
+        &installation_id,
+        current_time_ms(),
+    ) {
+        return lease_error_response(error);
+    }
+
+    let lifecycle = lifecycle_snapshot(&state).await;
+    if lifecycle.protected_work_items.total > 0 && !request.force {
+        let _ = FileExt::unlock(&lifecycle_lock);
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": format!(
+                    "后台服务仍有 {} 项受保护任务，已取消重启。",
+                    lifecycle.protected_work_items.total
+                ),
+                "protectedWorkItems": lifecycle.protected_work_items,
+            })),
+        )
+            .into_response();
+    }
+
+    // No protected work was observed. Stop the IM bridge before committing the
+    // shutdown signal so it cannot keep opening new polling/streaming work in
+    // the final handoff window. The bridge can be started normally after the
+    // launch agent brings up the replacement daemon.
+    crate::web::stop_bridge_for_lifecycle_shutdown(&state).await;
+    let accepted = state.request_shutdown().await;
+    let _ = FileExt::unlock(&lifecycle_lock);
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": accepted,
+            "state": if accepted { "restarting" } else { "not_running" },
+        })),
+    )
+        .into_response()
+}
+
+async fn lifecycle_lease_operation(
+    state: &SharedState,
+    request: LifecycleLeaseRequest,
+    operation: LeaseOperation,
+) -> Response {
+    let installation_id = match normalized_installation_id(&request.installation_id) {
+        Ok(value) => value,
+        Err(error) => return lease_error_response(error),
+    };
+    if request.daemon_instance_id.trim() != state.daemon_identity.instance_id {
+        return lease_error_response(LeaseError::conflict("后台服务实例已变化，请刷新后重试。"));
+    }
+
+    match update_lifecycle_lease(
+        &state.config_path,
+        &state.daemon_identity,
+        &installation_id,
+        operation,
+        current_time_ms(),
+    ) {
+        Ok(()) => Json(lifecycle_snapshot(state).await).into_response(),
+        Err(error) => lease_error_response(error),
+    }
+}
+
+fn lease_error_response(error: LeaseError) -> Response {
+    (
+        error.status,
+        Json(json!({
+            "error": error.message,
+        })),
+    )
+        .into_response()
+}
+
+/// Build a lifecycle snapshot for the authenticated management API. Reading
+/// the snapshot never grants or renews a lease.
 pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
     let config = state.config.lock().await;
     let bind = config.bind.clone();
@@ -340,6 +522,8 @@ pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
 
+    let management = lifecycle_management_snapshot(&state.config_path, &state.daemon_identity);
+
     LifecycleResponse {
         service: LifecycleServiceIdentity {
             service: state.daemon_identity.service.clone(),
@@ -354,7 +538,8 @@ pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
         bind,
         runtime: LifecycleRuntimeStatus {
             state: "active",
-            product_version: env!("CARGO_PKG_VERSION"),
+            product_version: version::PRODUCT_VERSION,
+            build_number: version::build_number(),
             api_major: API_MAJOR,
         },
         protected_work_items: LifecycleProtectedWorkItems {
@@ -365,15 +550,247 @@ pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
             remote_control_requests,
             total,
         },
-        management: LifecycleManagementOwnership {
-            state: "unmanaged",
+        management,
+    }
+}
+
+fn lifecycle_management_snapshot(
+    config_path: &Path,
+    identity: &DaemonIdentity,
+) -> LifecycleManagementOwnership {
+    let Ok(control) = read_control_file(config_path) else {
+        return read_only_management();
+    };
+    let Some(lease) = control.lease else {
+        return read_only_management();
+    };
+    if lease.expires_at_ms <= current_time_ms() {
+        return read_only_management();
+    }
+    if lease.daemon_instance_id != identity.instance_id {
+        return LifecycleManagementOwnership {
+            state: "conflict",
             mode: "readOnly",
             can_control: false,
-            installation_id: None,
-            lease_generation: None,
-            lease_expires_at_ms: None,
-        },
+            installation_id: Some(lease.installation_id),
+            lease_generation: Some(lease.generation),
+            lease_expires_at_ms: Some(lease.expires_at_ms),
+        };
     }
+    LifecycleManagementOwnership {
+        state: "managed",
+        mode: "managed",
+        can_control: true,
+        installation_id: Some(lease.installation_id),
+        lease_generation: Some(lease.generation),
+        lease_expires_at_ms: Some(lease.expires_at_ms),
+    }
+}
+
+fn read_only_management() -> LifecycleManagementOwnership {
+    LifecycleManagementOwnership {
+        state: "unmanaged",
+        mode: "readOnly",
+        can_control: false,
+        installation_id: None,
+        lease_generation: None,
+        lease_expires_at_ms: None,
+    }
+}
+
+fn normalized_installation_id(value: &str) -> Result<String, LeaseError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > 128 || trimmed != value {
+        return Err(LeaseError::bad_request("installationId 无效。"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn current_time_ms() -> u64 {
+    now_ms().min(u64::MAX as u128) as u64
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+fn update_lifecycle_lease(
+    config_path: &Path,
+    identity: &DaemonIdentity,
+    installation_id: &str,
+    operation: LeaseOperation,
+    now_ms: u64,
+) -> Result<(), LeaseError> {
+    ensure_management_token(config_path)
+        .map_err(|_| LeaseError::internal("无法读取后台服务管理控制文件。"))?;
+
+    let lock = acquire_lifecycle_lock(config_path)?;
+
+    let result = (|| {
+        let mut control = read_control_file(config_path)
+            .map_err(|_| LeaseError::internal("后台服务管理控制文件格式无效。"))?;
+        let active = control
+            .lease
+            .as_ref()
+            .filter(|lease| lease.expires_at_ms > now_ms);
+
+        match operation {
+            LeaseOperation::Claim => {
+                if let Some(existing) = active
+                    && (existing.installation_id != installation_id
+                        || existing.daemon_instance_id != identity.instance_id)
+                {
+                    return Err(LeaseError::conflict(
+                        "后台服务已由其他安装管理，请先释放或等待管理租约过期。",
+                    ));
+                }
+
+                let generation = if let Some(existing) = active {
+                    existing.generation
+                } else {
+                    control.lease_generation = control.lease_generation.saturating_add(1).max(1);
+                    control.lease_generation
+                };
+                control.lease = Some(ControlLease {
+                    installation_id: installation_id.to_string(),
+                    daemon_instance_id: identity.instance_id.clone(),
+                    generation,
+                    expires_at_ms: now_ms.saturating_add(MANAGEMENT_LEASE_DURATION_MS),
+                });
+            }
+            LeaseOperation::Renew => {
+                let Some(existing) = active else {
+                    return Err(LeaseError::conflict("管理租约已过期，请重新申请。"));
+                };
+                if existing.installation_id != installation_id
+                    || existing.daemon_instance_id != identity.instance_id
+                {
+                    return Err(LeaseError::conflict("当前安装不持有后台服务管理租约。"));
+                }
+                control.lease = Some(ControlLease {
+                    expires_at_ms: now_ms.saturating_add(MANAGEMENT_LEASE_DURATION_MS),
+                    ..existing.clone()
+                });
+            }
+            LeaseOperation::Release => {
+                let Some(existing) = control.lease.as_ref() else {
+                    return Ok(());
+                };
+                if existing.installation_id != installation_id
+                    || existing.daemon_instance_id != identity.instance_id
+                {
+                    return Err(LeaseError::conflict("当前安装不持有后台服务管理租约。"));
+                }
+                control.lease = None;
+            }
+        }
+        write_control_file(config_path, &control)
+            .map_err(|_| LeaseError::internal("无法保存后台服务管理租约。"))
+    })();
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
+fn acquire_lifecycle_lock(config_path: &Path) -> Result<File, LeaseError> {
+    let lock_path = control_lock_path(config_path);
+    let parent = lock_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| LeaseError::internal("无法准备后台服务管理锁。"))?;
+    fs::create_dir_all(parent).map_err(|_| LeaseError::internal("无法准备后台服务管理锁。"))?;
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|_| LeaseError::internal("无法打开后台服务管理锁。"))?;
+    lock.lock_exclusive()
+        .map_err(|_| LeaseError::internal("无法锁定后台服务管理控制文件。"))?;
+    Ok(lock)
+}
+
+fn validate_active_lifecycle_lease(
+    config_path: &Path,
+    identity: &DaemonIdentity,
+    installation_id: &str,
+    now_ms: u64,
+) -> Result<(), LeaseError> {
+    let control = read_control_file(config_path)
+        .map_err(|_| LeaseError::internal("后台服务管理控制文件格式无效。"))?;
+    let Some(lease) = control.lease else {
+        return Err(LeaseError::conflict("当前安装不持有后台服务管理租约。"));
+    };
+    if lease.expires_at_ms <= now_ms {
+        return Err(LeaseError::conflict("管理租约已过期，请重新申请。"));
+    }
+    if lease.installation_id != installation_id || lease.daemon_instance_id != identity.instance_id
+    {
+        return Err(LeaseError::conflict("当前安装不持有后台服务管理租约。"));
+    }
+    Ok(())
+}
+
+fn control_lock_path(config_path: &Path) -> PathBuf {
+    control_file_path(config_path)
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .join(CONTROL_LOCK_FILE_NAME)
+}
+
+fn read_control_file(config_path: &Path) -> Result<ControlFile, AuthError> {
+    let path = control_file_path(config_path);
+    let mut file = open_control_file(&path, false).map_err(AuthError::Io)?;
+    file.lock_shared().map_err(AuthError::Io)?;
+    let mut raw = String::new();
+    let read_result = file.read_to_string(&mut raw);
+    let _ = FileExt::unlock(&file);
+    read_result.map_err(AuthError::Io)?;
+    let control: ControlFile =
+        serde_json::from_str(&raw).map_err(|_| AuthError::InvalidControlFile)?;
+    let token = control.management_token.trim();
+    if token.is_empty() || token != control.management_token || token.len() > 256 {
+        return Err(AuthError::InvalidControlFile);
+    }
+    Ok(control)
+}
+
+fn write_control_file(config_path: &Path, control: &ControlFile) -> Result<(), AuthError> {
+    let path = control_file_path(config_path);
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or(AuthError::InvalidControlFile)?;
+    fs::create_dir_all(parent).map_err(AuthError::Io)?;
+    let contents = serde_json::to_vec(control).map_err(|_| AuthError::InvalidControlFile)?;
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        CONTROL_FILE_NAME,
+        Uuid::new_v4().simple()
+    ));
+    let result = (|| {
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary).map_err(AuthError::Io)?;
+        file.write_all(&contents).map_err(AuthError::Io)?;
+        file.write_all(b"\n").map_err(AuthError::Io)?;
+        file.sync_all().map_err(AuthError::Io)?;
+        if let Err(error) = fs::rename(&temporary, &path) {
+            if path.exists() {
+                fs::remove_file(&path).map_err(AuthError::Io)?;
+                fs::rename(&temporary, &path).map_err(AuthError::Io)?;
+            } else {
+                return Err(AuthError::Io(error));
+            }
+        }
+        enforce_private_permissions(&path).map_err(AuthError::Io)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 /// Middleware for all `/api/v1/manage/*` routes.
@@ -447,6 +864,8 @@ fn load_or_create_management_token(path: &Path) -> Result<String, AuthError> {
     let token = Uuid::new_v4().simple().to_string();
     let contents = serde_json::to_vec(&ControlFile {
         management_token: token.clone(),
+        lease: None,
+        lease_generation: 0,
     })
     .map_err(|_| AuthError::InvalidControlFile)?;
 
@@ -528,6 +947,25 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_runtime_includes_product_and_build_versions() {
+        let runtime = LifecycleRuntimeStatus {
+            state: "active",
+            product_version: version::PRODUCT_VERSION,
+            build_number: version::build_number(),
+            api_major: API_MAJOR,
+        };
+        assert_eq!(
+            serde_json::to_value(runtime).expect("serialize lifecycle runtime"),
+            json!({
+                "state": "active",
+                "productVersion": version::PRODUCT_VERSION,
+                "buildNumber": version::build_number(),
+                "apiMajor": API_MAJOR,
+            })
+        );
+    }
+
+    #[test]
     fn management_auth_accepts_shared_token_and_rejects_missing_or_wrong_token() {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("config.toml");
@@ -548,6 +986,81 @@ mod tests {
         let mut wrong = HeaderMap::new();
         wrong.insert(AUTHORIZATION, "Bearer definitely-wrong".parse().unwrap());
         assert!(!authorize(&config_path, &wrong).expect("wrong auth"));
+    }
+
+    #[test]
+    fn lifecycle_lease_claim_renew_release_is_instance_and_installation_bound() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let identity = DaemonIdentity {
+            service: "threadrelay".to_string(),
+            pid: 42,
+            instance_id: "daemon-instance".to_string(),
+            started_at_ms: 123,
+        };
+        ensure_management_token(&config_path).expect("create control file");
+
+        let now = current_time_ms();
+        update_lifecycle_lease(
+            &config_path,
+            &identity,
+            "installation-a",
+            LeaseOperation::Claim,
+            now,
+        )
+        .expect("claim lease");
+        let claimed = read_control_file(&config_path).expect("read claimed control file");
+        let lease = claimed.lease.expect("claimed lease");
+        assert_eq!(lease.installation_id, "installation-a");
+        assert_eq!(lease.daemon_instance_id, "daemon-instance");
+        assert_eq!(lease.generation, 1);
+        assert!(lease.expires_at_ms > now);
+        assert!(lifecycle_management_snapshot(&config_path, &identity).can_control);
+
+        update_lifecycle_lease(
+            &config_path,
+            &identity,
+            "installation-a",
+            LeaseOperation::Renew,
+            now + 1_000,
+        )
+        .expect("renew lease");
+        let renewed = read_control_file(&config_path)
+            .expect("read renewed control file")
+            .lease
+            .expect("renewed lease");
+        assert_eq!(renewed.generation, lease.generation);
+        assert!(renewed.expires_at_ms > lease.expires_at_ms);
+
+        let other = DaemonIdentity {
+            instance_id: "other-daemon".to_string(),
+            ..identity.clone()
+        };
+        let conflict = update_lifecycle_lease(
+            &config_path,
+            &other,
+            "installation-b",
+            LeaseOperation::Claim,
+            now + 2_000,
+        )
+        .expect_err("second installation must not steal active lease");
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+
+        update_lifecycle_lease(
+            &config_path,
+            &identity,
+            "installation-a",
+            LeaseOperation::Release,
+            now + 3_000,
+        )
+        .expect("release lease");
+        assert!(
+            read_control_file(&config_path)
+                .expect("read released control file")
+                .lease
+                .is_none()
+        );
+        assert!(!lifecycle_management_snapshot(&config_path, &identity).can_control);
     }
 
     #[cfg(unix)]
