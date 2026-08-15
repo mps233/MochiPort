@@ -1,11 +1,14 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, AtomicUsize, Ordering},
+    },
 };
 
 use tokio::{
-    sync::{Mutex, broadcast, oneshot},
+    sync::{Mutex, Notify, broadcast, oneshot},
     task::JoinHandle,
 };
 
@@ -25,6 +28,143 @@ use crate::{
 };
 
 pub type SharedState = Arc<AppState>;
+
+/// Admission state for work that must not be cut off during a daemon restart.
+///
+/// This is deliberately process-local. The management lease still fences the
+/// cross-process restart request; the gate closes the race between the final
+/// protected-work check and the shutdown signal inside this process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum LifecycleAdmissionState {
+    Active = 0,
+    Draining = 1,
+    ShutdownCommitted = 2,
+}
+
+impl LifecycleAdmissionState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Draining => "draining",
+            Self::ShutdownCommitted => "shutdownCommitted",
+        }
+    }
+
+    fn from_raw(raw: u8) -> Self {
+        match raw {
+            1 => Self::Draining,
+            2 => Self::ShutdownCommitted,
+            _ => Self::Active,
+        }
+    }
+}
+
+/// Coordinates admission of new protected work with a lifecycle drain.
+pub struct LifecycleAdmission {
+    state: AtomicU8,
+    active_permits: AtomicUsize,
+    drained: Notify,
+}
+
+impl LifecycleAdmission {
+    pub fn new() -> Self {
+        Self {
+            state: AtomicU8::new(LifecycleAdmissionState::Active as u8),
+            active_permits: AtomicUsize::new(0),
+            drained: Notify::new(),
+        }
+    }
+
+    pub fn state(&self) -> LifecycleAdmissionState {
+        LifecycleAdmissionState::from_raw(self.state.load(Ordering::Acquire))
+    }
+
+    /// Atomically admit work only while the daemon is active.
+    pub fn try_admit(self: &Arc<Self>) -> Option<LifecycleAdmissionPermit> {
+        if self.state() != LifecycleAdmissionState::Active {
+            return None;
+        }
+        self.active_permits.fetch_add(1, Ordering::AcqRel);
+        // A drain may begin between the first state read and the increment.
+        // Re-check after increment; the permit keeps the drain waiting until
+        // this failed admission has been removed.
+        if self.state() != LifecycleAdmissionState::Active {
+            self.release_permit();
+            return None;
+        }
+        Some(LifecycleAdmissionPermit {
+            admission: Arc::clone(self),
+        })
+    }
+
+    pub fn begin_draining(&self) -> bool {
+        self.state
+            .compare_exchange(
+                LifecycleAdmissionState::Active as u8,
+                LifecycleAdmissionState::Draining as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub async fn wait_for_drain(&self) {
+        loop {
+            let notified = self.drained.notified();
+            if self.active_permits.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub fn commit_shutdown(&self) -> bool {
+        self.state
+            .compare_exchange(
+                LifecycleAdmissionState::Draining as u8,
+                LifecycleAdmissionState::ShutdownCommitted as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    pub fn cancel_draining(&self) -> bool {
+        self.state
+            .compare_exchange(
+                LifecycleAdmissionState::Draining as u8,
+                LifecycleAdmissionState::Active as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn release_permit(&self) {
+        if self.active_permits.fetch_sub(1, Ordering::AcqRel) == 1 {
+            // Keep one notification as a permit if the waiter has not been
+            // scheduled yet; this avoids a check/await race in wait_for_drain.
+            self.drained.notify_one();
+        }
+    }
+}
+
+impl Default for LifecycleAdmission {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct LifecycleAdmissionPermit {
+    admission: Arc<LifecycleAdmission>,
+}
+
+impl Drop for LifecycleAdmissionPermit {
+    fn drop(&mut self) {
+        self.admission.release_permit();
+    }
+}
 
 pub struct AppState {
     pub config_path: PathBuf,
@@ -47,6 +187,10 @@ pub struct AppState {
     pub wecom_onboard: Mutex<Option<WecomOnboardSession>>,
     pub safe_relaunch: Mutex<Option<crate::safe_relaunch::PendingSafeRelaunch>>,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    pub lifecycle_admission: Arc<LifecycleAdmission>,
+    /// Serializes lease mutations with an in-progress async drain without
+    /// holding the filesystem lock across await points.
+    pub lifecycle_control: Mutex<()>,
 }
 
 pub struct RemoteControlState {
@@ -145,6 +289,10 @@ pub struct PendingRemoteRequest {
     pub method: String,
     pub thread_id: Option<String>,
     pub track_thread_active: bool,
+    /// Keeps the lifecycle admission open for the whole pending request,
+    /// rather than only until its outbound envelope has been written.
+    #[allow(dead_code)]
+    pub lifecycle_permit: Option<LifecycleAdmissionPermit>,
     pub response_tx: oneshot::Sender<anyhow::Result<Value>>,
     pub message: Value,
     pub envelopes: Vec<Value>,
@@ -374,6 +522,8 @@ impl AppState {
             wecom_onboard: Mutex::new(None),
             safe_relaunch: Mutex::new(None),
             shutdown_tx: Mutex::new(shutdown_tx),
+            lifecycle_admission: Arc::new(LifecycleAdmission::new()),
+            lifecycle_control: Mutex::new(()),
         })
     }
 
@@ -419,8 +569,7 @@ impl AppState {
     pub async fn request_shutdown(&self) -> bool {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
         if let Some(tx) = shutdown_tx.take() {
-            let _ = tx.send(());
-            true
+            tx.send(()).is_ok()
         } else {
             false
         }
@@ -494,6 +643,42 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[tokio::test]
+    async fn lifecycle_admission_closes_race_and_commits_once() {
+        let admission = Arc::new(LifecycleAdmission::new());
+        let permit = admission.try_admit().expect("active work admitted");
+
+        assert!(admission.begin_draining());
+        assert_eq!(admission.state(), LifecycleAdmissionState::Draining);
+        assert!(admission.try_admit().is_none());
+
+        let wait = tokio::spawn({
+            let admission = Arc::clone(&admission);
+            async move { admission.wait_for_drain().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!wait.is_finished());
+
+        drop(permit);
+        wait.await.expect("drain waiter");
+        assert!(admission.commit_shutdown());
+        assert_eq!(
+            admission.state(),
+            LifecycleAdmissionState::ShutdownCommitted
+        );
+        assert!(!admission.commit_shutdown());
+        assert!(!admission.begin_draining());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_admission_can_cancel_draining_after_protected_conflict() {
+        let admission = Arc::new(LifecycleAdmission::new());
+        assert!(admission.begin_draining());
+        assert!(admission.cancel_draining());
+        assert_eq!(admission.state(), LifecycleAdmissionState::Active);
+        assert!(admission.try_admit().is_some());
+    }
     use crate::config::TelegramConfig;
 
     fn telegram_account(

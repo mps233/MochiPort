@@ -95,6 +95,10 @@ pub(super) async fn send_initialize_for_client_on_connection(
     connection_epoch: u64,
     client_key: &str,
 ) -> Result<u64> {
+    let lifecycle_permit = state
+        .lifecycle_admission
+        .try_admit()
+        .ok_or_else(|| anyhow!("daemon lifecycle is draining; retry after restart"))?;
     let client_key = normalize_remote_client_key(client_key);
     let initialize_id = next_request_id();
     let request_key = initialize_id.to_string();
@@ -137,6 +141,7 @@ pub(super) async fn send_initialize_for_client_on_connection(
                 method: "initialize".to_string(),
                 thread_id: None,
                 track_thread_active: false,
+                lifecycle_permit: Some(lifecycle_permit),
                 response_tx: tx,
                 message: message.clone(),
                 envelopes: envelopes.clone(),

@@ -1017,6 +1017,7 @@ struct APIClient {
     func restartLifecycle(
         installationId: String,
         daemonInstanceId: String,
+        leaseGeneration: Int64? = nil,
         force: Bool = false
     ) async throws -> ManageActionResponse {
         try await performManagePOST(
@@ -1024,7 +1025,8 @@ struct APIClient {
             body: LifecycleControlRequest(
                 installationId: installationId,
                 daemonInstanceId: daemonInstanceId,
-                force: force
+                force: force,
+                leaseGeneration: leaseGeneration
             )
         )
     }
@@ -1489,6 +1491,7 @@ struct APIClient {
         let installationId: String
         let daemonInstanceId: String
         let force: Bool
+        let leaseGeneration: Int64?
     }
 
     private struct EmptyRequestBody: Encodable {}

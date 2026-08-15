@@ -178,6 +178,8 @@ impl ApiClient {
                     | "/api/im-channel/enabled"
                     | "/api/im/account/enabled"
                     | "/api/im/account/delete"
+                    | "/api/shutdown"
+                    | "/api/shutdown/instance"
                     | "/api/feishu/onboard/start"
                     | "/api/feishu/onboard/poll"
                     | "/api/telegram/configure"

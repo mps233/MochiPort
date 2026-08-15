@@ -27,6 +27,10 @@ pub(crate) async fn start_turn_for_route(
     received_at_ms: u128,
     origin: TurnOrigin,
 ) -> TurnStartOutcome {
+    let _lifecycle_permit = match state.lifecycle_admission.try_admit() {
+        Some(permit) => permit,
+        None => return TurnStartOutcome::Busy,
+    };
     let Some((thread_id, bound_route)) = live_thread_binding_for_route(state, route).await else {
         return TurnStartOutcome::NoThread;
     };

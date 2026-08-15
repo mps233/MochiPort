@@ -134,7 +134,12 @@ struct SettingsView: View {
                         value: lifecycle.runtime.buildNumber.map(String.init) ?? "旧版后台服务"
                     )
                     if model.daemonBuildMismatch {
-                        Label("界面与后台服务构建不一致", systemImage: "exclamationmark.triangle")
+                        Label(
+                            model.daemonUpgradePending
+                                ? model.daemonUpgradeDetail
+                                : "界面与后台服务构建不一致",
+                            systemImage: "exclamationmark.triangle"
+                        )
                             .foregroundStyle(.orange)
                     }
                     Label(

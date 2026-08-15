@@ -49,6 +49,7 @@ final class AppModel: ObservableObject {
     private let fixtureStatus: ServiceStatus?
     private var refreshInFlight = false
     private var launchAttempted = false
+    private var daemonRuntimePreparedBuild: String?
     private var refreshTask: Task<Void, Never>?
     private var autoRefreshStarted = false
     private var windowVisible = true
@@ -113,10 +114,58 @@ final class AppModel: ObservableObject {
         return guiBuildNumber != daemonBuild
     }
 
+    /// A newer GUI may prepare its helper without replacing a daemon that is
+    /// still serving work. Downgrades are never automatic.
+    nonisolated static func daemonRequiresUpgrade(
+        guiBuild: String?,
+        daemonBuild: Int?
+    ) -> Bool {
+        guard let guiBuild,
+              let guiBuildNumber = Int(guiBuild),
+              let daemonBuild
+        else { return false }
+        return guiBuildNumber > daemonBuild
+    }
+
     var daemonBuildMismatch: Bool {
         guard let daemonBuild = lifecycle?.runtime.buildNumber else { return false }
         let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
         return Self.buildNumbersMismatch(guiBuild: guiBuild, daemonBuild: daemonBuild)
+    }
+
+    var daemonUpgradePending: Bool {
+        guard let lifecycle,
+              let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        else { return false }
+        return Self.daemonRequiresUpgrade(
+            guiBuild: guiBuild,
+            daemonBuild: lifecycle.runtime.buildNumber
+        )
+    }
+
+    var daemonUpgradePrepared: Bool {
+        guard daemonUpgradePending,
+              let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        else { return false }
+        return daemonRuntimePreparedBuild == guiBuild
+    }
+
+    var daemonUpgradeDetail: String {
+        guard let lifecycle,
+              let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+              let guiBuildNumber = Int(guiBuild),
+              let daemonBuild = lifecycle.runtime.buildNumber
+        else { return "后台版本未知" }
+        if daemonBuild > guiBuildNumber {
+            return "后台构建 (daemonBuild) 高于界面 (guiBuildNumber)，不会自动降级"
+        }
+        if daemonBuild == guiBuildNumber {
+            return "版本一致"
+        }
+        if daemonUpgradePrepared {
+            return "已准备构建 (guiBuildNumber)，安全重启后生效"
+        }
+        return "发现构建 (guiBuildNumber)，正在准备运行版本"
     }
 
     var ownsDaemonLease: Bool {
@@ -306,6 +355,9 @@ final class AppModel: ObservableObject {
             do {
                 dashboard = try await apiClient.dashboard()
                 lifecycle = try? await apiClient.lifecycle()
+                if let lifecycle {
+                    await prepareDaemonRuntimeIfNeeded(lifecycle)
+                }
                 await reconcileLifecycleLease()
                 settings = try? await apiClient.settings()
                 // Account details were added after the first versioned
@@ -352,6 +404,26 @@ final class AppModel: ObservableObject {
         resetRequestLogPagination(clearLogs: true)
         requestLogDetail = nil
         sectionErrors = [:]
+    }
+
+    private func prepareDaemonRuntimeIfNeeded(_ lifecycle: ManageLifecycle) async {
+        guard Self.daemonRequiresUpgrade(
+            guiBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+            daemonBuild: lifecycle.runtime.buildNumber
+        ),
+        let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+        daemonRuntimePreparedBuild != guiBuild
+        else { return }
+
+        do {
+            try await daemonLauncher.prepareRuntime()
+            daemonRuntimePreparedBuild = guiBuild
+            daemonRecoveryError = nil
+        } catch let error as DaemonLaunchError {
+            daemonRecoveryError = error.localizedDescription
+        } catch {
+            daemonRecoveryError = userFacingMessage(for: error)
+        }
     }
 
     private func clearSectionData(_ section: AppSection) {
@@ -1056,16 +1128,19 @@ final class AppModel: ObservableObject {
 
     func restartDaemon() async {
         guard fixtureStatus == nil, ownsDaemonLease,
-              let instanceId = lifecycle?.service.instanceId
+              let lifecycle,
+              let leaseGeneration = lifecycle.management.leaseGeneration
         else {
             managementOperationError = "当前界面没有后台服务管理权。"
             return
         }
+        let instanceId = lifecycle.service.instanceId
         managementOperationError = nil
         do {
             let response = try await apiClient.restartLifecycle(
                 installationId: installationId,
-                daemonInstanceId: instanceId
+                daemonInstanceId: instanceId,
+                leaseGeneration: leaseGeneration
             )
             guard response.ok else {
                 throw APIClientError.operationFailed("后台服务没有接受重启请求。")

@@ -19,6 +19,19 @@ pub struct GatewayError {
 }
 
 impl GatewayError {
+    pub fn lifecycle_draining() -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            error_type: "service_unavailable_error".to_string(),
+            code: "daemon_draining".to_string(),
+            message: "daemon is shutting down; retry after it is available".to_string(),
+            provider: None,
+            upstream_status: None,
+            upstream_error_type: None,
+            upstream_code: None,
+        }
+    }
+
     pub fn disabled() -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,

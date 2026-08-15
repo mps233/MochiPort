@@ -117,6 +117,10 @@ final class APIContractTests: XCTestCase {
             configuration.launchAgentURL.path,
             home.appendingPathComponent("Library/LaunchAgents/\(DaemonLaunchConfiguration.label).plist").path
         )
+        XCTAssertEqual(
+            try configuration.stagedHelperURL().path,
+            legacyDirectory.appendingPathComponent("runtimes/dev/threadrelay-daemon").path
+        )
     }
 
     func testGUIRecoveryConfigurationRestartsOnlyUnexpectedExit() throws {
@@ -161,10 +165,13 @@ final class APIContractTests: XCTestCase {
         )
     }
 
-    func testDaemonLauncherUpdatesLoadedServiceWithoutForcingRestart() async throws {
+    func testDaemonLauncherStagesRuntimeAndUpdatesLoadedServiceWithoutRestart() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
             if arguments.first == "print" {
                 return CommandResult(
                     exitCode: 0,
@@ -180,7 +187,7 @@ final class APIContractTests: XCTestCase {
                     """
                 )
             }
-            return CommandResult(exitCode: arguments.first == "kickstart" ? 0 : 1, output: "")
+            return CommandResult(exitCode: 1, output: "unexpected command")
         }
         let launcher = DaemonLauncher(
             configurationLoader: { fixture.configuration },
@@ -190,10 +197,21 @@ final class APIContractTests: XCTestCase {
         try await launcher.startIfNeeded()
 
         XCTAssertEqual(commands.arguments, [
+            ["--version"],
             ["print", "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"],
-            ["kickstart", "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"],
         ])
-        XCTAssertFalse(commands.arguments.flatMap { $0 }.contains("-k"))
+        XCTAssertEqual(commands.executablePaths.count, 2)
+        XCTAssertTrue(
+            commands.executablePaths[0].deletingLastPathComponent()
+                == (try fixture.configuration.stagedHelperURL()).deletingLastPathComponent()
+        )
+        XCTAssertTrue(commands.executablePaths[0].lastPathComponent.hasPrefix(".threadrelay-daemon."))
+        XCTAssertEqual(commands.executablePaths[1].path, "/bin/launchctl")
+        XCTAssertFalse(
+            commands.arguments
+                .compactMap(\.first)
+                .contains(where: { ["bootout", "kickstart", "bootstrap"].contains($0) })
+        )
         let plistData = try Data(contentsOf: fixture.configuration.launchAgentURL)
         let plist = try XCTUnwrap(
             PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)
@@ -204,13 +222,34 @@ final class APIContractTests: XCTestCase {
             environment["THREADRELAY_HOME"],
             fixture.configuration.configURL.deletingLastPathComponent().path
         )
+        XCTAssertEqual(environment["THREADRELAY_BUNDLE_BUILD"], "389")
+        XCTAssertEqual(
+            plist["ProgramArguments"] as? [String],
+            [
+                try fixture.configuration.stagedHelperURL().path,
+                "--config",
+                fixture.configuration.configURL.path,
+                "daemon",
+            ]
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: fixture.configuration.stagedHelperURL()),
+            Data("embedded-runtime".utf8)
+        )
+        let attributes = try FileManager.default.attributesOfItem(
+            atPath: fixture.configuration.stagedHelperURL().path
+        )
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o755)
     }
 
-    func testDaemonLauncherRejectsLoadedServiceFromDifferentHelper() async throws {
+    func testDaemonLauncherLeavesLoadedServiceFromDifferentHelperRunning() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let staleHelper = fixture.root.appendingPathComponent("OldThreadRelay.app/Contents/Helpers/threadrelay-daemon")
         let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
             guard arguments.first == "print" else {
                 return CommandResult(exitCode: 1, output: "unexpected command")
             }
@@ -233,19 +272,18 @@ final class APIContractTests: XCTestCase {
             commandRunner: commands.run
         )
 
-        do {
-            try await launcher.startIfNeeded()
-            XCTFail("Expected stale launch agent to be rejected")
-        } catch let error as DaemonLaunchError {
-            XCTAssertEqual(
-                error,
-                .loadedAgentMismatch(expected: fixture.configuration.helperURL.path, actual: staleHelper.path)
-            )
-        }
-        XCTAssertEqual(commands.arguments.map(\.first), ["print"])
+        try await launcher.startIfNeeded()
+
+        XCTAssertEqual(commands.arguments.map(\.first), ["--version", "print"])
+        XCTAssertFalse(
+            commands.arguments
+                .compactMap(\.first)
+                .contains(where: { ["bootout", "kickstart", "bootstrap"].contains($0) })
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.configuration.launchAgentURL.path))
     }
 
-    func testDaemonLauncherReloadsSameHelperAfterStaleBundleBuild() async throws {
+    func testDaemonLauncherDoesNotReloadRunningServiceAfterBundleBuildChanges() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let configuration = DaemonLaunchConfiguration(
@@ -254,33 +292,32 @@ final class APIContractTests: XCTestCase {
             launchAgentURL: fixture.configuration.launchAgentURL,
             logURL: fixture.configuration.logURL,
             homeURL: fixture.configuration.homeURL,
-            buildIdentifier: "389"
+            buildIdentifier: "390"
         )
-        let printCount = IntCounter()
         let commands = CommandInvocationRecorder { arguments in
-            if arguments.first == "print" {
-                if printCount.next() == 1 {
-                    return CommandResult(
-                        exitCode: 0,
-                        output: """
-                        state = running
-                        program = \(configuration.helperURL.path)
-                        arguments = {
-                            \(configuration.helperURL.path)
-                            --config
-                            \(configuration.configURL.path)
-                            daemon
-                        }
-                        environment = {
-                            THREADRELAY_HOME => \(configuration.configURL.deletingLastPathComponent().path)
-                            THREADRELAY_BUNDLE_BUILD => 388
-                        }
-                        """
-                    )
-                }
-                return CommandResult(exitCode: 1, output: "service not found")
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 390)\n")
             }
-            return CommandResult(exitCode: ["bootout", "bootstrap"].contains(arguments.first) ? 0 : 1, output: "")
+            if arguments.first == "print" {
+                return CommandResult(
+                    exitCode: 0,
+                    output: """
+                    state = running
+                    program = \(configuration.helperURL.path)
+                    arguments = {
+                        \(configuration.helperURL.path)
+                        --config
+                        \(configuration.configURL.path)
+                        daemon
+                    }
+                    environment = {
+                        THREADRELAY_HOME => \(configuration.configURL.deletingLastPathComponent().path)
+                        THREADRELAY_BUNDLE_BUILD => 388
+                    }
+                    """
+                )
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
         }
         let launcher = DaemonLauncher(
             configurationLoader: { configuration },
@@ -289,7 +326,25 @@ final class APIContractTests: XCTestCase {
 
         try await launcher.startIfNeeded()
 
-        XCTAssertEqual(commands.arguments.map(\.first), ["print", "bootout", "print", "bootstrap"])
+        XCTAssertEqual(commands.arguments.map(\.first), ["--version", "print"])
+        let plistData = try Data(contentsOf: configuration.launchAgentURL)
+        let plist = try XCTUnwrap(
+            PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)
+                as? [String: Any]
+        )
+        XCTAssertEqual(
+            plist["ProgramArguments"] as? [String],
+            [
+                try configuration.stagedHelperURL().path,
+                "--config",
+                configuration.configURL.path,
+                "daemon",
+            ]
+        )
+        XCTAssertEqual(
+            (plist["EnvironmentVariables"] as? [String: String])?["THREADRELAY_BUNDLE_BUILD"],
+            "390"
+        )
     }
 
     func testGUIRecoveryLauncherReloadsSameSupervisorAfterStaleBundleBuild() throws {
@@ -356,7 +411,10 @@ final class APIContractTests: XCTestCase {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let commands = CommandInvocationRecorder { arguments in
-            CommandResult(exitCode: arguments.first == "bootstrap" ? 0 : 1, output: "")
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            return CommandResult(exitCode: arguments.first == "bootstrap" ? 0 : 1, output: "")
         }
         let launcher = DaemonLauncher(
             configurationLoader: { fixture.configuration },
@@ -365,7 +423,7 @@ final class APIContractTests: XCTestCase {
 
         try await launcher.startIfNeeded()
 
-        XCTAssertEqual(commands.arguments.map(\.first), ["print", "bootstrap"])
+        XCTAssertEqual(commands.arguments.map(\.first), ["--version", "print", "bootstrap"])
         let plistData = try Data(contentsOf: fixture.configuration.launchAgentURL)
         let plist = try XCTUnwrap(
             PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)
@@ -375,7 +433,7 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(
             plist["ProgramArguments"] as? [String],
             [
-                fixture.configuration.helperURL.path,
+                try fixture.configuration.stagedHelperURL().path,
                 "--config",
                 fixture.configuration.configURL.path,
                 "daemon",
@@ -386,6 +444,114 @@ final class APIContractTests: XCTestCase {
             environment["THREADRELAY_HOME"],
             fixture.configuration.configURL.deletingLastPathComponent().path
         )
+        XCTAssertEqual(environment["THREADRELAY_BUNDLE_BUILD"], "389")
+    }
+
+    func testDaemonLauncherAtomicallyReplacesExistingStagedRuntime() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let stagedHelper = try fixture.configuration.stagedHelperURL()
+        try FileManager.default.createDirectory(
+            at: stagedHelper.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("stale-runtime".utf8).write(to: stagedHelper)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: stagedHelper.path
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 0, output: "state = running")
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        try await launcher.startIfNeeded()
+
+        XCTAssertEqual(try Data(contentsOf: stagedHelper), Data("embedded-runtime".utf8))
+        let attributes = try FileManager.default.attributesOfItem(atPath: stagedHelper.path)
+        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o755)
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(
+                atPath: stagedHelper.deletingLastPathComponent().path
+            ),
+            ["threadrelay-daemon"]
+        )
+    }
+
+    func testDaemonLauncherRejectsMismatchedRuntimeBuildBeforePublishing() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let commands = CommandInvocationRecorder { arguments in
+            guard arguments == ["--version"] else {
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+            return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 388)\n")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        do {
+            try await launcher.startIfNeeded()
+            XCTFail("Expected mismatched runtime build to fail")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(
+                error,
+                .runtimeVersionMismatch(expected: "389", actual: "388")
+            )
+        }
+
+        XCTAssertEqual(commands.arguments, [["--version"]])
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: try fixture.configuration.stagedHelperURL().path)
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.configuration.launchAgentURL.path)
+        )
+        let runtimeDirectory = try fixture.configuration.stagedHelperURL()
+            .deletingLastPathComponent()
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: runtimeDirectory.path),
+            []
+        )
+    }
+
+    func testDaemonLauncherRejectsUnsafeRuntimeBuildIdentifier() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configuration = DaemonLaunchConfiguration(
+            helperURL: fixture.configuration.helperURL,
+            configURL: fixture.configuration.configURL,
+            launchAgentURL: fixture.configuration.launchAgentURL,
+            logURL: fixture.configuration.logURL,
+            homeURL: fixture.configuration.homeURL,
+            buildIdentifier: "../389"
+        )
+        let commands = CommandInvocationRecorder { _ in
+            CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { configuration },
+            commandRunner: commands.run
+        )
+
+        do {
+            try await launcher.startIfNeeded()
+            XCTFail("Expected unsafe build identifier to fail")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(error, .runtimeBuildIdentifierInvalid("../389"))
+        }
+        XCTAssertTrue(commands.arguments.isEmpty)
     }
 
     func testManagementCredentialStoreLoadsAllValidUniqueCandidatesInPathOrder() throws {
@@ -1260,6 +1426,7 @@ final class APIContractTests: XCTestCase {
                 return MockResponse(statusCode: 200, json: Self.lifecycleJSON)
             case "/api/v1/manage/lifecycle/restart":
                 XCTAssertEqual(body?["force"] as? Bool, false)
+                XCTAssertEqual(body?["leaseGeneration"] as? Int, 7)
                 return MockResponse(statusCode: 200, json: #"{"ok":true,"state":"restarting"}"#)
             default:
                 return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
@@ -1280,7 +1447,8 @@ final class APIContractTests: XCTestCase {
         )
         let restart = try await client.restartLifecycle(
             installationId: "installation-a",
-            daemonInstanceId: "fixture-instance"
+            daemonInstanceId: "fixture-instance",
+            leaseGeneration: 7
         )
         XCTAssertTrue(restart.ok)
     }
@@ -2494,7 +2662,16 @@ final class APIContractTests: XCTestCase {
         XCTAssertFalse(AppModel.buildNumbersMismatch(guiBuild: "development", daemonBuild: 387))
     }
 
-    func testLoadedDaemonAgentRejectsAStaleBundleBuild() {
+    func testDaemonUpgradeOnlyTargetsAnOlderRunningBuild() {
+        XCTAssertTrue(AppModel.daemonRequiresUpgrade(guiBuild: "404", daemonBuild: 392))
+        XCTAssertFalse(AppModel.daemonRequiresUpgrade(guiBuild: "404", daemonBuild: 404))
+        XCTAssertFalse(AppModel.daemonRequiresUpgrade(guiBuild: "404", daemonBuild: 405))
+        XCTAssertFalse(AppModel.daemonRequiresUpgrade(guiBuild: nil, daemonBuild: 392))
+        XCTAssertFalse(AppModel.daemonRequiresUpgrade(guiBuild: "development", daemonBuild: 392))
+        XCTAssertFalse(AppModel.daemonRequiresUpgrade(guiBuild: "404", daemonBuild: nil))
+    }
+
+    func testLoadedDaemonAgentRejectsAStaleBundleBuild() throws {
         let configuration = DaemonLaunchConfiguration(
             helperURL: URL(fileURLWithPath: "/fixture/ThreadRelay.app/Contents/Helpers/threadrelay-daemon"),
             configURL: URL(fileURLWithPath: "/fixture/data/config.toml"),
@@ -2503,11 +2680,12 @@ final class APIContractTests: XCTestCase {
             homeURL: URL(fileURLWithPath: "/fixture/home"),
             buildIdentifier: "389"
         )
+        let stagedHelper = try configuration.stagedHelperURL()
         let output = """
         state = running
-        program = /fixture/ThreadRelay.app/Contents/Helpers/threadrelay-daemon
+        program = \(stagedHelper.path)
         arguments = {
-            /fixture/ThreadRelay.app/Contents/Helpers/threadrelay-daemon
+            \(stagedHelper.path)
             --config
             /fixture/data/config.toml
             daemon
@@ -2746,7 +2924,12 @@ final class APIContractTests: XCTestCase {
             at: helper.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        XCTAssertTrue(FileManager.default.createFile(atPath: helper.path, contents: Data()))
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: helper.path,
+                contents: Data("embedded-runtime".utf8)
+            )
+        )
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
             ofItemAtPath: helper.path
@@ -2759,7 +2942,7 @@ final class APIContractTests: XCTestCase {
                 launchAgentURL: root.appendingPathComponent("home/Library/LaunchAgents/daemon.plist"),
                 logURL: root.appendingPathComponent("data/logs/daemon.log"),
                 homeURL: root.appendingPathComponent("home", isDirectory: true),
-                buildIdentifier: nil
+                buildIdentifier: "389"
             )
         )
     }
@@ -2992,6 +3175,7 @@ private final class CommandInvocationRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private let handler: Handler
     private var recordedArguments: [[String]] = []
+    private var recordedExecutablePaths: [URL] = []
 
     init(handler: @escaping Handler) {
         self.handler = handler
@@ -3001,9 +3185,14 @@ private final class CommandInvocationRecorder: @unchecked Sendable {
         lock.withLock { recordedArguments }
     }
 
-    func run(_: URL, arguments: [String]) -> CommandResult {
+    var executablePaths: [URL] {
+        lock.withLock { recordedExecutablePaths }
+    }
+
+    func run(_ executable: URL, arguments: [String]) -> CommandResult {
         lock.withLock {
             recordedArguments.append(arguments)
+            recordedExecutablePaths.append(executable)
         }
         return handler(arguments)
     }

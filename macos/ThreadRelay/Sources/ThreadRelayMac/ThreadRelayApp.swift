@@ -406,7 +406,12 @@ private struct MenuBarStatusView: View {
                 .foregroundStyle(.secondary)
                 .font(.caption)
             if model.daemonBuildMismatch {
-                Label("界面与后台服务构建不一致", systemImage: "exclamationmark.triangle")
+                Label(
+                    model.daemonUpgradePending
+                        ? model.daemonUpgradeDetail
+                        : "界面与后台服务构建不一致",
+                    systemImage: "exclamationmark.triangle"
+                )
                     .foregroundStyle(.orange)
                     .font(.caption)
             }

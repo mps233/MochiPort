@@ -145,6 +145,11 @@ pub struct LifecycleControlRequest {
     pub daemon_instance_id: String,
     #[serde(default)]
     pub force: bool,
+    /// New clients send the lease generation to fence a restart request if
+    /// ownership changes while existing work drains. It stays optional so
+    /// older GUI clients remain compatible.
+    #[serde(default)]
+    pub lease_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -155,9 +160,129 @@ enum LeaseOperation {
 }
 
 #[derive(Debug)]
-struct LeaseError {
+pub(crate) struct LeaseError {
     status: StatusCode,
     message: String,
+}
+
+#[derive(Debug)]
+pub(crate) enum LifecycleShutdownResult {
+    Accepted,
+    AlreadyInProgress,
+    ProtectedWork(LifecycleProtectedWorkItems),
+    LeaseRejected(LeaseError),
+    NotRunning,
+}
+
+/// Run the single in-process shutdown path used by lifecycle restart and the
+/// compatibility shutdown routes.  Admission closes before the first work
+/// snapshot, so a request cannot enter between the safety check and the
+/// shutdown signal. The second snapshot catches work that was already in
+/// flight while the bridge was being stopped.
+pub(crate) async fn request_shutdown_with_drain(
+    state: &SharedState,
+    force: bool,
+    event_message: &'static str,
+) -> LifecycleShutdownResult {
+    request_shutdown_with_drain_inner(state, force, event_message, None, None).await
+}
+
+pub(crate) async fn request_restart_with_drain(
+    state: &SharedState,
+    force: bool,
+    event_message: &'static str,
+    installation_id: &str,
+    lease_generation: Option<u64>,
+) -> LifecycleShutdownResult {
+    // Keep lease mutations serialized with the complete asynchronous drain.
+    // This is a Tokio mutex, so it does not block executor workers while the
+    // protected work finishes.
+    let _lifecycle_control = state.lifecycle_control.lock().await;
+    match acquire_validated_lifecycle_lease_lock(state, installation_id, lease_generation).await {
+        Ok(lock) => {
+            let _ = FileExt::unlock(&lock);
+        }
+        Err(error) => return LifecycleShutdownResult::LeaseRejected(error),
+    }
+    request_shutdown_with_drain_inner(
+        state,
+        force,
+        event_message,
+        Some(installation_id.to_string()),
+        lease_generation,
+    )
+    .await
+}
+
+async fn request_shutdown_with_drain_inner(
+    state: &SharedState,
+    force: bool,
+    event_message: &'static str,
+    lease_installation_id: Option<String>,
+    lease_generation: Option<u64>,
+) -> LifecycleShutdownResult {
+    if !state.lifecycle_admission.begin_draining() {
+        return LifecycleShutdownResult::AlreadyInProgress;
+    }
+
+    state
+        .push_event("warn", "shutdown_requested", event_message)
+        .await;
+
+    let initial = lifecycle_snapshot(state).await;
+    if initial.protected_work_items.total > 0 && !force {
+        state.lifecycle_admission.cancel_draining();
+        return LifecycleShutdownResult::ProtectedWork(initial.protected_work_items);
+    }
+
+    // Stop polling/streaming before the final snapshot. Any handler that had
+    // already passed the admission gate keeps its permit until it returns.
+    crate::web::stop_bridge_for_lifecycle_shutdown(state).await;
+    state.lifecycle_admission.wait_for_drain().await;
+
+    let final_snapshot = lifecycle_snapshot(state).await;
+    if final_snapshot.protected_work_items.total > 0 && !force {
+        cancel_draining_and_restore_bridge(state).await;
+        return LifecycleShutdownResult::ProtectedWork(final_snapshot.protected_work_items);
+    }
+
+    let lifecycle_lock = if let Some(installation_id) = lease_installation_id {
+        match acquire_validated_lifecycle_lease_lock(state, &installation_id, lease_generation)
+            .await
+        {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                cancel_draining_and_restore_bridge(state).await;
+                return LifecycleShutdownResult::LeaseRejected(error);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Keep the validated lease lock across the shutdown signal and the local
+    // admission commit. The await only acquires the in-process shutdown
+    // sender mutex; holding this Send file handle here fences lease takeover
+    // until this daemon has committed to shutting down.
+    if state.request_shutdown().await {
+        state.lifecycle_admission.commit_shutdown();
+        if let Some(lock) = lifecycle_lock.as_ref() {
+            let _ = FileExt::unlock(lock);
+        }
+        LifecycleShutdownResult::Accepted
+    } else {
+        if let Some(lock) = lifecycle_lock.as_ref() {
+            let _ = FileExt::unlock(lock);
+        }
+        cancel_draining_and_restore_bridge(state).await;
+        LifecycleShutdownResult::NotRunning
+    }
+}
+
+async fn cancel_draining_and_restore_bridge(state: &SharedState) {
+    if state.lifecycle_admission.cancel_draining() {
+        let _ = crate::web::start_bridge_if_ready(state, "lifecycle drain cancelled").await;
+    }
 }
 
 impl LeaseError {
@@ -399,53 +524,49 @@ pub async fn restart_lifecycle(
     if request.daemon_instance_id.trim() != state.daemon_identity.instance_id {
         return lease_error_response(LeaseError::conflict("后台服务实例已变化，请刷新后重试。"));
     }
-    // Keep lease ownership stable from validation through the shutdown
-    // request. Without this lock another installation could release/claim the
-    // lease after validation and still allow this restart to go through.
-    let lifecycle_lock = match acquire_lifecycle_lock(&state.config_path) {
-        Ok(lock) => lock,
-        Err(error) => return lease_error_response(error),
-    };
-    if let Err(error) = validate_active_lifecycle_lease(
-        &state.config_path,
-        &state.daemon_identity,
+    match request_restart_with_drain(
+        &state,
+        request.force,
+        "lifecycle restart requested",
         &installation_id,
-        current_time_ms(),
-    ) {
-        return lease_error_response(error);
-    }
-
-    let lifecycle = lifecycle_snapshot(&state).await;
-    if lifecycle.protected_work_items.total > 0 && !request.force {
-        let _ = FileExt::unlock(&lifecycle_lock);
-        return (
+        request.lease_generation,
+    )
+    .await
+    {
+        LifecycleShutdownResult::Accepted => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "state": "restarting" })),
+        )
+            .into_response(),
+        LifecycleShutdownResult::NotRunning => (
+            StatusCode::OK,
+            Json(json!({ "ok": false, "state": "not_running" })),
+        )
+            .into_response(),
+        LifecycleShutdownResult::AlreadyInProgress => (
             StatusCode::CONFLICT,
             Json(json!({
-                "error": format!(
-                    "后台服务仍有 {} 项受保护任务，已取消重启。",
-                    lifecycle.protected_work_items.total
-                ),
-                "protectedWorkItems": lifecycle.protected_work_items,
+                "ok": false,
+                "state": "draining",
+                "error": "后台服务正在关闭或重启，请稍后重试。",
             })),
         )
-            .into_response();
+            .into_response(),
+        LifecycleShutdownResult::ProtectedWork(protected_work_items) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "state": "active",
+                "error": format!(
+                    "后台服务仍有 {} 项受保护任务，已取消重启。",
+                    protected_work_items.total
+                ),
+                "protectedWorkItems": protected_work_items,
+            })),
+        )
+            .into_response(),
+        LifecycleShutdownResult::LeaseRejected(error) => lease_error_response(error),
     }
-
-    // No protected work was observed. Stop the IM bridge before committing the
-    // shutdown signal so it cannot keep opening new polling/streaming work in
-    // the final handoff window. The bridge can be started normally after the
-    // launch agent brings up the replacement daemon.
-    crate::web::stop_bridge_for_lifecycle_shutdown(&state).await;
-    let accepted = state.request_shutdown().await;
-    let _ = FileExt::unlock(&lifecycle_lock);
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": accepted,
-            "state": if accepted { "restarting" } else { "not_running" },
-        })),
-    )
-        .into_response()
 }
 
 async fn lifecycle_lease_operation(
@@ -453,6 +574,7 @@ async fn lifecycle_lease_operation(
     request: LifecycleLeaseRequest,
     operation: LeaseOperation,
 ) -> Response {
+    let _lifecycle_control = state.lifecycle_control.lock().await;
     let installation_id = match normalized_installation_id(&request.installation_id) {
         Ok(value) => value,
         Err(error) => return lease_error_response(error),
@@ -461,13 +583,10 @@ async fn lifecycle_lease_operation(
         return lease_error_response(LeaseError::conflict("后台服务实例已变化，请刷新后重试。"));
     }
 
-    match update_lifecycle_lease(
-        &state.config_path,
-        &state.daemon_identity,
-        &installation_id,
-        operation,
-        current_time_ms(),
-    ) {
+    // Keep lease mutations behind the same in-process lifecycle mutex used by
+    // restart. This prevents a heartbeat/release from changing ownership in
+    // the middle of a local drain.
+    match update_lifecycle_lease_async(&state, installation_id.clone(), operation).await {
         Ok(()) => Json(lifecycle_snapshot(state).await).into_response(),
         Err(error) => lease_error_response(error),
     }
@@ -537,7 +656,7 @@ pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
         config_path,
         bind,
         runtime: LifecycleRuntimeStatus {
-            state: "active",
+            state: state.lifecycle_admission.state().as_str(),
             product_version: version::PRODUCT_VERSION,
             build_number: version::build_number(),
             api_major: API_MAJOR,
@@ -691,6 +810,26 @@ fn update_lifecycle_lease(
     result
 }
 
+async fn update_lifecycle_lease_async(
+    state: &SharedState,
+    installation_id: String,
+    operation: LeaseOperation,
+) -> Result<(), LeaseError> {
+    let config_path = state.config_path.clone();
+    let identity = state.daemon_identity.clone();
+    tokio::task::spawn_blocking(move || {
+        update_lifecycle_lease(
+            &config_path,
+            &identity,
+            &installation_id,
+            operation,
+            current_time_ms(),
+        )
+    })
+    .await
+    .map_err(|_| LeaseError::internal("后台服务管理锁任务失败。"))?
+}
+
 fn acquire_lifecycle_lock(config_path: &Path) -> Result<File, LeaseError> {
     let lock_path = control_lock_path(config_path);
     let parent = lock_path
@@ -713,6 +852,7 @@ fn validate_active_lifecycle_lease(
     config_path: &Path,
     identity: &DaemonIdentity,
     installation_id: &str,
+    expected_generation: Option<u64>,
     now_ms: u64,
 ) -> Result<(), LeaseError> {
     let control = read_control_file(config_path)
@@ -727,7 +867,44 @@ fn validate_active_lifecycle_lease(
     {
         return Err(LeaseError::conflict("当前安装不持有后台服务管理租约。"));
     }
+    if expected_generation.is_some_and(|generation| lease.generation != generation) {
+        return Err(LeaseError::conflict(
+            "后台服务管理租约已换代，请刷新后重试。",
+        ));
+    }
     Ok(())
+}
+
+/// Validate a lifecycle lease while keeping fs2 lock acquisition and file I/O
+/// off the Tokio worker. A successful call returns the still-locked file so a
+/// caller can fence the final shutdown commit; the caller must unlock it.
+async fn acquire_validated_lifecycle_lease_lock(
+    state: &SharedState,
+    installation_id: &str,
+    expected_generation: Option<u64>,
+) -> Result<File, LeaseError> {
+    let config_path = state.config_path.clone();
+    let identity = state.daemon_identity.clone();
+    let installation_id = installation_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let lock = acquire_lifecycle_lock(&config_path)?;
+        let result = validate_active_lifecycle_lease(
+            &config_path,
+            &identity,
+            &installation_id,
+            expected_generation,
+            current_time_ms(),
+        );
+        match result {
+            Ok(()) => Ok(lock),
+            Err(error) => {
+                let _ = FileExt::unlock(&lock);
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|_| LeaseError::internal("后台服务管理锁任务失败。"))?
 }
 
 fn control_lock_path(config_path: &Path) -> PathBuf {
@@ -799,12 +976,14 @@ pub async fn require_bearer(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    match authorize(&state.config_path, request.headers()) {
-        Ok(true) => next.run(request).await,
-        Ok(false) => unauthorized_response(),
-        // Do not include the path, token, or parser details in the response.
-        // This keeps control-file contents out of HTTP logs and client errors.
-        Err(_) => (
+    let config_path = state.config_path.clone();
+    let headers = request.headers().clone();
+    let authorization =
+        tokio::task::spawn_blocking(move || authorize(&config_path, &headers)).await;
+    match authorization {
+        Ok(Ok(true)) => next.run(request).await,
+        Ok(Ok(false)) => unauthorized_response(),
+        Ok(Err(_)) | Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({
                 "error": "management authentication unavailable",

@@ -213,8 +213,10 @@ private struct OverviewView: View {
                         if model.daemonBuildMismatch {
                             Divider()
                             OverviewStatusRow(
-                                title: "版本一致性",
-                                detail: "界面与后台服务构建不一致",
+                                title: model.daemonUpgradePending ? "后台升级" : "版本一致性",
+                                detail: model.daemonUpgradePending
+                                    ? model.daemonUpgradeDetail
+                                    : "界面与后台服务构建不一致",
                                 symbol: "exclamationmark.triangle",
                                 tint: .caution
                             )
@@ -281,6 +283,8 @@ private struct OverviewView: View {
     private func runtimeState(_ state: String) -> String {
         switch state {
         case "active": "运行中"
+        case "draining": "排空中"
+        case "shutdownCommitted": "正在切换"
         default: "未知状态"
         }
     }
@@ -341,6 +345,7 @@ private struct OverviewView: View {
             "服务就绪：\(readyDescription(dashboard?.service.ready))",
             "后台构建：\(model.lifecycle?.runtime.buildNumber.map(String.init) ?? "旧版/未知")",
             "构建一致性：\(model.daemonBuildMismatch ? "不一致" : "未发现差异")",
+            "后台升级：\(model.daemonUpgradePending ? model.daemonUpgradeDetail : "无")",
             "远程控制：\(remoteDetail)",
             "AI 网关：\(dashboardDetail(dashboard?.aiGatewayEnabled))",
         ]

@@ -150,6 +150,10 @@ async fn request_once_with_timeout_for_client_inner(
     params: Value,
     timeout: Duration,
 ) -> Result<Value> {
+    let lifecycle_permit = state
+        .lifecycle_admission
+        .try_admit()
+        .ok_or_else(|| anyhow!("daemon lifecycle is draining; retry after restart"))?;
     let requested_client_key = normalize_remote_client_key(client_key);
     let client_key = {
         let mut remote = state.remote_control.inner.lock().await;
@@ -245,6 +249,7 @@ async fn request_once_with_timeout_for_client_inner(
                 method: method.to_string(),
                 thread_id: thread_id.clone(),
                 track_thread_active,
+                lifecycle_permit: Some(lifecycle_permit),
                 response_tx: tx,
                 message: message.clone(),
                 envelopes: envelopes.clone(),

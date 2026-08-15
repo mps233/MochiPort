@@ -219,6 +219,17 @@ pub fn router(state: SharedState) -> Router {
             manage_api::require_bearer,
         ));
 
+    // The compatibility shutdown endpoints predate the versioned management
+    // API. Keep them available for older launchers, but require the same
+    // local bearer credential so they cannot bypass lifecycle ownership.
+    let legacy_shutdown_routes = Router::new()
+        .route("/api/shutdown", post(shutdown))
+        .route("/api/shutdown/instance", post(shutdown_instance))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            manage_api::require_bearer,
+        ));
+
     Router::new()
         .route("/healthz", get(manage_api::healthz))
         .nest("/api/v1/manage", manage_routes)
@@ -227,8 +238,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/oauth/token", post(oauth::oauth_token))
         .route("/api/status", get(status))
         .route("/api/gui/dashboard", get(gui_dashboard))
-        .route("/api/shutdown", post(shutdown))
-        .route("/api/shutdown/instance", post(shutdown_instance))
         .route(
             "/api/update/safe-relaunch",
             get(crate::safe_relaunch::status).post(crate::safe_relaunch::register),
@@ -287,6 +296,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/events", get(events))
         .merge(plugins::router())
         .merge(remote_control_backend::router())
+        .merge(legacy_shutdown_routes)
         .nest("/ai-gateway", crate::ai_gateway::router())
         .layer(middleware::from_fn(access_log))
         .with_state(state)
@@ -658,15 +668,46 @@ async fn perform_shutdown(
     state: &SharedState,
     event_message: &'static str,
 ) -> (StatusCode, Json<serde_json::Value>) {
-    state
-        .push_event("warn", "shutdown_requested", event_message)
-        .await;
-    im_api::stop_bridge_task(&state).await;
-    let accepted = state.request_shutdown().await;
-    (
-        StatusCode::OK,
-        Json(json!({ "ok": true, "accepted": accepted })),
-    )
+    match manage_api::request_shutdown_with_drain(state, false, event_message).await {
+        manage_api::LifecycleShutdownResult::Accepted => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "accepted": true })),
+        ),
+        manage_api::LifecycleShutdownResult::NotRunning => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "accepted": false })),
+        ),
+        manage_api::LifecycleShutdownResult::AlreadyInProgress => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "accepted": false,
+                "state": "draining",
+                "error": "后台服务正在关闭或重启，请稍后重试。",
+            })),
+        ),
+        manage_api::LifecycleShutdownResult::ProtectedWork(protected_work_items) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "accepted": false,
+                "state": "active",
+                "error": format!(
+                    "后台服务仍有 {} 项受保护任务，已取消关闭。",
+                    protected_work_items.total
+                ),
+                "protectedWorkItems": protected_work_items,
+            })),
+        ),
+        manage_api::LifecycleShutdownResult::LeaseRejected(_) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "accepted": false,
+                "error": "当前后台服务管理租约已失效。",
+            })),
+        ),
+    }
 }
 
 async fn get_config(State(state): State<SharedState>) -> Json<AppConfig> {
@@ -955,6 +996,28 @@ mod tests {
 
         let valid = route_response(app, "/api/v1/manage/status", Some(&token)).await;
         assert_eq!(valid.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn legacy_shutdown_routes_require_the_shared_bearer_credential() {
+        let (app, _temp, token) = management_test_router();
+        let missing =
+            request_response(app.clone(), Method::POST, "/api/shutdown", None, None).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+
+        let wrong = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/shutdown/instance",
+            Some("wrong-management-token"),
+            Some(r#"{"daemonInstanceId":"stale"}"#),
+        )
+        .await;
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+        let accepted =
+            request_response(app, Method::POST, "/api/shutdown", Some(&token), None).await;
+        assert_eq!(accepted.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -2301,6 +2364,7 @@ mod tests {
                             method: "turn/start".to_string(),
                             thread_id: None,
                             track_thread_active: true,
+                            lifecycle_permit: None,
                             response_tx: tokio::sync::oneshot::channel().0,
                             message: json!({}),
                             envelopes: Vec::new(),
@@ -2608,5 +2672,164 @@ mod tests {
             .await
             .expect("shutdown signal timeout")
             .expect("shutdown signal sender");
+    }
+
+    #[tokio::test]
+    async fn guarded_shutdown_refuses_protected_work_without_signalling() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        config.state_path = temp.path().join("state.json");
+        let identity = DaemonIdentity::new();
+        let instance_id = identity.instance_id.clone();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        let state = AppState::new(
+            temp.path().join("config.toml"),
+            config,
+            Some(shutdown_tx),
+            Some(identity),
+        );
+        state
+            .runtime
+            .lock()
+            .await
+            .current_turn_by_thread
+            .insert("protected-thread".to_string(), "protected-turn".to_string());
+
+        let response = shutdown_instance(
+            State(state.clone()),
+            Json(InstanceShutdownRequest {
+                daemon_instance_id: instance_id,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let payload = response_json(response).await;
+        assert_eq!(payload["protectedWorkItems"]["total"], json!(1));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown_rx)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_restart_commits_shutdown_once_when_idle() {
+        let (state, _temp, token) = management_test_state();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let instance_id = state.daemon_identity.instance_id.clone();
+        let body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": instance_id,
+        })
+        .to_string();
+        let app = router(state.clone());
+
+        let claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::OK);
+
+        let restart = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/restart",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(restart.status(), StatusCode::OK);
+        assert_eq!(response_json(restart).await["state"], json!("restarting"));
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx)
+            .await
+            .expect("shutdown signal timeout")
+            .expect("shutdown signal sender");
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::ShutdownCommitted
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_restart_rejects_stale_lease_generation() {
+        let (state, _temp, token) = management_test_state();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let instance_id = state.daemon_identity.instance_id.clone();
+        let claim_body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": instance_id,
+        })
+        .to_string();
+        let app = router(state.clone());
+
+        let first_claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&claim_body),
+        )
+        .await;
+        assert_eq!(first_claim.status(), StatusCode::OK);
+        let first_generation = response_json(first_claim).await["management"]["leaseGeneration"]
+            .as_u64()
+            .expect("first lease generation");
+
+        let release = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/release",
+            Some(&token),
+            Some(&claim_body),
+        )
+        .await;
+        assert_eq!(release.status(), StatusCode::OK);
+
+        let second_claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&claim_body),
+        )
+        .await;
+        assert_eq!(second_claim.status(), StatusCode::OK);
+        let second_generation = response_json(second_claim).await["management"]["leaseGeneration"]
+            .as_u64()
+            .expect("second lease generation");
+        assert!(second_generation > first_generation);
+
+        let stale_body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": instance_id,
+            "leaseGeneration": first_generation,
+        })
+        .to_string();
+        let restart = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/restart",
+            Some(&token),
+            Some(&stale_body),
+        )
+        .await;
+        assert_eq!(restart.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(restart).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("换代"))
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown_rx)
+                .await
+                .is_err()
+        );
     }
 }

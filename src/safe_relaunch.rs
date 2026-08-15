@@ -822,7 +822,11 @@ fn stop_daemon_guarded(args: &SafeRelaunchHelperArgs) -> Result<(), &'static str
         if !active_daemon_matches(args) {
             return Err("old daemon identity changed before guarded shutdown");
         }
-        if !request_daemon_shutdown(args.bind_addr, &args.daemon_instance_id) {
+        if !request_daemon_shutdown(
+            args.bind_addr,
+            &args.daemon_instance_id,
+            Some(&args.config_path),
+        ) {
             log_line(
                 &args.log_path,
                 "guarded_shutdown_request_unavailable_waiting_for_existing_exit",
@@ -880,7 +884,11 @@ fn verified_daemon_process_matches(args: &SafeRelaunchHelperArgs) -> bool {
         && process_matches_executable(args.daemon_pid, &args.old_executable_path)
 }
 
-fn request_daemon_shutdown(address: SocketAddr, daemon_instance_id: &str) -> bool {
+fn request_daemon_shutdown(
+    address: SocketAddr,
+    daemon_instance_id: &str,
+    config_path: Option<&Path>,
+) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(&address, Duration::from_millis(400)) else {
         return false;
     };
@@ -892,8 +900,12 @@ fn request_daemon_shutdown(address: SocketAddr, daemon_instance_id: &str) -> boo
         return false;
     }
     let _ = stream.set_write_timeout(Some(Duration::from_millis(400)));
+    let authorization = config_path
+        .and_then(|path| crate::manage_api::management_token(path).ok())
+        .map(|token| format!("Authorization: Bearer {token}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "POST /api/shutdown/instance HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        "POST /api/shutdown/instance HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nConnection: close\r\n{authorization}Content-Length: {}\r\n\r\n",
         body.len()
     );
     if stream.write_all(request.as_bytes()).is_err() || stream.write_all(&body).is_err() {
@@ -1585,7 +1597,7 @@ mod tests {
         });
 
         let accepted = tokio::task::spawn_blocking(move || {
-            request_daemon_shutdown(address, "instance-under-test")
+            request_daemon_shutdown(address, "instance-under-test", None)
         })
         .await
         .expect("shutdown probe task");

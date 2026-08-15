@@ -6,7 +6,7 @@ use std::{
 
 use axum::{
     Json,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, Query, RawQuery, State},
     http::{
         HeaderMap, HeaderName, HeaderValue,
@@ -14,11 +14,12 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
+use futures_util::StreamExt;
 use serde::{Deserialize, de::IntoDeserializer};
 use serde_json::json;
 use tracing::info;
 
-use crate::app_state::SharedState;
+use crate::app_state::{LifecycleAdmissionPermit, SharedState};
 
 use super::catalog::{configured_models_etag, configured_models_response_with_etag};
 use super::config::{ProviderConfig, ProviderType};
@@ -33,6 +34,27 @@ use super::request_log::{
 };
 use super::responses_lite_tools::prepare_for_provider;
 use super::router::{resolve_provider_with_state, resolve_provider_with_state_for_type};
+
+fn try_admit_lifecycle_work(state: &SharedState) -> Result<LifecycleAdmissionPermit, Response> {
+    state
+        .lifecycle_admission
+        .try_admit()
+        .ok_or_else(|| GatewayError::lifecycle_draining().into_response())
+}
+
+/// Keep protected-work admission alive until the response body is consumed.
+///
+/// Streaming Responses handlers return before their SSE body finishes. Moving
+/// the permit into the body stream prevents a lifecycle drain from committing
+/// while the upstream stream is still being delivered to the client.
+fn attach_lifecycle_permit(response: Response, permit: LifecycleAdmissionPermit) -> Response {
+    let (parts, body) = response.into_parts();
+    let body = body.into_data_stream().map(move |frame| {
+        let _keep_alive = &permit;
+        frame
+    });
+    Response::from_parts(parts, Body::from_stream(body))
+}
 
 static AI_GATEWAY_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 const MAX_DECOMPRESSED_REQUEST_BODY_BYTES: usize = 512 * 1024 * 1024;
@@ -66,6 +88,11 @@ pub async fn handle_alpha_search(
     let request_logging_enabled = gateway_config.request_logging_enabled;
     let request_log_details_enabled = gateway_config.request_log_details_enabled;
     drop(config);
+    let lifecycle_permit = match try_admit_lifecycle_work(&state) {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+    let _in_flight_guard = AiGatewayInFlightGuard::new();
 
     let inspection = match openai_alpha_search::inspect_request(&body) {
         Ok(inspection) => inspection,
@@ -157,7 +184,7 @@ pub async fn handle_alpha_search(
     };
     record_routing_outcome(&state, &route_id, outcome).await;
     match result {
-        Ok(response) => response,
+        Ok(response) => attach_lifecycle_permit(response, lifecycle_permit),
         Err(error) => {
             update_failed_log(&log_context, &error.message);
             error.into_response()
@@ -205,6 +232,11 @@ async fn handle_image_request(
     let request_logging_enabled = gateway_config.request_logging_enabled;
     let request_log_details_enabled = gateway_config.request_log_details_enabled;
     drop(config);
+    let lifecycle_permit = match try_admit_lifecycle_work(&state) {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
+    let _in_flight_guard = AiGatewayInFlightGuard::new();
 
     let inspection = match openai_images::inspect_request(&body, endpoint) {
         Ok(inspection) => inspection,
@@ -299,7 +331,7 @@ async fn handle_image_request(
     let outcome = classify_outcome(&result);
     record_routing_outcome(&state, &route_id, outcome).await;
     match result {
-        Ok(response) => response,
+        Ok(response) => attach_lifecycle_permit(response, lifecycle_permit),
         Err(error) => {
             update_failed_log(&log_context, &error.message);
             error.into_response()
@@ -324,6 +356,10 @@ pub async fn handle_responses_compact(
     let request_log_details_enabled = gw_config.request_log_details_enabled;
     let models_etag = configured_models_etag(&gw_config);
     drop(config);
+    let lifecycle_permit = match try_admit_lifecycle_work(&state) {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     let in_flight = AI_GATEWAY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) + 1;
     let _in_flight_guard = AiGatewayInFlightGuard;
 
@@ -434,7 +470,7 @@ pub async fn handle_responses_compact(
     match result {
         Ok(mut response) => {
             set_models_etag_header(&mut response, &models_etag);
-            response
+            attach_lifecycle_permit(response, lifecycle_permit)
         }
         Err(error) => {
             update_failed_log(&log_context, &error.message);
@@ -461,6 +497,10 @@ pub async fn handle_responses(
     let request_log_details_enabled = gw_config.request_log_details_enabled;
     let models_etag = configured_models_etag(&gw_config);
     drop(config);
+    let lifecycle_permit = match try_admit_lifecycle_work(&state) {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     let in_flight = AI_GATEWAY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) + 1;
     let _in_flight_guard = AiGatewayInFlightGuard;
 
@@ -616,7 +656,7 @@ pub async fn handle_responses(
             match result {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
-                    resp.into_response()
+                    attach_lifecycle_permit(resp.into_response(), lifecycle_permit)
                 }
                 Err(e) => {
                     update_failed_log(&log_context, &e.message);
@@ -649,7 +689,7 @@ pub async fn handle_responses(
             match result {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
-                    resp.into_response()
+                    attach_lifecycle_permit(resp.into_response(), lifecycle_permit)
                 }
                 Err(e) => {
                     update_failed_log(&log_context, &e.message);
@@ -682,7 +722,7 @@ pub async fn handle_responses(
             match result {
                 Ok(mut resp) => {
                     set_models_etag_header(&mut resp, &models_etag);
-                    resp.into_response()
+                    attach_lifecycle_permit(resp.into_response(), lifecycle_permit)
                 }
                 Err(e) => {
                     update_failed_log(&log_context, &e.message);
@@ -737,6 +777,13 @@ fn decode_request_body(headers: &HeaderMap, body: Bytes) -> Result<Bytes, Gatewa
 }
 
 struct AiGatewayInFlightGuard;
+
+impl AiGatewayInFlightGuard {
+    fn new() -> Self {
+        AI_GATEWAY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
 
 impl Drop for AiGatewayInFlightGuard {
     fn drop(&mut self) {
@@ -1278,25 +1325,56 @@ fn set_etag_header(response: &mut axum::response::Response, etag: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-    use std::time::Instant;
+    use std::{
+        io::Cursor,
+        sync::Arc,
+        time::{Duration, Instant},
+    };
 
     use axum::{
-        body::Bytes,
+        body::{Body, Bytes},
         http::{HeaderMap, HeaderValue, header::CONTENT_ENCODING},
+        response::Response,
     };
+    use futures_util::StreamExt;
     use serde_json::json;
 
     use crate::ai_gateway::config::{ProviderConfig, ProviderType};
     use crate::ai_gateway::context::GatewayContext;
     use crate::ai_gateway::providers::openai_images;
     use crate::ai_gateway::request_log::RequestLogStore;
+    use crate::app_state::LifecycleAdmission;
 
     use super::{
-        GatewayRequestEnvelope, decode_request_body, deserialize_gateway_request,
-        filter_image_generation_tools, insert_initial_image_log,
+        GatewayRequestEnvelope, attach_lifecycle_permit, decode_request_body,
+        deserialize_gateway_request, filter_image_generation_tools, insert_initial_image_log,
         strip_hosted_web_search_from_lite_request_tools,
     };
+
+    #[tokio::test]
+    async fn lifecycle_permit_stays_attached_until_response_body_is_dropped() {
+        let admission = Arc::new(LifecycleAdmission::new());
+        let permit = admission.try_admit().expect("admit response");
+        let response = attach_lifecycle_permit(Response::new(Body::from("ok")), permit);
+
+        assert!(admission.begin_draining());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), admission.wait_for_drain())
+                .await
+                .is_err()
+        );
+
+        let mut body = response.into_body().into_data_stream();
+        assert_eq!(
+            body.next().await.expect("response chunk").expect("body"),
+            Bytes::from("ok")
+        );
+        drop(body);
+
+        tokio::time::timeout(Duration::from_millis(100), admission.wait_for_drain())
+            .await
+            .expect("drain after body drop");
+    }
 
     fn lite_request(model: &str) -> serde_json::Value {
         json!({

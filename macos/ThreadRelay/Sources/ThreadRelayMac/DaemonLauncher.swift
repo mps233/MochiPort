@@ -4,6 +4,11 @@ import Foundation
 enum DaemonLaunchError: LocalizedError, Equatable {
     case helperMissing
     case helperNotExecutable
+    case runtimeBuildIdentifierInvalid(String)
+    case runtimeDirectoryUnavailable
+    case runtimeStageFailed
+    case runtimeNotExecutable
+    case runtimeVersionMismatch(expected: String, actual: String?)
     case guiExecutableMissing
     case guiExecutableNotExecutable
     case guiSupervisorMissing
@@ -19,6 +24,16 @@ enum DaemonLaunchError: LocalizedError, Equatable {
             return "应用内未找到后台服务。请重新安装 ThreadRelay。"
         case .helperNotExecutable:
             return "应用内的后台服务不可执行。请重新安装 ThreadRelay。"
+        case let .runtimeBuildIdentifierInvalid(identifier):
+            return "后台服务构建标识无效：\(identifier)"
+        case .runtimeDirectoryUnavailable:
+            return "无法创建后台服务版本目录。"
+        case .runtimeStageFailed:
+            return "无法准备后台服务运行版本。"
+        case .runtimeNotExecutable:
+            return "准备好的后台服务不可执行。"
+        case let .runtimeVersionMismatch(expected, actual):
+            return "后台服务构建不匹配（应为 \(expected)，实际为 \(actual ?? "未知")）。"
         case .guiExecutableMissing:
             return "应用内未找到 ThreadRelay 界面程序。请重新安装 ThreadRelay。"
         case .guiExecutableNotExecutable:
@@ -108,19 +123,44 @@ struct DaemonLaunchConfiguration: Equatable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    func resolvedBuildIdentifier() throws -> String {
+        guard let buildIdentifier else { return "dev" }
+        let trimmed = buildIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
+        let allowed = CharacterSet(
+            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        )
+        guard !trimmed.isEmpty,
+              trimmed != ".",
+              trimmed != "..",
+              trimmed.rangeOfCharacter(from: allowed.inverted) == nil
+        else {
+            throw DaemonLaunchError.runtimeBuildIdentifierInvalid(buildIdentifier)
+        }
+        return trimmed
+    }
+
+    func stagedHelperURL() throws -> URL {
+        let buildIdentifier = try resolvedBuildIdentifier()
+        return configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+            .appendingPathComponent(buildIdentifier, isDirectory: true)
+            .appendingPathComponent("threadrelay-daemon")
+    }
+
     func propertyListData() throws -> Data {
+        let resolvedBuildIdentifier = try resolvedBuildIdentifier()
+        let stagedHelperURL = try stagedHelperURL()
         var environment: [String: String] = [
             "HOME": homeURL.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "THREADRELAY_HOME": configURL.deletingLastPathComponent().path,
         ]
-        if let buildIdentifier {
-            environment["THREADRELAY_BUNDLE_BUILD"] = buildIdentifier
-        }
+        environment["THREADRELAY_BUNDLE_BUILD"] = resolvedBuildIdentifier
         let propertyList: [String: Any] = [
             "Label": Self.label,
             "ProgramArguments": [
-                helperURL.path,
+                stagedHelperURL.path,
                 "--config",
                 configURL.path,
                 "daemon",
@@ -215,7 +255,14 @@ struct CommandResult: Equatable {
 }
 
 protocol DaemonLaunching: Sendable {
+    /// Prepare the embedded daemon for a future launch without touching the
+    /// currently loaded LaunchAgent or running process.
+    func prepareRuntime() async throws
     func startIfNeeded() async throws
+}
+
+extension DaemonLaunching {
+    func prepareRuntime() async throws {}
 }
 
 struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
@@ -230,6 +277,18 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
     ) {
         self.configurationLoader = configurationLoader
         self.commandRunner = commandRunner
+    }
+
+    func prepareRuntime() async throws {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            try Self.prepareRuntime(
+                configuration: configuration,
+                commandRunner: commandRunner
+            )
+        }.value
     }
 
     func startIfNeeded() async throws {
@@ -249,6 +308,34 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         commandRunner: @Sendable (URL, [String]) throws -> CommandResult
     ) throws {
         let fileManager = FileManager.default
+        try prepareRuntime(configuration: configuration, commandRunner: commandRunner)
+
+        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+        let domain = "gui/\(getuid())"
+        let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
+        let printResult = try commandRunner(launchctl, ["print", serviceTarget])
+
+        try writeLaunchAgent(configuration, fileManager: fileManager)
+        if printResult.exitCode == 0 {
+            // Staging prepares the next launch only. An already loaded job may
+            // still be serving protected work from an older path or build, so
+            // this path must never bootout, kickstart, or bootstrap it.
+            return
+        }
+        let result = try commandRunner(
+            launchctl,
+            ["bootstrap", domain, configuration.launchAgentURL.path]
+        )
+        guard result.exitCode == 0 else {
+            throw DaemonLaunchError.launchctlFailed(lastLine(of: result.output))
+        }
+    }
+
+    private static func prepareRuntime(
+        configuration: DaemonLaunchConfiguration,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        let fileManager = FileManager.default
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(
             atPath: configuration.helperURL.path,
@@ -260,91 +347,102 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             throw DaemonLaunchError.helperNotExecutable
         }
 
-        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
-        let domain = "gui/\(getuid())"
-        let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
-        let printResult = try commandRunner(launchctl, ["print", serviceTarget])
-
-        let result: CommandResult
-        if printResult.exitCode == 0 {
-            if loadedAgentMatches(
-                output: printResult.output,
-                configuration: configuration
-            ) {
-                // Keep the running daemon alive, but update the on-disk job so
-                // newly added environment values apply on the next explicit
-                // LaunchAgent reload or user login.
-                try writeLaunchAgent(configuration, fileManager: fileManager)
-                result = try commandRunner(launchctl, ["kickstart", serviceTarget])
-            } else {
-                // A job from the same bundle can still be running the previous
-                // binary after an in-place app update. Reload it so the new
-                // build number and embedded daemon are actually adopted.
-                guard loadedProgram(from: printResult.output) == configuration.helperURL.path else {
-                    throw DaemonLaunchError.loadedAgentMismatch(
-                        expected: configuration.helperURL.path,
-                        actual: loadedProgram(from: printResult.output)
-                    )
-                }
-                try unloadAgent(
-                    launchctl: launchctl,
-                    serviceTarget: serviceTarget,
-                    commandRunner: commandRunner
-                )
-                try writeLaunchAgent(configuration, fileManager: fileManager)
-                result = try commandRunner(
-                    launchctl,
-                    ["bootstrap", domain, configuration.launchAgentURL.path]
-                )
-            }
-        } else {
-            try writeLaunchAgent(configuration, fileManager: fileManager)
-            result = try commandRunner(
-                launchctl,
-                ["bootstrap", domain, configuration.launchAgentURL.path]
-            )
-        }
-        guard result.exitCode == 0 else {
-            throw DaemonLaunchError.launchctlFailed(lastLine(of: result.output))
-        }
-    }
-
-    private static func unloadAgent(
-        launchctl: URL,
-        serviceTarget: String,
-        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
-    ) throws {
-        let bootout = try commandRunner(launchctl, ["bootout", serviceTarget])
-        if bootout.exitCode != 0 {
-            // Another recovery attempt may have unloaded the job between the
-            // initial print and bootout. Only surface an error when it is
-            // still present after the failed bootout.
-            let afterBootout = try commandRunner(launchctl, ["print", serviceTarget])
-            if afterBootout.exitCode == 0 {
-                throw DaemonLaunchError.launchctlFailed(lastLine(of: bootout.output))
-            }
-            return
-        }
-        waitForAgentToDisappear(
-            launchctl: launchctl,
-            serviceTarget: serviceTarget,
+        _ = try stageRuntime(
+            configuration: configuration,
+            fileManager: fileManager,
             commandRunner: commandRunner
         )
     }
 
-    private static func waitForAgentToDisappear(
-        launchctl: URL,
-        serviceTarget: String,
+    private static func stageRuntime(
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager,
         commandRunner: @Sendable (URL, [String]) throws -> CommandResult
-    ) {
-        for attempt in 0..<10 {
-            if let result = try? commandRunner(launchctl, ["print", serviceTarget]), result.exitCode != 0 {
-                return
-            }
-            if attempt < 9 {
-                Thread.sleep(forTimeInterval: 0.1)
+    ) throws -> URL {
+        let expectedBuild = try configuration.resolvedBuildIdentifier()
+        let destination = try configuration.stagedHelperURL()
+        let runtimeDirectory = destination.deletingLastPathComponent()
+        do {
+            try fileManager.createDirectory(
+                at: runtimeDirectory,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            throw DaemonLaunchError.runtimeDirectoryUnavailable
+        }
+
+        let temporary = runtimeDirectory.appendingPathComponent(
+            ".threadrelay-daemon.\(UUID().uuidString).tmp"
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+        do {
+            try fileManager.copyItem(at: configuration.helperURL, to: temporary)
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: temporary.path
+            )
+        } catch {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
+        try validateRuntimePermissions(at: temporary, fileManager: fileManager)
+
+        let versionResult: CommandResult
+        do {
+            versionResult = try commandRunner(temporary, ["--version"])
+        } catch {
+            throw DaemonLaunchError.runtimeVersionMismatch(
+                expected: expectedBuild,
+                actual: nil
+            )
+        }
+        let actualBuild = daemonBuildIdentifier(fromVersionOutput: versionResult.output)
+        guard versionResult.exitCode == 0, actualBuild == expectedBuild else {
+            throw DaemonLaunchError.runtimeVersionMismatch(
+                expected: expectedBuild,
+                actual: actualBuild
+            )
+        }
+
+        let renameResult = temporary.path.withCString { temporaryPath in
+            destination.path.withCString { destinationPath in
+                Darwin.rename(temporaryPath, destinationPath)
             }
         }
+        guard renameResult == 0 else {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
+        try validateRuntimePermissions(at: destination, fileManager: fileManager)
+        return destination
+    }
+
+    private static func validateRuntimePermissions(
+        at url: URL,
+        fileManager: FileManager
+    ) throws {
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try fileManager.attributesOfItem(atPath: url.path)
+        } catch {
+            throw DaemonLaunchError.runtimeNotExecutable
+        }
+        let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue
+        guard attributes[.type] as? FileAttributeType == .typeRegular,
+              permissions.map({ $0 & 0o777 }) == 0o755,
+              fileManager.isExecutableFile(atPath: url.path)
+        else {
+            throw DaemonLaunchError.runtimeNotExecutable
+        }
+    }
+
+    private static func daemonBuildIdentifier(fromVersionOutput output: String) -> String? {
+        let line = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard line.hasPrefix("threadrelay "),
+              let buildStart = line.range(of: "(build "),
+              line.hasSuffix(")")
+        else { return nil }
+        let value = line[buildStart.upperBound..<line.index(before: line.endIndex)]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return value.isEmpty ? nil : value
     }
 
     static func loadedAgentMatches(
@@ -354,16 +452,18 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         let lines = output.split(whereSeparator: \.isNewline).map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard let program = loadedProgram(from: output), program == configuration.helperURL.path else {
+        guard let stagedHelperURL = try? configuration.stagedHelperURL(),
+              let expectedBuild = try? configuration.resolvedBuildIdentifier(),
+              let program = loadedProgram(from: output),
+              program == stagedHelperURL.path
+        else {
             return false
         }
-        if let buildIdentifier = configuration.buildIdentifier {
-            guard loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
-                == configuration.configURL.deletingLastPathComponent().path,
-                loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD") == buildIdentifier
-            else {
-                return false
-            }
+        guard loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
+            == configuration.configURL.deletingLastPathComponent().path,
+            loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD") == expectedBuild
+        else {
+            return false
         }
         guard let argumentsStart = lines.firstIndex(where: { $0 == "arguments = {" }),
               let argumentsEnd = lines[(argumentsStart + 1)...].firstIndex(of: "}") else {
@@ -373,7 +473,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             .filter { !$0.isEmpty }
             .map { unquote($0) }
         return arguments == [
-            configuration.helperURL.path,
+            stagedHelperURL.path,
             "--config",
             configuration.configURL.path,
             "daemon",
