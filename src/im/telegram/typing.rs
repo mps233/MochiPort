@@ -11,10 +11,34 @@ use crate::{
 
 const TELEGRAM_TYPING_RETRY_THROTTLE_MS: u128 = 300;
 const TELEGRAM_TYPING_RENEWAL_MS: u128 = 4_000;
+const TELEGRAM_THINKING_DRAFT_RENEWAL_MS: u128 = 12_000;
 const TELEGRAM_TYPING_RETRY_MAX_SECONDS: u64 = 30;
 const TELEGRAM_TYPING_SEND_TIMEOUT_SECONDS: u64 = 5;
 const TELEGRAM_TYPING_FINISH_TIMEOUT_SECONDS: u64 = 6;
 const TURN_TYPING_ITEM_PREFIX: &str = "turn:";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramThinkingMode {
+    RichDraft,
+    Draft,
+    ChatAction,
+}
+
+impl TelegramThinkingMode {
+    fn renewal_ms(self) -> u128 {
+        match self {
+            Self::RichDraft | Self::Draft => TELEGRAM_THINKING_DRAFT_RENEWAL_MS,
+            Self::ChatAction => TELEGRAM_TYPING_RENEWAL_MS,
+        }
+    }
+
+    fn sent_event(self) -> &'static str {
+        match self {
+            Self::RichDraft | Self::Draft => "telegram_thinking_draft_sent",
+            Self::ChatAction => "telegram_typing_sent",
+        }
+    }
+}
 
 pub(crate) async fn start_turn(
     state: &SharedState,
@@ -26,25 +50,131 @@ pub(crate) async fn start_turn(
     start(state, api, thread_id, &turn_item_id(turn_id), route).await;
 }
 
-pub(crate) async fn finish_turn(
+pub(crate) async fn finish_thread(
     state: &SharedState,
     api: TelegramApi,
     thread_id: &str,
-    turn_id: &str,
     route: &RouteTarget,
 ) {
-    finish(state, api, thread_id, &turn_item_id(turn_id), route).await;
+    let finishing = state
+        .runtime
+        .lock()
+        .await
+        .finish_telegram_typing_for_thread(thread_id);
+    drain_finishing(state, api, thread_id, route, finishing).await;
 }
 
-pub(crate) async fn turn_is_active(state: &SharedState, thread_id: &str, turn_id: &str) -> bool {
+pub(crate) async fn suspend_for_persistent_message(
+    state: &SharedState,
+    api: TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    terminal: bool,
+    turn_id: Option<&str>,
+) {
+    let finishing = state
+        .runtime
+        .lock()
+        .await
+        .suspend_telegram_typing_for_persistent_message(thread_id, terminal, turn_id);
+    drain_finishing(state, api, thread_id, route, finishing).await;
+}
+
+pub(crate) async fn resume_after_persistent_message(state: &SharedState, thread_id: &str) {
     state
         .runtime
         .lock()
         .await
-        .telegram_typing_item_is_active(thread_id, &turn_item_id(turn_id))
+        .resume_telegram_typing_after_persistent_message(thread_id);
 }
 
-pub(crate) async fn start(
+async fn drain_finishing(
+    state: &SharedState,
+    api: TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    finishing: Vec<(String, i64, bool)>,
+) {
+    if finishing.is_empty() {
+        return;
+    }
+    for (item_id, generation, should_start) in &finishing {
+        if *should_start {
+            spawn_driver(state, api.clone(), thread_id, item_id, route, *generation);
+        }
+    }
+
+    let completed_in_time = tokio::time::timeout(
+        Duration::from_secs(TELEGRAM_TYPING_FINISH_TIMEOUT_SECONDS),
+        async {
+            loop {
+                let still_active = {
+                    let runtime = state.runtime.lock().await;
+                    finishing.iter().any(|(item_id, generation, _)| {
+                        runtime.telegram_typing_is_active(thread_id, item_id, *generation)
+                    })
+                };
+                if !still_active {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        },
+    )
+    .await
+    .is_ok();
+    if completed_in_time {
+        return;
+    }
+
+    for (item_id, generation, _) in finishing {
+        let cancelled = state
+            .runtime
+            .lock()
+            .await
+            .cancel_telegram_typing_generation(thread_id, &item_id, generation);
+        if cancelled {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_typing_finish_timeout",
+                    format!(
+                        "thread={thread_id} item={item_id} chat={} generation={generation}",
+                        route.chat_id
+                    ),
+                )
+                .await;
+        }
+    }
+}
+
+pub(crate) async fn restore_after_persistent_message(
+    state: &SharedState,
+    api: TelegramApi,
+    thread_id: &str,
+    turn_id: Option<&str>,
+    route: &RouteTarget,
+) {
+    if let Some(turn_id) = turn_id {
+        let is_current_turn = state
+            .runtime
+            .lock()
+            .await
+            .current_turn_id(thread_id)
+            .is_some_and(|current_turn_id| current_turn_id == turn_id);
+        if !is_current_turn {
+            return;
+        }
+        start_turn(state, api, thread_id, turn_id, route).await;
+    }
+    state
+        .runtime
+        .lock()
+        .await
+        .wake_telegram_typing_for_thread(thread_id);
+}
+
+async fn start(
     state: &SharedState,
     api: TelegramApi,
     thread_id: &str,
@@ -58,66 +188,6 @@ pub(crate) async fn start(
         .start_telegram_typing(thread_id, item_id);
     if let Some(generation) = generation {
         spawn_driver(state, api, thread_id, item_id, route, generation);
-    }
-}
-
-pub(crate) async fn finish(
-    state: &SharedState,
-    api: TelegramApi,
-    thread_id: &str,
-    item_id: &str,
-    route: &RouteTarget,
-) {
-    let typing = state
-        .runtime
-        .lock()
-        .await
-        .finish_telegram_typing(thread_id, item_id);
-    let Some((generation, should_start, completed)) = typing else {
-        return;
-    };
-    if should_start {
-        spawn_driver(state, api, thread_id, item_id, route, generation);
-    }
-    let completed_in_time = tokio::time::timeout(
-        Duration::from_secs(TELEGRAM_TYPING_FINISH_TIMEOUT_SECONDS),
-        async {
-            loop {
-                if !state
-                    .runtime
-                    .lock()
-                    .await
-                    .telegram_typing_is_active(thread_id, item_id, generation)
-                {
-                    return;
-                }
-                tokio::select! {
-                    _ = completed.notified() => {}
-                    _ = tokio::time::sleep(Duration::from_millis(50)) => {}
-                }
-            }
-        },
-    )
-    .await
-    .is_ok();
-    if !completed_in_time {
-        let cancelled = state
-            .runtime
-            .lock()
-            .await
-            .cancel_telegram_typing_generation(thread_id, item_id, generation);
-        if cancelled {
-            state
-                .push_event(
-                    "warn",
-                    "telegram_typing_finish_timeout",
-                    format!(
-                        "thread={thread_id} item={item_id} chat={} generation={generation}",
-                        route.chat_id
-                    ),
-                )
-                .await;
-        }
     }
 }
 
@@ -148,6 +218,7 @@ async fn typing_driver(
 ) {
     let adapter = TelegramAdapter::new(api);
     let mut consecutive_failures = 0_u32;
+    let mut thinking_mode = TelegramThinkingMode::RichDraft;
     loop {
         let now_ms = crate::types::now_ms();
         let (send_delay_ms, wait_for_update) = {
@@ -165,7 +236,7 @@ async fn typing_driver(
                 &item_id,
                 generation,
                 now_ms,
-                TELEGRAM_TYPING_RENEWAL_MS,
+                thinking_mode.renewal_ms(),
             ) {
                 (None, Some(wait))
             } else {
@@ -216,17 +287,20 @@ async fn typing_driver(
             return;
         };
         let result = if finished {
+            // Telegram drafts are finalized by the next persistent bot message.
+            // Waiting for this driver to stop before that message is sent keeps
+            // an in-flight heartbeat from recreating Thinking afterwards.
             Ok(())
         } else {
             match tokio::time::timeout(
                 Duration::from_secs(TELEGRAM_TYPING_SEND_TIMEOUT_SECONDS),
-                adapter.send_typing_action(&route.chat_id),
+                send_thinking_indicator(&adapter, &route.chat_id, generation, &mut thinking_mode),
             )
             .await
             {
                 Ok(result) => result,
                 Err(_) => Err(anyhow::anyhow!(
-                    "telegram sendChatAction timed out after {TELEGRAM_TYPING_SEND_TIMEOUT_SECONDS}s"
+                    "telegram thinking indicator timed out after {TELEGRAM_TYPING_SEND_TIMEOUT_SECONDS}s"
                 )),
             }
         };
@@ -246,7 +320,7 @@ async fn typing_driver(
                     state
                         .push_event(
                             "info",
-                            "telegram_typing_sent",
+                            thinking_mode.sent_event(),
                             format!(
                                 "thread={thread_id} item={item_id} chat={} generation={generation}",
                                 route.chat_id
@@ -268,6 +342,15 @@ async fn typing_driver(
                 }
             }
         }
+        let retry_wake_driver = if retry_delay.is_some() {
+            state
+                .runtime
+                .lock()
+                .await
+                .telegram_typing_wake_driver(&thread_id, &item_id, generation)
+        } else {
+            None
+        };
         let action = state.runtime.lock().await.complete_telegram_typing_send(
             &thread_id,
             &item_id,
@@ -280,7 +363,14 @@ async fn typing_driver(
                 && item_id.starts_with(TURN_TYPING_ITEM_PREFIX)
                 && let Some(retry_delay) = retry_delay
             {
-                tokio::time::sleep(retry_delay).await;
+                if let Some(wake_driver) = retry_wake_driver {
+                    tokio::select! {
+                        _ = tokio::time::sleep(retry_delay) => {}
+                        _ = wake_driver.notified() => {}
+                    }
+                } else {
+                    tokio::time::sleep(retry_delay).await;
+                }
                 let restarted = state
                     .runtime
                     .lock()
@@ -293,6 +383,27 @@ async fn typing_driver(
             return;
         }
     }
+}
+
+async fn send_thinking_indicator(
+    adapter: &TelegramAdapter,
+    chat_id: &str,
+    draft_id: i64,
+    mode: &mut TelegramThinkingMode,
+) -> anyhow::Result<()> {
+    if *mode == TelegramThinkingMode::RichDraft {
+        if adapter.send_rich_thinking_draft(chat_id, draft_id).await? {
+            return Ok(());
+        }
+        *mode = TelegramThinkingMode::Draft;
+    }
+    if *mode == TelegramThinkingMode::Draft {
+        if adapter.send_thinking_draft(chat_id, draft_id).await? {
+            return Ok(());
+        }
+        *mode = TelegramThinkingMode::ChatAction;
+    }
+    adapter.send_typing_action(chat_id).await
 }
 
 fn turn_item_id(turn_id: &str) -> String {
@@ -320,7 +431,11 @@ mod tests {
 
     use reqwest::StatusCode;
 
-    use super::{turn_item_id, typing_retry_delay};
+    use super::{
+        TELEGRAM_THINKING_DRAFT_RENEWAL_MS, TELEGRAM_TYPING_RENEWAL_MS,
+        TELEGRAM_TYPING_SEND_TIMEOUT_SECONDS, TelegramThinkingMode, turn_item_id,
+        typing_retry_delay,
+    };
     use crate::im::telegram::api::TelegramApiError;
     use crate::im_runtime::RuntimeState;
 
@@ -357,6 +472,27 @@ mod tests {
         assert_eq!(
             typing_retry_delay(&generic_error, 10),
             Duration::from_secs(30)
+        );
+    }
+
+    #[test]
+    fn native_draft_renews_before_expiry_and_fallback_uses_typing_cadence() {
+        assert_eq!(
+            TelegramThinkingMode::RichDraft.renewal_ms(),
+            TELEGRAM_THINKING_DRAFT_RENEWAL_MS
+        );
+        assert_eq!(
+            TelegramThinkingMode::Draft.renewal_ms(),
+            TELEGRAM_THINKING_DRAFT_RENEWAL_MS
+        );
+        assert_eq!(
+            TelegramThinkingMode::ChatAction.renewal_ms(),
+            TELEGRAM_TYPING_RENEWAL_MS
+        );
+        assert!(
+            TELEGRAM_THINKING_DRAFT_RENEWAL_MS
+                + u128::from(TELEGRAM_TYPING_SEND_TIMEOUT_SECONDS) * 1_000
+                < 20_000
         );
     }
 }

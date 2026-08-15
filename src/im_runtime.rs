@@ -169,6 +169,7 @@ pub struct RuntimeState {
     pub pending_approval_request_keys: HashSet<String>,
     pub feishu_streaming_cards_by_item: HashMap<String, FeishuStreamingCardState>,
     telegram_typing_by_item: HashMap<String, TelegramTypingState>,
+    telegram_typing_suspended_threads: HashSet<String>,
     telegram_completed_typing_keys: HashSet<String>,
     telegram_completed_typing_order: VecDeque<String>,
     telegram_command_progress_by_thread: HashMap<String, TelegramCommandProgressState>,
@@ -835,7 +836,18 @@ impl RuntimeState {
 
     pub fn start_telegram_typing(&mut self, thread_id: &str, item_id: &str) -> Option<i64> {
         let key = telegram_typing_key(thread_id, item_id);
-        if self.telegram_completed_typing_keys.contains(&key) {
+        if self.telegram_typing_suspended_threads.contains(thread_id)
+            || self.telegram_completed_typing_keys.contains(&key)
+        {
+            return None;
+        }
+        let thread_prefix = telegram_typing_thread_prefix(thread_id);
+        if !self.telegram_typing_by_item.contains_key(&key)
+            && self
+                .telegram_typing_by_item
+                .keys()
+                .any(|active_key| active_key.starts_with(&thread_prefix))
+        {
             return None;
         }
         if !self.telegram_typing_by_item.contains_key(&key) {
@@ -881,10 +893,81 @@ impl RuntimeState {
         typing.revision = typing.revision.saturating_add(1);
         let should_start = !typing.sending;
         typing.sending = true;
-        if !should_start {
-            typing.wake_driver.notify_one();
-        }
+        // Wake a driver that may be sleeping in a retry backoff even when a
+        // fresh completion driver will be spawned for this state.
+        typing.wake_driver.notify_one();
         Some((typing.generation, should_start, typing.completed.clone()))
+    }
+
+    pub fn finish_telegram_typing_for_thread(
+        &mut self,
+        thread_id: &str,
+    ) -> Vec<(String, i64, bool)> {
+        self.stop_telegram_typing_for_thread(thread_id, true, None)
+    }
+
+    pub fn suspend_telegram_typing_for_persistent_message(
+        &mut self,
+        thread_id: &str,
+        terminal: bool,
+        turn_id: Option<&str>,
+    ) -> Vec<(String, i64, bool)> {
+        self.telegram_typing_suspended_threads
+            .insert(thread_id.to_string());
+        self.stop_telegram_typing_for_thread(thread_id, terminal, turn_id)
+    }
+
+    pub fn resume_telegram_typing_after_persistent_message(&mut self, thread_id: &str) {
+        self.telegram_typing_suspended_threads.remove(thread_id);
+    }
+
+    fn stop_telegram_typing_for_thread(
+        &mut self,
+        thread_id: &str,
+        terminal: bool,
+        terminal_turn_id: Option<&str>,
+    ) -> Vec<(String, i64, bool)> {
+        let terminal_turn_id = if terminal {
+            terminal_turn_id.map(str::to_string).or_else(|| {
+                self.current_turn_by_thread
+                    .get(thread_id)
+                    .map(String::to_string)
+            })
+        } else {
+            None
+        };
+        if let Some(turn_id) = terminal_turn_id {
+            self.remember_completed_telegram_typing(&telegram_typing_key(
+                thread_id,
+                &format!("turn:{turn_id}"),
+            ));
+        }
+        let prefix = telegram_typing_thread_prefix(thread_id);
+        let mut item_ids = self
+            .telegram_typing_by_item
+            .keys()
+            .filter_map(|key| key.strip_prefix(&prefix).map(str::to_string))
+            .collect::<Vec<_>>();
+        item_ids.sort();
+
+        let mut finishing = Vec::with_capacity(item_ids.len());
+        for item_id in item_ids {
+            let key = telegram_typing_key(thread_id, &item_id);
+            if terminal {
+                self.remember_completed_telegram_typing(&key);
+            }
+            let Some(typing) = self.telegram_typing_by_item.get_mut(&key) else {
+                continue;
+            };
+            typing.dirty = true;
+            typing.finished = true;
+            typing.revision = typing.revision.saturating_add(1);
+            let should_start = !typing.sending;
+            typing.sending = true;
+            typing.wake_driver.notify_one();
+            finishing.push((item_id, typing.generation, should_start));
+        }
+        finishing
     }
 
     pub fn take_telegram_typing_snapshot(
@@ -1000,6 +1083,7 @@ impl RuntimeState {
         {
             return false;
         }
+        self.remember_completed_telegram_typing(&key);
         self.remove_telegram_typing(&key);
         true
     }
@@ -1027,6 +1111,46 @@ impl RuntimeState {
             typing.revision = typing.revision.saturating_add(1);
         }
         true
+    }
+
+    /// Force an active typing/thinking driver to send its next heartbeat now.
+    ///
+    /// Native Telegram drafts can be hidden when a regular message arrives.
+    /// Waking the driver lets callers restore the indicator immediately after
+    /// that message is delivered instead of waiting for the normal heartbeat.
+    pub fn wake_telegram_typing(&mut self, thread_id: &str, item_id: &str) -> bool {
+        let Some(typing) = self
+            .telegram_typing_by_item
+            .get_mut(&telegram_typing_key(thread_id, item_id))
+        else {
+            return false;
+        };
+        if typing.finished {
+            return false;
+        }
+        if !typing.dirty {
+            typing.dirty = true;
+            typing.revision = typing.revision.saturating_add(1);
+        }
+        typing.wake_driver.notify_one();
+        true
+    }
+
+    pub fn wake_telegram_typing_for_thread(&mut self, thread_id: &str) -> usize {
+        let prefix = telegram_typing_thread_prefix(thread_id);
+        let mut woken = 0;
+        for (key, typing) in &mut self.telegram_typing_by_item {
+            if !key.starts_with(&prefix) || typing.finished {
+                continue;
+            }
+            if !typing.dirty {
+                typing.dirty = true;
+                typing.revision = typing.revision.saturating_add(1);
+            }
+            typing.wake_driver.notify_one();
+            woken += 1;
+        }
+        woken
     }
 
     pub fn complete_telegram_typing_send(
@@ -1082,6 +1206,7 @@ impl RuntimeState {
     }
 
     fn clear_all_telegram_typing(&mut self) {
+        self.telegram_typing_suspended_threads.clear();
         let keys = self
             .telegram_typing_by_item
             .keys()
@@ -3835,6 +3960,261 @@ mod tests {
     }
 
     #[test]
+    fn telegram_typing_can_be_woken_after_a_regular_message_delivery() {
+        let mut runtime = RuntimeState::default();
+        let generation = runtime
+            .start_telegram_typing("thread", "turn:turn-1")
+            .expect("typing update");
+        let (_, initial_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "turn:turn-1", generation, 1_000)
+            .expect("initial typing snapshot");
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "turn:turn-1",
+                generation,
+                initial_revision,
+                true,
+            ),
+            TelegramTypingSendAction::Continue
+        );
+
+        assert!(runtime.wake_telegram_typing("thread", "turn:turn-1"));
+        assert_eq!(
+            runtime.telegram_typing_send_delay_ms("thread", "turn:turn-1", generation, 1_001, 300),
+            Some(299)
+        );
+        let (finished, renewal_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "turn:turn-1", generation, 1_300)
+            .expect("woken typing snapshot");
+        assert!(!finished);
+        assert!(renewal_revision > initial_revision);
+    }
+
+    #[test]
+    fn telegram_typing_wakes_only_the_active_driver_for_its_thread() {
+        let mut runtime = RuntimeState::default();
+        let turn_generation = runtime
+            .start_telegram_typing("thread", "turn:turn-1")
+            .expect("turn typing");
+        let other_generation = runtime
+            .start_telegram_typing("other-thread", "turn:other-turn")
+            .expect("other typing");
+        for (thread_id, item_id, generation) in [
+            ("thread", "turn:turn-1", turn_generation),
+            ("other-thread", "turn:other-turn", other_generation),
+        ] {
+            let (_, revision) = runtime
+                .take_telegram_typing_snapshot(thread_id, item_id, generation, 1_000)
+                .expect("initial typing snapshot");
+            assert_eq!(
+                runtime
+                    .complete_telegram_typing_send(thread_id, item_id, generation, revision, true,),
+                TelegramTypingSendAction::Continue
+            );
+        }
+
+        assert_eq!(runtime.wake_telegram_typing_for_thread("thread"), 1);
+        assert_eq!(
+            runtime.telegram_typing_send_delay_ms(
+                "thread",
+                "turn:turn-1",
+                turn_generation,
+                1_001,
+                300,
+            ),
+            Some(299)
+        );
+        assert!(
+            runtime
+                .telegram_typing_send_delay_ms(
+                    "other-thread",
+                    "turn:other-turn",
+                    other_generation,
+                    1_001,
+                    300,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_typing_allows_only_one_draft_driver_per_thread() {
+        let mut runtime = RuntimeState::default();
+        let turn_generation = runtime
+            .start_telegram_typing("thread", "turn:turn-1")
+            .expect("turn typing");
+        assert!(
+            runtime
+                .start_telegram_typing("thread", "agent-item")
+                .is_none()
+        );
+
+        let finishing = runtime.finish_telegram_typing_for_thread("thread");
+
+        assert_eq!(
+            finishing,
+            vec![("turn:turn-1".to_string(), turn_generation, false)]
+        );
+        let (finished, revision) = runtime
+            .take_telegram_typing_snapshot("thread", "turn:turn-1", turn_generation, 1_001)
+            .expect("finished typing snapshot");
+        assert!(finished);
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "turn:turn-1",
+                turn_generation,
+                revision,
+                true,
+            ),
+            TelegramTypingSendAction::Stop
+        );
+        assert!(
+            runtime
+                .start_telegram_typing("thread", "turn:turn-1")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_approval_barrier_pauses_then_allows_the_turn_to_resume() {
+        let mut runtime = RuntimeState::default();
+        let generation = runtime
+            .start_telegram_typing("thread", "turn:turn-1")
+            .expect("turn typing");
+
+        let pausing =
+            runtime.suspend_telegram_typing_for_persistent_message("thread", false, Some("turn-1"));
+        assert_eq!(
+            pausing,
+            vec![("turn:turn-1".to_string(), generation, false)]
+        );
+        assert!(
+            runtime
+                .start_telegram_typing("thread", "turn:turn-1")
+                .is_none()
+        );
+        let (finished, revision) = runtime
+            .take_telegram_typing_snapshot("thread", "turn:turn-1", generation, 1_001)
+            .expect("paused typing snapshot");
+        assert!(finished);
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "turn:turn-1",
+                generation,
+                revision,
+                true,
+            ),
+            TelegramTypingSendAction::Stop
+        );
+        assert!(
+            runtime
+                .start_telegram_typing("thread", "turn:turn-1")
+                .is_none()
+        );
+
+        runtime.resume_telegram_typing_after_persistent_message("thread");
+        assert!(
+            runtime
+                .start_telegram_typing("thread", "turn:turn-1")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn telegram_final_barrier_blocks_late_deltas_for_the_completed_turn() {
+        let mut runtime = RuntimeState::default();
+        let generation = runtime
+            .start_telegram_typing("thread", "turn:turn-1")
+            .expect("turn typing");
+
+        let finishing =
+            runtime.suspend_telegram_typing_for_persistent_message("thread", true, Some("turn-1"));
+        assert_eq!(
+            finishing,
+            vec![("turn:turn-1".to_string(), generation, false)]
+        );
+        let (finished, revision) = runtime
+            .take_telegram_typing_snapshot("thread", "turn:turn-1", generation, 1_001)
+            .expect("finished typing snapshot");
+        assert!(finished);
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "turn:turn-1",
+                generation,
+                revision,
+                true,
+            ),
+            TelegramTypingSendAction::Stop
+        );
+
+        runtime.resume_telegram_typing_after_persistent_message("thread");
+        assert!(
+            runtime
+                .start_telegram_typing("thread", "turn:turn-1")
+                .is_none()
+        );
+        assert!(
+            runtime
+                .start_telegram_typing("thread", "turn:turn-2")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn telegram_final_barrier_tombstones_a_turn_without_an_existing_driver() {
+        let mut runtime = RuntimeState::default();
+
+        assert!(
+            runtime
+                .suspend_telegram_typing_for_persistent_message("thread", true, Some("turn-1"),)
+                .is_empty()
+        );
+        runtime.resume_telegram_typing_after_persistent_message("thread");
+
+        assert!(
+            runtime
+                .start_telegram_typing("thread", "turn:turn-1")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_typing_can_be_woken_during_retry_backoff() {
+        let mut runtime = RuntimeState::default();
+        let generation = runtime
+            .start_telegram_typing("thread", "turn:turn-1")
+            .expect("typing update");
+        let (_, failed_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "turn:turn-1", generation, 1_000)
+            .expect("typing snapshot");
+        assert_eq!(
+            runtime.complete_telegram_typing_send(
+                "thread",
+                "turn:turn-1",
+                generation,
+                failed_revision,
+                false,
+            ),
+            TelegramTypingSendAction::Stop
+        );
+
+        assert!(runtime.wake_telegram_typing("thread", "turn:turn-1"));
+        assert_eq!(
+            runtime.start_telegram_typing("thread", "turn:turn-1"),
+            Some(generation)
+        );
+        let (finished, retry_revision) = runtime
+            .take_telegram_typing_snapshot("thread", "turn:turn-1", generation, 1_001)
+            .expect("woken retry snapshot");
+        assert!(!finished);
+        assert!(retry_revision > failed_revision);
+    }
+
+    #[test]
     fn telegram_typing_is_removed_after_internal_completion() {
         let mut runtime = RuntimeState::default();
         let generation = runtime
@@ -3961,6 +4341,7 @@ mod tests {
         assert!(runtime.telegram_typing_item_is_active("thread", "item"));
         assert!(runtime.cancel_telegram_typing_generation("thread", "item", generation));
         assert!(!runtime.telegram_typing_item_is_active("thread", "item"));
+        assert!(runtime.start_telegram_typing("thread", "item").is_none());
     }
 
     #[test]
@@ -4052,6 +4433,7 @@ mod tests {
             ),
             TelegramTypingSendAction::Stop
         );
+        assert!(!runtime.telegram_typing_item_is_active("thread", "item"));
         tokio::time::timeout(std::time::Duration::from_millis(50), completed.notified())
             .await
             .expect("typing failure during finish should still wake the final sender");
@@ -4101,14 +4483,12 @@ mod tests {
     }
 
     #[test]
-    fn completing_a_turn_clears_all_of_its_telegram_typing() {
+    fn completing_a_turn_clears_its_single_telegram_typing_driver() {
         let mut runtime = RuntimeState::default();
         let first = runtime
             .start_telegram_typing("thread", "item-1")
             .expect("first typing state");
-        let second = runtime
-            .start_telegram_typing("thread", "item-2")
-            .expect("second typing state");
+        assert!(runtime.start_telegram_typing("thread", "item-2").is_none());
         runtime
             .start_telegram_typing("other-thread", "item")
             .expect("other typing state");
@@ -4118,11 +4498,6 @@ mod tests {
         assert!(
             runtime
                 .take_telegram_typing_snapshot("thread", "item-1", first, 1_000)
-                .is_none()
-        );
-        assert!(
-            runtime
-                .take_telegram_typing_snapshot("thread", "item-2", second, 1_000)
                 .is_none()
         );
         assert_eq!(runtime.telegram_typing_by_item.len(), 1);

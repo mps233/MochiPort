@@ -287,7 +287,7 @@ pub(crate) async fn handle_inbound(
                 Some(&turn_id),
             )
             .await;
-            telegram_typing::finish_turn(&state, api.clone(), &thread_id, &turn_id, &route).await;
+            telegram_typing::finish_thread(&state, api.clone(), &thread_id, &route).await;
             events::finish_telegram_command_progress_with_api(
                 &state,
                 api.clone(),
@@ -329,8 +329,7 @@ pub(crate) async fn handle_inbound(
                     Some(&thread_id),
                 )
                 .await;
-                telegram_typing::finish_turn(&state, api.clone(), &thread_id, &turn_id, &route)
-                    .await;
+                telegram_typing::finish_thread(&state, api.clone(), &thread_id, &route).await;
                 events::finish_telegram_command_progress_with_api(
                     &state,
                     api.clone(),

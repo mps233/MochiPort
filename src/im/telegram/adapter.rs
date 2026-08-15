@@ -182,6 +182,85 @@ impl TelegramAdapter {
         self.api.send_chat_action(target, "typing").await
     }
 
+    pub async fn send_rich_thinking_draft(&self, target: &str, draft_id: i64) -> Result<bool> {
+        let Ok(chat_id) = target.trim().parse::<i64>() else {
+            log_adapter(
+                "send_thinking_rich_draft_fallback",
+                format!("chat={target} reason=non_numeric_private_chat"),
+            );
+            return Ok(false);
+        };
+        if chat_id <= 0 || draft_id == 0 {
+            log_adapter(
+                "send_thinking_rich_draft_fallback",
+                format!("chat={target} draft={draft_id} reason=non_private_chat_or_invalid_draft"),
+            );
+            return Ok(false);
+        }
+
+        let rich_message = TelegramInputRichMessage::html("<tg-thinking>Thinking...</tg-thinking>");
+        log_adapter(
+            "send_thinking_rich_draft",
+            format!("chat={target} draft={draft_id}"),
+        );
+        match self
+            .api
+            .send_rich_message_draft(chat_id, draft_id, &rich_message)
+            .await
+        {
+            Ok(()) => Ok(true),
+            Err(err)
+                if err
+                    .downcast_ref::<TelegramApiError>()
+                    .is_some_and(TelegramApiError::should_fallback_from_rich_message_draft) =>
+            {
+                log_adapter(
+                    "send_thinking_rich_draft_fallback",
+                    format!("chat={target} draft={draft_id} reason=unsupported err={err}"),
+                );
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub async fn send_thinking_draft(&self, target: &str, draft_id: i64) -> Result<bool> {
+        let Ok(chat_id) = target.trim().parse::<i64>() else {
+            log_adapter(
+                "send_thinking_draft_fallback",
+                format!("chat={target} reason=non_numeric_private_chat"),
+            );
+            return Ok(false);
+        };
+        if chat_id <= 0 || draft_id == 0 {
+            log_adapter(
+                "send_thinking_draft_fallback",
+                format!("chat={target} draft={draft_id} reason=non_private_chat_or_invalid_draft"),
+            );
+            return Ok(false);
+        }
+
+        log_adapter(
+            "send_thinking_draft",
+            format!("chat={target} draft={draft_id}"),
+        );
+        match self.api.send_message_draft(chat_id, draft_id, "").await {
+            Ok(()) => Ok(true),
+            Err(err)
+                if err
+                    .downcast_ref::<TelegramApiError>()
+                    .is_some_and(TelegramApiError::should_fallback_from_message_draft) =>
+            {
+                log_adapter(
+                    "send_thinking_draft_fallback",
+                    format!("chat={target} draft={draft_id} reason=unsupported err={err}"),
+                );
+                Ok(false)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     pub async fn send_image_path(
         &self,
         target: &str,
@@ -1581,15 +1660,25 @@ mod tests {
 
     use crate::{
         im::core::i18n::ImText,
+        im::telegram::{api::TelegramApi, types::TelegramSettings},
         im_runtime::{ApprovalDecisionOption, PendingApproval},
     };
 
     use super::{
-        TELEGRAM_MAX_MESSAGE_CHARS, empty_inline_keyboard, resolved_approval_text,
+        TELEGRAM_MAX_MESSAGE_CHARS, TelegramAdapter, empty_inline_keyboard, resolved_approval_text,
         telegram_cleanup_text, telegram_context_compaction_messages, telegram_text_chunks,
         telegram_turn_completed_chunks, telegram_turn_completed_messages,
         telegram_user_message_chunks, telegram_user_message_messages,
     };
+
+    #[tokio::test]
+    async fn thinking_draft_skips_targets_that_cannot_be_private_chats() {
+        let adapter = TelegramAdapter::new(TelegramApi::new(TelegramSettings::default()));
+
+        assert!(!adapter.send_thinking_draft("-1001", 7).await.unwrap());
+        assert!(!adapter.send_thinking_draft("@channel", 7).await.unwrap());
+        assert!(!adapter.send_thinking_draft("42", 0).await.unwrap());
+    }
 
     #[test]
     fn chunks_long_text_on_char_boundaries() {

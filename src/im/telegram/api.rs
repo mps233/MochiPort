@@ -284,6 +284,54 @@ impl TelegramApiError {
             || rich_blocks_capability_error
             || unsupported_rich_edit
     }
+
+    pub fn should_fallback_from_message_draft(&self) -> bool {
+        if !self.method.eq_ignore_ascii_case("sendMessageDraft") {
+            return false;
+        }
+
+        if self.error_code == Some(404) || self.status == StatusCode::NOT_FOUND {
+            return true;
+        }
+
+        let is_bad_request = self.error_code == Some(400) || self.status == StatusCode::BAD_REQUEST;
+        if !is_bad_request {
+            return false;
+        }
+        let description = self.description.to_ascii_lowercase();
+        description.contains("message text is empty")
+            || description.contains("private chat")
+            || description.contains("method is not available")
+            || description.contains("method not found")
+            || description.contains("not supported")
+    }
+
+    pub fn should_fallback_from_rich_message_draft(&self) -> bool {
+        if !self.method.eq_ignore_ascii_case("sendRichMessageDraft") {
+            return false;
+        }
+
+        // Older Bot API servers do not know the rich draft endpoint at all.
+        if self.error_code == Some(404) || self.status == StatusCode::NOT_FOUND {
+            return true;
+        }
+
+        let is_bad_request = self.error_code == Some(400) || self.status == StatusCode::BAD_REQUEST;
+        if !is_bad_request {
+            return false;
+        }
+        let description = self.description.to_ascii_lowercase();
+        description.contains("rich_message")
+            || description.contains("rich message")
+            || description.contains("sendrichmessagedraft")
+            || description.contains("inputrichblock")
+            || description.contains("thinking")
+            || description.contains("unsupported")
+            || description.contains("not supported")
+            || description.contains("method is not available")
+            || description.contains("method not found")
+            || description.contains("private chat")
+    }
 }
 
 impl TelegramApi {
@@ -539,6 +587,29 @@ impl TelegramApi {
         Ok(())
     }
 
+    pub async fn send_message_draft(&self, chat_id: i64, draft_id: i64, text: &str) -> Result<()> {
+        if draft_id == 0 {
+            return Err(anyhow!("telegram message draft id must be non-zero"));
+        }
+        let body = send_message_draft_body(chat_id, draft_id, text);
+        let _: bool = self.post("sendMessageDraft", &body).await?;
+        Ok(())
+    }
+
+    pub async fn send_rich_message_draft(
+        &self,
+        chat_id: i64,
+        draft_id: i64,
+        rich_message: &TelegramInputRichMessage,
+    ) -> Result<()> {
+        if draft_id == 0 {
+            return Err(anyhow!("telegram rich message draft id must be non-zero"));
+        }
+        let body = send_rich_message_draft_body(chat_id, draft_id, rich_message);
+        let _: bool = self.post("sendRichMessageDraft", &body).await?;
+        Ok(())
+    }
+
     pub async fn get_me(&self) -> Result<TelegramUser> {
         self.post("getMe", &serde_json::json!({})).await
     }
@@ -773,16 +844,37 @@ fn send_chat_action_body(chat_id: &str, action: &str) -> serde_json::Value {
     })
 }
 
+fn send_message_draft_body(chat_id: i64, draft_id: i64, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "chat_id": chat_id,
+        "draft_id": draft_id,
+        "text": text,
+    })
+}
+
+fn send_rich_message_draft_body(
+    chat_id: i64,
+    draft_id: i64,
+    rich_message: &TelegramInputRichMessage,
+) -> serde_json::Value {
+    serde_json::json!({
+        "chat_id": chat_id,
+        "draft_id": draft_id,
+        "rich_message": rich_message,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use reqwest::StatusCode;
 
     use super::{
-        TelegramApiError, TelegramInputRichMessage, TelegramInputRichMessageMedia,
+        TelegramApi, TelegramApiError, TelegramInputRichMessage, TelegramInputRichMessageMedia,
         TelegramParseMode, TelegramResponse, TelegramUpdate, edit_message_reply_markup_body,
         edit_message_text_body, edit_rich_message_body, send_chat_action_body,
-        send_rich_message_body,
+        send_message_draft_body, send_rich_message_body, send_rich_message_draft_body,
     };
+    use crate::im::telegram::types::TelegramSettings;
 
     fn api_error(
         method: &str,
@@ -903,6 +995,132 @@ mod tests {
                 "chat_id": "42",
                 "action": "typing",
             })
+        );
+    }
+
+    #[test]
+    fn builds_empty_message_draft_payload_for_native_thinking() {
+        assert_eq!(
+            send_message_draft_body(42, 7, ""),
+            serde_json::json!({
+                "chat_id": 42,
+                "draft_id": 7,
+                "text": "",
+            })
+        );
+    }
+
+    #[test]
+    fn builds_rich_message_draft_payload_for_native_thinking() {
+        let rich_message = TelegramInputRichMessage::html("<tg-thinking>Thinking...</tg-thinking>");
+        assert_eq!(
+            send_rich_message_draft_body(42, 7, &rich_message),
+            serde_json::json!({
+                "chat_id": 42,
+                "draft_id": 7,
+                "rich_message": {
+                    "html": "<tg-thinking>Thinking...</tg-thinking>",
+                },
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_message_draft_id_before_sending() {
+        let api = TelegramApi::new(TelegramSettings::default());
+
+        let error = api
+            .send_message_draft(42, 0, "")
+            .await
+            .expect_err("zero draft id must be rejected locally");
+
+        assert!(error.to_string().contains("must be non-zero"));
+    }
+
+    #[tokio::test]
+    async fn rejects_zero_rich_message_draft_id_before_sending() {
+        let api = TelegramApi::new(TelegramSettings::default());
+        let rich_message = TelegramInputRichMessage::html("<tg-thinking>Thinking...</tg-thinking>");
+
+        let error = api
+            .send_rich_message_draft(42, 0, &rich_message)
+            .await
+            .expect_err("zero rich draft id must be rejected locally");
+
+        assert!(error.to_string().contains("must be non-zero"));
+    }
+
+    #[test]
+    fn message_draft_fallback_only_accepts_capability_errors() {
+        assert!(
+            api_error("sendMessageDraft", StatusCode::NOT_FOUND, 404, "Not Found",)
+                .should_fallback_from_message_draft()
+        );
+        assert!(
+            api_error(
+                "sendMessageDraft",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: method is available only for private chats",
+            )
+            .should_fallback_from_message_draft()
+        );
+        assert!(
+            api_error(
+                "sendMessageDraft",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: message text is empty",
+            )
+            .should_fallback_from_message_draft()
+        );
+        assert!(
+            !api_error(
+                "sendMessageDraft",
+                StatusCode::TOO_MANY_REQUESTS,
+                429,
+                "Too Many Requests",
+            )
+            .should_fallback_from_message_draft()
+        );
+        assert!(
+            !api_error("sendMessage", StatusCode::NOT_FOUND, 404, "Not Found",)
+                .should_fallback_from_message_draft()
+        );
+    }
+
+    #[test]
+    fn rich_message_draft_fallback_only_accepts_capability_errors() {
+        assert!(
+            api_error(
+                "sendRichMessageDraft",
+                StatusCode::NOT_FOUND,
+                404,
+                "Not Found",
+            )
+            .should_fallback_from_rich_message_draft()
+        );
+        assert!(
+            api_error(
+                "sendRichMessageDraft",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: unsupported rich message block",
+            )
+            .should_fallback_from_rich_message_draft()
+        );
+        assert!(
+            !api_error(
+                "sendRichMessageDraft",
+                StatusCode::TOO_MANY_REQUESTS,
+                429,
+                "Too Many Requests",
+            )
+            .should_fallback_from_rich_message_draft()
+        );
+        assert!(
+            !api_error("sendRichMessage", StatusCode::NOT_FOUND, 404, "Not Found",)
+                .should_fallback_from_rich_message_draft()
         );
     }
 

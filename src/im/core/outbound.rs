@@ -356,25 +356,27 @@ async fn send_telegram_outbound(
     telegram_api: &TelegramApi,
     message: ImOutboundMessage,
 ) {
-    if message.kind == ImOutboundKind::Approval
-        && let Some(turn_id) = message.turn_id.as_deref()
-    {
-        telegram_typing::finish_turn(
+    let draft_barrier = telegram_draft_barrier(message.kind);
+    if let Some(terminal) = draft_barrier {
+        telegram_typing::suspend_for_persistent_message(
             state,
             telegram_api.clone(),
             &message.thread_id,
-            turn_id,
             &message.route,
+            terminal,
+            message.turn_id.as_deref(),
         )
         .await;
     }
     let adapter = TelegramAdapter::new(telegram_api.clone());
-    match &message.payload {
+    let sent_context_compaction = match &message.payload {
         ImOutboundPayload::Text(text) => {
-            send_telegram_text(state, &adapter, &message, text).await;
+            send_telegram_text(state, &adapter, &message, text).await
+                && message.item_type.as_deref() == Some("contextCompaction")
         }
         ImOutboundPayload::Approval(approval) => {
             send_telegram_approval(state, &adapter, &message, approval).await;
+            false
         }
         ImOutboundPayload::Image {
             path,
@@ -390,12 +392,14 @@ async fn send_telegram_outbound(
                 fallback_text.as_deref(),
             )
             .await;
+            false
         }
         ImOutboundPayload::RichBlocks {
             blocks,
             fallback_text,
         } => {
             send_telegram_rich_blocks(state, &adapter, &message, blocks, fallback_text).await;
+            false
         }
         ImOutboundPayload::TelegramCommentary {
             segment,
@@ -411,7 +415,29 @@ async fn send_telegram_outbound(
                 fallback_text,
             )
             .await;
+            false
         }
+    };
+    if sent_context_compaction {
+        telegram_typing::restore_after_persistent_message(
+            state,
+            telegram_api.clone(),
+            &message.thread_id,
+            message.turn_id.as_deref(),
+            &message.route,
+        )
+        .await;
+    }
+    if draft_barrier.is_some() {
+        telegram_typing::resume_after_persistent_message(state, &message.thread_id).await;
+    }
+}
+
+fn telegram_draft_barrier(kind: ImOutboundKind) -> Option<bool> {
+    match kind {
+        ImOutboundKind::Approval => Some(false),
+        ImOutboundKind::TurnReply => Some(true),
+        ImOutboundKind::Item | ImOutboundKind::ImageItem => None,
     }
 }
 
@@ -963,7 +989,7 @@ async fn send_telegram_text(
     adapter: &TelegramAdapter,
     message: &ImOutboundMessage,
     text: &str,
-) {
+) -> bool {
     let event_begin = match message.kind {
         ImOutboundKind::TurnReply => "telegram_turn_send_begin",
         ImOutboundKind::Item | ImOutboundKind::ImageItem => "telegram_item_send_begin",
@@ -1045,6 +1071,7 @@ async fn send_telegram_text(
                 )
                 .await;
             }
+            true
         }
         Err(err) => {
             log_outbound_result("send_telegram_text_failed", message, &err.to_string());
@@ -1067,6 +1094,7 @@ async fn send_telegram_text(
                     ),
                 )
                 .await;
+            false
         }
     }
 }
@@ -1447,7 +1475,7 @@ async fn send_telegram_image(
                 )
                 .await;
             if let Some(fallback_text) = fallback_text {
-                send_telegram_text(state, adapter, message, fallback_text).await;
+                let _ = send_telegram_text(state, adapter, message, fallback_text).await;
             }
         }
     }
@@ -1489,6 +1517,20 @@ mod safe_relaunch_tests {
             ImOutboundKind::Item,
             "agentMessage"
         )));
+    }
+
+    #[test]
+    fn persistent_turn_outputs_stop_the_draft_immediately_before_delivery() {
+        assert_eq!(
+            telegram_draft_barrier(ImOutboundKind::TurnReply),
+            Some(true)
+        );
+        assert_eq!(
+            telegram_draft_barrier(ImOutboundKind::Approval),
+            Some(false)
+        );
+        assert_eq!(telegram_draft_barrier(ImOutboundKind::Item), None);
+        assert_eq!(telegram_draft_barrier(ImOutboundKind::ImageItem), None);
     }
 
     #[test]

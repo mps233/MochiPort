@@ -614,18 +614,23 @@ async fn enqueue_approval(
     approval: &PendingApproval,
 ) -> Result<()> {
     let request_key = approval.request_key();
+    let thread_id = approval_thread_id(&approval.params)
+        .unwrap_or_default()
+        .to_string();
+    let turn_id = approval_turn_id(&approval.params).map(str::to_string);
+    let effective_turn_id = if turn_id.is_some() || thread_id.is_empty() {
+        turn_id
+    } else {
+        state
+            .runtime
+            .lock()
+            .await
+            .current_turn_id(&thread_id)
+            .map(str::to_string)
+    };
     outbound_tx.enqueue(ImOutboundMessage {
-        thread_id: approval
-            .params
-            .get("threadId")
-            .and_then(|value| value.as_str())
-            .unwrap_or_default()
-            .to_string(),
-        turn_id: approval
-            .params
-            .get("turnId")
-            .and_then(|value| value.as_str())
-            .map(str::to_string),
+        thread_id,
+        turn_id: effective_turn_id,
         route: route.clone(),
         item_id: Some(request_key),
         item_type: Some("approval".to_string()),
@@ -646,6 +651,38 @@ async fn enqueue_approval(
         )
         .await;
     Ok(())
+}
+
+fn approval_thread_id(params: &serde_json::Value) -> Option<&str> {
+    params
+        .get("threadId")
+        .and_then(|value| value.as_str())
+        .or_else(|| params.get("thread_id").and_then(|value| value.as_str()))
+        .or_else(|| {
+            params
+                .get("thread")
+                .and_then(|thread| thread.get("id"))
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| {
+            params
+                .get("turn")
+                .and_then(|turn| turn.get("threadId").or_else(|| turn.get("thread_id")))
+                .and_then(|value| value.as_str())
+        })
+}
+
+fn approval_turn_id(params: &serde_json::Value) -> Option<&str> {
+    params
+        .get("turnId")
+        .and_then(|value| value.as_str())
+        .or_else(|| params.get("turn_id").and_then(|value| value.as_str()))
+        .or_else(|| {
+            params
+                .get("turn")
+                .and_then(|turn| turn.get("id"))
+                .and_then(|value| value.as_str())
+        })
 }
 
 pub(crate) async fn send_turn_reply(
@@ -686,16 +723,6 @@ pub(crate) async fn send_turn_reply(
             (true, effective_turn_id)
         }
     };
-    if route.platform == ImPlatformKind::Telegram
-        && is_final_answer
-        && let Some(turn_id) = effective_turn_id.as_deref()
-    {
-        if let Some(api) = api_registry.telegram_for_route(route) {
-            telegram_typing::finish_turn(state, api, thread_id, turn_id, route).await;
-        } else {
-            log_missing_api(state, route, "turn_reply_typing").await;
-        }
-    }
     if !should_send {
         let event_kind = format!("{}_turn_reply_skipped", route.platform.key());
         state
@@ -979,7 +1006,6 @@ async fn start_telegram_agent_typing(
     api_registry: &ImApiRegistry,
     thread_id: &str,
     turn_id: Option<&str>,
-    item_id: &str,
     route: &RouteTarget,
 ) {
     let current_turn_id = state
@@ -994,28 +1020,11 @@ async fn start_telegram_agent_typing(
     if turn_id.is_some_and(|turn_id| turn_id != current_turn_id) {
         return;
     }
-    if telegram_typing::turn_is_active(state, thread_id, &current_turn_id).await {
-        return;
-    }
     let Some(api) = api_registry.telegram_for_route(route) else {
         log_missing_api(state, route, "agent_typing").await;
         return;
     };
-    telegram_typing::start(state, api, thread_id, item_id, route).await;
-}
-
-async fn finish_telegram_agent_typing(
-    state: &SharedState,
-    api_registry: &ImApiRegistry,
-    thread_id: &str,
-    item_id: &str,
-    route: &RouteTarget,
-) {
-    let Some(api) = api_registry.telegram_for_route(route) else {
-        log_missing_api(state, route, "agent_typing_final").await;
-        return;
-    };
-    telegram_typing::finish(state, api, thread_id, item_id, route).await;
+    telegram_typing::start_turn(state, api, thread_id, &current_turn_id, route).await;
 }
 
 fn turn_reply_dedupe_key(
@@ -1458,7 +1467,7 @@ async fn schedule_terminal_status_fallback(
         }
         if route.platform == ImPlatformKind::Telegram {
             if let Some(api) = api_registry.telegram_for_route(&route) {
-                telegram_typing::finish_turn(&state, api, &thread_id, &turn_id, &route).await;
+                telegram_typing::finish_thread(&state, api, &thread_id, &route).await;
             } else {
                 log_missing_api(&state, &route, "terminal_fallback_typing").await;
             }
@@ -1584,16 +1593,15 @@ pub(crate) async fn handle_codex_notification(
                     .mark_turn_completed(thread_id, turn_id.as_deref());
                 return;
             };
-            if route.platform == ImPlatformKind::Telegram
-                && let Some(turn_id) = turn_id.as_deref()
-            {
+            if route.platform == ImPlatformKind::Telegram {
                 if let Some(api) = api_registry.telegram_for_route(&route) {
-                    telegram_typing::finish_turn(&state, api.clone(), thread_id, turn_id, &route)
+                    telegram_typing::finish_thread(&state, api.clone(), thread_id, &route).await;
+                    if let Some(turn_id) = turn_id.as_deref() {
+                        finish_telegram_command_progress_with_api_and_outcome(
+                            &state, api, thread_id, &route, turn_id, true,
+                        )
                         .await;
-                    finish_telegram_command_progress_with_api_and_outcome(
-                        &state, api, thread_id, &route, turn_id, true,
-                    )
-                    .await;
+                    }
                 } else {
                     log_missing_api(&state, &route, "error_typing").await;
                 }
@@ -1750,9 +1758,6 @@ pub(crate) async fn handle_codex_notification(
             let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
                 return;
             };
-            let Some(item_id) = params.get("itemId").and_then(|v| v.as_str()) else {
-                return;
-            };
             let Some(delta) = params.get("delta").and_then(|v| v.as_str()) else {
                 return;
             };
@@ -1782,7 +1787,6 @@ pub(crate) async fn handle_codex_notification(
                     &api_registry,
                     thread_id,
                     params.get("turnId").and_then(|value| value.as_str()),
-                    item_id,
                     &route,
                 )
                 .await;
@@ -1791,6 +1795,9 @@ pub(crate) async fn handle_codex_notification(
             if route.platform != ImPlatformKind::Feishu {
                 return;
             }
+            let Some(item_id) = params.get("itemId").and_then(|value| value.as_str()) else {
+                return;
+            };
             let Some(api) = api_registry.feishu_for_route(&route) else {
                 log_missing_api(&state, &route, "agent_delta").await;
                 return;
@@ -2201,16 +2208,6 @@ pub(crate) async fn handle_codex_notification(
                     && let Some(text) = extract_agent_message_text(item)
                 {
                     let is_final_answer = agent_message_is_final_answer(item);
-                    if route.platform == ImPlatformKind::Telegram {
-                        finish_telegram_agent_typing(
-                            &state,
-                            &api_registry,
-                            thread_id,
-                            item_id,
-                            &route,
-                        )
-                        .await;
-                    }
                     send_turn_reply(
                         &state,
                         &api_registry,
@@ -2417,12 +2414,10 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
-                if let Some(turn_id) = effective_turn_id.as_deref() {
-                    if let Some(api) = api_registry.telegram_for_route(&route) {
-                        telegram_typing::finish_turn(&state, api, thread_id, turn_id, &route).await;
-                    } else {
-                        log_missing_api(&state, &route, "turn_typing_final").await;
-                    }
+                if let Some(api) = api_registry.telegram_for_route(&route) {
+                    telegram_typing::finish_thread(&state, api, thread_id, &route).await;
+                } else {
+                    log_missing_api(&state, &route, "turn_typing_final").await;
                 }
                 finish_telegram_command_progress(
                     &state,
@@ -2972,10 +2967,22 @@ async fn send_text_im_codex_item(
         Vec::new()
     };
 
+    // Capture the turn while the event is being queued. The outbound worker
+    // may deliver this item later, after another turn has become current.
+    let outbound_turn_id =
+        if route.platform == ImPlatformKind::Telegram && item_type == "contextCompaction" {
+            let runtime = state.runtime.lock().await;
+            turn_id
+                .map(str::to_string)
+                .or_else(|| runtime.current_turn_id(thread_id).map(str::to_string))
+        } else {
+            turn_id.map(str::to_string)
+        };
+
     log_remote_to_im_enqueue("item_enqueue", thread_id, route, item_id, item_type, &text);
     outbound_tx.enqueue(ImOutboundMessage {
         thread_id: thread_id.to_string(),
-        turn_id: turn_id.map(str::to_string),
+        turn_id: outbound_turn_id.clone(),
         route: route.clone(),
         item_id: Some(item_id.to_string()),
         item_type: Some(item_type.to_string()),
@@ -2984,7 +2991,7 @@ async fn send_text_im_codex_item(
     })?;
     if route.platform == ImPlatformKind::Telegram
         && item_type == "contextCompaction"
-        && let Some(turn_id) = turn_id
+        && let Some(turn_id) = outbound_turn_id.as_deref()
     {
         state
             .runtime
@@ -3530,6 +3537,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn telegram_approval_captures_current_turn_when_turn_is_omitted() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        state
+            .runtime
+            .lock()
+            .await
+            .mark_turn_started("thread", "turn");
+        let approval = PendingApproval {
+            request_id: json!("request-1"),
+            request_kind: "commandExecution".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({"turn": {"threadId": "thread"}}),
+            summary: "Run cargo test".to_string(),
+            decisions: Vec::new(),
+            message_id: None,
+            remote_client_key: None,
+        };
+
+        send_approval(&state, &outbound_tx, &route, &approval)
+            .await
+            .expect("queue approval");
+
+        let message = try_recv_for_test(&mut outbound_rx).expect("queued approval");
+        assert_eq!(message.kind, ImOutboundKind::Approval);
+        assert_eq!(message.thread_id, "thread");
+        assert_eq!(message.turn_id.as_deref(), Some("turn"));
+    }
+
+    #[tokio::test]
     async fn telegram_web_search_is_folded_into_task_progress() {
         let state = test_state();
         let route = test_telegram_route();
@@ -3955,6 +3993,33 @@ mod tests {
             _ => panic!("commentary should use an aggregate payload"),
         }
         assert!(try_recv_for_test(&mut outbound_rx).is_none());
+    }
+
+    #[tokio::test]
+    async fn telegram_context_compaction_captures_current_turn_when_turn_is_omitted() {
+        let state = test_state();
+        let route = test_telegram_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        {
+            let mut runtime = state.runtime.lock().await;
+            runtime.bind_route("thread", route.clone());
+            runtime.mark_turn_started("thread", "turn");
+        }
+
+        send_text_im_codex_item(
+            &state,
+            &outbound_tx,
+            "thread",
+            None,
+            &route,
+            "compaction",
+            &json!({"id": "compaction", "type": "contextCompaction"}),
+        )
+        .await
+        .expect("queue context compaction");
+
+        let compaction = try_recv_for_test(&mut outbound_rx).expect("context compaction");
+        assert_eq!(compaction.turn_id.as_deref(), Some("turn"));
     }
 
     #[tokio::test]
