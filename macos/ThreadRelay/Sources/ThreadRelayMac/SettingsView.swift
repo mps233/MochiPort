@@ -18,6 +18,7 @@ struct SettingsView: View {
     @State private var updateMessage = "尚未检查更新"
     @State private var releaseNotes = ""
     @State private var latestReleaseURL: URL?
+    @State private var confirmsRestart = false
 
     var body: some View {
         TabView {
@@ -40,6 +41,18 @@ struct SettingsView: View {
         }
         .onChange(of: model.settings) { settings in
             synchronizeSettings(settings)
+        }
+        .confirmationDialog(
+            "重启本地服务？",
+            isPresented: $confirmsRestart,
+            titleVisibility: .visible
+        ) {
+            Button("重启", role: .destructive) {
+                Task { await model.restartDaemon() }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("ThreadRelay 会先确认没有进行中的受保护任务，再请求后台服务安全重启。")
         }
     }
 
@@ -116,6 +129,24 @@ struct SettingsView: View {
             Section("运行实例") {
                 if let lifecycle = model.lifecycle {
                     LabeledContent("版本", value: lifecycle.runtime.productVersion)
+                    LabeledContent(
+                        "构建",
+                        value: lifecycle.runtime.buildNumber.map(String.init) ?? "旧版后台服务"
+                    )
+                    if model.daemonBuildMismatch {
+                        Label("界面与后台服务构建不一致", systemImage: "exclamationmark.triangle")
+                            .foregroundStyle(.orange)
+                    }
+                    Label(
+                        model.ownsDaemonLease
+                            ? "当前界面已获得后台服务管理权"
+                            : model.daemonLeaseConflict
+                                ? "后台服务由其他安装管理，当前界面仅能查看"
+                                : "当前界面仅能查看后台服务状态",
+                        systemImage: model.ownsDaemonLease ? "lock.open" : "eye"
+                    )
+                    .font(.caption)
+                    .foregroundStyle(model.daemonLeaseConflict ? .orange : .secondary)
                     LabeledContent("进程", value: String(lifecycle.service.pid))
                     LabeledContent("运行文件") {
                         Text(lifecycle.executable)
@@ -144,6 +175,13 @@ struct SettingsView: View {
                             guard let url = await model.logDirectory() else { return }
                             NSWorkspace.shared.open(url)
                         }
+                    }
+                }
+                if model.ownsDaemonLease {
+                    Button {
+                        confirmsRestart = true
+                    } label: {
+                        Label("安全重启后台服务", systemImage: "arrow.clockwise.circle")
                     }
                 }
             }

@@ -360,6 +360,9 @@ struct ManageLifecycle: Decodable, Equatable {
     struct Runtime: Decodable, Equatable {
         let state: String
         let productVersion: String
+        /// Optional for compatibility with daemons released before the
+        /// lifecycle build number was added.
+        let buildNumber: Int?
         let apiMajor: Int
     }
 
@@ -933,6 +936,60 @@ struct APIClient {
         throw APIClientError.unauthorized
     }
 
+    func claimLifecycleLease(
+        installationId: String,
+        daemonInstanceId: String
+    ) async throws -> ManageLifecycle {
+        try await performManagePOST(
+            path: "api/v1/manage/lifecycle/lease/claim",
+            body: LifecycleLeaseRequest(
+                installationId: installationId,
+                daemonInstanceId: daemonInstanceId
+            )
+        )
+    }
+
+    func renewLifecycleLease(
+        installationId: String,
+        daemonInstanceId: String
+    ) async throws -> ManageLifecycle {
+        try await performManagePOST(
+            path: "api/v1/manage/lifecycle/lease/renew",
+            body: LifecycleLeaseRequest(
+                installationId: installationId,
+                daemonInstanceId: daemonInstanceId
+            )
+        )
+    }
+
+    func releaseLifecycleLease(
+        installationId: String,
+        daemonInstanceId: String
+    ) async throws -> ManageLifecycle {
+        try await performManagePOST(
+            path: "api/v1/manage/lifecycle/lease/release",
+            body: LifecycleLeaseRequest(
+                installationId: installationId,
+                daemonInstanceId: daemonInstanceId
+            )
+        )
+    }
+
+    func restartLifecycle(
+        installationId: String,
+        daemonInstanceId: String,
+        force: Bool = false
+    ) async throws -> ManageActionResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/lifecycle/restart",
+            body: LifecycleControlRequest(
+                installationId: installationId,
+                daemonInstanceId: daemonInstanceId,
+                force: force
+            )
+        )
+    }
+
     func imAccounts() async throws -> [ManageIMAccount] {
         let connection = connectionLoader()
         let candidates = connection.credentials()
@@ -1362,6 +1419,17 @@ struct APIClient {
         let localConnectionMode: String
         let outboundProxyMode: String
         let outboundProxyUrl: String?
+    }
+
+    private struct LifecycleLeaseRequest: Encodable {
+        let installationId: String
+        let daemonInstanceId: String
+    }
+
+    private struct LifecycleControlRequest: Encodable {
+        let installationId: String
+        let daemonInstanceId: String
+        let force: Bool
     }
 
     private struct EmptyRequestBody: Encodable {}

@@ -206,10 +206,19 @@ private struct OverviewView: View {
                         Divider()
                         OverviewStatusRow(
                             title: "运行时",
-                            detail: "v\(lifecycle.runtime.productVersion) · \(managementMode(lifecycle.management))",
+                            detail: runtimeDetail(lifecycle),
                             symbol: "shippingbox",
                             tint: lifecycle.management.canControl ? .positive : .secondary
                         )
+                        if model.daemonBuildMismatch {
+                            Divider()
+                            OverviewStatusRow(
+                                title: "版本一致性",
+                                detail: "界面与后台服务构建不一致",
+                                symbol: "exclamationmark.triangle",
+                                tint: .caution
+                            )
+                        }
                         Divider()
                         OverviewStatusRow(
                             title: "受保护任务",
@@ -260,7 +269,13 @@ private struct OverviewView: View {
 
     private var daemonDetail: String {
         guard let lifecycle = model.lifecycle else { return model.serviceStatus.title }
-        return lifecycle.management.canControl ? "已托管 · \(runtimeState(lifecycle.runtime.state))" : "运行正常 · 只读"
+        if model.ownsDaemonLease {
+            return "已托管 · \(runtimeState(lifecycle.runtime.state))"
+        }
+        if model.daemonLeaseConflict {
+            return "运行正常 · 其他安装管理"
+        }
+        return "运行正常 · 仅查看"
     }
 
     private func runtimeState(_ state: String) -> String {
@@ -271,8 +286,18 @@ private struct OverviewView: View {
     }
 
     private func managementMode(_ management: ManageLifecycle.Management) -> String {
-        if management.canControl { return "可管理" }
-        return management.mode == "readOnly" ? "只读" : "未知模式"
+        if model.ownsDaemonLease { return "当前安装已托管" }
+        if model.daemonLeaseConflict { return "其他安装已托管" }
+        return management.mode == "readOnly" ? "仅查看" : "未知模式"
+    }
+
+    private func runtimeDetail(_ lifecycle: ManageLifecycle) -> String {
+        var components = ["v\(lifecycle.runtime.productVersion)"]
+        if let buildNumber = lifecycle.runtime.buildNumber {
+            components.append("构建 \(buildNumber)")
+        }
+        components.append(managementMode(lifecycle.management))
+        return components.joined(separator: " · ")
     }
 
     private func protectedWorkDetail(_ items: ManageLifecycle.ProtectedWorkItems) -> String {
@@ -314,6 +339,8 @@ private struct OverviewView: View {
             "仪表盘状态：\(model.dashboardState.title)",
             "服务 API：\(dashboard?.service.apiMajor.description ?? "未知")",
             "服务就绪：\(readyDescription(dashboard?.service.ready))",
+            "后台构建：\(model.lifecycle?.runtime.buildNumber.map(String.init) ?? "旧版/未知")",
+            "构建一致性：\(model.daemonBuildMismatch ? "不一致" : "未发现差异")",
             "远程控制：\(remoteDetail)",
             "AI 网关：\(dashboardDetail(dashboard?.aiGatewayEnabled))",
         ]

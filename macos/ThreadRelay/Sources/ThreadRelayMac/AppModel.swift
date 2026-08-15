@@ -54,6 +54,8 @@ final class AppModel: ObservableObject {
     private var daemonHealthFailureCount = 0
     private var daemonAutoRestartNotBefore: Date?
     private var startupUpdateCheckScheduled = false
+    private var lifecycleLeaseTask: Task<Void, Never>?
+    private let installationId: String
 
     /// Mirrors the legacy GUI's unhealthy-daemon recovery policy: three
     /// consecutive probe failures trigger a restart, then a cooldown blocks
@@ -76,6 +78,67 @@ final class AppModel: ObservableObject {
         return urlError.code == .cannotConnectToHost || urlError.code == .networkConnectionLost
     }
 
+    private static let installationIDDefaultsKey = "threadrelay.management.installation-id"
+
+    private static func loadInstallationID() -> String {
+        if let existing = UserDefaults.standard.string(forKey: installationIDDefaultsKey),
+           !existing.isEmpty
+        {
+            return existing
+        }
+        let generated = UUID().uuidString.lowercased()
+        UserDefaults.standard.set(generated, forKey: installationIDDefaultsKey)
+        return generated
+    }
+
+    /// Returns true only when both sides expose a valid build number and they
+    /// differ. An older daemon without `runtime.buildNumber` is unknown, not
+    /// a mismatch, so it remains usable while the backend is upgraded.
+    nonisolated static func buildNumbersMismatch(
+        guiBuild: String?,
+        daemonBuild: Int?
+    ) -> Bool {
+        guard let guiBuild,
+              let guiBuildNumber = Int(guiBuild),
+              let daemonBuild
+        else { return false }
+        return guiBuildNumber != daemonBuild
+    }
+
+    var daemonBuildMismatch: Bool {
+        guard let daemonBuild = lifecycle?.runtime.buildNumber else { return false }
+        let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        return Self.buildNumbersMismatch(guiBuild: guiBuild, daemonBuild: daemonBuild)
+    }
+
+    var ownsDaemonLease: Bool {
+        guard let management = lifecycle?.management,
+              management.canControl,
+              management.installationId == installationId
+        else { return false }
+        guard let expiresAt = management.leaseExpiresAtMs else { return true }
+        return expiresAt > currentTimeMilliseconds
+    }
+
+    var daemonLeaseConflict: Bool {
+        guard let management = lifecycle?.management,
+              let owner = management.installationId,
+              owner != installationId,
+              let expiresAt = management.leaseExpiresAtMs
+        else { return false }
+        return expiresAt > currentTimeMilliseconds
+    }
+
+    var daemonManagementDetail: String {
+        if ownsDaemonLease { return "已托管 · 运行中" }
+        if daemonLeaseConflict { return "运行正常 · 其他安装管理" }
+        return "运行正常 · 仅查看"
+    }
+
+    private var currentTimeMilliseconds: Int64 {
+        Int64(Date().timeIntervalSince1970 * 1_000)
+    }
+
     init(
         apiClient: APIClient = APIClient(),
         daemonLauncher: any DaemonLaunching = DaemonLauncher(),
@@ -84,10 +147,12 @@ final class AppModel: ObservableObject {
         self.apiClient = apiClient
         self.daemonLauncher = daemonLauncher
         self.fixtureStatus = fixtureStatus
+        self.installationId = Self.loadInstallationID()
     }
 
     deinit {
         refreshTask?.cancel()
+        lifecycleLeaseTask?.cancel()
     }
 
     func startAutoRefresh() {
@@ -233,6 +298,7 @@ final class AppModel: ObservableObject {
             do {
                 dashboard = try await apiClient.dashboard()
                 lifecycle = try? await apiClient.lifecycle()
+                await reconcileLifecycleLease()
                 settings = try? await apiClient.settings()
                 // Account details were added after the first versioned
                 // dashboard. Keep the dashboard usable when an older daemon
@@ -256,6 +322,7 @@ final class AppModel: ObservableObject {
             serviceStatus = .bridgeAvailable
             dashboard = nil
             lifecycle = nil
+            stopLifecycleLeaseHeartbeat()
             imAccounts = []
             imAccountsAvailability = .needsUpdate
             clearManagementPages()
@@ -264,6 +331,7 @@ final class AppModel: ObservableObject {
     }
 
     private func clearManagementPages() {
+        stopLifecycleLeaseHeartbeat()
         for section in AppSection.allCases {
             sectionLoadGenerations[section, default: 0] += 1
         }
@@ -296,6 +364,69 @@ final class AppModel: ObservableObject {
         case .requestLogs:
             requestLogs = []
             requestLogDetail = nil
+        }
+    }
+
+    private func reconcileLifecycleLease() async {
+        guard fixtureStatus == nil, let lifecycle else {
+            stopLifecycleLeaseHeartbeat()
+            return
+        }
+        if ownsDaemonLease {
+            startLifecycleLeaseHeartbeat()
+            return
+        }
+        if daemonLeaseConflict {
+            stopLifecycleLeaseHeartbeat()
+            return
+        }
+        do {
+            let claimed = try await apiClient.claimLifecycleLease(
+                installationId: installationId,
+                daemonInstanceId: lifecycle.service.instanceId
+            )
+            self.lifecycle = claimed
+            startLifecycleLeaseHeartbeat()
+        } catch {
+            // Claiming is opportunistic. A second installation may own the
+            // lease, or an older daemon may not expose the endpoint yet.
+            stopLifecycleLeaseHeartbeat()
+        }
+    }
+
+    private func startLifecycleLeaseHeartbeat() {
+        guard lifecycleLeaseTask == nil else { return }
+        lifecycleLeaseTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(for: .seconds(10))
+                } catch {
+                    return
+                }
+                guard let self, !Task.isCancelled else { return }
+                await self.renewLifecycleLease()
+            }
+        }
+    }
+
+    private func stopLifecycleLeaseHeartbeat() {
+        lifecycleLeaseTask?.cancel()
+        lifecycleLeaseTask = nil
+    }
+
+    private func renewLifecycleLease() async {
+        guard ownsDaemonLease, let instanceId = lifecycle?.service.instanceId else {
+            stopLifecycleLeaseHeartbeat()
+            return
+        }
+        do {
+            lifecycle = try await apiClient.renewLifecycleLease(
+                installationId: installationId,
+                daemonInstanceId: instanceId
+            )
+        } catch {
+            stopLifecycleLeaseHeartbeat()
+            lifecycle = try? await apiClient.lifecycle()
         }
     }
 
@@ -696,6 +827,45 @@ final class AppModel: ObservableObject {
         } catch {
             daemonRecoveryError = userFacingMessage(for: error)
         }
+    }
+
+    func restartDaemon() async {
+        guard fixtureStatus == nil, ownsDaemonLease,
+              let instanceId = lifecycle?.service.instanceId
+        else {
+            managementOperationError = "当前界面没有后台服务管理权。"
+            return
+        }
+        managementOperationError = nil
+        do {
+            let response = try await apiClient.restartLifecycle(
+                installationId: installationId,
+                daemonInstanceId: instanceId
+            )
+            guard response.ok else {
+                throw APIClientError.operationFailed("后台服务没有接受重启请求。")
+            }
+            actionFeedback = ActionFeedback(message: "正在安全重启本地服务")
+            dashboardState = .starting
+            serviceStatus = .checking
+            _ = await waitForDaemonReplacement(previousInstanceId: instanceId)
+            await refresh()
+        } catch {
+            managementOperationError = userFacingMessage(for: error)
+        }
+    }
+
+    private func waitForDaemonReplacement(previousInstanceId: String) async -> Bool {
+        for attempt in 0..<80 {
+            if let current = try? await apiClient.lifecycle(),
+               current.service.instanceId != previousInstanceId
+            {
+                return true
+            }
+            guard attempt < 79 else { return false }
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        return false
     }
 
     /// Silently checks GitHub for a newer release once per app launch. The
@@ -1101,7 +1271,7 @@ final class AppModel: ObservableObject {
             executable: "/Preview/ThreadRelay",
             configPath: "/Preview/config.toml",
             bind: "127.0.0.1:3847",
-            runtime: .init(state: "active", productVersion: "0.5.0", apiMajor: 1),
+            runtime: .init(state: "active", productVersion: "0.5.0", buildNumber: nil, apiMajor: 1),
             protectedWorkItems: .init(
                 aiGatewayRequests: 0,
                 codexTurns: 0,
