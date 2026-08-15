@@ -244,6 +244,42 @@ struct ManageSettings: Decodable, Equatable {
 
 struct ManageRequestLogsResponse: Decodable, Equatable {
     let logs: [ManageRequestLog]
+    let nextCursor: String?
+    let hasMore: Bool?
+}
+
+enum RequestLogSort: String, Codable, CaseIterable, Hashable, Sendable {
+    case newest
+    case oldest
+
+    var label: String {
+        switch self {
+        case .newest: "最新优先"
+        case .oldest: "最早优先"
+        }
+    }
+}
+
+struct RequestLogFilters: Equatable, Hashable, Sendable {
+    var query: String
+    var status: String?
+    var channel: String?
+    var modelId: String?
+    var sort: RequestLogSort
+
+    init(
+        query: String = "",
+        status: String? = nil,
+        channel: String? = nil,
+        modelId: String? = nil,
+        sort: RequestLogSort = .newest
+    ) {
+        self.query = query
+        self.status = status
+        self.channel = channel
+        self.modelId = modelId
+        self.sort = sort
+    }
 }
 
 struct ManageRequestLog: Decodable, Equatable, Identifiable {
@@ -1274,12 +1310,32 @@ struct APIClient {
         return response.settings
     }
 
-    func requestLogs() async throws -> [ManageRequestLog] {
-        let response: ManageRequestLogsResponse = try await performManageGET(
+    func requestLogs(
+        filters: RequestLogFilters = RequestLogFilters(),
+        cursor: String? = nil,
+        limit: Int = 50
+    ) async throws -> ManageRequestLogsResponse {
+        var queryItems = [
+            URLQueryItem(name: "limit", value: String(max(1, limit))),
+            URLQueryItem(name: "sort", value: filters.sort.rawValue),
+        ]
+        func appendNonempty(name: String, value: String?) {
+            guard let value,
+                  !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { return }
+            queryItems.append(URLQueryItem(name: name, value: value))
+        }
+        appendNonempty(name: "cursor", value: cursor)
+        appendNonempty(name: "query", value: filters.query)
+        appendNonempty(name: "status", value: filters.status)
+        appendNonempty(name: "channel", value: filters.channel)
+        appendNonempty(name: "modelId", value: filters.modelId)
+
+        return try await performManageGET(
             path: "api/v1/manage/request-logs",
+            queryItems: queryItems,
             timeout: 10
         )
-        return response.logs
     }
 
     func requestLogDetail(id: Int64) async throws -> ManageRequestLogDetail {
@@ -1565,6 +1621,7 @@ struct APIClient {
 
     private func performManageGET<Response: Decodable>(
         path: String,
+        queryItems: [URLQueryItem] = [],
         timeout: TimeInterval = 5
     ) async throws -> Response {
         let connection = connectionLoader()
@@ -1582,6 +1639,7 @@ struct APIClient {
                 let (data, response) = try await request(
                     baseURL: connection.baseURL,
                     path: path,
+                    queryItems: queryItems,
                     bearerToken: candidate.token,
                     timeoutInterval: timeout
                 )
@@ -1725,12 +1783,25 @@ struct APIClient {
     private func request(
         baseURL: URL,
         path: String,
+        queryItems: [URLQueryItem] = [],
         method: String = "GET",
         body: Data? = nil,
         bearerToken: String,
         timeoutInterval: TimeInterval? = nil
     ) async throws -> (Data, URLResponse) {
-        let url = baseURL.appending(path: path)
+        let pathURL = baseURL.appending(path: path)
+        guard var components = URLComponents(
+            url: pathURL,
+            resolvingAgainstBaseURL: false
+        ) else {
+            throw APIClientError.invalidResponse
+        }
+        if !queryItems.isEmpty {
+            components.queryItems = queryItems
+        }
+        guard let url = components.url else {
+            throw APIClientError.invalidResponse
+        }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.cachePolicy = .reloadIgnoringLocalCacheData

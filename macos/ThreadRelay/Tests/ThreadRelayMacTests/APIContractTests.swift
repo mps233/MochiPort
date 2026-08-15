@@ -1494,7 +1494,7 @@ final class APIContractTests: XCTestCase {
         )
         XCTAssertEqual(saved.theme, "dark")
 
-        let logs = try await client.requestLogs()
+        let logs = try await client.requestLogs().logs
         XCTAssertEqual(logs[0].totalTokens, 30)
         let detail = try await client.requestLogDetail(id: 7)
         XCTAssertEqual(detail.requestHeadersJson, #"{"authorization":"<redacted>"}"#)
@@ -1927,6 +1927,229 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(timeouts.values, ["300.0"])
     }
 
+    func testRequestLogsEncodeFiltersAndDecodePaginationMetadata() async throws {
+        let urls = URLRecorder()
+        let client = makeClient { request in
+            urls.record(request.url)
+            return MockResponse(
+                statusCode: 200,
+                json: Self.requestLogsPageJSON(
+                    ids: [7],
+                    nextCursor: "next-page",
+                    hasMore: true
+                )
+            )
+        }
+
+        let response = try await client.requestLogs(
+            filters: RequestLogFilters(
+                query: "req 100% & ready",
+                status: "error",
+                channel: "primary/backup",
+                modelId: "gpt/5?codex",
+                sort: .oldest
+            ),
+            cursor: "1754:7+/=",
+            limit: 25
+        )
+
+        let url = try XCTUnwrap(urls.urls.first)
+        let components = try XCTUnwrap(
+            URLComponents(url: url, resolvingAgainstBaseURL: false)
+        )
+        let query = Dictionary(
+            uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value) }
+        )
+        XCTAssertEqual(components.path, "/api/v1/manage/request-logs")
+        XCTAssertEqual(query["limit"]!, "25")
+        XCTAssertEqual(query["cursor"]!, "1754:7+/=")
+        XCTAssertEqual(query["query"]!, "req 100% & ready")
+        XCTAssertEqual(query["status"]!, "error")
+        XCTAssertEqual(query["channel"]!, "primary/backup")
+        XCTAssertEqual(query["modelId"]!, "gpt/5?codex")
+        XCTAssertEqual(query["sort"]!, "oldest")
+        XCTAssertEqual(response.logs.map(\.id), [7])
+        XCTAssertEqual(response.nextCursor, "next-page")
+        XCTAssertEqual(response.hasMore, true)
+    }
+
+    @MainActor
+    func testLegacyRequestLogsResponseActsAsSinglePage() async {
+        let client = makeClient { _ in
+            MockResponse(
+                statusCode: 200,
+                json: Self.requestLogsPageJSON(ids: [7])
+            )
+        }
+        let model = AppModel(apiClient: client)
+
+        let loaded = await model.loadSection(.requestLogs)
+        let loadedMore = await model.loadMoreRequestLogs()
+
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(model.requestLogs.map(\.id), [7])
+        XCTAssertFalse(model.requestLogHasMore)
+        XCTAssertFalse(model.requestLogLoadingMore)
+        XCTAssertFalse(loadedMore)
+    }
+
+    @MainActor
+    func testRequestLogsCursorWithoutHasMoreFlagStillEnablesNextPage() async {
+        let client = makeClient { _ in
+            MockResponse(
+                statusCode: 200,
+                json: Self.requestLogsPageJSON(ids: [7], nextCursor: "cursor-1")
+            )
+        }
+        let model = AppModel(apiClient: client)
+
+        let loaded = await model.loadSection(.requestLogs)
+
+        XCTAssertTrue(loaded)
+        XCTAssertTrue(model.requestLogHasMore)
+    }
+
+    @MainActor
+    func testRequestLogPaginationDeduplicatesAndRefreshKeepsLoadedTail() async {
+        let firstPageCalls = IntCounter()
+        let client = makeClient { request in
+            let components = request.url.flatMap {
+                URLComponents(url: $0, resolvingAgainstBaseURL: false)
+            }
+            let cursor = components?.queryItems?.first(where: { $0.name == "cursor" })?.value
+            if cursor == "cursor-1" {
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.requestLogsPageJSON(ids: [6, 5], hasMore: false)
+                )
+            }
+            let firstPageCall = firstPageCalls.next()
+            if firstPageCall == 1 {
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.requestLogsPageJSON(
+                        ids: [7, 6],
+                        nextCursor: "cursor-1",
+                        hasMore: true
+                    )
+                )
+            }
+            if firstPageCall > 2 {
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.requestLogsPageJSON(ids: [9], hasMore: false)
+                )
+            }
+            return MockResponse(
+                statusCode: 200,
+                json: Self.requestLogsPageJSON(
+                    ids: [8, 7],
+                    nextCursor: "cursor-refreshed",
+                    hasMore: true
+                )
+            )
+        }
+        let model = AppModel(apiClient: client)
+
+        let firstPageLoaded = await model.loadSection(.requestLogs)
+        XCTAssertTrue(firstPageLoaded)
+        XCTAssertTrue(model.requestLogHasMore)
+        let nextPageLoaded = await model.loadMoreRequestLogs()
+        XCTAssertTrue(nextPageLoaded)
+        XCTAssertEqual(model.requestLogs.map(\.id), [7, 6, 5])
+        XCTAssertFalse(model.requestLogHasMore)
+
+        let refreshed = await model.refreshRequestLogs()
+        XCTAssertTrue(refreshed)
+        XCTAssertEqual(model.requestLogs.map(\.id), [8, 7, 6, 5])
+        XCTAssertFalse(model.requestLogHasMore)
+
+        let exhaustedRefresh = await model.refreshRequestLogs()
+        XCTAssertTrue(exhaustedRefresh)
+        XCTAssertEqual(model.requestLogs.map(\.id), [9])
+        XCTAssertFalse(model.requestLogHasMore)
+    }
+
+    @MainActor
+    func testStaleRequestLogLoadMoreCannotMergeAfterFiltersChange() async {
+        let client = makeClient { request in
+            let components = request.url.flatMap {
+                URLComponents(url: $0, resolvingAgainstBaseURL: false)
+            }
+            let items = components?.queryItems ?? []
+            let cursor = items.first(where: { $0.name == "cursor" })?.value
+            let query = items.first(where: { $0.name == "query" })?.value
+            if cursor == "cursor-1" {
+                Thread.sleep(forTimeInterval: 0.15)
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.requestLogsPageJSON(ids: [1], hasMore: false)
+                )
+            }
+            if query == "new-filter" {
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.requestLogsPageJSON(ids: [10], hasMore: false)
+                )
+            }
+            return MockResponse(
+                statusCode: 200,
+                json: Self.requestLogsPageJSON(
+                    ids: [3, 2],
+                    nextCursor: "cursor-1",
+                    hasMore: true
+                )
+            )
+        }
+        let model = AppModel(apiClient: client)
+        let firstPageLoaded = await model.loadSection(.requestLogs)
+        XCTAssertTrue(firstPageLoaded)
+
+        let staleLoadMore = Task { await model.loadMoreRequestLogs() }
+        try? await Task.sleep(for: .milliseconds(25))
+        let filterLoaded = await model.setRequestLogFilters(
+            RequestLogFilters(query: "new-filter")
+        )
+        let staleMerged = await staleLoadMore.value
+
+        XCTAssertTrue(filterLoaded)
+        XCTAssertFalse(staleMerged)
+        XCTAssertEqual(model.requestLogFilters.query, "new-filter")
+        XCTAssertEqual(model.requestLogs.map(\.id), [10])
+        XCTAssertFalse(model.requestLogLoadingMore)
+    }
+
+    @MainActor
+    func testForcedRequestLogRefreshCannotClobberNewerResponse() async {
+        let calls = IntCounter()
+        let client = makeClient { _ in
+            if calls.next() == 1 {
+                Thread.sleep(forTimeInterval: 0.15)
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.requestLogsPageJSON(ids: [1], hasMore: false)
+                )
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+            return MockResponse(
+                statusCode: 200,
+                json: Self.requestLogsPageJSON(ids: [2], hasMore: false)
+            )
+        }
+        let model = AppModel(apiClient: client)
+
+        let olderRefresh = Task { await model.refreshRequestLogs() }
+        try? await Task.sleep(for: .milliseconds(25))
+        let newerRefresh = Task { await model.refreshRequestLogs() }
+        let newerSucceeded = await newerRefresh.value
+        let olderSucceeded = await olderRefresh.value
+
+        XCTAssertTrue(newerSucceeded)
+        XCTAssertFalse(olderSucceeded)
+        XCTAssertEqual(model.requestLogs.map(\.id), [2])
+        XCTAssertFalse(model.isLoading(.requestLogs))
+    }
+
     @MainActor
     func testAppModelClearOldRequestLogsPublishesDeletedCountAndRefreshes() async {
         let listCalls = IntCounter()
@@ -1974,7 +2197,7 @@ final class APIContractTests: XCTestCase {
             }
         }
 
-        let logs = try await client.requestLogs()
+        let logs = try await client.requestLogs().logs
         XCTAssertEqual(logs[0].readCacheTokens, 1200)
         XCTAssertEqual(logs[0].readCacheHitRate, 0.8)
         XCTAssertEqual(logs[0].writeCacheTokens, 3000)
@@ -1996,7 +2219,7 @@ final class APIContractTests: XCTestCase {
             MockResponse(statusCode: 200, json: Self.requestLogsJSON)
         }
 
-        let logs = try await client.requestLogs()
+        let logs = try await client.requestLogs().logs
 
         XCTAssertNil(logs[0].readCacheTokens)
         XCTAssertNil(logs[0].writeCache5mTokens)
@@ -2429,6 +2652,28 @@ final class APIContractTests: XCTestCase {
     // Mirrors the daemon payload where the Anthropic TTL-split keys are
     // omitted entirely when unreported (serde skip_serializing_if).
     private static let requestLogsJSON = #"{"logs":[{"id":7,"requestId":"req-7","modelId":"model-a","stream":true,"channel":"primary","providerType":"openai_responses","status":"success","inputTokens":10,"outputTokens":20,"totalTokens":30,"readCacheTokens":null,"readCacheHitRate":null,"writeCacheTokens":null,"costUsd":0.01,"latencyMs":1200,"ttftMs":300,"createdAtMs":1754000120000,"createdAt":"2026-08-13T00:00:00Z","errorMessage":null,"upstreamRequestBodyBytes":128}]}"#
+
+    private static func requestLogsPageJSON(
+        ids: [Int64],
+        nextCursor: String? = nil,
+        hasMore: Bool? = nil
+    ) -> String {
+        let logs = ids.map { id in
+            #"{"id":\#(id),"requestId":"req-\#(id)","modelId":"model-a","stream":true,"channel":"primary","providerType":"openai_responses","status":"success","createdAtMs":\#(1_754_000_000_000 + id),"createdAt":"2026-08-13T00:00:00Z"}"#
+        }
+        var payload = #"{"logs":[\#(logs.joined(separator: ","))]"#
+        if let nextCursor {
+            payload += #", "nextCursor":"\#(nextCursor)""#
+        } else if hasMore != nil {
+            payload += #", "nextCursor":null"#
+        }
+        if let hasMore {
+            payload += #", "hasMore":\#(hasMore)}"#
+        } else {
+            payload += "}"
+        }
+        return payload
+    }
 
     private static func jsonBody(from request: URLRequest) -> [String: Any]? {
         let data: Data?

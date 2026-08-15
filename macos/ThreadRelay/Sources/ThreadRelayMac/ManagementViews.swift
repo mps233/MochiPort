@@ -2046,6 +2046,12 @@ private struct GatewayModelToken: View {
 struct RequestLogsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var query = ""
+    @State private var statusFilter: String?
+    @State private var channelFilter: String?
+    @State private var modelFilter: String?
+    @State private var sort: RequestLogSort = .newest
+    @State private var knownChannels: Set<String> = []
+    @State private var knownModels: Set<String> = []
     @State private var selectedID: Int64?
     @State private var activeDetailID: Int64?
     @State private var confirmsClear = false
@@ -2053,15 +2059,25 @@ struct RequestLogsView: View {
     @State private var clearing = false
     @State private var detailTask: Task<Void, Never>?
 
-    private var filteredLogs: [ManageRequestLog] {
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !needle.isEmpty else { return model.requestLogs }
-        return model.requestLogs.filter {
-            $0.requestId.lowercased().contains(needle)
-                || $0.modelId.lowercased().contains(needle)
-                || $0.channel.lowercased().contains(needle)
-                || $0.status.lowercased().contains(needle)
-        }
+    private var filters: RequestLogFilters {
+        RequestLogFilters(
+            query: query,
+            status: statusFilter,
+            channel: channelFilter,
+            modelId: modelFilter,
+            sort: sort
+        )
+    }
+
+    private var hasActiveFilters: Bool {
+        !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || statusFilter != nil
+            || channelFilter != nil
+            || modelFilter != nil
+    }
+
+    private var activeStructuredFilterCount: Int {
+        [statusFilter, channelFilter, modelFilter].compactMap { $0 }.count
     }
 
     var body: some View {
@@ -2076,35 +2092,53 @@ struct RequestLogsView: View {
                 .padding(.top, ThreadRelaySpacing.page)
                 .padding(.bottom, 20)
 
-                HStack(spacing: 10) {
-                    TextField("搜索请求 ID、模型、Provider 或状态", text: $query)
-                        .textFieldStyle(.roundedBorder)
-                    Button {
-                        Task { await model.loadSection(.requestLogs, force: true) }
-                    } label: {
-                        Label("刷新", systemImage: "arrow.clockwise")
-                    }
-                    Menu {
-                        Button("清理 3 天前的日志…") {
-                            confirmsClearOld = true
-                        }
-                        Button("清空全部日志…", role: .destructive) {
-                            confirmsClear = true
-                        }
-                    } label: {
-                        if clearing {
-                            HStack(spacing: 6) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("正在清理…")
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 10) {
+                        NativeSearchField("搜索请求 ID、模型、渠道、Provider 或状态", text: $query)
+                            .frame(minWidth: 300, idealWidth: 440, maxWidth: .infinity)
+                            .frame(height: 28)
+                        Button {
+                            Task { await model.loadSection(.requestLogs, force: true) }
+                        } label: {
+                            Group {
+                                if model.isLoading(.requestLogs) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.clockwise")
+                                }
                             }
-                        } else {
-                            Text("清理")
+                            .frame(width: 16, height: 16)
                         }
+                        .disabled(model.isLoading(.requestLogs) || clearing)
+                        .help("刷新请求日志")
+                        .accessibilityLabel("刷新请求日志")
+                        Menu {
+                            Button("清理 3 天前的日志…") {
+                                confirmsClearOld = true
+                            }
+                            Button("清空全部日志…", role: .destructive) {
+                                confirmsClear = true
+                            }
+                        } label: {
+                            if clearing {
+                                HStack(spacing: 6) {
+                                    ProgressView()
+                                        .controlSize(.small)
+                                    Text("正在清理…")
+                                }
+                            } else {
+                                Label("清理", systemImage: "trash")
+                            }
+                        }
+                        .fixedSize()
+                        .disabled(clearing)
+                        .accessibilityLabel("清理请求日志")
                     }
-                    .fixedSize()
-                    .disabled(model.requestLogs.isEmpty || clearing)
-                    .accessibilityLabel("清理请求日志")
+
+                    filterBar
+                    .pickerStyle(.menu)
+                    .controlSize(.regular)
                 }
                 .padding(.horizontal, 28)
                 .padding(.bottom, 16)
@@ -2120,17 +2154,20 @@ struct RequestLogsView: View {
                 }
 
                 Group {
-                    if filteredLogs.isEmpty, !model.isLoading(.requestLogs) {
+                    if model.requestLogs.isEmpty, !model.isLoading(.requestLogs) {
                         ManagementEmptyState(
-                            title: query.isEmpty ? "没有请求日志" : "没有匹配的请求",
-                            message: query.isEmpty
-                                ? "在 AI 网关中开启请求日志后，新请求会显示在这里。"
-                                : "调整搜索词后重试。",
+                            title: hasActiveFilters ? "没有匹配的请求" : "没有请求日志",
+                            message: hasActiveFilters
+                                ? "调整搜索或筛选条件后重试。"
+                                : "在 AI 网关中开启请求日志后，新请求会显示在这里。",
                             symbol: "list.bullet.rectangle"
                         )
+                    } else if model.requestLogs.isEmpty {
+                        ProgressView("正在读取请求日志…")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                     } else {
                         List(selection: $selectedID) {
-                            ForEach(filteredLogs) { log in
+                            ForEach(model.requestLogs) { log in
                                 RequestLogRow(log: log)
                                     .tag(log.id)
                                     // Keep the list on the page's neutral system
@@ -2140,6 +2177,30 @@ struct RequestLogsView: View {
                                     .onTapGesture {
                                         showDetail(id: log.id)
                                     }
+                            }
+
+                            if model.requestLogHasMore {
+                                HStack {
+                                    Spacer()
+                                    Button {
+                                        Task { _ = await model.loadMoreRequestLogs() }
+                                    } label: {
+                                        if model.requestLogLoadingMore {
+                                            HStack(spacing: 7) {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                                Text("正在加载…")
+                                            }
+                                        } else {
+                                            Label("加载更多", systemImage: "chevron.down")
+                                        }
+                                    }
+                                    .disabled(model.requestLogLoadingMore)
+                                    Spacer()
+                                }
+                                .padding(.vertical, 8)
+                                .listRowBackground(Color.clear)
+                                .listRowSeparator(.hidden)
                             }
                         }
                         .listStyle(.inset)
@@ -2161,7 +2222,13 @@ struct RequestLogsView: View {
         }
         .animation(.easeInOut(duration: 0.16), value: activeDetailID)
         .background(Color(nsColor: .windowBackgroundColor))
-        .task { await model.loadSection(.requestLogs) }
+        .task(id: filters) {
+            if filters.query != model.requestLogFilters.query {
+                try? await Task.sleep(for: .milliseconds(300))
+                guard !Task.isCancelled else { return }
+            }
+            await model.setRequestLogFilters(filters)
+        }
         // Mirrors the legacy GUI's 5-second list auto-refresh. Pauses while
         // the window is hidden or a clear/reload is already running; the
         // section is only mounted while the page is visible, so switching
@@ -2178,6 +2245,7 @@ struct RequestLogsView: View {
             }
         }
         .onChange(of: model.requestLogs) { logs in
+            rememberFilterOptions(from: logs)
             if let id = activeDetailID, !logs.contains(where: { $0.id == id }) {
                 closeDetail()
             }
@@ -2190,6 +2258,7 @@ struct RequestLogsView: View {
                 showDetail(id: id)
             }
         }
+        .onAppear { rememberFilterOptions(from: model.requestLogs) }
         .onDisappear { detailTask?.cancel() }
         .alert("清空全部请求日志？", isPresented: $confirmsClear) {
             Button("取消", role: .cancel) {}
@@ -2274,6 +2343,93 @@ struct RequestLogsView: View {
         activeDetailID = nil
         model.clearRequestLogDetail()
         model.dismissSectionError(.requestLogs)
+    }
+
+    private func rememberFilterOptions(from logs: [ManageRequestLog]) {
+        knownChannels.formUnion(logs.map(\.channel).filter { !$0.isEmpty })
+        knownModels.formUnion(logs.map(\.modelId).filter { !$0.isEmpty })
+    }
+
+    private var filterBar: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                statusPicker.frame(width: 118)
+                channelPicker.frame(width: 140)
+                modelPicker.frame(width: 180)
+                sortPicker.frame(width: 118)
+                Spacer(minLength: 8)
+                loadedCount
+            }
+
+            HStack(spacing: 8) {
+                Menu {
+                    statusPicker
+                    channelPicker
+                    modelPicker
+                    Divider()
+                    Button("清除筛选") {
+                        statusFilter = nil
+                        channelFilter = nil
+                        modelFilter = nil
+                    }
+                    .disabled(activeStructuredFilterCount == 0)
+                } label: {
+                    Label(
+                        activeStructuredFilterCount == 0
+                            ? "筛选"
+                            : "筛选 \(activeStructuredFilterCount)",
+                        systemImage: "line.3.horizontal.decrease.circle"
+                    )
+                }
+                sortPicker.frame(width: 118)
+                Spacer(minLength: 8)
+                loadedCount
+            }
+        }
+    }
+
+    private var statusPicker: some View {
+        Picker("状态", selection: $statusFilter) {
+            Text("全部状态").tag(String?.none)
+            Text("进行中").tag(String?.some("running"))
+            Text("已完成").tag(String?.some("completed"))
+            Text("失败").tag(String?.some("failed"))
+            Text("已取消").tag(String?.some("cancelled"))
+            Text("成功（兼容）").tag(String?.some("success"))
+        }
+    }
+
+    private var channelPicker: some View {
+        Picker("渠道", selection: $channelFilter) {
+            Text("全部渠道").tag(String?.none)
+            ForEach(knownChannels.sorted(), id: \.self) { channel in
+                Text(channel).tag(String?.some(channel))
+            }
+        }
+    }
+
+    private var modelPicker: some View {
+        Picker("模型", selection: $modelFilter) {
+            Text("全部模型").tag(String?.none)
+            ForEach(knownModels.sorted(), id: \.self) { modelID in
+                Text(modelID).tag(String?.some(modelID))
+            }
+        }
+    }
+
+    private var sortPicker: some View {
+        Picker("排序", selection: $sort) {
+            ForEach(RequestLogSort.allCases, id: \.self) { option in
+                Text(option.label).tag(option)
+            }
+        }
+    }
+
+    private var loadedCount: some View {
+        Text("\(model.requestLogs.count) 条")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
     }
 }
 

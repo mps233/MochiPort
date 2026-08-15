@@ -29,6 +29,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var gateway: ManageGateway?
     @Published private(set) var settings: ManageSettings?
     @Published private(set) var requestLogs: [ManageRequestLog] = []
+    @Published private(set) var requestLogFilters = RequestLogFilters()
+    @Published private(set) var requestLogHasMore = false
+    @Published private(set) var requestLogLoadingMore = false
     @Published private(set) var requestLogDetail: ManageRequestLogDetail?
     @Published private(set) var loadingSections: Set<AppSection> = []
     @Published private(set) var sectionErrors: [AppSection: String] = [:]
@@ -51,6 +54,11 @@ final class AppModel: ObservableObject {
     private var windowVisible = true
     private var sectionLoadGenerations: [AppSection: Int] = [:]
     private var sectionActivityCounts: [AppSection: Int] = [:]
+    private var requestLogDataGeneration = 0
+    private var requestLogNextCursor: String?
+    private var requestLogLoadedFilters: RequestLogFilters?
+    private var requestLogLoadedPageCount = 0
+    private var requestLogLoadMoreOperationID: UUID?
     private var daemonHealthFailureCount = 0
     private var daemonAutoRestartNotBefore: Date?
     private var startupUpdateCheckScheduled = false
@@ -341,7 +349,7 @@ final class AppModel: ObservableObject {
         codexSessionProviders = []
         gateway = nil
         settings = nil
-        requestLogs = []
+        resetRequestLogPagination(clearLogs: true)
         requestLogDetail = nil
         sectionErrors = [:]
     }
@@ -362,7 +370,7 @@ final class AppModel: ObservableObject {
         case .gateway:
             gateway = nil
         case .requestLogs:
-            requestLogs = []
+            resetRequestLogPagination(clearLogs: true)
             requestLogDetail = nil
         }
     }
@@ -496,9 +504,28 @@ final class AppModel: ObservableObject {
                 guard isCurrentLoad(section, generation: generation) else { return false }
                 gateway = response
             case .requestLogs:
-                let response = try await apiClient.requestLogs()
-                guard isCurrentLoad(section, generation: generation) else { return false }
-                requestLogs = response
+                let filters = requestLogFilters
+                let dataGeneration = beginRequestLogFirstPageLoad()
+                let previousLogs = requestLogs
+                let previousCursor = requestLogNextCursor
+                let previousHasMore = requestLogHasMore
+                let previousPageCount = requestLogLoadedPageCount
+                let preserveLoadedTail = requestLogLoadedFilters == filters
+                    && previousPageCount > 0
+                let response = try await apiClient.requestLogs(filters: filters)
+                guard isCurrentLoad(section, generation: generation),
+                      requestLogDataGeneration == dataGeneration,
+                      requestLogFilters == filters
+                else { return false }
+                applyRequestLogFirstPage(
+                    response,
+                    filters: filters,
+                    previousLogs: previousLogs,
+                    previousCursor: previousCursor,
+                    previousHasMore: previousHasMore,
+                    previousPageCount: previousPageCount,
+                    preserveLoadedTail: preserveLoadedTail
+                )
             }
             guard isCurrentLoad(section, generation: generation) else { return false }
             return true
@@ -515,6 +542,151 @@ final class AppModel: ObservableObject {
 
     func isLoading(_ section: AppSection) -> Bool {
         loadingSections.contains(section)
+    }
+
+    /// Replaces the active server-side filters and loads their first page.
+    /// Any response still in flight for an older filter set is ignored.
+    @discardableResult
+    func setRequestLogFilters(_ filters: RequestLogFilters) async -> Bool {
+        requestLogFilters = filters
+        resetRequestLogPagination(clearLogs: true)
+        return await loadSection(.requestLogs, force: true)
+    }
+
+    @discardableResult
+    func resetRequestLogFilters() async -> Bool {
+        await setRequestLogFilters(RequestLogFilters())
+    }
+
+    @discardableResult
+    func refreshRequestLogs() async -> Bool {
+        await loadSection(.requestLogs, force: true)
+    }
+
+    /// Loads the next keyset page and appends only IDs that are not already
+    /// present. A first-page refresh or filter change invalidates this merge.
+    @discardableResult
+    func loadMoreRequestLogs() async -> Bool {
+        guard fixtureStatus == nil else { return true }
+        guard !requestLogLoadingMore,
+              !isLoading(.requestLogs),
+              requestLogHasMore,
+              let cursor = requestLogNextCursor,
+              requestLogLoadedFilters == requestLogFilters
+        else { return false }
+
+        let filters = requestLogFilters
+        let dataGeneration = requestLogDataGeneration
+        let operationID = UUID()
+        requestLogLoadMoreOperationID = operationID
+        requestLogLoadingMore = true
+        defer {
+            if requestLogLoadMoreOperationID == operationID {
+                requestLogLoadMoreOperationID = nil
+                requestLogLoadingMore = false
+            }
+        }
+
+        do {
+            let response = try await apiClient.requestLogs(
+                filters: filters,
+                cursor: cursor
+            )
+            guard !Task.isCancelled,
+                  requestLogLoadMoreOperationID == operationID,
+                  requestLogDataGeneration == dataGeneration,
+                  requestLogFilters == filters
+            else { return false }
+
+            requestLogs = Self.mergingRequestLogs(
+                requestLogs,
+                after: response.logs
+            )
+            let nextCursor = response.nextCursor
+            requestLogNextCursor = nextCursor
+            requestLogHasMore = Self.requestLogPageHasMore(
+                response,
+                previousCursor: cursor
+            )
+            requestLogLoadedPageCount += 1
+            sectionErrors[.requestLogs] = nil
+            return true
+        } catch {
+            guard !Task.isCancelled,
+                  requestLogLoadMoreOperationID == operationID,
+                  requestLogDataGeneration == dataGeneration,
+                  requestLogFilters == filters
+            else { return false }
+            sectionErrors[.requestLogs] = userFacingMessage(for: error)
+            return false
+        }
+    }
+
+    private func beginRequestLogFirstPageLoad() -> Int {
+        requestLogDataGeneration += 1
+        requestLogLoadMoreOperationID = nil
+        requestLogLoadingMore = false
+        return requestLogDataGeneration
+    }
+
+    private func applyRequestLogFirstPage(
+        _ response: ManageRequestLogsResponse,
+        filters: RequestLogFilters,
+        previousLogs: [ManageRequestLog],
+        previousCursor: String?,
+        previousHasMore: Bool,
+        previousPageCount: Int,
+        preserveLoadedTail: Bool
+    ) {
+        let responseHasMore = Self.requestLogPageHasMore(response)
+        if preserveLoadedTail, responseHasMore {
+            requestLogs = Self.mergingRequestLogs(response.logs, after: previousLogs)
+        } else {
+            requestLogs = Self.mergingRequestLogs(response.logs, after: [])
+        }
+
+        if preserveLoadedTail, previousPageCount > 1, responseHasMore {
+            requestLogNextCursor = previousCursor
+            requestLogHasMore = previousHasMore
+            requestLogLoadedPageCount = previousPageCount
+        } else {
+            requestLogNextCursor = response.nextCursor
+            requestLogHasMore = responseHasMore
+            requestLogLoadedPageCount = 1
+        }
+        requestLogLoadedFilters = filters
+    }
+
+    private func resetRequestLogPagination(clearLogs: Bool) {
+        requestLogDataGeneration += 1
+        requestLogNextCursor = nil
+        requestLogHasMore = false
+        requestLogLoadedFilters = nil
+        requestLogLoadedPageCount = 0
+        requestLogLoadMoreOperationID = nil
+        requestLogLoadingMore = false
+        if clearLogs {
+            requestLogs = []
+        }
+    }
+
+    private static func mergingRequestLogs(
+        _ leading: [ManageRequestLog],
+        after trailing: [ManageRequestLog]
+    ) -> [ManageRequestLog] {
+        var seen = Set<Int64>()
+        return (leading + trailing).filter { seen.insert($0.id).inserted }
+    }
+
+    private static func requestLogPageHasMore(
+        _ response: ManageRequestLogsResponse,
+        previousCursor: String? = nil
+    ) -> Bool {
+        guard let nextCursor = response.nextCursor,
+              !nextCursor.isEmpty,
+              nextCursor != previousCursor
+        else { return false }
+        return response.hasMore ?? true
     }
 
     private func isCurrentLoad(_ section: AppSection, generation: Int) -> Bool {
@@ -746,6 +918,7 @@ final class AppModel: ObservableObject {
         await performManagementAction(section: .requestLogs) {
             let deleted = try await self.apiClient.clearRequestLogs()
             self.requestLogDetail = nil
+            self.resetRequestLogPagination(clearLogs: false)
             try await self.requireSectionRefresh(.requestLogs)
             return "已清空 \(deleted) 条日志"
         }
@@ -758,6 +931,7 @@ final class AppModel: ObservableObject {
     func clearOldRequestLogs(days: Int = 3) async -> Bool {
         await performManagementAction(section: .requestLogs) {
             let deleted = try await self.apiClient.clearOldRequestLogs(days: days)
+            self.resetRequestLogPagination(clearLogs: false)
             try await self.requireSectionRefresh(.requestLogs)
             return "已清理 \(deleted) 条旧日志"
         }

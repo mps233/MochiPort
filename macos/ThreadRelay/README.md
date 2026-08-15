@@ -36,8 +36,9 @@ The Codex screen can configure, repair, uninstall, refresh models, and perform
 an enhanced launch after preflight. Sessions can be searched and moved between
 their original provider and AI Gateway. The Gateway screen reads and writes
 provider protocol, URL, model list, priority, timeout, enablement, logging, and
-visible-model settings. Request logs support local search, destructive-clear
-confirmation, and lazy request/upstream/SSE/response detail loading. Settings
+visible-model settings. Request logs support server-side cursor pagination,
+combined filters, search, sorting, destructive-clear confirmation, and lazy
+request/upstream/SSE/response detail loading. Settings
 controls the service-message language, app appearance, local connection mode,
 outbound proxy, daemon diagnostics, log directory, and a manual GitHub release
 check.
