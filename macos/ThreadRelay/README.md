@@ -54,3 +54,13 @@ Generate the shared Xcode version settings from the Rust package version with:
 THREADRELAY_BUILD_NUMBER=1 scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 ```
+
+Use the same `THREADRELAY_BUILD_NUMBER` when compiling the Rust daemon. The
+assembly script rejects a bundle when its embedded daemon was built with a
+different number, so the GUI and daemon cannot silently drift apart:
+
+```sh
+THREADRELAY_BUILD_NUMBER=389 cargo build --release --features gui --bin threadrelay
+THREADRELAY_BUILD_NUMBER=389 scripts/generate-swift-version.sh \
+  macos/ThreadRelay/Config/Version.xcconfig
+```

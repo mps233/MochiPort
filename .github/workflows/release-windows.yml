@@ -74,6 +74,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $env:THREADRELAY_BUILD_NUMBER = "${{ github.run_number }}"
           cargo build --locked --release --features gui --bin threadrelay
 
       - name: Sign Binaries

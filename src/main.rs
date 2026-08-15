@@ -22,6 +22,7 @@ mod remote_control_backend;
 mod safe_relaunch;
 mod store;
 mod types;
+mod version;
 mod vscode_extension_patch;
 mod web;
 
@@ -48,7 +49,11 @@ use crate::{
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
     if matches!(cli.command, Command::Version) {
-        println!("threadrelay {}", env!("CARGO_PKG_VERSION"));
+        println!(
+            "threadrelay {} (build {})",
+            version::PRODUCT_VERSION,
+            version::BUILD_NUMBER
+        );
         return Ok(());
     }
     if let Command::SafeRelaunchHelper {

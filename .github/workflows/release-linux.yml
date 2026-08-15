@@ -58,7 +58,8 @@ jobs:
       - name: Build Release
         run: |
           set -euo pipefail
-          cargo build --locked --release --features gui --bin threadrelay
+          THREADRELAY_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}" \
+            cargo build --locked --release --features gui --bin threadrelay
           strip target/release/threadrelay
 
       - name: Prepare Release Metadata

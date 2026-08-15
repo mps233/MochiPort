@@ -80,10 +80,12 @@ jobs:
 
           # Build wxWidgets as universal (arm64 + x86_64) and compile for native arch
           export WX_OSX_ARCHITECTURES="arm64;x86_64"
-          PATH="$(brew --prefix)/bin:$PATH" cargo build --locked --release --features gui --bin threadrelay --target aarch64-apple-darwin
+          THREADRELAY_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}" \
+            PATH="$(brew --prefix)/bin:$PATH" cargo build --locked --release --features gui --bin threadrelay --target aarch64-apple-darwin
 
           # Compile for Intel (wxWidgets libs are already fat, no rebuild needed)
-          PATH="$(brew --prefix)/bin:$PATH" cargo build --locked --release --features gui --bin threadrelay --target x86_64-apple-darwin
+          THREADRELAY_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}" \
+            PATH="$(brew --prefix)/bin:$PATH" cargo build --locked --release --features gui --bin threadrelay --target x86_64-apple-darwin
 
           # Create universal binary
           mkdir -p target/release

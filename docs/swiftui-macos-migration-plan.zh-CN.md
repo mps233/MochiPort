@@ -4,8 +4,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Phase 3 已完成；Phase 4-6 的 Codex、会话、AI Gateway、请求日志和设置主页面已接入真实版本化管理 API，性能、诊断导出和发布级无障碍收尾仍待完成 |
-| 最近核验 | 2026-08-14；Swift/Xcode 93 项、Rust 841 项通过（1 项忽略）；Universal Release build 380 已完成 Telegram 原生输入状态改造后的隔离组装与签名验证 |
+| 状态 | Phase 3 已完成；Phase 4-6 的 Codex、会话、AI Gateway、请求日志和设置主页面已接入真实版本化管理 API；生命周期租约、安全重启、GUI supervisor 更新切换和构建号校验已落地，性能、诊断导出和发布级无障碍收尾仍待完成 |
+| 最近核验 | 2026-08-15；Swift/Xcode 98 项、Rust 862 项通过（1 项忽略）；Universal Release build 389 已完成 GUI 自动恢复、更新切换防竞态、daemon/GUI 构建号显示与 Telegram 原生 Thinking 最终消息接管的隔离组装和签名验证 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
 | 主前端 | SwiftUI |
@@ -168,7 +168,7 @@ SwiftUI 首版不负责把旧 `Application Support/CodexHub` 数据搬到新目�
 - 产品语义版本继续以根目录 `Cargo.toml` 的 package version 为唯一来源。
 - 构建号由显式 `THREADRELAY_BUILD_NUMBER` 提供；CI 使用 GitHub run number，本地正式打包必须显式传入。
 - 构建脚本生成 Swift 使用的 `Version.xcconfig`，并校验 Xcode、Cargo、Info.plist、helper `--version` 和发布清单一致；仅在采用 Sparkle 时增加 appcast 校验。
-- `/healthz` 仅返回 `service=threadrelay`、API 主版本和 `ready`；受鉴权运行状态接口另行返回 `productVersion`、`build`、`apiVersion`、`apiMinSupported`、`apiMaxSupported`、PID 启动时间和 runtime 哈希。
+- `/healthz` 仅返回 `service=threadrelay`、API 主版本和 `ready`；受鉴权运行状态接口另行返回 `productVersion`、`buildNumber`、`apiMajor`、PID、启动时间和 runtime 状态。
 - Bundle ID 固定为 `io.github.mps233.threadrelay`，正式签名 Team ID 在 SwiftUI 迁移前后保持一致。
 - `swiftui-preview` 使用独立 Bundle ID 和更新 feed，可与 stable GUI 并行安装；两者复用同一兼容 daemon，不各自启动服务。
 - 最后一个 wxDragon ThreadRelay 版本作为桥接版本。仍使用 `com.codexhub.app` 的更早 CodexHub 不直接原位升级到 SwiftUI，而是先迁移到桥接版或并行安装 ThreadRelay；业务数据仍由 Rust 兼容路径读取。
