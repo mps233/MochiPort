@@ -1975,22 +1975,39 @@ final class APIContractTests: XCTestCase {
 
     @MainActor
     func testLegacyRequestLogsResponseActsAsSinglePage() async {
-        let client = makeClient { _ in
-            MockResponse(
+        let urls = URLRecorder()
+        let client = makeClient { request in
+            urls.record(request.url)
+            return MockResponse(
                 statusCode: 200,
-                json: Self.requestLogsPageJSON(ids: [7])
+                json: Self.requestLogsPageJSON(ids: [9, 8, 7])
             )
         }
         let model = AppModel(apiClient: client)
 
-        let loaded = await model.loadSection(.requestLogs)
+        let loaded = await model.setRequestLogFilters(
+            RequestLogFilters(
+                query: "REQ-",
+                status: "SUCCESS",
+                channel: "PRIMARY",
+                modelId: "MODEL-A",
+                sort: .oldest
+            )
+        )
         let loadedMore = await model.loadMoreRequestLogs()
 
         XCTAssertTrue(loaded)
-        XCTAssertEqual(model.requestLogs.map(\.id), [7])
+        XCTAssertEqual(model.requestLogs.map(\.id), [7, 8, 9])
         XCTAssertFalse(model.requestLogHasMore)
         XCTAssertFalse(model.requestLogLoadingMore)
         XCTAssertFalse(loadedMore)
+        let components = urls.urls.first.flatMap {
+            URLComponents(url: $0, resolvingAgainstBaseURL: false)
+        }
+        XCTAssertEqual(
+            components?.queryItems?.first(where: { $0.name == "limit" })?.value,
+            "200"
+        )
     }
 
     @MainActor

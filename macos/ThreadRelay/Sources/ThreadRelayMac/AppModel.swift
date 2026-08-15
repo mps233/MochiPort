@@ -512,7 +512,10 @@ final class AppModel: ObservableObject {
                 let previousPageCount = requestLogLoadedPageCount
                 let preserveLoadedTail = requestLogLoadedFilters == filters
                     && previousPageCount > 0
-                let response = try await apiClient.requestLogs(filters: filters)
+                let response = Self.applyingLegacyRequestLogFilters(
+                    to: try await apiClient.requestLogs(filters: filters),
+                    filters: filters
+                )
                 guard isCurrentLoad(section, generation: generation),
                       requestLogDataGeneration == dataGeneration,
                       requestLogFilters == filters
@@ -687,6 +690,59 @@ final class AppModel: ObservableObject {
               nextCursor != previousCursor
         else { return false }
         return response.hasMore ?? true
+    }
+
+    /// Daemons released before server-side pagination ignore unknown query
+    /// parameters and omit both metadata keys. Keep search, exact filters and
+    /// ordering functional against their bounded 200-row response.
+    private static func applyingLegacyRequestLogFilters(
+        to response: ManageRequestLogsResponse,
+        filters: RequestLogFilters
+    ) -> ManageRequestLogsResponse {
+        guard response.nextCursor == nil, response.hasMore == nil else {
+            return response
+        }
+
+        let query = filters.query
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let logs = response.logs
+            .filter { log in
+                exactMatch(log.status, expected: filters.status)
+                    && exactMatch(log.channel, expected: filters.channel)
+                    && exactMatch(log.modelId, expected: filters.modelId)
+                    && (
+                        query.isEmpty
+                            || [
+                                log.requestId,
+                                log.modelId,
+                                log.channel,
+                                log.status,
+                                log.providerType,
+                            ].contains { $0.lowercased().contains(query) }
+                    )
+            }
+            .sorted { lhs, rhs in
+                let isAscending = filters.sort == .oldest
+                if lhs.createdAtMs == rhs.createdAtMs {
+                    return isAscending ? lhs.id < rhs.id : lhs.id > rhs.id
+                }
+                return isAscending
+                    ? lhs.createdAtMs < rhs.createdAtMs
+                    : lhs.createdAtMs > rhs.createdAtMs
+            }
+        return ManageRequestLogsResponse(
+            logs: logs,
+            nextCursor: nil,
+            hasMore: nil
+        )
+    }
+
+    private static func exactMatch(_ value: String, expected: String?) -> Bool {
+        guard let expected = expected?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !expected.isEmpty
+        else { return true }
+        return value.caseInsensitiveCompare(expected) == .orderedSame
     }
 
     private func isCurrentLoad(_ section: AppSection, generation: Int) -> Bool {

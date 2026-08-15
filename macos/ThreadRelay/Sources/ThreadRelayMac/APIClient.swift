@@ -1313,7 +1313,7 @@ struct APIClient {
     func requestLogs(
         filters: RequestLogFilters = RequestLogFilters(),
         cursor: String? = nil,
-        limit: Int = 50
+        limit: Int = 200
     ) async throws -> ManageRequestLogsResponse {
         var queryItems = [
             URLQueryItem(name: "limit", value: String(max(1, limit))),
