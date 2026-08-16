@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | Phase 3 已完成；Phase 2 已具备版本化 daemon staging、持久化切换事务、候选版本准入 hold、连续健康校验、失败回滚和 GUI 崩溃恢复；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页已完成，隔离端口故障矩阵、统一切换日志、增强启动完整状态机、诊断导出和发布级无障碍收尾仍待完成 |
-| 最近核验 | 2026-08-16；SwiftPM 135 项、Rust 901 项通过（1 项忽略）；Universal Release build 415 已完成候选 daemon 准入保护、租约换代提交、不可达回滚和切换竞态收敛的正式组装、签名与运行验证，GUI 已切换至 415，受保护 daemon 保持 build 410 继续运行 |
+| 最近核验 | 2026-08-16；SwiftPM 144 项、Rust 902 项通过（1 项忽略）；Universal Release build 416 已完成候选 daemon 准入保护、租约换代提交、不可达回滚、切换竞态收敛和恢复身份校验加固的正式组装、签名与运行验证，GUI 已切换至 416，受保护 daemon 保持 build 410 继续运行 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
 | 主前端 | SwiftUI |
@@ -378,7 +378,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 ### Phase 2：daemon 生命周期与菜单栏
 
-当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、连续健康检查、失败回滚和 GUI 崩溃恢复。凭据轮换、统一切换日志和隔离端口完整故障矩阵仍未完成。
+当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、连续健康检查、失败回滚和 GUI 崩溃恢复。自动化测试已覆盖 journal 损坏或篡改、候选构建不一致、冻结后进程身份变化、回滚启动失败，以及跨 daemon 实例和租约换代的拒绝路径；凭据轮换、统一切换日志和隔离端口完整故障矩阵仍未完成。
 
 交付物：
 
@@ -388,6 +388,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 - [ ] 按 Phase 0 控制平面 ADR 使用和轮换共享管理凭据，落实唯一管理租约与可信接管。
 - [x] 实现 daemon 管理租约、受保护 drain、候选 hold/commit、连续健康校验和失败回滚协议。
 - [ ] 在隔离端口完成端口占用、候选 API 不可达、KeepAlive 连续换 PID、helper 崩溃和回滚失败的完整故障注入矩阵。
+  当前自动化边界：候选 API 不可达、PID/路径/参数/环境变化、journal 损坏或篡改、候选构建不一致、回滚 bootstrap 失败，以及跨 daemon 实例和租约 generation 失效均已有确定性回归测试；端口占用、KeepAlive 真实连续换 PID、helper 真实崩溃和隔离进程级回滚仍待验证。
 - [x] 实现 `MenuBarExtra`：打开主窗口、服务状态、检查更新、退出。
 - [x] 处理重复启动和 GUI 切换中崩溃恢复，持久化 journal 可在重启后继续提交或回滚。
 - [ ] 完成端口冲突、旧 CodexHub 兼容 daemon 和真实 helper 崩溃的发布级验证。
