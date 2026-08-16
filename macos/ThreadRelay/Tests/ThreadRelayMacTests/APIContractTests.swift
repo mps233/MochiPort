@@ -531,55 +531,19 @@ final class APIContractTests: XCTestCase {
         )
     }
 
-    func testGUIRecoveryLauncherReloadsSameSupervisorAfterStaleBundleBuild() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let executable = root.appendingPathComponent("ThreadRelay.app/Contents/MacOS/ThreadRelay")
-        let supervisor = root.appendingPathComponent("ThreadRelay.app/Contents/Helpers/threadrelay-gui-supervisor")
-        try FileManager.default.createDirectory(
-            at: executable.deletingLastPathComponent(),
-            withIntermediateDirectories: true
+    func testGUIRecoveryLauncherUpdatesStaleBuildWithoutReloadingRunningSupervisor() throws {
+        let fixture = try makeGUIRecoveryLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configuration = fixture.configuration
+        let printOutput = guiRecoveryLaunchctlOutput(
+            configuration: configuration,
+            build: "388"
         )
-        try FileManager.default.createDirectory(
-            at: supervisor.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        XCTAssertTrue(FileManager.default.createFile(atPath: executable.path, contents: Data()))
-        XCTAssertTrue(FileManager.default.createFile(atPath: supervisor.path, contents: Data()))
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: supervisor.path)
-        let configuration = GUIRecoveryConfiguration(
-            executableURL: executable,
-            supervisorURL: supervisor,
-            launchAgentURL: root.appendingPathComponent("home/Library/LaunchAgents/gui.plist"),
-            logURL: root.appendingPathComponent("data/logs/gui.log"),
-            homeURL: root.appendingPathComponent("home"),
-            dataDirectoryURL: root.appendingPathComponent("data"),
-            buildIdentifier: "389"
-        )
-        let printCount = IntCounter()
         let commands = CommandInvocationRecorder { arguments in
             if arguments.first == "print" {
-                if printCount.next() == 1 {
-                    return CommandResult(
-                        exitCode: 0,
-                        output: """
-                        state = running
-                        program = \(configuration.supervisorURL.path)
-                        arguments = {
-                            \(configuration.supervisorURL.path)
-                        }
-                        environment = {
-                            THREADRELAY_HOME => \(configuration.dataDirectoryURL.path)
-                            THREADRELAY_BUNDLE_BUILD => 388
-                        }
-                        """
-                    )
-                }
-                return CommandResult(exitCode: 1, output: "service not found")
+                return CommandResult(exitCode: 0, output: printOutput)
             }
-            return CommandResult(exitCode: ["bootout", "bootstrap"].contains(arguments.first) ? 0 : 1, output: "")
+            return CommandResult(exitCode: 1, output: "unexpected command")
         }
         let launcher = GUIRecoveryLauncher(
             configurationLoader: { configuration },
@@ -588,7 +552,158 @@ final class APIContractTests: XCTestCase {
 
         try launcher.startIfNeeded()
 
-        XCTAssertEqual(commands.arguments.map(\.first), ["print", "bootout", "print", "bootstrap"])
+        let serviceTarget = "gui/\(getuid())/\(GUIRecoveryConfiguration.label)"
+        XCTAssertEqual(commands.arguments, [["print", serviceTarget]])
+        let plist = try guiRecoveryLaunchAgentPropertyList(at: configuration.launchAgentURL)
+        let environment = try XCTUnwrap(plist["EnvironmentVariables"] as? [String: String])
+        XCTAssertEqual(environment["HOME"], configuration.homeURL.path)
+        XCTAssertEqual(environment["THREADRELAY_HOME"], configuration.dataDirectoryURL.path)
+        XCTAssertEqual(environment["THREADRELAY_BUNDLE_BUILD"], "389")
+    }
+
+    func testGUIRecoveryLauncherKickstartsStoppedSupervisorWithoutReloadingIt() throws {
+        let fixture = try makeGUIRecoveryLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configuration = fixture.configuration
+        let printOutput = guiRecoveryLaunchctlOutput(
+            configuration: configuration,
+            state: "exited",
+            build: "388"
+        )
+        let launchAgentDataAtKickstart = LockedValue<Data?>(nil)
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 0, output: printOutput)
+            }
+            if arguments.first == "kickstart" {
+                launchAgentDataAtKickstart.value = try? Data(
+                    contentsOf: configuration.launchAgentURL
+                )
+                return CommandResult(exitCode: 0, output: "")
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let launcher = GUIRecoveryLauncher(
+            configurationLoader: { configuration },
+            commandRunner: commands.run
+        )
+
+        try launcher.startIfNeeded()
+
+        let serviceTarget = "gui/\(getuid())/\(GUIRecoveryConfiguration.label)"
+        XCTAssertEqual(
+            commands.arguments,
+            [
+                ["print", serviceTarget],
+                ["kickstart", serviceTarget],
+            ]
+        )
+        let launchAgentData = try XCTUnwrap(launchAgentDataAtKickstart.value)
+        let launchAgentAtKickstart = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: launchAgentData,
+                options: [],
+                format: nil
+            ) as? [String: Any]
+        )
+        XCTAssertEqual(
+            (launchAgentAtKickstart["EnvironmentVariables"] as? [String: String])?[
+                "THREADRELAY_BUNDLE_BUILD"
+            ],
+            "389"
+        )
+        let plist = try guiRecoveryLaunchAgentPropertyList(at: configuration.launchAgentURL)
+        let environment = try XCTUnwrap(plist["EnvironmentVariables"] as? [String: String])
+        XCTAssertEqual(environment["THREADRELAY_BUNDLE_BUILD"], "389")
+    }
+
+    func testGUIRecoveryLauncherRejectsSupervisorFromAnotherBundlePath() throws {
+        let fixture = try makeGUIRecoveryLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configuration = fixture.configuration
+        let otherSupervisor = fixture.root.appendingPathComponent(
+            "Other.app/Contents/Helpers/threadrelay-gui-supervisor"
+        )
+        let printOutput = guiRecoveryLaunchctlOutput(
+            configuration: configuration,
+            supervisorURL: otherSupervisor,
+            arguments: [otherSupervisor.path]
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            guard arguments.first == "print" else {
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+            return CommandResult(exitCode: 0, output: printOutput)
+        }
+        let launcher = GUIRecoveryLauncher(
+            configurationLoader: { configuration },
+            commandRunner: commands.run
+        )
+
+        XCTAssertThrowsError(try launcher.startIfNeeded()) { error in
+            XCTAssertEqual(
+                error as? DaemonLaunchError,
+                .loadedAgentMismatch(
+                    expected: configuration.supervisorURL.path,
+                    actual: otherSupervisor.path
+                )
+            )
+        }
+        let serviceTarget = "gui/\(getuid())/\(GUIRecoveryConfiguration.label)"
+        XCTAssertEqual(commands.arguments, [["print", serviceTarget]])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configuration.launchAgentURL.path))
+    }
+
+    func testGUIRecoveryLauncherRejectsSupervisorWithMismatchedIdentity() throws {
+        let fixture = try makeGUIRecoveryLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configuration = fixture.configuration
+        let mismatches: [(home: URL, data: URL, arguments: [String])] = [
+            (
+                fixture.root.appendingPathComponent("other-home"),
+                configuration.dataDirectoryURL,
+                [configuration.supervisorURL.path]
+            ),
+            (
+                configuration.homeURL,
+                fixture.root.appendingPathComponent("other-data"),
+                [configuration.supervisorURL.path]
+            ),
+            (
+                configuration.homeURL,
+                configuration.dataDirectoryURL,
+                [configuration.supervisorURL.path, "--unexpected"]
+            ),
+        ]
+
+        for mismatch in mismatches {
+            let printOutput = guiRecoveryLaunchctlOutput(
+                configuration: configuration,
+                arguments: mismatch.arguments,
+                homeURL: mismatch.home,
+                dataDirectoryURL: mismatch.data
+            )
+            let commands = CommandInvocationRecorder { arguments in
+                guard arguments.first == "print" else {
+                    return CommandResult(exitCode: 1, output: "unexpected command")
+                }
+                return CommandResult(exitCode: 0, output: printOutput)
+            }
+            let launcher = GUIRecoveryLauncher(
+                configurationLoader: { configuration },
+                commandRunner: commands.run
+            )
+
+            XCTAssertThrowsError(try launcher.startIfNeeded()) { error in
+                XCTAssertEqual(
+                    error as? DaemonLaunchError,
+                    .loadedAgentUntrusted(configuration.supervisorURL.path)
+                )
+            }
+            let serviceTarget = "gui/\(getuid())/\(GUIRecoveryConfiguration.label)"
+            XCTAssertEqual(commands.arguments, [["print", serviceTarget]])
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configuration.launchAgentURL.path))
     }
 
     func testDaemonLauncherBootstrapsMissingService() async throws {
@@ -5168,6 +5283,90 @@ final class APIContractTests: XCTestCase {
     private func runtimeSwitchJournalURL(for configuration: DaemonLaunchConfiguration) -> URL {
         configuration.configURL.deletingLastPathComponent()
             .appendingPathComponent("threadrelay-runtime-switch.json")
+    }
+
+    private func makeGUIRecoveryLauncherFixture() throws -> (
+        root: URL,
+        configuration: GUIRecoveryConfiguration
+    ) {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let executable = root.appendingPathComponent(
+            "ThreadRelay.app/Contents/MacOS/ThreadRelay"
+        )
+        let supervisor = root.appendingPathComponent(
+            "ThreadRelay.app/Contents/Helpers/threadrelay-gui-supervisor"
+        )
+        try FileManager.default.createDirectory(
+            at: executable.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createDirectory(
+            at: supervisor.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(FileManager.default.createFile(atPath: executable.path, contents: Data()))
+        XCTAssertTrue(FileManager.default.createFile(atPath: supervisor.path, contents: Data()))
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: executable.path
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: supervisor.path
+        )
+        return (
+            root,
+            GUIRecoveryConfiguration(
+                executableURL: executable,
+                supervisorURL: supervisor,
+                launchAgentURL: root.appendingPathComponent(
+                    "home/Library/LaunchAgents/gui.plist"
+                ),
+                logURL: root.appendingPathComponent("data/logs/gui.log"),
+                homeURL: root.appendingPathComponent("home"),
+                dataDirectoryURL: root.appendingPathComponent("data"),
+                buildIdentifier: "389"
+            )
+        )
+    }
+
+    private func guiRecoveryLaunchAgentPropertyList(at url: URL) throws -> [String: Any] {
+        try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: Data(contentsOf: url),
+                options: [],
+                format: nil
+            ) as? [String: Any]
+        )
+    }
+
+    private func guiRecoveryLaunchctlOutput(
+        configuration: GUIRecoveryConfiguration,
+        state: String = "running",
+        build: String = "389",
+        supervisorURL: URL? = nil,
+        arguments: [String]? = nil,
+        homeURL: URL? = nil,
+        dataDirectoryURL: URL? = nil
+    ) -> String {
+        let resolvedSupervisor = supervisorURL ?? configuration.supervisorURL
+        let resolvedArguments = arguments ?? [resolvedSupervisor.path]
+        let argumentLines = resolvedArguments
+            .map { "    \($0)" }
+            .joined(separator: "\n")
+        return """
+        state = \(state)
+        program = \(resolvedSupervisor.path)
+        arguments = {
+        \(argumentLines)
+        }
+        environment = {
+            HOME => \((homeURL ?? configuration.homeURL).path)
+            THREADRELAY_HOME => \((dataDirectoryURL ?? configuration.dataDirectoryURL).path)
+            THREADRELAY_BUNDLE_BUILD => \(build)
+        }
+        """
     }
 
     private func makeDaemonLauncherFixture(

@@ -2014,9 +2014,24 @@ struct GUIRecoveryLauncher: @unchecked Sendable {
         let serviceTarget = "\(domain)/\(GUIRecoveryConfiguration.label)"
         let printResult = try commandRunner(launchctl, ["print", serviceTarget])
 
-        if printResult.exitCode == 0,
-           Self.loadedAgentMatches(output: printResult.output, configuration: configuration)
-        {
+        if printResult.exitCode == 0 {
+            guard Self.loadedAgentHasSameIdentity(
+                output: printResult.output,
+                configuration: configuration
+            ) else {
+                let loadedProgram = Self.loadedProgram(from: printResult.output)
+                if loadedProgram != configuration.supervisorURL.path {
+                    throw DaemonLaunchError.loadedAgentMismatch(
+                        expected: configuration.supervisorURL.path,
+                        actual: loadedProgram
+                    )
+                }
+                throw DaemonLaunchError.loadedAgentUntrusted(loadedProgram)
+            }
+
+            // The running supervisor may have loaded an older build value from
+            // launchd. Updating the on-disk plist is sufficient: reloading the
+            // job here would interrupt the GUI recovery chain currently in use.
             try Self.writeLaunchAgent(configuration, fileManager: fileManager)
             if printResult.output.contains("state = running") {
                 return
@@ -2026,23 +2041,6 @@ struct GUIRecoveryLauncher: @unchecked Sendable {
                 throw DaemonLaunchError.launchctlFailed(Self.lastLine(of: kickstart.output))
             }
             return
-        }
-
-        // A stale job may still point at a previous bundle. Remove it before
-        // installing the active bundle's path so the next crash cannot revive
-        // an older copy.
-        if printResult.exitCode == 0 {
-            guard Self.loadedProgram(from: printResult.output) == configuration.supervisorURL.path else {
-                throw DaemonLaunchError.loadedAgentMismatch(
-                    expected: configuration.supervisorURL.path,
-                    actual: Self.loadedProgram(from: printResult.output)
-                )
-            }
-            try Self.unloadAgent(
-                launchctl: launchctl,
-                serviceTarget: serviceTarget,
-                commandRunner: commandRunner
-            )
         }
 
         try Self.writeLaunchAgent(configuration, fileManager: fileManager)
@@ -2055,7 +2053,7 @@ struct GUIRecoveryLauncher: @unchecked Sendable {
         }
     }
 
-    private static func loadedAgentMatches(
+    private static func loadedAgentHasSameIdentity(
         output: String,
         configuration: GUIRecoveryConfiguration
     ) -> Bool {
@@ -2070,13 +2068,11 @@ struct GUIRecoveryLauncher: @unchecked Sendable {
         else {
             return false
         }
-        if let buildIdentifier = configuration.buildIdentifier {
-            guard loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
-                == configuration.dataDirectoryURL.path,
-                loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD") == buildIdentifier
-            else {
-                return false
-            }
+        guard loadedEnvironmentValue(from: output, key: "HOME") == configuration.homeURL.path,
+              loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
+              == configuration.dataDirectoryURL.path
+        else {
+            return false
         }
         guard let argumentsStart = lines.firstIndex(where: { $0 == "arguments = {" }),
               let argumentsEnd = lines[(argumentsStart + 1)...].firstIndex(of: "}") else {
@@ -2095,41 +2091,6 @@ struct GUIRecoveryLauncher: @unchecked Sendable {
             .first(where: { $0.hasPrefix("program = ") })
             .map { String($0.dropFirst("program = ".count)) }
             .map(unquote)
-    }
-
-    private static func unloadAgent(
-        launchctl: URL,
-        serviceTarget: String,
-        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
-    ) throws {
-        let bootout = try commandRunner(launchctl, ["bootout", serviceTarget])
-        if bootout.exitCode != 0 {
-            let afterBootout = try commandRunner(launchctl, ["print", serviceTarget])
-            if afterBootout.exitCode == 0 {
-                throw DaemonLaunchError.launchctlFailed(Self.lastLine(of: bootout.output))
-            }
-            return
-        }
-        Self.waitForAgentToDisappear(
-            launchctl: launchctl,
-            serviceTarget: serviceTarget,
-            commandRunner: commandRunner
-        )
-    }
-
-    private static func waitForAgentToDisappear(
-        launchctl: URL,
-        serviceTarget: String,
-        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
-    ) {
-        for attempt in 0..<10 {
-            if let result = try? commandRunner(launchctl, ["print", serviceTarget]), result.exitCode != 0 {
-                return
-            }
-            if attempt < 9 {
-                Thread.sleep(forTimeInterval: 0.1)
-            }
-        }
     }
 
     private static func loadedEnvironmentValue(from output: String, key: String) -> String? {
