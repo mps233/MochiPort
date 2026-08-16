@@ -4,8 +4,6 @@ import SwiftUI
 struct CodexAccessView: View {
     @EnvironmentObject private var model: AppModel
     @State private var confirmsUninstall = false
-    @State private var showsEnhancedWait = false
-    @State private var enhancedLaunching = false
 
     var body: some View {
         ManagementScrollPage(
@@ -35,36 +33,19 @@ struct CodexAccessView: View {
         } message: {
             Text("只移除 ThreadRelay 管理的 Codex 配置，并保留其他用户配置。")
         }
-        .sheet(isPresented: $showsEnhancedWait) {
-            EnhancedLaunchWaitSheet(
-                checkRunning: { await model.checkCodexAppRunning() },
-                onReady: {
-                    showsEnhancedWait = false
-                    startEnhancedLaunch()
-                },
-                onCancel: { showsEnhancedWait = false }
+        .sheet(
+            isPresented: Binding(
+                get: { model.codexEnhancedWaitingForAppExit },
+                set: { presented in
+                    if !presented {
+                        Task { await model.cancelCodexEnhancedLaunch() }
+                    }
+                }
             )
-        }
-    }
-
-    /// Enhanced launch requires Codex App to be closed first; when it is
-    /// still running, show the waiting sheet that polls the preflight until
-    /// the app exits, then continues automatically.
-    private func startEnhancedLaunchFlow() {
-        guard !enhancedLaunching else { return }
-        if model.codexPreflight?.status.running == true {
-            showsEnhancedWait = true
-        } else {
-            startEnhancedLaunch()
-        }
-    }
-
-    private func startEnhancedLaunch() {
-        guard !enhancedLaunching else { return }
-        enhancedLaunching = true
-        Task {
-            _ = await model.launchCodexEnhanced()
-            enhancedLaunching = false
+        ) {
+            EnhancedLaunchWaitSheet(
+                onCancel: { Task { await model.cancelCodexEnhancedLaunch() } }
+            )
         }
     }
 
@@ -148,20 +129,37 @@ struct CodexAccessView: View {
                 }
                 Spacer()
                 Button {
-                    startEnhancedLaunchFlow()
+                    Task { await model.beginCodexEnhancedLaunch() }
                 } label: {
-                    if enhancedLaunching {
+                    if model.codexEnhancedLaunchInProgress {
                         HStack(spacing: 7) {
                             ProgressView()
                                 .controlSize(.small)
                             Text("正在启动…")
                         }
                     } else {
-                        Text("增强启动")
+                        Text(model.codexEnhancedLaunchError == nil ? "增强启动" : "重新尝试")
                     }
                 }
-                .disabled(!status.configured || enhancedLaunching)
+                .disabled(!status.configured || model.codexEnhancedLaunchInProgress)
                 .accessibilityLabel("增强启动 Codex App")
+            }
+
+            if let operation = model.codexEnhancedOperation {
+                Divider()
+                EnhancedLaunchProgressRow(
+                    operation: operation,
+                    legacyFallback: model.codexEnhancedUsesLegacyFallback,
+                    error: model.codexEnhancedLaunchError,
+                    canCancel: model.canCancelCodexEnhancedLaunch,
+                    cancel: { Task { await model.cancelCodexEnhancedLaunch() } }
+                )
+            } else if let error = model.codexEnhancedLaunchError {
+                Divider()
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             VStack(alignment: .leading, spacing: 6) {
@@ -221,12 +219,9 @@ struct CodexAccessView: View {
     }
 }
 
-/// Modal shown when enhanced launch is requested while Codex App is still
-/// running. Polls the preflight once per second; a poll failure counts as
-/// "still running" so the flow never continues on stale data.
+/// Modal shown while the AppModel performs a fresh preflight and waits for
+/// Codex App to exit. The polling task survives view reconstruction.
 private struct EnhancedLaunchWaitSheet: View {
-    let checkRunning: () async -> Bool?
-    let onReady: () -> Void
     let onCancel: () -> Void
 
     var body: some View {
@@ -247,16 +242,83 @@ private struct EnhancedLaunchWaitSheet: View {
         }
         .padding(28)
         .frame(width: 380)
-        .task {
-            while !Task.isCancelled {
-                if await checkRunning() == false {
-                    onReady()
-                    return
+        .accessibilityIdentifier("codex.enhanced-wait-sheet")
+    }
+}
+
+private struct EnhancedLaunchProgressRow: View {
+    let operation: ManageEnhancedLaunchOperation
+    let legacyFallback: Bool
+    let error: String?
+    let canCancel: Bool
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 11) {
+            statusSymbol
+                .frame(width: 18, height: 18)
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 7) {
+                    Text(phaseTitle)
+                        .font(.callout.weight(.semibold))
+                    if legacyFallback {
+                        Text("兼容模式")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                try? await Task.sleep(for: .seconds(1))
+                Text(error ?? operation.message)
+                    .font(.caption)
+                    .foregroundStyle(error == nil ? AnyShapeStyle(.secondary) : AnyShapeStyle(.red))
+                    .fixedSize(horizontal: false, vertical: true)
+                if let recovery = operation.recovery, !recovery.isEmpty {
+                    Text(recovery)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Spacer(minLength: 12)
+            if canCancel {
+                Button("取消", role: .cancel, action: cancel)
+                    .controlSize(.small)
             }
         }
-        .accessibilityIdentifier("codex.enhanced-wait-sheet")
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("codex.enhanced-operation")
+    }
+
+    @ViewBuilder
+    private var statusSymbol: some View {
+        switch operation.phase {
+        case "ready":
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case "failed":
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundStyle(.red)
+        case "cancelled":
+            Image(systemName: "xmark.circle")
+                .foregroundStyle(.secondary)
+        default:
+            ProgressView()
+                .controlSize(.small)
+        }
+    }
+
+    private var phaseTitle: String {
+        switch operation.phase {
+        case "preparing": "正在准备"
+        case "launching": "正在启动 Codex App"
+        case "waitingForApp", "waiting_for_app": "等待 Codex App 就绪"
+        case "injecting": "正在应用增强配置"
+        case "ready": "增强启动已完成"
+        case "failed": "增强启动失败"
+        case "cancelled": "增强启动已取消"
+        default: "正在增强启动"
+        }
     }
 }
 

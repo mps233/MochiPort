@@ -4275,6 +4275,80 @@ final class APIContractTests: XCTestCase {
         )
     }
 
+    func testEnhancedLaunchOperationUsesStartStatusAndCancelRoutes() async throws {
+        let requestId = "enhanced-request-1"
+        let client = makeClient { request in
+            XCTAssertEqual(
+                request.value(forHTTPHeaderField: "Authorization"),
+                "Bearer fixture-token"
+            )
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/api/v1/manage/codex/enhanced/operation/start"):
+                XCTAssertEqual(Self.jsonBody(from: request)?["requestId"] as? String, requestId)
+                return MockResponse(
+                    statusCode: 202,
+                    json: Self.enhancedOperationJSON(
+                        requestId: requestId,
+                        phase: "preparing",
+                        canCancel: true,
+                        message: "正在准备增强启动"
+                    )
+                )
+            case ("GET", "/api/v1/manage/codex/enhanced/operation"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.enhancedOperationJSON(
+                        requestId: requestId,
+                        phase: "injecting",
+                        canCancel: true,
+                        message: "正在应用模型与界面增强配置"
+                    )
+                )
+            case ("POST", "/api/v1/manage/codex/enhanced/operation/cancel"):
+                XCTAssertEqual(Self.jsonBody(from: request)?["requestId"] as? String, requestId)
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.enhancedOperationJSON(
+                        requestId: requestId,
+                        phase: "cancelled",
+                        canCancel: false,
+                        message: "增强启动已取消",
+                        recovery: "Codex App 已保留运行"
+                    )
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+
+        let started = try await client.startCodexEnhancedOperation(requestId: requestId)
+        XCTAssertEqual(started.phase, "preparing")
+        XCTAssertTrue(started.isRunning)
+
+        let fetchedCurrent = try await client.codexEnhancedOperation()
+        let current = try XCTUnwrap(fetchedCurrent)
+        XCTAssertEqual(current.phase, "injecting")
+        XCTAssertTrue(current.canCancel)
+
+        let cancelled = try await client.cancelCodexEnhancedOperation(requestId: requestId)
+        XCTAssertEqual(cancelled.phase, "cancelled")
+        XCTAssertTrue(cancelled.isTerminal)
+        XCTAssertEqual(cancelled.recovery, "Codex App 已保留运行")
+    }
+
+    func testEnhancedLaunchOperationMissingRouteUsesLegacyCapabilityFallback() async {
+        let client = makeClient { _ in
+            MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+        }
+
+        do {
+            _ = try await client.startCodexEnhancedOperation(requestId: "legacy-request")
+            XCTFail("Expected old daemon capability fallback")
+        } catch {
+            XCTAssertEqual(error as? APIClientError, .featureUnavailable)
+        }
+    }
+
     func testGatewayProviderMutationKeepsAPIKeyWriteOnly() async throws {
         let responseJSON = #"{"ok":true,"gateway":{"enabled":true,"filterImageGenerationTool":false,"requestLoggingEnabled":true,"requestLogDetailsEnabled":false,"codexVisibleModels":["model-a"],"providers":[{"name":"primary","enabled":true,"providerType":"open_ai_responses","compatibility":null,"baseUrl":"https://provider.example/v1","modelsUrl":null,"models":["model-a"],"modelAliases":{},"promptCacheRetention":null,"weight":100,"timeoutSecs":60,"secretSet":true}]}}"#
         let client = makeClient { request in
@@ -4447,6 +4521,222 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(model.dashboardState, .loaded)
         XCTAssertEqual(model.imAccounts, [])
         XCTAssertEqual(model.imAccountsAvailability, .needsUpdate)
+    }
+
+    @MainActor
+    func testAppModelLoadsCodexFromBuild410WithoutLifecycleSecurityFields() async {
+        let lifecycleCalls = IntCounter()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                let lifecycleCall = lifecycleCalls.next()
+                let owner = lifecycleCall == 1
+                    ? "other-installation"
+                    : UserDefaults.standard.string(
+                        forKey: "threadrelay.management.installation-id"
+                    ) ?? "missing-installation"
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.build410LifecyclePayload(
+                        installationId: owner,
+                        canControl: lifecycleCall != 1
+                    )
+                )
+            case ("GET", "/api/v1/manage/im/accounts"):
+                return MockResponse(statusCode: 200, json: Self.imAccountsJSON)
+            case ("GET", "/api/v1/manage/codex/status"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.codexStatusJSON
+                )
+            case ("GET", "/api/v1/manage/codex/enhanced/preflight"):
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                XCTFail("An active build 410 lease must not be claimed automatically")
+                return MockResponse(statusCode: 409, json: #"{"error":"lease conflict"}"#)
+            default:
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: IdentityVerifyingDaemonLauncher(),
+            guiBuildLoader: { "421" }
+        )
+
+        await model.refresh()
+        let loadedCodex = await model.loadSection(.codex)
+
+        XCTAssertEqual(model.serviceStatus, .available)
+        XCTAssertEqual(model.dashboardState, .loaded)
+        XCTAssertEqual(model.lifecycle?.runtime.buildNumber, 410)
+        XCTAssertNil(model.lifecycle?.executableSha256)
+        XCTAssertNil(model.lifecycle?.management.managementTokenGeneration)
+        XCTAssertTrue(model.daemonLeaseConflict)
+        XCTAssertFalse(model.daemonTransitionInProgress)
+        XCTAssertFalse(model.canTakeOverDaemonLease)
+        XCTAssertNil(model.daemonLeaseTakeoverConfirmation)
+        XCTAssertTrue(loadedCodex)
+        XCTAssertTrue(model.codexStatus?.configured == true)
+        XCTAssertNil(model.codexPreflight)
+
+        await model.refresh()
+
+        XCTAssertTrue(model.ownsDaemonLease)
+        XCTAssertFalse(model.daemonTransitionInProgress)
+        XCTAssertFalse(model.canRotateManagementCredential)
+        XCTAssertNil(model.managementCredentialRotationConfirmation)
+    }
+
+    @MainActor
+    func testAppModelResumesRunningEnhancedLaunchAndPublishesCompletion() async {
+        let operationReads = IntCounter()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/v1/manage/codex/status"):
+                return MockResponse(statusCode: 200, json: Self.codexStatusJSON)
+            case ("GET", "/api/v1/manage/codex/enhanced/preflight"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"status":{"running":false}}"#
+                )
+            case ("GET", "/api/v1/manage/codex/enhanced/operation"):
+                let ready = operationReads.next() > 1
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.enhancedOperationJSON(
+                        requestId: "resumed-request",
+                        phase: ready ? "ready" : "injecting",
+                        canCancel: !ready,
+                        message: ready ? "增强模式已就绪" : "正在应用模型与界面增强配置"
+                    )
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            codexEnhancedOperationPollDelay: .milliseconds(1)
+        )
+
+        let loaded = await model.loadSection(.codex)
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(model.codexEnhancedOperation?.phase, "injecting")
+
+        for _ in 0..<20 where model.codexEnhancedOperation?.phase != "ready" {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        XCTAssertEqual(model.codexEnhancedOperation?.phase, "ready")
+        XCTAssertFalse(model.codexEnhancedLaunchInProgress)
+        XCTAssertEqual(model.actionFeedback?.message, "增强启动已完成")
+        XCTAssertNil(model.codexEnhancedLaunchError)
+        XCTAssertGreaterThanOrEqual(operationReads.current, 2)
+    }
+
+    @MainActor
+    func testAppModelKeepsMonitoringEnhancedLaunchAfterTransientReadFailures() async {
+        let operationReads = IntCounter()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/v1/manage/codex/status"):
+                return MockResponse(statusCode: 200, json: Self.codexStatusJSON)
+            case ("GET", "/api/v1/manage/codex/enhanced/preflight"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"status":{"running":false}}"#
+                )
+            case ("GET", "/api/v1/manage/codex/enhanced/operation"):
+                switch operationReads.next() {
+                case 1:
+                    return MockResponse(
+                        statusCode: 200,
+                        json: Self.enhancedOperationJSON(
+                            requestId: "recovering-request",
+                            phase: "injecting",
+                            canCancel: true,
+                            message: "正在应用模型与界面增强配置"
+                        )
+                    )
+                case 2...4:
+                    return MockResponse(
+                        statusCode: 503,
+                        json: #"{"error":"Service temporarily unavailable"}"#
+                    )
+                default:
+                    return MockResponse(
+                        statusCode: 200,
+                        json: Self.enhancedOperationJSON(
+                            requestId: "recovering-request",
+                            phase: "ready",
+                            canCancel: false,
+                            message: "增强模式已就绪"
+                        )
+                    )
+                }
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            codexEnhancedOperationPollDelay: .milliseconds(1),
+            codexEnhancedOperationRecoveryPollDelay: .milliseconds(1)
+        )
+
+        let loaded = await model.loadSection(.codex)
+        XCTAssertTrue(loaded)
+        for _ in 0..<40 where model.codexEnhancedOperation?.phase != "ready" {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+
+        XCTAssertEqual(model.codexEnhancedOperation?.phase, "ready")
+        XCTAssertFalse(model.codexEnhancedLaunchInProgress)
+        XCTAssertNil(model.codexEnhancedLaunchError)
+        XCTAssertGreaterThanOrEqual(operationReads.current, 5)
+    }
+
+    @MainActor
+    func testAppModelFallsBackToLegacyEnhancedLaunchWithExplicitCancelLimit() async {
+        let legacyLaunchStarted = LockedValue(false)
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/v1/manage/codex/enhanced/preflight"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"status":{"running":false}}"#
+                )
+            case ("POST", "/api/v1/manage/codex/enhanced/operation/start"):
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            case ("POST", "/api/v1/manage/codex/enhanced/launch"):
+                legacyLaunchStarted.value = true
+                Thread.sleep(forTimeInterval: 0.05)
+                return MockResponse(statusCode: 200, json: #"{"ok":true}"#)
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let model = AppModel(apiClient: client)
+
+        let started = await model.beginCodexEnhancedLaunch()
+        XCTAssertTrue(started)
+        for _ in 0..<20 where !legacyLaunchStarted.value {
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        XCTAssertTrue(model.codexEnhancedUsesLegacyFallback)
+        XCTAssertTrue(model.canCancelCodexEnhancedLaunch)
+
+        await model.cancelCodexEnhancedLaunch()
+
+        XCTAssertEqual(model.codexEnhancedOperation?.phase, "cancelled")
+        XCTAssertTrue(
+            model.codexEnhancedOperation?.recovery?.contains("不支持服务端取消") == true
+        )
     }
 
     @MainActor
@@ -5900,6 +6190,7 @@ final class APIContractTests: XCTestCase {
     private static let healthJSON = #"{"service":"threadrelay","apiMajor":1,"ready":true}"#
     private static let dashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"bridgeRunning":true,"remoteControlConnected":true,"remoteControlHealthy":true,"executionClients":{"codexApp":{"configured":true,"connected":true},"vscode":{"configured":true,"connected":true},"cli":{"configured":false,"connected":false}},"messageChannels":{"telegram":{"accountCount":2,"connectedAccountCount":1},"feishu":{"accountCount":1,"connectedAccountCount":1},"wechat":{"accountCount":1,"connectedAccountCount":1},"wecom":{"accountCount":0,"connectedAccountCount":0}},"aiGatewayEnabled":true,"aiGatewayProviderCount":2,"requestLoggingEnabled":true}"#
     private static let imAccountsJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"accounts":[{"platform":"telegram","accountId":"telegram-main","displayName":"主 Telegram","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":true,"connected":true,"lastError":null,"lastEventAtMs":1754000120000,"lastInboundAtMs":1754000100000},{"platform":"wecom","accountId":"wecom-offline","displayName":"企业微信","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":false,"connected":false,"lastError":"连接失败","lastEventAtMs":null,"lastInboundAtMs":null}]}"#
+    private static let codexStatusJSON = #"{"codexHome":"/fixture/.codex","configured":true,"configOk":true,"authOk":true,"providerOk":true,"configError":null,"authError":null,"guiConfigured":true,"guiError":null,"remoteControlSupported":true,"remoteControlConfigured":true,"remoteControlError":null,"providers":[{"name":"ai-gateway","baseUrl":"http://127.0.0.1:3847/backend-api","secretSet":true,"supportsWebsockets":true}],"imageGenerationEnabled":true,"connectionMode":"standard"}"#
     private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
     private static let originalV1DashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"legacy-instance","pid":456,"startedAtMs":789},"bridgeRunning":true,"remoteControlConnected":false,"remoteControlHealthy":false,"codexAppConfigured":true,"imAccountCount":5,"connectedImAccountCount":3,"aiGatewayEnabled":false,"aiGatewayProviderCount":1,"requestLoggingEnabled":true}"#
     // Mirrors the daemon payload where the Anthropic TTL-split keys are
@@ -5919,6 +6210,41 @@ final class APIContractTests: XCTestCase {
             management = #"{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}"#
         }
         return #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"\#(instanceId)","pid":123,"startedAtMs":456},"executable":"\#(executable)","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":\#(build),"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":\#(management)}"#
+    }
+
+    /// Models the build 410 shape: both lifecycle security fields introduced
+    /// later are intentionally absent from this fixture.
+    private static func build410LifecyclePayload(
+        installationId: String,
+        canControl: Bool
+    ) -> String {
+        #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"build-410-instance","pid":410,"startedAtMs":1786896000000},"executable":"/fixture/runtimes/410/threadrelay-daemon","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":410,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"managed","mode":"managed","canControl":\#(canControl),"installationId":"\#(installationId)","leaseGeneration":7,"leaseExpiresAtMs":4102444800000}}"#
+    }
+
+    private static func enhancedOperationJSON(
+        requestId: String,
+        phase: String,
+        canCancel: Bool,
+        message: String,
+        error: String? = nil,
+        recovery: String? = nil
+    ) -> String {
+        let payload: [String: Any] = [
+            "ok": true,
+            "operation": [
+                "requestId": requestId,
+                "phase": phase,
+                "startedAtMs": 1_786_896_000_000,
+                "updatedAtMs": 1_786_896_000_100,
+                "canCancel": canCancel,
+                "message": message,
+                "error": error.map { $0 as Any } ?? NSNull(),
+                "recovery": recovery.map { $0 as Any } ?? NSNull(),
+                "report": NSNull(),
+            ],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
     }
 
     private static func lifecycleSecurityPayload(

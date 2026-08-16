@@ -465,6 +465,30 @@ struct ManageCodexPreflightResponse: Decodable, Equatable {
     let status: Status
 }
 
+struct ManageEnhancedLaunchOperation: Decodable, Equatable, Identifiable, Sendable {
+    let requestId: String
+    let phase: String
+    let startedAtMs: Int64
+    let updatedAtMs: Int64
+    let canCancel: Bool
+    let message: String
+    let error: String?
+    let recovery: String?
+
+    var id: String { requestId }
+
+    var isTerminal: Bool {
+        phase == "ready" || phase == "failed" || phase == "cancelled"
+    }
+
+    var isRunning: Bool { !isTerminal }
+}
+
+struct ManageEnhancedLaunchOperationResponse: Decodable, Equatable, Sendable {
+    let ok: Bool
+    let operation: ManageEnhancedLaunchOperation?
+}
+
 struct ManageGatewayMutationResponse: Decodable, Equatable {
     let ok: Bool
     let gateway: ManageGateway
@@ -1404,8 +1428,43 @@ struct APIClient: Sendable {
         try await performManagePOST(
             path: "api/v1/manage/codex/enhanced/launch",
             body: EmptyRequestBody(),
-            timeout: 90
+            timeout: 90,
+            exposeServerError: true
         )
+    }
+
+    func startCodexEnhancedOperation(
+        requestId: String
+    ) async throws -> ManageEnhancedLaunchOperation {
+        let response: ManageEnhancedLaunchOperationResponse = try await performManagePOST(
+            path: "api/v1/manage/codex/enhanced/operation/start",
+            body: EnhancedLaunchOperationRequest(requestId: requestId)
+        )
+        guard response.ok, let operation = response.operation else {
+            throw APIClientError.invalidResponse
+        }
+        return operation
+    }
+
+    func codexEnhancedOperation() async throws -> ManageEnhancedLaunchOperation? {
+        let response: ManageEnhancedLaunchOperationResponse = try await performManageGET(
+            path: "api/v1/manage/codex/enhanced/operation"
+        )
+        guard response.ok else { throw APIClientError.invalidResponse }
+        return response.operation
+    }
+
+    func cancelCodexEnhancedOperation(
+        requestId: String
+    ) async throws -> ManageEnhancedLaunchOperation {
+        let response: ManageEnhancedLaunchOperationResponse = try await performManagePOST(
+            path: "api/v1/manage/codex/enhanced/operation/cancel",
+            body: EnhancedLaunchOperationRequest(requestId: requestId)
+        )
+        guard response.ok, let operation = response.operation else {
+            throw APIClientError.invalidResponse
+        }
+        return operation
     }
 
     func codexSessions() async throws -> ManageCodexSessionsResponse {
@@ -1797,6 +1856,10 @@ struct APIClient: Sendable {
         let leaseGeneration: Int64
     }
 
+    private struct EnhancedLaunchOperationRequest: Encodable {
+        let requestId: String
+    }
+
     private struct EmptyRequestBody: Encodable {}
 
     private func fetchDashboard(
@@ -1955,6 +2018,9 @@ struct APIClient: Sendable {
                 guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
                 guard httpResponse.statusCode != 404 else {
                     let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data)
+                    if Self.isMissingRouteError(payload?.error) {
+                        throw APIClientError.featureUnavailable
+                    }
                     if payload?.error?.isEmpty == false {
                         throw operationError(from: data, statusCode: httpResponse.statusCode)
                     }
@@ -1978,7 +2044,8 @@ struct APIClient: Sendable {
     private func performManagePOST<Body: Encodable, Response: Decodable>(
         path: String,
         body: Body,
-        timeout: TimeInterval = 10
+        timeout: TimeInterval = 10,
+        exposeServerError: Bool = false
     ) async throws -> Response {
         let connection = connectionLoader()
         let candidates = connection.credentials()
@@ -2010,13 +2077,20 @@ struct APIClient: Sendable {
                     // resource. Older daemons normally return an empty/plain
                     // 404 because the versioned route itself does not exist.
                     let payload = try? JSONDecoder().decode(ErrorPayload.self, from: data)
+                    if Self.isMissingRouteError(payload?.error) {
+                        throw APIClientError.featureUnavailable
+                    }
                     if payload?.error?.isEmpty == false {
                         throw operationError(from: data, statusCode: httpResponse.statusCode)
                     }
                     throw APIClientError.featureUnavailable
                 }
                 guard (200...299).contains(httpResponse.statusCode) else {
-                    throw operationError(from: data, statusCode: httpResponse.statusCode)
+                    throw operationError(
+                        from: data,
+                        statusCode: httpResponse.statusCode,
+                        exposeServerError: exposeServerError
+                    )
                 }
                 do {
                     return try JSONDecoder().decode(Response.self, from: data)
@@ -2078,7 +2152,19 @@ struct APIClient: Sendable {
         let error: String?
     }
 
-    private func operationError(from data: Data, statusCode: Int) -> APIClientError {
+    private static func isMissingRouteError(_ raw: String?) -> Bool {
+        guard let raw else { return false }
+        return switch raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "not found", "route not found": true
+        default: false
+        }
+    }
+
+    private func operationError(
+        from data: Data,
+        statusCode: Int,
+        exposeServerError: Bool = false
+    ) -> APIClientError {
         let raw = (try? JSONDecoder().decode(ErrorPayload.self, from: data))?.error?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let message: String
@@ -2100,7 +2186,7 @@ struct APIClient: Sendable {
              "Sub2API 返回了无法识别的数据",
              "尚未连接 Sub2API 账号池":
             message = raw ?? "Sub2API 账号池不可用。"
-        case let raw? where statusCode < 500 && !raw.isEmpty:
+        case let raw? where (statusCode < 500 || exposeServerError) && !raw.isEmpty:
             // Validation failures carry a specific, already-sanitized reason
             // (for example a Telegram token rejection); show it as-is.
             message = raw

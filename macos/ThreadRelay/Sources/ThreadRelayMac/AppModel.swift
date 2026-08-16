@@ -36,6 +36,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var imAccountsAvailability: MessagingAccountsAvailability = .loading
     @Published private(set) var codexStatus: ManageCodexStatus?
     @Published private(set) var codexPreflight: ManageCodexPreflightResponse?
+    @Published private(set) var codexEnhancedOperation: ManageEnhancedLaunchOperation?
+    @Published private(set) var codexEnhancedWaitingForAppExit = false
+    @Published private(set) var codexEnhancedUsesLegacyFallback = false
+    @Published private(set) var codexEnhancedLaunchError: String?
     @Published private(set) var codexSessions: [ManageCodexSession] = []
     @Published private(set) var codexSessionProviders: [String] = []
     @Published private(set) var gateway: ManageGateway?
@@ -71,6 +75,8 @@ final class AppModel: ObservableObject {
     private let daemonReplacementAttemptLimit: Int
     private let daemonReplacementPollDelay: Duration
     private let daemonReplacementStableProbeCount: Int
+    private let codexEnhancedOperationPollDelay: Duration
+    private let codexEnhancedOperationRecoveryPollDelay: Duration
     private var refreshInFlight = false
     private var launchAttempted = false
     private var daemonRuntimePreparedBuild: String?
@@ -84,6 +90,10 @@ final class AppModel: ObservableObject {
     private var requestLogLoadedFilters: RequestLogFilters?
     private var requestLogLoadedPageCount = 0
     private var requestLogLoadMoreOperationID: UUID?
+    private var codexEnhancedWaitTask: Task<Void, Never>?
+    private var codexEnhancedMonitorTask: Task<Void, Never>?
+    private var codexEnhancedMonitorRequestId: String?
+    private var codexEnhancedLegacyTask: Task<Void, Never>?
     private var daemonHealthFailureCount = 0
     private var daemonAutoRestartNotBefore: Date?
     private var startupUpdateCheckScheduled = false
@@ -266,6 +276,18 @@ final class AppModel: ObservableObject {
         return "运行正常 · 仅查看"
     }
 
+    var codexEnhancedLaunchInProgress: Bool {
+        codexEnhancedWaitingForAppExit
+            || codexEnhancedOperation?.isRunning == true
+            || codexEnhancedLegacyTask != nil
+    }
+
+    var canCancelCodexEnhancedLaunch: Bool {
+        codexEnhancedWaitingForAppExit
+            || codexEnhancedOperation?.canCancel == true
+            || codexEnhancedLegacyTask != nil
+    }
+
     private var currentTimeMilliseconds: Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
     }
@@ -315,7 +337,9 @@ final class AppModel: ObservableObject {
         },
         daemonReplacementAttemptLimit: Int = 80,
         daemonReplacementPollDelay: Duration = .milliseconds(250),
-        daemonReplacementStableProbeCount: Int = 3
+        daemonReplacementStableProbeCount: Int = 3,
+        codexEnhancedOperationPollDelay: Duration = .milliseconds(400),
+        codexEnhancedOperationRecoveryPollDelay: Duration = .seconds(2)
     ) {
         self.apiClient = apiClient
         self.daemonLauncher = daemonLauncher
@@ -324,12 +348,17 @@ final class AppModel: ObservableObject {
         self.daemonReplacementAttemptLimit = max(1, daemonReplacementAttemptLimit)
         self.daemonReplacementPollDelay = daemonReplacementPollDelay
         self.daemonReplacementStableProbeCount = max(1, daemonReplacementStableProbeCount)
+        self.codexEnhancedOperationPollDelay = codexEnhancedOperationPollDelay
+        self.codexEnhancedOperationRecoveryPollDelay = codexEnhancedOperationRecoveryPollDelay
         self.installationId = Self.loadInstallationID()
     }
 
     deinit {
         refreshTask?.cancel()
         lifecycleLeaseTask?.cancel()
+        codexEnhancedWaitTask?.cancel()
+        codexEnhancedMonitorTask?.cancel()
+        codexEnhancedLegacyTask?.cancel()
     }
 
     func startAutoRefresh() {
@@ -546,11 +575,16 @@ final class AppModel: ObservableObject {
 
     private func clearManagementPages() {
         stopLifecycleLeaseHeartbeat()
+        stopCodexEnhancedClientTasks()
         for section in AppSection.allCases {
             sectionLoadGenerations[section, default: 0] += 1
         }
         codexStatus = nil
         codexPreflight = nil
+        codexEnhancedOperation = nil
+        codexEnhancedWaitingForAppExit = false
+        codexEnhancedUsesLegacyFallback = false
+        codexEnhancedLaunchError = nil
         codexSessions = []
         codexSessionProviders = []
         gateway = nil
@@ -883,11 +917,22 @@ final class AppModel: ObservableObject {
             case .overview:
                 await refresh()
             case .codex:
+                async let preflightRequest = try? apiClient.codexEnhancedPreflight()
+                async let operationRequest = try? apiClient.codexEnhancedOperation()
                 let status = try await apiClient.codexStatus()
-                let preflight = try? await apiClient.codexEnhancedPreflight()
+                let preflight = await preflightRequest
+                let operation = await operationRequest
                 guard isCurrentLoad(section, generation: generation) else { return false }
                 codexStatus = status
                 codexPreflight = preflight
+                if let operation {
+                    codexEnhancedOperation = operation
+                    codexEnhancedUsesLegacyFallback = false
+                    updateCodexEnhancedPresentation(for: operation)
+                    if operation.isRunning {
+                        monitorCodexEnhancedOperation(requestId: operation.requestId)
+                    }
+                }
             case .sessions:
                 let response = try await apiClient.codexSessions()
                 guard isCurrentLoad(section, generation: generation) else { return false }
@@ -1210,21 +1255,273 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func launchCodexEnhanced() async -> Bool {
-        await performManagementAction(section: .codex) {
-            _ = try await self.apiClient.launchCodexEnhanced()
-            try await self.requireSectionRefresh(.codex)
-            return "增强启动已完成"
+    func beginCodexEnhancedLaunch() async -> Bool {
+        guard fixtureStatus == nil, !codexEnhancedLaunchInProgress else { return false }
+        stopCodexEnhancedClientTasks()
+        codexEnhancedOperation = nil
+        codexEnhancedLaunchError = nil
+        codexEnhancedUsesLegacyFallback = false
+        managementOperationError = nil
+
+        do {
+            let preflight = try await apiClient.codexEnhancedPreflight()
+            codexPreflight = preflight
+            if preflight.status.running {
+                waitForCodexAppExit()
+            } else {
+                await startCodexEnhancedOperation()
+            }
+            return true
+        } catch let error as APIClientError where error == .featureUnavailable {
+            // Older daemons do not expose a preflight route. Their synchronous
+            // launch endpoint remains the only compatible path.
+            startLegacyCodexEnhancedLaunch()
+            return true
+        } catch {
+            codexEnhancedLaunchError = userFacingMessage(for: error)
+            return false
         }
     }
 
-    /// Re-reads the enhanced-launch preflight and returns whether Codex App
-    /// is currently running. `nil` means the check itself failed.
-    func checkCodexAppRunning() async -> Bool? {
-        guard fixtureStatus == nil else { return false }
-        guard let preflight = try? await apiClient.codexEnhancedPreflight() else { return nil }
-        codexPreflight = preflight
-        return preflight.status.running
+    func cancelCodexEnhancedLaunch() async {
+        if codexEnhancedWaitingForAppExit {
+            codexEnhancedWaitTask?.cancel()
+            codexEnhancedWaitTask = nil
+            codexEnhancedWaitingForAppExit = false
+            actionFeedback = ActionFeedback(message: "已取消增强启动")
+            return
+        }
+
+        if let legacyTask = codexEnhancedLegacyTask {
+            let requestId = codexEnhancedOperation?.requestId ?? UUID().uuidString.lowercased()
+            legacyTask.cancel()
+            codexEnhancedLegacyTask = nil
+            codexEnhancedOperation = localEnhancedOperation(
+                requestId: requestId,
+                phase: "cancelled",
+                canCancel: false,
+                message: "已停止等待旧版后台服务",
+                recovery: "旧版后台服务不支持服务端取消；Codex App 仍可能继续启动。"
+            )
+            return
+        }
+
+        guard let operation = codexEnhancedOperation,
+              operation.isRunning,
+              operation.canCancel
+        else { return }
+        do {
+            let cancelled = try await apiClient.cancelCodexEnhancedOperation(
+                requestId: operation.requestId
+            )
+            codexEnhancedOperation = cancelled
+            updateCodexEnhancedPresentation(for: cancelled)
+        } catch {
+            codexEnhancedLaunchError = "取消失败：\(userFacingMessage(for: error))"
+        }
+    }
+
+    private func waitForCodexAppExit() {
+        codexEnhancedWaitingForAppExit = true
+        codexEnhancedWaitTask?.cancel()
+        codexEnhancedWaitTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                do {
+                    let preflight = try await self.apiClient.codexEnhancedPreflight()
+                    try Task.checkCancellation()
+                    self.codexPreflight = preflight
+                    if !preflight.status.running {
+                        self.codexEnhancedWaitingForAppExit = false
+                        self.codexEnhancedWaitTask = nil
+                        await self.startCodexEnhancedOperation()
+                        return
+                    }
+                    try await Task.sleep(for: .seconds(1))
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.codexEnhancedWaitingForAppExit = false
+                    self.codexEnhancedWaitTask = nil
+                    self.codexEnhancedLaunchError =
+                        "无法确认 Codex App 是否已退出：\(self.userFacingMessage(for: error))"
+                    return
+                }
+            }
+        }
+    }
+
+    private func startCodexEnhancedOperation() async {
+        let requestId = UUID().uuidString.lowercased()
+        do {
+            let operation = try await apiClient.startCodexEnhancedOperation(requestId: requestId)
+            codexEnhancedOperation = operation
+            codexEnhancedUsesLegacyFallback = false
+            updateCodexEnhancedPresentation(for: operation)
+            if operation.isRunning {
+                monitorCodexEnhancedOperation(requestId: operation.requestId)
+            }
+        } catch let error as APIClientError where error == .featureUnavailable {
+            startLegacyCodexEnhancedLaunch(requestId: requestId)
+        } catch {
+            // A response can be lost after the daemon accepted the request.
+            // Re-read the singleton operation before reporting a start error.
+            if let operation = try? await apiClient.codexEnhancedOperation(),
+               operation.isRunning
+            {
+                codexEnhancedOperation = operation
+                codexEnhancedUsesLegacyFallback = false
+                updateCodexEnhancedPresentation(for: operation)
+                monitorCodexEnhancedOperation(requestId: operation.requestId)
+            } else {
+                codexEnhancedLaunchError = userFacingMessage(for: error)
+            }
+        }
+    }
+
+    private func monitorCodexEnhancedOperation(requestId: String) {
+        if codexEnhancedMonitorTask != nil,
+           codexEnhancedMonitorRequestId == requestId
+        {
+            return
+        }
+        codexEnhancedMonitorTask?.cancel()
+        codexEnhancedMonitorRequestId = requestId
+        codexEnhancedMonitorTask = Task { [weak self] in
+            guard let self else { return }
+            var consecutiveFailures = 0
+            while !Task.isCancelled {
+                do {
+                    let pollDelay = consecutiveFailures >= 3
+                        ? self.codexEnhancedOperationRecoveryPollDelay
+                        : self.codexEnhancedOperationPollDelay
+                    try await Task.sleep(for: pollDelay)
+                    try Task.checkCancellation()
+                    guard let operation = try await self.apiClient.codexEnhancedOperation(),
+                          operation.requestId == requestId
+                    else {
+                        throw APIClientError.invalidResponse
+                    }
+                    try Task.checkCancellation()
+                    consecutiveFailures = 0
+                    self.codexEnhancedOperation = operation
+                    self.updateCodexEnhancedPresentation(for: operation)
+                    if operation.isTerminal {
+                        self.codexEnhancedMonitorTask = nil
+                        self.codexEnhancedMonitorRequestId = nil
+                        await self.finishCodexEnhancedOperation(operation)
+                        return
+                    }
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    consecutiveFailures += 1
+                    if consecutiveFailures >= 3 {
+                        self.codexEnhancedLaunchError =
+                            "暂时无法读取增强启动进度：\(self.userFacingMessage(for: error))"
+                    }
+                }
+            }
+        }
+    }
+
+    private func startLegacyCodexEnhancedLaunch(requestId: String = UUID().uuidString.lowercased()) {
+        let startedAt = currentTimeMilliseconds
+        codexEnhancedUsesLegacyFallback = true
+        codexEnhancedLaunchError = nil
+        codexEnhancedOperation = ManageEnhancedLaunchOperation(
+            requestId: requestId,
+            phase: "launching",
+            startedAtMs: startedAt,
+            updatedAtMs: startedAt,
+            canCancel: true,
+            message: "正在等待旧版后台服务完成增强启动",
+            error: nil,
+            recovery: "取消只能停止本机等待，无法中止旧版后台服务中的启动。"
+        )
+        codexEnhancedLegacyTask?.cancel()
+        codexEnhancedLegacyTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await self.apiClient.launchCodexEnhanced()
+                try Task.checkCancellation()
+                self.codexEnhancedLegacyTask = nil
+                self.codexEnhancedOperation = self.localEnhancedOperation(
+                    requestId: requestId,
+                    phase: "ready",
+                    canCancel: false,
+                    message: "增强启动已完成"
+                )
+                self.actionFeedback = ActionFeedback(message: "增强启动已完成")
+                _ = await self.loadSection(.codex, force: true)
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.codexEnhancedLegacyTask = nil
+                let message = self.userFacingMessage(for: error)
+                self.codexEnhancedOperation = self.localEnhancedOperation(
+                    requestId: requestId,
+                    phase: "failed",
+                    canCancel: false,
+                    message: "增强启动失败",
+                    error: message
+                )
+                self.codexEnhancedLaunchError = message
+            }
+        }
+    }
+
+    private func updateCodexEnhancedPresentation(for operation: ManageEnhancedLaunchOperation) {
+        switch operation.phase {
+        case "failed":
+            codexEnhancedLaunchError = operation.error ?? operation.message
+        case "cancelled":
+            codexEnhancedLaunchError = nil
+        default:
+            codexEnhancedLaunchError = nil
+        }
+    }
+
+    private func finishCodexEnhancedOperation(_ operation: ManageEnhancedLaunchOperation) async {
+        updateCodexEnhancedPresentation(for: operation)
+        if operation.phase == "ready" {
+            actionFeedback = ActionFeedback(message: "增强启动已完成")
+            _ = await loadSection(.codex, force: true)
+        }
+    }
+
+    private func localEnhancedOperation(
+        requestId: String,
+        phase: String,
+        canCancel: Bool,
+        message: String,
+        error: String? = nil,
+        recovery: String? = nil
+    ) -> ManageEnhancedLaunchOperation {
+        let now = currentTimeMilliseconds
+        return ManageEnhancedLaunchOperation(
+            requestId: requestId,
+            phase: phase,
+            startedAtMs: codexEnhancedOperation?.startedAtMs ?? now,
+            updatedAtMs: now,
+            canCancel: canCancel,
+            message: message,
+            error: error,
+            recovery: recovery
+        )
+    }
+
+    private func stopCodexEnhancedClientTasks() {
+        codexEnhancedWaitTask?.cancel()
+        codexEnhancedWaitTask = nil
+        codexEnhancedMonitorTask?.cancel()
+        codexEnhancedMonitorTask = nil
+        codexEnhancedMonitorRequestId = nil
+        codexEnhancedLegacyTask?.cancel()
+        codexEnhancedLegacyTask = nil
     }
 
     @discardableResult
