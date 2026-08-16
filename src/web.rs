@@ -62,6 +62,14 @@ pub fn router(state: SharedState) -> Router {
             "/lifecycle/lease/release",
             post(manage_api::release_lifecycle_lease),
         )
+        .route(
+            "/lifecycle/lease/takeover",
+            post(manage_api::takeover_lifecycle_lease),
+        )
+        .route(
+            "/lifecycle/credential/rotate",
+            post(manage_api::rotate_management_credential),
+        )
         .route("/lifecycle/restart", post(manage_api::restart_lifecycle))
         .route(
             "/lifecycle/runtime-switch/commit",
@@ -946,6 +954,22 @@ mod tests {
             serde_json::to_vec(&control).expect("encode management control file"),
         )
         .expect("write management control file");
+    }
+
+    async fn lifecycle_lease_request(state: &SharedState, installation_id: &str) -> Value {
+        let lifecycle = manage_api::lifecycle_snapshot(state).await;
+        json!({
+            "installationId": installation_id,
+            "daemonInstanceId": lifecycle.service.instance_id,
+            "daemonIdentity": {
+                "pid": lifecycle.service.pid,
+                "startedAtMs": lifecycle.service.started_at_ms,
+                "executable": lifecycle.executable,
+                "executableSha256": lifecycle.executable_sha256
+                    .expect("test executable digest"),
+                "bind": lifecycle.bind,
+            },
+        })
     }
 
     fn management_test_router() -> (Router, TempDir, String) {
@@ -3069,6 +3093,7 @@ mod tests {
                 "bind",
                 "configPath",
                 "executable",
+                "executableSha256",
                 "management",
                 "protectedWorkItems",
                 "runtime",
@@ -3112,6 +3137,9 @@ mod tests {
                 .as_str()
                 .is_some_and(|path| !path.is_empty())
         );
+        assert!(lifecycle["executableSha256"].as_str().is_some_and(
+            |digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        ));
     }
 
     #[tokio::test]
@@ -3152,13 +3180,10 @@ mod tests {
     #[tokio::test]
     async fn runtime_switch_commit_releases_candidate_hold_and_returns_managed_snapshot() {
         let (state, _temp, token) = management_test_state();
-        let instance_id = state.daemon_identity.instance_id.clone();
         let app = router(state.clone());
-        let claim_body = json!({
-            "installationId": "swiftui-test-installation",
-            "daemonInstanceId": instance_id,
-        })
-        .to_string();
+        let claim_body = lifecycle_lease_request(&state, "swiftui-test-installation")
+            .await
+            .to_string();
         let claim = request_response(
             app.clone(),
             Method::POST,
@@ -3201,7 +3226,6 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_lease_claims_and_restart_respects_protected_work() {
         let (state, _temp, token) = management_test_state();
-        let instance_id = state.daemon_identity.instance_id.clone();
         {
             let mut runtime = state.runtime.lock().await;
             runtime
@@ -3209,11 +3233,9 @@ mod tests {
                 .insert("protected-thread".to_string(), "protected-turn".to_string());
         }
         let app = router(state.clone());
-        let body = json!({
-            "installationId": "swiftui-test-installation",
-            "daemonInstanceId": instance_id,
-        })
-        .to_string();
+        let body = lifecycle_lease_request(&state, "swiftui-test-installation")
+            .await
+            .to_string();
 
         let before_claim = request_response(
             app.clone(),
@@ -3257,6 +3279,234 @@ mod tests {
                 .is_some_and(|message| message.contains("受保护任务"))
         );
         assert_eq!(restart_payload["protectedWorkItems"]["total"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_credential_rotation_route_enforces_cas_and_idempotency() {
+        let (state, _temp, old_token) = management_test_state();
+        let app = router(state.clone());
+        let claim_body = lifecycle_lease_request(&state, "installation-a")
+            .await
+            .to_string();
+        let claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&old_token),
+            Some(&claim_body),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::OK);
+        let claimed = response_json(claim).await;
+        let lease_generation = claimed["management"]["leaseGeneration"]
+            .as_u64()
+            .expect("lease generation");
+        let token_generation = claimed["management"]["managementTokenGeneration"]
+            .as_u64()
+            .expect("token generation");
+
+        let stale_body = json!({
+            "installationId": "installation-a",
+            "daemonInstanceId": state.daemon_identity.instance_id,
+            "leaseGeneration": lease_generation + 1,
+            "expectedManagementTokenGeneration": token_generation,
+            "requestId": "rotation-stale-lease",
+            "reason": "leakRecovery",
+        })
+        .to_string();
+        let stale = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/credential/rotate",
+            Some(&old_token),
+            Some(&stale_body),
+        )
+        .await;
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+
+        let rotation_body = json!({
+            "installationId": "installation-a",
+            "daemonInstanceId": state.daemon_identity.instance_id,
+            "leaseGeneration": lease_generation,
+            "expectedManagementTokenGeneration": token_generation,
+            "requestId": "rotation-request",
+            "reason": "leakRecovery",
+        })
+        .to_string();
+        let rotation = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/credential/rotate",
+            Some(&old_token),
+            Some(&rotation_body),
+        )
+        .await;
+        assert_eq!(rotation.status(), StatusCode::OK);
+        let rotation = response_json(rotation).await;
+        assert_eq!(rotation["rotated"], json!(true));
+        assert_eq!(
+            rotation["managementTokenGeneration"],
+            json!(token_generation + 1)
+        );
+        assert_exact_keys(
+            rotation.as_object().expect("rotation response"),
+            &["managementTokenGeneration", "ok", "requestId", "rotated"],
+        );
+
+        let rejected_old_token =
+            route_response(app.clone(), "/api/v1/manage/lifecycle", Some(&old_token)).await;
+        assert_eq!(rejected_old_token.status(), StatusCode::UNAUTHORIZED);
+        let new_token = manage_api::management_token(&state.config_path).expect("new token");
+        let replay = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/credential/rotate",
+            Some(&new_token),
+            Some(&rotation_body),
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(response_json(replay).await["rotated"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_takeover_route_requires_force_identity_and_matching_generations() {
+        let (state, _temp, original_token) = management_test_state();
+        let app = router(state.clone());
+
+        let missing_proof = json!({
+            "installationId": "installation-a",
+            "daemonInstanceId": state.daemon_identity.instance_id,
+        })
+        .to_string();
+        let rejected_claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&original_token),
+            Some(&missing_proof),
+        )
+        .await;
+        assert_eq!(rejected_claim.status(), StatusCode::BAD_REQUEST);
+
+        let claim_body = lifecycle_lease_request(&state, "installation-a")
+            .await
+            .to_string();
+        let claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&original_token),
+            Some(&claim_body),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::OK);
+        let claimed = response_json(claim).await;
+        let lease_generation = claimed["management"]["leaseGeneration"]
+            .as_u64()
+            .expect("lease generation");
+        let token_generation = claimed["management"]["managementTokenGeneration"]
+            .as_u64()
+            .expect("token generation");
+
+        let mut takeover = lifecycle_lease_request(&state, "installation-b").await;
+        takeover["expectedLeaseGeneration"] = json!(lease_generation);
+        takeover["expectedManagementTokenGeneration"] = json!(token_generation);
+        takeover["requestId"] = json!("takeover-request");
+        takeover["force"] = json!(false);
+        let not_forced = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/takeover",
+            Some(&original_token),
+            Some(&takeover.to_string()),
+        )
+        .await;
+        assert_eq!(not_forced.status(), StatusCode::BAD_REQUEST);
+
+        takeover["force"] = json!(true);
+        let mut wrong_identity = takeover.clone();
+        wrong_identity["daemonIdentity"]["executableSha256"] = json!("incorrect");
+        let rejected_identity = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/takeover",
+            Some(&original_token),
+            Some(&wrong_identity.to_string()),
+        )
+        .await;
+        assert_eq!(rejected_identity.status(), StatusCode::CONFLICT);
+
+        let mut stale_generation = takeover.clone();
+        stale_generation["expectedLeaseGeneration"] = json!(lease_generation + 1);
+        let rejected_generation = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/takeover",
+            Some(&original_token),
+            Some(&stale_generation.to_string()),
+        )
+        .await;
+        assert_eq!(rejected_generation.status(), StatusCode::CONFLICT);
+
+        let accepted = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/takeover",
+            Some(&original_token),
+            Some(&takeover.to_string()),
+        )
+        .await;
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let accepted = response_json(accepted).await;
+        assert_eq!(accepted["rotated"], json!(true));
+        let new_generation = accepted["managementTokenGeneration"]
+            .as_u64()
+            .expect("new token generation");
+
+        let rejected_old_token = route_response(
+            app.clone(),
+            "/api/v1/manage/lifecycle",
+            Some(&original_token),
+        )
+        .await;
+        assert_eq!(rejected_old_token.status(), StatusCode::UNAUTHORIZED);
+        let replacement_token =
+            manage_api::management_token(&state.config_path).expect("replacement token");
+        let replay = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/takeover",
+            Some(&replacement_token),
+            Some(&takeover.to_string()),
+        )
+        .await;
+        assert_eq!(replay.status(), StatusCode::OK);
+        assert_eq!(response_json(replay).await["rotated"], json!(false));
+
+        takeover["expectedManagementTokenGeneration"] = json!(new_generation);
+        let mismatched_replay = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/takeover",
+            Some(&replacement_token),
+            Some(&takeover.to_string()),
+        )
+        .await;
+        assert_eq!(mismatched_replay.status(), StatusCode::CONFLICT);
+
+        let lifecycle =
+            route_response(app, "/api/v1/manage/lifecycle", Some(&replacement_token)).await;
+        assert_eq!(lifecycle.status(), StatusCode::OK);
+        let lifecycle = response_json(lifecycle).await;
+        assert_eq!(
+            lifecycle["management"]["installationId"],
+            json!("installation-b")
+        );
+        assert_eq!(
+            lifecycle["management"]["managementTokenGeneration"],
+            json!(new_generation)
+        );
     }
 
     fn assert_exact_keys(object: &serde_json::Map<String, Value>, expected: &[&str]) {
@@ -3438,12 +3688,9 @@ mod tests {
         let (state, _temp, token) = management_test_state();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         *state.shutdown_tx.lock().await = Some(shutdown_tx);
-        let instance_id = state.daemon_identity.instance_id.clone();
-        let body = json!({
-            "installationId": "swiftui-test-installation",
-            "daemonInstanceId": instance_id,
-        })
-        .to_string();
+        let body = lifecycle_lease_request(&state, "swiftui-test-installation")
+            .await
+            .to_string();
         let app = router(state.clone());
 
         let claim = request_response(
@@ -3482,11 +3729,9 @@ mod tests {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
         *state.shutdown_tx.lock().await = Some(shutdown_tx);
         let instance_id = state.daemon_identity.instance_id.clone();
-        let claim_body = json!({
-            "installationId": "swiftui-test-installation",
-            "daemonInstanceId": instance_id,
-        })
-        .to_string();
+        let claim_body = lifecycle_lease_request(&state, "swiftui-test-installation")
+            .await
+            .to_string();
         let app = router(state.clone());
 
         let first_claim = request_response(
@@ -3711,11 +3956,9 @@ mod tests {
         );
         assert_eq!(retained_control["lease"]["generation"], json!(7));
 
-        let claim_body = json!({
-            "installationId": installation_id,
-            "daemonInstanceId": current_instance_id,
-        })
-        .to_string();
+        let claim_body = lifecycle_lease_request(&state, installation_id)
+            .await
+            .to_string();
         let handoff = request_response(
             app.clone(),
             Method::POST,

@@ -59,11 +59,17 @@ Phase 0 已实现最小凭据字段；新增字段必须向后兼容，旧客户
 
 stable、preview 和桥接版从同一配置目录发现控制文件。凭据只在首次初始化、可信管理接管或明确的泄漏恢复中轮换。轮换采用文件锁、临时文件、`fsync` 和原子替换；成功后 generation 递增。不能因 GUI 普通启动或崩溃自动轮换。
 
+控制文件中的 `managementTokenGeneration` 从 1 开始，缺少该字段的旧控制文件按 1 读取。控制文件的认证读取、租约修改和凭据轮换统一使用稳定的 `threadrelay-control.lock`：读取持有共享锁，初始化与修改持有独占锁；不能锁定会被原子替换的 JSON 文件本身。写入必须先同步临时文件，再原子替换目标并同步父目录；任何平台都不得通过“先删除旧文件再重命名”模拟替换。读写新字段时保留无法识别的控制文件字段，避免不同版本续租时抹除扩展状态。
+
+明确的泄漏恢复使用 `POST /api/v1/manage/lifecycle/credential/rotate`。请求必须携带 installation ID、daemon instance ID、租约 generation、预期凭据 generation、唯一 request ID 和轮换原因；只有当前有效租约持有者可以执行。daemon 持久化最后一次不含秘密的轮换记录，使同一 request ID 在响应丢失后可以幂等重试。响应只返回执行状态、request ID 和新的 generation，不返回 token，也不给旧 token 设置宽限期。
+
 ### 唯一管理租约
 
 同一用户数据域任一时刻只有一个安装持有管理租约。只有租约持有者可轮换凭据、staging helper、排空、切换、重启或停止 daemon。读取状态与经过 revision 保护的业务配置写入不要求租约。
 
 租约获取必须校验 daemon PID、instance ID、可执行路径、runtime 哈希和端口归属。租约仍存活时，另一安装只能只读，除非用户明确确认接管。租约过期不等于立即可杀进程；候选安装必须重新完成身份校验后才能接管。
+
+普通 `lease/claim` 只能获取无人持有或已经过期的租约，并携带 GUI 已核验的 daemon 身份快照；它不能覆盖其他安装的有效租约。仍存活租约的显式接管使用 `POST /api/v1/manage/lifecycle/lease/takeover`，请求必须包含 `force: true`、观察到的租约与凭据 generation、唯一 request ID，以及相同的 daemon 身份快照。daemon 在同一独占锁事务中重新核验身份、换代租约并轮换管理凭据；任一观察值已经变化就返回冲突，不推断用户仍同意新的接管目标。
 
 ### 多 GUI 并发写
 
