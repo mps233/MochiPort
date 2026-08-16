@@ -4,8 +4,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Phase 3 已完成；Phase 2 已具备版本化 daemon staging、持久化切换事务、候选版本准入 hold、连续健康校验、失败回滚和 GUI 崩溃恢复，隔离端口故障矩阵已完成；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页已完成，统一切换日志、增强启动完整状态机、诊断导出和发布级无障碍收尾仍待完成 |
-| 最近核验 | 2026-08-16；SwiftPM 150 项、Rust 904 项通过（1 项忽略）；Universal Release build 419 已完成真实故障矩阵和 GUI supervisor 原位升级竞态修复的正式组装、签名与运行验证，GUI 已由 build 418 自动切换至 419，supervisor 进程保持不变，受保护 daemon 保持 build 410 继续运行 |
+| 状态 | Phase 3 已完成；Phase 2 已具备版本化 daemon staging、持久化切换事务、可信管理接管、管理凭据轮换、候选版本准入 hold、连续健康校验、失败回滚和 GUI 崩溃恢复，隔离端口故障矩阵已完成；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页已完成，统一脱敏切换日志、旧版兼容发布验证、增强启动完整状态机、诊断导出和发布级无障碍收尾仍待完成 |
+| 最近核验 | 2026-08-16；SwiftPM 162 项、Rust 全量 910 项通过（1 项忽略）；Universal Release build 421 已完成管理权安全交接的正式组装、签名与运行验证，GUI 已由 build 420 自动切换至 421，supervisor 进程保持不变，受保护 daemon 保持 build 410 继续运行 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
 | 主前端 | SwiftUI |
@@ -378,14 +378,14 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 ### Phase 2：daemon 生命周期与菜单栏
 
-当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、连续健康检查、失败回滚和 GUI 崩溃恢复。自动化测试已覆盖 journal 损坏或篡改、候选构建不一致、冻结后进程身份变化、回滚启动失败，以及跨 daemon 实例和租约换代的拒绝路径；隔离进程矩阵也已验证端口占用、KeepAlive 连续换 PID、真实 helper 启动失败和恢复 previous helper。凭据轮换与统一脱敏切换日志仍未完成。
+当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、可信管理接管、管理凭据轮换、连续健康检查、失败回滚和 GUI 崩溃恢复。自动化测试已覆盖 journal 损坏或篡改、候选构建不一致、冻结后进程身份变化、回滚启动失败，以及跨 daemon 实例、租约与凭据 generation 换代的拒绝和幂等重试路径；隔离进程矩阵也已验证端口占用、KeepAlive 连续换 PID、真实 helper 启动失败和恢复 previous helper。当前剩余重点是统一脱敏切换日志和旧 CodexHub 兼容 daemon 的发布级验证。
 
 交付物：
 
 - [x] 实现现有 daemon 探测、精确 PID、instance、路径、参数和环境校验、启动及受保护关闭。
 - [x] 将 Rust daemon 作为独立可执行文件嵌入 App Bundle。
 - [x] 将已校验 helper staging 到版本化 runtime，启动时不继承 GUI 管道和生命周期。
-- [ ] 按 Phase 0 控制平面 ADR 使用和轮换共享管理凭据，落实唯一管理租约与可信接管。
+- [x] 按 Phase 0 控制平面 ADR 使用和轮换共享管理凭据，落实唯一管理租约与可信接管；控制文件使用稳定锁与原子替换，接管和泄漏恢复均通过 generation、daemon 身份快照和幂等 request ID 防止竞态。
 - [x] 实现 daemon 管理租约、受保护 drain、候选 hold/commit、连续健康校验和失败回滚协议。
 - [x] 在隔离端口完成端口占用、候选 API 不可达、KeepAlive 连续换 PID、helper 崩溃和回滚失败的完整故障注入矩阵。
   确定性回归测试覆盖候选 API 不可达、PID/路径/参数/环境变化、journal 损坏或篡改、候选构建不一致、回滚 bootstrap 失败，以及跨 daemon 实例和租约 generation 失效。`scripts/test-macos-daemon-fault-matrix.sh --run` 使用临时 HOME、独立端口和唯一 `io.github.mps233.threadrelay.tests.*` label 启动真实进程，验证占用端口时非零退出且不发布 locator、三次 `SIGKILL` 后 KeepAlive 每次都换 PID 和 instance、候选 helper 连续 bind 失败后恢复 previous helper；脚本同时断言正式 daemon 的 PID、程序路径、locator 哈希和 Codex GUI launchctl 环境前后不变，并清理全部测试作业。
