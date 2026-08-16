@@ -63,6 +63,10 @@ pub fn router(state: SharedState) -> Router {
             post(manage_api::release_lifecycle_lease),
         )
         .route("/lifecycle/restart", post(manage_api::restart_lifecycle))
+        .route(
+            "/lifecycle/runtime-switch/commit",
+            post(manage_api::commit_runtime_switch),
+        )
         .route("/dashboard", get(manage_dashboard))
         .route("/log-directory", get(manage_log_directory))
         .route("/codex/status", get(codex_app::manage_codex_app_status))
@@ -918,6 +922,30 @@ mod tests {
             ..ProviderConfig::default()
         }];
         management_state_with_config(config)
+    }
+
+    fn seed_test_lifecycle_lease(
+        state: &SharedState,
+        installation_id: &str,
+        daemon_instance_id: &str,
+        generation: u64,
+    ) {
+        let path = manage_api::control_file_path(&state.config_path);
+        let mut control: Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read management control file"))
+                .expect("parse management control file");
+        control["leaseGeneration"] = json!(generation);
+        control["lease"] = json!({
+            "installationId": installation_id,
+            "daemonInstanceId": daemon_instance_id,
+            "generation": generation,
+            "expiresAtMs": u64::MAX,
+        });
+        std::fs::write(
+            path,
+            serde_json::to_vec(&control).expect("encode management control file"),
+        )
+        .expect("write management control file");
     }
 
     fn management_test_router() -> (Router, TempDir, String) {
@@ -3122,6 +3150,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn runtime_switch_commit_releases_candidate_hold_and_returns_managed_snapshot() {
+        let (state, _temp, token) = management_test_state();
+        let instance_id = state.daemon_identity.instance_id.clone();
+        let app = router(state.clone());
+        let claim_body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": instance_id,
+        })
+        .to_string();
+        let claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&claim_body),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::OK);
+        let generation = response_json(claim).await["management"]["leaseGeneration"]
+            .as_u64()
+            .expect("candidate hold lease generation");
+
+        assert!(state.lifecycle_admission.begin_candidate_hold());
+        let commit_body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": state.daemon_identity.instance_id,
+            "leaseGeneration": generation,
+        })
+        .to_string();
+        let commit = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/runtime-switch/commit",
+            Some(&token),
+            Some(&commit_body),
+        )
+        .await;
+        assert_eq!(commit.status(), StatusCode::OK);
+        let payload = response_json(commit).await;
+        assert_eq!(payload["runtime"]["state"], json!("active"));
+        assert_eq!(payload["management"]["canControl"], json!(true));
+        assert!(!state.lifecycle_admission.is_candidate_hold());
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
+        );
+    }
+
+    #[tokio::test]
     async fn lifecycle_lease_claims_and_restart_respects_protected_work() {
         let (state, _temp, token) = management_test_state();
         let instance_id = state.daemon_identity.instance_id.clone();
@@ -3474,5 +3551,149 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn candidate_hold_reports_draining_and_rejects_normal_claim() {
+        let (state, _temp, token) = management_test_state();
+        assert!(state.lifecycle_admission.begin_candidate_hold());
+        assert!(state.lifecycle_admission.is_candidate_hold());
+        assert!(
+            !start_bridge_if_ready(&state, "candidate bridge start test").await,
+            "candidate hold must keep the bridge stopped"
+        );
+        assert!(state.bridge_task.lock().await.is_none());
+
+        let instance_id = state.daemon_identity.instance_id.clone();
+        let body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": instance_id,
+        })
+        .to_string();
+        let app = router(state.clone());
+
+        let lifecycle = route_response(app.clone(), "/api/v1/manage/lifecycle", Some(&token)).await;
+        assert_eq!(lifecycle.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(lifecycle).await["runtime"]["state"],
+            json!("draining")
+        );
+
+        let claim = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(claim).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("runtime-switch/commit"))
+        );
+        assert!(state.lifecycle_admission.is_candidate_hold());
+    }
+
+    #[tokio::test]
+    async fn runtime_switch_commit_validates_and_activates_the_candidate() {
+        let (state, _temp, token) = management_test_state();
+        let candidate_instance_id = state.daemon_identity.instance_id.clone();
+        seed_test_lifecycle_lease(&state, "swiftui-test-installation", "previous-daemon", 7);
+        assert!(state.lifecycle_admission.begin_candidate_hold());
+        let app = router(state.clone());
+
+        for body in [
+            json!({
+                "installationId": "swiftui-test-installation",
+                "daemonInstanceId": "stale-candidate",
+                "leaseGeneration": 7,
+            }),
+            json!({
+                "installationId": "other-installation",
+                "daemonInstanceId": candidate_instance_id,
+                "leaseGeneration": 7,
+            }),
+            json!({
+                "installationId": "swiftui-test-installation",
+                "daemonInstanceId": candidate_instance_id,
+                "leaseGeneration": 6,
+            }),
+        ] {
+            let response = request_response(
+                app.clone(),
+                Method::POST,
+                "/api/v1/manage/lifecycle/runtime-switch/commit",
+                Some(&token),
+                Some(&body.to_string()),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert!(state.lifecycle_admission.is_candidate_hold());
+        }
+
+        let body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": candidate_instance_id,
+            "leaseGeneration": 7,
+        })
+        .to_string();
+        let committed = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/runtime-switch/commit",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(committed.status(), StatusCode::OK);
+        let lifecycle = response_json(committed).await;
+        assert_eq!(lifecycle["runtime"]["state"], json!("active"));
+        assert_eq!(lifecycle["management"]["state"], json!("managed"));
+        assert_eq!(lifecycle["management"]["canControl"], json!(true));
+        assert_eq!(
+            lifecycle["management"]["installationId"],
+            json!("swiftui-test-installation")
+        );
+        assert_eq!(lifecycle["management"]["leaseGeneration"], json!(8));
+        assert!(!state.lifecycle_admission.is_candidate_hold());
+    }
+
+    #[tokio::test]
+    async fn candidate_hold_accepts_a_guarded_restart_with_the_previous_lease() {
+        let (state, _temp, token) = management_test_state();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let candidate_instance_id = state.daemon_identity.instance_id.clone();
+        seed_test_lifecycle_lease(&state, "swiftui-test-installation", "previous-daemon", 7);
+        assert!(state.lifecycle_admission.begin_candidate_hold());
+        let app = router(state.clone());
+        let body = json!({
+            "installationId": "swiftui-test-installation",
+            "daemonInstanceId": candidate_instance_id,
+            "leaseGeneration": 7,
+        })
+        .to_string();
+
+        let restart = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/restart",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(restart.status(), StatusCode::OK);
+        assert_eq!(response_json(restart).await["state"], json!("restarting"));
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx)
+            .await
+            .expect("shutdown signal timeout")
+            .expect("shutdown signal sender");
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::ShutdownCommitted
+        );
+        assert!(!state.lifecycle_admission.is_candidate_hold());
     }
 }

@@ -208,6 +208,9 @@ fn run_gui_command() -> anyhow::Result<()> {
 async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<()> {
     let daemon_identity = daemon_process::DaemonIdentity::new();
     let _daemon_lock = daemon_process::DaemonInstanceLock::acquire(&config_path, &daemon_identity)?;
+    let runtime_switch_hold = std::env::var("THREADRELAY_RUNTIME_SWITCH_HOLD")
+        .ok()
+        .is_some_and(|value| value == "1");
     let bind = config.bind.clone();
     outbound_http::init(&config.outbound_proxy, config.local_listen_port())?;
     let chain_log_path = chain_log_path(&config);
@@ -219,6 +222,16 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         Some(shutdown_tx),
         Some(daemon_identity),
     );
+    if runtime_switch_hold {
+        state.lifecycle_admission.begin_candidate_hold();
+        state
+            .push_event(
+                "info",
+                "runtime_switch_hold_started",
+                "candidate daemon is waiting for an authenticated runtime switch commit",
+            )
+            .await;
+    }
     {
         let config = state.config.lock().await;
         state

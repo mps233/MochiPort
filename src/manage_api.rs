@@ -152,6 +152,18 @@ pub struct LifecycleControlRequest {
     pub lease_generation: Option<u64>,
 }
 
+/// Commits a newly launched candidate daemon that started with
+/// `THREADRELAY_RUNTIME_SWITCH_HOLD=1`. The generation is the lease owned by
+/// the previous daemon; committing rebinds that lease to this instance and
+/// advances it before bridge admission is reopened.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSwitchCommitRequest {
+    pub installation_id: String,
+    pub daemon_instance_id: String,
+    pub lease_generation: u64,
+}
+
 #[derive(Debug, Clone, Copy)]
 enum LeaseOperation {
     Claim,
@@ -184,6 +196,7 @@ pub(crate) async fn request_shutdown_with_drain(
     force: bool,
     event_message: &'static str,
 ) -> LifecycleShutdownResult {
+    let _lifecycle_control = state.lifecycle_control.lock().await;
     request_shutdown_with_drain_inner(state, force, event_message, None, None).await
 }
 
@@ -198,7 +211,12 @@ pub(crate) async fn request_restart_with_drain(
     // This is a Tokio mutex, so it does not block executor workers while the
     // protected work finishes.
     let _lifecycle_control = state.lifecycle_control.lock().await;
-    match acquire_validated_lifecycle_lease_lock(state, installation_id, lease_generation).await {
+    let lease_lock = if state.lifecycle_admission.is_candidate_hold() {
+        acquire_candidate_hold_lifecycle_lease_lock(state, installation_id, lease_generation).await
+    } else {
+        acquire_validated_lifecycle_lease_lock(state, installation_id, lease_generation).await
+    };
+    match lease_lock {
         Ok(lock) => {
             let _ = FileExt::unlock(&lock);
         }
@@ -221,7 +239,8 @@ async fn request_shutdown_with_drain_inner(
     lease_installation_id: Option<String>,
     lease_generation: Option<u64>,
 ) -> LifecycleShutdownResult {
-    if !state.lifecycle_admission.begin_draining() {
+    let candidate_hold = state.lifecycle_admission.take_candidate_hold_for_shutdown();
+    if !candidate_hold && !state.lifecycle_admission.begin_draining() {
         return LifecycleShutdownResult::AlreadyInProgress;
     }
 
@@ -231,7 +250,11 @@ async fn request_shutdown_with_drain_inner(
 
     let initial = lifecycle_snapshot(state).await;
     if initial.protected_work_items.total > 0 && !force {
-        state.lifecycle_admission.cancel_draining();
+        if candidate_hold {
+            state.lifecycle_admission.restore_candidate_hold();
+        } else {
+            state.lifecycle_admission.cancel_draining();
+        }
         return LifecycleShutdownResult::ProtectedWork(initial.protected_work_items);
     }
 
@@ -242,17 +265,29 @@ async fn request_shutdown_with_drain_inner(
 
     let final_snapshot = lifecycle_snapshot(state).await;
     if final_snapshot.protected_work_items.total > 0 && !force {
-        cancel_draining_and_restore_bridge(state).await;
+        if candidate_hold {
+            state.lifecycle_admission.restore_candidate_hold();
+        } else {
+            cancel_draining_and_restore_bridge(state).await;
+        }
         return LifecycleShutdownResult::ProtectedWork(final_snapshot.protected_work_items);
     }
 
     let lifecycle_lock = if let Some(installation_id) = lease_installation_id {
-        match acquire_validated_lifecycle_lease_lock(state, &installation_id, lease_generation)
-            .await
-        {
+        let lease_lock = if candidate_hold {
+            acquire_candidate_hold_lifecycle_lease_lock(state, &installation_id, lease_generation)
+                .await
+        } else {
+            acquire_validated_lifecycle_lease_lock(state, &installation_id, lease_generation).await
+        };
+        match lease_lock {
             Ok(lock) => Some(lock),
             Err(error) => {
-                cancel_draining_and_restore_bridge(state).await;
+                if candidate_hold {
+                    state.lifecycle_admission.restore_candidate_hold();
+                } else {
+                    cancel_draining_and_restore_bridge(state).await;
+                }
                 return LifecycleShutdownResult::LeaseRejected(error);
             }
         }
@@ -274,7 +309,11 @@ async fn request_shutdown_with_drain_inner(
         if let Some(lock) = lifecycle_lock.as_ref() {
             let _ = FileExt::unlock(lock);
         }
-        cancel_draining_and_restore_bridge(state).await;
+        if candidate_hold {
+            state.lifecycle_admission.restore_candidate_hold();
+        } else {
+            cancel_draining_and_restore_bridge(state).await;
+        }
         LifecycleShutdownResult::NotRunning
     }
 }
@@ -569,6 +608,46 @@ pub async fn restart_lifecycle(
     }
 }
 
+/// Release the admission hold installed on a candidate runtime after the GUI
+/// has verified several consecutive health probes. The lease hand-off and the
+/// in-process state transition are serialized with restart/lease operations.
+pub async fn commit_runtime_switch(
+    State(state): State<SharedState>,
+    Json(request): Json<RuntimeSwitchCommitRequest>,
+) -> Response {
+    let _lifecycle_control = state.lifecycle_control.lock().await;
+    let installation_id = match normalized_installation_id(&request.installation_id) {
+        Ok(value) => value,
+        Err(error) => return lease_error_response(error),
+    };
+    if request.daemon_instance_id.trim() != state.daemon_identity.instance_id {
+        return lease_error_response(LeaseError::conflict("后台服务实例已变化，请刷新后重试。"));
+    }
+    if !state.lifecycle_admission.is_candidate_hold() {
+        return lease_error_response(LeaseError::conflict("当前后台服务不是等待提交的候选版本。"));
+    }
+
+    if let Err(error) =
+        commit_candidate_lifecycle_lease_async(&state, installation_id, request.lease_generation)
+            .await
+    {
+        return lease_error_response(error);
+    }
+
+    if !state.lifecycle_admission.commit_candidate_hold() {
+        // This should only be reachable if a local lifecycle operation raced
+        // the request outside the control mutex. Keep the candidate fenced if
+        // that invariant is ever violated.
+        return lease_error_response(LeaseError::internal("后台服务候选版本提交状态发生变化。"));
+    }
+    let _ = crate::web::start_bridge_if_ready(
+        &state,
+        "bridge start requested after runtime switch commit",
+    )
+    .await;
+    Json(lifecycle_snapshot(&state).await).into_response()
+}
+
 async fn lifecycle_lease_operation(
     state: &SharedState,
     request: LifecycleLeaseRequest,
@@ -581,6 +660,11 @@ async fn lifecycle_lease_operation(
     };
     if request.daemon_instance_id.trim() != state.daemon_identity.instance_id {
         return lease_error_response(LeaseError::conflict("后台服务实例已变化，请刷新后重试。"));
+    }
+    if matches!(operation, LeaseOperation::Claim) && state.lifecycle_admission.is_candidate_hold() {
+        return lease_error_response(LeaseError::conflict(
+            "候选后台服务正在等待切换提交，请使用 runtime-switch/commit。",
+        ));
     }
 
     // Keep lease mutations behind the same in-process lifecycle mutex used by
@@ -729,6 +813,80 @@ fn current_time_ms() -> u64 {
     now_ms().min(u64::MAX as u128) as u64
 }
 
+fn commit_candidate_lifecycle_lease(
+    config_path: &Path,
+    identity: &DaemonIdentity,
+    installation_id: &str,
+    expected_generation: u64,
+    now_ms: u64,
+) -> Result<(), LeaseError> {
+    ensure_management_token(config_path)
+        .map_err(|_| LeaseError::internal("无法读取后台服务管理控制文件。"))?;
+
+    let lock = acquire_lifecycle_lock(config_path)?;
+    let result = (|| {
+        let mut control = read_control_file(config_path)
+            .map_err(|_| LeaseError::internal("后台服务管理控制文件格式无效。"))?;
+        let Some(existing) = control.lease.as_ref().cloned() else {
+            return Err(LeaseError::conflict("当前安装不持有后台服务管理租约。"));
+        };
+        if existing.expires_at_ms <= now_ms {
+            return Err(LeaseError::conflict("管理租约已过期，请重新申请。"));
+        }
+        if existing.installation_id != installation_id {
+            return Err(LeaseError::conflict(
+                "后台服务已由其他安装管理，请先释放或等待管理租约过期。",
+            ));
+        }
+        if existing.generation != expected_generation {
+            return Err(LeaseError::conflict(
+                "后台服务管理租约已换代，请刷新后重试。",
+            ));
+        }
+
+        if existing.daemon_instance_id == identity.instance_id {
+            return Ok(());
+        }
+
+        let generation = control
+            .lease_generation
+            .max(existing.generation)
+            .saturating_add(1)
+            .max(1);
+        control.lease_generation = generation;
+        control.lease = Some(ControlLease {
+            installation_id: installation_id.to_string(),
+            daemon_instance_id: identity.instance_id.clone(),
+            generation,
+            expires_at_ms: now_ms.saturating_add(MANAGEMENT_LEASE_DURATION_MS),
+        });
+        write_control_file(config_path, &control)
+            .map_err(|_| LeaseError::internal("无法保存后台服务管理租约。"))
+    })();
+    let _ = FileExt::unlock(&lock);
+    result
+}
+
+async fn commit_candidate_lifecycle_lease_async(
+    state: &SharedState,
+    installation_id: String,
+    expected_generation: u64,
+) -> Result<(), LeaseError> {
+    let config_path = state.config_path.clone();
+    let identity = state.daemon_identity.clone();
+    tokio::task::spawn_blocking(move || {
+        commit_candidate_lifecycle_lease(
+            &config_path,
+            &identity,
+            &installation_id,
+            expected_generation,
+            current_time_ms(),
+        )
+    })
+    .await
+    .map_err(|_| LeaseError::internal("后台服务管理锁任务失败。"))?
+}
+
 fn is_zero(value: &u64) -> bool {
     *value == 0
 }
@@ -756,15 +914,16 @@ fn update_lifecycle_lease(
         match operation {
             LeaseOperation::Claim => {
                 if let Some(existing) = active
-                    && (existing.installation_id != installation_id
-                        || existing.daemon_instance_id != identity.instance_id)
+                    && existing.installation_id != installation_id
                 {
                     return Err(LeaseError::conflict(
                         "后台服务已由其他安装管理，请先释放或等待管理租约过期。",
                     ));
                 }
 
-                let generation = if let Some(existing) = active {
+                let generation = if let Some(existing) = active
+                    && existing.daemon_instance_id == identity.instance_id
+                {
                     existing.generation
                 } else {
                     control.lease_generation = control.lease_generation.saturating_add(1).max(1);
@@ -875,6 +1034,31 @@ fn validate_active_lifecycle_lease(
     Ok(())
 }
 
+fn validate_candidate_hold_lifecycle_lease(
+    config_path: &Path,
+    installation_id: &str,
+    expected_generation: Option<u64>,
+    now_ms: u64,
+) -> Result<(), LeaseError> {
+    let control = read_control_file(config_path)
+        .map_err(|_| LeaseError::internal("后台服务管理控制文件格式无效。"))?;
+    let Some(lease) = control.lease else {
+        return Err(LeaseError::conflict("当前安装不持有后台服务管理租约。"));
+    };
+    if lease.expires_at_ms <= now_ms {
+        return Err(LeaseError::conflict("管理租约已过期，请重新申请。"));
+    }
+    if lease.installation_id != installation_id {
+        return Err(LeaseError::conflict("当前安装不持有后台服务管理租约。"));
+    }
+    if expected_generation.is_some_and(|generation| lease.generation != generation) {
+        return Err(LeaseError::conflict(
+            "后台服务管理租约已换代，请刷新后重试。",
+        ));
+    }
+    Ok(())
+}
+
 /// Validate a lifecycle lease while keeping fs2 lock acquisition and file I/O
 /// off the Tokio worker. A successful call returns the still-locked file so a
 /// caller can fence the final shutdown commit; the caller must unlock it.
@@ -891,6 +1075,33 @@ async fn acquire_validated_lifecycle_lease_lock(
         let result = validate_active_lifecycle_lease(
             &config_path,
             &identity,
+            &installation_id,
+            expected_generation,
+            current_time_ms(),
+        );
+        match result {
+            Ok(()) => Ok(lock),
+            Err(error) => {
+                let _ = FileExt::unlock(&lock);
+                Err(error)
+            }
+        }
+    })
+    .await
+    .map_err(|_| LeaseError::internal("后台服务管理锁任务失败。"))?
+}
+
+async fn acquire_candidate_hold_lifecycle_lease_lock(
+    state: &SharedState,
+    installation_id: &str,
+    expected_generation: Option<u64>,
+) -> Result<File, LeaseError> {
+    let config_path = state.config_path.clone();
+    let installation_id = installation_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let lock = acquire_lifecycle_lock(&config_path)?;
+        let result = validate_candidate_hold_lifecycle_lease(
+            &config_path,
             &installation_id,
             expected_generation,
             current_time_ms(),
@@ -1227,7 +1438,25 @@ mod tests {
 
         update_lifecycle_lease(
             &config_path,
-            &identity,
+            &other,
+            "installation-a",
+            LeaseOperation::Claim,
+            now + 2_500,
+        )
+        .expect("same installation should rebind after daemon replacement");
+        let rebound = read_control_file(&config_path)
+            .expect("read rebound control file")
+            .lease
+            .expect("rebound lease");
+        assert_eq!(rebound.installation_id, "installation-a");
+        assert_eq!(rebound.daemon_instance_id, "other-daemon");
+        assert!(rebound.generation > renewed.generation);
+        assert!(!lifecycle_management_snapshot(&config_path, &identity).can_control);
+        assert!(lifecycle_management_snapshot(&config_path, &other).can_control);
+
+        update_lifecycle_lease(
+            &config_path,
+            &other,
             "installation-a",
             LeaseOperation::Release,
             now + 3_000,
@@ -1240,6 +1469,117 @@ mod tests {
                 .is_none()
         );
         assert!(!lifecycle_management_snapshot(&config_path, &identity).can_control);
+    }
+
+    #[test]
+    fn candidate_commit_rebinds_the_previous_lease_and_advances_generation() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let previous = DaemonIdentity {
+            service: "threadrelay".to_string(),
+            pid: 41,
+            instance_id: "previous-daemon".to_string(),
+            started_at_ms: 122,
+        };
+        let candidate = DaemonIdentity {
+            pid: 42,
+            instance_id: "candidate-daemon".to_string(),
+            started_at_ms: 123,
+            ..previous.clone()
+        };
+        ensure_management_token(&config_path).expect("create control file");
+
+        let now = current_time_ms();
+        update_lifecycle_lease(
+            &config_path,
+            &previous,
+            "installation-a",
+            LeaseOperation::Claim,
+            now,
+        )
+        .expect("claim previous lease");
+        let previous_lease = read_control_file(&config_path)
+            .expect("read previous control file")
+            .lease
+            .expect("previous lease");
+
+        commit_candidate_lifecycle_lease(
+            &config_path,
+            &candidate,
+            "installation-a",
+            previous_lease.generation,
+            now + 100,
+        )
+        .expect("commit candidate lease");
+
+        let control = read_control_file(&config_path).expect("read candidate control file");
+        let candidate_lease = control.lease.expect("candidate lease");
+        assert_eq!(candidate_lease.installation_id, "installation-a");
+        assert_eq!(candidate_lease.daemon_instance_id, "candidate-daemon");
+        assert!(candidate_lease.generation > previous_lease.generation);
+        assert_eq!(control.lease_generation, candidate_lease.generation);
+        assert!(candidate_lease.expires_at_ms > previous_lease.expires_at_ms);
+        assert!(!lifecycle_management_snapshot(&config_path, &previous).can_control);
+        assert!(lifecycle_management_snapshot(&config_path, &candidate).can_control);
+    }
+
+    #[test]
+    fn candidate_commit_rejects_the_wrong_installation_or_generation() {
+        let temp = tempdir().expect("tempdir");
+        let config_path = temp.path().join("config.toml");
+        let previous = DaemonIdentity {
+            service: "threadrelay".to_string(),
+            pid: 41,
+            instance_id: "previous-daemon".to_string(),
+            started_at_ms: 122,
+        };
+        let candidate = DaemonIdentity {
+            pid: 42,
+            instance_id: "candidate-daemon".to_string(),
+            started_at_ms: 123,
+            ..previous.clone()
+        };
+        ensure_management_token(&config_path).expect("create control file");
+
+        let now = current_time_ms();
+        update_lifecycle_lease(
+            &config_path,
+            &previous,
+            "installation-a",
+            LeaseOperation::Claim,
+            now,
+        )
+        .expect("claim previous lease");
+        let previous_lease = read_control_file(&config_path)
+            .expect("read previous control file")
+            .lease
+            .expect("previous lease");
+
+        let wrong_installation = commit_candidate_lifecycle_lease(
+            &config_path,
+            &candidate,
+            "installation-b",
+            previous_lease.generation,
+            now + 100,
+        )
+        .expect_err("other installation must not commit candidate lease");
+        assert_eq!(wrong_installation.status, StatusCode::CONFLICT);
+
+        let wrong_generation = commit_candidate_lifecycle_lease(
+            &config_path,
+            &candidate,
+            "installation-a",
+            previous_lease.generation.saturating_add(1),
+            now + 100,
+        )
+        .expect_err("stale generation must not commit candidate lease");
+        assert_eq!(wrong_generation.status, StatusCode::CONFLICT);
+
+        let unchanged = read_control_file(&config_path)
+            .expect("read unchanged control file")
+            .lease
+            .expect("unchanged previous lease");
+        assert_eq!(unchanged, previous_lease);
     }
 
     #[cfg(unix)]
