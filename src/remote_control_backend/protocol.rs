@@ -59,8 +59,6 @@ enum OutgoingClientEvent {
         segment_id: Option<usize>,
     },
     Ping,
-    #[allow(dead_code)]
-    ClientClosed,
 }
 
 #[derive(Debug, Serialize)]

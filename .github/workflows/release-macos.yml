@@ -116,7 +116,6 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${CARGO_VERSION%%[-+]*}" "$CONTENTS/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER:-1}" "$CONTENTS/Info.plist"
           cp "packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
-          cp packaging/brand/*.png "$RESOURCES/brand/"
           python3 packaging/generate-third-party-licenses.py "$RESOURCES/THIRD_PARTY_LICENSES.txt"
           cp LICENSE NOTICE "$RESOURCES/"
           cp packaging/brand/LICENSE.lucide-icons "$RESOURCES/brand/"

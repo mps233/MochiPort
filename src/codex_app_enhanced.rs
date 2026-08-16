@@ -618,6 +618,7 @@ struct EarlyAttachDiagnostics {
     fallback: Option<String>,
 }
 
+#[cfg(test)]
 pub async fn launch_and_inject(
     models: Vec<String>,
     backend_url: &str,

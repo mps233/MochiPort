@@ -91,18 +91,8 @@ impl FeishuApi {
         format!("{FEISHU_WS_BASE}/callback/ws/endpoint")
     }
 
-    #[allow(dead_code)]
-    pub(super) fn oauth_device_authorization_url(&self) -> String {
-        "https://accounts.feishu.cn/oauth/v1/device_authorization".to_string()
-    }
-
     pub(super) fn app_registration_url(&self) -> String {
         "https://accounts.feishu.cn/oauth/v1/app/registration".to_string()
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn send_message_url(&self) -> String {
-        format!("{FEISHU_API_BASE}/im/v1/messages?receive_id_type=chat_id")
     }
 
     pub(super) fn send_message_url_for_receive_id_type(&self, receive_id_type: &str) -> String {
@@ -133,11 +123,6 @@ impl FeishuApi {
         format!("{FEISHU_API_BASE}/im/v1/images")
     }
 
-    #[allow(dead_code)]
-    pub(super) fn upload_file_url(&self) -> String {
-        format!("{FEISHU_API_BASE}/im/v1/files")
-    }
-
     pub(super) fn application_info_url(&self, app_id: &str) -> String {
         format!("{FEISHU_API_BASE}/application/v6/applications/{app_id}")
     }
@@ -148,75 +133,6 @@ impl FeishuApi {
 
     pub(super) fn image_resource_download_url(&self, message_id: &str, image_key: &str) -> String {
         format!("{FEISHU_API_BASE}/im/v1/messages/{message_id}/resources/{image_key}?type=image")
-    }
-
-    #[allow(dead_code)]
-    pub async fn request_device_authorization(
-        &self,
-        scope: Option<&str>,
-    ) -> Result<serde_json::Value> {
-        let app_id = self
-            .settings
-            .app_id
-            .clone()
-            .filter(|v| !v.trim().is_empty())
-            .ok_or_else(|| anyhow!("missing app_id"))?;
-        let app_secret = self
-            .settings
-            .app_secret
-            .clone()
-            .filter(|v| !v.trim().is_empty())
-            .ok_or_else(|| anyhow!("missing app_secret"))?;
-
-        let mut scope_value = scope.unwrap_or("").trim().to_string();
-        if !scope_value
-            .split_whitespace()
-            .any(|part| part == "offline_access")
-        {
-            scope_value = if scope_value.is_empty() {
-                "offline_access".to_string()
-            } else {
-                format!("{scope_value} offline_access")
-            };
-        }
-
-        let basic_auth = {
-            use base64::Engine as _;
-            base64::engine::general_purpose::STANDARD.encode(format!("{app_id}:{app_secret}"))
-        };
-
-        let body = [
-            ("client_id", app_id.as_str()),
-            ("scope", scope_value.as_str()),
-        ];
-
-        let response = self
-            .http_client()
-            .post(self.oauth_device_authorization_url())
-            .header("Authorization", format!("Basic {basic_auth}"))
-            .header("Content-Type", "application/x-www-form-urlencoded")
-            .header("User-Agent", "arthas-desktop")
-            .form(&body)
-            .send()
-            .await?;
-
-        let status = response.status();
-        let payload =
-            read_json_response(response, "feishu oauth device authorization", false).await?;
-        if !status.is_success() {
-            return Err(anyhow!(
-                "feishu oauth device authorization failed: status={} body={}",
-                status,
-                payload
-            ));
-        }
-        if payload.get("error").is_some() {
-            return Err(anyhow!(
-                "feishu oauth device authorization failed: body={}",
-                payload
-            ));
-        }
-        Ok(payload)
     }
 
     pub async fn start_app_registration(&self) -> Result<serde_json::Value> {
@@ -526,12 +442,6 @@ impl FeishuApi {
             .ok_or_else(|| anyhow!("feishu interactive send missing message_id"))
     }
 
-    #[allow(dead_code)]
-    pub async fn send_cardkit_message(&self, chat_id: &str, card_id: &str) -> Result<String> {
-        self.send_cardkit_message_to("chat_id", chat_id, card_id)
-            .await
-    }
-
     pub async fn send_cardkit_message_to(
         &self,
         receive_id_type: &str,
@@ -782,104 +692,6 @@ impl FeishuApi {
             .and_then(|v| v.as_str())
             .map(|v| v.to_string())
             .ok_or_else(|| anyhow!("feishu upload image missing image_key"))
-    }
-
-    #[allow(dead_code)]
-    pub async fn upload_file(&self, local_path: &str, file_name: Option<&str>) -> Result<String> {
-        let token = self.get_tenant_access_token().await?;
-        let bytes = fs::read(local_path)?;
-        let fallback_name = Path::new(local_path)
-            .file_name()
-            .and_then(|v| v.to_str())
-            .unwrap_or("attachment.bin");
-        let resolved_name = file_name
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(fallback_name)
-            .to_string();
-        let mime = mime_guess::from_path(&resolved_name)
-            .first_raw()
-            .unwrap_or("application/octet-stream");
-        let part = reqwest::multipart::Part::bytes(bytes)
-            .file_name(resolved_name)
-            .mime_str(mime)?;
-        let form = reqwest::multipart::Form::new()
-            .text("file_type", "stream")
-            .part("file", part);
-        let response = self
-            .http_client()
-            .post(self.upload_file_url())
-            .header("Authorization", format!("Bearer {token}"))
-            .multipart(form)
-            .send()
-            .await?;
-        let status = response.status();
-        let payload: serde_json::Value = response.json().await?;
-        ensure_feishu_api_success("upload_file", status, &payload)?;
-        payload
-            .get("data")
-            .and_then(|v| v.get("file_key"))
-            .and_then(|v| v.as_str())
-            .map(|v| v.to_string())
-            .ok_or_else(|| anyhow!("feishu upload file missing file_key"))
-    }
-
-    #[allow(dead_code)]
-    pub async fn send_image_message(&self, chat_id: &str, image_key: &str) -> Result<()> {
-        let token = self.get_tenant_access_token().await?;
-        let body = serde_json::json!({
-            "receive_id": chat_id,
-            "msg_type": "image",
-            "content": serde_json::json!({
-                "image_key": image_key
-            }).to_string(),
-        });
-        let response = self
-            .http_client()
-            .post(self.send_message_url())
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Content-Type", "application/json; charset=utf-8")
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        let payload: serde_json::Value = response.json().await?;
-        log_feishu_api_response(
-            &format!("send_image_message chat_id={chat_id} image_key={image_key}"),
-            status,
-            &payload,
-        );
-        ensure_feishu_api_success("send_image_message", status, &payload)?;
-        Ok(())
-    }
-
-    #[allow(dead_code)]
-    pub async fn send_file_message(&self, chat_id: &str, file_key: &str) -> Result<()> {
-        let token = self.get_tenant_access_token().await?;
-        let body = serde_json::json!({
-            "receive_id": chat_id,
-            "msg_type": "file",
-            "content": serde_json::json!({
-                "file_key": file_key
-            }).to_string(),
-        });
-        let response = self
-            .http_client()
-            .post(self.send_message_url())
-            .header("Authorization", format!("Bearer {token}"))
-            .header("Content-Type", "application/json; charset=utf-8")
-            .json(&body)
-            .send()
-            .await?;
-        let status = response.status();
-        let payload: serde_json::Value = response.json().await?;
-        log_feishu_api_response(
-            &format!("send_file_message chat_id={chat_id} file_key={file_key}"),
-            status,
-            &payload,
-        );
-        ensure_feishu_api_success("send_file_message", status, &payload)?;
-        Ok(())
     }
 
     pub async fn download_image(

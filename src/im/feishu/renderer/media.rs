@@ -1,33 +1,6 @@
 use super::common::{build_markdown_card, image_element};
 use super::markdown::normalize_card_markdown;
 
-#[allow(dead_code)]
-pub fn build_image_generation_summary_card(
-    status: &str,
-    revised_prompt: Option<&str>,
-    saved_path: Option<&str>,
-) -> serde_json::Value {
-    // User-facing IM summary: only keep the final revised prompt.
-    // Everything else (status/path/result) is noisy for chat.
-    let _ = status;
-    let _ = saved_path;
-
-    // IMPORTANT: do NOT wrap in ``` fences; Feishu renders code blocks with a horizontal scrollbar.
-    let content = revised_prompt
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(normalize_card_markdown)
-        .unwrap_or_else(|| "_未提供修订提示词_".to_string());
-
-    build_markdown_card(&content, None, None)
-}
-
-#[allow(dead_code)]
-pub fn build_status_card(text: &str) -> serde_json::Value {
-    let content = normalize_card_markdown(text);
-    build_markdown_card(&content, None, None)
-}
-
 pub fn build_image_generation_result_card(
     status: &str,
     revised_prompt: Option<&str>,
@@ -78,13 +51,5 @@ pub fn build_image_view_result_card(path: &str, image_key: &str) -> serde_json::
     card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
     card["body"]["vertical_spacing"] = serde_json::json!("8px");
     card["body"]["elements"] = serde_json::Value::Array(elements);
-    card
-}
-
-#[allow(dead_code)]
-pub fn build_history_summary_card(text: &str) -> serde_json::Value {
-    let content = normalize_card_markdown(text);
-    let mut card = build_markdown_card(&content, Some("历史摘要"), Some("grey"));
-    card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
     card
 }

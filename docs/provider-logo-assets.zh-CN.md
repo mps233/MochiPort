@@ -26,7 +26,7 @@ packaging/brand/providers/
 - Telegram：`packaging/brand/telegram-logo.svg`
 - 微信：`packaging/brand/wechat-logo.svg`
 - 飞书：`packaging/brand/feishu-logo.png`，`@lobehub/icons` 当前没有对应组件，使用飞书 GitHub 官方头像资源
-- VS Code 插件：`packaging/brand/openai-badge.svg`，基于 LobeHub OpenAI 图形增加浅色徽章背景，保证暗色主题可见
+- VS Code 插件：`packaging/brand/vscode-logo.svg`，使用 VS Code 官方品牌配色
 - Codex CLI：`packaging/brand/codex-cli.svg`，来自 Lucide `terminal`
 - 本地服务：`packaging/brand/service-server.svg`，来自 Lucide `server`
 - OpenAI：`packaging/brand/providers/openai.svg`

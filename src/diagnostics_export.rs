@@ -29,6 +29,7 @@ pub struct ConnectionDiagnosticsExport {
     pub path: PathBuf,
 }
 
+#[cfg(test)]
 pub fn export_connection_diagnostics(
     input: &ConnectionDiagnosticsInput,
     output_dir: &Path,
@@ -583,6 +584,7 @@ fn redact_sensitive_string(value: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn timestamp_for_filename() -> String {
     timestamp_ms().to_string()
 }

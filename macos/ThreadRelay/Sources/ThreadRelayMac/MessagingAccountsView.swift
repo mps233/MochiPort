@@ -32,14 +32,6 @@ struct MessagingAccountSummary: Identifiable, Equatable {
             }
         }
 
-        var shortTitle: String {
-            switch self {
-            case .feishu: "飞书"
-            case .telegram: "TG"
-            case .wechat: "微信"
-            case .wecom: "企微"
-            }
-        }
     }
 
     let platform: Platform

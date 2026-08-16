@@ -19,25 +19,6 @@ pub fn init(config: &OutboundProxyConfig, local_port: Option<u16>) -> Result<()>
     Ok(())
 }
 
-/// Installs the regular client and derives a no-redirect client using the
-/// same proxy configuration. Kept as a compatibility wrapper for callers that
-/// do not have a local listener port available.
-#[allow(dead_code)]
-pub fn install(client: Client, config: &OutboundProxyConfig) {
-    let sensitive_client = match build_sensitive_client(config, None) {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::error!(
-                target: "threadrelay::network",
-                %error,
-                "failed to apply proxy settings to compatibility sensitive client"
-            );
-            default_sensitive_client()
-        }
-    };
-    install_with_sensitive(client, sensitive_client, config);
-}
-
 pub fn install_with_sensitive(
     client: Client,
     sensitive_client: Client,

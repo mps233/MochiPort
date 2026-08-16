@@ -358,6 +358,7 @@ pub fn uninstall_codex_app(
     })
 }
 
+#[cfg(test)]
 pub fn inspect_codex_app_config(
     codex_home: Option<PathBuf>,
     backend_url: &str,
@@ -423,6 +424,7 @@ pub fn inspect_codex_app_config_for_mode(
     }
 }
 
+#[cfg(test)]
 pub fn enable_codex_app_remote_control_switch(
     codex_home: Option<PathBuf>,
 ) -> Result<CodexAppRemoteControlSwitchStatus> {

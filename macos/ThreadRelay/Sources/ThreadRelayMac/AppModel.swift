@@ -270,12 +270,6 @@ final class AppModel: ObservableObject {
         return daemonManagementConfirmation(for: lifecycle)
     }
 
-    var daemonManagementDetail: String {
-        if ownsDaemonLease { return "已托管 · 运行中" }
-        if daemonLeaseConflict { return "运行正常 · 其他安装管理" }
-        return "运行正常 · 仅查看"
-    }
-
     var codexEnhancedLaunchInProgress: Bool {
         codexEnhancedWaitingForAppExit
             || codexEnhancedOperation?.isRunning == true
@@ -1008,11 +1002,6 @@ final class AppModel: ObservableObject {
         requestLogFilters = filters
         resetRequestLogPagination(clearLogs: true)
         return await loadSection(.requestLogs, force: true)
-    }
-
-    @discardableResult
-    func resetRequestLogFilters() async -> Bool {
-        await setRequestLogFilters(RequestLogFilters())
     }
 
     @discardableResult

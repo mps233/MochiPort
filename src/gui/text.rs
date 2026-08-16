@@ -109,6 +109,7 @@ impl GuiText {
         }
     }
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     pub(super) fn tray_still_running_message(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
@@ -463,101 +464,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn provider_management(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "Provider 管理",
-            GuiLocale::EnUs => "Provider Management",
-        }
-    }
-
-    pub(super) fn add(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "新增",
-            GuiLocale::EnUs => "Add",
-        }
-    }
-
-    pub(super) fn save(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "保存",
-            GuiLocale::EnUs => "Save",
-        }
-    }
-
-    pub(super) fn delete(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "删除",
-            GuiLocale::EnUs => "Delete",
-        }
-    }
-
     pub(super) fn enable(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "启用",
             GuiLocale::EnUs => "Enable",
-        }
-    }
-
-    pub(super) fn new_provider_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "清空表单，新增一个 provider",
-            GuiLocale::EnUs => "Clear the form and add a provider",
-        }
-    }
-
-    pub(super) fn save_provider_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "保存或更新当前表单里的 provider",
-            GuiLocale::EnUs => "Save or update the provider in the form",
-        }
-    }
-
-    pub(super) fn delete_provider_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "删除当前选中的 provider",
-            GuiLocale::EnUs => "Delete the selected provider",
-        }
-    }
-
-    pub(super) fn configure_provider_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "保存并使用这个模型服务",
-            GuiLocale::EnUs => "Save and use this model provider",
-        }
-    }
-
-    pub(super) fn provider_catalog_loading(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "正在匹配 ~/.codex/config.toml 里的 provider",
-            GuiLocale::EnUs => "Reading providers from ~/.codex/config.toml",
-        }
-    }
-
-    pub(super) fn provider_name(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "Provider 名称",
-            GuiLocale::EnUs => "Provider Name",
-        }
-    }
-
-    pub(super) fn name(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "名称",
-            GuiLocale::EnUs => "Name",
-        }
-    }
-
-    pub(super) fn current(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "当前",
-            GuiLocale::EnUs => "Current",
-        }
-    }
-
-    pub(super) fn api_key_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "API Key 已保存时会用星号显示；需要更换时直接输入新 key。",
-            GuiLocale::EnUs => "Saved API keys are masked. Enter a new key to replace it.",
         }
     }
 
@@ -648,13 +558,6 @@ impl GuiText {
             GuiLocale::EnUs => {
                 "Note: If Codex reports \"not configured in any provider\", add the matching provider and model in AI Gateway, or map a Codex model name such as gpt-5.4-mini to an available upstream model such as deepseek-v4-flash."
             }
-        }
-    }
-
-    pub(super) fn codex_session_history(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "会话历史管理",
-            GuiLocale::EnUs => "Session History",
         }
     }
 
@@ -772,13 +675,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "请先在右侧选择一个会话。",
             GuiLocale::EnUs => "Select a session on the right first.",
-        }
-    }
-
-    pub(super) fn session_select_provider_first(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "请选择目标 Provider。",
-            GuiLocale::EnUs => "Choose a target provider.",
         }
     }
 
@@ -959,13 +855,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn provider_websocket(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "启用 WebSocket",
-            GuiLocale::EnUs => "Enable WebSocket",
-        }
-    }
-
     pub(super) fn clear_codex_access(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "恢复 Codex 原有配置",
@@ -1069,13 +958,6 @@ impl GuiText {
             GuiLocale::EnUs => {
                 "Request logging is disabled. To view logs, enable logging in AI Gateway management."
             }
-        }
-    }
-
-    pub(super) fn request_logs(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "请求日志",
-            GuiLocale::EnUs => "Request Logs",
         }
     }
 
@@ -1454,52 +1336,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn new_provider_prompt(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "填写新 provider 名称、Base URL 和 API Key，然后点击启用。",
-            GuiLocale::EnUs => "Enter a provider name, Base URL, and API key, then click Enable.",
-        }
-    }
-
-    pub(super) fn saving_provider(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "正在保存 provider，请稍候...",
-            GuiLocale::EnUs => "Saving provider...",
-        }
-    }
-
-    pub(super) fn deleting_provider(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "正在删除 provider，请稍候...",
-            GuiLocale::EnUs => "Deleting provider...",
-        }
-    }
-
-    pub(super) fn enabling_provider(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "正在启用，请稍候...",
-            GuiLocale::EnUs => "Enabling provider...",
-        }
-    }
-
-    pub(super) fn save_in_progress(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "保存中...",
-            GuiLocale::EnUs => "Saving...",
-        }
-    }
-
     pub(super) fn delete_in_progress(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "删除中...",
             GuiLocale::EnUs => "Deleting...",
-        }
-    }
-
-    pub(super) fn enable_in_progress(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "启用中...",
-            GuiLocale::EnUs => "Enabling...",
         }
     }
 
@@ -1593,75 +1433,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn provider_waiting_service(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "等待本地服务",
-            GuiLocale::EnUs => "Waiting for local service",
-        }
-    }
-
-    pub(super) fn provider_read_after_start(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "启动后读取 ~/.codex/config.toml",
-            GuiLocale::EnUs => "Reads ~/.codex/config.toml after startup",
-        }
-    }
-
     pub(super) fn not_configured(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "未配置",
             GuiLocale::EnUs => "Not configured",
-        }
-    }
-
-    pub(super) fn provider_create_on_write(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "未配置，写入时新建",
-            GuiLocale::EnUs => "Not configured; created when written",
-        }
-    }
-
-    pub(super) fn in_use(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "使用中",
-            GuiLocale::EnUs => "Active",
-        }
-    }
-
-    pub(super) fn key_configured(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "已配置",
-            GuiLocale::EnUs => "Configured",
-        }
-    }
-
-    pub(super) fn provider_catalog_after_service(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "本地服务运行后会读取 ~/.codex/config.toml 里的 provider。",
-            GuiLocale::EnUs => {
-                "Providers are read from ~/.codex/config.toml after the local service starts."
-            }
-        }
-    }
-
-    pub(super) fn no_provider(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "还没有 provider，填写后点击启用。",
-            GuiLocale::EnUs => "No providers yet. Fill the form and click Enable.",
-        }
-    }
-
-    pub(super) fn current_provider(self, name: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("当前 provider: {name}"),
-            GuiLocale::EnUs => format!("Current provider: {name}"),
-        }
-    }
-
-    pub(super) fn saved_providers(self, count: usize) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("已保存 {count} 个 provider，请选择一个使用。"),
-            GuiLocale::EnUs => format!("{count} providers saved. Select one to use."),
         }
     }
 
@@ -1842,13 +1617,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "保存并接入",
             GuiLocale::EnUs => "Save and Connect",
-        }
-    }
-
-    pub(super) fn select_provider_to_delete(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "请先选择或填写要删除的 provider。",
-            GuiLocale::EnUs => "Select or enter a provider to delete first.",
         }
     }
 
@@ -2082,15 +1850,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn update_download_started(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "正在下载更新包，下载完成后会打开安装包。",
-            GuiLocale::EnUs => {
-                "Downloading the update. The installer package will open when the download finishes."
-            }
-        }
-    }
-
     pub(super) fn update_download_title(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "下载更新",
@@ -2116,13 +1875,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => format!("正在下载更新包… 已下载 {downloaded}"),
             GuiLocale::EnUs => format!("Downloading the update... {downloaded} downloaded"),
-        }
-    }
-
-    pub(super) fn update_download_verifying(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "下载完成，正在校验更新包…",
-            GuiLocale::EnUs => "Download complete. Verifying the update...",
         }
     }
 
@@ -2224,28 +1976,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn confirm_delete_provider_message(self, provider_name: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => {
-                format!(
-                    "删除 provider `{provider_name}`？如果它正在使用中，也会取消当前 provider 设置。"
-                )
-            }
-            GuiLocale::EnUs => {
-                format!(
-                    "Delete provider `{provider_name}`? If it is active, the current provider setting will also be cleared."
-                )
-            }
-        }
-    }
-
-    pub(super) fn confirm_delete_provider_title(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "删除 Provider",
-            GuiLocale::EnUs => "Delete Provider",
-        }
-    }
-
     pub(super) fn confirm_delete_im_account_message(self, account_name: &str) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!("删除机器人 `{account_name}`？相关会话绑定也会一起清理。"),
@@ -2275,101 +2005,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "机器人接入已删除。",
             GuiLocale::EnUs => "Bot integration deleted.",
-        }
-    }
-
-    pub(super) fn provider_verify_selected_failed(self, active: &str, expected: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!(
-                "配置接口已返回成功，但当前 provider 仍是 {active}，期望是 {expected}。请刷新后再试一次。"
-            ),
-            GuiLocale::EnUs => format!(
-                "The configure API returned success, but the current provider is still {active}; expected {expected}. Refresh and try again."
-            ),
-        }
-    }
-
-    pub(super) fn provider_name_empty(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "Provider 名称不能为空。",
-            GuiLocale::EnUs => "Provider name cannot be empty.",
-        }
-    }
-
-    pub(super) fn provider_verify_saved_failed(self, provider_name: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!(
-                "保存接口已返回成功，但 provider {provider_name} 没有出现在配置列表里。请刷新后再试一次。"
-            ),
-            GuiLocale::EnUs => format!(
-                "The save API returned success, but provider {provider_name} is not in the configured provider list. Refresh and try again."
-            ),
-        }
-    }
-
-    pub(super) fn provider_verify_websocket_failed(
-        self,
-        provider_name: &str,
-        actual: &str,
-        expected: bool,
-    ) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!(
-                "WebSocket 写入接口已返回成功，但 provider {provider_name} 的 supports_websockets 仍是 {actual}，期望是 {expected}。请刷新后再试一次。"
-            ),
-            GuiLocale::EnUs => format!(
-                "The WebSocket API returned success, but provider {provider_name} still has supports_websockets={actual}; expected {expected}. Refresh and try again."
-            ),
-        }
-    }
-
-    pub(super) fn not_found(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "<未找到>",
-            GuiLocale::EnUs => "<not found>",
-        }
-    }
-
-    pub(super) fn unset(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "<未设置>",
-            GuiLocale::EnUs => "<unset>",
-        }
-    }
-
-    pub(super) fn provider_verify_deleted_failed(self, provider_name: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!(
-                "删除接口已返回成功，但 provider {provider_name} 仍在配置列表里。请刷新后再试一次。"
-            ),
-            GuiLocale::EnUs => format!(
-                "The delete API returned success, but provider {provider_name} is still in the configured provider list. Refresh and try again."
-            ),
-        }
-    }
-
-    pub(super) fn provider_saved_info(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "Provider 已保存。需要使用它时再点击启用。",
-            GuiLocale::EnUs => "Provider saved. Click Enable when you want to use it.",
-        }
-    }
-
-    pub(super) fn provider_deleted_info(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "Provider 已删除。",
-            GuiLocale::EnUs => "Provider deleted.",
-        }
-    }
-
-    pub(super) fn provider_enabled_info(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => {
-                "已启用。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。"
-            }
-            GuiLocale::EnUs => {
-                "Enabled. Restart Codex App, then open remote-control in the App. The VS Code extension can also connect."
-            }
         }
     }
 
@@ -2704,13 +2339,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn ai_gateway_management(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "大模型厂商管理",
-            GuiLocale::EnUs => "AI Gateway Management",
-        }
-    }
-
     pub(super) fn ai_gw_channel_list(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "大模型厂商列表",
@@ -2782,13 +2410,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "名称",
             GuiLocale::EnUs => "Name",
-        }
-    }
-
-    pub(super) fn ai_gw_col_type(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "类型",
-            GuiLocale::EnUs => "Type",
         }
     }
 
@@ -2987,24 +2608,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn ai_gw_api_format(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "API 格式",
-            GuiLocale::EnUs => "API Format",
-        }
-    }
-
     pub(super) fn ai_gw_api_protocol(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "API 协议",
             GuiLocale::EnUs => "API Protocol",
-        }
-    }
-
-    pub(super) fn ai_gw_provider_type(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "类型",
-            GuiLocale::EnUs => "Type",
         }
     }
 

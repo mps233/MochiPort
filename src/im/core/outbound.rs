@@ -61,12 +61,6 @@ enum TelegramTextPresentation {
 #[derive(Debug, Clone)]
 pub(crate) enum ImOutboundPayload {
     Text(String),
-    /// Telegram-native rich blocks with a plain-text/Markdown fallback for
-    /// older API servers and platforms that do not understand the payload.
-    RichBlocks {
-        blocks: Vec<serde_json::Value>,
-        fallback_text: String,
-    },
     TelegramCommentary {
         segment: u64,
         rich_markdown: String,
@@ -289,8 +283,7 @@ async fn send_wecom_outbound(
                     .map_err(|text_err| anyhow!("media={media_err}; fallback={text_err}"))
             }
         },
-        ImOutboundPayload::RichBlocks { fallback_text, .. }
-        | ImOutboundPayload::TelegramCommentary { fallback_text, .. } => {
+        ImOutboundPayload::TelegramCommentary { fallback_text, .. } => {
             adapter
                 .send_text(
                     state,
@@ -394,13 +387,6 @@ async fn send_telegram_outbound(
             .await;
             false
         }
-        ImOutboundPayload::RichBlocks {
-            blocks,
-            fallback_text,
-        } => {
-            send_telegram_rich_blocks(state, &adapter, &message, blocks, fallback_text).await;
-            false
-        }
         ImOutboundPayload::TelegramCommentary {
             segment,
             rich_markdown,
@@ -452,7 +438,6 @@ async fn send_feishu_outbound(
             send_feishu_approval(state, &adapter, &message, approval).await;
         }
         ImOutboundPayload::Text(_)
-        | ImOutboundPayload::RichBlocks { .. }
         | ImOutboundPayload::TelegramCommentary { .. }
         | ImOutboundPayload::Image { .. } => {
             state
@@ -554,8 +539,7 @@ async fn send_wechat_outbound(
             )
             .await;
         }
-        ImOutboundPayload::RichBlocks { fallback_text, .. }
-        | ImOutboundPayload::TelegramCommentary { fallback_text, .. } => {
+        ImOutboundPayload::TelegramCommentary { fallback_text, .. } => {
             send_wechat_text(state, &adapter, &message, fallback_text).await;
         }
     }
@@ -775,7 +759,6 @@ async fn defer_wechat_outbound_if_waiting(
         if matches!(
             message.payload,
             ImOutboundPayload::Text(_)
-                | ImOutboundPayload::RichBlocks { .. }
                 | ImOutboundPayload::TelegramCommentary { .. }
                 | ImOutboundPayload::Approval(_)
         ) {
@@ -799,7 +782,6 @@ async fn defer_wechat_outbound_if_waiting(
         if matches!(
             message.payload,
             ImOutboundPayload::Text(_)
-                | ImOutboundPayload::RichBlocks { .. }
                 | ImOutboundPayload::TelegramCommentary { .. }
                 | ImOutboundPayload::Approval(_)
         ) {
@@ -1099,88 +1081,6 @@ async fn send_telegram_text(
     }
 }
 
-async fn send_telegram_rich_blocks(
-    state: &SharedState,
-    adapter: &TelegramAdapter,
-    message: &ImOutboundMessage,
-    blocks: &[serde_json::Value],
-    fallback_text: &str,
-) {
-    let event_begin = match message.kind {
-        ImOutboundKind::TurnReply => "telegram_turn_send_begin",
-        ImOutboundKind::Item | ImOutboundKind::ImageItem => "telegram_item_send_begin",
-        ImOutboundKind::Approval => "telegram_approval_send_begin",
-    };
-    let event_done = match message.kind {
-        ImOutboundKind::TurnReply => "telegram_turn_completed_sent",
-        ImOutboundKind::Item | ImOutboundKind::ImageItem => "telegram_item_sent",
-        ImOutboundKind::Approval => "telegram_approval_sent",
-    };
-    state
-        .push_event(
-            "info",
-            event_begin,
-            format!(
-                "thread={} item={} type={} chat={} rich_blocks={} fallback_len={}",
-                message.thread_id,
-                message.item_id.as_deref().unwrap_or(""),
-                message.item_type.as_deref().unwrap_or(""),
-                message.route.chat_id,
-                blocks.len(),
-                fallback_text.chars().count()
-            ),
-        )
-        .await;
-    log_outbound_message(
-        "send_telegram_rich_blocks_begin",
-        message,
-        Some(fallback_text),
-    );
-    match adapter
-        .send_or_update_rich_blocks(&message.route.chat_id, None, blocks.to_vec(), fallback_text)
-        .await
-    {
-        Ok(message_id) => {
-            log_outbound_result("send_telegram_rich_blocks_done", message, &message_id);
-            state
-                .push_event(
-                    "info",
-                    event_done,
-                    format!(
-                        "thread={} item={} type={} chat={} message={}",
-                        message.thread_id,
-                        message.item_id.as_deref().unwrap_or(""),
-                        message.item_type.as_deref().unwrap_or(""),
-                        message.route.chat_id,
-                        message_id
-                    ),
-                )
-                .await;
-        }
-        Err(err) => {
-            log_outbound_result(
-                "send_telegram_rich_blocks_failed",
-                message,
-                &err.to_string(),
-            );
-            state
-                .push_event(
-                    "error",
-                    "telegram_item_failed",
-                    format!(
-                        "thread={} item={} type={} chat={} err={}",
-                        message.thread_id,
-                        message.item_id.as_deref().unwrap_or(""),
-                        message.item_type.as_deref().unwrap_or(""),
-                        message.route.chat_id,
-                        err
-                    ),
-                )
-                .await;
-        }
-    }
-}
-
 async fn send_telegram_commentary(
     state: &SharedState,
     adapter: &TelegramAdapter,
@@ -1313,20 +1213,6 @@ fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&
         (_, Some(text)) => ("text", text.chars().count(), trace_preview(text, 500)),
         (ImOutboundPayload::Text(text), None) => {
             ("text", text.chars().count(), trace_preview(text, 500))
-        }
-        (
-            ImOutboundPayload::RichBlocks {
-                fallback_text,
-                blocks,
-            },
-            None,
-        ) => {
-            let rich_text = format!("blocks={} fallback={}", blocks.len(), fallback_text);
-            (
-                "rich_blocks",
-                rich_text.chars().count(),
-                trace_preview(&rich_text, 500),
-            )
         }
         (
             ImOutboundPayload::TelegramCommentary {

@@ -62,26 +62,6 @@ pub struct FeishuStreamingCardState {
     pub last_sent_at: Option<Instant>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct FeishuUserInputOption {
-    pub label: String,
-    pub description: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
-pub struct FeishuUserInputQuestion {
-    pub id: String,
-    pub header: String,
-    pub question: String,
-    pub is_other: bool,
-    pub is_secret: bool,
-    pub options: Option<Vec<FeishuUserInputOption>>,
-}
-
 fn non_empty(value: String) -> Option<String> {
     let value = value.trim().to_string();
     (!value.is_empty()).then_some(value)

@@ -101,26 +101,3 @@ struct ActionFeedbackCapsule: View {
         }
     }
 }
-
-struct FloatingControlSurface<Content: View>: View {
-    @ViewBuilder let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        Group {
-            if #available(macOS 26, *) {
-                content
-                    .padding(18)
-                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: ThreadRelayRadius.overlay))
-                    .glassEffectTransition(.materialize)
-            } else {
-                content
-                    .padding(18)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: ThreadRelayRadius.overlay))
-            }
-        }
-    }
-}

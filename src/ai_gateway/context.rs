@@ -6,8 +6,6 @@ use axum::http::{HeaderMap, HeaderName};
 pub struct GatewayContext {
     pub request_id: String,
     pub session_id: Option<String>,
-    pub thread_id: Option<String>,
-    pub window_id: Option<String>,
     /// 最终确定的 prompt_cache_key。
     pub prompt_cache_key: String,
     /// 需要合并到上游请求的安全 header。
@@ -79,7 +77,6 @@ impl GatewayContext {
         let session_id =
             get_header(headers, "session_id").or_else(|| get_header(headers, "session-id"));
         let thread_id = get_header(headers, "thread-id");
-        let window_id = get_header(headers, "x-codex-window-id");
         let request_id = get_header(headers, "x-client-request-id")
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -101,8 +98,6 @@ impl GatewayContext {
         Self {
             request_id,
             session_id: session_id.or(metadata_session_id),
-            thread_id,
-            window_id,
             prompt_cache_key,
             upstream_headers,
         }

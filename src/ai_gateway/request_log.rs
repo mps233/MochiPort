@@ -259,11 +259,6 @@ impl RequestLogStore {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn db_path(&self) -> &Path {
-        &self.inner.db_path
-    }
-
     pub fn insert_record(&self, record: &RequestLogRecord) -> rusqlite::Result<i64> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         self.enqueue_write(RequestLogWrite::Insert {
@@ -858,11 +853,13 @@ pub fn json_body_size_bytes(value: &Value) -> Option<i64> {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Result<i64> {
     let conn = open(db_path)?;
     insert_record_with_conn(&conn, record)
 }
 
+#[cfg(test)]
 fn insert_record_with_conn(conn: &Connection, record: &RequestLogRecord) -> rusqlite::Result<i64> {
     insert_record_with_optional_id(conn, None, record)
 }

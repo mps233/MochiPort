@@ -49,6 +49,7 @@ impl ResponsesEndpoint {
 }
 
 /// OpenAI Responses API 透传：补齐 cache 字段后代理到上游。
+#[cfg(test)]
 pub async fn passthrough(
     client: &reqwest::Client,
     ctx: &GatewayContext,

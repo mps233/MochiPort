@@ -208,14 +208,3 @@ pub fn build_thread_list_card(
     card["body"]["elements"] = serde_json::Value::Array(elements);
     card
 }
-
-#[allow(dead_code)]
-pub fn build_thread_list_loading_card(title: &str, page: usize) -> serde_json::Value {
-    let body = format!(
-        "正在加载历史会话...\n\n<font color='grey'>第 {} 页</font>",
-        page.max(1)
-    );
-    let mut card = build_markdown_card(&body, Some(title), Some("grey"));
-    card["body"]["padding"] = serde_json::json!("8px 8px 8px 8px");
-    card
-}

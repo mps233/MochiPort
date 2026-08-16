@@ -531,7 +531,6 @@ pub(super) struct RemoteControlConnectionStatus {
 #[serde(rename_all = "camelCase")]
 pub(super) struct CodexAppStatus {
     pub(super) configured: bool,
-    pub(super) provider: Option<CodexAppProviderStatus>,
     #[serde(default)]
     pub(super) providers: Vec<CodexAppProviderStatus>,
     #[serde(default = "default_true")]
@@ -543,10 +542,6 @@ pub(super) struct CodexAppStatus {
 #[serde(rename_all = "camelCase")]
 pub(super) struct CodexAppProviderStatus {
     pub(super) name: String,
-    pub(super) base_url: Option<String>,
-    pub(super) key: Option<String>,
-    #[serde(default)]
-    pub(super) supports_websockets: bool,
 }
 
 #[derive(Clone, Deserialize)]
@@ -632,7 +627,6 @@ mod tests {
         };
         let codex_app = CodexAppStatus {
             configured: true,
-            provider: None,
             providers: Vec::new(),
             image_generation_enabled: true,
         };

@@ -240,15 +240,6 @@ pub(super) fn basename(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
-#[allow(dead_code)]
-pub fn should_render_as_card(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    trimmed.contains("```") || trimmed.contains('|') || trimmed.contains('\n')
-}
-
 pub fn build_markdown_card(
     text: &str,
     title: Option<&str>,

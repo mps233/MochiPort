@@ -274,16 +274,6 @@ impl ContentPart {
             annotations: Some(Vec::new()),
         }
     }
-
-    pub fn summary_text(text: impl Into<String>) -> Self {
-        Self {
-            part_type: "summary_text".into(),
-            text: Some(text.into()),
-            image_url: None,
-            detail: None,
-            annotations: None,
-        }
-    }
 }
 
 // ─── FunctionCallOutput ────────────────────────────────────────
@@ -403,30 +393,6 @@ pub struct ResponseObject {
     pub error: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete_details: Option<Value>,
-}
-
-impl ResponseObject {
-    /// 创建初始的 in_progress response 对象。
-    pub fn new_in_progress(id: String, model: String) -> Self {
-        Self {
-            id,
-            object_type: "response".into(),
-            model,
-            created_at: chrono_timestamp(),
-            status: "in_progress".into(),
-            output: Vec::new(),
-            usage: None,
-            error: None,
-            incomplete_details: None,
-        }
-    }
-}
-
-fn chrono_timestamp() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
 }
 
 // ─── Usage ─────────────────────────────────────────────────────

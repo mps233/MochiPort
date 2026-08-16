@@ -71,19 +71,6 @@ impl GatewayError {
         }
     }
 
-    pub fn not_implemented() -> Self {
-        Self {
-            status: StatusCode::NOT_IMPLEMENTED,
-            error_type: "not_implemented".to_string(),
-            code: "not_implemented".to_string(),
-            message: "AI Gateway is not yet implemented".into(),
-            provider: None,
-            upstream_status: None,
-            upstream_error_type: None,
-            upstream_code: None,
-        }
-    }
-
     pub fn upstream(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,

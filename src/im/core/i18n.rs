@@ -1012,22 +1012,6 @@ impl ImText {
         )
     }
 
-    pub(crate) fn thread_list_body_wecom(self, provider: Option<&str>) -> String {
-        let mut body = self
-            .choose(
-                "请选择一个 Codex 会话接入后续消息。",
-                "Choose a Codex session to attach future messages.",
-            )
-            .to_string();
-        if let Some(provider) = provider {
-            body.push_str(&match self.locale {
-                ImLocale::ZhCn => format!(" 已按 provider `{provider}` 过滤。"),
-                ImLocale::EnUs => format!(" Filtered by provider `{provider}`."),
-            });
-        }
-        body
-    }
-
     pub(crate) fn create_choice_tip_feishu(self) -> &'static str {
         self.choose(
             "提示：回复 `/q` 可退出当前会话，回复 `/s` 可中断当前任务。",

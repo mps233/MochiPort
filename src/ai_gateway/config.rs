@@ -78,6 +78,7 @@ impl Default for AiGatewayConfig {
 
 impl AiGatewayConfig {
     /// 按 model 名选择已启用的 provider：匹配显式 model 或 model alias。
+    #[cfg(test)]
     pub fn select_provider(&self, model: &str) -> Option<&ProviderConfig> {
         self.select_provider_for_session(model, None)
     }
@@ -87,6 +88,7 @@ impl AiGatewayConfig {
     /// 权重语义是**优先级**：权重最高的 provider 优先命中；权重相同的一组内用
     /// Rendezvous/HRW Hash 按 session 稳定分流（无 session 时用 route_id 稳定排序）。
     /// 该版本不感知熔断/粘性，仅用于不需要状态的调用点。
+    #[cfg(test)]
     pub fn select_provider_for_session(
         &self,
         model: &str,

@@ -6,17 +6,6 @@ use super::config::{
 use super::error::GatewayError;
 use super::routing_state::GatewayRoutingState;
 
-/// 根据 model 名选择 provider（无状态版本），找不到则返回错误。
-pub fn resolve_provider<'a>(
-    model: &str,
-    session_id: Option<&str>,
-    config: &'a AiGatewayConfig,
-) -> Result<&'a ProviderConfig, GatewayError> {
-    config
-        .select_provider_for_session(model, session_id)
-        .ok_or_else(|| GatewayError::invalid_model(model))
-}
-
 /// 状态感知的路由选择：熔断健康过滤 + 会话粘性 + 权重优先级。
 ///
 /// 顺序：

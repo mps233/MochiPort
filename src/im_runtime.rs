@@ -422,12 +422,6 @@ impl RuntimeState {
         self.pending_attachments_by_conversation.clear();
     }
 
-    #[allow(dead_code)]
-    pub fn clear_pending_approvals(&mut self) {
-        self.pending_approvals_by_conversation.clear();
-        self.pending_approval_request_keys.clear();
-    }
-
     pub fn is_bridge_generation(&self, generation: u64) -> bool {
         self.bridge_generation == generation
     }
@@ -438,21 +432,6 @@ impl RuntimeState {
             .route_by_thread
             .insert(thread_id.to_string(), route.clone());
         log_route_bind(thread_id, &route, previous.as_ref());
-    }
-
-    #[allow(dead_code)]
-    pub fn unbind_route(&mut self, thread_id: &str) {
-        if let Some(route) = self.route_by_thread.remove(thread_id) {
-            log_route_unbind("unbind_thread", "direct", thread_id, &route);
-        }
-        self.telegram_command_progress_by_thread.remove(thread_id);
-        self.telegram_commentary_by_thread.remove(thread_id);
-        self.terminal_status_fallback_by_thread.remove(thread_id);
-    }
-
-    #[allow(dead_code)]
-    pub fn unbind_routes_for_conversation(&mut self, conversation_key: &str) -> Vec<String> {
-        self.unbind_routes_for_conversation_with_reason(conversation_key, "unspecified")
     }
 
     pub fn unbind_routes_for_conversation_with_reason(
@@ -585,6 +564,7 @@ impl RuntimeState {
             .map(String::as_str)
     }
 
+    #[cfg(test)]
     pub(crate) fn register_terminal_status_fallback(
         &mut self,
         thread_id: &str,
@@ -678,6 +658,7 @@ impl RuntimeState {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn terminal_status_fallback_matches(&self, thread_id: &str, turn_id: &str) -> bool {
         self.terminal_status_fallback_by_thread
             .get(thread_id)
@@ -880,6 +861,7 @@ impl RuntimeState {
         Some(typing.generation)
     }
 
+    #[cfg(test)]
     pub fn finish_telegram_typing(
         &mut self,
         thread_id: &str,
@@ -1064,6 +1046,7 @@ impl RuntimeState {
             .is_some_and(|typing| typing.generation == generation)
     }
 
+    #[cfg(test)]
     pub fn telegram_typing_item_is_active(&self, thread_id: &str, item_id: &str) -> bool {
         self.telegram_typing_by_item
             .contains_key(&telegram_typing_key(thread_id, item_id))
@@ -1118,6 +1101,7 @@ impl RuntimeState {
     /// Native Telegram drafts can be hidden when a regular message arrives.
     /// Waking the driver lets callers restore the indicator immediately after
     /// that message is delivered instead of waiting for the normal heartbeat.
+    #[cfg(test)]
     pub fn wake_telegram_typing(&mut self, thread_id: &str, item_id: &str) -> bool {
         let Some(typing) = self
             .telegram_typing_by_item
@@ -1711,6 +1695,7 @@ impl RuntimeState {
         claim_next_telegram_command_progress_snapshot(progress)
     }
 
+    #[cfg(test)]
     pub(crate) fn remember_telegram_command_progress_delivery(
         &mut self,
         thread_id: &str,
@@ -1882,22 +1867,6 @@ impl RuntimeState {
             .is_some_and(|approval| approval.request_key() == request_key)
     }
 
-    #[allow(dead_code)]
-    pub fn approval_by_request_key(
-        &self,
-        conversation_key: &str,
-        request_key: &str,
-    ) -> Option<PendingApproval> {
-        self.pending_approvals_by_conversation
-            .get(conversation_key)
-            .and_then(|approvals| {
-                approvals
-                    .iter()
-                    .find(|approval| approval.request_key() == request_key)
-                    .cloned()
-            })
-    }
-
     pub fn approval_by_request_key_anywhere(
         &self,
         request_key: &str,
@@ -1988,25 +1957,6 @@ impl RuntimeState {
         };
         request.message_id = Some(message_id);
         true
-    }
-
-    #[allow(dead_code)]
-    pub fn update_thread_routing_request_page(
-        &mut self,
-        request_id: &str,
-        page: usize,
-        page_cursors: Vec<Option<String>>,
-        thread_ids_by_page: Vec<Vec<String>>,
-        history_cursor: Option<String>,
-        history_has_next: bool,
-    ) -> Option<ThreadRoutingRequestState> {
-        let request = self.thread_routing_requests.get_mut(request_id)?;
-        request.page = page;
-        request.page_cursors = page_cursors;
-        request.thread_ids_by_page = thread_ids_by_page;
-        request.history_cursor = history_cursor;
-        request.history_has_next = history_has_next;
-        Some(request.clone())
     }
 
     pub fn clear_thread_routing_request(

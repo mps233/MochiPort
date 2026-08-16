@@ -100,14 +100,6 @@ pub fn default_remote_client_key() -> &'static str {
     DEFAULT_REMOTE_CLIENT_KEY
 }
 
-#[allow(dead_code)]
-pub async fn select_remote_client_key(state: &SharedState) -> Result<String> {
-    let mut remote = state.remote_control.inner.lock().await;
-    active_connection_epoch_locked(&mut remote)
-        .map(|connection_epoch| default_client_key_for_connection_locked(&remote, connection_epoch))
-        .ok_or_else(|| anyhow!("remote-control websocket is not connected"))
-}
-
 pub(crate) enum OutboundWsMessage {
     Text(Value),
     Ping(axum::body::Bytes),

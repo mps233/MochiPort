@@ -3526,8 +3526,7 @@ mod tests {
                 assert!(text.starts_with("result"));
                 assert!(!text.contains("🤖 Codex"));
             }
-            ImOutboundPayload::RichBlocks { .. }
-            | ImOutboundPayload::TelegramCommentary { .. }
+            ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. } => {
                 panic!("Telegram final reply must be queued as text")
@@ -4161,7 +4160,6 @@ mod tests {
         match message.payload {
             ImOutboundPayload::Image { path, .. } => assert!(path.is_file()),
             ImOutboundPayload::Text(_)
-            | ImOutboundPayload::RichBlocks { .. }
             | ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_) => {
                 panic!("MCP aggregation must not queue an item text message")
@@ -4210,8 +4208,7 @@ mod tests {
                 assert!(text.contains("任务失败"));
                 assert!(text.contains("503 Service Unavailable"));
             }
-            ImOutboundPayload::RichBlocks { .. }
-            | ImOutboundPayload::TelegramCommentary { .. }
+            ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. } => {
                 panic!("terminal failure must be queued as text")
@@ -4244,8 +4241,7 @@ mod tests {
         assert_eq!(message.item_type.as_deref(), Some("turnCompleted"));
         match message.payload {
             ImOutboundPayload::Text(text) => assert!(text.contains("已完成")),
-            ImOutboundPayload::RichBlocks { .. }
-            | ImOutboundPayload::TelegramCommentary { .. }
+            ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
             | ImOutboundPayload::Image { .. } => {
                 panic!("terminal success must be queued as text")
