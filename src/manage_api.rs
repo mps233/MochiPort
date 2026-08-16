@@ -88,6 +88,7 @@ pub struct LifecycleRuntimeStatus {
 pub struct LifecycleProtectedWorkItems {
     pub ai_gateway_requests: usize,
     pub codex_turns: usize,
+    pub enhanced_launches: usize,
     pub im_streams: usize,
     pub pending_approvals: usize,
     pub remote_control_requests: usize,
@@ -859,6 +860,7 @@ pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
         runtime.protected_work_item_counts()
     };
     let ai_gateway_requests = crate::ai_gateway::handler::in_flight_count();
+    let enhanced_launches = state.enhanced_launch_operations.protected_work_count();
     let remote_control_requests = {
         let remote = state.remote_control.inner.lock().await;
         if remote.connections.is_empty() {
@@ -878,6 +880,7 @@ pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
     };
     let total = ai_gateway_requests
         .saturating_add(codex_turns)
+        .saturating_add(enhanced_launches)
         .saturating_add(im_streams)
         .saturating_add(pending_approvals)
         .saturating_add(remote_control_requests);
@@ -915,6 +918,7 @@ pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
         protected_work_items: LifecycleProtectedWorkItems {
             ai_gateway_requests,
             codex_turns,
+            enhanced_launches,
             im_streams,
             pending_approvals,
             remote_control_requests,

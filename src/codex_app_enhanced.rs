@@ -1,18 +1,26 @@
 use std::{
     collections::HashSet,
     process::Command,
-    sync::{Mutex, OnceLock},
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU8, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tokio::{sync::watch, time::timeout};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 use url::{Host, Url};
 
-use crate::chain_log;
+use crate::{
+    app_state::{LifecycleAdmission, LifecycleAdmissionPermit},
+    chain_log,
+    types::now_ms,
+};
 
 const DEFAULT_CDP_PORT: u16 = 9335;
 const CODEX_APP_READY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -23,6 +31,10 @@ const ENHANCED_INJECTION_TIMEOUT: Duration = Duration::from_secs(45);
 // after that window so a cold renderer does not accumulate retry timers.
 const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(43);
 const ENHANCED_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
+const PROCESS_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const APP_LAUNCH_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 const ENHANCED_SCRIPT_VERSION: u64 = 21;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -57,7 +69,7 @@ const LEGACY_CODEXHUB_FEATURE_GATES: &[&str] = &[
     "2296472986",
 ];
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnhancedLaunchReport {
     pub port: u16,
@@ -100,6 +112,444 @@ pub struct EnhancedLaunchReport {
     pub plugin_catalog_cache_refreshed: bool,
     pub plugin_catalog_cache_refresh_error: Option<String>,
     pub startup_elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum EnhancedLaunchOperationPhase {
+    Preparing,
+    Launching,
+    WaitingForApp,
+    Injecting,
+    Ready,
+    Failed,
+    Cancelled,
+}
+
+impl EnhancedLaunchOperationPhase {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Ready | Self::Failed | Self::Cancelled)
+    }
+
+    fn can_transition_to(self, next: Self) -> bool {
+        if self == next {
+            return true;
+        }
+        if self.is_terminal() {
+            return false;
+        }
+        if matches!(next, Self::Failed | Self::Cancelled) {
+            return true;
+        }
+        matches!(
+            (self, next),
+            (Self::Preparing, Self::Launching)
+                | (Self::Launching, Self::WaitingForApp)
+                | (Self::Launching, Self::Injecting)
+                | (Self::WaitingForApp, Self::Injecting)
+                | (Self::Injecting, Self::Ready)
+        )
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnhancedLaunchOperation {
+    pub request_id: String,
+    pub phase: EnhancedLaunchOperationPhase,
+    pub started_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub can_cancel: bool,
+    pub message: String,
+    pub error: Option<String>,
+    pub recovery: Option<String>,
+    pub report: Option<EnhancedLaunchReport>,
+}
+
+impl EnhancedLaunchOperation {
+    pub fn is_terminal(&self) -> bool {
+        self.phase.is_terminal()
+    }
+}
+
+#[derive(Clone)]
+pub struct EnhancedLaunchCancellation {
+    inner: Arc<EnhancedLaunchCancellationInner>,
+}
+
+struct EnhancedLaunchCancellationInner {
+    state: AtomicU8,
+    changed: watch::Sender<bool>,
+}
+
+impl EnhancedLaunchCancellation {
+    fn new() -> Self {
+        let (changed, _) = watch::channel(false);
+        Self {
+            inner: Arc::new(EnhancedLaunchCancellationInner {
+                state: AtomicU8::new(0),
+                changed,
+            }),
+        }
+    }
+
+    pub fn cancel(&self) -> bool {
+        if self
+            .inner
+            .state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.inner.changed.send_replace(true);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.state.load(Ordering::Acquire) == 1
+    }
+
+    fn try_commit(&self) -> bool {
+        self.inner
+            .state
+            .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn can_cancel(&self) -> bool {
+        self.inner.state.load(Ordering::Acquire) == 0
+    }
+
+    async fn cancelled(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let mut changed = self.inner.changed.subscribe();
+        while !*changed.borrow_and_update() {
+            if changed.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct EnhancedLaunchControl {
+    cancellation: EnhancedLaunchCancellation,
+    progress: Option<Arc<dyn Fn(EnhancedLaunchOperationPhase, &str) + Send + Sync>>,
+}
+
+impl EnhancedLaunchControl {
+    fn detached() -> Self {
+        Self {
+            cancellation: EnhancedLaunchCancellation::new(),
+            progress: None,
+        }
+    }
+
+    fn for_operation(
+        cancellation: EnhancedLaunchCancellation,
+        progress: Arc<dyn Fn(EnhancedLaunchOperationPhase, &str) + Send + Sync>,
+    ) -> Self {
+        Self {
+            cancellation,
+            progress: Some(progress),
+        }
+    }
+
+    fn report(&self, phase: EnhancedLaunchOperationPhase, message: &str) {
+        if let Some(progress) = self.progress.as_ref() {
+            progress(phase, message);
+        }
+    }
+
+    fn ensure_active(&self) -> Result<()> {
+        if self.cancellation.is_cancelled() {
+            return Err(anyhow!(EnhancedLaunchCancelled));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cancellation(&self) -> &EnhancedLaunchCancellation {
+        &self.cancellation
+    }
+}
+
+#[derive(Debug)]
+struct EnhancedLaunchCancelled;
+
+impl std::fmt::Display for EnhancedLaunchCancelled {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("增强启动已取消")
+    }
+}
+
+impl std::error::Error for EnhancedLaunchCancelled {}
+
+fn error_is_cancelled(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<EnhancedLaunchCancelled>().is_some()
+}
+
+#[derive(Debug)]
+pub struct EnhancedLaunchFailure {
+    pub error: String,
+    pub recovery: Option<String>,
+    pub cancelled: bool,
+}
+
+struct EnhancedLaunchOperationSlot {
+    operation: EnhancedLaunchOperation,
+    cancellation: EnhancedLaunchCancellation,
+    changed: watch::Sender<EnhancedLaunchOperation>,
+}
+
+pub struct EnhancedLaunchOperationManager {
+    inner: Mutex<Option<EnhancedLaunchOperationSlot>>,
+}
+
+pub enum EnhancedLaunchOperationBegin {
+    Started {
+        operation: EnhancedLaunchOperation,
+        control: EnhancedLaunchControl,
+        lifecycle_permit: LifecycleAdmissionPermit,
+    },
+    Existing(EnhancedLaunchOperation),
+    Conflict(EnhancedLaunchOperation),
+    LifecycleUnavailable,
+}
+
+pub enum EnhancedLaunchCancelResult {
+    Accepted(EnhancedLaunchOperation),
+    Terminal(EnhancedLaunchOperation),
+    Conflict(EnhancedLaunchOperation),
+    NotFound,
+}
+
+impl EnhancedLaunchOperationManager {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(None),
+        }
+    }
+
+    pub fn current(&self) -> Option<EnhancedLaunchOperation> {
+        self.lock_slot().as_ref().map(|slot| slot.operation.clone())
+    }
+
+    pub fn protected_work_count(&self) -> usize {
+        usize::from(
+            self.lock_slot()
+                .as_ref()
+                .is_some_and(|slot| !slot.operation.is_terminal()),
+        )
+    }
+
+    pub fn begin(
+        self: &Arc<Self>,
+        request_id: String,
+        lifecycle_admission: &Arc<LifecycleAdmission>,
+    ) -> EnhancedLaunchOperationBegin {
+        let mut current = self.lock_slot();
+        if let Some(slot) = current.as_ref() {
+            if slot.operation.request_id == request_id {
+                return EnhancedLaunchOperationBegin::Existing(slot.operation.clone());
+            }
+            if !slot.operation.is_terminal() {
+                return EnhancedLaunchOperationBegin::Conflict(slot.operation.clone());
+            }
+        }
+
+        let Some(lifecycle_permit) = lifecycle_admission.try_admit() else {
+            return EnhancedLaunchOperationBegin::LifecycleUnavailable;
+        };
+        let timestamp = operation_now_ms();
+        let operation = EnhancedLaunchOperation {
+            request_id: request_id.clone(),
+            phase: EnhancedLaunchOperationPhase::Preparing,
+            started_at_ms: timestamp,
+            updated_at_ms: timestamp,
+            can_cancel: true,
+            message: "正在准备增强启动".to_string(),
+            error: None,
+            recovery: None,
+            report: None,
+        };
+        let cancellation = EnhancedLaunchCancellation::new();
+        let (changed, _) = watch::channel(operation.clone());
+        *current = Some(EnhancedLaunchOperationSlot {
+            operation: operation.clone(),
+            cancellation: cancellation.clone(),
+            changed,
+        });
+
+        let manager = Arc::clone(self);
+        let progress_request_id = request_id;
+        let progress_cancellation = cancellation.clone();
+        let progress = Arc::new(move |phase, message: &str| {
+            manager.advance(&progress_request_id, &progress_cancellation, phase, message);
+        });
+        EnhancedLaunchOperationBegin::Started {
+            operation,
+            control: EnhancedLaunchControl::for_operation(cancellation, progress),
+            lifecycle_permit,
+        }
+    }
+
+    pub fn finish_success(
+        &self,
+        request_id: &str,
+        cancellation: &EnhancedLaunchCancellation,
+        report: EnhancedLaunchReport,
+    ) {
+        let mut current = self.lock_slot();
+        let Some(slot) = current.as_mut() else {
+            return;
+        };
+        if !same_operation(slot, request_id, cancellation)
+            || slot.operation.is_terminal()
+            || !slot
+                .operation
+                .phase
+                .can_transition_to(EnhancedLaunchOperationPhase::Ready)
+        {
+            return;
+        }
+        slot.operation.phase = EnhancedLaunchOperationPhase::Ready;
+        slot.operation.updated_at_ms = operation_now_ms();
+        slot.operation.can_cancel = false;
+        slot.operation.message = "增强模式已就绪".to_string();
+        slot.operation.error = None;
+        slot.operation.recovery = None;
+        slot.operation.report = Some(report);
+        slot.changed.send_replace(slot.operation.clone());
+    }
+
+    pub fn finish_failure(
+        &self,
+        request_id: &str,
+        cancellation: &EnhancedLaunchCancellation,
+        failure: EnhancedLaunchFailure,
+    ) {
+        let mut current = self.lock_slot();
+        let Some(slot) = current.as_mut() else {
+            return;
+        };
+        if !same_operation(slot, request_id, cancellation) || slot.operation.is_terminal() {
+            return;
+        }
+        let cancelled = failure.cancelled || slot.cancellation.is_cancelled();
+        slot.operation.phase = if cancelled {
+            EnhancedLaunchOperationPhase::Cancelled
+        } else {
+            EnhancedLaunchOperationPhase::Failed
+        };
+        slot.operation.updated_at_ms = operation_now_ms();
+        slot.operation.can_cancel = false;
+        slot.operation.message = if cancelled {
+            "增强启动已取消".to_string()
+        } else {
+            "增强启动失败".to_string()
+        };
+        slot.operation.error = Some(failure.error);
+        slot.operation.recovery = failure.recovery;
+        slot.operation.report = None;
+        slot.changed.send_replace(slot.operation.clone());
+    }
+
+    pub fn cancel(&self, request_id: &str) -> EnhancedLaunchCancelResult {
+        let mut current = self.lock_slot();
+        let Some(slot) = current.as_mut() else {
+            return EnhancedLaunchCancelResult::NotFound;
+        };
+        if slot.operation.request_id != request_id {
+            return EnhancedLaunchCancelResult::Conflict(slot.operation.clone());
+        }
+        if slot.operation.is_terminal() {
+            return EnhancedLaunchCancelResult::Terminal(slot.operation.clone());
+        }
+        if slot.cancellation.is_cancelled() {
+            return EnhancedLaunchCancelResult::Accepted(slot.operation.clone());
+        }
+        if !slot.cancellation.cancel() {
+            return EnhancedLaunchCancelResult::Conflict(slot.operation.clone());
+        }
+        slot.operation.updated_at_ms = operation_now_ms();
+        slot.operation.can_cancel = false;
+        slot.operation.message = "正在取消增强启动".to_string();
+        slot.changed.send_replace(slot.operation.clone());
+        EnhancedLaunchCancelResult::Accepted(slot.operation.clone())
+    }
+
+    pub async fn wait_for_terminal(&self, request_id: &str) -> Option<EnhancedLaunchOperation> {
+        let mut changed = {
+            let current = self.lock_slot();
+            let slot = current.as_ref()?;
+            if slot.operation.request_id != request_id {
+                return None;
+            }
+            slot.changed.subscribe()
+        };
+        loop {
+            let operation = changed.borrow_and_update().clone();
+            if operation.is_terminal() {
+                return Some(operation);
+            }
+            if changed.changed().await.is_err() {
+                return None;
+            }
+        }
+    }
+
+    fn advance(
+        &self,
+        request_id: &str,
+        cancellation: &EnhancedLaunchCancellation,
+        phase: EnhancedLaunchOperationPhase,
+        message: &str,
+    ) {
+        let mut current = self.lock_slot();
+        let Some(slot) = current.as_mut() else {
+            return;
+        };
+        if !same_operation(slot, request_id, cancellation)
+            || slot.cancellation.is_cancelled()
+            || !slot.operation.phase.can_transition_to(phase)
+        {
+            return;
+        }
+        slot.operation.phase = phase;
+        slot.operation.updated_at_ms = operation_now_ms();
+        slot.operation.can_cancel = slot.cancellation.can_cancel();
+        slot.operation.message = message.to_string();
+        slot.changed.send_replace(slot.operation.clone());
+    }
+
+    fn lock_slot(&self) -> std::sync::MutexGuard<'_, Option<EnhancedLaunchOperationSlot>> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+fn same_operation(
+    slot: &EnhancedLaunchOperationSlot,
+    request_id: &str,
+    cancellation: &EnhancedLaunchCancellation,
+) -> bool {
+    slot.operation.request_id == request_id
+        && Arc::ptr_eq(&slot.cancellation.inner, &cancellation.inner)
+}
+
+impl Default for EnhancedLaunchOperationManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn operation_now_ms() -> u64 {
+    u64::try_from(now_ms()).unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Serialize)]
@@ -172,17 +622,124 @@ pub async fn launch_and_inject(
     models: Vec<String>,
     backend_url: &str,
 ) -> Result<EnhancedLaunchReport> {
+    launch_and_inject_controlled(models, backend_url, EnhancedLaunchControl::detached())
+        .await
+        .map_err(|failure| anyhow!(failure.error))
+}
+
+pub async fn launch_and_inject_controlled(
+    models: Vec<String>,
+    backend_url: &str,
+    control: EnhancedLaunchControl,
+) -> std::result::Result<EnhancedLaunchReport, EnhancedLaunchFailure> {
+    let mut recovery = EnhancedLaunchRecovery::default();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let pending =
+            launch_and_inject_pending(models, backend_url, &control, &mut recovery).await?;
+        control.ensure_active()?;
+        if !control.cancellation.try_commit() {
+            return Err(anyhow!(EnhancedLaunchCancelled));
+        }
+        control.report(EnhancedLaunchOperationPhase::Injecting, "正在完成增强启动");
+        Ok(pending.commit())
+    })
+    .catch_unwind()
+    .await;
+    match outcome {
+        Ok(Ok(report)) => Ok(report),
+        Ok(Err(err)) => Err(recover_launch_failure(err, &recovery, backend_url)),
+        Err(_) => {
+            chain_log::write_line(
+                "[codex_app_enhanced] event=launch_worker_panicked recovery=attempted",
+            );
+            Err(recover_launch_failure(
+                anyhow!("增强启动后台任务异常退出"),
+                &recovery,
+                backend_url,
+            ))
+        }
+    }
+}
+
+#[derive(Default)]
+struct EnhancedLaunchRecovery {
+    gui_environment: Option<crate::codex_app_config::CodexAppGuiEnvironmentSnapshot>,
+    environment_may_have_changed: bool,
+    app_was_running: bool,
+    launch_attempted: bool,
+}
+
+struct PendingEnhancedLaunch {
+    report: EnhancedLaunchReport,
+    browser_session: Option<(EarlyBrowserSession, String)>,
+    page_session: CdpSocket,
+}
+
+impl PendingEnhancedLaunch {
+    fn commit(self) -> EnhancedLaunchReport {
+        if let Some((session, source)) = self.browser_session {
+            retain_browser_cdp_session(session, source);
+        }
+        retain_page_cdp_session(self.page_session);
+        self.report
+    }
+}
+
+fn recover_launch_failure(
+    err: anyhow::Error,
+    recovery: &EnhancedLaunchRecovery,
+    backend_url: &str,
+) -> EnhancedLaunchFailure {
+    let cancelled = err.downcast_ref::<EnhancedLaunchCancelled>().is_some();
+    let mut recovery_notes = Vec::new();
+    if recovery.environment_may_have_changed
+        && let Some(snapshot) = recovery.gui_environment.as_ref()
+    {
+        match crate::codex_app_config::restore_gui_environment(snapshot, backend_url) {
+            Ok(()) => recovery_notes.push("已恢复启动前的 Codex GUI 环境".to_string()),
+            Err(restore_error) => recovery_notes.push(format!(
+                "Codex GUI 环境自动恢复失败，请在设置中修复：{restore_error}"
+            )),
+        }
+    }
+    if recovery.launch_attempted {
+        recovery_notes.push(
+            "Codex App 可能已经启动，但无法确认本轮进程归属，因此未自动退出；请手动退出后重试"
+                .to_string(),
+        );
+    } else if recovery.app_was_running {
+        recovery_notes.push("原本运行中的 Codex App 未被自动退出".to_string());
+    }
+    EnhancedLaunchFailure {
+        error: format!("{err:#}"),
+        recovery: (!recovery_notes.is_empty()).then(|| recovery_notes.join("；")),
+        cancelled,
+    }
+}
+
+async fn launch_and_inject_pending(
+    models: Vec<String>,
+    backend_url: &str,
+    control: &EnhancedLaunchControl,
+    recovery: &mut EnhancedLaunchRecovery,
+) -> Result<PendingEnhancedLaunch> {
     let started = Instant::now();
     let models = normalized_models(models);
     if models.is_empty() {
         bail!("Codex 可见模型列表为空，请先在 Codex 接入页面保存模型");
     }
+    control.ensure_active()?;
     chain_log::write_line(format!(
         "[codex_app_enhanced] event=launch_start model_count={}",
         models.len()
     ));
     crate::codex_app_config::prepare_codex_app_config_recovery_snapshot(None)
         .context("准备 Codex 配置恢复快照失败")?;
+    recovery.gui_environment = Some(
+        crate::codex_app_config::capture_gui_environment()
+            .map_err(anyhow::Error::msg)
+            .context("读取 Codex GUI 环境失败")?,
+    );
 
     let client = reqwest::Client::builder()
         .no_proxy()
@@ -191,12 +748,24 @@ pub async fn launch_and_inject(
     let source = enhanced_statsig_script(&models, backend_url)?;
     let mut launched = false;
     let mut early_attach = EarlyAttachDiagnostics::default();
-    let app_running = tokio::task::spawn_blocking(codex_app_is_running)
-        .await
-        .context("检测 Codex App 进程失败")??;
+    let mut browser_session = None;
+    control.report(
+        EnhancedLaunchOperationPhase::Launching,
+        "正在检查 Codex App 启动条件",
+    );
+    let app_running = controlled(
+        control,
+        PROCESS_CHECK_TIMEOUT,
+        "检测 Codex App 进程",
+        tokio::task::spawn_blocking(codex_app_is_running),
+    )
+    .await
+    .context("检测 Codex App 进程任务失败")???;
+    recovery.app_was_running = app_running;
     let target = if app_running {
-        match find_app_target(&client, DEFAULT_CDP_PORT).await? {
+        match find_app_target(&client, DEFAULT_CDP_PORT, control).await? {
             Some(target) => {
+                recovery.environment_may_have_changed = true;
                 crate::codex_app_config::configure_gui_direct_api_base(backend_url)
                     .map_err(|err| anyhow!("配置 CODEX_API_BASE_URL 失败: {err}"))?;
                 target
@@ -204,25 +773,40 @@ pub async fn launch_and_inject(
             None => bail!("Codex App 正在运行。请先完全退出，再使用增强模式启动 Codex"),
         }
     } else {
+        recovery.environment_may_have_changed = true;
         crate::codex_app_config::configure_gui_direct_api_base(backend_url)
             .map_err(|err| anyhow!("配置 CODEX_API_BASE_URL 失败: {err}"))?;
-        let early_attach_blocked = match find_browser_websocket_url(&client, DEFAULT_CDP_PORT).await
-        {
-            Ok(Some(_)) => Some(format!(
-                "本地端口 {DEFAULT_CDP_PORT} 在 Codex 启动前已被 CDP 服务占用"
-            )),
-            Ok(None) => None,
-            Err(err) => Some(format!("检查本地 CDP 端口失败: {err}")),
-        };
-        launch_codex_app(DEFAULT_CDP_PORT).await?;
+        let early_attach_blocked =
+            match find_browser_websocket_url(&client, DEFAULT_CDP_PORT, control).await {
+                Ok(Some(_)) => Some(format!(
+                    "本地端口 {DEFAULT_CDP_PORT} 在 Codex 启动前已被 CDP 服务占用"
+                )),
+                Ok(None) => None,
+                Err(err) => {
+                    if error_is_cancelled(&err) {
+                        return Err(err);
+                    }
+                    Some(format!("检查本地 CDP 端口失败: {err}"))
+                }
+            };
+        control.report(
+            EnhancedLaunchOperationPhase::Launching,
+            "正在启动 Codex App",
+        );
+        recovery.launch_attempted = true;
+        launch_codex_app(DEFAULT_CDP_PORT, control).await?;
         launched = true;
+        control.report(
+            EnhancedLaunchOperationPhase::WaitingForApp,
+            "正在等待 Codex App 就绪",
+        );
         if let Some(fallback) = early_attach_blocked {
             chain_log::write_line(format!(
                 "[codex_app_enhanced] event=early_attach_fallback error={fallback}"
             ));
             early_attach.fallback = Some(fallback);
         } else {
-            match attach_to_initial_renderer(&client, DEFAULT_CDP_PORT, &source).await {
+            match attach_to_initial_renderer(&client, DEFAULT_CDP_PORT, &source, control).await {
                 Ok(session) => {
                     early_attach.applied = session.applied;
                     early_attach.target_id = Some(session.target_id.clone());
@@ -235,9 +819,12 @@ pub async fn launch_and_inject(
                         "[codex_app_enhanced] event=early_attach_ready applied={} elapsed_ms={} target_id={}",
                         session.applied, session.elapsed_ms, session.target_id
                     ));
-                    retain_browser_cdp_session(session, source.clone());
+                    browser_session = Some((session, source.clone()));
                 }
                 Err(err) => {
+                    if error_is_cancelled(&err) {
+                        return Err(err);
+                    }
                     let fallback = err.to_string();
                     chain_log::write_line(format!(
                         "[codex_app_enhanced] event=early_attach_fallback error={fallback}"
@@ -246,7 +833,7 @@ pub async fn launch_and_inject(
                 }
             }
         }
-        wait_for_app_target(&client, DEFAULT_CDP_PORT).await?
+        wait_for_app_target(&client, DEFAULT_CDP_PORT, control).await?
     };
     chain_log::write_line(format!(
         "[codex_app_enhanced] event=target_ready elapsed_ms={} launched={} target_id={} early_attach_applied={}",
@@ -256,8 +843,13 @@ pub async fn launch_and_inject(
         early_attach.applied
     ));
 
-    let (target, status) =
-        inject_until_ready(&client, DEFAULT_CDP_PORT, target, &models, &source).await?;
+    control.report(
+        EnhancedLaunchOperationPhase::Injecting,
+        "正在应用模型与界面增强配置",
+    );
+    let (connection, status) =
+        inject_until_ready(&client, DEFAULT_CDP_PORT, target, &models, &source, control).await?;
+    let target = connection.target.clone();
     chain_log::write_line(format!(
         "[codex_app_enhanced] event=injection_applied elapsed_ms={} target_id={}",
         started.elapsed().as_millis(),
@@ -310,7 +902,7 @@ pub async fn launch_and_inject(
         status.script_attempts
     ));
 
-    Ok(EnhancedLaunchReport {
+    let report = EnhancedLaunchReport {
         port: DEFAULT_CDP_PORT,
         launched,
         target_id: target.id,
@@ -351,6 +943,12 @@ pub async fn launch_and_inject(
         plugin_catalog_cache_refreshed: status.plugin_catalog_cache_refreshed,
         plugin_catalog_cache_refresh_error: status.plugin_catalog_cache_refresh_error,
         startup_elapsed_ms,
+    };
+    control.ensure_active()?;
+    Ok(PendingEnhancedLaunch {
+        report,
+        browser_session,
+        page_session: connection.socket,
     })
 }
 
@@ -363,8 +961,40 @@ fn normalized_models(models: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-async fn find_app_target(client: &reqwest::Client, port: u16) -> Result<Option<CdpTarget>> {
-    let Some(targets) = fetch_cdp_json::<Vec<CdpTarget>>(client, port, "/json/list").await? else {
+async fn controlled<T, F>(
+    control: &EnhancedLaunchControl,
+    duration: Duration,
+    label: &str,
+    future: F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::select! {
+        biased;
+        _ = control.cancellation.cancelled() => Err(anyhow!(EnhancedLaunchCancelled)),
+        result = timeout(duration, future) => {
+            result.with_context(|| format!("{label} 超时（{} 秒）", duration.as_secs()))
+        }
+    }
+}
+
+async fn controlled_sleep(control: &EnhancedLaunchControl, duration: Duration) -> Result<()> {
+    tokio::select! {
+        biased;
+        _ = control.cancellation.cancelled() => Err(anyhow!(EnhancedLaunchCancelled)),
+        _ = tokio::time::sleep(duration) => Ok(()),
+    }
+}
+
+async fn find_app_target(
+    client: &reqwest::Client,
+    port: u16,
+    control: &EnhancedLaunchControl,
+) -> Result<Option<CdpTarget>> {
+    let Some(targets) =
+        fetch_cdp_json::<Vec<CdpTarget>>(client, port, "/json/list", control).await?
+    else {
         return Ok(None);
     };
     Ok(targets.into_iter().find(|target| {
@@ -374,21 +1004,30 @@ async fn find_app_target(client: &reqwest::Client, port: u16) -> Result<Option<C
     }))
 }
 
-async fn wait_for_app_target(client: &reqwest::Client, port: u16) -> Result<CdpTarget> {
+async fn wait_for_app_target(
+    client: &reqwest::Client,
+    port: u16,
+    control: &EnhancedLaunchControl,
+) -> Result<CdpTarget> {
     let deadline = tokio::time::Instant::now() + CODEX_APP_READY_TIMEOUT;
     loop {
-        if let Some(target) = find_app_target(client, port).await? {
+        if let Some(target) = find_app_target(client, port, control).await? {
             return Ok(target);
         }
         if tokio::time::Instant::now() >= deadline {
             bail!("Codex App 未在 30 秒内开放本地 CDP 端口 {port}");
         }
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        controlled_sleep(control, Duration::from_millis(50)).await?;
     }
 }
 
-async fn find_browser_websocket_url(client: &reqwest::Client, port: u16) -> Result<Option<String>> {
-    let Some(version) = fetch_cdp_json::<CdpBrowserVersion>(client, port, "/json/version").await?
+async fn find_browser_websocket_url(
+    client: &reqwest::Client,
+    port: u16,
+    control: &EnhancedLaunchControl,
+) -> Result<Option<String>> {
+    let Some(version) =
+        fetch_cdp_json::<CdpBrowserVersion>(client, port, "/json/version", control).await?
     else {
         return Ok(None);
     };
@@ -414,14 +1053,29 @@ async fn fetch_cdp_json<T: DeserializeOwned>(
     client: &reqwest::Client,
     port: u16,
     path: &str,
+    control: &EnhancedLaunchControl,
 ) -> Result<Option<T>> {
     let mut parse_error = None;
     for url in cdp_http_urls(port, path) {
-        let response = match client.get(&url).send().await {
+        let response = match controlled(
+            control,
+            CDP_COMMAND_TIMEOUT,
+            "请求 Codex CDP",
+            client.get(&url).send(),
+        )
+        .await?
+        {
             Ok(response) if response.status().is_success() => response,
             Ok(_) | Err(_) => continue,
         };
-        match response.json::<T>().await {
+        match controlled(
+            control,
+            CDP_COMMAND_TIMEOUT,
+            "读取 Codex CDP 响应",
+            response.json::<T>(),
+        )
+        .await?
+        {
             Ok(value) => return Ok(Some(value)),
             Err(error) => parse_error = Some((url, error)),
         }
@@ -437,21 +1091,27 @@ async fn attach_to_initial_renderer(
     client: &reqwest::Client,
     port: u16,
     source: &str,
+    control: &EnhancedLaunchControl,
 ) -> Result<EarlyBrowserSession> {
     let started = Instant::now();
     let deadline = tokio::time::Instant::now() + EARLY_ATTACH_TIMEOUT;
     let websocket_url = loop {
-        if let Some(url) = find_browser_websocket_url(client, port).await? {
+        if let Some(url) = find_browser_websocket_url(client, port, control).await? {
             break url;
         }
         if tokio::time::Instant::now() >= deadline {
             bail!("Codex browser CDP 未在早期挂载时限内开放");
         }
-        tokio::time::sleep(EARLY_ATTACH_POLL_INTERVAL).await;
+        controlled_sleep(control, EARLY_ATTACH_POLL_INTERVAL).await?;
     };
-    let (mut socket, _) = connect_async(websocket_url)
-        .await
-        .context("连接 Codex browser CDP 失败")?;
+    let (mut socket, _) = controlled(
+        control,
+        CDP_CONNECT_TIMEOUT,
+        "连接 Codex browser CDP",
+        connect_async(websocket_url),
+    )
+    .await?
+    .context("连接 Codex browser CDP 失败")?;
     let mut command_id = 1_u64;
     let enable_id = send_cdp_request(
         &mut socket,
@@ -463,6 +1123,7 @@ async fn attach_to_initial_renderer(
             "waitForDebuggerOnStart": true,
             "flatten": true,
         }),
+        control,
     )
     .await?;
     let mut auto_attach_enabled = false;
@@ -474,12 +1135,24 @@ async fn attach_to_initial_renderer(
             bail!("Codex browser CDP 已连接，但未及时捕获 renderer");
         }
         let remaining = deadline.saturating_duration_since(now);
-        let message = tokio::time::timeout(remaining, socket.next())
-            .await
-            .context("等待 Codex renderer 超时")?
-            .context("Codex browser CDP 在 renderer 出现前关闭")??;
+        let message = controlled(
+            control,
+            remaining.min(CDP_COMMAND_TIMEOUT),
+            "等待 Codex renderer",
+            socket.next(),
+        )
+        .await?
+        .context("Codex browser CDP 在 renderer 出现前关闭")??;
         match message {
-            Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
+            Message::Ping(payload) => {
+                controlled(
+                    control,
+                    CDP_COMMAND_TIMEOUT,
+                    "回复 Codex browser CDP 心跳",
+                    socket.send(Message::Pong(payload)),
+                )
+                .await??;
+            }
             Message::Text(text) => {
                 let message: Value = serde_json::from_str(&text)?;
                 if message.get("id").and_then(Value::as_u64) == Some(enable_id) {
@@ -490,8 +1163,14 @@ async fn attach_to_initial_renderer(
                 }
                 if let Some(target) = attached_target_from_event(&message) {
                     let is_renderer = is_codex_renderer_target(&target);
-                    install_on_attached_target(&mut socket, &mut command_id, &target, source)
-                        .await?;
+                    install_on_attached_target(
+                        &mut socket,
+                        &mut command_id,
+                        &target,
+                        source,
+                        control,
+                    )
+                    .await?;
                     if is_renderer && renderer.is_none() {
                         renderer = Some(target);
                     }
@@ -580,9 +1259,18 @@ async fn install_on_attached_target(
     command_id: &mut u64,
     target: &AttachedTarget,
     source: &str,
+    control: &EnhancedLaunchControl,
 ) -> Result<()> {
     for (method, params) in attached_target_commands(target, source) {
-        send_cdp_request(socket, command_id, Some(&target.session_id), method, params).await?;
+        send_cdp_request(
+            socket,
+            command_id,
+            Some(&target.session_id),
+            method,
+            params,
+            control,
+        )
+        .await?;
     }
     if is_codex_renderer_target(target) {
         chain_log::write_line(format!(
@@ -599,13 +1287,18 @@ async fn send_cdp_request(
     session_id: Option<&str>,
     method: &str,
     params: Value,
+    control: &EnhancedLaunchControl,
 ) -> Result<u64> {
     let id = *command_id;
     *command_id += 1;
     let request = cdp_request_value(id, session_id, method, params);
-    socket
-        .send(Message::Text(request.to_string().into()))
-        .await?;
+    controlled(
+        control,
+        CDP_COMMAND_TIMEOUT,
+        &format!("发送 CDP {method}"),
+        socket.send(Message::Text(request.to_string().into())),
+    )
+    .await??;
     Ok(id)
 }
 
@@ -660,14 +1353,20 @@ async fn connect_and_install(
     target: &CdpTarget,
     port: u16,
     source: &str,
+    control: &EnhancedLaunchControl,
 ) -> Result<ActiveInjection> {
     let websocket_url = validated_websocket_url(target, port)?;
-    let (mut socket, _) = connect_async(websocket_url)
-        .await
-        .context("连接 Codex App CDP 失败")?;
+    let (mut socket, _) = controlled(
+        control,
+        CDP_CONNECT_TIMEOUT,
+        "连接 Codex App CDP",
+        connect_async(websocket_url),
+    )
+    .await?
+    .context("连接 Codex App CDP 失败")?;
     let mut command_id = 1_u64;
     for (method, params) in enhanced_script_install_commands(source) {
-        let result = cdp_command(&mut socket, &mut command_id, method, params).await?;
+        let result = cdp_command(&mut socket, &mut command_id, method, params, control).await?;
         if method == "Runtime.evaluate" {
             ensure_runtime_evaluation_succeeded(&result)?;
         }
@@ -684,7 +1383,11 @@ async fn connect_and_install(
     })
 }
 
-async fn reapply_script(active: &mut ActiveInjection, source: &str) -> Result<()> {
+async fn reapply_script(
+    active: &mut ActiveInjection,
+    source: &str,
+    control: &EnhancedLaunchControl,
+) -> Result<()> {
     let result = cdp_command(
         &mut active.socket,
         &mut active.command_id,
@@ -693,6 +1396,7 @@ async fn reapply_script(active: &mut ActiveInjection, source: &str) -> Result<()
             "expression": source,
             "returnByValue": true,
         }),
+        control,
     )
     .await?;
     ensure_runtime_evaluation_succeeded(&result)?;
@@ -734,10 +1438,20 @@ fn ensure_runtime_evaluation_succeeded(result: &Value) -> Result<()> {
 
 fn retain_page_cdp_session(mut socket: CdpSocket) {
     let handle = tokio::spawn(async move {
+        let control = EnhancedLaunchControl::detached();
         while let Some(message) = socket.next().await {
             match message {
                 Ok(Message::Ping(payload)) => {
-                    if socket.send(Message::Pong(payload)).await.is_err() {
+                    if !matches!(
+                        controlled(
+                            &control,
+                            CDP_COMMAND_TIMEOUT,
+                            "回复 Codex page CDP 心跳",
+                            socket.send(Message::Pong(payload)),
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    ) {
                         break;
                     }
                 }
@@ -757,12 +1471,22 @@ fn retain_page_cdp_session(mut socket: CdpSocket) {
 
 fn retain_browser_cdp_session(session: EarlyBrowserSession, source: String) {
     let handle = tokio::spawn(async move {
+        let control = EnhancedLaunchControl::detached();
         let mut socket = session.socket;
         let mut command_id = session.command_id;
         while let Some(message) = socket.next().await {
             match message {
                 Ok(Message::Ping(payload)) => {
-                    if socket.send(Message::Pong(payload)).await.is_err() {
+                    if !matches!(
+                        controlled(
+                            &control,
+                            CDP_COMMAND_TIMEOUT,
+                            "回复 Codex browser CDP 心跳",
+                            socket.send(Message::Pong(payload)),
+                        )
+                        .await,
+                        Ok(Ok(()))
+                    ) {
                         break;
                     }
                 }
@@ -776,6 +1500,7 @@ fn retain_browser_cdp_session(session: EarlyBrowserSession, source: String) {
                             &mut command_id,
                             &target,
                             &source,
+                            &control,
                         )
                         .await
                     {
@@ -810,20 +1535,35 @@ async fn cdp_command<S>(
     command_id: &mut u64,
     method: &str,
     params: Value,
+    control: &EnhancedLaunchControl,
 ) -> Result<Value>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let id = *command_id;
     *command_id += 1;
-    socket
-        .send(Message::Text(
+    controlled(
+        control,
+        CDP_COMMAND_TIMEOUT,
+        &format!("发送 CDP {method}"),
+        socket.send(Message::Text(
             json!({ "id": id, "method": method, "params": params })
                 .to_string()
                 .into(),
-        ))
-        .await?;
-    while let Some(message) = socket.next().await {
+        )),
+    )
+    .await??;
+    loop {
+        let Some(message) = controlled(
+            control,
+            CDP_COMMAND_TIMEOUT,
+            &format!("等待 CDP {method} 响应"),
+            socket.next(),
+        )
+        .await?
+        else {
+            break;
+        };
         let message = message?;
         let Message::Text(text) = message else {
             continue;
@@ -887,7 +1627,8 @@ async fn inject_until_ready(
     initial_target: CdpTarget,
     expected_models: &[String],
     source: &str,
-) -> Result<(CdpTarget, InjectedStatus)> {
+    control: &EnhancedLaunchControl,
+) -> Result<(ActiveInjection, InjectedStatus)> {
     let deadline = tokio::time::Instant::now() + ENHANCED_INJECTION_TIMEOUT;
     let mut initial_target = Some(initial_target);
     let mut active: Option<ActiveInjection> = None;
@@ -896,9 +1637,12 @@ async fn inject_until_ready(
     loop {
         let target = match initial_target.take() {
             Some(target) => Some(target),
-            None => match find_app_target(client, port).await {
+            None => match find_app_target(client, port, control).await {
                 Ok(target) => target,
                 Err(err) => {
+                    if error_is_cancelled(&err) {
+                        return Err(err);
+                    }
                     last_error = Some(err.to_string());
                     None
                 }
@@ -917,14 +1661,19 @@ async fn inject_until_ready(
                     ));
                 }
                 active = None;
-                match connect_and_install(&target, port, source).await {
+                match connect_and_install(&target, port, source, control).await {
                     Ok(connection) => active = Some(connection),
-                    Err(err) => last_error = Some(err.to_string()),
+                    Err(err) => {
+                        if error_is_cancelled(&err) {
+                            return Err(err);
+                        }
+                        last_error = Some(err.to_string());
+                    }
                 }
             }
 
             if let Some(connection) = active.as_mut() {
-                match inspect_injected_status_on_socket(connection).await {
+                match inspect_injected_status_on_socket(connection, control).await {
                     Ok(status) => {
                         let ready = injected_status_is_ready(&status, expected_models);
                         let should_reapply =
@@ -934,17 +1683,22 @@ async fn inject_until_ready(
                             let connection = active
                                 .take()
                                 .expect("active injection exists after status check");
-                            retain_page_cdp_session(connection.socket);
-                            return Ok((connection.target, status));
+                            return Ok((connection, status));
                         }
                         if should_reapply {
-                            if let Err(err) = reapply_script(connection, source).await {
+                            if let Err(err) = reapply_script(connection, source, control).await {
+                                if error_is_cancelled(&err) {
+                                    return Err(err);
+                                }
                                 last_error = Some(err.to_string());
                                 active = None;
                             }
                         }
                     }
                     Err(err) => {
+                        if error_is_cancelled(&err) {
+                            return Err(err);
+                        }
                         last_error = Some(err.to_string());
                         active = None;
                     }
@@ -964,7 +1718,7 @@ async fn inject_until_ready(
                 .unwrap_or_default();
             bail!("Codex App 已启动，但增强配置（模型列表/语言）未在 45 秒内生效{detail}");
         }
-        tokio::time::sleep(ENHANCED_STATUS_POLL_INTERVAL).await;
+        controlled_sleep(control, ENHANCED_STATUS_POLL_INTERVAL).await?;
     }
 }
 
@@ -1027,7 +1781,10 @@ fn injected_status_detail(status: &InjectedStatus) -> String {
     )
 }
 
-async fn inspect_injected_status_on_socket(active: &mut ActiveInjection) -> Result<InjectedStatus> {
+async fn inspect_injected_status_on_socket(
+    active: &mut ActiveInjection,
+    control: &EnhancedLaunchControl,
+) -> Result<InjectedStatus> {
     let gates = serde_json::to_string(SUPPORTED_FEATURE_GATES)?;
     let expression = format!(
         r#"(() => {{
@@ -1100,6 +1857,7 @@ async fn inspect_injected_status_on_socket(active: &mut ActiveInjection) -> Resu
         &mut active.command_id,
         "Runtime.evaluate",
         json!({ "expression": expression, "returnByValue": true }),
+        control,
     )
     .await?;
     let value = result
@@ -2401,11 +3159,48 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     ))
 }
 
-async fn launch_codex_app(port: u16) -> Result<()> {
-    tokio::task::spawn_blocking(move || launch_codex_app_blocking(port))
+async fn launch_codex_app(port: u16, control: &EnhancedLaunchControl) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        launch_codex_app_macos(port, control).await
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        controlled(
+            control,
+            APP_LAUNCH_COMMAND_TIMEOUT,
+            "启动 Codex App",
+            tokio::task::spawn_blocking(move || launch_codex_app_blocking(port)),
+        )
         .await
-        .context("启动 Codex App 任务失败")??;
-    Ok(())
+        .context("启动 Codex App 任务失败")???;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+async fn launch_codex_app_macos(port: u16, control: &EnhancedLaunchControl) -> Result<()> {
+    let arguments = format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}");
+    for app_name in ["Codex", "ChatGPT"] {
+        control.ensure_active()?;
+        let mut command = tokio::process::Command::new("open");
+        command
+            .args(["-na", app_name, "--args"])
+            .args(arguments.split_whitespace())
+            .kill_on_drop(true);
+        let status = controlled(
+            control,
+            APP_LAUNCH_COMMAND_TIMEOUT,
+            "启动 Codex App",
+            command.status(),
+        )
+        .await??;
+        if status.success() {
+            return Ok(());
+        }
+    }
+    bail!("macOS 无法定位 Codex App")
 }
 
 #[cfg(target_os = "windows")]
@@ -2556,6 +3351,7 @@ fn launch_codex_app_blocking(port: u16) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 fn launch_codex_app_blocking(port: u16) -> Result<()> {
     let arguments = format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}");
     for app_name in ["Codex", "ChatGPT"] {
@@ -2674,6 +3470,193 @@ fn codex_app_is_running() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn begin_test_operation(
+        manager: &Arc<EnhancedLaunchOperationManager>,
+        admission: &Arc<LifecycleAdmission>,
+        request_id: &str,
+    ) -> (EnhancedLaunchControl, LifecycleAdmissionPermit) {
+        match manager.begin(request_id.to_string(), admission) {
+            EnhancedLaunchOperationBegin::Started {
+                control,
+                lifecycle_permit,
+                ..
+            } => (control, lifecycle_permit),
+            _ => panic!("operation should start"),
+        }
+    }
+
+    #[test]
+    fn enhanced_operation_is_idempotent_and_rejects_a_different_active_request() {
+        let manager = Arc::new(EnhancedLaunchOperationManager::new());
+        let admission = Arc::new(LifecycleAdmission::new());
+        let (_control, permit) = begin_test_operation(&manager, &admission, "request-one");
+
+        assert!(matches!(
+            manager.begin("request-one".into(), &admission),
+            EnhancedLaunchOperationBegin::Existing(operation)
+                if operation.request_id == "request-one"
+        ));
+        assert!(matches!(
+            manager.begin("request-two".into(), &admission),
+            EnhancedLaunchOperationBegin::Conflict(operation)
+                if operation.request_id == "request-one"
+        ));
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn enhanced_operation_cancel_reaches_a_terminal_state_and_blocks_commit() {
+        let manager = Arc::new(EnhancedLaunchOperationManager::new());
+        let admission = Arc::new(LifecycleAdmission::new());
+        let (control, permit) = begin_test_operation(&manager, &admission, "cancel-me");
+
+        assert!(matches!(
+            manager.cancel("cancel-me"),
+            EnhancedLaunchCancelResult::Accepted(_)
+        ));
+        assert!(matches!(
+            manager.cancel("cancel-me"),
+            EnhancedLaunchCancelResult::Accepted(_)
+        ));
+        control.report(EnhancedLaunchOperationPhase::Launching, "late progress");
+        let cancelling = manager.current().expect("cancelling");
+        assert_eq!(cancelling.phase, EnhancedLaunchOperationPhase::Preparing);
+        assert!(!cancelling.can_cancel);
+        assert_eq!(cancelling.message, "正在取消增强启动");
+        assert!(control.ensure_active().is_err());
+        assert!(!control.cancellation.try_commit());
+        manager.finish_failure(
+            "cancel-me",
+            control.cancellation(),
+            EnhancedLaunchFailure {
+                error: "增强启动已取消".into(),
+                recovery: Some("环境已恢复".into()),
+                cancelled: true,
+            },
+        );
+
+        let operation = manager
+            .wait_for_terminal("cancel-me")
+            .await
+            .expect("terminal operation");
+        assert_eq!(operation.phase, EnhancedLaunchOperationPhase::Cancelled);
+        assert!(!operation.can_cancel);
+        assert_eq!(operation.recovery.as_deref(), Some("环境已恢复"));
+        drop(permit);
+    }
+
+    #[test]
+    fn enhanced_operation_transitions_in_order_and_terminal_requests_are_replaceable() {
+        let manager = Arc::new(EnhancedLaunchOperationManager::new());
+        let admission = Arc::new(LifecycleAdmission::new());
+        let (control, permit) = begin_test_operation(&manager, &admission, "first");
+
+        control.report(EnhancedLaunchOperationPhase::Launching, "launching");
+        assert_eq!(
+            manager.current().expect("launching").phase,
+            EnhancedLaunchOperationPhase::Launching
+        );
+        control.report(EnhancedLaunchOperationPhase::WaitingForApp, "waiting");
+        control.report(EnhancedLaunchOperationPhase::Injecting, "injecting");
+        control.report(EnhancedLaunchOperationPhase::Launching, "stale");
+        assert_eq!(
+            manager.current().expect("injecting").phase,
+            EnhancedLaunchOperationPhase::Injecting
+        );
+        assert!(control.cancellation.try_commit());
+        control.report(EnhancedLaunchOperationPhase::Injecting, "finalizing");
+        assert!(!manager.current().expect("finalizing").can_cancel);
+        manager.finish_success(
+            "first",
+            control.cancellation(),
+            EnhancedLaunchReport {
+                target_id: "renderer".into(),
+                ..EnhancedLaunchReport::default()
+            },
+        );
+        drop(permit);
+
+        assert!(matches!(
+            manager.begin("first".into(), &admission),
+            EnhancedLaunchOperationBegin::Existing(operation)
+                if operation.phase == EnhancedLaunchOperationPhase::Ready
+        ));
+        assert!(matches!(
+            manager.begin("second".into(), &admission),
+            EnhancedLaunchOperationBegin::Started { .. }
+        ));
+    }
+
+    #[test]
+    fn stale_callbacks_cannot_mutate_a_reused_request_id() {
+        let manager = Arc::new(EnhancedLaunchOperationManager::new());
+        let admission = Arc::new(LifecycleAdmission::new());
+        let (old_control, old_permit) = begin_test_operation(&manager, &admission, "reused");
+        old_control.report(EnhancedLaunchOperationPhase::Launching, "old");
+        manager.finish_failure(
+            "reused",
+            old_control.cancellation(),
+            EnhancedLaunchFailure {
+                error: "old failure".into(),
+                recovery: None,
+                cancelled: false,
+            },
+        );
+        drop(old_permit);
+
+        let (other_control, other_permit) = begin_test_operation(&manager, &admission, "other");
+        manager.finish_failure(
+            "other",
+            other_control.cancellation(),
+            EnhancedLaunchFailure {
+                error: "other failure".into(),
+                recovery: None,
+                cancelled: false,
+            },
+        );
+        drop(other_permit);
+
+        let (new_control, new_permit) = begin_test_operation(&manager, &admission, "reused");
+        old_control.report(EnhancedLaunchOperationPhase::Launching, "stale callback");
+        assert_eq!(
+            manager.current().expect("new operation").phase,
+            EnhancedLaunchOperationPhase::Preparing
+        );
+        new_control.report(EnhancedLaunchOperationPhase::Launching, "new callback");
+        assert_eq!(
+            manager.current().expect("new operation").phase,
+            EnhancedLaunchOperationPhase::Launching
+        );
+        drop(new_permit);
+    }
+
+    #[tokio::test]
+    async fn enhanced_operation_holds_lifecycle_admission_and_rejects_drain_starts() {
+        let manager = Arc::new(EnhancedLaunchOperationManager::new());
+        let admission = Arc::new(LifecycleAdmission::new());
+        let (_control, permit) = begin_test_operation(&manager, &admission, "protected");
+
+        assert!(admission.begin_draining());
+        assert!(matches!(
+            manager.begin("other".into(), &admission),
+            EnhancedLaunchOperationBegin::Conflict(_)
+        ));
+        let drained = tokio::spawn({
+            let admission = Arc::clone(&admission);
+            async move { admission.wait_for_drain().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!drained.is_finished());
+        drop(permit);
+        drained.await.expect("drain completes");
+
+        let idle_manager = Arc::new(EnhancedLaunchOperationManager::new());
+        assert!(matches!(
+            idle_manager.begin("rejected".into(), &admission),
+            EnhancedLaunchOperationBegin::LifecycleUnavailable
+        ));
+    }
 
     #[test]
     fn enhanced_script_embeds_models_and_only_patches_selected_statsig_sections() {

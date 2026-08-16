@@ -100,6 +100,18 @@ pub fn router(state: SharedState) -> Router {
             "/codex/enhanced/launch",
             post(codex_app::launch_codex_app_enhanced),
         )
+        .route(
+            "/codex/enhanced/operation/start",
+            post(codex_app::start_codex_app_enhanced_operation),
+        )
+        .route(
+            "/codex/enhanced/operation",
+            get(codex_app::codex_app_enhanced_operation),
+        )
+        .route(
+            "/codex/enhanced/operation/cancel",
+            post(codex_app::cancel_codex_app_enhanced_operation),
+        )
         .route("/sessions", get(codex_app::codex_app_sessions))
         .route(
             "/sessions/provider",
@@ -1025,6 +1037,153 @@ mod tests {
                 .expect("serve mock endpoint");
         });
         address
+    }
+
+    #[tokio::test]
+    async fn enhanced_operation_routes_expose_idempotency_conflict_and_cancel() {
+        let (state, _temp, token) = management_test_state();
+        let _mutation = state.codex_app_mutations.lock().await;
+        let (control, permit) = match state
+            .enhanced_launch_operations
+            .begin("fixture-operation".into(), &state.lifecycle_admission)
+        {
+            crate::codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+                control,
+                lifecycle_permit,
+                ..
+            } => (control, lifecycle_permit),
+            _ => panic!("fixture operation should start"),
+        };
+        let app = router(state.clone());
+
+        let same = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/codex/enhanced/operation/start",
+            Some(&token),
+            Some(r#"{"requestId":"fixture-operation"}"#),
+        )
+        .await;
+        assert_eq!(same.status(), StatusCode::OK);
+        assert_eq!(response_json(same).await["operation"]["phase"], "preparing");
+
+        let conflict = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/codex/enhanced/operation/start",
+            Some(&token),
+            Some(r#"{"requestId":"another-operation"}"#),
+        )
+        .await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(conflict).await["operation"]["requestId"],
+            "fixture-operation"
+        );
+
+        let cancel = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/codex/enhanced/operation/cancel",
+            Some(&token),
+            Some(r#"{"requestId":"fixture-operation"}"#),
+        )
+        .await;
+        assert_eq!(cancel.status(), StatusCode::ACCEPTED);
+        assert_eq!(response_json(cancel).await["operation"]["canCancel"], false);
+
+        let repeated_cancel = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/codex/enhanced/operation/cancel",
+            Some(&token),
+            Some(r#"{"requestId":"fixture-operation"}"#),
+        )
+        .await;
+        assert_eq!(repeated_cancel.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            response_json(repeated_cancel).await["operation"]["message"],
+            "正在取消增强启动"
+        );
+
+        state.enhanced_launch_operations.finish_failure(
+            "fixture-operation",
+            control.cancellation(),
+            crate::codex_app_enhanced::EnhancedLaunchFailure {
+                error: "fixture cancellation".into(),
+                recovery: None,
+                cancelled: true,
+            },
+        );
+        drop(permit);
+    }
+
+    #[tokio::test]
+    async fn enhanced_operation_start_is_rejected_during_lifecycle_drain() {
+        let (state, _temp, token) = management_test_state();
+        assert!(state.lifecycle_admission.begin_draining());
+        let app = router(state);
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/codex/enhanced/operation/start",
+            Some(&token),
+            Some(r#"{"requestId":"drain-rejected"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            response_json(response).await["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("切换")
+        );
+    }
+
+    #[tokio::test]
+    async fn codex_app_mutations_reject_concurrent_writes() {
+        let (state, _temp, token) = management_test_state();
+        let _mutation = state.codex_app_mutations.lock().await;
+        let app = router(state.clone());
+
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/codex/repair",
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(response).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("写操作"))
+        );
+    }
+
+    #[tokio::test]
+    async fn enhanced_operation_start_rejects_a_busy_mutation_lock() {
+        let (state, _temp, token) = management_test_state();
+        let _mutation = state.codex_app_mutations.lock().await;
+        let app = router(state.clone());
+        let request_body = r#"{"requestId":"waiting-for-mutation"}"#;
+
+        let start = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/codex/enhanced/operation/start",
+            Some(&token),
+            Some(request_body),
+        )
+        .await;
+        assert_eq!(start.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(start).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("写操作"))
+        );
+        assert!(state.enhanced_launch_operations.current().is_none());
     }
 
     #[tokio::test]
@@ -3158,6 +3317,7 @@ mod tests {
             &[
                 "aiGatewayRequests",
                 "codexTurns",
+                "enhancedLaunches",
                 "imStreams",
                 "pendingApprovals",
                 "remoteControlRequests",
@@ -3169,11 +3329,84 @@ mod tests {
             json!({
                 "aiGatewayRequests": 0,
                 "codexTurns": 0,
+                "enhancedLaunches": 0,
                 "imStreams": 0,
                 "pendingApprovals": 0,
                 "remoteControlRequests": 0,
                 "total": 0,
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_route_counts_a_running_enhanced_launch_as_protected_work() {
+        let (state, _temp, token) = management_test_state();
+        let (_control, _permit) = match state.enhanced_launch_operations.begin(
+            "protected-enhanced-launch".into(),
+            &state.lifecycle_admission,
+        ) {
+            crate::codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+                control,
+                lifecycle_permit,
+                ..
+            } => (control, lifecycle_permit),
+            _ => panic!("enhanced launch should be admitted"),
+        };
+        let app = router(state);
+
+        let response = route_response(app, "/api/v1/manage/lifecycle", Some(&token)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let lifecycle = response_json(response).await;
+        assert_eq!(
+            lifecycle["protectedWorkItems"]["enhancedLaunches"],
+            json!(1)
+        );
+        assert_eq!(lifecycle["protectedWorkItems"]["total"], json!(1));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_restart_rejects_a_running_enhanced_launch_before_draining() {
+        let (state, _temp, token) = management_test_state();
+        let body = lifecycle_lease_request(&state, "enhanced-launch-owner")
+            .await
+            .to_string();
+        let app = router(state.clone());
+        let claim = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(claim.status(), StatusCode::OK);
+
+        let (_control, _permit) = match state.enhanced_launch_operations.begin(
+            "restart-protected-enhanced-launch".into(),
+            &state.lifecycle_admission,
+        ) {
+            crate::codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+                control,
+                lifecycle_permit,
+                ..
+            } => (control, lifecycle_permit),
+            _ => panic!("enhanced launch should be admitted"),
+        };
+        let restart = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/restart",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(restart.status(), StatusCode::CONFLICT);
+        let payload = response_json(restart).await;
+        assert_eq!(payload["protectedWorkItems"]["enhancedLaunches"], json!(1));
+        assert_eq!(payload["protectedWorkItems"]["total"], json!(1));
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
         );
     }
 

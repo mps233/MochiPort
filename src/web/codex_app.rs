@@ -1,15 +1,23 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::panic::AssertUnwindSafe;
 
 use crate::{
     ai_gateway::catalog::configured_models_response_with_etag,
-    app_state::SharedState,
+    app_state::{LifecycleAdmissionPermit, SharedState},
     codex_app_config::{self, ConfigureCodexAppOptions},
     codex_app_enhanced, codex_session_history,
     config::LocalConnectionMode,
     remote_control_backend,
 };
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct EnhancedLaunchOperationRequest {
+    request_id: String,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -103,10 +111,23 @@ struct ManageCodexAppProviderStatus {
     supports_websockets: bool,
 }
 
+fn codex_app_mutation_conflict() -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "ok": false,
+            "error": "另一个 Codex App 写操作正在进行，请稍后重试",
+        })),
+    )
+}
+
 pub(super) async fn configure_codex_app(
     State(state): State<SharedState>,
     payload: Option<Json<ConfigureCodexAppRequest>>,
 ) -> impl IntoResponse {
+    let Ok(_mutation) = state.codex_app_mutations.try_lock() else {
+        return codex_app_mutation_conflict();
+    };
     let request = payload.map(|Json(value)| value);
     let config = state.config.lock().await.clone();
     let codex_home = request
@@ -213,6 +234,9 @@ pub(super) async fn set_codex_app_provider_websocket(
     State(state): State<SharedState>,
     Json(request): Json<SetCodexAppProviderWebSocketRequest>,
 ) -> impl IntoResponse {
+    let Ok(_mutation) = state.codex_app_mutations.try_lock() else {
+        return codex_app_mutation_conflict();
+    };
     let provider_name = request.provider_name.trim();
     if provider_name.is_empty() {
         return (
@@ -257,6 +281,9 @@ pub(super) async fn delete_codex_app_provider(
     State(state): State<SharedState>,
     Json(request): Json<DeleteCodexAppProviderRequest>,
 ) -> impl IntoResponse {
+    let Ok(_mutation) = state.codex_app_mutations.try_lock() else {
+        return codex_app_mutation_conflict();
+    };
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
     match codex_app_config::delete_codex_app_provider(None, request.provider_name.trim()) {
@@ -289,6 +316,9 @@ pub(super) async fn delete_codex_app_provider(
 }
 
 pub(super) async fn uninstall_codex_app(State(state): State<SharedState>) -> impl IntoResponse {
+    let Ok(_mutation) = state.codex_app_mutations.try_lock() else {
+        return codex_app_mutation_conflict();
+    };
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
     match codex_app_config::uninstall_codex_app(None, &backend_url) {
@@ -382,6 +412,211 @@ pub(super) async fn refresh_codex_app_models(
 pub(super) async fn launch_codex_app_enhanced(
     State(state): State<SharedState>,
 ) -> impl IntoResponse {
+    let mutation = match state.codex_app_mutations.clone().try_lock_owned() {
+        Ok(mutation) => mutation,
+        Err(_) => return codex_app_mutation_conflict(),
+    };
+    let request_id = format!("legacy-{}", uuid::Uuid::new_v4().as_simple());
+    match state
+        .enhanced_launch_operations
+        .begin(request_id.clone(), &state.lifecycle_admission)
+    {
+        codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+            control,
+            lifecycle_permit,
+            ..
+        } => {
+            spawn_codex_app_enhanced_operation(
+                state.clone(),
+                request_id.clone(),
+                control,
+                lifecycle_permit,
+                mutation,
+            );
+            match state
+                .enhanced_launch_operations
+                .wait_for_terminal(&request_id)
+                .await
+            {
+                Some(operation) => legacy_enhanced_operation_response(operation),
+                None => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "ok": false, "error": "增强启动状态丢失" })),
+                ),
+            }
+        }
+        codex_app_enhanced::EnhancedLaunchOperationBegin::Existing(operation) => {
+            legacy_enhanced_operation_response(operation)
+        }
+        codex_app_enhanced::EnhancedLaunchOperationBegin::Conflict(operation) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": "已有增强启动正在进行",
+                "operation": operation,
+            })),
+        ),
+        codex_app_enhanced::EnhancedLaunchOperationBegin::LifecycleUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "error": "后台服务正在切换或关闭，暂时不能启动增强模式",
+            })),
+        ),
+    }
+}
+
+pub(super) async fn start_codex_app_enhanced_operation(
+    State(state): State<SharedState>,
+    Json(request): Json<EnhancedLaunchOperationRequest>,
+) -> impl IntoResponse {
+    let request_id = match normalized_enhanced_request_id(&request.request_id) {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": error })),
+            );
+        }
+    };
+    let mutation = match state.codex_app_mutations.clone().try_lock_owned() {
+        Ok(mutation) => mutation,
+        Err(_) => {
+            if let Some(operation) = state.enhanced_launch_operations.current() {
+                if operation.request_id == request_id {
+                    return (
+                        StatusCode::OK,
+                        Json(json!({ "ok": true, "operation": operation })),
+                    );
+                }
+                if !operation.is_terminal() {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(json!({
+                            "ok": false,
+                            "error": "已有其他增强启动正在进行",
+                            "operation": operation,
+                        })),
+                    );
+                }
+            }
+            return codex_app_mutation_conflict();
+        }
+    };
+    match state
+        .enhanced_launch_operations
+        .begin(request_id.clone(), &state.lifecycle_admission)
+    {
+        codex_app_enhanced::EnhancedLaunchOperationBegin::Started {
+            operation,
+            control,
+            lifecycle_permit,
+        } => {
+            spawn_codex_app_enhanced_operation(
+                state,
+                request_id,
+                control,
+                lifecycle_permit,
+                mutation,
+            );
+            (
+                StatusCode::ACCEPTED,
+                Json(json!({ "ok": true, "operation": operation })),
+            )
+        }
+        codex_app_enhanced::EnhancedLaunchOperationBegin::Existing(operation) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "operation": operation })),
+        ),
+        codex_app_enhanced::EnhancedLaunchOperationBegin::Conflict(operation) => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": "已有其他增强启动正在进行",
+                "operation": operation,
+            })),
+        ),
+        codex_app_enhanced::EnhancedLaunchOperationBegin::LifecycleUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "ok": false,
+                "error": "后台服务正在切换或关闭，暂时不能启动增强模式",
+            })),
+        ),
+    }
+}
+
+pub(super) async fn codex_app_enhanced_operation(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "operation": state.enhanced_launch_operations.current(),
+        })),
+    )
+}
+
+pub(super) async fn cancel_codex_app_enhanced_operation(
+    State(state): State<SharedState>,
+    Json(request): Json<EnhancedLaunchOperationRequest>,
+) -> impl IntoResponse {
+    let request_id = match normalized_enhanced_request_id(&request.request_id) {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": error })),
+            );
+        }
+    };
+    match state.enhanced_launch_operations.cancel(&request_id) {
+        codex_app_enhanced::EnhancedLaunchCancelResult::Accepted(operation) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "ok": true, "operation": operation })),
+        ),
+        codex_app_enhanced::EnhancedLaunchCancelResult::Terminal(operation) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "operation": operation })),
+        ),
+        codex_app_enhanced::EnhancedLaunchCancelResult::Conflict(operation) => {
+            let error = if operation.request_id == request_id {
+                "增强启动正在完成，已经无法取消"
+            } else {
+                "requestId 与当前增强启动不一致"
+            };
+            (
+                StatusCode::CONFLICT,
+                Json(json!({ "ok": false, "error": error, "operation": operation })),
+            )
+        }
+        codex_app_enhanced::EnhancedLaunchCancelResult::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": "没有可取消的增强启动" })),
+        ),
+    }
+}
+
+fn normalized_enhanced_request_id(request_id: &str) -> Result<String, &'static str> {
+    let request_id = request_id.trim();
+    if request_id.is_empty() {
+        return Err("requestId 不能为空");
+    }
+    if request_id.len() > 128 || request_id.chars().any(char::is_control) {
+        return Err("requestId 格式无效");
+    }
+    Ok(request_id.to_string())
+}
+
+async fn run_codex_app_enhanced_operation(
+    state: SharedState,
+    request_id: String,
+    control: codex_app_enhanced::EnhancedLaunchControl,
+    lifecycle_permit: LifecycleAdmissionPermit,
+) {
+    let _lifecycle_permit = lifecycle_permit;
+    let operation_control = control.clone();
     let (models, backend_url) = {
         let config = state.config.lock().await;
         let (response, _) = configured_models_response_with_etag(&config.ai_gateway);
@@ -401,36 +636,121 @@ pub(super) async fn launch_codex_app_enhanced(
             format!("models={}", models.len()),
         )
         .await;
-    match codex_app_enhanced::launch_and_inject(models, &backend_url).await {
+    let result =
+        codex_app_enhanced::launch_and_inject_controlled(models, &backend_url, control).await;
+    match result {
         Ok(report) => {
+            let event_message = format!(
+                "launched={} port={} models={} gates={} i18n={}",
+                report.launched,
+                report.port,
+                report.available_models.len(),
+                report.key_gates_enabled,
+                report.i18n_enabled
+            );
+            state.enhanced_launch_operations.finish_success(
+                &request_id,
+                operation_control.cancellation(),
+                report,
+            );
+            state
+                .push_event("info", "codex_app_enhanced_launch_ready", event_message)
+                .await;
+        }
+        Err(failure) => {
+            let error = failure.error.clone();
+            state.enhanced_launch_operations.finish_failure(
+                &request_id,
+                operation_control.cancellation(),
+                failure,
+            );
+            state
+                .push_event("error", "codex_app_enhanced_launch_failed", error)
+                .await;
+        }
+    }
+}
+
+fn spawn_codex_app_enhanced_operation(
+    state: SharedState,
+    request_id: String,
+    control: codex_app_enhanced::EnhancedLaunchControl,
+    lifecycle_permit: LifecycleAdmissionPermit,
+    mutation: tokio::sync::OwnedMutexGuard<()>,
+) {
+    let manager = state.enhanced_launch_operations.clone();
+    let panic_control = control.clone();
+    let panic_request_id = request_id.clone();
+    tokio::spawn(async move {
+        let panicked = AssertUnwindSafe(run_codex_app_enhanced_operation(
+            state.clone(),
+            request_id,
+            control,
+            lifecycle_permit,
+        ))
+        .catch_unwind()
+        .await
+        .is_err();
+        if panicked {
+            manager.finish_failure(
+                &panic_request_id,
+                panic_control.cancellation(),
+                codex_app_enhanced::EnhancedLaunchFailure {
+                    error: "增强启动后台任务异常退出".to_string(),
+                    recovery: Some(
+                        "请检查 Codex App 状态；如接入异常，请先在设置中修复后重试".to_string(),
+                    ),
+                    cancelled: false,
+                },
+            );
+            // Keep the mutation guard until the panic path has published a
+            // terminal operation state, just like the normal worker path.
+            drop(mutation);
             state
                 .push_event(
-                    "info",
-                    "codex_app_enhanced_launch_ready",
-                    format!(
-                        "launched={} port={} models={} gates={} i18n={}",
-                        report.launched,
-                        report.port,
-                        report.available_models.len(),
-                        report.key_gates_enabled,
-                        report.i18n_enabled
-                    ),
+                    "error",
+                    "codex_app_enhanced_launch_worker_panicked",
+                    "增强启动后台任务异常退出",
                 )
                 .await;
-            (
-                StatusCode::OK,
-                Json(json!({ "ok": true, "report": report })),
-            )
+        } else {
+            drop(mutation);
         }
-        Err(err) => {
-            state
-                .push_event("error", "codex_app_enhanced_launch_failed", err.to_string())
-                .await;
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "ok": false, "error": err.to_string() })),
-            )
-        }
+    });
+}
+
+fn legacy_enhanced_operation_response(
+    operation: codex_app_enhanced::EnhancedLaunchOperation,
+) -> (StatusCode, Json<Value>) {
+    match operation.phase {
+        codex_app_enhanced::EnhancedLaunchOperationPhase::Ready => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "report": operation.report })),
+        ),
+        codex_app_enhanced::EnhancedLaunchOperationPhase::Cancelled => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": operation.error.unwrap_or_else(|| "增强启动已取消".to_string()),
+                "recovery": operation.recovery,
+            })),
+        ),
+        codex_app_enhanced::EnhancedLaunchOperationPhase::Failed => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "ok": false,
+                "error": operation.error.unwrap_or_else(|| "增强启动失败".to_string()),
+                "recovery": operation.recovery,
+            })),
+        ),
+        _ => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "ok": false,
+                "error": "增强启动仍在进行",
+                "operation": operation,
+            })),
+        ),
     }
 }
 
@@ -613,6 +933,9 @@ fn move_session_provider(
 pub(super) async fn repair_codex_app_gui_environment(
     State(state): State<SharedState>,
 ) -> impl IntoResponse {
+    let Ok(_mutation) = state.codex_app_mutations.try_lock() else {
+        return codex_app_mutation_conflict();
+    };
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
     let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url, true);

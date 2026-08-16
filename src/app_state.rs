@@ -261,6 +261,8 @@ pub struct AppState {
     pub safe_relaunch: Mutex<Option<crate::safe_relaunch::PendingSafeRelaunch>>,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     pub lifecycle_admission: Arc<LifecycleAdmission>,
+    pub enhanced_launch_operations: Arc<crate::codex_app_enhanced::EnhancedLaunchOperationManager>,
+    pub codex_app_mutations: Arc<Mutex<()>>,
     /// Serializes lease mutations with an in-progress async drain without
     /// holding the filesystem lock across await points.
     pub lifecycle_control: Mutex<()>,
@@ -596,6 +598,10 @@ impl AppState {
             safe_relaunch: Mutex::new(None),
             shutdown_tx: Mutex::new(shutdown_tx),
             lifecycle_admission: Arc::new(LifecycleAdmission::new()),
+            enhanced_launch_operations: Arc::new(
+                crate::codex_app_enhanced::EnhancedLaunchOperationManager::new(),
+            ),
+            codex_app_mutations: Arc::new(Mutex::new(())),
             lifecycle_control: Mutex::new(()),
         })
     }

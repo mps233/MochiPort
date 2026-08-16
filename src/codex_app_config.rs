@@ -1005,6 +1005,73 @@ pub fn configure_gui_environment(
     status
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CodexAppGuiEnvironmentSnapshot {
+    values: Vec<(&'static str, Option<String>)>,
+}
+
+pub fn capture_gui_environment() -> Result<CodexAppGuiEnvironmentSnapshot, String> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let mut values = Vec::with_capacity(3);
+        for name in [
+            CODEX_API_BASE_URL_ENV,
+            CODEX_API_ENDPOINT_ENV,
+            CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
+        ] {
+            values.push((name, gui_getenv(name)?));
+        }
+        Ok(CodexAppGuiEnvironmentSnapshot { values })
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Ok(CodexAppGuiEnvironmentSnapshot::default())
+    }
+}
+
+pub fn restore_gui_environment(
+    snapshot: &CodexAppGuiEnvironmentSnapshot,
+    backend_url: &str,
+) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let managed_api_base = codex_app_gui_api_base_url(backend_url);
+        let mut errors = Vec::new();
+        for (name, value) in &snapshot.values {
+            let managed_value = match *name {
+                CODEX_API_BASE_URL_ENV => Some(managed_api_base.as_str()),
+                CODEX_API_ENDPOINT_ENV | CODEX_APP_SERVER_LOGIN_ISSUER_ENV => None,
+                _ => continue,
+            };
+            let current = match gui_getenv(name) {
+                Ok(current) => current,
+                Err(err) => {
+                    errors.push(format!("{name}: {err}"));
+                    continue;
+                }
+            };
+            if current.as_deref() != managed_value {
+                continue;
+            }
+            if let Err(err) = gui_set_or_unsetenv(name, value.as_deref()) {
+                errors.push(format!("{name}: {err}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (snapshot, backend_url);
+        Ok(())
+    }
+}
+
 pub fn configure_gui_direct_api_base(backend_url: &str) -> Result<(), String> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {

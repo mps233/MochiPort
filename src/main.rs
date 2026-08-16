@@ -286,6 +286,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         let environment_state = state.clone();
         tokio::spawn(async move {
             tracing::info!(target: "threadrelay::startup", "starting Codex App environment synchronization");
+            let mutation = environment_state.codex_app_mutations.lock().await;
             let result = tokio::task::spawn_blocking(move || {
                 tracing::info!(target: "threadrelay::startup", "Codex App environment synchronization entered blocking worker");
                 let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
@@ -293,6 +294,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
                 (gui_api_base, proxy_cleanup)
             })
             .await;
+            drop(mutation);
 
             match result {
                 Ok((gui_api_base, proxy_cleanup)) => {
