@@ -378,7 +378,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 ### Phase 2：daemon 生命周期与菜单栏
 
-当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、连续健康检查、失败回滚和 GUI 崩溃恢复。自动化测试已覆盖 journal 损坏或篡改、候选构建不一致、冻结后进程身份变化、回滚启动失败，以及跨 daemon 实例和租约换代的拒绝路径；凭据轮换、统一切换日志和隔离端口完整故障矩阵仍未完成。
+当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、连续健康检查、失败回滚和 GUI 崩溃恢复。自动化测试已覆盖 journal 损坏或篡改、候选构建不一致、冻结后进程身份变化、回滚启动失败，以及跨 daemon 实例和租约换代的拒绝路径；隔离进程矩阵也已验证端口占用、KeepAlive 连续换 PID、真实 helper 启动失败和恢复 previous helper。凭据轮换与统一脱敏切换日志仍未完成。
 
 交付物：
 
@@ -387,11 +387,11 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 - [x] 将已校验 helper staging 到版本化 runtime，启动时不继承 GUI 管道和生命周期。
 - [ ] 按 Phase 0 控制平面 ADR 使用和轮换共享管理凭据，落实唯一管理租约与可信接管。
 - [x] 实现 daemon 管理租约、受保护 drain、候选 hold/commit、连续健康校验和失败回滚协议。
-- [ ] 在隔离端口完成端口占用、候选 API 不可达、KeepAlive 连续换 PID、helper 崩溃和回滚失败的完整故障注入矩阵。
-  当前自动化边界：候选 API 不可达、PID/路径/参数/环境变化、journal 损坏或篡改、候选构建不一致、回滚 bootstrap 失败，以及跨 daemon 实例和租约 generation 失效均已有确定性回归测试；端口占用、KeepAlive 真实连续换 PID、helper 真实崩溃和隔离进程级回滚仍待验证。
+- [x] 在隔离端口完成端口占用、候选 API 不可达、KeepAlive 连续换 PID、helper 崩溃和回滚失败的完整故障注入矩阵。
+  确定性回归测试覆盖候选 API 不可达、PID/路径/参数/环境变化、journal 损坏或篡改、候选构建不一致、回滚 bootstrap 失败，以及跨 daemon 实例和租约 generation 失效。`scripts/test-macos-daemon-fault-matrix.sh --run` 使用临时 HOME、独立端口和唯一 `io.github.mps233.threadrelay.tests.*` label 启动真实进程，验证占用端口时非零退出且不发布 locator、三次 `SIGKILL` 后 KeepAlive 每次都换 PID 和 instance、候选 helper 连续 bind 失败后恢复 previous helper；脚本同时断言正式 daemon 的 PID、程序路径、locator 哈希和 Codex GUI launchctl 环境前后不变，并清理全部测试作业。
 - [x] 实现 `MenuBarExtra`：打开主窗口、服务状态、检查更新、退出。
 - [x] 处理重复启动和 GUI 切换中崩溃恢复，持久化 journal 可在重启后继续提交或回滚。
-- [ ] 完成端口冲突、旧 CodexHub 兼容 daemon 和真实 helper 崩溃的发布级验证。
+- [ ] 完成旧 CodexHub 兼容 daemon 的发布级验证；端口冲突和真实 helper 崩溃已由隔离进程矩阵通过。
 - [x] 实现“关闭窗口后隐藏或退出 GUI”的偏好；两种行为都不停止 daemon，停止受管服务保留为独立危险操作。
 - [x] 新 runtime 启动、健康校验或最终提交失败时自动恢复上一 runtime。
 - [ ] 建立统一脱敏的独立切换日志。
