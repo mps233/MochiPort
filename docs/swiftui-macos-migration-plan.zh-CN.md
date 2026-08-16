@@ -4,8 +4,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Phase 3 已完成；Phase 2 的内嵌 daemon、生命周期租约、安全重启、菜单栏、关闭偏好和 GUI supervisor 已落地；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页已完成，增强启动完整状态机、诊断导出和发布级无障碍收尾仍待完成 |
-| 最近核验 | 2026-08-15；SwiftPM 106 项、Rust 897 项通过（1 项忽略）；Universal Release build 404 已完成请求日志服务端游标分页、组合筛选、搜索、排序、旧 daemon 降级、自适应界面的正式组装、签名与运行验证，GUI 已切换至 404，受保护 daemon 保持 build 392 继续运行 |
+| 状态 | Phase 3 已完成；Phase 2 已具备版本化 daemon staging、持久化切换事务、候选版本准入 hold、连续健康校验、失败回滚和 GUI 崩溃恢复；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页已完成，隔离端口故障矩阵、统一切换日志、增强启动完整状态机、诊断导出和发布级无障碍收尾仍待完成 |
+| 最近核验 | 2026-08-16；SwiftPM 135 项、Rust 901 项通过（1 项忽略）；Universal Release build 415 已完成候选 daemon 准入保护、租约换代提交、不可达回滚和切换竞态收敛的正式组装、签名与运行验证，GUI 已切换至 415，受保护 daemon 保持 build 410 继续运行 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
 | 主前端 | SwiftUI |
@@ -378,19 +378,22 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 ### Phase 2：daemon 生命周期与菜单栏
 
-当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入生命周期租约、受保护工作项检查和安全重启，菜单栏与关闭窗口偏好可用。版本化 runtime staging、凭据轮换与可信接管、完整 drain/commit/rollback 故障矩阵仍未完成，因此相关复合条目继续保持未勾选。
+当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、连续健康检查、失败回滚和 GUI 崩溃恢复。凭据轮换、统一切换日志和隔离端口完整故障矩阵仍未完成。
 
 交付物：
 
-- [ ] 实现现有 daemon 探测、精确身份校验、启动和受保护关闭。
+- [x] 实现现有 daemon 探测、精确 PID、instance、路径、参数和环境校验、启动及受保护关闭。
 - [x] 将 Rust daemon 作为独立可执行文件嵌入 App Bundle。
-- [ ] 将已校验 helper staging 到版本化 runtime，启动时不继承 GUI 管道和生命周期。
+- [x] 将已校验 helper staging 到版本化 runtime，启动时不继承 GUI 管道和生命周期。
 - [ ] 按 Phase 0 控制平面 ADR 使用和轮换共享管理凭据，落实唯一管理租约与可信接管。
-- [ ] 实现 daemon 所有权状态机和 drain/commit 协议，并在隔离端口做故障注入。
+- [x] 实现 daemon 管理租约、受保护 drain、候选 hold/commit、连续健康校验和失败回滚协议。
+- [ ] 在隔离端口完成端口占用、候选 API 不可达、KeepAlive 连续换 PID、helper 崩溃和回滚失败的完整故障注入矩阵。
 - [x] 实现 `MenuBarExtra`：打开主窗口、服务状态、检查更新、退出。
-- [ ] 处理重复启动、端口冲突、旧 CodexHub 兼容 daemon 和崩溃恢复。
+- [x] 处理重复启动和 GUI 切换中崩溃恢复，持久化 journal 可在重启后继续提交或回滚。
+- [ ] 完成端口冲突、旧 CodexHub 兼容 daemon 和真实 helper 崩溃的发布级验证。
 - [x] 实现“关闭窗口后隐藏或退出 GUI”的偏好；两种行为都不停止 daemon，停止受管服务保留为独立危险操作。
-- [ ] 建立统一脱敏的独立切换日志；新 runtime 启动失败时自动恢复上一 runtime。
+- [x] 新 runtime 启动、健康校验或最终提交失败时自动恢复上一 runtime。
+- [ ] 建立统一脱敏的独立切换日志。
 
 验收：正常启动、重复启动、GUI 崩溃、helper 崩溃、runtime 切换和回滚场景不会误杀无关进程；GUI 关闭和产品发起的计划切换造成的受保护工作项主动终止数为 0，存在阻塞项时延期而非强杀。daemon 自身崩溃和网络故障不计为产品主动终止；用户明确选择“立即停止”造成的强制中断单独记录。此阶段不代表已接入自动更新。
 
