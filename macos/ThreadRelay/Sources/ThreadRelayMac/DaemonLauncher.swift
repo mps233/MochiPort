@@ -942,8 +942,14 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                 transactionLock.release()
                 return nil
             }
-            let data = try Data(contentsOf: journalURL)
-            let journal = try JSONDecoder().decode(DaemonRuntimeSwitchJournal.self, from: data)
+            guard let data = try? Data(contentsOf: journalURL),
+                  let journal = try? JSONDecoder().decode(
+                      DaemonRuntimeSwitchJournal.self,
+                      from: data
+                  )
+            else {
+                throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+            }
             try validateRuntimeSwitchJournal(journal, configuration: configuration)
             let transaction = DaemonRuntimeSwitch(
                 journal: journal,
@@ -1098,12 +1104,10 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         }
         guard loadedProgram(from: loadedAgentOutput) == programPath,
               loadedArguments(from: loadedAgentOutput) == arguments,
-              loadedEnvironmentValue(from: loadedAgentOutput, key: "THREADRELAY_HOME")
-                  == configuration.configURL.deletingLastPathComponent().path,
-              loadedEnvironmentValue(from: loadedAgentOutput, key: "THREADRELAY_BUNDLE_BUILD")
-                  == environment["THREADRELAY_BUNDLE_BUILD"],
-              loadedEnvironmentValue(from: loadedAgentOutput, key: "THREADRELAY_RUNTIME_SWITCH_HOLD")
-                  == environment["THREADRELAY_RUNTIME_SWITCH_HOLD"]
+              loadedEnvironmentMatches(
+                  output: loadedAgentOutput,
+                  expected: environment
+              )
         else {
             throw DaemonLaunchError.loadedAgentUntrusted(
                 loadedProgram(from: loadedAgentOutput)
@@ -1135,12 +1139,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         }
         return loadedProgram(from: output) == programPath
             && loadedArguments(from: output) == arguments
-            && loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
-                == configuration.configURL.deletingLastPathComponent().path
-            && loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD")
-                == environment["THREADRELAY_BUNDLE_BUILD"]
-            && loadedEnvironmentValue(from: output, key: "THREADRELAY_RUNTIME_SWITCH_HOLD")
-                == environment["THREADRELAY_RUNTIME_SWITCH_HOLD"]
+            && loadedEnvironmentMatches(output: output, expected: environment)
     }
 
     private static func isManagedRuntimeProgram(
@@ -1350,6 +1349,15 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             .first
     }
 
+    private static func loadedEnvironmentMatches(
+        output: String,
+        expected: [String: String]
+    ) -> Bool {
+        expected.allSatisfy { key, value in
+            loadedEnvironmentValue(from: output, key: key) == value
+        }
+    }
+
     private static func launchAgentHasRuntimeSwitchHold(_ data: Data) -> Bool {
         guard let propertyList = try? PropertyListSerialization.propertyList(
             from: data,
@@ -1451,10 +1459,21 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             "daemon",
         ],
         let environment = propertyList["EnvironmentVariables"] as? [String: String],
+        environment["HOME"] == configuration.homeURL.path,
+        environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin",
         environment["THREADRELAY_HOME"]
             == configuration.configURL.deletingLastPathComponent().path,
         let build = environment["THREADRELAY_BUNDLE_BUILD"],
-        build == URL(fileURLWithPath: programPath).deletingLastPathComponent().lastPathComponent
+        build == URL(fileURLWithPath: programPath).deletingLastPathComponent().lastPathComponent,
+        Set(environment.keys).subtracting([
+            "HOME",
+            "PATH",
+            "THREADRELAY_HOME",
+            "THREADRELAY_BUNDLE_BUILD",
+            "THREADRELAY_RUNTIME_SWITCH_HOLD",
+        ]).isEmpty,
+        environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] == nil
+            || environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] == "1"
         else {
             throw DaemonLaunchError.runtimeSwitchRecoveryRequired
         }
@@ -1492,10 +1511,16 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             from: journal.candidateLaunchAgentData,
             configuration: configuration
         )
+        let expectedCandidatePath = try configuration.stagedHelperURL().path
+        let expectedCandidateBuild = try configuration.resolvedBuildIdentifier()
         guard canonicalPath(previous.programPath) == canonicalPath(journal.previousProgramPath),
               previous.build == journal.previousBuild,
               canonicalPath(candidate.programPath) == canonicalPath(journal.candidateProgramPath),
-              candidate.build == journal.candidateBuild
+              candidate.build == journal.candidateBuild,
+              canonicalPath(candidate.programPath) == canonicalPath(expectedCandidatePath),
+              candidate.build == expectedCandidateBuild,
+              previous.environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] == nil,
+              candidate.environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] == "1"
         else {
             throw DaemonLaunchError.runtimeSwitchRecoveryRequired
         }
