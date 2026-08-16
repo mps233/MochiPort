@@ -3661,6 +3661,157 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cross_daemon_lease_handoff_rejects_stale_instance_generation_and_candidate_claim() {
+        let (state, _temp, token) = management_test_state();
+        let current_instance_id = state.daemon_identity.instance_id.clone();
+        let previous_instance_id = "previous-daemon";
+        let installation_id = "swiftui-test-installation";
+        seed_test_lifecycle_lease(&state, installation_id, previous_instance_id, 7);
+        let app = router(state.clone());
+
+        for path in [
+            "/api/v1/manage/lifecycle/lease/renew",
+            "/api/v1/manage/lifecycle/lease/release",
+            "/api/v1/manage/lifecycle/restart",
+        ] {
+            let stale_instance_body = json!({
+                "installationId": installation_id,
+                "daemonInstanceId": previous_instance_id,
+                "leaseGeneration": 7,
+            })
+            .to_string();
+            let response = request_response(
+                app.clone(),
+                Method::POST,
+                path,
+                Some(&token),
+                Some(&stale_instance_body),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::CONFLICT,
+                "stale daemon instance must not call {path}"
+            );
+            assert!(
+                response_json(response).await["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("实例已变化")),
+                "stale daemon rejection should identify the instance fence"
+            );
+        }
+        let retained_control: Value = serde_json::from_slice(
+            &std::fs::read(manage_api::control_file_path(&state.config_path))
+                .expect("read retained management control file"),
+        )
+        .expect("parse retained management control file");
+        assert_eq!(
+            retained_control["lease"]["daemonInstanceId"],
+            json!(previous_instance_id)
+        );
+        assert_eq!(retained_control["lease"]["generation"], json!(7));
+
+        let claim_body = json!({
+            "installationId": installation_id,
+            "daemonInstanceId": current_instance_id,
+        })
+        .to_string();
+        let handoff = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&claim_body),
+        )
+        .await;
+        assert_eq!(handoff.status(), StatusCode::OK);
+        let handoff_generation = response_json(handoff).await["management"]["leaseGeneration"]
+            .as_u64()
+            .expect("handoff lease generation");
+        assert!(handoff_generation > 7);
+
+        let stale_generation_body = json!({
+            "installationId": installation_id,
+            "daemonInstanceId": current_instance_id,
+            "leaseGeneration": 7,
+        })
+        .to_string();
+        let stale_generation = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/restart",
+            Some(&token),
+            Some(&stale_generation_body),
+        )
+        .await;
+        assert_eq!(stale_generation.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(stale_generation).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("换代"))
+        );
+
+        assert!(state.lifecycle_admission.begin_candidate_hold());
+        let claim_during_candidate_hold = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/lease/claim",
+            Some(&token),
+            Some(&claim_body),
+        )
+        .await;
+        assert_eq!(claim_during_candidate_hold.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(claim_during_candidate_hold).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("runtime-switch/commit"))
+        );
+
+        for (daemon_instance_id, generation, expected_error) in [
+            (previous_instance_id, handoff_generation, "实例已变化"),
+            (current_instance_id.as_str(), 7, "换代"),
+        ] {
+            let stale_commit_body = json!({
+                "installationId": installation_id,
+                "daemonInstanceId": daemon_instance_id,
+                "leaseGeneration": generation,
+            })
+            .to_string();
+            let stale_commit = request_response(
+                app.clone(),
+                Method::POST,
+                "/api/v1/manage/lifecycle/runtime-switch/commit",
+                Some(&token),
+                Some(&stale_commit_body),
+            )
+            .await;
+            assert_eq!(stale_commit.status(), StatusCode::CONFLICT);
+            assert!(
+                response_json(stale_commit).await["error"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(expected_error))
+            );
+            assert!(
+                state.lifecycle_admission.is_candidate_hold(),
+                "rejected handoff must keep candidate admission fenced"
+            );
+        }
+        let retained_control: Value = serde_json::from_slice(
+            &std::fs::read(manage_api::control_file_path(&state.config_path))
+                .expect("read retained handoff control file"),
+        )
+        .expect("parse retained handoff control file");
+        assert_eq!(
+            retained_control["lease"]["daemonInstanceId"],
+            json!(current_instance_id)
+        );
+        assert_eq!(
+            retained_control["lease"]["generation"],
+            json!(handoff_generation)
+        );
+    }
+
+    #[tokio::test]
     async fn candidate_hold_accepts_a_guarded_restart_with_the_previous_lease() {
         let (state, _temp, token) = management_test_state();
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
