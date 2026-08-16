@@ -1120,6 +1120,21 @@ struct APIClient: Sendable {
         )
     }
 
+    func commitRuntimeSwitch(
+        installationId: String,
+        daemonInstanceId: String,
+        leaseGeneration: Int64
+    ) async throws -> ManageLifecycle {
+        try await performManagePOST(
+            path: "api/v1/manage/lifecycle/runtime-switch/commit",
+            body: LifecycleRuntimeSwitchCommitRequest(
+                installationId: installationId,
+                daemonInstanceId: daemonInstanceId,
+                leaseGeneration: leaseGeneration
+            )
+        )
+    }
+
     func imAccounts() async throws -> [ManageIMAccount] {
         let connection = connectionLoader()
         let candidates = connection.credentials()
@@ -1647,6 +1662,12 @@ struct APIClient: Sendable {
         let daemonInstanceId: String
         let force: Bool
         let leaseGeneration: Int64?
+    }
+
+    private struct LifecycleRuntimeSwitchCommitRequest: Encodable {
+        let installationId: String
+        let daemonInstanceId: String
+        let leaseGeneration: Int64
     }
 
     private struct EmptyRequestBody: Encodable {}

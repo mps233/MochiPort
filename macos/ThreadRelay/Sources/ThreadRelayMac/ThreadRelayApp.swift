@@ -423,10 +423,18 @@ private struct MenuBarStatusView: View {
         Button("刷新") {
             Task { await model.refresh() }
         }
-        Button(model.daemonRecoveryInProgress ? "正在启动本地服务…" : "启动本地服务") {
+        Button(
+            model.daemonRecoveryInProgress || model.daemonTransitionInProgress
+                ? "正在处理本地服务…"
+                : "启动本地服务"
+        ) {
             Task { await model.startDaemonManually() }
         }
-        .disabled(!serviceUnavailable || model.daemonRecoveryInProgress)
+        .disabled(
+            !serviceUnavailable
+                || model.daemonRecoveryInProgress
+                || model.daemonTransitionInProgress
+        )
         if let update = model.availableUpdate {
             Button("下载新版本 \(update.version)") {
                 openURL(update.url)

@@ -1,6 +1,9 @@
 import Darwin
 import Foundation
 
+@_silgen_name("flock")
+private func threadRelayFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
+
 enum DaemonLaunchError: LocalizedError, Equatable {
     case helperMissing
     case helperNotExecutable
@@ -15,7 +18,16 @@ enum DaemonLaunchError: LocalizedError, Equatable {
     case guiSupervisorNotExecutable
     case launchAgentDirectoryUnavailable
     case launchAgentWriteFailed
+    case launchAgentSnapshotUnavailable
+    case runtimeSwitchBusy
+    case runtimeSwitchRecoveryRequired
+    case runtimeSwitchJournalFailed
     case loadedAgentMismatch(expected: String, actual: String?)
+    case loadedAgentUntrusted(String?)
+    case daemonProcessChanged(expected: Int32, actual: Int32?)
+    case daemonFreezeFailed(Int32)
+    case runtimeSwitchFailed(String)
+    case runtimeRollbackFailed(String)
     case launchctlFailed(String)
 
     var errorDescription: String? {
@@ -46,9 +58,29 @@ enum DaemonLaunchError: LocalizedError, Equatable {
             return "无法访问当前用户的后台服务目录。"
         case .launchAgentWriteFailed:
             return "无法保存后台服务启动配置。"
+        case .launchAgentSnapshotUnavailable:
+            return "无法读取当前后台服务启动配置，已取消切换。"
+        case .runtimeSwitchBusy:
+            return "另一个后台服务切换正在进行，请稍后重试。"
+        case .runtimeSwitchRecoveryRequired:
+            return "检测到上次后台服务切换尚未收尾，请先完成恢复。"
+        case .runtimeSwitchJournalFailed:
+            return "无法保存后台服务切换记录，已取消切换。"
         case let .loadedAgentMismatch(expected, actual):
             let actualDescription = actual.map { "当前为 \($0)" } ?? "当前路径未知"
             return "后台服务启动配置指向了其他版本（应为 \(expected)，\(actualDescription)）。请重新安装 ThreadRelay 后重试。"
+        case let .loadedAgentUntrusted(actual):
+            let detail = actual.map { "（\($0)）" } ?? ""
+            return "当前后台进程无法确认为 ThreadRelay 管理的运行版本\(detail)，已取消切换。"
+        case let .daemonProcessChanged(expected, actual):
+            let actualText = actual.map(String.init) ?? "未运行"
+            return "后台服务进程已变化（预期 \(expected)，当前 \(actualText)），需要重新确认任务状态。"
+        case let .daemonFreezeFailed(pid):
+            return "无法锁定已排空的后台服务进程 \(pid)，已取消切换。"
+        case let .runtimeSwitchFailed(detail):
+            return detail.isEmpty ? "新后台服务启动失败。" : "新后台服务启动失败：\(detail)"
+        case let .runtimeRollbackFailed(detail):
+            return detail.isEmpty ? "新后台服务启动失败，且无法恢复上一版本。" : "新后台服务启动失败，且无法恢复上一版本：\(detail)"
         case let .launchctlFailed(detail):
             return detail.isEmpty ? "无法启动后台服务。" : "无法启动后台服务：\(detail)"
         }
@@ -148,7 +180,7 @@ struct DaemonLaunchConfiguration: Equatable {
             .appendingPathComponent("threadrelay-daemon")
     }
 
-    func propertyListData() throws -> Data {
+    func propertyListData(runtimeSwitchHold: Bool = false) throws -> Data {
         let resolvedBuildIdentifier = try resolvedBuildIdentifier()
         let stagedHelperURL = try stagedHelperURL()
         var environment: [String: String] = [
@@ -157,6 +189,9 @@ struct DaemonLaunchConfiguration: Equatable {
             "THREADRELAY_HOME": configURL.deletingLastPathComponent().path,
         ]
         environment["THREADRELAY_BUNDLE_BUILD"] = resolvedBuildIdentifier
+        if runtimeSwitchHold {
+            environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] = "1"
+        }
         let propertyList: [String: Any] = [
             "Label": Self.label,
             "ProgramArguments": [
@@ -254,29 +289,177 @@ struct CommandResult: Equatable {
     let output: String
 }
 
+enum DaemonRuntimeSwitchPhase: String, Codable, Sendable {
+    case prepared
+    case freezingPrevious
+    case previousStopped
+    case candidateStarted
+    case rollingBack
+    case rolledBack
+    case committed
+}
+
+struct DaemonRuntimeSwitchJournal: Codable, Equatable, Sendable {
+    let schemaVersion: Int
+    let transactionId: String
+    var phase: DaemonRuntimeSwitchPhase
+    let previousLaunchAgentData: Data
+    let previousProgramPath: String
+    let previousBuild: String
+    let previousInstanceId: String
+    let previousPID: Int32
+    let candidateLaunchAgentData: Data
+    let candidateProgramPath: String
+    let candidateBuild: String
+    let createdAtMilliseconds: Int64
+    var updatedAtMilliseconds: Int64
+}
+
+private final class DaemonRuntimeSwitchLock: @unchecked Sendable {
+    private let stateLock = NSLock()
+    private var descriptor: Int32?
+
+    init(url: URL, fileManager: FileManager) throws {
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        } catch {
+            throw DaemonLaunchError.runtimeSwitchJournalFailed
+        }
+        let descriptor = url.path.withCString {
+            Darwin.open($0, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        }
+        guard descriptor >= 0 else {
+            throw DaemonLaunchError.runtimeSwitchJournalFailed
+        }
+        guard threadRelayFlock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+            Darwin.close(descriptor)
+            throw DaemonLaunchError.runtimeSwitchBusy
+        }
+        _ = Darwin.fchmod(descriptor, S_IRUSR | S_IWUSR)
+        self.descriptor = descriptor
+    }
+
+    func release() {
+        stateLock.withLock {
+            guard let descriptor else { return }
+            _ = threadRelayFlock(descriptor, LOCK_UN)
+            Darwin.close(descriptor)
+            self.descriptor = nil
+        }
+    }
+
+    deinit {
+        release()
+    }
+}
+
+final class DaemonRuntimeSwitch: @unchecked Sendable {
+    fileprivate let stateLock = NSLock()
+    private let operationLock = NSLock()
+    fileprivate var storedJournal: DaemonRuntimeSwitchJournal
+    fileprivate let transactionLock: DaemonRuntimeSwitchLock?
+
+    init(journal: DaemonRuntimeSwitchJournal) {
+        storedJournal = journal
+        transactionLock = nil
+    }
+
+    fileprivate init(
+        journal: DaemonRuntimeSwitchJournal,
+        transactionLock: DaemonRuntimeSwitchLock
+    ) {
+        storedJournal = journal
+        self.transactionLock = transactionLock
+    }
+
+    var journal: DaemonRuntimeSwitchJournal {
+        stateLock.withLock { storedJournal }
+    }
+
+    fileprivate func updateJournal(_ journal: DaemonRuntimeSwitchJournal) {
+        stateLock.withLock { storedJournal = journal }
+    }
+
+    fileprivate func releaseLock() {
+        transactionLock?.release()
+    }
+
+    fileprivate func withExclusiveOperation<T>(_ operation: () throws -> T) rethrows -> T {
+        operationLock.lock()
+        defer { operationLock.unlock() }
+        return try operation()
+    }
+}
+
 protocol DaemonLaunching: Sendable {
     /// Prepare the embedded daemon for a future launch without touching the
     /// currently loaded LaunchAgent or running process.
     func prepareRuntime() async throws
     func startIfNeeded() async throws
+    func prepareRuntimeSwitch(
+        expectedPID: Int32,
+        expectedInstanceId: String,
+        expectedExecutable: String
+    ) async throws -> DaemonRuntimeSwitch
+    func activatePreparedRuntime(
+        _ transaction: DaemonRuntimeSwitch,
+        expectedPID: Int32,
+        expectedExecutable: String
+    ) async throws
+    func rollbackRuntime(
+        _ transaction: DaemonRuntimeSwitch,
+        expectedPID: Int32?,
+        expectedExecutable: String?
+    ) async throws
+    func cancelRuntimeSwitch(_ transaction: DaemonRuntimeSwitch) async throws
+    func commitRuntimeSwitch(_ transaction: DaemonRuntimeSwitch) async throws
+    func loadPendingRuntimeSwitch() async throws -> DaemonRuntimeSwitch?
 }
 
 extension DaemonLaunching {
     func prepareRuntime() async throws {}
+    func prepareRuntimeSwitch(
+        expectedPID _: Int32,
+        expectedInstanceId _: String,
+        expectedExecutable _: String
+    ) async throws -> DaemonRuntimeSwitch {
+        throw DaemonLaunchError.runtimeSwitchFailed("当前启动器不支持版本切换。")
+    }
+    func activatePreparedRuntime(
+        _: DaemonRuntimeSwitch,
+        expectedPID _: Int32,
+        expectedExecutable _: String
+    ) async throws {}
+    func rollbackRuntime(
+        _: DaemonRuntimeSwitch,
+        expectedPID _: Int32?,
+        expectedExecutable _: String?
+    ) async throws {}
+    func cancelRuntimeSwitch(_: DaemonRuntimeSwitch) async throws {}
+    func commitRuntimeSwitch(_: DaemonRuntimeSwitch) async throws {}
+    func loadPendingRuntimeSwitch() async throws -> DaemonRuntimeSwitch? { nil }
 }
 
 struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
     private let configurationLoader: @Sendable () throws -> DaemonLaunchConfiguration
     private let commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    private let processSignaler: @Sendable (Int32, Int32) -> Int32
 
     init(
         configurationLoader: @escaping @Sendable () throws -> DaemonLaunchConfiguration = {
             try .current()
         },
-        commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult = Self.runCommand
+        commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult = Self.runCommand,
+        processSignaler: @escaping @Sendable (Int32, Int32) -> Int32 = { pid, signal in
+            Darwin.kill(pid, signal)
+        }
     ) {
         self.configurationLoader = configurationLoader
         self.commandRunner = commandRunner
+        self.processSignaler = processSignaler
     }
 
     func prepareRuntime() async throws {
@@ -284,10 +467,13 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         let commandRunner = commandRunner
         try await Task.detached(priority: .userInitiated) {
             let configuration = try configurationLoader()
-            try Self.prepareRuntime(
-                configuration: configuration,
-                commandRunner: commandRunner
-            )
+            try Self.withRuntimeSwitchLock(configuration: configuration) {
+                try Self.requireNoPendingRuntimeSwitch(configuration: configuration)
+                try Self.prepareRuntime(
+                    configuration: configuration,
+                    commandRunner: commandRunner
+                )
+            }
         }.value
     }
 
@@ -296,9 +482,118 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         let commandRunner = commandRunner
         try await Task.detached(priority: .userInitiated) {
             let configuration = try configurationLoader()
-            try Self.installAndStart(
+            try Self.withRuntimeSwitchLock(configuration: configuration) {
+                try Self.requireNoPendingRuntimeSwitch(configuration: configuration)
+                try Self.installAndStart(
+                    configuration: configuration,
+                    commandRunner: commandRunner
+                )
+            }
+        }.value
+    }
+
+    func prepareRuntimeSwitch(
+        expectedPID: Int32,
+        expectedInstanceId: String,
+        expectedExecutable: String
+    ) async throws -> DaemonRuntimeSwitch {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        return try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            return try Self.prepareRuntimeSwitch(
                 configuration: configuration,
+                expectedPID: expectedPID,
+                expectedInstanceId: expectedInstanceId,
+                expectedExecutable: expectedExecutable,
                 commandRunner: commandRunner
+            )
+        }.value
+    }
+
+    func activatePreparedRuntime(
+        _ transaction: DaemonRuntimeSwitch,
+        expectedPID: Int32,
+        expectedExecutable: String
+    ) async throws {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        let processSignaler = processSignaler
+        try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            try transaction.withExclusiveOperation {
+                try Self.activatePreparedRuntime(
+                    transaction,
+                    configuration: configuration,
+                    expectedPID: expectedPID,
+                    expectedExecutable: expectedExecutable,
+                    commandRunner: commandRunner,
+                    processSignaler: processSignaler
+                )
+            }
+        }.value
+    }
+
+    func rollbackRuntime(
+        _ transaction: DaemonRuntimeSwitch,
+        expectedPID: Int32?,
+        expectedExecutable: String?
+    ) async throws {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        let processSignaler = processSignaler
+        try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            try transaction.withExclusiveOperation {
+                try Self.rollbackRuntime(
+                    transaction,
+                    configuration: configuration,
+                    expectedPID: expectedPID,
+                    expectedExecutable: expectedExecutable,
+                    commandRunner: commandRunner,
+                    processSignaler: processSignaler
+                )
+            }
+        }.value
+    }
+
+    func cancelRuntimeSwitch(_ transaction: DaemonRuntimeSwitch) async throws {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        let processSignaler = processSignaler
+        try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            try transaction.withExclusiveOperation {
+                try Self.cancelRuntimeSwitch(
+                    transaction,
+                    configuration: configuration,
+                    commandRunner: commandRunner,
+                    processSignaler: processSignaler
+                )
+            }
+        }.value
+    }
+
+    func commitRuntimeSwitch(_ transaction: DaemonRuntimeSwitch) async throws {
+        let configurationLoader = configurationLoader
+        try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            try transaction.withExclusiveOperation {
+                try Self.commitRuntimeSwitch(transaction, configuration: configuration)
+            }
+        }.value
+    }
+
+    func loadPendingRuntimeSwitch() async throws -> DaemonRuntimeSwitch? {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        let processSignaler = processSignaler
+        return try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            return try Self.loadPendingRuntimeSwitch(
+                configuration: configuration,
+                commandRunner: commandRunner,
+                processSignaler: processSignaler
             )
         }.value
     }
@@ -315,19 +610,428 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
         let printResult = try commandRunner(launchctl, ["print", serviceTarget])
 
-        try writeLaunchAgent(configuration, fileManager: fileManager)
         if printResult.exitCode == 0 {
             // Staging prepares the next launch only. An already loaded job may
-            // still be serving protected work from an older path or build, so
-            // this path must never bootout, kickstart, or bootstrap it.
+            // still be serving protected work from an older path or build.
+            // Keep both the loaded job and its on-disk plist unchanged.
             return
         }
+        try writeLaunchAgent(configuration, fileManager: fileManager)
         let result = try commandRunner(
             launchctl,
             ["bootstrap", domain, configuration.launchAgentURL.path]
         )
         guard result.exitCode == 0 else {
             throw DaemonLaunchError.launchctlFailed(lastLine(of: result.output))
+        }
+    }
+
+    private struct RuntimeSnapshot {
+        let launchAgentData: Data
+        let programURL: URL
+        let build: String
+    }
+
+    private static func prepareRuntimeSwitch(
+        configuration: DaemonLaunchConfiguration,
+        expectedPID: Int32,
+        expectedInstanceId: String,
+        expectedExecutable: String,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws -> DaemonRuntimeSwitch {
+        let fileManager = FileManager.default
+        let transactionLock = try acquireRuntimeSwitchLock(
+            configuration: configuration,
+            fileManager: fileManager
+        )
+        do {
+            try requireNoPendingRuntimeSwitch(configuration: configuration)
+            try prepareRuntime(configuration: configuration, commandRunner: commandRunner)
+
+            let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+            let serviceTarget = "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"
+            let printResult = try commandRunner(launchctl, ["print", serviceTarget])
+            guard printResult.exitCode == 0 else {
+                throw DaemonLaunchError.launchAgentSnapshotUnavailable
+            }
+            let previous = try validatedRuntimeSnapshot(
+                configuration: configuration,
+                loadedAgentOutput: printResult.output,
+                fileManager: fileManager
+            )
+            guard loadedPID(from: printResult.output) == expectedPID else {
+                throw DaemonLaunchError.daemonProcessChanged(
+                    expected: expectedPID,
+                    actual: loadedPID(from: printResult.output)
+                )
+            }
+            guard canonicalPath(expectedExecutable) == canonicalPath(previous.programURL.path) else {
+                throw DaemonLaunchError.loadedAgentUntrusted(expectedExecutable)
+            }
+
+            let now = currentTimeMilliseconds()
+            let journal = DaemonRuntimeSwitchJournal(
+                schemaVersion: 1,
+                transactionId: UUID().uuidString.lowercased(),
+                phase: .prepared,
+                previousLaunchAgentData: previous.launchAgentData,
+                previousProgramPath: previous.programURL.path,
+                previousBuild: previous.build,
+                previousInstanceId: expectedInstanceId,
+                previousPID: expectedPID,
+                candidateLaunchAgentData: try configuration.propertyListData(runtimeSwitchHold: true),
+                candidateProgramPath: try configuration.stagedHelperURL().path,
+                candidateBuild: try configuration.resolvedBuildIdentifier(),
+                createdAtMilliseconds: now,
+                updatedAtMilliseconds: now
+            )
+            try persistRuntimeSwitchJournal(journal, configuration: configuration)
+            return DaemonRuntimeSwitch(journal: journal, transactionLock: transactionLock)
+        } catch {
+            transactionLock.release()
+            throw error
+        }
+    }
+
+    private static func activatePreparedRuntime(
+        _ transaction: DaemonRuntimeSwitch,
+        configuration: DaemonLaunchConfiguration,
+        expectedPID: Int32,
+        expectedExecutable: String,
+        commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult,
+        processSignaler: @escaping @Sendable (Int32, Int32) -> Int32
+    ) throws {
+        let journal = try validatedTransaction(transaction, configuration: configuration)
+        guard journal.phase == .prepared || journal.phase == .freezingPrevious else {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+        guard canonicalPath(expectedExecutable) == canonicalPath(journal.previousProgramPath) else {
+            throw DaemonLaunchError.loadedAgentUntrusted(expectedExecutable)
+        }
+
+        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+        let domain = "gui/\(getuid())"
+        let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
+        let printResult = try commandRunner(launchctl, ["print", serviceTarget])
+        try requireLoadedAgent(
+            printResult,
+            launchAgentData: journal.previousLaunchAgentData,
+            expectedPID: expectedPID,
+            configuration: configuration
+        )
+
+        try updateRuntimeSwitchPhase(
+            .freezingPrevious,
+            transaction: transaction,
+            configuration: configuration
+        )
+        do {
+            try freezeAndUnloadAgent(
+                expectedPID: expectedPID,
+                expectedLaunchAgentData: journal.previousLaunchAgentData,
+                configuration: configuration,
+                launchctl: launchctl,
+                serviceTarget: serviceTarget,
+                commandRunner: commandRunner,
+                processSignaler: processSignaler
+            )
+            try updateRuntimeSwitchPhase(
+                .previousStopped,
+                transaction: transaction,
+                configuration: configuration
+            )
+            try writeLaunchAgentData(
+                journal.candidateLaunchAgentData,
+                to: configuration.launchAgentURL,
+                logURL: configuration.logURL,
+                fileManager: .default
+            )
+            let bootstrap = try commandRunner(
+                launchctl,
+                ["bootstrap", domain, configuration.launchAgentURL.path]
+            )
+            guard bootstrap.exitCode == 0 else {
+                throw DaemonLaunchError.launchctlFailed(lastLine(of: bootstrap.output))
+            }
+            try updateRuntimeSwitchPhase(
+                .candidateStarted,
+                transaction: transaction,
+                configuration: configuration
+            )
+        } catch let error as DaemonLaunchError {
+            switch error {
+            case .daemonProcessChanged, .daemonFreezeFailed, .loadedAgentUntrusted:
+                throw error
+            default:
+                throw DaemonLaunchError.runtimeSwitchFailed(error.localizedDescription)
+            }
+        }
+    }
+
+    private static func rollbackRuntime(
+        _ transaction: DaemonRuntimeSwitch,
+        configuration: DaemonLaunchConfiguration,
+        expectedPID: Int32?,
+        expectedExecutable: String?,
+        commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult,
+        processSignaler: @escaping @Sendable (Int32, Int32) -> Int32
+    ) throws {
+        let journal = try validatedTransaction(transaction, configuration: configuration)
+        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+        let domain = "gui/\(getuid())"
+        let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
+        var previousIsLoaded = false
+        let printResult = try commandRunner(launchctl, ["print", serviceTarget])
+
+        try updateRuntimeSwitchPhase(
+            .rollingBack,
+            transaction: transaction,
+            configuration: configuration
+        )
+        if printResult.exitCode == 0 {
+            if loadedAgentMatches(
+                output: printResult.output,
+                launchAgentData: journal.previousLaunchAgentData,
+                configuration: configuration
+            ) {
+                previousIsLoaded = true
+                if let pid = loadedPID(from: printResult.output) {
+                    _ = processSignaler(pid, SIGCONT)
+                }
+            } else if loadedAgentMatches(
+                output: printResult.output,
+                launchAgentData: journal.candidateLaunchAgentData,
+                configuration: configuration
+            ) {
+                let rollbackPID: Int32
+                if let expectedPID, let expectedExecutable,
+                   canonicalPath(expectedExecutable) == canonicalPath(journal.candidateProgramPath)
+                {
+                    rollbackPID = expectedPID
+                } else if expectedPID == nil,
+                          expectedExecutable == nil,
+                          launchAgentHasRuntimeSwitchHold(journal.candidateLaunchAgentData),
+                          let loadedPID = loadedPID(from: printResult.output)
+                {
+                    rollbackPID = loadedPID
+                } else {
+                    throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+                }
+                try freezeAndUnloadAgent(
+                    expectedPID: rollbackPID,
+                    expectedLaunchAgentData: journal.candidateLaunchAgentData,
+                    configuration: configuration,
+                    launchctl: launchctl,
+                    serviceTarget: serviceTarget,
+                    commandRunner: commandRunner,
+                    processSignaler: processSignaler
+                )
+            } else {
+                throw DaemonLaunchError.loadedAgentUntrusted(
+                    loadedProgram(from: printResult.output)
+                )
+            }
+        }
+
+        try writeLaunchAgentData(
+            journal.previousLaunchAgentData,
+            to: configuration.launchAgentURL,
+            logURL: configuration.logURL,
+            fileManager: .default
+        )
+        if !previousIsLoaded {
+            let bootstrap = try commandRunner(
+                launchctl,
+                ["bootstrap", domain, configuration.launchAgentURL.path]
+            )
+            guard bootstrap.exitCode == 0 else {
+                throw DaemonLaunchError.runtimeRollbackFailed(lastLine(of: bootstrap.output))
+            }
+        }
+        try updateRuntimeSwitchPhase(
+            .rolledBack,
+            transaction: transaction,
+            configuration: configuration
+        )
+    }
+
+    private static func cancelRuntimeSwitch(
+        _ transaction: DaemonRuntimeSwitch,
+        configuration: DaemonLaunchConfiguration,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult,
+        processSignaler: @Sendable (Int32, Int32) -> Int32
+    ) throws {
+        let journal = try validatedTransaction(transaction, configuration: configuration)
+        guard journal.phase == .prepared || journal.phase == .freezingPrevious else {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+        let serviceTarget = "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"
+        let printResult = try commandRunner(launchctl, ["print", serviceTarget])
+        guard printResult.exitCode == 0,
+              loadedAgentMatches(
+                  output: printResult.output,
+                  launchAgentData: journal.previousLaunchAgentData,
+                  configuration: configuration
+              )
+        else {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+        if journal.phase == .freezingPrevious,
+           let pid = loadedPID(from: printResult.output)
+        {
+            _ = processSignaler(pid, SIGCONT)
+        }
+        try writeLaunchAgentData(
+            journal.previousLaunchAgentData,
+            to: configuration.launchAgentURL,
+            logURL: configuration.logURL,
+            fileManager: .default
+        )
+        try removeRuntimeSwitchJournal(configuration: configuration)
+        transaction.releaseLock()
+    }
+
+    private static func commitRuntimeSwitch(
+        _ transaction: DaemonRuntimeSwitch,
+        configuration: DaemonLaunchConfiguration
+    ) throws {
+        let journal = try validatedTransaction(transaction, configuration: configuration)
+        switch journal.phase {
+        case .candidateStarted:
+            try writeLaunchAgentData(
+                try configuration.propertyListData(),
+                to: configuration.launchAgentURL,
+                logURL: configuration.logURL,
+                fileManager: .default
+            )
+            try updateRuntimeSwitchPhase(
+                .committed,
+                transaction: transaction,
+                configuration: configuration
+            )
+        case .committed:
+            try writeLaunchAgentData(
+                try configuration.propertyListData(),
+                to: configuration.launchAgentURL,
+                logURL: configuration.logURL,
+                fileManager: .default
+            )
+        case .rolledBack:
+            break
+        default:
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+        try removeRuntimeSwitchJournal(configuration: configuration)
+        transaction.releaseLock()
+    }
+
+    private static func loadPendingRuntimeSwitch(
+        configuration: DaemonLaunchConfiguration,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult,
+        processSignaler: @Sendable (Int32, Int32) -> Int32
+    ) throws -> DaemonRuntimeSwitch? {
+        let fileManager = FileManager.default
+        let transactionLock = try acquireRuntimeSwitchLock(
+            configuration: configuration,
+            fileManager: fileManager
+        )
+        do {
+            let journalURL = runtimeSwitchJournalURL(configuration: configuration)
+            guard fileManager.fileExists(atPath: journalURL.path) else {
+                transactionLock.release()
+                return nil
+            }
+            let data = try Data(contentsOf: journalURL)
+            let journal = try JSONDecoder().decode(DaemonRuntimeSwitchJournal.self, from: data)
+            try validateRuntimeSwitchJournal(journal, configuration: configuration)
+            let transaction = DaemonRuntimeSwitch(
+                journal: journal,
+                transactionLock: transactionLock
+            )
+
+            let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+            let domain = "gui/\(getuid())"
+            let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
+            let printResult = try commandRunner(launchctl, ["print", serviceTarget])
+            if printResult.exitCode != 0 {
+                try writeLaunchAgentData(
+                    journal.previousLaunchAgentData,
+                    to: configuration.launchAgentURL,
+                    logURL: configuration.logURL,
+                    fileManager: fileManager
+                )
+                let bootstrap = try commandRunner(
+                    launchctl,
+                    ["bootstrap", domain, configuration.launchAgentURL.path]
+                )
+                guard bootstrap.exitCode == 0 else {
+                    throw DaemonLaunchError.runtimeRollbackFailed(lastLine(of: bootstrap.output))
+                }
+                try updateRuntimeSwitchPhase(
+                    .rolledBack,
+                    transaction: transaction,
+                    configuration: configuration
+                )
+                return transaction
+            }
+
+            if loadedAgentMatches(
+                output: printResult.output,
+                launchAgentData: journal.previousLaunchAgentData,
+                configuration: configuration
+            ) {
+                if let pid = loadedPID(from: printResult.output) {
+                    _ = processSignaler(pid, SIGCONT)
+                }
+                try writeLaunchAgentData(
+                    journal.previousLaunchAgentData,
+                    to: configuration.launchAgentURL,
+                    logURL: configuration.logURL,
+                    fileManager: fileManager
+                )
+                try updateRuntimeSwitchPhase(
+                    .rolledBack,
+                    transaction: transaction,
+                    configuration: configuration
+                )
+                return transaction
+            }
+            if loadedAgentMatches(
+                output: printResult.output,
+                launchAgentData: journal.candidateLaunchAgentData,
+                configuration: configuration
+            ) {
+                guard journal.phase == .previousStopped
+                    || journal.phase == .candidateStarted
+                    || journal.phase == .rollingBack
+                    || journal.phase == .committed
+                else {
+                    throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+                }
+                try writeLaunchAgentData(
+                    journal.candidateLaunchAgentData,
+                    to: configuration.launchAgentURL,
+                    logURL: configuration.logURL,
+                    fileManager: fileManager
+                )
+                if journal.phase == .previousStopped {
+                    try updateRuntimeSwitchPhase(
+                        .candidateStarted,
+                        transaction: transaction,
+                        configuration: configuration
+                    )
+                } else if journal.phase == .rollingBack,
+                          let pid = loadedPID(from: printResult.output)
+                {
+                    _ = processSignaler(pid, SIGCONT)
+                }
+                return transaction
+            }
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        } catch {
+            transactionLock.release()
+            throw error
         }
     }
 
@@ -352,6 +1056,124 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             fileManager: fileManager,
             commandRunner: commandRunner
         )
+    }
+
+    private static func validatedRuntimeSnapshot(
+        configuration: DaemonLaunchConfiguration,
+        loadedAgentOutput: String,
+        fileManager: FileManager
+    ) throws -> RuntimeSnapshot {
+        guard let data = try? Data(contentsOf: configuration.launchAgentURL),
+              let propertyList = try? PropertyListSerialization.propertyList(
+                  from: data,
+                  options: [],
+                  format: nil
+              ) as? [String: Any],
+              propertyList["Label"] as? String == DaemonLaunchConfiguration.label,
+              let arguments = propertyList["ProgramArguments"] as? [String],
+              arguments.count == 4,
+              let programPath = arguments.first,
+              arguments == [
+                  programPath,
+                  "--config",
+                  configuration.configURL.path,
+                  "daemon",
+              ],
+              let environment = propertyList["EnvironmentVariables"] as? [String: String],
+              environment["THREADRELAY_HOME"]
+                  == configuration.configURL.deletingLastPathComponent().path,
+              environment["THREADRELAY_BUNDLE_BUILD"]
+                  == URL(fileURLWithPath: programPath).deletingLastPathComponent().lastPathComponent
+        else {
+            throw DaemonLaunchError.launchAgentSnapshotUnavailable
+        }
+
+        let programURL = URL(fileURLWithPath: programPath)
+        guard isManagedRuntimeProgram(
+            programURL,
+            configuration: configuration,
+            fileManager: fileManager
+        ) else {
+            throw DaemonLaunchError.loadedAgentUntrusted(programPath)
+        }
+        guard loadedProgram(from: loadedAgentOutput) == programPath,
+              loadedArguments(from: loadedAgentOutput) == arguments,
+              loadedEnvironmentValue(from: loadedAgentOutput, key: "THREADRELAY_HOME")
+                  == configuration.configURL.deletingLastPathComponent().path,
+              loadedEnvironmentValue(from: loadedAgentOutput, key: "THREADRELAY_BUNDLE_BUILD")
+                  == environment["THREADRELAY_BUNDLE_BUILD"],
+              loadedEnvironmentValue(from: loadedAgentOutput, key: "THREADRELAY_RUNTIME_SWITCH_HOLD")
+                  == environment["THREADRELAY_RUNTIME_SWITCH_HOLD"]
+        else {
+            throw DaemonLaunchError.loadedAgentUntrusted(
+                loadedProgram(from: loadedAgentOutput)
+            )
+        }
+
+        return RuntimeSnapshot(
+            launchAgentData: data,
+            programURL: programURL,
+            build: environment["THREADRELAY_BUNDLE_BUILD"] ?? ""
+        )
+    }
+
+    private static func loadedAgentMatches(
+        output: String,
+        launchAgentData: Data,
+        configuration: DaemonLaunchConfiguration
+    ) -> Bool {
+        guard let propertyList = try? PropertyListSerialization.propertyList(
+            from: launchAgentData,
+            options: [],
+            format: nil
+        ) as? [String: Any],
+        let arguments = propertyList["ProgramArguments"] as? [String],
+        let programPath = arguments.first,
+        let environment = propertyList["EnvironmentVariables"] as? [String: String]
+        else {
+            return false
+        }
+        return loadedProgram(from: output) == programPath
+            && loadedArguments(from: output) == arguments
+            && loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
+                == configuration.configURL.deletingLastPathComponent().path
+            && loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD")
+                == environment["THREADRELAY_BUNDLE_BUILD"]
+            && loadedEnvironmentValue(from: output, key: "THREADRELAY_RUNTIME_SWITCH_HOLD")
+                == environment["THREADRELAY_RUNTIME_SWITCH_HOLD"]
+    }
+
+    private static func isManagedRuntimeProgram(
+        _ programURL: URL,
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager
+    ) -> Bool {
+        let resolvedProgram = programURL.standardizedFileURL.resolvingSymlinksInPath()
+        let runtimeRoot = configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+        guard resolvedProgram.lastPathComponent == "threadrelay-daemon",
+              resolvedProgram.deletingLastPathComponent().deletingLastPathComponent() == runtimeRoot
+        else {
+            return false
+        }
+        let buildIdentifier = resolvedProgram.deletingLastPathComponent().lastPathComponent
+        let allowed = CharacterSet(
+            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        )
+        guard !buildIdentifier.isEmpty,
+              buildIdentifier != ".",
+              buildIdentifier != "..",
+              buildIdentifier.rangeOfCharacter(from: allowed.inverted) == nil,
+              let attributes = try? fileManager.attributesOfItem(atPath: resolvedProgram.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              fileManager.isExecutableFile(atPath: resolvedProgram.path)
+        else {
+            return false
+        }
+        return true
     }
 
     private static func stageRuntime(
@@ -461,7 +1283,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         }
         guard loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
             == configuration.configURL.deletingLastPathComponent().path,
-            loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD") == expectedBuild
+            loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD") == expectedBuild,
+            loadedEnvironmentValue(from: output, key: "THREADRELAY_RUNTIME_SWITCH_HOLD") == nil
         else {
             return false
         }
@@ -489,6 +1312,28 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             .map(unquote)
     }
 
+    private static func loadedPID(from output: String) -> Int32? {
+        output
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { $0.hasPrefix("pid = ") })
+            .flatMap { Int32($0.dropFirst("pid = ".count)) }
+    }
+
+    private static func loadedArguments(from output: String) -> [String]? {
+        let lines = output.split(whereSeparator: \.isNewline).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard let argumentsStart = lines.firstIndex(where: { $0 == "arguments = {" }),
+              let argumentsEnd = lines[(argumentsStart + 1)...].firstIndex(of: "}")
+        else {
+            return nil
+        }
+        return lines[(argumentsStart + 1)..<argumentsEnd]
+            .filter { !$0.isEmpty }
+            .map(unquote)
+    }
+
     private static func loadedEnvironmentValue(from output: String, key: String) -> String? {
         output
             .split(whereSeparator: \.isNewline)
@@ -505,11 +1350,342 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             .first
     }
 
+    private static func launchAgentHasRuntimeSwitchHold(_ data: Data) -> Bool {
+        guard let propertyList = try? PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ) as? [String: Any],
+        let environment = propertyList["EnvironmentVariables"] as? [String: String]
+        else {
+            return false
+        }
+        return environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] == "1"
+    }
+
     private static func unquote(_ value: String) -> String {
         guard value.count >= 2, value.first == "\"", value.last == "\"" else {
             return value
         }
         return String(value.dropFirst().dropLast())
+    }
+
+    private struct LaunchAgentIdentity {
+        let programPath: String
+        let build: String
+        let arguments: [String]
+        let environment: [String: String]
+    }
+
+    private static func runtimeSwitchJournalURL(
+        configuration: DaemonLaunchConfiguration
+    ) -> URL {
+        configuration.configURL.deletingLastPathComponent()
+            .appendingPathComponent("threadrelay-runtime-switch.json")
+    }
+
+    private static func runtimeSwitchLockURL(
+        configuration: DaemonLaunchConfiguration
+    ) -> URL {
+        configuration.configURL.deletingLastPathComponent()
+            .appendingPathComponent("threadrelay-runtime-switch.lock")
+    }
+
+    private static func currentTimeMilliseconds() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1_000)
+    }
+
+    private static func canonicalPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    private static func acquireRuntimeSwitchLock(
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager
+    ) throws -> DaemonRuntimeSwitchLock {
+        try DaemonRuntimeSwitchLock(
+            url: runtimeSwitchLockURL(configuration: configuration),
+            fileManager: fileManager
+        )
+    }
+
+    private static func withRuntimeSwitchLock<T>(
+        configuration: DaemonLaunchConfiguration,
+        operation: () throws -> T
+    ) throws -> T {
+        let lock = try acquireRuntimeSwitchLock(
+            configuration: configuration,
+            fileManager: .default
+        )
+        defer { lock.release() }
+        return try operation()
+    }
+
+    private static func requireNoPendingRuntimeSwitch(
+        configuration: DaemonLaunchConfiguration
+    ) throws {
+        if FileManager.default.fileExists(
+            atPath: runtimeSwitchJournalURL(configuration: configuration).path
+        ) {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+    }
+
+    private static func launchAgentIdentity(
+        from data: Data,
+        configuration: DaemonLaunchConfiguration
+    ) throws -> LaunchAgentIdentity {
+        guard let propertyList = try? PropertyListSerialization.propertyList(
+            from: data,
+            options: [],
+            format: nil
+        ) as? [String: Any],
+        propertyList["Label"] as? String == DaemonLaunchConfiguration.label,
+        let arguments = propertyList["ProgramArguments"] as? [String],
+        arguments.count == 4,
+        let programPath = arguments.first,
+        arguments == [
+            programPath,
+            "--config",
+            configuration.configURL.path,
+            "daemon",
+        ],
+        let environment = propertyList["EnvironmentVariables"] as? [String: String],
+        environment["THREADRELAY_HOME"]
+            == configuration.configURL.deletingLastPathComponent().path,
+        let build = environment["THREADRELAY_BUNDLE_BUILD"],
+        build == URL(fileURLWithPath: programPath).deletingLastPathComponent().lastPathComponent
+        else {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+        guard isManagedRuntimeProgram(
+            URL(fileURLWithPath: programPath),
+            configuration: configuration,
+            fileManager: .default
+        ) else {
+            throw DaemonLaunchError.loadedAgentUntrusted(programPath)
+        }
+        return LaunchAgentIdentity(
+            programPath: programPath,
+            build: build,
+            arguments: arguments,
+            environment: environment
+        )
+    }
+
+    private static func validateRuntimeSwitchJournal(
+        _ journal: DaemonRuntimeSwitchJournal,
+        configuration: DaemonLaunchConfiguration
+    ) throws {
+        guard journal.schemaVersion == 1,
+              !journal.transactionId.isEmpty,
+              !journal.previousInstanceId.isEmpty,
+              journal.previousPID > 0
+        else {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+        let previous = try launchAgentIdentity(
+            from: journal.previousLaunchAgentData,
+            configuration: configuration
+        )
+        let candidate = try launchAgentIdentity(
+            from: journal.candidateLaunchAgentData,
+            configuration: configuration
+        )
+        guard canonicalPath(previous.programPath) == canonicalPath(journal.previousProgramPath),
+              previous.build == journal.previousBuild,
+              canonicalPath(candidate.programPath) == canonicalPath(journal.candidateProgramPath),
+              candidate.build == journal.candidateBuild
+        else {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+    }
+
+    private static func validatedTransaction(
+        _ transaction: DaemonRuntimeSwitch,
+        configuration: DaemonLaunchConfiguration
+    ) throws -> DaemonRuntimeSwitchJournal {
+        let journalURL = runtimeSwitchJournalURL(configuration: configuration)
+        guard let data = try? Data(contentsOf: journalURL),
+              let persisted = try? JSONDecoder().decode(
+                  DaemonRuntimeSwitchJournal.self,
+                  from: data
+              ),
+              persisted == transaction.journal
+        else {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+        try validateRuntimeSwitchJournal(persisted, configuration: configuration)
+        return persisted
+    }
+
+    private static func persistRuntimeSwitchJournal(
+        _ journal: DaemonRuntimeSwitchJournal,
+        configuration: DaemonLaunchConfiguration
+    ) throws {
+        let fileManager = FileManager.default
+        let destination = runtimeSwitchJournalURL(configuration: configuration)
+        let directory = destination.deletingLastPathComponent()
+        let temporary = directory.appendingPathComponent(
+            ".threadrelay-runtime-switch.\(UUID().uuidString).tmp"
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+        do {
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            try encoder.encode(journal).write(to: temporary)
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: temporary.path
+            )
+            let handle = try FileHandle(forWritingTo: temporary)
+            try handle.synchronize()
+            try handle.close()
+            let renameResult = temporary.path.withCString { temporaryPath in
+                destination.path.withCString { destinationPath in
+                    Darwin.rename(temporaryPath, destinationPath)
+                }
+            }
+            guard renameResult == 0 else {
+                throw DaemonLaunchError.runtimeSwitchJournalFailed
+            }
+            synchronizeDirectory(directory)
+        } catch let error as DaemonLaunchError {
+            throw error
+        } catch {
+            throw DaemonLaunchError.runtimeSwitchJournalFailed
+        }
+    }
+
+    private static func removeRuntimeSwitchJournal(
+        configuration: DaemonLaunchConfiguration
+    ) throws {
+        let url = runtimeSwitchJournalURL(configuration: configuration)
+        guard unlink(url.path) == 0 || errno == ENOENT else {
+            throw DaemonLaunchError.runtimeSwitchJournalFailed
+        }
+        synchronizeDirectory(url.deletingLastPathComponent())
+    }
+
+    private static func synchronizeDirectory(_ directory: URL) {
+        let descriptor = directory.path.withCString {
+            Darwin.open($0, O_RDONLY | O_CLOEXEC)
+        }
+        guard descriptor >= 0 else { return }
+        _ = Darwin.fsync(descriptor)
+        Darwin.close(descriptor)
+    }
+
+    private static func updateRuntimeSwitchPhase(
+        _ phase: DaemonRuntimeSwitchPhase,
+        transaction: DaemonRuntimeSwitch,
+        configuration: DaemonLaunchConfiguration
+    ) throws {
+        var journal = try validatedTransaction(transaction, configuration: configuration)
+        journal.phase = phase
+        journal.updatedAtMilliseconds = currentTimeMilliseconds()
+        try persistRuntimeSwitchJournal(journal, configuration: configuration)
+        transaction.updateJournal(journal)
+    }
+
+    private static func requireLoadedAgent(
+        _ printResult: CommandResult,
+        launchAgentData: Data,
+        expectedPID: Int32,
+        configuration: DaemonLaunchConfiguration
+    ) throws {
+        let actualPID = loadedPID(from: printResult.output)
+        guard printResult.exitCode == 0, actualPID == expectedPID else {
+            throw DaemonLaunchError.daemonProcessChanged(
+                expected: expectedPID,
+                actual: actualPID
+            )
+        }
+        guard loadedAgentMatches(
+            output: printResult.output,
+            launchAgentData: launchAgentData,
+            configuration: configuration
+        ) else {
+            throw DaemonLaunchError.loadedAgentUntrusted(
+                loadedProgram(from: printResult.output)
+            )
+        }
+    }
+
+    private static func freezeAndUnloadAgent(
+        expectedPID: Int32,
+        expectedLaunchAgentData: Data,
+        configuration: DaemonLaunchConfiguration,
+        launchctl: URL,
+        serviceTarget: String,
+        commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult,
+        processSignaler: @escaping @Sendable (Int32, Int32) -> Int32
+    ) throws {
+        let beforeFreeze = try commandRunner(launchctl, ["print", serviceTarget])
+        try requireLoadedAgent(
+            beforeFreeze,
+            launchAgentData: expectedLaunchAgentData,
+            expectedPID: expectedPID,
+            configuration: configuration
+        )
+        guard processSignaler(expectedPID, SIGSTOP) == 0 else {
+            throw DaemonLaunchError.daemonFreezeFailed(expectedPID)
+        }
+        let resumeIfStillLoaded = {
+            guard let current = try? commandRunner(launchctl, ["print", serviceTarget]),
+                  current.exitCode == 0,
+                  loadedPID(from: current.output) == expectedPID,
+                  loadedAgentMatches(
+                      output: current.output,
+                      launchAgentData: expectedLaunchAgentData,
+                      configuration: configuration
+                  )
+            else { return }
+            _ = processSignaler(expectedPID, SIGCONT)
+        }
+        var shouldResume = true
+        defer {
+            if shouldResume {
+                resumeIfStillLoaded()
+            }
+        }
+
+        let frozen = try commandRunner(launchctl, ["print", serviceTarget])
+        try requireLoadedAgent(
+            frozen,
+            launchAgentData: expectedLaunchAgentData,
+            expectedPID: expectedPID,
+            configuration: configuration
+        )
+
+        let bootout = try commandRunner(launchctl, ["bootout", serviceTarget])
+        if bootout.exitCode != 0 {
+            let afterBootout = try commandRunner(launchctl, ["print", serviceTarget])
+            if afterBootout.exitCode == 0 {
+                try requireLoadedAgent(
+                    afterBootout,
+                    launchAgentData: expectedLaunchAgentData,
+                    expectedPID: expectedPID,
+                    configuration: configuration
+                )
+                throw DaemonLaunchError.launchctlFailed(lastLine(of: bootout.output))
+            }
+            shouldResume = false
+            return
+        }
+
+        for attempt in 0..<20 {
+            let result = try commandRunner(launchctl, ["print", serviceTarget])
+            if result.exitCode != 0 {
+                shouldResume = false
+                return
+            }
+            if attempt < 19 {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        throw DaemonLaunchError.launchctlFailed("后台服务未在预期时间内停止。")
     }
 
     private static func writeLaunchAgent(
@@ -536,6 +1712,53 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         } catch {
             throw DaemonLaunchError.launchAgentWriteFailed
         }
+    }
+
+    private static func writeLaunchAgentData(
+        _ data: Data,
+        to launchAgentURL: URL,
+        logURL: URL,
+        fileManager: FileManager
+    ) throws {
+        do {
+            try fileManager.createDirectory(
+                at: launchAgentURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try fileManager.createDirectory(
+                at: logURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: launchAgentURL, options: .atomic)
+        } catch {
+            throw DaemonLaunchError.launchAgentWriteFailed
+        }
+    }
+
+    private static func unloadAgent(
+        launchctl: URL,
+        serviceTarget: String,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        let bootout = try commandRunner(launchctl, ["bootout", serviceTarget])
+        if bootout.exitCode != 0 {
+            let afterBootout = try commandRunner(launchctl, ["print", serviceTarget])
+            guard afterBootout.exitCode != 0 else {
+                throw DaemonLaunchError.launchctlFailed(lastLine(of: bootout.output))
+            }
+            return
+        }
+
+        for attempt in 0..<20 {
+            let result = try commandRunner(launchctl, ["print", serviceTarget])
+            if result.exitCode != 0 {
+                return
+            }
+            if attempt < 19 {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        throw DaemonLaunchError.launchctlFailed("后台服务未在预期时间内停止。")
     }
 
     private static func runCommand(_ executable: URL, _ arguments: [String]) throws -> CommandResult {

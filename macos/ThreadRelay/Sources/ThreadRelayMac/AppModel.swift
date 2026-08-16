@@ -44,6 +44,7 @@ final class AppModel: ObservableObject {
     @Published var managementOperationError: String?
     @Published var actionFeedback: ActionFeedback?
     @Published private(set) var daemonRecoveryInProgress = false
+    @Published private(set) var daemonTransitionInProgress = false
     @Published var daemonRecoveryError: String?
     @Published private(set) var availableUpdate: AvailableUpdate?
     @Published var updateNoticeDismissed = false
@@ -51,6 +52,10 @@ final class AppModel: ObservableObject {
     private let apiClient: APIClient
     private let daemonLauncher: any DaemonLaunching
     private let fixtureStatus: ServiceStatus?
+    private let guiBuildLoader: @Sendable () -> String?
+    private let daemonReplacementAttemptLimit: Int
+    private let daemonReplacementPollDelay: Duration
+    private let daemonReplacementStableProbeCount: Int
     private var refreshInFlight = false
     private var launchAttempted = false
     private var daemonRuntimePreparedBuild: String?
@@ -68,6 +73,10 @@ final class AppModel: ObservableObject {
     private var daemonAutoRestartNotBefore: Date?
     private var startupUpdateCheckScheduled = false
     private var lifecycleLeaseTask: Task<Void, Never>?
+    private var daemonRuntimeSwitchRecoveryChecked = false
+    private var pendingDaemonRuntimeSwitch: DaemonRuntimeSwitch?
+    private var daemonRuntimeSwitchOperationInProgress = false
+    private var daemonTransitionGeneration: UInt64 = 0
     private let installationId: String
     private static let sub2ApiAccountPoolCacheLifetime: TimeInterval = 5 * 60
     private var sub2ApiAccountPoolGeneration: UInt64 = 0
@@ -136,13 +145,12 @@ final class AppModel: ObservableObject {
 
     var daemonBuildMismatch: Bool {
         guard let daemonBuild = lifecycle?.runtime.buildNumber else { return false }
-        let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-        return Self.buildNumbersMismatch(guiBuild: guiBuild, daemonBuild: daemonBuild)
+        return Self.buildNumbersMismatch(guiBuild: guiBuildLoader(), daemonBuild: daemonBuild)
     }
 
     var daemonUpgradePending: Bool {
         guard let lifecycle,
-              let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+              let guiBuild = guiBuildLoader()
         else { return false }
         return Self.daemonRequiresUpgrade(
             guiBuild: guiBuild,
@@ -152,14 +160,14 @@ final class AppModel: ObservableObject {
 
     var daemonUpgradePrepared: Bool {
         guard daemonUpgradePending,
-              let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+              let guiBuild = guiBuildLoader()
         else { return false }
         return daemonRuntimePreparedBuild == guiBuild
     }
 
     var daemonUpgradeDetail: String {
         Self.daemonUpgradeDetailText(
-            guiBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+            guiBuild: guiBuildLoader(),
             daemonBuild: lifecycle?.runtime.buildNumber,
             prepared: daemonUpgradePrepared
         )
@@ -217,11 +225,21 @@ final class AppModel: ObservableObject {
     init(
         apiClient: APIClient = APIClient(),
         daemonLauncher: any DaemonLaunching = DaemonLauncher(),
-        fixtureStatus: ServiceStatus? = nil
+        fixtureStatus: ServiceStatus? = nil,
+        guiBuildLoader: @escaping @Sendable () -> String? = {
+            Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        },
+        daemonReplacementAttemptLimit: Int = 80,
+        daemonReplacementPollDelay: Duration = .milliseconds(250),
+        daemonReplacementStableProbeCount: Int = 3
     ) {
         self.apiClient = apiClient
         self.daemonLauncher = daemonLauncher
         self.fixtureStatus = fixtureStatus
+        self.guiBuildLoader = guiBuildLoader
+        self.daemonReplacementAttemptLimit = max(1, daemonReplacementAttemptLimit)
+        self.daemonReplacementPollDelay = daemonReplacementPollDelay
+        self.daemonReplacementStableProbeCount = max(1, daemonReplacementStableProbeCount)
         self.installationId = Self.loadInstallationID()
     }
 
@@ -269,9 +287,21 @@ final class AppModel: ObservableObject {
     var isWindowVisible: Bool { windowVisible }
 
     func refresh() async {
-        guard !refreshInFlight else { return }
+        guard !refreshInFlight, !daemonRuntimeSwitchOperationInProgress else { return }
         refreshInFlight = true
-        defer { refreshInFlight = false }
+        let recoveringRuntimeSwitch = await beginRuntimeSwitchRecoveryIfNeeded()
+        defer {
+            refreshInFlight = false
+            if recoveringRuntimeSwitch {
+                let recoveryStillPending = pendingDaemonRuntimeSwitch != nil
+                daemonTransitionInProgress = recoveryStillPending
+                if recoveryStillPending {
+                    stopLifecycleLeaseHeartbeat()
+                } else if ownsDaemonLease {
+                    startLifecycleLeaseHeartbeat()
+                }
+            }
+        }
 
         // Preview runs use deterministic state and must never contact or
         // change the user's daemon.
@@ -292,11 +322,17 @@ final class AppModel: ObservableObject {
         case let .success(probe):
             daemonHealthFailureCount = 0
             await loadServiceStatus(probe: probe)
+            if recoveringRuntimeSwitch {
+                await finishRuntimeSwitchRecoveryIfPossible()
+            }
         case let .failure(error):
             serviceStatus = .unavailable(userFacingMessage(for: error))
             imAccountsAvailability = .unavailable(userFacingMessage(for: error))
             dashboardState = dashboard == nil ? .offline : .stale
             registerDaemonProbeFailure(error)
+            if recoveringRuntimeSwitch {
+                await finishRuntimeSwitchRecoveryWithoutProbe()
+            }
         }
         lastCheckedAt = Date()
     }
@@ -313,6 +349,7 @@ final class AppModel: ObservableObject {
         daemonHealthFailureCount += 1
         guard fixtureStatus == nil,
               !daemonRecoveryInProgress,
+              !daemonTransitionInProgress,
               Self.daemonAutoRestartReady(
                   failures: daemonHealthFailureCount,
                   now: Date(),
@@ -363,6 +400,7 @@ final class AppModel: ObservableObject {
     }
 
     private func loadServiceStatus(probe: ServiceProbe) async {
+        let transitionGeneration = daemonTransitionGeneration
         switch probe {
         case let .versioned(health):
             serviceStatus = health.ready ? .available : .unavailable("服务正在启动")
@@ -371,12 +409,20 @@ final class AppModel: ObservableObject {
                 return
             }
             do {
-                dashboard = try await apiClient.dashboard()
-                lifecycle = try? await apiClient.lifecycle()
-                if let lifecycle {
+                let loadedDashboard = try await apiClient.dashboard()
+                guard transitionGeneration == daemonTransitionGeneration else { return }
+                dashboard = loadedDashboard
+                let loadedLifecycle = try? await apiClient.lifecycle()
+                guard transitionGeneration == daemonTransitionGeneration else { return }
+                lifecycle = loadedLifecycle
+                if let lifecycle, !daemonTransitionInProgress {
                     await prepareDaemonRuntimeIfNeeded(lifecycle)
                 }
-                await reconcileLifecycleLease()
+                if daemonTransitionInProgress {
+                    stopLifecycleLeaseHeartbeat()
+                } else {
+                    await reconcileLifecycleLease()
+                }
                 settings = try? await apiClient.settings()
                 // Account details were added after the first versioned
                 // dashboard. Keep the dashboard usable when an older daemon
@@ -427,11 +473,12 @@ final class AppModel: ObservableObject {
     }
 
     private func prepareDaemonRuntimeIfNeeded(_ lifecycle: ManageLifecycle) async {
-        guard Self.daemonRequiresUpgrade(
-            guiBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+        guard !daemonTransitionInProgress,
+              Self.daemonRequiresUpgrade(
+            guiBuild: guiBuildLoader(),
             daemonBuild: lifecycle.runtime.buildNumber
         ),
-        let guiBuild = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+        let guiBuild = guiBuildLoader(),
         daemonRuntimePreparedBuild != guiBuild
         else { return }
 
@@ -443,6 +490,123 @@ final class AppModel: ObservableObject {
             daemonRecoveryError = error.localizedDescription
         } catch {
             daemonRecoveryError = userFacingMessage(for: error)
+        }
+    }
+
+    private func beginRuntimeSwitchRecoveryIfNeeded() async -> Bool {
+        guard fixtureStatus == nil else { return false }
+        if pendingDaemonRuntimeSwitch != nil {
+            daemonTransitionInProgress = true
+            stopLifecycleLeaseHeartbeat()
+            return true
+        }
+        guard !daemonRuntimeSwitchRecoveryChecked else { return false }
+        daemonRuntimeSwitchRecoveryChecked = true
+        daemonTransitionGeneration &+= 1
+        daemonTransitionInProgress = true
+        stopLifecycleLeaseHeartbeat()
+        do {
+            guard let transaction = try await daemonLauncher.loadPendingRuntimeSwitch() else {
+                daemonTransitionInProgress = false
+                daemonRecoveryError = nil
+                return false
+            }
+            pendingDaemonRuntimeSwitch = transaction
+            daemonTransitionInProgress = true
+            stopLifecycleLeaseHeartbeat()
+            dashboardState = .starting
+            serviceStatus = .checking
+            return true
+        } catch DaemonLaunchError.runtimeSwitchBusy {
+            daemonRuntimeSwitchRecoveryChecked = false
+            daemonRecoveryError = DaemonLaunchError.runtimeSwitchBusy.localizedDescription
+            return false
+        } catch {
+            daemonRuntimeSwitchRecoveryChecked = false
+            daemonRecoveryError = "无法恢复上次后台服务切换：\(userFacingMessage(for: error))"
+            return false
+        }
+    }
+
+    private func finishRuntimeSwitchRecoveryIfPossible() async {
+        guard let transaction = pendingDaemonRuntimeSwitch else { return }
+        let journal = transaction.journal
+        do {
+            var recovered: ManageLifecycle?
+            var recoveredCandidate = false
+            var restoredPrevious = false
+            switch journal.phase {
+            case .candidateStarted, .committed:
+                if let candidate = try await waitForDaemonIdentity(
+                    expectedBuild: Int(journal.candidateBuild),
+                    expectedExecutable: journal.candidateProgramPath
+                ) {
+                    if candidate.runtime.state == "draining" {
+                        recovered = try await commitCandidateRuntimeIfNeeded(
+                            candidate,
+                            expectedLeaseGeneration: candidate.management.leaseGeneration
+                        )
+                    } else {
+                        guard candidate.management.canControl else {
+                            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+                        }
+                        recovered = candidate
+                    }
+                    recoveredCandidate = true
+                } else {
+                    recovered = try await restorePreviousRuntime(transaction)
+                    restoredPrevious = true
+                }
+            case .rollingBack:
+                recovered = try await restorePreviousRuntime(transaction)
+                restoredPrevious = true
+            case .rolledBack:
+                recovered = try await waitForDaemonIdentity(
+                    expectedBuild: Int(journal.previousBuild),
+                    expectedExecutable: journal.previousProgramPath
+                )
+                restoredPrevious = true
+            case .prepared, .freezingPrevious, .previousStopped:
+                recovered = try await restorePreviousRuntime(transaction)
+                restoredPrevious = true
+            }
+            guard let recovered else {
+                throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+            }
+            try Task.checkCancellation()
+            try await daemonLauncher.commitRuntimeSwitch(transaction)
+            pendingDaemonRuntimeSwitch = nil
+            daemonRecoveryError = nil
+            if let claimed = try await claimLifecycleForRecoveryWait(recovered) {
+                lifecycle = claimed
+            } else {
+                lifecycle = recovered
+            }
+            if recoveredCandidate {
+                daemonRuntimePreparedBuild = nil
+                actionFeedback = ActionFeedback(
+                    message: "已恢复并完成后台构建 \(journal.candidateBuild) 的切换"
+                )
+            } else if restoredPrevious {
+                actionFeedback = ActionFeedback(message: "后台服务已恢复到上一版本")
+            }
+        } catch {
+            daemonRecoveryError = "后台服务切换记录仍需恢复：\(userFacingMessage(for: error))"
+        }
+    }
+
+    private func finishRuntimeSwitchRecoveryWithoutProbe() async {
+        guard let transaction = pendingDaemonRuntimeSwitch else { return }
+        do {
+            let restored = try await restorePreviousRuntime(transaction)
+            try Task.checkCancellation()
+            try await daemonLauncher.commitRuntimeSwitch(transaction)
+            pendingDaemonRuntimeSwitch = nil
+            lifecycle = try await reclaimLifecycle(restored)
+            daemonRecoveryError = nil
+            actionFeedback = ActionFeedback(message: "后台服务已恢复到上一版本")
+        } catch {
+            daemonRecoveryError = "后台服务切换恢复尚未完成：\(userFacingMessage(for: error))"
         }
     }
 
@@ -470,7 +634,7 @@ final class AppModel: ObservableObject {
     }
 
     private func reconcileLifecycleLease() async {
-        guard fixtureStatus == nil, let lifecycle else {
+        guard fixtureStatus == nil, !daemonTransitionInProgress, let lifecycle else {
             stopLifecycleLeaseHeartbeat()
             return
         }
@@ -483,10 +647,16 @@ final class AppModel: ObservableObject {
             return
         }
         do {
+            let transitionGeneration = daemonTransitionGeneration
+            let instanceId = lifecycle.service.instanceId
             let claimed = try await apiClient.claimLifecycleLease(
                 installationId: installationId,
-                daemonInstanceId: lifecycle.service.instanceId
+                daemonInstanceId: instanceId
             )
+            guard transitionGeneration == daemonTransitionGeneration,
+                  !daemonTransitionInProgress,
+                  self.lifecycle?.service.instanceId == instanceId
+            else { return }
             self.lifecycle = claimed
             startLifecycleLeaseHeartbeat()
         } catch {
@@ -497,7 +667,7 @@ final class AppModel: ObservableObject {
     }
 
     private func startLifecycleLeaseHeartbeat() {
-        guard lifecycleLeaseTask == nil else { return }
+        guard lifecycleLeaseTask == nil, !daemonTransitionInProgress else { return }
         lifecycleLeaseTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
@@ -517,18 +687,34 @@ final class AppModel: ObservableObject {
     }
 
     private func renewLifecycleLease() async {
-        guard ownsDaemonLease, let instanceId = lifecycle?.service.instanceId else {
+        guard !daemonTransitionInProgress,
+              ownsDaemonLease,
+              let instanceId = lifecycle?.service.instanceId
+        else {
             stopLifecycleLeaseHeartbeat()
             return
         }
+        let transitionGeneration = daemonTransitionGeneration
         do {
-            lifecycle = try await apiClient.renewLifecycleLease(
+            let renewed = try await apiClient.renewLifecycleLease(
                 installationId: installationId,
                 daemonInstanceId: instanceId
             )
+            guard transitionGeneration == daemonTransitionGeneration,
+                  !daemonTransitionInProgress,
+                  lifecycle?.service.instanceId == instanceId
+            else { return }
+            lifecycle = renewed
         } catch {
+            guard transitionGeneration == daemonTransitionGeneration,
+                  !daemonTransitionInProgress
+            else { return }
             stopLifecycleLeaseHeartbeat()
-            lifecycle = try? await apiClient.lifecycle()
+            let refreshed = try? await apiClient.lifecycle()
+            guard transitionGeneration == daemonTransitionGeneration,
+                  !daemonTransitionInProgress
+            else { return }
+            lifecycle = refreshed
         }
     }
 
@@ -1272,7 +1458,10 @@ final class AppModel: ObservableObject {
     /// Manually (re)starts the local daemon. Unlike the automatic launch path
     /// this is not limited to a single attempt per app lifetime.
     func startDaemonManually() async {
-        guard fixtureStatus == nil, !daemonRecoveryInProgress else { return }
+        guard fixtureStatus == nil,
+              !daemonRecoveryInProgress,
+              !daemonTransitionInProgress
+        else { return }
         daemonRecoveryInProgress = true
         defer { daemonRecoveryInProgress = false }
         daemonRecoveryError = nil
@@ -1294,45 +1483,467 @@ final class AppModel: ObservableObject {
     }
 
     func restartDaemon() async {
-        guard fixtureStatus == nil, ownsDaemonLease,
-              let lifecycle,
-              let leaseGeneration = lifecycle.management.leaseGeneration
+        guard fixtureStatus == nil,
+              !daemonTransitionInProgress,
+              ownsDaemonLease,
+              let lifecycle
         else {
             managementOperationError = "当前界面没有后台服务管理权。"
             return
         }
-        let instanceId = lifecycle.service.instanceId
-        managementOperationError = nil
-        do {
-            let response = try await apiClient.restartLifecycle(
-                installationId: installationId,
-                daemonInstanceId: instanceId,
-                leaseGeneration: leaseGeneration
-            )
-            guard response.ok else {
-                throw APIClientError.operationFailed("后台服务没有接受重启请求。")
+        daemonTransitionInProgress = true
+        daemonTransitionGeneration &+= 1
+        daemonRuntimeSwitchOperationInProgress = true
+        stopLifecycleLeaseHeartbeat()
+        defer {
+            daemonRuntimeSwitchOperationInProgress = false
+            let recoveryStillPending = pendingDaemonRuntimeSwitch != nil
+            daemonTransitionInProgress = recoveryStillPending
+            if recoveryStillPending {
+                stopLifecycleLeaseHeartbeat()
+            } else if ownsDaemonLease {
+                startLifecycleLeaseHeartbeat()
             }
-            actionFeedback = ActionFeedback(message: "正在安全重启本地服务")
-            dashboardState = .starting
-            serviceStatus = .checking
-            _ = await waitForDaemonReplacement(previousInstanceId: instanceId)
-            await refresh()
+        }
+
+        let previousInstanceId = lifecycle.service.instanceId
+        let guiBuild = guiBuildLoader()
+        let targetBuild = Self.daemonRequiresUpgrade(
+            guiBuild: guiBuild,
+            daemonBuild: lifecycle.runtime.buildNumber
+        ) ? guiBuild : nil
+        let targetExecutable = targetBuild.map {
+            URL(fileURLWithPath: lifecycle.configPath)
+                .deletingLastPathComponent()
+                .appendingPathComponent("runtimes", isDirectory: true)
+                .appendingPathComponent($0, isDirectory: true)
+                .appendingPathComponent("threadrelay-daemon")
+                .standardizedFileURL.path
+        }
+        managementOperationError = nil
+        actionFeedback = ActionFeedback(
+            message: targetBuild == nil ? "正在安全重启本地服务" : "正在切换后台服务版本"
+        )
+        dashboardState = .starting
+        serviceStatus = .checking
+
+        var transaction: DaemonRuntimeSwitch?
+        do {
+            if let targetBuild {
+                let activeTransaction = try await daemonLauncher.prepareRuntimeSwitch(
+                    expectedPID: try daemonPID(lifecycle),
+                    expectedInstanceId: lifecycle.service.instanceId,
+                    expectedExecutable: lifecycle.executable
+                )
+                transaction = activeTransaction
+                pendingDaemonRuntimeSwitch = activeTransaction
+                daemonRuntimePreparedBuild = targetBuild
+                do {
+                    try await drainAndActivateRuntimeSwitch(
+                        activeTransaction,
+                        startingWith: lifecycle
+                    )
+                } catch {
+                    let restored = try await restorePreviousRuntime(activeTransaction)
+                    self.lifecycle = try await reclaimLifecycle(restored)
+                    markDaemonReachable()
+                    try await daemonLauncher.commitRuntimeSwitch(activeTransaction)
+                    self.transactionDidFinish(activeTransaction)
+                    actionFeedback = nil
+                    managementOperationError = "新后台服务启动失败，已恢复上一版本：\(userFacingMessage(for: error))"
+                    return
+                }
+
+                guard let replacement = try await waitForDaemonReplacement(
+                    previousInstanceId: previousInstanceId,
+                    expectedBuild: Int(targetBuild),
+                    expectedExecutable: targetExecutable
+                ) else {
+                    let restored = try await restorePreviousRuntime(activeTransaction)
+                    self.lifecycle = try await reclaimLifecycle(restored)
+                    markDaemonReachable()
+                    try await daemonLauncher.commitRuntimeSwitch(activeTransaction)
+                    self.transactionDidFinish(activeTransaction)
+                    actionFeedback = nil
+                    managementOperationError = "新后台服务未能通过连续健康校验，已恢复上一版本。"
+                    return
+                }
+
+                do {
+                    let committed = try await commitCandidateRuntimeIfNeeded(
+                        replacement,
+                        expectedLeaseGeneration: lifecycle.management.leaseGeneration
+                    )
+                    try await daemonLauncher.commitRuntimeSwitch(activeTransaction)
+                    self.transactionDidFinish(activeTransaction)
+                    self.lifecycle = committed
+                    markDaemonReachable()
+                    daemonRuntimePreparedBuild = nil
+                    actionFeedback = ActionFeedback(message: "后台服务已升级到构建 \(targetBuild)")
+                } catch {
+                    // A candidate can be healthy but still fail the final
+                    // authenticated commit (or the local plist commit). Keep
+                    // the journal and converge back to the previous runtime.
+                    let failure = error
+                    do {
+                        let restored = try await restorePreviousRuntime(activeTransaction)
+                        self.lifecycle = try await reclaimLifecycle(restored)
+                        markDaemonReachable()
+                        try await daemonLauncher.commitRuntimeSwitch(activeTransaction)
+                        self.transactionDidFinish(activeTransaction)
+                        actionFeedback = nil
+                        managementOperationError =
+                            "新后台服务提交失败，已恢复上一版本：\(userFacingMessage(for: failure))"
+                    } catch {
+                        throw error
+                    }
+                }
+            } else {
+                try await requestLifecycleRestart(lifecycle)
+                guard let replacement = try await waitForDaemonReplacement(
+                    previousInstanceId: previousInstanceId
+                ) else {
+                    actionFeedback = nil
+                    managementOperationError = "后台服务未能在预期时间内恢复。"
+                    return
+                }
+                self.lifecycle = try await reclaimLifecycle(replacement)
+                markDaemonReachable()
+                actionFeedback = ActionFeedback(message: "后台服务已安全重启")
+            }
         } catch {
+            if let transaction,
+               transaction.journal.phase == .prepared
+                    || transaction.journal.phase == .freezingPrevious
+            {
+                if (try? await daemonLauncher.cancelRuntimeSwitch(transaction)) != nil {
+                    transactionDidFinish(transaction)
+                }
+            }
+            actionFeedback = nil
             managementOperationError = userFacingMessage(for: error)
         }
     }
 
-    private func waitForDaemonReplacement(previousInstanceId: String) async -> Bool {
-        for attempt in 0..<80 {
-            if let current = try? await apiClient.lifecycle(),
-               current.service.instanceId != previousInstanceId
-            {
-                return true
-            }
-            guard attempt < 79 else { return false }
-            try? await Task.sleep(for: .milliseconds(250))
+    private func transactionDidFinish(_ transaction: DaemonRuntimeSwitch) {
+        if pendingDaemonRuntimeSwitch === transaction {
+            pendingDaemonRuntimeSwitch = nil
         }
-        return false
+    }
+
+    private func daemonPID(_ lifecycle: ManageLifecycle) throws -> Int32 {
+        guard let pid = Int32(exactly: lifecycle.service.pid), pid > 0 else {
+            throw DaemonLaunchError.loadedAgentUntrusted(lifecycle.executable)
+        }
+        return pid
+    }
+
+    private func requestLifecycleRestart(_ lifecycle: ManageLifecycle) async throws {
+        guard let leaseGeneration = lifecycle.management.leaseGeneration else {
+            throw APIClientError.operationFailed("后台服务管理租约已失效。")
+        }
+        let response = try await apiClient.restartLifecycle(
+            installationId: installationId,
+            daemonInstanceId: lifecycle.service.instanceId,
+            leaseGeneration: leaseGeneration
+        )
+        guard response.ok else {
+            throw APIClientError.operationFailed("后台服务没有接受重启请求。")
+        }
+    }
+
+    private func commitCandidateRuntimeIfNeeded(
+        _ candidate: ManageLifecycle,
+        expectedLeaseGeneration: Int64?
+    ) async throws -> ManageLifecycle {
+        guard candidate.runtime.state == "draining" else {
+            guard candidate.management.canControl else {
+                throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+            }
+            return candidate
+        }
+        guard let leaseGeneration = expectedLeaseGeneration, leaseGeneration >= 0 else {
+            throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+        }
+        return try await apiClient.commitRuntimeSwitch(
+            installationId: installationId,
+            daemonInstanceId: candidate.service.instanceId,
+            leaseGeneration: leaseGeneration
+        )
+    }
+
+    private func reclaimLifecycle(_ lifecycle: ManageLifecycle) async throws -> ManageLifecycle {
+        try await claimLifecycleForRecoveryWait(lifecycle) ?? lifecycle
+    }
+
+    private func markDaemonReachable() {
+        serviceStatus = .available
+        dashboardState = dashboard == nil ? .loading : .stale
+        lastCheckedAt = Date()
+    }
+
+    private func drainAndActivateRuntimeSwitch(
+        _ transaction: DaemonRuntimeSwitch,
+        startingWith lifecycle: ManageLifecycle
+    ) async throws {
+        var current = lifecycle
+        for attempt in 0..<3 {
+            try await requestLifecycleRestart(current)
+            do {
+                try await daemonLauncher.activatePreparedRuntime(
+                    transaction,
+                    expectedPID: try daemonPID(current),
+                    expectedExecutable: current.executable
+                )
+                return
+            } catch DaemonLaunchError.daemonProcessChanged {
+                guard attempt < 2 else {
+                    throw DaemonLaunchError.runtimeSwitchFailed(
+                        "后台进程连续变化，切换已暂停。"
+                    )
+                }
+                current = try await waitForClaimedDaemon(
+                    expectedBuild: Int(transaction.journal.previousBuild),
+                    expectedExecutable: transaction.journal.previousProgramPath
+                )
+            }
+        }
+    }
+
+    private func waitForClaimedDaemon(
+        expectedBuild: Int?,
+        expectedExecutable: String
+    ) async throws -> ManageLifecycle {
+        for attempt in 0..<daemonReplacementAttemptLimit {
+            try Task.checkCancellation()
+            if let current = try await lifecycleForRecoveryWait(),
+               Self.daemonIdentityMatches(
+                   current,
+                   expectedBuild: expectedBuild,
+                   expectedExecutable: expectedExecutable
+               ),
+               let claimed = try await claimLifecycleForRecoveryWait(current)
+            {
+                return claimed
+            }
+            guard attempt < daemonReplacementAttemptLimit - 1 else {
+                try Task.checkCancellation()
+                break
+            }
+            try await Task.sleep(for: daemonReplacementPollDelay)
+        }
+        try Task.checkCancellation()
+        throw DaemonLaunchError.runtimeSwitchFailed("无法重新取得后台服务管理权。")
+    }
+
+    private func restorePreviousRuntime(
+        _ transaction: DaemonRuntimeSwitch
+    ) async throws -> ManageLifecycle {
+        let journal = transaction.journal
+        for attempt in 0..<3 {
+            if let current = try await lifecycleForRecoveryWait() {
+                if Self.daemonIdentityMatches(
+                    current,
+                    expectedBuild: Int(journal.previousBuild),
+                    expectedExecutable: journal.previousProgramPath
+                ) {
+                    try Task.checkCancellation()
+                    try await daemonLauncher.rollbackRuntime(
+                        transaction,
+                        expectedPID: try daemonPID(current),
+                        expectedExecutable: current.executable
+                    )
+                    break
+                }
+                guard Self.pathsMatch(current.executable, journal.candidateProgramPath) else {
+                    throw DaemonLaunchError.runtimeSwitchRecoveryRequired
+                }
+                let claimed = try await apiClient.claimLifecycleLease(
+                    installationId: installationId,
+                    daemonInstanceId: current.service.instanceId
+                )
+                try await requestLifecycleRestart(claimed)
+                do {
+                    try Task.checkCancellation()
+                    try await daemonLauncher.rollbackRuntime(
+                        transaction,
+                        expectedPID: try daemonPID(claimed),
+                        expectedExecutable: claimed.executable
+                    )
+                    break
+                } catch DaemonLaunchError.daemonProcessChanged {
+                    guard attempt < 2 else { throw DaemonLaunchError.runtimeSwitchRecoveryRequired }
+                    continue
+                }
+            } else {
+                try Task.checkCancellation()
+                try await daemonLauncher.rollbackRuntime(
+                    transaction,
+                    expectedPID: nil,
+                    expectedExecutable: nil
+                )
+                break
+            }
+        }
+        guard let restored = try await waitForDaemonIdentity(
+            expectedBuild: Int(journal.previousBuild),
+            expectedExecutable: journal.previousProgramPath
+        ) else {
+            throw DaemonLaunchError.runtimeRollbackFailed("上一版本未能连续通过健康校验。")
+        }
+        return restored
+    }
+
+    private func waitForDaemonReplacement(
+        previousInstanceId: String,
+        expectedBuild: Int? = nil,
+        expectedExecutable: String? = nil
+    ) async throws -> ManageLifecycle? {
+        var consecutiveMatches = 0
+        var stableService: ManageLifecycle.Service?
+        for attempt in 0..<daemonReplacementAttemptLimit {
+            try Task.checkCancellation()
+            if let current = try await lifecycleForRecoveryWait(), Self.daemonReplacementMatches(
+                   current,
+                   previousInstanceId: previousInstanceId,
+                   expectedBuild: expectedBuild,
+                   expectedExecutable: expectedExecutable
+               )
+            {
+                if stableService == current.service {
+                    consecutiveMatches += 1
+                } else {
+                    stableService = current.service
+                    consecutiveMatches = 1
+                }
+                if consecutiveMatches >= daemonReplacementStableProbeCount {
+                    return current
+                }
+            } else {
+                consecutiveMatches = 0
+                stableService = nil
+            }
+            guard attempt < daemonReplacementAttemptLimit - 1 else {
+                try Task.checkCancellation()
+                return nil
+            }
+            try await Task.sleep(for: daemonReplacementPollDelay)
+        }
+        try Task.checkCancellation()
+        return nil
+    }
+
+    private func waitForDaemonIdentity(
+        expectedBuild: Int?,
+        expectedExecutable: String
+    ) async throws -> ManageLifecycle? {
+        var consecutiveMatches = 0
+        var stableService: ManageLifecycle.Service?
+        for attempt in 0..<daemonReplacementAttemptLimit {
+            try Task.checkCancellation()
+            if let current = try await lifecycleForRecoveryWait(),
+               Self.daemonIdentityMatches(
+                   current,
+                   expectedBuild: expectedBuild,
+                   expectedExecutable: expectedExecutable
+               )
+            {
+                if stableService == current.service {
+                    consecutiveMatches += 1
+                } else {
+                    stableService = current.service
+                    consecutiveMatches = 1
+                }
+                if consecutiveMatches >= daemonReplacementStableProbeCount {
+                    return current
+                }
+            } else {
+                consecutiveMatches = 0
+                stableService = nil
+            }
+            guard attempt < daemonReplacementAttemptLimit - 1 else {
+                try Task.checkCancellation()
+                return nil
+            }
+            try await Task.sleep(for: daemonReplacementPollDelay)
+        }
+        try Task.checkCancellation()
+        return nil
+    }
+
+    /// Recovery polling treats ordinary daemon/API failures as a missing
+    /// observation, but cancellation must escape immediately. URLSession can
+    /// surface task cancellation as either CancellationError or
+    /// URLError(.cancelled), so check the task after every request as well.
+    private func lifecycleForRecoveryWait() async throws -> ManageLifecycle? {
+        try Task.checkCancellation()
+        do {
+            let lifecycle = try await apiClient.lifecycle()
+            try Task.checkCancellation()
+            return lifecycle
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            return nil
+        }
+    }
+
+    private func claimLifecycleForRecoveryWait(
+        _ lifecycle: ManageLifecycle
+    ) async throws -> ManageLifecycle? {
+        try Task.checkCancellation()
+        do {
+            let claimed = try await apiClient.claimLifecycleLease(
+                installationId: installationId,
+                daemonInstanceId: lifecycle.service.instanceId
+            )
+            try Task.checkCancellation()
+            return claimed
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            return nil
+        }
+    }
+
+    nonisolated static func daemonReplacementMatches(
+        _ lifecycle: ManageLifecycle,
+        previousInstanceId: String,
+        expectedBuild: Int?,
+        expectedExecutable: String?
+    ) -> Bool {
+        guard lifecycle.service.ready,
+              lifecycle.service.instanceId != previousInstanceId
+        else {
+            return false
+        }
+        if let expectedBuild, lifecycle.runtime.buildNumber != expectedBuild {
+            return false
+        }
+        if let expectedExecutable,
+           URL(fileURLWithPath: lifecycle.executable).standardizedFileURL.path
+            != URL(fileURLWithPath: expectedExecutable).standardizedFileURL.path
+        {
+            return false
+        }
+        return true
+    }
+
+    nonisolated static func daemonIdentityMatches(
+        _ lifecycle: ManageLifecycle,
+        expectedBuild: Int?,
+        expectedExecutable: String
+    ) -> Bool {
+        lifecycle.service.ready
+            && (expectedBuild == nil || lifecycle.runtime.buildNumber == expectedBuild)
+            && pathsMatch(lifecycle.executable, expectedExecutable)
+    }
+
+    nonisolated private static func pathsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        URL(fileURLWithPath: lhs).standardizedFileURL.resolvingSymlinksInPath().path
+            == URL(fileURLWithPath: rhs).standardizedFileURL.resolvingSymlinksInPath().path
     }
 
     /// Silently checks GitHub for a newer release once per app launch. The

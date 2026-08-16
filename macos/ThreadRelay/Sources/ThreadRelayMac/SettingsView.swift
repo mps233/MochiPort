@@ -186,8 +186,14 @@ struct SettingsView: View {
                     Button {
                         confirmsRestart = true
                     } label: {
-                        Label("安全重启后台服务", systemImage: "arrow.clockwise.circle")
+                        Label(
+                            model.daemonTransitionInProgress
+                                ? "正在切换后台服务"
+                                : "安全重启后台服务",
+                            systemImage: "arrow.clockwise.circle"
+                        )
                     }
+                    .disabled(model.daemonTransitionInProgress)
                 }
             }
         }

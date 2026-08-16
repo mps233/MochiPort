@@ -165,7 +165,7 @@ final class APIContractTests: XCTestCase {
         )
     }
 
-    func testDaemonLauncherStagesRuntimeAndUpdatesLoadedServiceWithoutRestart() async throws {
+    func testDaemonLauncherStagesRuntimeWithoutPublishingPlistForLoadedService() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let commands = CommandInvocationRecorder { arguments in
@@ -212,25 +212,8 @@ final class APIContractTests: XCTestCase {
                 .compactMap(\.first)
                 .contains(where: { ["bootout", "kickstart", "bootstrap"].contains($0) })
         )
-        let plistData = try Data(contentsOf: fixture.configuration.launchAgentURL)
-        let plist = try XCTUnwrap(
-            PropertyListSerialization.propertyList(from: plistData, options: [], format: nil)
-                as? [String: Any]
-        )
-        let environment = try XCTUnwrap(plist["EnvironmentVariables"] as? [String: String])
-        XCTAssertEqual(
-            environment["THREADRELAY_HOME"],
-            fixture.configuration.configURL.deletingLastPathComponent().path
-        )
-        XCTAssertEqual(environment["THREADRELAY_BUNDLE_BUILD"], "389")
-        XCTAssertEqual(
-            plist["ProgramArguments"] as? [String],
-            [
-                try fixture.configuration.stagedHelperURL().path,
-                "--config",
-                fixture.configuration.configURL.path,
-                "daemon",
-            ]
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.configuration.launchAgentURL.path)
         )
         XCTAssertEqual(
             try Data(contentsOf: fixture.configuration.stagedHelperURL()),
@@ -280,7 +263,7 @@ final class APIContractTests: XCTestCase {
                 .compactMap(\.first)
                 .contains(where: { ["bootout", "kickstart", "bootstrap"].contains($0) })
         )
-        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.configuration.launchAgentURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.configuration.launchAgentURL.path))
     }
 
     func testDaemonLauncherDoesNotReloadRunningServiceAfterBundleBuildChanges() async throws {
@@ -294,6 +277,7 @@ final class APIContractTests: XCTestCase {
             homeURL: fixture.configuration.homeURL,
             buildIdentifier: "390"
         )
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
         let commands = CommandInvocationRecorder { arguments in
             if arguments == ["--version"] {
                 return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 390)\n")
@@ -303,9 +287,9 @@ final class APIContractTests: XCTestCase {
                     exitCode: 0,
                     output: """
                     state = running
-                    program = \(configuration.helperURL.path)
+                    program = \(previous.path)
                     arguments = {
-                        \(configuration.helperURL.path)
+                        \(previous.path)
                         --config
                         \(configuration.configURL.path)
                         daemon
@@ -335,7 +319,7 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(
             plist["ProgramArguments"] as? [String],
             [
-                try configuration.stagedHelperURL().path,
+                previous.path,
                 "--config",
                 configuration.configURL.path,
                 "daemon",
@@ -343,7 +327,7 @@ final class APIContractTests: XCTestCase {
         )
         XCTAssertEqual(
             (plist["EnvironmentVariables"] as? [String: String])?["THREADRELAY_BUNDLE_BUILD"],
-            "390"
+            "388"
         )
     }
 
@@ -552,6 +536,1132 @@ final class APIContractTests: XCTestCase {
             XCTAssertEqual(error, .runtimeBuildIdentifierInvalid("../389"))
         }
         XCTAssertTrue(commands.arguments.isEmpty)
+    }
+
+    func testDaemonLauncherActivatesPreparedRuntimeAfterTrustedDaemonDrains() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let current = try fixture.configuration.stagedHelperURL()
+        let serviceLoaded = LockedValue(true)
+        let signals = SignalInvocationRecorder()
+        let oldOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388"
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            switch arguments.first {
+            case "print":
+                guard serviceLoaded.value else {
+                    return CommandResult(exitCode: 113, output: "service not found")
+                }
+                return CommandResult(
+                    exitCode: 0,
+                    output: oldOutput
+                )
+            case "bootout":
+                serviceLoaded.value = false
+                return CommandResult(exitCode: 0, output: "")
+            case "bootstrap":
+                serviceLoaded.value = true
+                return CommandResult(exitCode: 0, output: "")
+            default:
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        )
+
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+        try await launcher.activatePreparedRuntime(
+            transaction,
+            expectedPID: 123,
+            expectedExecutable: previous.path
+        )
+
+        XCTAssertEqual(
+            commands.arguments.map(\.first),
+            ["--version", "print", "print", "print", "print", "bootout", "print", "bootstrap"]
+        )
+        XCTAssertEqual(signals.signals.map(\.signal), [SIGSTOP])
+        XCTAssertEqual(transaction.journal.phase, .candidateStarted)
+        let plist = try daemonLaunchAgentPropertyList(at: fixture.configuration.launchAgentURL)
+        XCTAssertEqual((plist["ProgramArguments"] as? [String])?.first, current.path)
+        XCTAssertEqual(
+            (plist["EnvironmentVariables"] as? [String: String])?["THREADRELAY_BUNDLE_BUILD"],
+            "389"
+        )
+        let journalURL = fixture.configuration.configURL.deletingLastPathComponent()
+            .appendingPathComponent("threadrelay-runtime-switch.json")
+        let journalAttributes = try FileManager.default.attributesOfItem(atPath: journalURL.path)
+        XCTAssertEqual(
+            (journalAttributes[.posixPermissions] as? NSNumber)?.intValue,
+            0o600
+        )
+        try await launcher.commitRuntimeSwitch(transaction)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: journalURL.path)
+        )
+    }
+
+    func testDaemonLauncherRestoresPreviousRuntimeWhenNewBootstrapFails() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let serviceLoaded = LockedValue(true)
+        let bootstrapCount = IntCounter()
+        let signals = SignalInvocationRecorder()
+        let oldOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388"
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            switch arguments.first {
+            case "print":
+                guard serviceLoaded.value else {
+                    return CommandResult(exitCode: 113, output: "service not found")
+                }
+                return CommandResult(
+                    exitCode: 0,
+                    output: oldOutput
+                )
+            case "bootout":
+                serviceLoaded.value = false
+                return CommandResult(exitCode: 0, output: "")
+            case "bootstrap":
+                let attempt = bootstrapCount.next()
+                serviceLoaded.value = attempt > 1
+                return CommandResult(
+                    exitCode: attempt == 1 ? 5 : 0,
+                    output: attempt == 1 ? "candidate exited" : ""
+                )
+            default:
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        )
+
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+
+        do {
+            try await launcher.activatePreparedRuntime(
+                transaction,
+                expectedPID: 123,
+                expectedExecutable: previous.path
+            )
+            XCTFail("Expected candidate bootstrap to fail")
+        } catch let error as DaemonLaunchError {
+            guard case .runtimeSwitchFailed = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(transaction.journal.phase, .previousStopped)
+        try await launcher.rollbackRuntime(
+            transaction,
+            expectedPID: nil,
+            expectedExecutable: nil
+        )
+        XCTAssertEqual(transaction.journal.phase, .rolledBack)
+        try await launcher.commitRuntimeSwitch(transaction)
+
+        let plist = try daemonLaunchAgentPropertyList(at: fixture.configuration.launchAgentURL)
+        XCTAssertEqual((plist["ProgramArguments"] as? [String])?.first, previous.path)
+        XCTAssertEqual(
+            (plist["EnvironmentVariables"] as? [String: String])?["THREADRELAY_BUNDLE_BUILD"],
+            "388"
+        )
+        XCTAssertEqual(bootstrapCount.next(), 3)
+        XCTAssertEqual(signals.signals.map(\.signal), [SIGSTOP])
+    }
+
+    func testDaemonLauncherKeepsPreviousRuntimeWhenBootoutFails() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let signals = SignalInvocationRecorder()
+        let oldOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388"
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 0, output: oldOutput)
+            }
+            if arguments.first == "bootout" {
+                return CommandResult(exitCode: 5, output: "operation not permitted")
+            }
+            return CommandResult(exitCode: 1, output: "must not bootstrap")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        )
+
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+
+        do {
+            try await launcher.activatePreparedRuntime(
+                transaction,
+                expectedPID: 123,
+                expectedExecutable: previous.path
+            )
+            XCTFail("Expected bootout failure")
+        } catch let error as DaemonLaunchError {
+            guard case .runtimeSwitchFailed = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(transaction.journal.phase, .freezingPrevious)
+        try await launcher.cancelRuntimeSwitch(transaction)
+
+        let plist = try daemonLaunchAgentPropertyList(at: fixture.configuration.launchAgentURL)
+        XCTAssertEqual((plist["ProgramArguments"] as? [String])?.first, previous.path)
+        XCTAssertFalse(commands.arguments.compactMap(\.first).contains("bootstrap"))
+        XCTAssertEqual(signals.signals.map(\.signal), [SIGSTOP, SIGCONT, SIGCONT])
+    }
+
+    func testDaemonLauncherRefusesToSwitchAnUntrustedLoadedProgram() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let foreign = fixture.root.appendingPathComponent("foreign/threadrelay-daemon")
+        let foreignOutput = launchctlOutput(
+            program: foreign,
+            configuration: fixture.configuration,
+            build: "388"
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return CommandResult(
+                    exitCode: 0,
+                    output: foreignOutput
+                )
+            }
+            return CommandResult(exitCode: 1, output: "must not mutate launchd")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        do {
+            _ = try await launcher.prepareRuntimeSwitch(
+                expectedPID: 123,
+                expectedInstanceId: "old-instance",
+                expectedExecutable: previous.path
+            )
+            XCTFail("Expected an untrusted process to be rejected")
+        } catch let error as DaemonLaunchError {
+            guard case .loadedAgentUntrusted = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+
+        XCTAssertEqual(commands.arguments.map(\.first), ["--version", "print"])
+    }
+
+    func testDaemonLauncherRejectsPIDChangeBeforeFreezeWithoutMutatingJob() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let printCount = IntCounter()
+        let signals = SignalInvocationRecorder()
+        let initialOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388",
+            pid: 123
+        )
+        let replacedOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388",
+            pid: 124
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return CommandResult(
+                    exitCode: 0,
+                    output: printCount.next() == 1 ? initialOutput : replacedOutput
+                )
+            }
+            return CommandResult(exitCode: 1, output: "must not mutate launchd")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        )
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+
+        do {
+            try await launcher.activatePreparedRuntime(
+                transaction,
+                expectedPID: 123,
+                expectedExecutable: previous.path
+            )
+            XCTFail("Expected the replaced PID to abort the cutover")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(error, .daemonProcessChanged(expected: 123, actual: 124))
+        }
+
+        XCTAssertTrue(signals.signals.isEmpty)
+        XCTAssertFalse(commands.arguments.compactMap(\.first).contains("bootout"))
+        XCTAssertEqual(transaction.journal.phase, .prepared)
+        try await launcher.cancelRuntimeSwitch(transaction)
+        let plist = try daemonLaunchAgentPropertyList(at: fixture.configuration.launchAgentURL)
+        XCTAssertEqual((plist["ProgramArguments"] as? [String])?.first, previous.path)
+    }
+
+    func testDaemonLauncherSerializesRuntimeSwitchesAcrossLaunchers() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let oldOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388"
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return CommandResult(
+                    exitCode: 0,
+                    output: oldOutput
+                )
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let first = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+        let second = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+        let transaction = try await first.prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+
+        do {
+            _ = try await second.loadPendingRuntimeSwitch()
+            XCTFail("Expected the second launcher to observe the held switch lock")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(error, .runtimeSwitchBusy)
+        }
+
+        try await first.cancelRuntimeSwitch(transaction)
+    }
+
+    func testDaemonLauncherRecoversPreviousRuntimeAfterInterruptedCandidateBootstrap() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let serviceLoaded = LockedValue(true)
+        let bootstrapCount = IntCounter()
+        let signals = SignalInvocationRecorder()
+        let oldOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388"
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            switch arguments.first {
+            case "print":
+                guard serviceLoaded.value else {
+                    return CommandResult(exitCode: 113, output: "service not found")
+                }
+                return CommandResult(
+                    exitCode: 0,
+                    output: oldOutput
+                )
+            case "bootout":
+                serviceLoaded.value = false
+                return CommandResult(exitCode: 0, output: "")
+            case "bootstrap":
+                let attempt = bootstrapCount.next()
+                serviceLoaded.value = attempt > 1
+                return CommandResult(
+                    exitCode: attempt == 1 ? 5 : 0,
+                    output: attempt == 1 ? "candidate failed" : ""
+                )
+            default:
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+        }
+
+        var interrupted: DaemonRuntimeSwitch? = try await DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        ).prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+        do {
+            try await DaemonLauncher(
+                configurationLoader: { fixture.configuration },
+                commandRunner: commands.run,
+                processSignaler: signals.run
+            ).activatePreparedRuntime(
+                try XCTUnwrap(interrupted),
+                expectedPID: 123,
+                expectedExecutable: previous.path
+            )
+            XCTFail("Expected candidate bootstrap failure")
+        } catch let error as DaemonLaunchError {
+            guard case .runtimeSwitchFailed = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        interrupted = nil
+
+        let recoveryLauncher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        )
+        let pending = try await recoveryLauncher.loadPendingRuntimeSwitch()
+        let recovered = try XCTUnwrap(pending)
+        XCTAssertEqual(recovered.journal.phase, .rolledBack)
+        let plist = try daemonLaunchAgentPropertyList(at: fixture.configuration.launchAgentURL)
+        XCTAssertEqual((plist["ProgramArguments"] as? [String])?.first, previous.path)
+        try await recoveryLauncher.commitRuntimeSwitch(recovered)
+    }
+
+    func testDaemonLauncherRecoveryPreservesRollingBackCandidateAndResumesIt() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let candidate = try fixture.configuration.stagedHelperURL()
+        let loadedRuntime = LockedValue("previous")
+        let oldOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388",
+            pid: 123
+        )
+        let candidateOutput = launchctlOutput(
+            program: candidate,
+            configuration: fixture.configuration,
+            build: "389",
+            pid: 456,
+            runtimeSwitchHold: true
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            switch arguments.first {
+            case "print":
+                switch loadedRuntime.value {
+                case "previous":
+                    return CommandResult(exitCode: 0, output: oldOutput)
+                case "candidate":
+                    return CommandResult(exitCode: 0, output: candidateOutput)
+                default:
+                    return CommandResult(exitCode: 113, output: "service not found")
+                }
+            case "bootout":
+                loadedRuntime.value = "none"
+                return CommandResult(exitCode: 0, output: "")
+            case "bootstrap":
+                loadedRuntime.value = "previous"
+                return CommandResult(exitCode: 0, output: "")
+            default:
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+        }
+        let signals = SignalInvocationRecorder()
+        var interrupted: DaemonRuntimeSwitch? = try await DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        ).prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+        var journal = try XCTUnwrap(interrupted).journal
+        journal.phase = .rollingBack
+        let journalURL = fixture.configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("threadrelay-runtime-switch.json")
+        try JSONEncoder().encode(journal).write(to: journalURL)
+        try journal.candidateLaunchAgentData.write(
+            to: fixture.configuration.launchAgentURL,
+            options: .atomic
+        )
+        loadedRuntime.value = "candidate"
+        interrupted = nil
+
+        let recoveryLauncher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        )
+        let commandCountBeforeRecovery = commands.arguments.count
+        let pending = try await recoveryLauncher.loadPendingRuntimeSwitch()
+        let recovered = try XCTUnwrap(pending)
+
+        XCTAssertEqual(recovered.journal.phase, .rollingBack)
+        XCTAssertEqual(loadedRuntime.value, "candidate")
+        XCTAssertEqual(signals.signals, [.init(pid: 456, signal: SIGCONT)])
+        XCTAssertFalse(
+            commands.arguments.dropFirst(commandCountBeforeRecovery)
+                .contains(where: { $0.first == "bootout" })
+        )
+
+        try await recoveryLauncher.rollbackRuntime(
+            recovered,
+            expectedPID: 456,
+            expectedExecutable: candidate.path
+        )
+        try await recoveryLauncher.commitRuntimeSwitch(recovered)
+        XCTAssertEqual(loadedRuntime.value, "previous")
+    }
+
+    func testDaemonLauncherDoesNotBootoutWhenPIDChangesAfterFreeze() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let printCount = IntCounter()
+        let signals = SignalInvocationRecorder()
+        let initialOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388",
+            pid: 123
+        )
+        let replacedOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388",
+            pid: 124
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return CommandResult(
+                    exitCode: 0,
+                    output: printCount.next() <= 3 ? initialOutput : replacedOutput
+                )
+            }
+            return CommandResult(exitCode: 1, output: "must not bootout")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        )
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+
+        do {
+            try await launcher.activatePreparedRuntime(
+                transaction,
+                expectedPID: 123,
+                expectedExecutable: previous.path
+            )
+            XCTFail("Expected the post-freeze identity check to fail")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(error, .daemonProcessChanged(expected: 123, actual: 124))
+        }
+
+        XCTAssertEqual(signals.signals, [.init(pid: 123, signal: SIGSTOP)])
+        XCTAssertFalse(commands.arguments.contains(where: { $0.first == "bootout" }))
+    }
+
+    func testDaemonReplacementRequiresTargetBuildAndExecutable() {
+        let expected = "/fixture/runtimes/389/threadrelay-daemon"
+        let valid = lifecycleFixture(
+            instanceId: "new-instance",
+            build: 389,
+            executable: expected
+        )
+        XCTAssertTrue(
+            AppModel.daemonReplacementMatches(
+                valid,
+                previousInstanceId: "old-instance",
+                expectedBuild: 389,
+                expectedExecutable: expected
+            )
+        )
+
+        let staleBuild = lifecycleFixture(
+            instanceId: "new-instance",
+            build: 388,
+            executable: "/fixture/runtimes/388/threadrelay-daemon"
+        )
+        XCTAssertFalse(
+            AppModel.daemonReplacementMatches(
+                staleBuild,
+                previousInstanceId: "old-instance",
+                expectedBuild: 389,
+                expectedExecutable: expected
+            )
+        )
+        XCTAssertFalse(
+            AppModel.daemonReplacementMatches(
+                valid,
+                previousInstanceId: "new-instance",
+                expectedBuild: 389,
+                expectedExecutable: expected
+            )
+        )
+    }
+
+    @MainActor
+    func testAppModelRollsBackWhenReplacementKeepsTheOldBuild() async {
+        let lifecycleCalls = IntCounter()
+        let leaseOwner = LockedValue<String?>(nil)
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                let call = lifecycleCalls.next()
+                if call == 2 {
+                    return MockResponse(
+                        statusCode: 200,
+                        json: Self.lifecyclePayload(
+                            instanceId: "wrong-build-instance",
+                            build: 388,
+                            executable: "/fixture/runtimes/388/threadrelay-daemon",
+                            installationId: leaseOwner.value
+                        )
+                    )
+                }
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: "old-instance",
+                        build: 388,
+                        executable: "/fixture/runtimes/388/threadrelay-daemon",
+                        installationId: leaseOwner.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                let installationId = Self.jsonBody(from: request)?["installationId"] as? String
+                leaseOwner.value = installationId
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: "old-instance",
+                        build: 388,
+                        executable: "/fixture/runtimes/388/threadrelay-daemon",
+                        installationId: installationId
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/restart"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"state":"restarting"}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let launcher = SwitchingDaemonLauncher()
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "389" },
+            daemonReplacementAttemptLimit: 1,
+            daemonReplacementPollDelay: .zero,
+            daemonReplacementStableProbeCount: 1
+        )
+        await model.refresh()
+        XCTAssertTrue(model.ownsDaemonLease)
+
+        await model.restartDaemon()
+
+        XCTAssertEqual(launcher.prepareCount, 1)
+        XCTAssertEqual(launcher.activationCount, 1)
+        XCTAssertEqual(launcher.rollbackCount, 1)
+        XCTAssertEqual(
+            model.managementOperationError,
+            "新后台服务未能通过连续健康校验，已恢复上一版本。"
+        )
+    }
+
+    @MainActor
+    func testAppModelRedrainsReplacementWhenLaunchdChangesPIDBeforeFreeze() async {
+        let restartCount = IntCounter()
+        let leaseOwner = LockedValue<String?>(nil)
+        let client = makeClient { request in
+            let restarts = restartCount.current
+            let lifecycle: (instance: String, build: Int, executable: String)
+            if restarts == 0 {
+                lifecycle = ("old-instance-1", 388, "/fixture/runtimes/388/threadrelay-daemon")
+            } else if restarts == 1 {
+                lifecycle = ("old-instance-2", 388, "/fixture/runtimes/388/threadrelay-daemon")
+            } else {
+                lifecycle = ("candidate-instance", 389, "/fixture/runtimes/389/threadrelay-daemon")
+            }
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: lifecycle.instance,
+                        build: lifecycle.build,
+                        executable: lifecycle.executable,
+                        installationId: leaseOwner.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                let installationId = Self.jsonBody(from: request)?["installationId"] as? String
+                leaseOwner.value = installationId
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: lifecycle.instance,
+                        build: lifecycle.build,
+                        executable: lifecycle.executable,
+                        installationId: installationId
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/restart"):
+                _ = restartCount.next()
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"state":"restarting"}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let launcher = SwitchingDaemonLauncher(processChangesBeforeActivation: 1)
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "389" },
+            daemonReplacementAttemptLimit: 3,
+            daemonReplacementPollDelay: .zero,
+            daemonReplacementStableProbeCount: 1
+        )
+        await model.refresh()
+
+        await model.restartDaemon()
+
+        XCTAssertEqual(restartCount.current, 2)
+        XCTAssertEqual(launcher.activationCount, 2)
+        XCTAssertNil(model.managementOperationError)
+        XCTAssertEqual(model.lifecycle?.runtime.buildNumber, 389)
+        XCTAssertEqual(model.actionFeedback?.message, "后台服务已升级到构建 389")
+    }
+
+    @MainActor
+    func testAppModelRetriesAnInProcessRollbackOnTheNextRefresh() async {
+        let daemonState = LockedValue("previous")
+        let leaseOwner = LockedValue<String?>(nil)
+        let restartCount = IntCounter()
+        let launcher = InterruptedSwitchDaemonLauncher(daemonState: daemonState)
+        let client = makeClient { request in
+            let isCandidate = daemonState.value == "candidate"
+            let instanceId = isCandidate ? "candidate-instance" : "old-instance"
+            let build = isCandidate ? 389 : 388
+            let executable = "/fixture/runtimes/\(build)/threadrelay-daemon"
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: instanceId,
+                        build: build,
+                        executable: executable,
+                        installationId: leaseOwner.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                let installationId = Self.jsonBody(from: request)?["installationId"] as? String
+                leaseOwner.value = installationId
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: instanceId,
+                        build: build,
+                        executable: executable,
+                        installationId: installationId
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/restart"):
+                _ = restartCount.next()
+                daemonState.value = "candidate"
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"state":"restarting"}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "389" },
+            daemonReplacementAttemptLimit: 1,
+            daemonReplacementPollDelay: .zero,
+            daemonReplacementStableProbeCount: 1
+        )
+        await model.refresh()
+
+        await model.restartDaemon()
+
+        XCTAssertEqual(launcher.rollbackCount, 1)
+        XCTAssertTrue(model.daemonTransitionInProgress)
+        XCTAssertEqual(launcher.loadPendingCount, 1)
+
+        await model.refresh()
+
+        XCTAssertEqual(launcher.rollbackCount, 2)
+        XCTAssertEqual(launcher.commitCount, 1)
+        XCTAssertEqual(launcher.loadPendingCount, 1)
+        XCTAssertFalse(model.daemonTransitionInProgress)
+        XCTAssertEqual(model.lifecycle?.runtime.buildNumber, 388)
+        XCTAssertEqual(model.actionFeedback?.message, "后台服务已恢复到上一版本")
+    }
+
+    @MainActor
+    func testAppModelRecoveryRollsBackAnUnhealthyCandidate() async {
+        let daemonState = LockedValue("candidate")
+        let leaseOwner = LockedValue<String?>(nil)
+        let restartCount = IntCounter()
+        let launcher = CandidateRecoveryDaemonLauncher(daemonState: daemonState)
+        let client = makeClient { request in
+            let isCandidate = daemonState.value == "candidate"
+            let instanceId = isCandidate ? "candidate-instance" : "old-instance"
+            let executable = isCandidate
+                ? "/fixture/runtimes/389/threadrelay-daemon"
+                : "/fixture/runtimes/388/threadrelay-daemon"
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: instanceId,
+                        build: 388,
+                        executable: executable,
+                        installationId: leaseOwner.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                let installationId = Self.jsonBody(from: request)?["installationId"] as? String
+                leaseOwner.value = installationId
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: instanceId,
+                        build: 388,
+                        executable: executable,
+                        installationId: installationId
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/restart"):
+                _ = restartCount.next()
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"state":"restarting"}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "389" },
+            daemonReplacementAttemptLimit: 1,
+            daemonReplacementPollDelay: .zero,
+            daemonReplacementStableProbeCount: 1
+        )
+
+        await model.refresh()
+
+        XCTAssertEqual(launcher.loadPendingCount, 1)
+        XCTAssertEqual(launcher.rollbackCount, 1)
+        XCTAssertEqual(launcher.commitCount, 1)
+        XCTAssertEqual(restartCount.current, 1)
+        XCTAssertEqual(model.lifecycle?.executable, "/fixture/runtimes/388/threadrelay-daemon")
+        XCTAssertFalse(model.daemonTransitionInProgress)
+        XCTAssertNil(model.daemonRecoveryError)
+        XCTAssertEqual(model.actionFeedback?.message, "后台服务已恢复到上一版本")
+    }
+
+    @MainActor
+    func testAppModelRecoveryRollsBackWhenCandidateAPIIsUnavailable() async {
+        let daemonState = LockedValue("candidate")
+        let leaseOwner = LockedValue<String?>(nil)
+        let launcher = CandidateRecoveryDaemonLauncher(daemonState: daemonState)
+        let client = makeClient { request in
+            let isCandidate = daemonState.value == "candidate"
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return isCandidate
+                    ? MockResponse(statusCode: 503, json: #"{"error":"temporarily unavailable"}"#)
+                    : MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                guard !isCandidate else {
+                    return MockResponse(
+                        statusCode: 503,
+                        json: #"{"error":"temporarily unavailable"}"#
+                    )
+                }
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: "old-instance",
+                        build: 388,
+                        executable: "/fixture/runtimes/388/threadrelay-daemon",
+                        installationId: leaseOwner.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                guard !isCandidate else {
+                    return MockResponse(
+                        statusCode: 503,
+                        json: #"{"error":"temporarily unavailable"}"#
+                    )
+                }
+                let installationId = Self.jsonBody(from: request)?["installationId"] as? String
+                leaseOwner.value = installationId
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: "old-instance",
+                        build: 388,
+                        executable: "/fixture/runtimes/388/threadrelay-daemon",
+                        installationId: installationId
+                    )
+                )
+            default:
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "389" },
+            daemonReplacementAttemptLimit: 1,
+            daemonReplacementPollDelay: .zero,
+            daemonReplacementStableProbeCount: 1
+        )
+
+        await model.refresh()
+
+        XCTAssertEqual(launcher.rollbackCount, 1)
+        XCTAssertEqual(launcher.commitCount, 1)
+        XCTAssertEqual(model.lifecycle?.runtime.buildNumber, 388)
+        XCTAssertEqual(model.lifecycle?.executable, "/fixture/runtimes/388/threadrelay-daemon")
+        XCTAssertFalse(model.daemonTransitionInProgress)
+        XCTAssertNil(model.daemonRecoveryError)
+        XCTAssertEqual(model.actionFeedback?.message, "后台服务已恢复到上一版本")
+    }
+
+    @MainActor
+    func testAppModelDoesNotCommitAcrossChangingCandidateInstances() async {
+        let restartCount = IntCounter()
+        let candidateCount = IntCounter()
+        let latestInstance = LockedValue("old-instance")
+        let leaseOwner = LockedValue<String?>(nil)
+        let client = makeClient { request in
+            let restarts = restartCount.current
+            let lifecycle: (instance: String, build: Int, executable: String)
+            if restarts == 0 || restarts >= 2 {
+                lifecycle = ("old-instance", 388, "/fixture/runtimes/388/threadrelay-daemon")
+            } else {
+                lifecycle = (
+                    "candidate-instance-\(candidateCount.next())",
+                    389,
+                    "/fixture/runtimes/389/threadrelay-daemon"
+                )
+            }
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                latestInstance.value = lifecycle.instance
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: lifecycle.instance,
+                        build: lifecycle.build,
+                        executable: lifecycle.executable,
+                        installationId: leaseOwner.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                let installationId = Self.jsonBody(from: request)?["installationId"] as? String
+                leaseOwner.value = installationId
+                let claimedInstance = latestInstance.value
+                let candidate = claimedInstance.hasPrefix("candidate-")
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: claimedInstance,
+                        build: candidate ? 389 : 388,
+                        executable: candidate
+                            ? "/fixture/runtimes/389/threadrelay-daemon"
+                            : "/fixture/runtimes/388/threadrelay-daemon",
+                        installationId: installationId
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/restart"):
+                _ = restartCount.next()
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"state":"restarting"}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let launcher = SwitchingDaemonLauncher()
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "389" },
+            daemonReplacementAttemptLimit: 3,
+            daemonReplacementPollDelay: .zero,
+            daemonReplacementStableProbeCount: 3
+        )
+        await model.refresh()
+
+        await model.restartDaemon()
+
+        XCTAssertEqual(launcher.rollbackCount, 1)
+        XCTAssertEqual(restartCount.current, 2)
+        XCTAssertEqual(model.lifecycle?.runtime.buildNumber, 388)
+        XCTAssertEqual(
+            model.managementOperationError,
+            "新后台服务未能通过连续健康校验，已恢复上一版本。"
+        )
+    }
+
+    @MainActor
+    func testAppModelRetriesRuntimeSwitchInspectionAfterLockContention() async {
+        let leaseOwner = LockedValue<String?>(nil)
+        let launcher = BusyThenEmptyDaemonLauncher()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: "old-instance",
+                        build: 388,
+                        executable: "/fixture/runtimes/388/threadrelay-daemon",
+                        installationId: leaseOwner.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                let installationId = Self.jsonBody(from: request)?["installationId"] as? String
+                leaseOwner.value = installationId
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecyclePayload(
+                        instanceId: "old-instance",
+                        build: 388,
+                        executable: "/fixture/runtimes/388/threadrelay-daemon",
+                        installationId: installationId
+                    )
+                )
+            default:
+                return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "388" }
+        )
+
+        await model.refresh()
+        XCTAssertEqual(launcher.loadPendingCount, 1)
+        XCTAssertTrue(model.daemonTransitionInProgress)
+
+        await model.refresh()
+
+        XCTAssertEqual(launcher.loadPendingCount, 2)
+        XCTAssertFalse(model.daemonTransitionInProgress)
+        XCTAssertNil(model.daemonRecoveryError)
     }
 
     func testManagementCredentialStoreLoadsAllValidUniqueCandidatesInPathOrder() throws {
@@ -1428,6 +2538,9 @@ final class APIContractTests: XCTestCase {
                 XCTAssertEqual(body?["force"] as? Bool, false)
                 XCTAssertEqual(body?["leaseGeneration"] as? Int, 7)
                 return MockResponse(statusCode: 200, json: #"{"ok":true,"state":"restarting"}"#)
+            case "/api/v1/manage/lifecycle/runtime-switch/commit":
+                XCTAssertEqual(body?["leaseGeneration"] as? Int, 7)
+                return MockResponse(statusCode: 200, json: Self.lifecycleJSON)
             default:
                 return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
             }
@@ -1451,6 +2564,12 @@ final class APIContractTests: XCTestCase {
             leaseGeneration: 7
         )
         XCTAssertTrue(restart.ok)
+        let committed = try await client.commitRuntimeSwitch(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance",
+            leaseGeneration: 7
+        )
+        XCTAssertEqual(committed.service.instanceId, "fixture-instance")
     }
 
     func testFetchLifecycleRejectsUnsupportedRuntimeAPIMajor() async {
@@ -3174,6 +4293,21 @@ final class APIContractTests: XCTestCase {
     // omitted entirely when unreported (serde skip_serializing_if).
     private static let requestLogsJSON = #"{"logs":[{"id":7,"requestId":"req-7","modelId":"model-a","stream":true,"channel":"primary","providerType":"openai_responses","status":"success","inputTokens":10,"outputTokens":20,"totalTokens":30,"readCacheTokens":null,"readCacheHitRate":null,"writeCacheTokens":null,"costUsd":0.01,"latencyMs":1200,"ttftMs":300,"createdAtMs":1754000120000,"createdAt":"2026-08-13T00:00:00Z","errorMessage":null,"upstreamRequestBodyBytes":128}]}"#
 
+    private static func lifecyclePayload(
+        instanceId: String,
+        build: Int,
+        executable: String,
+        installationId: String?
+    ) -> String {
+        let management: String
+        if let installationId {
+            management = #"{"state":"managed","mode":"managed","canControl":true,"installationId":"\#(installationId)","leaseGeneration":1,"leaseExpiresAtMs":4102444800000}"#
+        } else {
+            management = #"{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}"#
+        }
+        return #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"\#(instanceId)","pid":123,"startedAtMs":456},"executable":"\#(executable)","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":\#(build),"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":\#(management)}"#
+    }
+
     private static func requestLogsPageJSON(
         ids: [Int64],
         nextCursor: String? = nil,
@@ -3269,6 +4403,123 @@ final class APIContractTests: XCTestCase {
                 logURL: root.appendingPathComponent("data/logs/daemon.log"),
                 homeURL: root.appendingPathComponent("home", isDirectory: true),
                 buildIdentifier: "389"
+            )
+        )
+    }
+
+    private func installDaemonRuntime(
+        build: String,
+        fixture: (root: URL, configuration: DaemonLaunchConfiguration)
+    ) throws -> URL {
+        let configuration = DaemonLaunchConfiguration(
+            helperURL: fixture.configuration.helperURL,
+            configURL: fixture.configuration.configURL,
+            launchAgentURL: fixture.configuration.launchAgentURL,
+            logURL: fixture.configuration.logURL,
+            homeURL: fixture.configuration.homeURL,
+            buildIdentifier: build
+        )
+        let staged = try configuration.stagedHelperURL()
+        try FileManager.default.createDirectory(
+            at: staged.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: staged.path,
+                contents: Data("previous-runtime".utf8)
+            )
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: staged.path
+        )
+        try FileManager.default.createDirectory(
+            at: fixture.configuration.launchAgentURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try configuration.propertyListData().write(
+            to: fixture.configuration.launchAgentURL,
+            options: .atomic
+        )
+        return staged
+    }
+
+    private func daemonLaunchAgentPropertyList(at url: URL) throws -> [String: Any] {
+        try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: Data(contentsOf: url),
+                options: [],
+                format: nil
+            ) as? [String: Any]
+        )
+    }
+
+    private func launchctlOutput(
+        program: URL,
+        configuration: DaemonLaunchConfiguration,
+        build: String,
+        pid: Int32 = 123,
+        runtimeSwitchHold: Bool = false
+    ) -> String {
+        let holdLine = runtimeSwitchHold
+            ? "            THREADRELAY_RUNTIME_SWITCH_HOLD => 1\n"
+            : ""
+        return """
+        state = running
+        pid = \(pid)
+        program = \(program.path)
+        arguments = {
+            \(program.path)
+            --config
+            \(configuration.configURL.path)
+            daemon
+        }
+        environment = {
+            THREADRELAY_HOME => \(configuration.configURL.deletingLastPathComponent().path)
+            THREADRELAY_BUNDLE_BUILD => \(build)
+        \(holdLine)        }
+        """
+    }
+
+    private func lifecycleFixture(
+        instanceId: String,
+        build: Int,
+        executable: String
+    ) -> ManageLifecycle {
+        ManageLifecycle(
+            service: .init(
+                service: "threadrelay",
+                apiMajor: 1,
+                ready: true,
+                instanceId: instanceId,
+                pid: 123,
+                startedAtMs: 456
+            ),
+            executable: executable,
+            configPath: "/fixture/config.toml",
+            bind: "127.0.0.1:3847",
+            runtime: .init(
+                state: "active",
+                productVersion: "0.5.0",
+                buildNumber: build,
+                apiMajor: 1
+            ),
+            protectedWorkItems: .init(
+                aiGatewayRequests: 0,
+                codexTurns: 0,
+                imStreams: 0,
+                pendingApprovals: 0,
+                remoteControlRequests: 0,
+                total: 0
+            ),
+            management: .init(
+                state: "managed",
+                mode: "managed",
+                canControl: true,
+                installationId: "fixture-installation",
+                leaseGeneration: 1,
+                leaseExpiresAtMs: 9_999_999_999
             )
         )
     }
@@ -3385,6 +4636,221 @@ private final class RecordingDaemonLauncher: DaemonLaunching, @unchecked Sendabl
     }
 }
 
+private final class SwitchingDaemonLauncher: DaemonLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var prepared = 0
+    private var activated = 0
+    private var rolledBack = 0
+    private var remainingProcessChanges: Int
+
+    init(processChangesBeforeActivation: Int = 0) {
+        remainingProcessChanges = processChangesBeforeActivation
+    }
+
+    var prepareCount: Int { lock.withLock { prepared } }
+    var activationCount: Int { lock.withLock { activated } }
+    var rollbackCount: Int { lock.withLock { rolledBack } }
+
+    func prepareRuntimeSwitch(
+        expectedPID _: Int32,
+        expectedInstanceId _: String,
+        expectedExecutable _: String
+    ) async throws -> DaemonRuntimeSwitch {
+        lock.withLock { prepared += 1 }
+        return DaemonRuntimeSwitch(
+            journal: DaemonRuntimeSwitchJournal(
+                schemaVersion: 1,
+                transactionId: "fixture-switch",
+                phase: .prepared,
+                previousLaunchAgentData: Data(),
+                previousProgramPath: "/fixture/runtimes/388/threadrelay-daemon",
+                previousBuild: "388",
+                previousInstanceId: "old-instance",
+                previousPID: 123,
+                candidateLaunchAgentData: Data(),
+                candidateProgramPath: "/fixture/runtimes/389/threadrelay-daemon",
+                candidateBuild: "389",
+                createdAtMilliseconds: 1,
+                updatedAtMilliseconds: 1
+            )
+        )
+    }
+
+    func startIfNeeded() async throws {}
+
+    func activatePreparedRuntime(
+        _: DaemonRuntimeSwitch,
+        expectedPID _: Int32,
+        expectedExecutable _: String
+    ) async throws {
+        let changesProcess = lock.withLock {
+            activated += 1
+            guard remainingProcessChanges > 0 else { return false }
+            remainingProcessChanges -= 1
+            return true
+        }
+        if changesProcess {
+            throw DaemonLaunchError.daemonProcessChanged(expected: 123, actual: 124)
+        }
+    }
+
+    func rollbackRuntime(
+        _: DaemonRuntimeSwitch,
+        expectedPID _: Int32?,
+        expectedExecutable _: String?
+    ) async throws {
+        lock.withLock { rolledBack += 1 }
+    }
+}
+
+private final class InterruptedSwitchDaemonLauncher: DaemonLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let daemonState: LockedValue<String>
+    private var loadedPending = 0
+    private var rolledBack = 0
+    private var committed = 0
+
+    init(daemonState: LockedValue<String>) {
+        self.daemonState = daemonState
+    }
+
+    var loadPendingCount: Int { lock.withLock { loadedPending } }
+    var rollbackCount: Int { lock.withLock { rolledBack } }
+    var commitCount: Int { lock.withLock { committed } }
+
+    func startIfNeeded() async throws {}
+
+    func loadPendingRuntimeSwitch() async throws -> DaemonRuntimeSwitch? {
+        lock.withLock { loadedPending += 1 }
+        return nil
+    }
+
+    func prepareRuntimeSwitch(
+        expectedPID _: Int32,
+        expectedInstanceId _: String,
+        expectedExecutable _: String
+    ) async throws -> DaemonRuntimeSwitch {
+        DaemonRuntimeSwitch(
+            journal: DaemonRuntimeSwitchJournal(
+                schemaVersion: 1,
+                transactionId: "interrupted-switch",
+                phase: .rollingBack,
+                previousLaunchAgentData: Data(),
+                previousProgramPath: "/fixture/runtimes/388/threadrelay-daemon",
+                previousBuild: "388",
+                previousInstanceId: "old-instance",
+                previousPID: 123,
+                candidateLaunchAgentData: Data(),
+                candidateProgramPath: "/fixture/runtimes/389/threadrelay-daemon",
+                candidateBuild: "389",
+                createdAtMilliseconds: 1,
+                updatedAtMilliseconds: 1
+            )
+        )
+    }
+
+    func activatePreparedRuntime(
+        _: DaemonRuntimeSwitch,
+        expectedPID _: Int32,
+        expectedExecutable _: String
+    ) async throws {
+        throw DaemonLaunchError.runtimeSwitchFailed("fixture interruption")
+    }
+
+    func rollbackRuntime(
+        _: DaemonRuntimeSwitch,
+        expectedPID _: Int32?,
+        expectedExecutable _: String?
+    ) async throws {
+        let attempt = lock.withLock {
+            rolledBack += 1
+            return rolledBack
+        }
+        guard attempt > 1 else {
+            throw DaemonLaunchError.runtimeRollbackFailed("fixture interruption")
+        }
+        daemonState.value = "previous"
+    }
+
+    func commitRuntimeSwitch(_: DaemonRuntimeSwitch) async throws {
+        lock.withLock { committed += 1 }
+    }
+}
+
+private final class CandidateRecoveryDaemonLauncher: DaemonLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let daemonState: LockedValue<String>
+    private let transaction: DaemonRuntimeSwitch
+    private var loadedPending = 0
+    private var rolledBack = 0
+    private var committed = 0
+
+    init(daemonState: LockedValue<String>) {
+        self.daemonState = daemonState
+        transaction = DaemonRuntimeSwitch(
+            journal: DaemonRuntimeSwitchJournal(
+                schemaVersion: 1,
+                transactionId: "candidate-recovery",
+                phase: .candidateStarted,
+                previousLaunchAgentData: Data(),
+                previousProgramPath: "/fixture/runtimes/388/threadrelay-daemon",
+                previousBuild: "388",
+                previousInstanceId: "old-instance",
+                previousPID: 123,
+                candidateLaunchAgentData: Data(),
+                candidateProgramPath: "/fixture/runtimes/389/threadrelay-daemon",
+                candidateBuild: "389",
+                createdAtMilliseconds: 1,
+                updatedAtMilliseconds: 1
+            )
+        )
+    }
+
+    var loadPendingCount: Int { lock.withLock { loadedPending } }
+    var rollbackCount: Int { lock.withLock { rolledBack } }
+    var commitCount: Int { lock.withLock { committed } }
+
+    func startIfNeeded() async throws {}
+
+    func loadPendingRuntimeSwitch() async throws -> DaemonRuntimeSwitch? {
+        lock.withLock { loadedPending += 1 }
+        return transaction
+    }
+
+    func rollbackRuntime(
+        _: DaemonRuntimeSwitch,
+        expectedPID _: Int32?,
+        expectedExecutable _: String?
+    ) async throws {
+        lock.withLock { rolledBack += 1 }
+        daemonState.value = "previous"
+    }
+
+    func commitRuntimeSwitch(_: DaemonRuntimeSwitch) async throws {
+        lock.withLock { committed += 1 }
+    }
+}
+
+private final class BusyThenEmptyDaemonLauncher: DaemonLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var loadedPending = 0
+
+    var loadPendingCount: Int { lock.withLock { loadedPending } }
+
+    func startIfNeeded() async throws {}
+
+    func loadPendingRuntimeSwitch() async throws -> DaemonRuntimeSwitch? {
+        let attempt = lock.withLock {
+            loadedPending += 1
+            return loadedPending
+        }
+        if attempt == 1 {
+            throw DaemonLaunchError.runtimeSwitchBusy
+        }
+        return nil
+    }
+}
+
 private struct MockResponse: Sendable {
     let statusCode: Int
     let body: Data
@@ -3441,11 +4907,29 @@ private final class IntCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
 
+    var current: Int {
+        lock.withLock { value }
+    }
+
     func next() -> Int {
         lock.withLock {
             value += 1
             return value
         }
+    }
+}
+
+private final class LockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValue: Value
+
+    init(_ value: Value) {
+        storedValue = value
+    }
+
+    var value: Value {
+        get { lock.withLock { storedValue } }
+        set { lock.withLock { storedValue = newValue } }
     }
 }
 
@@ -3521,6 +5005,27 @@ private final class CommandInvocationRecorder: @unchecked Sendable {
             recordedExecutablePaths.append(executable)
         }
         return handler(arguments)
+    }
+}
+
+private final class SignalInvocationRecorder: @unchecked Sendable {
+    struct Invocation: Equatable {
+        let pid: Int32
+        let signal: Int32
+    }
+
+    private let lock = NSLock()
+    private var recordedSignals: [Invocation] = []
+
+    var signals: [Invocation] {
+        lock.withLock { recordedSignals }
+    }
+
+    func run(_ pid: Int32, signal: Int32) -> Int32 {
+        lock.withLock {
+            recordedSignals.append(Invocation(pid: pid, signal: signal))
+        }
+        return 0
     }
 }
 
