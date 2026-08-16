@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Foundation
 
 @_silgen_name("flock")
@@ -531,6 +532,7 @@ protocol DaemonLaunching: Sendable {
     func cancelRuntimeSwitch(_ transaction: DaemonRuntimeSwitch) async throws
     func commitRuntimeSwitch(_ transaction: DaemonRuntimeSwitch) async throws
     func loadPendingRuntimeSwitch() async throws -> DaemonRuntimeSwitch?
+    func verifiedDaemonIdentity(for lifecycle: ManageLifecycle) async throws -> ManageDaemonIdentity
 }
 
 extension DaemonLaunching {
@@ -555,12 +557,24 @@ extension DaemonLaunching {
     func cancelRuntimeSwitch(_: DaemonRuntimeSwitch) async throws {}
     func commitRuntimeSwitch(_: DaemonRuntimeSwitch) async throws {}
     func loadPendingRuntimeSwitch() async throws -> DaemonRuntimeSwitch? { nil }
+    /// Lightweight default for test doubles. The production launcher overrides
+    /// this with launchd, locator, bind, path, and digest verification.
+    func verifiedDaemonIdentity(for lifecycle: ManageLifecycle) async throws -> ManageDaemonIdentity {
+        ManageDaemonIdentity(
+            pid: lifecycle.service.pid,
+            startedAtMs: lifecycle.service.startedAtMs,
+            executable: lifecycle.executable,
+            executableSha256: lifecycle.executableSha256 ?? "",
+            bind: lifecycle.bind
+        )
+    }
 }
 
 struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
     private let configurationLoader: @Sendable () throws -> DaemonLaunchConfiguration
     private let commandRunner: @Sendable (URL, [String]) throws -> CommandResult
     private let processSignaler: @Sendable (Int32, Int32) -> Int32
+    private let activeDaemonLocatorLoader: @Sendable () -> ActiveDaemonLocator?
 
     init(
         configurationLoader: @escaping @Sendable () throws -> DaemonLaunchConfiguration = {
@@ -569,11 +583,15 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult = Self.runCommand,
         processSignaler: @escaping @Sendable (Int32, Int32) -> Int32 = { pid, signal in
             Darwin.kill(pid, signal)
+        },
+        activeDaemonLocatorLoader: @escaping @Sendable () -> ActiveDaemonLocator? = {
+            ManagementCredentialStore.loadLocator()
         }
     ) {
         self.configurationLoader = configurationLoader
         self.commandRunner = commandRunner
         self.processSignaler = processSignaler
+        self.activeDaemonLocatorLoader = activeDaemonLocatorLoader
     }
 
     func prepareRuntime() async throws {
@@ -712,6 +730,177 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         }.value
     }
 
+    func verifiedDaemonIdentity(for lifecycle: ManageLifecycle) async throws -> ManageDaemonIdentity {
+        let configurationLoader = configurationLoader
+        let activeDaemonLocatorLoader = activeDaemonLocatorLoader
+        let commandRunner = commandRunner
+        return try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            guard let locator = activeDaemonLocatorLoader() else {
+                throw DaemonLaunchError.loadedAgentUntrusted(lifecycle.executable)
+            }
+            return try Self.verifyDaemonIdentity(
+                lifecycle,
+                configuration: configuration,
+                locator: locator,
+                commandRunner: commandRunner
+            )
+        }.value
+    }
+
+    private static func verifyDaemonIdentity(
+        _ lifecycle: ManageLifecycle,
+        configuration: DaemonLaunchConfiguration,
+        locator: ActiveDaemonLocator,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult,
+        fileManager: FileManager = .default
+    ) throws -> ManageDaemonIdentity {
+        guard lifecycle.service.service == "threadrelay",
+              lifecycle.service.apiMajor == 1,
+              let expectedPID = Int32(exactly: lifecycle.service.pid),
+              expectedPID > 0,
+              lifecycle.service.startedAtMs >= 0,
+              pathsMatch(lifecycle.configPath, configuration.configURL.path),
+              locator.service == "threadrelay",
+              locator.apiMajor == 1,
+              locator.instanceId == lifecycle.service.instanceId,
+              locator.pid == lifecycle.service.pid,
+              locator.startedAtMs == lifecycle.service.startedAtMs,
+              pathsMatch(
+                  locator.controlFile,
+                  configuration.configURL.deletingLastPathComponent()
+                      .appendingPathComponent("threadrelay-control.json").path
+              ),
+              let locatorBaseURL = locator.validatedBaseURL,
+              baseURL(locatorBaseURL, matchesBind: lifecycle.bind)
+        else {
+            throw DaemonLaunchError.loadedAgentUntrusted(lifecycle.executable)
+        }
+
+        let executableURL = URL(fileURLWithPath: lifecycle.executable)
+        guard isManagedRuntimeProgram(
+            executableURL,
+            configuration: configuration,
+            fileManager: fileManager
+        ) else {
+            throw DaemonLaunchError.loadedAgentUntrusted(lifecycle.executable)
+        }
+
+        let serviceTarget = "gui/\(getuid())/\(configuration.launchdLabel)"
+        let loaded = try commandRunner(
+            URL(fileURLWithPath: "/bin/launchctl"),
+            ["print", serviceTarget]
+        )
+        guard loaded.exitCode == 0,
+              loadedPID(from: loaded.output) == expectedPID,
+              let loadedProgram = loadedProgram(from: loaded.output),
+              pathsMatch(loadedProgram, lifecycle.executable),
+              loadedArguments(from: loaded.output) == [
+                  lifecycle.executable,
+                  "--config",
+                  lifecycle.configPath,
+                  "daemon",
+              ],
+              loadedEnvironmentValue(from: loaded.output, key: "THREADRELAY_HOME")
+                  == configuration.configURL.deletingLastPathComponent().path
+        else {
+            throw DaemonLaunchError.loadedAgentUntrusted(
+                loadedProgram(from: loaded.output)
+            )
+        }
+        guard loadedRuntimeSwitchHoldIsTrusted(
+            output: loaded.output,
+            lifecycle: lifecycle,
+            configuration: configuration,
+            fileManager: fileManager
+        ) else {
+            throw DaemonLaunchError.loadedAgentUntrusted(loadedProgram)
+        }
+
+        let executableSha256: String
+        do {
+            let executableData = try Data(contentsOf: executableURL, options: .mappedIfSafe)
+            executableSha256 = SHA256.hash(data: executableData)
+                .map { String(format: "%02x", $0) }
+                .joined()
+        } catch {
+            throw DaemonLaunchError.loadedAgentUntrusted(lifecycle.executable)
+        }
+        if let expectedSha256 = lifecycle.executableSha256,
+           expectedSha256.lowercased() != executableSha256 {
+            throw DaemonLaunchError.loadedAgentUntrusted(lifecycle.executable)
+        }
+
+        return ManageDaemonIdentity(
+            pid: lifecycle.service.pid,
+            startedAtMs: lifecycle.service.startedAtMs,
+            executable: lifecycle.executable,
+            executableSha256: executableSha256,
+            bind: lifecycle.bind
+        )
+    }
+
+    private static func baseURL(_ baseURL: URL, matchesBind bind: String) -> Bool {
+        guard let baseComponents = URLComponents(
+            url: baseURL,
+            resolvingAgainstBaseURL: false
+        ),
+        let bindComponents = URLComponents(
+            string: bind.contains("://") ? bind : "http://\(bind)"
+        ),
+        baseComponents.scheme?.lowercased() == "http",
+        bindComponents.scheme?.lowercased() == "http",
+        baseComponents.port == bindComponents.port,
+        let baseHost = baseComponents.host?.lowercased(),
+        let bindHost = bindComponents.host?.lowercased()
+        else {
+            return false
+        }
+        return normalizedLoopbackHost(baseHost) == normalizedLoopbackHost(bindHost)
+    }
+
+    private static func normalizedLoopbackHost(_ host: String) -> String? {
+        switch host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")) {
+        case "127.0.0.1": "127.0.0.1"
+        case "::1": "::1"
+        default: nil
+        }
+    }
+
+    private static func pathsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        URL(fileURLWithPath: lhs).standardizedFileURL.resolvingSymlinksInPath()
+            == URL(fileURLWithPath: rhs).standardizedFileURL.resolvingSymlinksInPath()
+    }
+
+    private static func loadedRuntimeSwitchHoldIsTrusted(
+        output: String,
+        lifecycle: ManageLifecycle,
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager
+    ) -> Bool {
+        guard let hold = loadedEnvironmentValue(
+            from: output,
+            key: "THREADRELAY_RUNTIME_SWITCH_HOLD"
+        ) else {
+            return true
+        }
+        guard hold == "1",
+              lifecycle.runtime.state == "active",
+              !fileManager.fileExists(
+                  atPath: runtimeSwitchJournalURL(configuration: configuration).path
+              ),
+              let snapshot = try? validatedRuntimeSnapshot(
+                  configuration: configuration,
+                  loadedAgentOutput: output,
+                  fileManager: fileManager
+              ),
+              pathsMatch(snapshot.programURL.path, lifecycle.executable)
+        else {
+            return false
+        }
+        return true
+    }
+
     private static func installAndStart(
         configuration: DaemonLaunchConfiguration,
         commandRunner: @Sendable (URL, [String]) throws -> CommandResult
@@ -831,7 +1020,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             printResult,
             launchAgentData: journal.previousLaunchAgentData,
             expectedPID: expectedPID,
-            configuration: configuration
+            configuration: configuration,
+            allowCommittedRuntimeSwitchHold: true
         )
 
         try updateRuntimeSwitchPhase(
@@ -847,7 +1037,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                 launchctl: launchctl,
                 serviceTarget: serviceTarget,
                 commandRunner: commandRunner,
-                processSignaler: processSignaler
+                processSignaler: processSignaler,
+                allowCommittedRuntimeSwitchHold: true
             )
             try updateRuntimeSwitchPhase(
                 .previousStopped,
@@ -903,20 +1094,25 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             configuration: configuration
         )
         if printResult.exitCode == 0 {
-            if loadedAgentMatches(
+            let previousCanRetainCommittedHold = journal.phase == .prepared
+                || journal.phase == .freezingPrevious
+            let previousMatches = loadedAgentMatches(
                 output: printResult.output,
                 launchAgentData: journal.previousLaunchAgentData,
+                configuration: configuration,
+                allowCommittedRuntimeSwitchHold: previousCanRetainCommittedHold
+            )
+            let candidateMatches = loadedAgentMatches(
+                output: printResult.output,
+                launchAgentData: journal.candidateLaunchAgentData,
                 configuration: configuration
-            ) {
+            )
+            if previousMatches && (previousCanRetainCommittedHold || !candidateMatches) {
                 previousIsLoaded = true
                 if let pid = loadedPID(from: printResult.output) {
                     _ = processSignaler(pid, SIGCONT)
                 }
-            } else if loadedAgentMatches(
-                output: printResult.output,
-                launchAgentData: journal.candidateLaunchAgentData,
-                configuration: configuration
-            ) {
+            } else if candidateMatches {
                 if let expectedPID, let expectedExecutable,
                    canonicalPath(expectedExecutable) == canonicalPath(journal.candidateProgramPath)
                 {
@@ -989,7 +1185,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
               loadedAgentMatches(
                   output: printResult.output,
                   launchAgentData: journal.previousLaunchAgentData,
-                  configuration: configuration
+                  configuration: configuration,
+                  allowCommittedRuntimeSwitchHold: true
               )
         else {
             throw DaemonLaunchError.runtimeSwitchRecoveryRequired
@@ -1099,11 +1296,20 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                 return transaction
             }
 
-            if loadedAgentMatches(
+            let previousCanRetainCommittedHold = journal.phase == .prepared
+                || journal.phase == .freezingPrevious
+            let previousMatches = loadedAgentMatches(
                 output: printResult.output,
                 launchAgentData: journal.previousLaunchAgentData,
+                configuration: configuration,
+                allowCommittedRuntimeSwitchHold: previousCanRetainCommittedHold
+            )
+            let candidateMatches = loadedAgentMatches(
+                output: printResult.output,
+                launchAgentData: journal.candidateLaunchAgentData,
                 configuration: configuration
-            ) {
+            )
+            if previousMatches && (previousCanRetainCommittedHold || !candidateMatches) {
                 if let pid = loadedPID(from: printResult.output) {
                     _ = processSignaler(pid, SIGCONT)
                 }
@@ -1120,11 +1326,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                 )
                 return transaction
             }
-            if loadedAgentMatches(
-                output: printResult.output,
-                launchAgentData: journal.candidateLaunchAgentData,
-                configuration: configuration
-            ) {
+            if candidateMatches {
                 guard journal.phase == .previousStopped
                     || journal.phase == .candidateStarted
                     || journal.phase == .rollingBack
@@ -1208,7 +1410,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
               environment["THREADRELAY_BUNDLE_BUILD"]
                   == URL(fileURLWithPath: programPath).deletingLastPathComponent().lastPathComponent,
               environment[DaemonLaunchConfiguration.skipDesktopIntegrationEnvironment]
-                  == configuration.desktopIntegrationEnvironmentValue
+                  == configuration.desktopIntegrationEnvironmentValue,
+              environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] == nil
         else {
             throw DaemonLaunchError.launchAgentSnapshotUnavailable
         }
@@ -1225,7 +1428,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
               loadedArguments(from: loadedAgentOutput) == arguments,
               loadedEnvironmentMatches(
                   output: loadedAgentOutput,
-                  expected: environment
+                  expected: environment,
+                  allowCommittedRuntimeSwitchHold: true
               )
         else {
             throw DaemonLaunchError.loadedAgentUntrusted(
@@ -1243,7 +1447,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
     private static func loadedAgentMatches(
         output: String,
         launchAgentData: Data,
-        configuration: DaemonLaunchConfiguration
+        configuration: DaemonLaunchConfiguration,
+        allowCommittedRuntimeSwitchHold: Bool = false
     ) -> Bool {
         guard let propertyList = try? PropertyListSerialization.propertyList(
             from: launchAgentData,
@@ -1258,7 +1463,11 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         }
         return loadedProgram(from: output) == programPath
             && loadedArguments(from: output) == arguments
-            && loadedEnvironmentMatches(output: output, expected: environment)
+            && loadedEnvironmentMatches(
+                output: output,
+                expected: environment,
+                allowCommittedRuntimeSwitchHold: allowCommittedRuntimeSwitchHold
+            )
     }
 
     private static func isManagedRuntimeProgram(
@@ -1474,7 +1683,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
 
     private static func loadedEnvironmentMatches(
         output: String,
-        expected: [String: String]
+        expected: [String: String],
+        allowCommittedRuntimeSwitchHold: Bool = false
     ) -> Bool {
         guard expected.allSatisfy({ key, value in
             loadedEnvironmentValue(from: output, key: key) == value
@@ -1486,6 +1696,13 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             "THREADRELAY_RUNTIME_SWITCH_HOLD",
         ] {
             let actualValue = loadedEnvironmentValue(from: output, key: optionalKey)
+            if optionalKey == "THREADRELAY_RUNTIME_SWITCH_HOLD",
+               allowCommittedRuntimeSwitchHold,
+               expected[optionalKey] == nil,
+               actualValue == "1"
+            {
+                continue
+            }
             guard actualValue == expected[optionalKey] else {
                 return false
             }
@@ -1756,7 +1973,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         _ printResult: CommandResult,
         launchAgentData: Data,
         expectedPID: Int32,
-        configuration: DaemonLaunchConfiguration
+        configuration: DaemonLaunchConfiguration,
+        allowCommittedRuntimeSwitchHold: Bool = false
     ) throws {
         let actualPID = loadedPID(from: printResult.output)
         guard printResult.exitCode == 0, actualPID == expectedPID else {
@@ -1768,7 +1986,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         guard loadedAgentMatches(
             output: printResult.output,
             launchAgentData: launchAgentData,
-            configuration: configuration
+            configuration: configuration,
+            allowCommittedRuntimeSwitchHold: allowCommittedRuntimeSwitchHold
         ) else {
             throw DaemonLaunchError.loadedAgentUntrusted(
                 loadedProgram(from: printResult.output)
@@ -1783,14 +2002,16 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         launchctl: URL,
         serviceTarget: String,
         commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult,
-        processSignaler: @escaping @Sendable (Int32, Int32) -> Int32
+        processSignaler: @escaping @Sendable (Int32, Int32) -> Int32,
+        allowCommittedRuntimeSwitchHold: Bool = false
     ) throws {
         let beforeFreeze = try commandRunner(launchctl, ["print", serviceTarget])
         try requireLoadedAgent(
             beforeFreeze,
             launchAgentData: expectedLaunchAgentData,
             expectedPID: expectedPID,
-            configuration: configuration
+            configuration: configuration,
+            allowCommittedRuntimeSwitchHold: allowCommittedRuntimeSwitchHold
         )
         guard processSignaler(expectedPID, SIGSTOP) == 0 else {
             throw DaemonLaunchError.daemonFreezeFailed(expectedPID)
@@ -1802,7 +2023,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                   loadedAgentMatches(
                       output: current.output,
                       launchAgentData: expectedLaunchAgentData,
-                      configuration: configuration
+                      configuration: configuration,
+                      allowCommittedRuntimeSwitchHold: allowCommittedRuntimeSwitchHold
                   )
             else { return }
             _ = processSignaler(expectedPID, SIGCONT)
@@ -1819,7 +2041,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             frozen,
             launchAgentData: expectedLaunchAgentData,
             expectedPID: expectedPID,
-            configuration: configuration
+            configuration: configuration,
+            allowCommittedRuntimeSwitchHold: allowCommittedRuntimeSwitchHold
         )
 
         let bootout = try commandRunner(launchctl, ["bootout", serviceTarget])
@@ -1830,7 +2053,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                     afterBootout,
                     launchAgentData: expectedLaunchAgentData,
                     expectedPID: expectedPID,
-                    configuration: configuration
+                    configuration: configuration,
+                    allowCommittedRuntimeSwitchHold: allowCommittedRuntimeSwitchHold
                 )
                 throw DaemonLaunchError.launchctlFailed(lastLine(of: bootout.output))
             }

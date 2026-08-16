@@ -13,6 +13,18 @@ struct SessionBatchMoveResult: Equatable {
     let failedIds: [String]
 }
 
+/// Immutable lease values captured when a destructive management confirmation
+/// is presented. The confirmed operation must use this exact observation so a
+/// refresh cannot silently retarget it to a different owner or generation.
+struct DaemonManagementConfirmation: Equatable, Sendable {
+    let daemonInstanceId: String
+    let daemonPID: Int
+    let daemonStartedAtMs: Int64
+    let leaseOwnerInstallationId: String
+    let leaseGeneration: Int64
+    let managementTokenGeneration: Int64
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published var selection: AppSection? = .overview
@@ -45,6 +57,9 @@ final class AppModel: ObservableObject {
     @Published var actionFeedback: ActionFeedback?
     @Published private(set) var daemonRecoveryInProgress = false
     @Published private(set) var daemonTransitionInProgress = false
+    @Published private(set) var daemonLeaseTakeoverInProgress = false
+    @Published private(set) var managementCredentialRotationInProgress = false
+    @Published private(set) var daemonManagementFeedback: String?
     @Published var daemonRecoveryError: String?
     @Published private(set) var availableUpdate: AvailableUpdate?
     @Published var updateNoticeDismissed = false
@@ -77,6 +92,9 @@ final class AppModel: ObservableObject {
     private var pendingDaemonRuntimeSwitch: DaemonRuntimeSwitch?
     private var daemonRuntimeSwitchOperationInProgress = false
     private var daemonTransitionGeneration: UInt64 = 0
+    private var lifecycleObservationGeneration: UInt64 = 0
+    private var cachedDaemonIdentity: ManageDaemonIdentity?
+    private var cachedDaemonIdentityInstanceId: String?
     private let installationId: String
     private static let sub2ApiAccountPoolCacheLifetime: TimeInterval = 5 * 60
     private var sub2ApiAccountPoolGeneration: UInt64 = 0
@@ -212,6 +230,36 @@ final class AppModel: ObservableObject {
         return expiresAt > currentTimeMilliseconds
     }
 
+    var canTakeOverDaemonLease: Bool {
+        guard daemonLeaseConflict,
+              lifecycle?.management.leaseGeneration != nil,
+              lifecycle?.management.managementTokenGeneration != nil
+        else { return false }
+        return !daemonTransitionInProgress
+            && !daemonLeaseTakeoverInProgress
+            && !managementCredentialRotationInProgress
+    }
+
+    var canRotateManagementCredential: Bool {
+        guard ownsDaemonLease,
+              lifecycle?.management.leaseGeneration != nil,
+              lifecycle?.management.managementTokenGeneration != nil
+        else { return false }
+        return !daemonTransitionInProgress
+            && !daemonLeaseTakeoverInProgress
+            && !managementCredentialRotationInProgress
+    }
+
+    var daemonLeaseTakeoverConfirmation: DaemonManagementConfirmation? {
+        guard canTakeOverDaemonLease, let lifecycle else { return nil }
+        return daemonManagementConfirmation(for: lifecycle)
+    }
+
+    var managementCredentialRotationConfirmation: DaemonManagementConfirmation? {
+        guard canRotateManagementCredential, let lifecycle else { return nil }
+        return daemonManagementConfirmation(for: lifecycle)
+    }
+
     var daemonManagementDetail: String {
         if ownsDaemonLease { return "已托管 · 运行中" }
         if daemonLeaseConflict { return "运行正常 · 其他安装管理" }
@@ -220,6 +268,42 @@ final class AppModel: ObservableObject {
 
     private var currentTimeMilliseconds: Int64 {
         Int64(Date().timeIntervalSince1970 * 1_000)
+    }
+
+    private func daemonManagementConfirmation(
+        for lifecycle: ManageLifecycle
+    ) -> DaemonManagementConfirmation? {
+        guard let owner = lifecycle.management.installationId,
+              let leaseGeneration = lifecycle.management.leaseGeneration,
+              let managementTokenGeneration = lifecycle.management.managementTokenGeneration
+        else { return nil }
+        return DaemonManagementConfirmation(
+            daemonInstanceId: lifecycle.service.instanceId,
+            daemonPID: lifecycle.service.pid,
+            daemonStartedAtMs: lifecycle.service.startedAtMs,
+            leaseOwnerInstallationId: owner,
+            leaseGeneration: leaseGeneration,
+            managementTokenGeneration: managementTokenGeneration
+        )
+    }
+
+    private func lifecycleMatchesConfirmation(
+        _ lifecycle: ManageLifecycle,
+        _ confirmation: DaemonManagementConfirmation
+    ) -> Bool {
+        lifecycle.service.instanceId == confirmation.daemonInstanceId
+            && lifecycle.service.pid == confirmation.daemonPID
+            && lifecycle.service.startedAtMs == confirmation.daemonStartedAtMs
+            && lifecycle.management.installationId == confirmation.leaseOwnerInstallationId
+            && lifecycle.management.leaseGeneration == confirmation.leaseGeneration
+            && lifecycle.management.managementTokenGeneration
+                == confirmation.managementTokenGeneration
+    }
+
+    private func lifecycleObservationIsCurrent(_ generation: UInt64) -> Bool {
+        generation == lifecycleObservationGeneration
+            && !daemonLeaseTakeoverInProgress
+            && !managementCredentialRotationInProgress
     }
 
     init(
@@ -401,6 +485,7 @@ final class AppModel: ObservableObject {
 
     private func loadServiceStatus(probe: ServiceProbe) async {
         let transitionGeneration = daemonTransitionGeneration
+        let observationGeneration = lifecycleObservationGeneration
         switch probe {
         case let .versioned(health):
             serviceStatus = health.ready ? .available : .unavailable("服务正在启动")
@@ -413,7 +498,9 @@ final class AppModel: ObservableObject {
                 guard transitionGeneration == daemonTransitionGeneration else { return }
                 dashboard = loadedDashboard
                 let loadedLifecycle = try? await apiClient.lifecycle()
-                guard transitionGeneration == daemonTransitionGeneration else { return }
+                guard transitionGeneration == daemonTransitionGeneration,
+                      lifecycleObservationIsCurrent(observationGeneration)
+                else { return }
                 lifecycle = loadedLifecycle
                 if let lifecycle, !daemonTransitionInProgress {
                     await prepareDaemonRuntimeIfNeeded(lifecycle)
@@ -431,6 +518,7 @@ final class AppModel: ObservableObject {
                 await loadIMAccounts()
                 dashboardState = .loaded
             } catch let error as APIClientError {
+                guard lifecycleObservationIsCurrent(observationGeneration) else { return }
                 if error == .unauthorized {
                     dashboard = nil
                     lifecycle = nil
@@ -445,7 +533,9 @@ final class AppModel: ObservableObject {
         case .legacy:
             serviceStatus = .bridgeAvailable
             dashboard = nil
-            lifecycle = nil
+            if lifecycleObservationIsCurrent(observationGeneration) {
+                lifecycle = nil
+            }
             stopLifecycleLeaseHeartbeat()
             imAccounts = []
             imAccountsAvailability = .needsUpdate
@@ -634,7 +724,12 @@ final class AppModel: ObservableObject {
     }
 
     private func reconcileLifecycleLease() async {
-        guard fixtureStatus == nil, !daemonTransitionInProgress, let lifecycle else {
+        guard fixtureStatus == nil,
+              !daemonTransitionInProgress,
+              !daemonLeaseTakeoverInProgress,
+              !managementCredentialRotationInProgress,
+              let lifecycle
+        else {
             stopLifecycleLeaseHeartbeat()
             return
         }
@@ -648,12 +743,19 @@ final class AppModel: ObservableObject {
         }
         do {
             let transitionGeneration = daemonTransitionGeneration
+            let observationGeneration = lifecycleObservationGeneration
             let instanceId = lifecycle.service.instanceId
+            let daemonIdentity = try await verifiedDaemonIdentity(
+                for: lifecycle,
+                forceRefresh: true
+            )
             let claimed = try await apiClient.claimLifecycleLease(
                 installationId: installationId,
-                daemonInstanceId: instanceId
+                daemonInstanceId: instanceId,
+                daemonIdentity: daemonIdentity
             )
             guard transitionGeneration == daemonTransitionGeneration,
+                  lifecycleObservationIsCurrent(observationGeneration),
                   !daemonTransitionInProgress,
                   self.lifecycle?.service.instanceId == instanceId
             else { return }
@@ -667,7 +769,11 @@ final class AppModel: ObservableObject {
     }
 
     private func startLifecycleLeaseHeartbeat() {
-        guard lifecycleLeaseTask == nil, !daemonTransitionInProgress else { return }
+        guard lifecycleLeaseTask == nil,
+              !daemonTransitionInProgress,
+              !daemonLeaseTakeoverInProgress,
+              !managementCredentialRotationInProgress
+        else { return }
         lifecycleLeaseTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
@@ -688,31 +794,50 @@ final class AppModel: ObservableObject {
 
     private func renewLifecycleLease() async {
         guard !daemonTransitionInProgress,
+              !daemonLeaseTakeoverInProgress,
+              !managementCredentialRotationInProgress,
               ownsDaemonLease,
-              let instanceId = lifecycle?.service.instanceId
+              let observedLifecycle = lifecycle
         else {
             stopLifecycleLeaseHeartbeat()
             return
         }
         let transitionGeneration = daemonTransitionGeneration
+        let observationGeneration = lifecycleObservationGeneration
+        let instanceId = observedLifecycle.service.instanceId
         do {
+            let daemonIdentity = try await verifiedDaemonIdentity(for: observedLifecycle)
             let renewed = try await apiClient.renewLifecycleLease(
                 installationId: installationId,
-                daemonInstanceId: instanceId
+                daemonInstanceId: instanceId,
+                daemonIdentity: daemonIdentity
             )
-            guard transitionGeneration == daemonTransitionGeneration,
+            guard !Task.isCancelled,
+                  transitionGeneration == daemonTransitionGeneration,
+                  lifecycleObservationIsCurrent(observationGeneration),
                   !daemonTransitionInProgress,
+                  !daemonLeaseTakeoverInProgress,
+                  !managementCredentialRotationInProgress,
                   lifecycle?.service.instanceId == instanceId
             else { return }
             lifecycle = renewed
         } catch {
-            guard transitionGeneration == daemonTransitionGeneration,
-                  !daemonTransitionInProgress
+            guard !Task.isCancelled,
+                  transitionGeneration == daemonTransitionGeneration,
+                  lifecycleObservationIsCurrent(observationGeneration),
+                  !daemonTransitionInProgress,
+                  !daemonLeaseTakeoverInProgress,
+                  !managementCredentialRotationInProgress
             else { return }
             stopLifecycleLeaseHeartbeat()
+            clearCachedDaemonIdentity()
             let refreshed = try? await apiClient.lifecycle()
-            guard transitionGeneration == daemonTransitionGeneration,
-                  !daemonTransitionInProgress
+            guard !Task.isCancelled,
+                  transitionGeneration == daemonTransitionGeneration,
+                  lifecycleObservationIsCurrent(observationGeneration),
+                  !daemonTransitionInProgress,
+                  !daemonLeaseTakeoverInProgress,
+                  !managementCredentialRotationInProgress
             else { return }
             lifecycle = refreshed
         }
@@ -1482,6 +1607,149 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Explicitly replaces another installation's still-active management
+    /// lease. This is only called after the user confirms the takeover in
+    /// Settings; background refresh never enters this path.
+    @discardableResult
+    func takeOverDaemonManagement(
+        confirming confirmation: DaemonManagementConfirmation
+    ) async -> Bool {
+        guard fixtureStatus == nil else { return false }
+        guard !daemonLeaseTakeoverInProgress,
+              !managementCredentialRotationInProgress,
+              !daemonTransitionInProgress
+        else { return false }
+        guard daemonLeaseConflict,
+              let observedLifecycle = lifecycle,
+              lifecycleMatchesConfirmation(observedLifecycle, confirmation)
+        else {
+            managementOperationError = "确认后后台服务管理租约已变化，请刷新状态并重新确认。"
+            return false
+        }
+
+        lifecycleObservationGeneration &+= 1
+        daemonLeaseTakeoverInProgress = true
+        managementOperationError = nil
+        daemonManagementFeedback = "正在核验后台服务身份并接管管理权…"
+        stopLifecycleLeaseHeartbeat()
+        defer {
+            lifecycleObservationGeneration &+= 1
+            daemonLeaseTakeoverInProgress = false
+            if ownsDaemonLease {
+                startLifecycleLeaseHeartbeat()
+            }
+        }
+
+        let requestId = UUID().uuidString
+        do {
+            let identity = try await verifiedDaemonIdentity(
+                for: observedLifecycle,
+                forceRefresh: true
+            )
+            let response = try await apiClient.takeOverLifecycleLease(
+                installationId: installationId,
+                daemonInstanceId: confirmation.daemonInstanceId,
+                expectedLeaseGeneration: confirmation.leaseGeneration,
+                expectedManagementTokenGeneration: confirmation.managementTokenGeneration,
+                requestId: requestId,
+                daemonIdentity: identity
+            )
+            let refreshed = try await validatedLifecycle(
+                after: response,
+                requestId: requestId,
+                expectedInstanceId: observedLifecycle.service.instanceId
+            )
+            lifecycle = refreshed
+            daemonManagementFeedback = "已接管后台服务，其他安装的管理权限和旧凭据已失效。"
+            actionFeedback = ActionFeedback(message: "已接管后台服务")
+            return true
+        } catch {
+            daemonManagementFeedback = nil
+            managementOperationError = "接管后台服务失败：\(userFacingMessage(for: error))"
+            return false
+        }
+    }
+
+    /// Rotates the shared management credential while retaining the current
+    /// installation's lease. The daemon never returns the new secret; the
+    /// next lifecycle read discovers it from the protected control file.
+    @discardableResult
+    func rotateManagementCredential(
+        confirming confirmation: DaemonManagementConfirmation
+    ) async -> Bool {
+        guard fixtureStatus == nil else { return false }
+        guard !daemonLeaseTakeoverInProgress,
+              !managementCredentialRotationInProgress,
+              !daemonTransitionInProgress
+        else { return false }
+        guard ownsDaemonLease,
+              let observedLifecycle = lifecycle,
+              lifecycleMatchesConfirmation(observedLifecycle, confirmation)
+        else {
+            managementOperationError = "确认后后台服务管理状态已变化，请刷新状态并重新确认。"
+            return false
+        }
+
+        lifecycleObservationGeneration &+= 1
+        managementCredentialRotationInProgress = true
+        managementOperationError = nil
+        daemonManagementFeedback = "正在重新生成管理凭据…"
+        stopLifecycleLeaseHeartbeat()
+        defer {
+            lifecycleObservationGeneration &+= 1
+            managementCredentialRotationInProgress = false
+            if ownsDaemonLease {
+                startLifecycleLeaseHeartbeat()
+            }
+        }
+
+        let requestId = UUID().uuidString
+        do {
+            let response = try await apiClient.rotateManagementCredential(
+                installationId: installationId,
+                daemonInstanceId: confirmation.daemonInstanceId,
+                leaseGeneration: confirmation.leaseGeneration,
+                expectedManagementTokenGeneration: confirmation.managementTokenGeneration,
+                requestId: requestId
+            )
+            let refreshed = try await validatedLifecycle(
+                after: response,
+                requestId: requestId,
+                expectedInstanceId: observedLifecycle.service.instanceId
+            )
+            lifecycle = refreshed
+            daemonManagementFeedback = "管理凭据已重新生成，旧凭据已立即失效。"
+            actionFeedback = ActionFeedback(message: "管理凭据已重新生成")
+            return true
+        } catch {
+            daemonManagementFeedback = nil
+            managementOperationError = "重新生成管理凭据失败：\(userFacingMessage(for: error))"
+            return false
+        }
+    }
+
+    private func validatedLifecycle(
+        after response: ManageLifecycleCredentialMutationResponse,
+        requestId: String,
+        expectedInstanceId: String
+    ) async throws -> ManageLifecycle {
+        guard response.ok, response.requestId == requestId else {
+            throw APIClientError.operationFailed("后台服务没有确认管理凭据变更。")
+        }
+        let refreshed = try await apiClient.lifecycle()
+        guard refreshed.service.instanceId == expectedInstanceId else {
+            throw APIClientError.operationFailed("后台服务实例已变化，请刷新状态后重试。")
+        }
+        guard refreshed.management.canControl,
+              refreshed.management.installationId == installationId,
+              refreshed.management.managementTokenGeneration
+                == response.managementTokenGeneration
+        else {
+            throw APIClientError.operationFailed("后台服务管理状态校验失败，请刷新后重试。")
+        }
+        return refreshed
+    }
+
     func restartDaemon() async {
         guard fixtureStatus == nil,
               !daemonTransitionInProgress,
@@ -1760,7 +2028,11 @@ final class AppModel: ObservableObject {
                 }
                 let claimed = try await apiClient.claimLifecycleLease(
                     installationId: installationId,
-                    daemonInstanceId: current.service.instanceId
+                    daemonInstanceId: current.service.instanceId,
+                    daemonIdentity: try await verifiedDaemonIdentity(
+                        for: current,
+                        forceRefresh: true
+                    )
                 )
                 try await requestLifecycleRestart(claimed)
                 do {
@@ -1896,7 +2168,11 @@ final class AppModel: ObservableObject {
         do {
             let claimed = try await apiClient.claimLifecycleLease(
                 installationId: installationId,
-                daemonInstanceId: lifecycle.service.instanceId
+                daemonInstanceId: lifecycle.service.instanceId,
+                daemonIdentity: try await verifiedDaemonIdentity(
+                    for: lifecycle,
+                    forceRefresh: true
+                )
             )
             try Task.checkCancellation()
             return claimed
@@ -1906,6 +2182,39 @@ final class AppModel: ObservableObject {
             try Task.checkCancellation()
             return nil
         }
+    }
+
+    private func verifiedDaemonIdentity(
+        for lifecycle: ManageLifecycle,
+        forceRefresh: Bool = false
+    ) async throws -> ManageDaemonIdentity {
+        if !forceRefresh,
+           let cachedDaemonIdentity,
+           cachedDaemonIdentityInstanceId == lifecycle.service.instanceId,
+           cachedDaemonIdentity.pid == lifecycle.service.pid,
+           cachedDaemonIdentity.startedAtMs == lifecycle.service.startedAtMs,
+           cachedDaemonIdentity.executable == lifecycle.executable,
+           cachedDaemonIdentity.bind == lifecycle.bind,
+           lifecycle.executableSha256.map({
+               $0.caseInsensitiveCompare(cachedDaemonIdentity.executableSha256) == .orderedSame
+           }) ?? true
+        {
+            return cachedDaemonIdentity
+        }
+        do {
+            let verified = try await daemonLauncher.verifiedDaemonIdentity(for: lifecycle)
+            cachedDaemonIdentity = verified
+            cachedDaemonIdentityInstanceId = lifecycle.service.instanceId
+            return verified
+        } catch {
+            clearCachedDaemonIdentity()
+            throw error
+        }
+    }
+
+    private func clearCachedDaemonIdentity() {
+        cachedDaemonIdentity = nil
+        cachedDaemonIdentityInstanceId = nil
     }
 
     nonisolated static func daemonReplacementMatches(

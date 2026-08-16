@@ -19,6 +19,8 @@ struct SettingsView: View {
     @State private var releaseNotes = ""
     @State private var latestReleaseURL: URL?
     @State private var confirmsRestart = false
+    @State private var daemonTakeoverConfirmation: DaemonManagementConfirmation?
+    @State private var credentialRotationConfirmation: DaemonManagementConfirmation?
 
     var body: some View {
         TabView {
@@ -53,6 +55,40 @@ struct SettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("ThreadRelay 会先确认没有进行中的受保护任务，再请求后台服务安全重启。")
+        }
+        .confirmationDialog(
+            "接管后台服务？",
+            isPresented: Binding(
+                get: { daemonTakeoverConfirmation != nil },
+                set: { if !$0 { daemonTakeoverConfirmation = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("接管后台服务", role: .destructive) {
+                guard let confirmation = daemonTakeoverConfirmation else { return }
+                daemonTakeoverConfirmation = nil
+                Task { await model.takeOverDaemonManagement(confirming: confirmation) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("这会重新核验正在运行的后台服务，接替其他安装的管理租约，并立即更换共享管理凭据。其他安装将失去管理权。")
+        }
+        .confirmationDialog(
+            "重新生成管理凭据？",
+            isPresented: Binding(
+                get: { credentialRotationConfirmation != nil },
+                set: { if !$0 { credentialRotationConfirmation = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("重新生成", role: .destructive) {
+                guard let confirmation = credentialRotationConfirmation else { return }
+                credentialRotationConfirmation = nil
+                Task { await model.rotateManagementCredential(confirming: confirmation) }
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("新的管理凭据会立即生效，旧凭据不再可用。当前安装会继续管理后台服务。")
         }
     }
 
@@ -193,7 +229,56 @@ struct SettingsView: View {
                             systemImage: "arrow.clockwise.circle"
                         )
                     }
-                    .disabled(model.daemonTransitionInProgress)
+                    .disabled(
+                        model.daemonTransitionInProgress
+                            || model.daemonLeaseTakeoverInProgress
+                            || model.managementCredentialRotationInProgress
+                    )
+                }
+                if model.daemonLeaseConflict {
+                    Button {
+                        daemonTakeoverConfirmation = model.daemonLeaseTakeoverConfirmation
+                    } label: {
+                        Label(
+                            model.daemonLeaseTakeoverInProgress
+                                ? "正在接管后台服务"
+                                : "接管后台服务",
+                            systemImage: "lock.open"
+                        )
+                    }
+                    .disabled(!model.canTakeOverDaemonLease)
+                }
+                if model.ownsDaemonLease {
+                    Button {
+                        credentialRotationConfirmation = model.managementCredentialRotationConfirmation
+                    } label: {
+                        Label(
+                            model.managementCredentialRotationInProgress
+                                ? "正在重新生成管理凭据"
+                                : "重新生成管理凭据",
+                            systemImage: "key"
+                        )
+                    }
+                    .disabled(!model.canRotateManagementCredential)
+                }
+                if model.daemonLeaseTakeoverInProgress
+                    || model.managementCredentialRotationInProgress
+                {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text(model.daemonManagementFeedback ?? "正在处理…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else if let error = model.managementOperationError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                } else if let feedback = model.daemonManagementFeedback {
+                    Label(feedback, systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
         }

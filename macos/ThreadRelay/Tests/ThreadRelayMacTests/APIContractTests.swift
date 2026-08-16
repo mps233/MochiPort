@@ -1853,6 +1853,263 @@ final class APIContractTests: XCTestCase {
         }
     }
 
+    func testDaemonLauncherVerifiesLifecycleIdentityAndComputesExecutableDigest() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let executable = try installDaemonRuntime(build: "389", fixture: fixture)
+        let expectedDigest = "e5789e49e5f4d6a8782d3633321311cc53e016637a8c664ca186b140f1c24a3a"
+        let lifecycle = lifecycleFixture(
+            instanceId: "verified-instance",
+            build: 389,
+            executable: executable.path,
+            executableSha256: expectedDigest,
+            configPath: fixture.configuration.configURL.path
+        )
+        let locator = ActiveDaemonLocator(
+            service: "threadrelay",
+            apiMajor: 1,
+            instanceId: lifecycle.service.instanceId,
+            pid: lifecycle.service.pid,
+            startedAtMs: lifecycle.service.startedAtMs,
+            baseURL: "http://127.0.0.1:3847",
+            controlFile: fixture.configuration.configURL.deletingLastPathComponent()
+                .appendingPathComponent("threadrelay-control.json").path
+        )
+        let loadedAgentOutput = launchctlOutput(
+            program: executable,
+            configuration: fixture.configuration,
+            build: "389",
+            pid: 123
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            guard arguments.first == "print" else {
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+            return CommandResult(
+                exitCode: 0,
+                output: loadedAgentOutput
+            )
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            activeDaemonLocatorLoader: { locator }
+        )
+
+        let identity = try await launcher.verifiedDaemonIdentity(for: lifecycle)
+        let legacyIdentity = try await launcher.verifiedDaemonIdentity(
+            for: lifecycleFixture(
+                instanceId: "verified-instance",
+                build: 389,
+                executable: executable.path,
+                configPath: fixture.configuration.configURL.path
+            )
+        )
+
+        XCTAssertEqual(identity.executableSha256, expectedDigest)
+        XCTAssertEqual(legacyIdentity, identity)
+        XCTAssertEqual(identity.pid, 123)
+        XCTAssertEqual(identity.startedAtMs, 456)
+        XCTAssertEqual(identity.bind, "127.0.0.1:3847")
+        XCTAssertEqual(commands.arguments, [
+            ["print", "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"],
+            ["print", "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"],
+        ])
+    }
+
+    func testDaemonLauncherAcceptsOnlyCommittedActiveRuntimeWithStaleProcessHold() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let executable = try installDaemonRuntime(build: "389", fixture: fixture)
+        let lifecycle = lifecycleFixture(
+            instanceId: "committed-instance",
+            build: 389,
+            executable: executable.path,
+            configPath: fixture.configuration.configURL.path
+        )
+        let locator = ActiveDaemonLocator(
+            service: "threadrelay",
+            apiMajor: 1,
+            instanceId: lifecycle.service.instanceId,
+            pid: lifecycle.service.pid,
+            startedAtMs: lifecycle.service.startedAtMs,
+            baseURL: "http://127.0.0.1:3847",
+            controlFile: fixture.configuration.configURL.deletingLastPathComponent()
+                .appendingPathComponent("threadrelay-control.json").path
+        )
+        let loadedAgentOutput = launchctlOutput(
+            program: executable,
+            configuration: fixture.configuration,
+            build: "389",
+            pid: 123,
+            runtimeSwitchHold: true
+        )
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: { _, _ in
+                CommandResult(exitCode: 0, output: loadedAgentOutput)
+            },
+            activeDaemonLocatorLoader: { locator }
+        )
+
+        let identity = try await launcher.verifiedDaemonIdentity(for: lifecycle)
+        XCTAssertEqual(identity.executable, executable.path)
+
+        let draining = lifecycleFixture(
+            instanceId: lifecycle.service.instanceId,
+            build: 389,
+            executable: executable.path,
+            configPath: fixture.configuration.configURL.path,
+            runtimeState: "draining"
+        )
+        do {
+            _ = try await launcher.verifiedDaemonIdentity(for: draining)
+            XCTFail("Expected an uncommitted candidate hold to be rejected")
+        } catch {
+            XCTAssertEqual(error as? DaemonLaunchError, .loadedAgentUntrusted(executable.path))
+        }
+
+        try Data("pending".utf8).write(
+            to: runtimeSwitchJournalURL(for: fixture.configuration),
+            options: .atomic
+        )
+        do {
+            _ = try await launcher.verifiedDaemonIdentity(for: lifecycle)
+            XCTFail("Expected a pending runtime switch to keep the hold untrusted")
+        } catch {
+            XCTAssertEqual(error as? DaemonLaunchError, .loadedAgentUntrusted(executable.path))
+        }
+    }
+
+    func testDaemonLauncherCanPrepareNextSwitchAfterCommittedProcessKeepsHold() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "388", fixture: fixture)
+        let loadedAgentOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "388",
+            pid: 123,
+            runtimeSwitchHold: true
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 0, output: loadedAgentOutput)
+            }
+            return CommandResult(exitCode: 1, output: "must not mutate launchd")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "committed-instance",
+            expectedExecutable: previous.path
+        )
+
+        XCTAssertEqual(transaction.journal.phase, .prepared)
+        try await launcher.cancelRuntimeSwitch(transaction)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: runtimeSwitchJournalURL(for: fixture.configuration).path
+            )
+        )
+    }
+
+    func testDaemonLauncherRejectsLifecycleIdentityWithWrongDigestOrLocator() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let executable = try installDaemonRuntime(build: "389", fixture: fixture)
+        let lifecycle = lifecycleFixture(
+            instanceId: "verified-instance",
+            build: 389,
+            executable: executable.path,
+            executableSha256: String(repeating: "0", count: 64),
+            configPath: fixture.configuration.configURL.path
+        )
+        let locator = ActiveDaemonLocator(
+            service: "threadrelay",
+            apiMajor: 1,
+            instanceId: lifecycle.service.instanceId,
+            pid: lifecycle.service.pid,
+            startedAtMs: lifecycle.service.startedAtMs,
+            baseURL: "http://127.0.0.1:3847",
+            controlFile: fixture.configuration.configURL.deletingLastPathComponent()
+                .appendingPathComponent("threadrelay-control.json").path
+        )
+        let loadedAgentOutput = launchctlOutput(
+            program: executable,
+            configuration: fixture.configuration,
+            build: "389",
+            pid: 123
+        )
+        let commands = CommandInvocationRecorder { _ in
+            CommandResult(
+                exitCode: 0,
+                output: loadedAgentOutput
+            )
+        }
+        let digestMismatch = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            activeDaemonLocatorLoader: { locator }
+        )
+
+        do {
+            _ = try await digestMismatch.verifiedDaemonIdentity(for: lifecycle)
+            XCTFail("Expected mismatched executable digest to be rejected")
+        } catch {
+            XCTAssertEqual(error as? DaemonLaunchError, .loadedAgentUntrusted(executable.path))
+        }
+
+        let wrongLocator = ActiveDaemonLocator(
+            service: locator.service,
+            apiMajor: locator.apiMajor,
+            instanceId: "another-instance",
+            pid: locator.pid,
+            startedAtMs: locator.startedAtMs,
+            baseURL: locator.baseURL,
+            controlFile: locator.controlFile
+        )
+        let locatorMismatch = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            activeDaemonLocatorLoader: { wrongLocator }
+        )
+        do {
+            _ = try await locatorMismatch.verifiedDaemonIdentity(for: lifecycle)
+            XCTFail("Expected mismatched active locator to be rejected")
+        } catch {
+            XCTAssertEqual(error as? DaemonLaunchError, .loadedAgentUntrusted(executable.path))
+        }
+
+        let wrongControlFile = ActiveDaemonLocator(
+            service: locator.service,
+            apiMajor: locator.apiMajor,
+            instanceId: locator.instanceId,
+            pid: locator.pid,
+            startedAtMs: locator.startedAtMs,
+            baseURL: locator.baseURL,
+            controlFile: fixture.root.appendingPathComponent("another-control.json").path
+        )
+        let controlFileMismatch = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            activeDaemonLocatorLoader: { wrongControlFile }
+        )
+        do {
+            _ = try await controlFileMismatch.verifiedDaemonIdentity(for: lifecycle)
+            XCTFail("Expected mismatched control file to be rejected")
+        } catch {
+            XCTAssertEqual(error as? DaemonLaunchError, .loadedAgentUntrusted(executable.path))
+        }
+    }
+
     func testDaemonReplacementRequiresTargetBuildAndExecutable() {
         let expected = "/fixture/runtimes/389/threadrelay-daemon"
         let valid = lifecycleFixture(
@@ -3220,7 +3477,7 @@ final class APIContractTests: XCTestCase {
             )
             return MockResponse(
                 statusCode: 200,
-                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":1,"codexTurns":2,"imStreams":3,"pendingApprovals":1,"remoteControlRequests":4,"total":11},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","executableSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":1,"codexTurns":2,"imStreams":3,"pendingApprovals":1,"remoteControlRequests":4,"total":11},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null,"managementTokenGeneration":9}}"#
             )
         }
 
@@ -3229,9 +3486,14 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(lifecycle.service.instanceId, "fixture-instance")
         XCTAssertEqual(lifecycle.runtime.productVersion, "0.5.0")
         XCTAssertEqual(lifecycle.runtime.buildNumber, 388)
+        XCTAssertEqual(
+            lifecycle.executableSha256,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        )
         XCTAssertEqual(lifecycle.protectedWorkItems.total, 11)
         XCTAssertEqual(lifecycle.management.mode, "readOnly")
         XCTAssertFalse(lifecycle.management.canControl)
+        XCTAssertEqual(lifecycle.management.managementTokenGeneration, 9)
     }
 
     func testFetchLifecycleAcceptsOlderDaemonWithoutBuildNumber() async throws {
@@ -3245,9 +3507,18 @@ final class APIContractTests: XCTestCase {
         let lifecycle = try await client.fetchLifecycle(bearerToken: "fixture-token")
 
         XCTAssertNil(lifecycle.runtime.buildNumber)
+        XCTAssertNil(lifecycle.executableSha256)
+        XCTAssertNil(lifecycle.management.managementTokenGeneration)
     }
 
     func testLifecycleMutationEndpointsUseVersionedRoutesAndIdentity() async throws {
+        let identity = ManageDaemonIdentity(
+            pid: 123,
+            startedAtMs: 456,
+            executable: "/fixture/ThreadRelay",
+            executableSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            bind: "127.0.0.1:3847"
+        )
         let client = makeClient { request in
             let path = request.url?.path
             let body = Self.jsonBody(from: request)
@@ -3258,7 +3529,36 @@ final class APIContractTests: XCTestCase {
             case "/api/v1/manage/lifecycle/lease/claim",
                  "/api/v1/manage/lifecycle/lease/renew",
                  "/api/v1/manage/lifecycle/lease/release":
+                let daemonIdentity = body?["daemonIdentity"] as? [String: Any]
+                XCTAssertEqual(daemonIdentity?["pid"] as? Int, 123)
+                XCTAssertEqual(daemonIdentity?["startedAtMs"] as? Int, 456)
+                XCTAssertEqual(daemonIdentity?["executable"] as? String, "/fixture/ThreadRelay")
+                XCTAssertEqual(
+                    daemonIdentity?["executableSha256"] as? String,
+                    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                )
+                XCTAssertEqual(daemonIdentity?["bind"] as? String, "127.0.0.1:3847")
                 return MockResponse(statusCode: 200, json: Self.lifecycleJSON)
+            case "/api/v1/manage/lifecycle/lease/takeover":
+                XCTAssertEqual(body?["expectedLeaseGeneration"] as? Int, 7)
+                XCTAssertEqual(body?["expectedManagementTokenGeneration"] as? Int, 9)
+                XCTAssertEqual(body?["requestId"] as? String, "request-takeover")
+                XCTAssertEqual(body?["force"] as? Bool, true)
+                XCTAssertNotNil(body?["daemonIdentity"] as? [String: Any])
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"rotated":true,"requestId":"request-takeover","managementTokenGeneration":10}"#
+                )
+            case "/api/v1/manage/lifecycle/credential/rotate":
+                XCTAssertEqual(body?["leaseGeneration"] as? Int, 7)
+                XCTAssertEqual(body?["expectedManagementTokenGeneration"] as? Int, 10)
+                XCTAssertEqual(body?["requestId"] as? String, "request-rotate")
+                XCTAssertEqual(body?["reason"] as? String, "leakRecovery")
+                XCTAssertNil(body?["daemonIdentity"])
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"rotated":true,"requestId":"request-rotate","managementTokenGeneration":11}"#
+                )
             case "/api/v1/manage/lifecycle/restart":
                 XCTAssertEqual(body?["force"] as? Bool, false)
                 XCTAssertEqual(body?["leaseGeneration"] as? Int, 7)
@@ -3273,16 +3573,36 @@ final class APIContractTests: XCTestCase {
 
         _ = try await client.claimLifecycleLease(
             installationId: "installation-a",
-            daemonInstanceId: "fixture-instance"
+            daemonInstanceId: "fixture-instance",
+            daemonIdentity: identity
         )
         _ = try await client.renewLifecycleLease(
             installationId: "installation-a",
-            daemonInstanceId: "fixture-instance"
+            daemonInstanceId: "fixture-instance",
+            daemonIdentity: identity
         )
         _ = try await client.releaseLifecycleLease(
             installationId: "installation-a",
-            daemonInstanceId: "fixture-instance"
+            daemonInstanceId: "fixture-instance",
+            daemonIdentity: identity
         )
+        let takeover = try await client.takeOverLifecycleLease(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance",
+            expectedLeaseGeneration: 7,
+            expectedManagementTokenGeneration: 9,
+            requestId: "request-takeover",
+            daemonIdentity: identity
+        )
+        XCTAssertEqual(takeover.managementTokenGeneration, 10)
+        let rotation = try await client.rotateManagementCredential(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance",
+            leaseGeneration: 7,
+            expectedManagementTokenGeneration: 10,
+            requestId: "request-rotate"
+        )
+        XCTAssertEqual(rotation.managementTokenGeneration, 11)
         let restart = try await client.restartLifecycle(
             installationId: "installation-a",
             daemonInstanceId: "fixture-instance",
@@ -3297,6 +3617,77 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(committed.service.instanceId, "fixture-instance")
     }
 
+    func testIdempotentLifecycleMutationsRetryLostResponsesWithSameRequestId() async throws {
+        let takeoverAttempts = IntCounter()
+        let takeoverRequestIds = StringRecorder()
+        let rotationAttempts = IntCounter()
+        let rotationRequestIds = StringRecorder()
+        let authorizations = StringRecorder()
+        let credential = LockedValue("initial-token")
+        let client = makeClient(credentialLoader: { credential.value }) { request in
+            let requestId = Self.jsonBody(from: request)?["requestId"] as? String ?? ""
+            authorizations.record(request.value(forHTTPHeaderField: "Authorization") ?? "")
+            switch request.url?.path {
+            case "/api/v1/manage/lifecycle/lease/takeover":
+                takeoverRequestIds.record(requestId)
+                guard takeoverAttempts.next() > 1 else {
+                    credential.value = "takeover-token"
+                    return MockResponse(error: URLError(.networkConnectionLost))
+                }
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"rotated":false,"requestId":"request-takeover","managementTokenGeneration":10}"#
+                )
+            case "/api/v1/manage/lifecycle/credential/rotate":
+                rotationRequestIds.record(requestId)
+                guard rotationAttempts.next() > 1 else {
+                    credential.value = "rotation-token"
+                    return MockResponse(error: URLError(.timedOut))
+                }
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"rotated":false,"requestId":"request-rotate","managementTokenGeneration":11}"#
+                )
+            default:
+                return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
+            }
+        }
+        let identity = ManageDaemonIdentity(
+            pid: 123,
+            startedAtMs: 456,
+            executable: "/fixture/ThreadRelay",
+            executableSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            bind: "127.0.0.1:3847"
+        )
+
+        let takeover = try await client.takeOverLifecycleLease(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance",
+            expectedLeaseGeneration: 7,
+            expectedManagementTokenGeneration: 9,
+            requestId: "request-takeover",
+            daemonIdentity: identity
+        )
+        let rotation = try await client.rotateManagementCredential(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance",
+            leaseGeneration: 8,
+            expectedManagementTokenGeneration: 10,
+            requestId: "request-rotate"
+        )
+
+        XCTAssertFalse(takeover.rotated)
+        XCTAssertFalse(rotation.rotated)
+        XCTAssertEqual(takeoverRequestIds.values, ["request-takeover", "request-takeover"])
+        XCTAssertEqual(rotationRequestIds.values, ["request-rotate", "request-rotate"])
+        XCTAssertEqual(authorizations.values, [
+            "Bearer initial-token",
+            "Bearer takeover-token",
+            "Bearer takeover-token",
+            "Bearer rotation-token",
+        ])
+    }
+
     func testFetchLifecycleRejectsUnsupportedRuntimeAPIMajor() async {
         let client = makeClient { _ in
             MockResponse(
@@ -3306,6 +3697,503 @@ final class APIContractTests: XCTestCase {
         }
 
         await assertLifecycleError(.unsupportedAPIMajor(2), from: client)
+    }
+
+    @MainActor
+    func testAppModelOnlyTakesOverConflictingLeaseAfterExplicitRequest() async {
+        let owner = LockedValue<String?>("other-installation")
+        let tokenGeneration = LockedValue<Int64>(3)
+        let takeoverCalls = IntCounter()
+        let launcher = IdentityVerifyingDaemonLauncher()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: owner.value != "other-installation",
+                        managementTokenGeneration: tokenGeneration.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                XCTFail("An active conflicting lease must never be claimed automatically")
+                return MockResponse(statusCode: 409, json: #"{"error":"lease conflict"}"#)
+            case ("POST", "/api/v1/manage/lifecycle/lease/takeover"):
+                _ = takeoverCalls.next()
+                let body = Self.jsonBody(from: request)
+                let installationId = body?["installationId"] as? String
+                let requestId = body?["requestId"] as? String ?? ""
+                XCTAssertEqual(body?["expectedLeaseGeneration"] as? Int, 7)
+                XCTAssertEqual(body?["expectedManagementTokenGeneration"] as? Int, 3)
+                XCTAssertEqual(body?["force"] as? Bool, true)
+                XCTAssertNotNil(body?["daemonIdentity"] as? [String: Any])
+                owner.value = installationId
+                tokenGeneration.value = 4
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"rotated":true,"requestId":"\#(requestId)","managementTokenGeneration":4}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: "")
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "388" }
+        )
+
+        await model.refresh()
+
+        XCTAssertTrue(model.daemonLeaseConflict)
+        XCTAssertEqual(takeoverCalls.current, 0)
+        XCTAssertEqual(launcher.verificationCount, 0)
+
+        let confirmation = model.daemonLeaseTakeoverConfirmation
+        XCTAssertNotNil(confirmation)
+        let succeeded = await model.takeOverDaemonManagement(confirming: confirmation!)
+
+        XCTAssertTrue(succeeded)
+        XCTAssertTrue(model.ownsDaemonLease)
+        XCTAssertEqual(takeoverCalls.current, 1)
+        XCTAssertEqual(launcher.verificationCount, 1)
+        XCTAssertFalse(model.daemonLeaseTakeoverInProgress)
+        XCTAssertNil(model.managementOperationError)
+        XCTAssertEqual(model.lifecycle?.management.managementTokenGeneration, 4)
+        XCTAssertEqual(model.actionFeedback?.message, "已接管后台服务")
+    }
+
+    @MainActor
+    func testAppModelRejectsTakeoverWhenConfirmedLeaseHasChanged() async {
+        let owner = LockedValue<String?>("installation-a")
+        let leaseGeneration = LockedValue<Int64>(7)
+        let tokenGeneration = LockedValue<Int64>(3)
+        let takeoverCalls = IntCounter()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: false,
+                        managementTokenGeneration: tokenGeneration.value,
+                        leaseGeneration: leaseGeneration.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/takeover"):
+                _ = takeoverCalls.next()
+                return MockResponse(statusCode: 500, json: #"{"error":"must not retarget"}"#)
+            default:
+                return MockResponse(statusCode: 404, json: "")
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: IdentityVerifyingDaemonLauncher(),
+            guiBuildLoader: { "388" }
+        )
+        await model.refresh()
+        let confirmation = model.daemonLeaseTakeoverConfirmation
+        XCTAssertNotNil(confirmation)
+
+        owner.value = "installation-b"
+        leaseGeneration.value = 8
+        tokenGeneration.value = 4
+        await model.refresh()
+
+        let succeeded = await model.takeOverDaemonManagement(confirming: confirmation!)
+
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(takeoverCalls.current, 0)
+        XCTAssertTrue(model.managementOperationError?.contains("重新确认") == true)
+        XCTAssertEqual(model.lifecycle?.management.installationId, "installation-b")
+    }
+
+    @MainActor
+    func testTakeoverResultIsNotClobberedByAnOlderRefresh() async {
+        let owner = LockedValue<String?>("other-installation")
+        let leaseGeneration = LockedValue<Int64>(7)
+        let tokenGeneration = LockedValue<Int64>(3)
+        let lifecycleCalls = IntCounter()
+        let staleRequestBlocked = LockedValue(false)
+        let staleResponseGate = MockResponseGate()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                let call = lifecycleCalls.next()
+                let payload = Self.lifecycleSecurityPayload(
+                    installationId: owner.value,
+                    canControl: owner.value != "other-installation",
+                    managementTokenGeneration: tokenGeneration.value,
+                    leaseGeneration: leaseGeneration.value
+                )
+                if call == 2 {
+                    staleRequestBlocked.value = true
+                    return MockResponse(
+                        statusCode: 200,
+                        json: payload,
+                        deliveryGate: staleResponseGate
+                    )
+                }
+                return MockResponse(statusCode: 200, json: payload)
+            case ("POST", "/api/v1/manage/lifecycle/lease/takeover"):
+                let body = Self.jsonBody(from: request)
+                owner.value = body?["installationId"] as? String
+                leaseGeneration.value = 8
+                tokenGeneration.value = 4
+                let requestId = body?["requestId"] as? String ?? ""
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"rotated":true,"requestId":"\#(requestId)","managementTokenGeneration":4}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: "")
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: IdentityVerifyingDaemonLauncher(),
+            guiBuildLoader: { "388" }
+        )
+        await model.refresh()
+        let confirmation = model.daemonLeaseTakeoverConfirmation
+        XCTAssertNotNil(confirmation)
+
+        let staleRefresh = Task { await model.refresh() }
+        for _ in 0..<100 where !staleRequestBlocked.value {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(staleRequestBlocked.value)
+
+        let succeeded = await model.takeOverDaemonManagement(confirming: confirmation!)
+        XCTAssertFalse(staleResponseGate.didTimeOut)
+        XCTAssertEqual(lifecycleCalls.current, 3)
+        staleResponseGate.open()
+        await staleRefresh.value
+
+        XCTAssertTrue(succeeded)
+        XCTAssertTrue(model.ownsDaemonLease)
+        XCTAssertEqual(model.lifecycle?.management.leaseGeneration, 8)
+        XCTAssertEqual(model.lifecycle?.management.managementTokenGeneration, 4)
+    }
+
+    @MainActor
+    func testAppModelClaimsUnmanagedLeaseThenRotatesCredentialExplicitly() async {
+        let owner = LockedValue<String?>(nil)
+        let tokenGeneration = LockedValue<Int64>(3)
+        let claimCalls = IntCounter()
+        let rotateCalls = IntCounter()
+        let launcher = IdentityVerifyingDaemonLauncher()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: owner.value != nil,
+                        managementTokenGeneration: tokenGeneration.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                _ = claimCalls.next()
+                let body = Self.jsonBody(from: request)
+                XCTAssertNotNil(body?["daemonIdentity"] as? [String: Any])
+                owner.value = body?["installationId"] as? String
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: true,
+                        managementTokenGeneration: tokenGeneration.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/credential/rotate"):
+                _ = rotateCalls.next()
+                let body = Self.jsonBody(from: request)
+                let requestId = body?["requestId"] as? String ?? ""
+                XCTAssertEqual(body?["leaseGeneration"] as? Int, 7)
+                XCTAssertEqual(body?["expectedManagementTokenGeneration"] as? Int, 3)
+                XCTAssertEqual(body?["reason"] as? String, "leakRecovery")
+                tokenGeneration.value = 4
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"rotated":true,"requestId":"\#(requestId)","managementTokenGeneration":4}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: "")
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: launcher,
+            guiBuildLoader: { "388" }
+        )
+
+        await model.refresh()
+
+        XCTAssertTrue(model.ownsDaemonLease)
+        XCTAssertEqual(claimCalls.current, 1)
+        XCTAssertEqual(launcher.verificationCount, 1)
+
+        let confirmation = model.managementCredentialRotationConfirmation
+        XCTAssertNotNil(confirmation)
+        let succeeded = await model.rotateManagementCredential(confirming: confirmation!)
+
+        XCTAssertTrue(succeeded)
+        XCTAssertEqual(rotateCalls.current, 1)
+        XCTAssertEqual(launcher.verificationCount, 1)
+        XCTAssertFalse(model.managementCredentialRotationInProgress)
+        XCTAssertNil(model.managementOperationError)
+        XCTAssertEqual(model.lifecycle?.management.managementTokenGeneration, 4)
+        XCTAssertEqual(model.actionFeedback?.message, "管理凭据已重新生成")
+    }
+
+    @MainActor
+    func testAppModelRejectsCredentialRotationWhenConfirmedLeaseHasChanged() async {
+        let owner = LockedValue<String?>(nil)
+        let leaseGeneration = LockedValue<Int64>(7)
+        let tokenGeneration = LockedValue<Int64>(3)
+        let rotationCalls = IntCounter()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: owner.value != nil,
+                        managementTokenGeneration: tokenGeneration.value,
+                        leaseGeneration: leaseGeneration.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                owner.value = Self.jsonBody(from: request)?["installationId"] as? String
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: true,
+                        managementTokenGeneration: tokenGeneration.value,
+                        leaseGeneration: leaseGeneration.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/credential/rotate"):
+                _ = rotationCalls.next()
+                return MockResponse(statusCode: 500, json: #"{"error":"must not retarget"}"#)
+            default:
+                return MockResponse(statusCode: 404, json: "")
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: IdentityVerifyingDaemonLauncher(),
+            guiBuildLoader: { "388" }
+        )
+        await model.refresh()
+        let confirmation = model.managementCredentialRotationConfirmation
+        XCTAssertNotNil(confirmation)
+
+        leaseGeneration.value = 8
+        tokenGeneration.value = 4
+        await model.refresh()
+
+        let succeeded = await model.rotateManagementCredential(confirming: confirmation!)
+
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(rotationCalls.current, 0)
+        XCTAssertTrue(model.managementOperationError?.contains("重新确认") == true)
+        XCTAssertEqual(model.lifecycle?.management.leaseGeneration, 8)
+        XCTAssertEqual(model.lifecycle?.management.managementTokenGeneration, 4)
+    }
+
+    @MainActor
+    func testCredentialRotationResultIsNotClobberedByAnOlderRefresh() async {
+        let owner = LockedValue<String?>(nil)
+        let tokenGeneration = LockedValue<Int64>(3)
+        let lifecycleCalls = IntCounter()
+        let staleRequestBlocked = LockedValue(false)
+        let staleResponseGate = MockResponseGate()
+        let client = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                let call = lifecycleCalls.next()
+                let payload = Self.lifecycleSecurityPayload(
+                    installationId: owner.value,
+                    canControl: owner.value != nil,
+                    managementTokenGeneration: tokenGeneration.value
+                )
+                if call == 2 {
+                    staleRequestBlocked.value = true
+                    return MockResponse(
+                        statusCode: 200,
+                        json: payload,
+                        deliveryGate: staleResponseGate
+                    )
+                }
+                return MockResponse(statusCode: 200, json: payload)
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                owner.value = Self.jsonBody(from: request)?["installationId"] as? String
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: true,
+                        managementTokenGeneration: tokenGeneration.value
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/credential/rotate"):
+                let body = Self.jsonBody(from: request)
+                tokenGeneration.value = 4
+                let requestId = body?["requestId"] as? String ?? ""
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"rotated":true,"requestId":"\#(requestId)","managementTokenGeneration":4}"#
+                )
+            default:
+                return MockResponse(statusCode: 404, json: "")
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            daemonLauncher: IdentityVerifyingDaemonLauncher(),
+            guiBuildLoader: { "388" }
+        )
+        await model.refresh()
+        let confirmation = model.managementCredentialRotationConfirmation
+        XCTAssertNotNil(confirmation)
+
+        let staleRefresh = Task { await model.refresh() }
+        for _ in 0..<100 where !staleRequestBlocked.value {
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertTrue(staleRequestBlocked.value)
+
+        let succeeded = await model.rotateManagementCredential(confirming: confirmation!)
+        XCTAssertFalse(staleResponseGate.didTimeOut)
+        XCTAssertEqual(lifecycleCalls.current, 3)
+        staleResponseGate.open()
+        await staleRefresh.value
+
+        XCTAssertTrue(succeeded)
+        XCTAssertTrue(model.ownsDaemonLease)
+        XCTAssertEqual(model.lifecycle?.management.leaseGeneration, 7)
+        XCTAssertEqual(model.lifecycle?.management.managementTokenGeneration, 4)
+    }
+
+    @MainActor
+    func testAppModelReportsTakeoverIdentityAndCredentialRotationFailures() async {
+        let conflictClient = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: "other-installation",
+                        canControl: false,
+                        managementTokenGeneration: 3
+                    )
+                )
+            default:
+                return MockResponse(statusCode: 404, json: "")
+            }
+        }
+        let failingLauncher = IdentityVerifyingDaemonLauncher(
+            error: .loadedAgentUntrusted("/fixture/ThreadRelay")
+        )
+        let takeoverModel = AppModel(
+            apiClient: conflictClient,
+            daemonLauncher: failingLauncher,
+            guiBuildLoader: { "388" }
+        )
+        await takeoverModel.refresh()
+
+        let takeoverConfirmation = takeoverModel.daemonLeaseTakeoverConfirmation
+        XCTAssertNotNil(takeoverConfirmation)
+        let takeoverSucceeded = await takeoverModel.takeOverDaemonManagement(
+            confirming: takeoverConfirmation!
+        )
+        XCTAssertFalse(takeoverSucceeded)
+        XCTAssertFalse(takeoverModel.daemonLeaseTakeoverInProgress)
+        XCTAssertTrue(takeoverModel.managementOperationError?.contains("本地服务不可用") == true)
+
+        let owner = LockedValue<String?>(nil)
+        let rotateClient = makeClient { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/healthz"):
+                return MockResponse(statusCode: 200, json: Self.healthJSON)
+            case ("GET", "/api/v1/manage/dashboard"):
+                return MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case ("GET", "/api/v1/manage/lifecycle"):
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: owner.value != nil,
+                        managementTokenGeneration: 3
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/lease/claim"):
+                owner.value = Self.jsonBody(from: request)?["installationId"] as? String
+                return MockResponse(
+                    statusCode: 200,
+                    json: Self.lifecycleSecurityPayload(
+                        installationId: owner.value,
+                        canControl: true,
+                        managementTokenGeneration: 3
+                    )
+                )
+            case ("POST", "/api/v1/manage/lifecycle/credential/rotate"):
+                return MockResponse(statusCode: 409, json: #"{"error":"凭据代次已变化"}"#)
+            default:
+                return MockResponse(statusCode: 404, json: "")
+            }
+        }
+        let rotateModel = AppModel(
+            apiClient: rotateClient,
+            daemonLauncher: IdentityVerifyingDaemonLauncher(),
+            guiBuildLoader: { "388" }
+        )
+        await rotateModel.refresh()
+
+        let rotationConfirmation = rotateModel.managementCredentialRotationConfirmation
+        XCTAssertNotNil(rotationConfirmation)
+        let rotationSucceeded = await rotateModel.rotateManagementCredential(
+            confirming: rotationConfirmation!
+        )
+        XCTAssertFalse(rotationSucceeded)
+        XCTAssertFalse(rotateModel.managementCredentialRotationInProgress)
+        XCTAssertTrue(rotateModel.managementOperationError?.contains("凭据代次已变化") == true)
     }
 
     func testLogDirectoryRejectsLocatorResponseFromReplacedDaemon() async throws {
@@ -5033,6 +5921,21 @@ final class APIContractTests: XCTestCase {
         return #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"\#(instanceId)","pid":123,"startedAtMs":456},"executable":"\#(executable)","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":\#(build),"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":\#(management)}"#
     }
 
+    private static func lifecycleSecurityPayload(
+        installationId: String?,
+        canControl: Bool,
+        managementTokenGeneration: Int64,
+        leaseGeneration: Int64 = 7
+    ) -> String {
+        let management: String
+        if let installationId {
+            management = #"{"state":"managed","mode":"managed","canControl":\#(canControl),"installationId":"\#(installationId)","leaseGeneration":\#(leaseGeneration),"leaseExpiresAtMs":4102444800000,"managementTokenGeneration":\#(managementTokenGeneration)}"#
+        } else {
+            management = #"{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null,"managementTokenGeneration":\#(managementTokenGeneration)}"#
+        }
+        return #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","executableSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":\#(management)}"#
+    }
+
     private static func requestLogsPageJSON(
         ids: [Int64],
         nextCursor: String? = nil,
@@ -5533,7 +6436,11 @@ final class APIContractTests: XCTestCase {
     private func lifecycleFixture(
         instanceId: String,
         build: Int,
-        executable: String
+        executable: String,
+        executableSha256: String? = nil,
+        configPath: String = "/fixture/config.toml",
+        bind: String = "127.0.0.1:3847",
+        runtimeState: String = "active"
     ) -> ManageLifecycle {
         ManageLifecycle(
             service: .init(
@@ -5545,10 +6452,11 @@ final class APIContractTests: XCTestCase {
                 startedAtMs: 456
             ),
             executable: executable,
-            configPath: "/fixture/config.toml",
-            bind: "127.0.0.1:3847",
+            executableSha256: executableSha256,
+            configPath: configPath,
+            bind: bind,
             runtime: .init(
-                state: "active",
+                state: runtimeState,
                 productVersion: "0.5.0",
                 buildNumber: build,
                 apiMajor: 1
@@ -5687,6 +6595,34 @@ private final class RecordingDaemonLauncher: DaemonLaunching, @unchecked Sendabl
     func startIfNeeded() async throws {
         lock.withLock { count += 1 }
         throw DaemonLaunchError.helperMissing
+    }
+}
+
+private final class IdentityVerifyingDaemonLauncher: DaemonLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let error: DaemonLaunchError?
+    private var verifications = 0
+
+    init(error: DaemonLaunchError? = nil) {
+        self.error = error
+    }
+
+    var verificationCount: Int {
+        lock.withLock { verifications }
+    }
+
+    func startIfNeeded() async throws {}
+
+    func verifiedDaemonIdentity(for lifecycle: ManageLifecycle) async throws -> ManageDaemonIdentity {
+        lock.withLock { verifications += 1 }
+        if let error { throw error }
+        return ManageDaemonIdentity(
+            pid: lifecycle.service.pid,
+            startedAtMs: lifecycle.service.startedAtMs,
+            executable: lifecycle.executable,
+            executableSha256: lifecycle.executableSha256 ?? "",
+            bind: lifecycle.bind
+        )
     }
 }
 
@@ -5909,17 +6845,43 @@ private struct MockResponse: Sendable {
     let statusCode: Int
     let body: Data
     let error: URLError?
+    let deliveryGate: MockResponseGate?
 
-    init(statusCode: Int, json: String) {
+    init(
+        statusCode: Int,
+        json: String,
+        deliveryGate: MockResponseGate? = nil
+    ) {
         self.statusCode = statusCode
         body = Data(json.utf8)
         error = nil
+        self.deliveryGate = deliveryGate
     }
 
     init(error: URLError) {
         statusCode = 0
         body = Data()
         self.error = error
+        deliveryGate = nil
+    }
+}
+
+private final class MockResponseGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var timedOut = false
+
+    var didTimeOut: Bool {
+        lock.withLock { timedOut }
+    }
+
+    func wait() {
+        guard semaphore.wait(timeout: .now() + 5) == .timedOut else { return }
+        lock.withLock { timedOut = true }
+    }
+
+    func open() {
+        semaphore.signal()
     }
 }
 
@@ -6118,6 +7080,17 @@ private final class MockURLProtocol: URLProtocol, @unchecked Sendable {
         }
 
         let mock = handler(request)
+        if let deliveryGate = mock.deliveryGate {
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                deliveryGate.wait()
+                deliver(mock, for: url)
+            }
+            return
+        }
+        deliver(mock, for: url)
+    }
+
+    private func deliver(_ mock: MockResponse, for url: URL) {
         if let error = mock.error {
             client?.urlProtocol(self, didFailWithError: error)
             return

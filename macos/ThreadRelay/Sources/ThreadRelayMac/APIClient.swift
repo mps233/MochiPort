@@ -475,8 +475,23 @@ struct ManageSettingsMutationResponse: Decodable, Equatable {
     let settings: ManageSettings
 }
 
-struct ManageLifecycle: Decodable, Equatable {
-    struct Service: Decodable, Equatable {
+struct ManageDaemonIdentity: Encodable, Equatable, Sendable {
+    let pid: Int
+    let startedAtMs: Int64
+    let executable: String
+    let executableSha256: String
+    let bind: String
+}
+
+struct ManageLifecycleCredentialMutationResponse: Decodable, Equatable, Sendable {
+    let ok: Bool
+    let rotated: Bool
+    let requestId: String
+    let managementTokenGeneration: Int64
+}
+
+struct ManageLifecycle: Decodable, Equatable, Sendable {
+    struct Service: Decodable, Equatable, Sendable {
         let service: String
         let apiMajor: Int
         let ready: Bool
@@ -485,7 +500,7 @@ struct ManageLifecycle: Decodable, Equatable {
         let startedAtMs: Int64
     }
 
-    struct Runtime: Decodable, Equatable {
+    struct Runtime: Decodable, Equatable, Sendable {
         let state: String
         let productVersion: String
         /// Optional for compatibility with daemons released before the
@@ -494,7 +509,7 @@ struct ManageLifecycle: Decodable, Equatable {
         let apiMajor: Int
     }
 
-    struct ProtectedWorkItems: Decodable, Equatable {
+    struct ProtectedWorkItems: Decodable, Equatable, Sendable {
         let aiGatewayRequests: Int
         let codexTurns: Int
         let imStreams: Int
@@ -503,22 +518,66 @@ struct ManageLifecycle: Decodable, Equatable {
         let total: Int
     }
 
-    struct Management: Decodable, Equatable {
+    struct Management: Decodable, Equatable, Sendable {
         let state: String
         let mode: String
         let canControl: Bool
         let installationId: String?
         let leaseGeneration: Int64?
         let leaseExpiresAtMs: Int64?
+        /// Optional for compatibility with daemons released before explicit
+        /// management credential rotation was introduced.
+        let managementTokenGeneration: Int64?
+
+        init(
+            state: String,
+            mode: String,
+            canControl: Bool,
+            installationId: String?,
+            leaseGeneration: Int64?,
+            leaseExpiresAtMs: Int64?,
+            managementTokenGeneration: Int64? = nil
+        ) {
+            self.state = state
+            self.mode = mode
+            self.canControl = canControl
+            self.installationId = installationId
+            self.leaseGeneration = leaseGeneration
+            self.leaseExpiresAtMs = leaseExpiresAtMs
+            self.managementTokenGeneration = managementTokenGeneration
+        }
     }
 
     let service: Service
     let executable: String
+    /// Optional for compatibility with daemons released before executable
+    /// identity was exposed by the lifecycle API.
+    let executableSha256: String?
     let configPath: String
     let bind: String
     let runtime: Runtime
     let protectedWorkItems: ProtectedWorkItems
     let management: Management
+
+    init(
+        service: Service,
+        executable: String,
+        executableSha256: String? = nil,
+        configPath: String,
+        bind: String,
+        runtime: Runtime,
+        protectedWorkItems: ProtectedWorkItems,
+        management: Management
+    ) {
+        self.service = service
+        self.executable = executable
+        self.executableSha256 = executableSha256
+        self.configPath = configPath
+        self.bind = bind
+        self.runtime = runtime
+        self.protectedWorkItems = protectedWorkItems
+        self.management = management
+    }
 }
 
 struct ManageDashboard: Decodable, Equatable {
@@ -1066,39 +1125,87 @@ struct APIClient: Sendable {
 
     func claimLifecycleLease(
         installationId: String,
-        daemonInstanceId: String
+        daemonInstanceId: String,
+        daemonIdentity: ManageDaemonIdentity
     ) async throws -> ManageLifecycle {
         try await performManagePOST(
             path: "api/v1/manage/lifecycle/lease/claim",
             body: LifecycleLeaseRequest(
                 installationId: installationId,
-                daemonInstanceId: daemonInstanceId
+                daemonInstanceId: daemonInstanceId,
+                daemonIdentity: daemonIdentity
             )
         )
     }
 
     func renewLifecycleLease(
         installationId: String,
-        daemonInstanceId: String
+        daemonInstanceId: String,
+        daemonIdentity: ManageDaemonIdentity
     ) async throws -> ManageLifecycle {
         try await performManagePOST(
             path: "api/v1/manage/lifecycle/lease/renew",
             body: LifecycleLeaseRequest(
                 installationId: installationId,
-                daemonInstanceId: daemonInstanceId
+                daemonInstanceId: daemonInstanceId,
+                daemonIdentity: daemonIdentity
             )
         )
     }
 
     func releaseLifecycleLease(
         installationId: String,
-        daemonInstanceId: String
+        daemonInstanceId: String,
+        daemonIdentity: ManageDaemonIdentity
     ) async throws -> ManageLifecycle {
         try await performManagePOST(
             path: "api/v1/manage/lifecycle/lease/release",
             body: LifecycleLeaseRequest(
                 installationId: installationId,
-                daemonInstanceId: daemonInstanceId
+                daemonInstanceId: daemonInstanceId,
+                daemonIdentity: daemonIdentity
+            )
+        )
+    }
+
+    func takeOverLifecycleLease(
+        installationId: String,
+        daemonInstanceId: String,
+        expectedLeaseGeneration: Int64,
+        expectedManagementTokenGeneration: Int64,
+        requestId: String,
+        daemonIdentity: ManageDaemonIdentity
+    ) async throws -> ManageLifecycleCredentialMutationResponse {
+        try await performIdempotentManagePOST(
+            path: "api/v1/manage/lifecycle/lease/takeover",
+            body: LifecycleLeaseTakeoverRequest(
+                installationId: installationId,
+                daemonInstanceId: daemonInstanceId,
+                expectedLeaseGeneration: expectedLeaseGeneration,
+                expectedManagementTokenGeneration: expectedManagementTokenGeneration,
+                requestId: requestId,
+                force: true,
+                daemonIdentity: daemonIdentity
+            )
+        )
+    }
+
+    func rotateManagementCredential(
+        installationId: String,
+        daemonInstanceId: String,
+        leaseGeneration: Int64,
+        expectedManagementTokenGeneration: Int64,
+        requestId: String
+    ) async throws -> ManageLifecycleCredentialMutationResponse {
+        try await performIdempotentManagePOST(
+            path: "api/v1/manage/lifecycle/credential/rotate",
+            body: LifecycleCredentialRotationRequest(
+                installationId: installationId,
+                daemonInstanceId: daemonInstanceId,
+                leaseGeneration: leaseGeneration,
+                expectedManagementTokenGeneration: expectedManagementTokenGeneration,
+                requestId: requestId,
+                reason: "leakRecovery"
             )
         )
     }
@@ -1655,6 +1762,26 @@ struct APIClient: Sendable {
     private struct LifecycleLeaseRequest: Encodable {
         let installationId: String
         let daemonInstanceId: String
+        let daemonIdentity: ManageDaemonIdentity
+    }
+
+    private struct LifecycleLeaseTakeoverRequest: Encodable {
+        let installationId: String
+        let daemonInstanceId: String
+        let expectedLeaseGeneration: Int64
+        let expectedManagementTokenGeneration: Int64
+        let requestId: String
+        let force: Bool
+        let daemonIdentity: ManageDaemonIdentity
+    }
+
+    private struct LifecycleCredentialRotationRequest: Encodable {
+        let installationId: String
+        let daemonInstanceId: String
+        let leaseGeneration: Int64
+        let expectedManagementTokenGeneration: Int64
+        let requestId: String
+        let reason: String
     }
 
     private struct LifecycleControlRequest: Encodable {
@@ -1901,6 +2028,22 @@ struct APIClient: Sendable {
             }
         }
         throw APIClientError.unauthorized
+    }
+
+    /// Takeover and credential rotation persist their request ids server-side,
+    /// so retrying once after a transport failure cannot apply them twice. A
+    /// fresh connection lookup also discovers the credential rotated by an
+    /// attempt whose response was lost.
+    private func performIdempotentManagePOST<Body: Encodable, Response: Decodable>(
+        path: String,
+        body: Body
+    ) async throws -> Response {
+        do {
+            return try await performManagePOST(path: path, body: body)
+        } catch let error as URLError where error.code != .cancelled {
+            try Task.checkCancellation()
+            return try await performManagePOST(path: path, body: body)
+        }
     }
 
     private func managementCandidateMatches(
