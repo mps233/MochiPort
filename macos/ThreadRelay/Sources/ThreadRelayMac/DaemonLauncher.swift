@@ -917,29 +917,32 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                 launchAgentData: journal.candidateLaunchAgentData,
                 configuration: configuration
             ) {
-                let rollbackPID: Int32
                 if let expectedPID, let expectedExecutable,
                    canonicalPath(expectedExecutable) == canonicalPath(journal.candidateProgramPath)
                 {
-                    rollbackPID = expectedPID
+                    try freezeAndUnloadAgent(
+                        expectedPID: expectedPID,
+                        expectedLaunchAgentData: journal.candidateLaunchAgentData,
+                        configuration: configuration,
+                        launchctl: launchctl,
+                        serviceTarget: serviceTarget,
+                        commandRunner: commandRunner,
+                        processSignaler: processSignaler
+                    )
                 } else if expectedPID == nil,
                           expectedExecutable == nil,
-                          launchAgentHasRuntimeSwitchHold(journal.candidateLaunchAgentData),
-                          let loadedPID = loadedPID(from: printResult.output)
+                          launchAgentHasRuntimeSwitchHold(journal.candidateLaunchAgentData)
                 {
-                    rollbackPID = loadedPID
+                    try unloadHeldCandidateAgent(
+                        expectedLaunchAgentData: journal.candidateLaunchAgentData,
+                        configuration: configuration,
+                        launchctl: launchctl,
+                        serviceTarget: serviceTarget,
+                        commandRunner: commandRunner
+                    )
                 } else {
                     throw DaemonLaunchError.runtimeSwitchRecoveryRequired
                 }
-                try freezeAndUnloadAgent(
-                    expectedPID: rollbackPID,
-                    expectedLaunchAgentData: journal.candidateLaunchAgentData,
-                    configuration: configuration,
-                    launchctl: launchctl,
-                    serviceTarget: serviceTarget,
-                    commandRunner: commandRunner,
-                    processSignaler: processSignaler
-                )
             } else {
                 throw DaemonLaunchError.loadedAgentUntrusted(
                     loadedProgram(from: printResult.output)
@@ -1473,9 +1476,21 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         output: String,
         expected: [String: String]
     ) -> Bool {
-        expected.allSatisfy { key, value in
+        guard expected.allSatisfy({ key, value in
             loadedEnvironmentValue(from: output, key: key) == value
+        }) else {
+            return false
         }
+        for optionalKey in [
+            DaemonLaunchConfiguration.skipDesktopIntegrationEnvironment,
+            "THREADRELAY_RUNTIME_SWITCH_HOLD",
+        ] {
+            let actualValue = loadedEnvironmentValue(from: output, key: optionalKey)
+            guard actualValue == expected[optionalKey] else {
+                return false
+            }
+        }
+        return true
     }
 
     private static func launchAgentHasRuntimeSwitchHold(_ data: Data) -> Bool {
@@ -1834,6 +1849,29 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             }
         }
         throw DaemonLaunchError.launchctlFailed("后台服务未在预期时间内停止。")
+    }
+
+    private static func unloadHeldCandidateAgent(
+        expectedLaunchAgentData: Data,
+        configuration: DaemonLaunchConfiguration,
+        launchctl: URL,
+        serviceTarget: String,
+        commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        let current = try commandRunner(launchctl, ["print", serviceTarget])
+        guard current.exitCode == 0 else { return }
+        guard loadedAgentMatches(
+            output: current.output,
+            launchAgentData: expectedLaunchAgentData,
+            configuration: configuration
+        ) else {
+            throw DaemonLaunchError.loadedAgentUntrusted(loadedProgram(from: current.output))
+        }
+        try unloadAgent(
+            launchctl: launchctl,
+            serviceTarget: serviceTarget,
+            commandRunner: commandRunner
+        )
     }
 
     private static func writeLaunchAgent(

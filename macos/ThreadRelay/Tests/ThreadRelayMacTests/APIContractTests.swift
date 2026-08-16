@@ -1272,6 +1272,82 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(loadedRuntime.value, "previous")
     }
 
+    func testDaemonLauncherRollsBackHeldCandidateWithoutPID() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let previous = try installDaemonRuntime(build: "389", fixture: fixture)
+        let candidate = try fixture.configuration.stagedHelperURL()
+        let loadedRuntime = LockedValue("previous")
+        let previousOutput = launchctlOutput(
+            program: previous,
+            configuration: fixture.configuration,
+            build: "389",
+            pid: 123
+        )
+        let candidateOutput = launchctlOutput(
+            program: candidate,
+            configuration: fixture.configuration,
+            build: "389",
+            pid: 456,
+            runtimeSwitchHold: true
+        ).replacingOccurrences(of: "pid = 456\n", with: "")
+        let bootoutCount = IntCounter()
+        let bootstrapCount = IntCounter()
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            switch arguments.first {
+            case "print":
+                switch loadedRuntime.value {
+                case "previous":
+                    return CommandResult(exitCode: 0, output: previousOutput)
+                case "candidate":
+                    return CommandResult(exitCode: 0, output: candidateOutput)
+                default:
+                    return CommandResult(exitCode: 113, output: "service not found")
+                }
+            case "bootout":
+                _ = bootoutCount.next()
+                loadedRuntime.value = "none"
+                return CommandResult(exitCode: 0, output: "")
+            case "bootstrap":
+                loadedRuntime.value = bootstrapCount.next() == 1 ? "candidate" : "previous"
+                return CommandResult(exitCode: 0, output: "")
+            default:
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+        }
+        let signals = SignalInvocationRecorder()
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run,
+            processSignaler: signals.run
+        )
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: 123,
+            expectedInstanceId: "old-instance",
+            expectedExecutable: previous.path
+        )
+        try await launcher.activatePreparedRuntime(
+            transaction,
+            expectedPID: 123,
+            expectedExecutable: previous.path
+        )
+
+        try await launcher.rollbackRuntime(
+            transaction,
+            expectedPID: nil,
+            expectedExecutable: nil
+        )
+        try await launcher.commitRuntimeSwitch(transaction)
+
+        XCTAssertEqual(loadedRuntime.value, "previous")
+        XCTAssertEqual(bootoutCount.current, 2)
+        XCTAssertEqual(bootstrapCount.current, 2)
+        XCTAssertEqual(signals.signals, [.init(pid: 123, signal: SIGSTOP)])
+    }
+
     func testDaemonLauncherDoesNotBootoutWhenPIDChangesAfterFreeze() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
