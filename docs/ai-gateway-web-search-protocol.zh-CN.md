@@ -418,8 +418,8 @@ Gateway 在 `GlmAnthropic` profile 中：
 当前应保持通过：
 
 ```powershell
-cargo test --features gui --bin codexhub anthropic
-cargo build --release --features gui --bin codexhub
+cargo test --features gui --bin threadrelay anthropic
+cargo build --release --features gui --bin threadrelay
 ```
 
 重点测试点：

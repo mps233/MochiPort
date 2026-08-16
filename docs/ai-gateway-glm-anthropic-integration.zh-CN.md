@@ -8,7 +8,6 @@
 
 相关文档：
 
-- [`ai-gateway-anthropic-first-roadmap.zh-CN.md`](ai-gateway-anthropic-first-roadmap.zh-CN.md)：Anthropic Messages 优先路线。
 - [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md)：Anthropic Messages adapter 设计。
 - [`ai-gateway-web-search-protocol.zh-CN.md`](ai-gateway-web-search-protocol.zh-CN.md)：Codex Responses `web_search` 与 Anthropic/GLM web search 的详细对接规则。
 - [`provider-logo-assets.zh-CN.md`](provider-logo-assets.zh-CN.md)：provider logo 资源维护方式。

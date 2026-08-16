@@ -5,7 +5,7 @@
 | 项目 | 内容 |
 | --- | --- |
 | 状态 | Phase 3 已完成；Phase 2 已具备版本化 daemon staging、持久化切换事务、可信管理接管、管理凭据轮换、候选版本准入 hold、连续健康校验、失败回滚和 GUI 崩溃恢复，隔离端口故障矩阵已完成；build 405-410 的代码路径、fixture 与只读 API 兼容已验证，真实旧版 claim/restart/runtime switch 发布验证仍待隔离环境完成；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页与增强启动完整状态机已完成，剩余重点为诊断导出和发布级无障碍收尾 |
-| 最近核验 | 2026-08-16；SwiftPM 167 项、Rust 全量测试通过（1 项忽略）；Universal Release GUI build 422 已完成正式组装、签名与运行验证，并复用正式 daemon build 410；升级期间 daemon PID 70418 未变化。增强启动 operation 的幂等、并发冲突、取消、失败恢复与旧 daemon 回退均有契约测试覆盖 |
+| 最近核验 | 2026-08-17；SwiftPM 170 项、Rust 924 项通过（1 项忽略）；Universal Release build 428 已完成正式组装、签名、事务切换与运行验证。增强启动 operation 的幂等、并发冲突、取消、失败恢复与旧 daemon 回退均有契约测试覆盖 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
 | 主前端 | SwiftUI |

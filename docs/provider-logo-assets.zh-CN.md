@@ -119,8 +119,8 @@ Some(ProviderLogoKind::NewProvider)
 7. 运行验证：
 
 ```powershell
-cargo build --release --features gui --bin codexhub
-cargo test --bin codexhub ai_gateway
+cargo build --release --features gui --bin threadrelay
+cargo test --bin threadrelay ai_gateway
 ```
 
 ## 注意事项

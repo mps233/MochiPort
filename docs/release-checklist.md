@@ -4,7 +4,7 @@ Use this before publishing the repository or creating a release.
 
 ## Repository Hygiene
 
-- [ ] Choose and add a license file.
+- [ ] Confirm `LICENSE`, `NOTICE`, and third-party attribution files are current.
 - [ ] Confirm `config.toml` is not tracked.
 - [ ] Confirm `threadrelay-state.json` is not tracked.
 - [ ] Confirm logs are not tracked.
@@ -13,11 +13,22 @@ Use this before publishing the repository or creating a release.
 
 ## Build
 
-```powershell
+```sh
 cargo fmt
 cargo test
 cargo build --release --features gui --bin threadrelay
 ```
+
+For the formal macOS app, set a numeric `BUILD_NUMBER` and use the handoff
+script. It runs the Rust and Xcode test suites, assembles
+`outputs/ThreadRelay.app`, switches the active app and daemon, and verifies that
+their builds match:
+
+```sh
+scripts/formal-macos-handoff.sh --build "$BUILD_NUMBER"
+```
+
+- [ ] Confirm the handoff reports the expected app and daemon build.
 
 ## Clean Local Artifacts
 

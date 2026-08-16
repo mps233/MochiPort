@@ -11,7 +11,6 @@
 - [`codex-app-web-run-model-visibility-tradeoff.zh-CN.md`](codex-app-web-run-model-visibility-tradeoff.zh-CN.md)：Codex App 模型显示、原生 `web.run` 与本地压缩之间的当前取舍和暂缓决策。
 - [`ai-gateway-web-search-protocol.zh-CN.md`](ai-gateway-web-search-protocol.zh-CN.md)：标准 Responses 托管 `web_search` 以及 Anthropic/GLM 转换规则。
 - [`ai-gateway-architecture.zh-CN.md`](ai-gateway-architecture.zh-CN.md)：AI Gateway 总体架构。
-- [`codex-app-fast-startup-statsig.zh-CN.md`](codex-app-fast-startup-statsig.zh-CN.md)：Codex App 本地后端与 feature gate 兼容边界。
 
 ## 1. 当前结论
 

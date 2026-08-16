@@ -167,7 +167,7 @@ pub(super) fn flush_glm_pending_text(&mut self, queue: &mut VecDeque<Bytes>) {
 
 ## 6. 测试覆盖
 
-`cargo test --bin codexhub ai_gateway::` 全量通过。相关用例：
+`cargo test --bin threadrelay ai_gateway::` 全量通过。相关用例：
 
 - `streams_glm_plain_text_token_by_token`（tests.rs）：纯文本产出多条独立
   `response.output_text.delta`，且拼接结果与最终 message 一致，验证打字机恢复。

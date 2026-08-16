@@ -1,10 +1,10 @@
 # Auth Notes
 
-This document records the current Codex App auth boundary for CodexHub.
+This document records the current Codex App auth boundary for ThreadRelay.
 
 ## Current Decision
 
-CodexHub writes Codex App `auth.json` in a local ChatGPT-shaped token mode:
+ThreadRelay writes Codex App `auth.json` in a local ChatGPT-shaped token mode:
 
 ```json
 {
@@ -20,20 +20,21 @@ CodexHub writes Codex App `auth.json` in a local ChatGPT-shaped token mode:
 }
 ```
 
-Do not switch normal initialization to API-key-only auth. Pure API key mode can show plugins in newer Codex App builds, but upstream remote-control rejects it before CodexHub can bridge the session.
+Do not switch normal initialization to API-key-only auth. Upstream remote-control rejects pure API key auth before ThreadRelay can bridge the session.
 
 ## Config Injection
 
-`codexhub configure-codex-app` writes:
+`threadrelay configure-codex-app` writes:
 
 - `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"` for local backend fallback endpoints.
-- A default `ai-gateway` provider at `http://127.0.0.1:3847/ai-gateway/v1`.
-- `experimental_bearer_token = "dummy-token"` so model requests still authenticate to CodexHub through the provider.
+- A default Actor Authorized `ai-gateway` provider at `http://127.0.0.1:3847/ai-gateway/v1` with `requires_openai_auth = false` and the legacy-compatible `x-openai-actor-authorization = "codexhub-local"` marker.
+- `experimental_bearer_token = "dummy-token"` so model requests still authenticate to ThreadRelay through the provider.
 - A local `openai-curated` marketplace entry when the cached curated catalog exists.
-- Cleanup for old plugin-blocking flags such as `apps = false`, `plugins = false`, `computer_use = false`.
+- `features.apps = false`, because the host-owned Apps/Connectors MCP backend is not implemented locally.
+- Cleanup for legacy plugin-blocking flags such as `plugins = false` and `computer_use = false`.
 - Cleanup for old CodexHub-generated bundled remote plugin state.
 
-CodexHub does not publish `openai-bundled` plugins through remote `list` or `installed` fallback. Bundled plugins, including `computer-use`, must come from Codex App's own local `openai-bundled` marketplace.
+ThreadRelay does not publish `openai-bundled` plugins through remote `list` or `installed` fallback. Bundled plugins, including `computer-use`, must come from Codex App's own local `openai-bundled` marketplace.
 
 ## Legacy Compatibility
 

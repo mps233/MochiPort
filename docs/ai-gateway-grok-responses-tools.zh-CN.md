@@ -320,7 +320,6 @@ Grok Build 参考：
 相关文档：
 
 - [`ai-gateway-grok-build-protocol-conversion-reference.zh-CN.md`](ai-gateway-grok-build-protocol-conversion-reference.zh-CN.md)
-- [ai-gateway-third-party-tool-search-plan.zh-CN.md](ai-gateway-third-party-tool-search-plan.zh-CN.md)
 - [`ai-gateway-responses-lite-web-search.zh-CN.md`](ai-gateway-responses-lite-web-search.zh-CN.md)
 - [xAI Web Search 官方文档](https://docs.x.ai/developers/tools/web-search)
 
@@ -331,6 +330,4 @@ Grok 路径现已补齐 tool_search 双向翻译：请求侧把 Codex 原生 too
 tool_search_call、tool_search_output 降级为 Grok 普通 function 语义；回程侧把
 function_call.name == tool_search 恢复为 Codex tool_search_call。
 
-详细决策、实现入口和测试清单见：
-
-- [ai-gateway-third-party-tool-search-plan.zh-CN.md](ai-gateway-third-party-tool-search-plan.zh-CN.md)
+相应实现入口与测试范围由本文及 Provider Adapter 的决策记录共同维护。

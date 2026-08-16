@@ -1,10 +1,10 @@
 # 认证说明
 
-这份文档记录 CodexHub 当前和 Codex App 的 auth 边界。
+这份文档记录 ThreadRelay 当前和 Codex App 的 auth 边界。
 
 ## 当前决策
 
-CodexHub 把 Codex App `auth.json` 写成本地 ChatGPT-shaped token 形态：
+ThreadRelay 把 Codex App `auth.json` 写成本地 ChatGPT-shaped token 形态：
 
 ```json
 {
@@ -20,20 +20,21 @@ CodexHub 把 Codex App `auth.json` 写成本地 ChatGPT-shaped token 形态：
 }
 ```
 
-正常初始化不要切到纯 API key auth。新版本 Codex App 在纯 API key 模式下可以显示插件，但上游 remote-control 会在连接 CodexHub 之前拒绝 API key auth。
+正常初始化不要切到纯 API key auth。上游 remote-control 会在连接 ThreadRelay 之前拒绝纯 API key auth。
 
 ## 配置注入
 
-`codexhub configure-codex-app` 会写入：
+`threadrelay configure-codex-app` 会写入：
 
 - `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`，用于本地 backend fallback 接口。
-- 默认 `ai-gateway` provider，地址是 `http://127.0.0.1:3847/ai-gateway/v1`。
-- `experimental_bearer_token = "dummy-token"`，所以模型请求仍然通过 provider 走 CodexHub。
+- 默认 Actor Authorization `ai-gateway` provider，地址是 `http://127.0.0.1:3847/ai-gateway/v1`，使用 `requires_openai_auth = false` 和兼容标记 `x-openai-actor-authorization = "codexhub-local"`。
+- `experimental_bearer_token = "dummy-token"`，所以模型请求仍然通过 provider 走 ThreadRelay。
 - 如果本地存在 cached curated catalog，则写入本地 `openai-curated` marketplace。
-- 清理历史插件阻断项，例如 `apps = false`、`plugins = false`、`computer_use = false`。
+- 固定写入 `features.apps = false`，因为本地没有实现由官方托管的 Apps/Connectors MCP 后端。
+- 清理历史插件阻断项，例如 `plugins = false`、`computer_use = false`。
 - 清理旧版 CodexHub 生成的 bundled remote plugin 状态。
 
-CodexHub 不通过 remote `list` 或 `installed` fallback 发布 `openai-bundled` 插件。包括 `computer-use` 在内的 bundled 插件必须来自 Codex App 自己的本地 `openai-bundled` marketplace。
+ThreadRelay 不通过 remote `list` 或 `installed` fallback 发布 `openai-bundled` 插件。包括 `computer-use` 在内的 bundled 插件必须来自 Codex App 自己的本地 `openai-bundled` marketplace。
 
 ## 历史兼容
 

@@ -52,13 +52,13 @@ For Codex App and the VS Code extension, the usual flow is: download the app -> 
 
 Download `ThreadRelay.dmg` from [ThreadRelay Releases](https://github.com/mps233/threadrelay/releases), drag it to Applications, then open it. On Windows, run `ThreadRelay.exe` from the release package. On Linux, download `ThreadRelay Linux x86_64.AppImage`, make it executable, then double-click it.
 
-If macOS warns that the app was downloaded from the internet, confirm the system prompt. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x "ThreadRelay Linux x86_64.AppImage"` once. The app does not install startup items and does not run in the background automatically.
+If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs per-user LaunchAgents that keep the local backend running and recover the GUI after an abnormal exit; a normal GUI quit does not reopen the window. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x "ThreadRelay Linux x86_64.AppImage"` once.
 
 Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The MVP only opens the download page; it does not silently replace the local app.
 
 ### 2. Open The App
 
-Open `ThreadRelay`. The GUI starts the local backend automatically and stops the backend it started when the GUI exits.
+Open `ThreadRelay`. The GUI ensures that the local backend is running. On macOS, the LaunchAgent-managed backend continues running after the GUI exits.
 
 Continue when the status overview shows the local service is running.
 
@@ -186,11 +186,9 @@ It does not:
 - install a `codex` wrapper
 - replace Codex CLI
 - launch Codex App through a shim
-- install login items or startup agents
-- run as a background service automatically
 - change Codex model, sandbox, approval policy, cwd, or environment
 
-The local backend starts only when the user opens the GUI or explicitly starts it from development tooling.
+The macOS client installs only per-user LaunchAgents for ThreadRelay itself, not a system-wide service. They keep the local backend running and recover the GUI only after an abnormal exit; a normal GUI quit stays quit.
 
 ## Technical Notes
 
@@ -264,7 +262,8 @@ GET http://127.0.0.1:3847/api/events
 ## More Docs
 
 - [Architecture](docs/architecture.md)
-- [WeChat integration plan](docs/wechat-integration-plan.zh-CN.md)
+- [Telegram integration and maintenance boundaries](docs/telegram-integration.zh-CN.md)
+- [WeChat integration and known limitations](docs/wechat-integration.zh-CN.md)
 - [Auth notes](docs/auth-notes.md)
 - [Troubleshooting](docs/troubleshooting.md)
 

@@ -53,13 +53,13 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 
 从 [ThreadRelay Releases](https://github.com/mps233/threadrelay/releases) 下载 `ThreadRelay.dmg`，拖到 Applications 后打开。Linux 下载 `ThreadRelay Linux x86_64.AppImage` 后赋予执行权限即可双击运行。
 
-第一次打开时，如果 macOS 提示来自互联网，按系统提示确认即可。Windows 直接运行 release 包里的 `ThreadRelay.exe`。Linux 如果桌面环境没有自动赋权，可以先执行 `chmod +x "ThreadRelay Linux x86_64.AppImage"`。这个 App 不会安装开机启动项，也不会自动常驻后台。
+第一次打开时，如果 macOS 提示来自互联网，按系统提示确认即可。macOS 客户端会安装当前用户范围的 LaunchAgent，用于保持本地 backend 运行并在 GUI 异常退出时恢复；正常退出 GUI 不会重新打开窗口。Windows 直接运行 release 包里的 `ThreadRelay.exe`。Linux 如果桌面环境没有自动赋权，可以先执行 `chmod +x "ThreadRelay Linux x86_64.AppImage"`。
 
 后续可以在菜单 `Help -> Check for Updates` 手动检查 GitHub Releases 是否有新版本。当前 MVP 只引导打开下载页，不会静默替换本机程序。
 
 ### 2. 打开应用
 
-打开 `ThreadRelay`。GUI 会自动启动本地 backend，并在退出时关闭本次启动的 backend。
+打开 `ThreadRelay`。GUI 会确保本地 backend 已启动；在 macOS 上，退出 GUI 后由 LaunchAgent 托管的 backend 会继续运行。
 
 状态概览显示本地服务运行后继续下一步。
 
@@ -185,11 +185,9 @@ GUI 里点击“恢复 Codex 原有配置”即可恢复写入前的 Codex 连�
 - 安装 `codex` 包装命令
 - 替换 Codex CLI
 - 通过 shim 启动 Codex App
-- 安装登录项或开机启动项
-- 自动常驻后台
 - 替换 Codex App、Codex CLI 或 VS Code 插件的原始可执行文件
 
-本地 backend 只会在用户明确打开 GUI 或主动从开发工具启动时运行。
+macOS 客户端只在当前用户范围内安装 ThreadRelay 自己的 LaunchAgent，不安装系统级服务。它负责保持本地 backend 运行，并只在 GUI 异常退出时恢复界面；用户正常退出 GUI 后不会自动重开窗口。
 
 ## 技术说明
 
@@ -260,7 +258,8 @@ GET http://127.0.0.1:3847/api/events
 ## 更多文档
 
 - [架构](docs/architecture.md)
-- [微信集成计划](docs/wechat-integration-plan.zh-CN.md)
+- [Telegram 集成与维护边界](docs/telegram-integration.zh-CN.md)
+- [微信集成与已知边界](docs/wechat-integration.zh-CN.md)
 - [认证说明](docs/auth-notes.zh-CN.md)
 - [排障](docs/troubleshooting.md)
 

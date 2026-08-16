@@ -1,20 +1,20 @@
-﻿# Telegram 集成计划
+﻿# Telegram 集成与维护边界
 
-本文档定义 `codexhub` 接入 Telegram 的落地边界。目标是先支持一个可用的 Telegram Bot 通道，而不是把飞书和 Telegram 抽象成同一种 UI。
+本文档记录 ThreadRelay 当前 Telegram Bot 通道的能力、协议边界和后续维护原则，而不是把飞书和 Telegram 抽象成同一种 UI。
 
 ## 目标
 
 - 支持 Telegram Bot 作为新的 IM 通道。
-- Telegram MVP 默认面向 BotFather 创建的私人 bot，由用户直接私聊这个 bot。
+- Telegram 默认面向 BotFather 创建的私人 bot，由用户直接私聊这个 bot。
 - 复用 Codex remote-control、thread 绑定、approval 队列、turn 状态、消息去重等平台无关逻辑。
 - 保留飞书现有体验，不因为 Telegram 引入大规模重写。
-- Telegram MVP 优先支持纯文本、默认新建 thread、审批确认和中断/退出命令。
+- Telegram 支持文本、附件、thread 创建/恢复、审批确认、中断/退出命令和原生草稿流式输出。
 
 ## 非目标
 
 - 不做跨平台卡片 DSL。
 - 不尝试复用飞书 CardKit/交互卡片 renderer。
-- 不在 MVP 阶段追平飞书的完整复杂卡片和流式卡片体验。
+- 不追平飞书 CardKit 的复杂卡片布局。
 - 不要求 Telegram 支持飞书专有的用户授权、审批卡片样式或多维交互布局。
 
 ## 架构原则
@@ -227,14 +227,3 @@ Telegram 不适合照搬飞书表单。当前表达方式：
 - Telegram Markdown/HTML 转义容易出错，MVP 应先使用纯文本或最少格式。
 - 多平台同时启用时，`last_route` 这类全局状态需要继续审查，避免平台互相覆盖。
 - Telegram Bot API 同一个 token 只能有一个 active long polling 消费者，用户开多个进程时会出现 409。
-
-## 推荐实施顺序
-
-1. 完成第一阶段平台身份和路由抽象。已完成。
-2. 保持飞书测试通过。已完成。
-3. 拆出飞书 adapter，但不改渲染结果。已完成。
-4. 新增 Telegram long polling + 纯文本发送。已完成。
-5. 加固 Telegram 协议层：polling probe、409 backoff、getMe、typing、智能切块。已完成。
-6. Telegram thread 管理：新建、参数创建、历史加载、分页。已完成基础能力。
-7. 补 approval inline keyboard 与原消息状态更新。已完成。
-8. 补原生流式草稿和文件/图片入站。已完成。

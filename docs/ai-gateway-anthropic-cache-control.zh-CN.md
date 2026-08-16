@@ -5,7 +5,6 @@
 相关文档：
 
 - [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md)
-- [`ai-gateway-anthropic-first-roadmap.zh-CN.md`](ai-gateway-anthropic-first-roadmap.zh-CN.md)
 - Anthropic Prompt Caching: <https://platform.claude.com/docs/en/build-with-claude/prompt-caching>
 - Anthropic Prompt Caching（镜像）: <https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching>
 

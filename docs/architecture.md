@@ -6,7 +6,7 @@ ThreadRelay bridges three systems:
 - A local ChatGPT backend-shaped base URL
 - IM channel adapters: Feishu websocket/message APIs, Telegram Bot API, and WeChat iLink APIs
 
-The planned AI Gateway is documented separately in
+The AI Gateway is documented separately in
 [`ai-gateway-architecture.zh-CN.md`](ai-gateway-architecture.zh-CN.md). It is an
 independent model API layer for Codex Responses requests and must not be mixed
 with the existing remote-control backend.
@@ -185,7 +185,7 @@ This keeps the implementation aligned with the official remote-control model ins
 
 ## Codex App Runtime
 
-ThreadRelay is intentionally scoped to Codex App remote-control. Codex App is launched normally by the user, reads `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`, and opens the remote-control websocket back to the local daemon. The project does not install a CLI wrapper or start Codex processes on the user's behalf.
+ThreadRelay is intentionally scoped to Codex App remote-control. Codex App can be launched normally by the user or, after an explicit user action, through ThreadRelay's enhanced launch flow. In both cases it reads `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"` and opens the remote-control websocket back to the local daemon. ThreadRelay does not replace the Codex runtime or silently start Codex processes in the background.
 
 ## Approval Handling
 
