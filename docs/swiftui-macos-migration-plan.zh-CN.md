@@ -4,8 +4,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Phase 3 已完成；Phase 2 已具备版本化 daemon staging、持久化切换事务、可信管理接管、管理凭据轮换、候选版本准入 hold、连续健康校验、失败回滚和 GUI 崩溃恢复，隔离端口故障矩阵已完成；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页已完成，统一脱敏切换日志、旧版兼容发布验证、增强启动完整状态机、诊断导出和发布级无障碍收尾仍待完成 |
-| 最近核验 | 2026-08-16；SwiftPM 162 项、Rust 全量 910 项通过（1 项忽略）；Universal Release build 421 已完成管理权安全交接的正式组装、签名与运行验证，GUI 已由 build 420 自动切换至 421，supervisor 进程保持不变，受保护 daemon 保持 build 410 继续运行 |
+| 状态 | Phase 3 已完成；Phase 2 已具备版本化 daemon staging、持久化切换事务、可信管理接管、管理凭据轮换、候选版本准入 hold、连续健康校验、失败回滚和 GUI 崩溃恢复，隔离端口故障矩阵已完成；build 405-410 的代码路径、fixture 与只读 API 兼容已验证，真实旧版 claim/restart/runtime switch 发布验证仍待隔离环境完成；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页与增强启动完整状态机已完成，剩余重点为诊断导出和发布级无障碍收尾 |
+| 最近核验 | 2026-08-16；SwiftPM 167 项、Rust 全量测试通过（1 项忽略）；Universal Release GUI build 422 已完成正式组装、签名与运行验证，并复用正式 daemon build 410；升级期间 daemon PID 70418 未变化。增强启动 operation 的幂等、并发冲突、取消、失败恢复与旧 daemon 回退均有契约测试覆盖 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | macOS 13 及以上 |
 | 主前端 | SwiftUI |
@@ -378,7 +378,9 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 ### Phase 2：daemon 生命周期与菜单栏
 
-当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、可信管理接管、管理凭据轮换、连续健康检查、失败回滚和 GUI 崩溃恢复。自动化测试已覆盖 journal 损坏或篡改、候选构建不一致、冻结后进程身份变化、回滚启动失败，以及跨 daemon 实例、租约与凭据 generation 换代的拒绝和幂等重试路径；隔离进程矩阵也已验证端口占用、KeepAlive 连续换 PID、真实 helper 启动失败和恢复 previous helper。当前剩余重点是统一脱敏切换日志和旧 CodexHub 兼容 daemon 的发布级验证。
+当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor；SwiftUI 已接入版本化 runtime staging、持久化切换 journal、跨进程锁、精确进程身份校验、受保护工作项排空、候选版本准入 hold、租约换代提交、可信管理接管、管理凭据轮换、连续健康检查、失败回滚和 GUI 崩溃恢复。自动化测试已覆盖 journal 损坏或篡改、候选构建不一致、冻结后进程身份变化、回滚启动失败，以及跨 daemon 实例、租约与凭据 generation 换代的拒绝和幂等重试路径；隔离进程矩阵也已验证端口占用、KeepAlive 连续换 PID、真实 helper 启动失败和恢复 previous helper。build 405-410 的代码路径、固定 fixture 与只读 API 兼容已验证；当前剩余重点是旧 daemon 的真实生命周期变更验证。
+
+2026-08-16 的现场只读证据为 GUI build 422 复用正式 daemon build 410，升级期间 daemon PID 70418 未变化；`/healthz`、`/api/v1/manage/dashboard`、`/api/v1/manage/lifecycle`、`/api/v1/manage/codex/status`、`/api/v1/manage/settings`、`/api/v1/manage/im/accounts`、`/api/v1/manage/gateway` 和 `/api/v1/manage/request-logs` 均返回 200。该证据只证明新 GUI 可读取并继续使用旧 daemon，不构成跨版本切换已达到 release-qualified 的声明：真实 claim、restart 和 runtime switch 仍需在 VM 或独立用户域验证；build 404 及以下或无法识别 build 的 daemon 需要先经过桥接版本，或在发布前定义明确的迁移与拒绝策略。
 
 交付物：
 
@@ -391,10 +393,10 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
   确定性回归测试覆盖候选 API 不可达、PID/路径/参数/环境变化、journal 损坏或篡改、候选构建不一致、回滚 bootstrap 失败，以及跨 daemon 实例和租约 generation 失效。`scripts/test-macos-daemon-fault-matrix.sh --run` 使用临时 HOME、独立端口和唯一 `io.github.mps233.threadrelay.tests.*` label 启动真实进程，验证占用端口时非零退出且不发布 locator、三次 `SIGKILL` 后 KeepAlive 每次都换 PID 和 instance、候选 helper 连续 bind 失败后恢复 previous helper；脚本同时断言正式 daemon 的 PID、程序路径、locator 哈希和 Codex GUI launchctl 环境前后不变，并清理全部测试作业。
 - [x] 实现 `MenuBarExtra`：打开主窗口、服务状态、检查更新、退出。
 - [x] 处理重复启动和 GUI 切换中崩溃恢复，持久化 journal 可在重启后继续提交或回滚。
-- [ ] 完成旧 CodexHub 兼容 daemon 的发布级验证；端口冲突和真实 helper 崩溃已由隔离进程矩阵通过。
+- [x] 完成 build 405-410 旧 daemon 的代码路径、固定 fixture 与只读 API 兼容验证；GUI build 422 复用正式 daemon build 410 时主要管理路由均返回 200，daemon PID 在 GUI 升级期间未变化。
+- [ ] 在 VM 或独立用户域完成旧 daemon 的真实 claim、restart 和 runtime switch 发布验证；build 404 及以下或无法识别 build 的版本必须经过桥接，或采用明确的迁移与拒绝策略。
 - [x] 实现“关闭窗口后隐藏或退出 GUI”的偏好；两种行为都不停止 daemon，停止受管服务保留为独立危险操作。
 - [x] 新 runtime 启动、健康校验或最终提交失败时自动恢复上一 runtime。
-- [ ] 建立统一脱敏的独立切换日志。
 
 验收：正常启动、重复启动、GUI 崩溃、helper 崩溃、runtime 切换和回滚场景不会误杀无关进程；GUI 关闭和产品发起的计划切换造成的受保护工作项主动终止数为 0，存在阻塞项时延期而非强杀。daemon 自身崩溃和网络故障不计为产品主动终止；用户明确选择“立即停止”造成的强制中断单独记录。此阶段不代表已接入自动更新。
 
@@ -423,12 +425,12 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 交付物：
 
 - [x] 迁移 Codex App 接入、修复和卸载操作。
-- [ ] 迁移增强启动及其预检、等待、取消和失败恢复。
+- [x] 迁移增强启动及其预检、等待、取消和失败恢复。
 - [x] 迁移可见模型配置。
 - [x] 迁移会话历史、搜索、状态和 Provider 移动操作。
 - [x] 为需要关闭 Codex App 的动作提供明确说明和可取消流程。
 
-当前状态：SwiftUI 已通过受保护的 `/api/v1/manage/codex/*` 和 `/api/v1/manage/sessions*` 路由读取脱敏状态并执行接入、修复、卸载、模型刷新、增强启动和会话 Provider 移动。增强启动会在 Codex App 仍运行时展示可取消等待页，检测到退出后自动继续；注入启动阶段本身的主动取消和完整失败恢复仍保留在本阶段后续任务中。
+当前状态：SwiftUI 已通过受保护的 `/api/v1/manage/codex/*` 和 `/api/v1/manage/sessions*` 路由读取脱敏状态并执行接入、修复、卸载、模型刷新、增强启动和会话 Provider 移动。增强启动已由 daemon 提供可查询的 operation 状态机，覆盖准备、启动、等待 App、注入、完成、失败和取消阶段；支持 requestId 幂等、并发冲突、服务端取消、超时、失败恢复和旧版 daemon 的同步接口回退。SwiftUI 会在页面重建后恢复并继续轮询运行中的 operation，并对旧版取消能力给出明确说明。
 
 验收：不会破坏 `~/.codex/config.toml` 中用户无关配置；每个写操作都有前后状态验证和失败回滚提示。
 
