@@ -68,6 +68,8 @@ XCRUN=/usr/bin/xcrun
 [ -x "$XCRUN" ] || fail "xcrun is unavailable"
 SWIFTC=$("$XCRUN" --find swiftc 2>/dev/null || true)
 [ -x "$SWIFTC" ] || fail "Swift compiler is required"
+MACOS_SDK=$($XCRUN --sdk macosx --show-sdk-path 2>/dev/null || true)
+[ -d "$MACOS_SDK" ] || fail "macOS SDK is required"
 if ! "$STRINGS" "$DAEMON_BINARY" \
   | /usr/bin/grep -q 'THREADRELAY_SKIP_DESKTOP_INTEGRATION'; then
   fail "daemon binary does not contain the required desktop-integration isolation switch"
@@ -160,7 +162,7 @@ case "$BUILD_ID" in
 esac
 PREVIOUS_PROGRAM="$THREADRELAY_TEST_HOME/runtimes/$BUILD_ID/threadrelay-daemon"
 OCCUPIED_PROGRAM="$OCCUPIED_TEST_HOME/runtimes/$BUILD_ID/threadrelay-daemon"
-ACTIVE_LOCATOR="$TEST_HOME/Library/Application Support/ThreadRelay/threadrelay-daemon.json"
+ACTIVE_LOCATOR="$TEST_HOME/Library/Application Support/ThreadRelay/threadrelay-active-daemon.json"
 FORMAL_STATE_BEFORE="$TEST_ROOT/formal-state.before"
 FORMAL_STATE_AFTER="$TEST_ROOT/formal-state.after"
 FORMAL_ENV_BEFORE="$TEST_ROOT/formal-environment.before"
@@ -206,8 +208,8 @@ snapshot_formal_locators() {
   output=$1
   : >"$output"
   for locator in \
-    "$REAL_HOME/Library/Application Support/ThreadRelay/threadrelay-daemon.json" \
-    "$REAL_HOME/Library/Application Support/CodexHub/threadrelay-daemon.json"; do
+    "$REAL_HOME/Library/Application Support/ThreadRelay/threadrelay-active-daemon.json" \
+    "$REAL_HOME/Library/Application Support/CodexHub/threadrelay-active-daemon.json"; do
     if [ -f "$locator" ]; then
       digest=$(/usr/bin/shasum -a 256 "$locator" | /usr/bin/awk '{ print $1 }')
       printf 'present %s %s\n' "$digest" "$locator" >>"$output"
@@ -489,75 +491,258 @@ retentionDays = 1
 EOF
 }
 
-write_daemon_plist() {
-  output=$1
-  program=$2
-  hold=$3
-  "$PYTHON" - \
-    "$output" \
-    "$DAEMON_LABEL" \
-    "$program" \
-    "$CONFIG_PATH" \
-    "$TEST_HOME" \
-    "$THREADRELAY_TEST_HOME" \
-    "$TEST_ROOT/codex-home" \
-    "$TEST_ROOT/vscode-extensions" \
-    "$TEST_ROOT/tmp" \
-    "$DAEMON_LOG" \
-    "$TEST_ROOT" \
-    "$hold" <<'PY'
-import plistlib
-import sys
+cat >"$HARNESS_SOURCE" <<'SWIFT'
+import Darwin
+import Foundation
 
-(
-    output,
-    label,
-    program,
-    config,
-    home,
-    runtime_home,
-    codex_home,
-    vscode_extensions,
-    temporary_directory,
-    log,
-    working_directory,
-    hold,
-) = sys.argv[1:]
-environment = {
-    "CODEX_API_BASE_URL": "",
-    "CODEX_API_ENDPOINT": "",
-    "CODEX_APP_SERVER_LOGIN_ISSUER": "",
-    "CODEX_CLI_PATH": "",
-    "CODEXHUB_REAL_CODEX_CLI_PATH": "",
-    "CODEX_HOME": codex_home,
-    "HOME": home,
-    "NO_PROXY": "127.0.0.1,localhost",
-    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-    "THREADRELAY_HOME": runtime_home,
-    "THREADRELAY_SKIP_DESKTOP_INTEGRATION": "1",
-    "TMPDIR": temporary_directory,
-    "USERPROFILE": home,
-    "VSCODE_EXTENSIONS": vscode_extensions,
-    "no_proxy": "127.0.0.1,localhost",
+private enum HarnessFailure: LocalizedError {
+    case message(String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .message(value): value
+        }
+    }
 }
-if hold == "1":
-    environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] = "1"
-job = {
-    "Label": label,
-    "ProgramArguments": [program, "--config", config, "daemon"],
-    "EnvironmentVariables": environment,
-    "WorkingDirectory": working_directory,
-    "RunAtLoad": True,
-    "KeepAlive": True,
-    "ProcessType": "Background",
-    "ThrottleInterval": 1,
-    "StandardOutPath": log,
-    "StandardErrorPath": log,
+
+private func runCommand(_ executable: URL, _ arguments: [String]) throws -> CommandResult {
+    let process = Process()
+    let output = Pipe()
+    process.executableURL = executable
+    process.arguments = arguments
+    process.standardOutput = output
+    process.standardError = output
+    try process.run()
+    process.waitUntilExit()
+    let data = output.fileHandleForReading.readDataToEndOfFile()
+    return CommandResult(
+        exitCode: process.terminationStatus,
+        output: String(decoding: data, as: UTF8.self)
+    )
 }
-with open(output, "wb") as stream:
-    plistlib.dump(job, stream, fmt=plistlib.FMT_XML, sort_keys=True)
-PY
-  "$PLUTIL" -lint "$output" >/dev/null
+
+private func lastLine(_ output: String) -> String {
+    output.split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
+}
+
+private final class BindFailureInjector: @unchecked Sendable {
+    private let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+    private let daemonService: String
+    private let blockerService: String
+    private let domain: String
+    private let blockerPlist: String
+    private let blockerLog: String
+    private let stateLock = NSLock()
+    private var daemonBootoutCount = 0
+
+    init(
+        daemonService: String,
+        blockerService: String,
+        domain: String,
+        blockerPlist: String,
+        blockerLog: String
+    ) {
+        self.daemonService = daemonService
+        self.blockerService = blockerService
+        self.domain = domain
+        self.blockerPlist = blockerPlist
+        self.blockerLog = blockerLog
+    }
+
+    func call(_ executable: URL, _ arguments: [String]) throws -> CommandResult {
+        let result = try runCommand(executable, arguments)
+        guard executable.path == launchctl.path,
+              arguments == ["bootout", daemonService]
+        else {
+            return result
+        }
+
+        let printAfterBootout = try runCommand(launchctl, ["print", daemonService])
+        guard result.exitCode == 0 || printAfterBootout.exitCode != 0 else {
+            return result
+        }
+
+        stateLock.lock()
+        daemonBootoutCount += 1
+        let completedBootouts = daemonBootoutCount
+        stateLock.unlock()
+
+        if completedBootouts == 1 {
+            try startBlocker()
+        } else if completedBootouts == 2 {
+            try stopBlocker()
+        }
+        return result
+    }
+
+    func waitForCandidateBindFailures(logURL: URL, minimum: Int) throws {
+        for _ in 0..<200 {
+            let contents = (try? String(contentsOf: logURL, encoding: .utf8)) ?? ""
+            let failures = contents
+                .split(whereSeparator: \.isNewline)
+                .map { $0.lowercased() }
+                .filter {
+                    $0.contains("address already in use") || $0.contains("os error 48")
+                }
+                .count
+            if failures >= minimum {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        throw HarnessFailure.message(
+            "candidate helper did not record \(minimum) bind failures"
+        )
+    }
+
+    func assertRecoveryInjectionCompleted() throws {
+        stateLock.lock()
+        let completedBootouts = daemonBootoutCount
+        stateLock.unlock()
+        guard completedBootouts >= 2 else {
+            throw HarnessFailure.message(
+                "rollback did not unload the failed candidate service "
+                    + "(observed \(completedBootouts) daemon bootouts)"
+            )
+        }
+        let blocker = try runCommand(launchctl, ["print", blockerService])
+        guard blocker.exitCode != 0 else {
+            throw HarnessFailure.message("port blocker remained loaded after rollback")
+        }
+    }
+
+    private func startBlocker() throws {
+        let bootstrap = try runCommand(
+            launchctl,
+            ["bootstrap", domain, blockerPlist]
+        )
+        guard bootstrap.exitCode == 0 else {
+            throw HarnessFailure.message(
+                "failed to inject port blocker: \(lastLine(bootstrap.output))"
+            )
+        }
+        for _ in 0..<200 {
+            let contents = (try? String(contentsOfFile: blockerLog, encoding: .utf8)) ?? ""
+            if contents.contains("fault-matrix blocker ready") {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        throw HarnessFailure.message("port blocker did not become ready")
+    }
+
+    private func stopBlocker() throws {
+        let printResult = try runCommand(launchctl, ["print", blockerService])
+        if printResult.exitCode == 0 {
+            let bootout = try runCommand(launchctl, ["bootout", blockerService])
+            let stillLoaded = try runCommand(launchctl, ["print", blockerService])
+            guard bootout.exitCode == 0 || stillLoaded.exitCode != 0 else {
+                throw HarnessFailure.message(
+                    "failed to remove port blocker: \(lastLine(bootout.output))"
+                )
+            }
+        }
+        for _ in 0..<100 {
+            if try runCommand(launchctl, ["print", blockerService]).exitCode != 0 {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        throw HarnessFailure.message("port blocker did not unload")
+    }
+}
+
+@main
+private struct DaemonFaultMatrixHarness {
+    static func main() async throws {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        guard arguments.count >= 8 else {
+            throw HarnessFailure.message("insufficient harness arguments")
+        }
+
+        let action = arguments[0]
+        let label = arguments[1]
+        let helperURL = URL(fileURLWithPath: arguments[2])
+        let configURL = URL(fileURLWithPath: arguments[3])
+        let launchAgentURL = URL(fileURLWithPath: arguments[4])
+        let logURL = URL(fileURLWithPath: arguments[5])
+        let homeURL = URL(fileURLWithPath: arguments[6], isDirectory: true)
+        let buildIdentifier = arguments[7]
+        let configuration = try DaemonLaunchConfiguration(
+            testLaunchdLabel: label,
+            helperURL: helperURL,
+            configURL: configURL,
+            launchAgentURL: launchAgentURL,
+            logURL: logURL,
+            homeURL: homeURL,
+            buildIdentifier: buildIdentifier
+        )
+
+        if action == "start" {
+            let launcher = DaemonLauncher(
+                configurationLoader: { configuration },
+                commandRunner: runCommand
+            )
+            try await launcher.startIfNeeded()
+            return
+        }
+
+        guard action == "switch-and-rollback", arguments.count == 16,
+              let expectedPID = Int32(arguments[8])
+        else {
+            throw HarnessFailure.message("invalid switch-and-rollback arguments")
+        }
+        let expectedInstanceId = arguments[9]
+        let expectedExecutable = arguments[10]
+        let injector = BindFailureInjector(
+            daemonService: arguments[11],
+            blockerService: arguments[12],
+            domain: arguments[13],
+            blockerPlist: arguments[14],
+            blockerLog: arguments[15]
+        )
+        let launcher = DaemonLauncher(
+            configurationLoader: { configuration },
+            commandRunner: injector.call
+        )
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: expectedPID,
+            expectedInstanceId: expectedInstanceId,
+            expectedExecutable: expectedExecutable
+        )
+        try await launcher.activatePreparedRuntime(
+            transaction,
+            expectedPID: expectedPID,
+            expectedExecutable: expectedExecutable
+        )
+        try injector.waitForCandidateBindFailures(logURL: logURL, minimum: 2)
+        try await launcher.rollbackRuntime(
+            transaction,
+            expectedPID: nil,
+            expectedExecutable: nil
+        )
+        try injector.assertRecoveryInjectionCompleted()
+        try await launcher.commitRuntimeSwitch(transaction)
+    }
+}
+SWIFT
+
+[ -f "$DAEMON_LAUNCHER_SOURCE" ] || fail "DaemonLauncher.swift is unavailable"
+"$SWIFTC" \
+  -sdk "$MACOS_SDK" \
+  -target arm64-apple-macosx13.0 \
+  -D DEBUG \
+  -parse-as-library \
+  "$DAEMON_LAUNCHER_SOURCE" \
+  "$HARNESS_SOURCE" \
+  -o "$HARNESS_BINARY"
+
+run_harness() {
+  /usr/bin/env -i \
+    HOME="$TEST_HOME" \
+    PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    TMPDIR="$TEST_ROOT/tmp" \
+    "$HARNESS_BINARY" "$@"
 }
 
 cat >"$BLOCKER_SCRIPT" <<'PY'
@@ -635,7 +820,7 @@ assert_loaded_program() {
 
 crash_test_daemon_job() {
   expected_pid=$1
-  assert_loaded_program "$DAEMON_SERVICE" "$PREVIOUS_HELPER"
+  assert_loaded_program "$DAEMON_SERVICE" "$PREVIOUS_PROGRAM"
   actual_pid=$(job_pid "$DAEMON_SERVICE" || true)
   [ "$actual_pid" = "$expected_pid" ] \
     || fail "test daemon pid changed before KeepAlive signal: $expected_pid -> ${actual_pid:-none}"
@@ -697,13 +882,14 @@ PY
 }
 
 wait_for_bind_failures() {
-  minimum=$1
+  log_path=$1
+  minimum=$2
   attempts=0
   while [ "$attempts" -lt 200 ]; do
     count=$(
       /usr/bin/grep -Eic \
         'address already in use|os error 48' \
-        "$DAEMON_LOG" 2>/dev/null \
+        "$log_path" 2>/dev/null \
         || true
     )
     if [ "$count" -ge "$minimum" ]; then
@@ -712,43 +898,34 @@ wait_for_bind_failures() {
     attempts=$((attempts + 1))
     /bin/sleep 0.1
   done
-  fail "candidate helper did not record $minimum bind failures"
+  fail "daemon did not record $minimum bind failures in $log_path"
 }
 
 note "isolated root: $TEST_ROOT"
 note "daemon label: $DAEMON_LABEL"
 note "blocker label: $BLOCKER_LABEL"
 
-note "case 1/3: occupied port rejects a direct daemon start"
+note "case 1/3: occupied port fences a KeepAlive daemon start"
 OCCUPIED_PORT=$(allocate_port)
 write_config "$OCCUPIED_CONFIG_PATH" "$OCCUPIED_TEST_HOME" "$OCCUPIED_PORT"
 start_blocker "$OCCUPIED_PORT"
-set +e
-/usr/bin/env -i \
-  CODEX_API_BASE_URL= \
-  CODEX_API_ENDPOINT= \
-  CODEX_APP_SERVER_LOGIN_ISSUER= \
-  CODEX_CLI_PATH= \
-  CODEXHUB_REAL_CODEX_CLI_PATH= \
-  CODEX_HOME="$TEST_ROOT/codex-home" \
-  HOME="$TEST_HOME" \
-  NO_PROXY="127.0.0.1,localhost" \
-  PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
-  THREADRELAY_HOME="$OCCUPIED_TEST_HOME" \
-  THREADRELAY_SKIP_DESKTOP_INTEGRATION=1 \
-  TMPDIR="$TEST_ROOT/tmp" \
-  USERPROFILE="$TEST_HOME" \
-  VSCODE_EXTENSIONS="$TEST_ROOT/vscode-extensions" \
-  no_proxy="127.0.0.1,localhost" \
-  "$PREVIOUS_HELPER" --config "$OCCUPIED_CONFIG_PATH" daemon \
-  >"$DIRECT_FAILURE_LOG" 2>&1
-DIRECT_EXIT=$?
-set -e
-[ "$DIRECT_EXIT" -ne 0 ] || fail "daemon unexpectedly started on an occupied port"
-/usr/bin/grep -Eiq 'address already in use|os error 48' "$DIRECT_FAILURE_LOG" \
-  || fail "direct daemon failure did not report the occupied port"
+: >"$DIRECT_FAILURE_LOG"
+run_harness \
+  start \
+  "$DAEMON_LABEL" \
+  "$HELPER_COPY" \
+  "$OCCUPIED_CONFIG_PATH" \
+  "$DAEMON_PLIST" \
+  "$DIRECT_FAILURE_LOG" \
+  "$TEST_HOME" \
+  "$BUILD_ID"
+assert_loaded_program "$DAEMON_SERVICE" "$OCCUPIED_PROGRAM"
+wait_for_run_count "$DAEMON_SERVICE" 2
+wait_for_bind_failures "$DIRECT_FAILURE_LOG" 2
 [ ! -e "$ACTIVE_LOCATOR" ] \
   || fail "occupied-port failure unexpectedly published an active daemon locator"
+bootout_exact_test_job "$DAEMON_SERVICE"
+wait_for_job_unloaded "$DAEMON_SERVICE"
 bootout_exact_test_job "$BLOCKER_SERVICE"
 wait_for_job_unloaded "$BLOCKER_SERVICE"
 wait_for_port_available "$OCCUPIED_PORT"
@@ -756,15 +933,21 @@ wait_for_port_available "$OCCUPIED_PORT"
 note "case 2/3: KeepAlive replaces the daemon pid three times after SIGKILL"
 DAEMON_PORT=$(allocate_port)
 write_config "$CONFIG_PATH" "$THREADRELAY_TEST_HOME" "$DAEMON_PORT"
-write_daemon_plist "$PREVIOUS_PLIST" "$PREVIOUS_HELPER" 0
-write_daemon_plist "$CANDIDATE_PLIST" "$CANDIDATE_HELPER" 1
-/bin/cp "$PREVIOUS_PLIST" "$DAEMON_PLIST"
-bootstrap_test_job "$DAEMON_SERVICE" "$DAEMON_PLIST"
+: >"$DAEMON_LOG"
+run_harness \
+  start \
+  "$DAEMON_LABEL" \
+  "$HELPER_COPY" \
+  "$CONFIG_PATH" \
+  "$DAEMON_PLIST" \
+  "$DAEMON_LOG" \
+  "$TEST_HOME" \
+  "$BUILD_ID"
 wait_for_health "$DAEMON_PORT"
 CURRENT_PID=$(wait_for_job_pid "$DAEMON_SERVICE")
-assert_loaded_program "$DAEMON_SERVICE" "$PREVIOUS_HELPER"
+assert_loaded_program "$DAEMON_SERVICE" "$PREVIOUS_PROGRAM"
 CURRENT_INSTANCE=$(fetch_and_assert_lifecycle \
-  "$DAEMON_PORT" "$CURRENT_PID" "$PREVIOUS_HELPER" active)
+  "$DAEMON_PORT" "$CURRENT_PID" "$PREVIOUS_PROGRAM" active)
 
 cycle=1
 while [ "$cycle" -le 3 ]; do
@@ -774,7 +957,7 @@ while [ "$cycle" -le 3 ]; do
   REPLACEMENT_INSTANCE=$(fetch_and_assert_lifecycle \
     "$DAEMON_PORT" \
     "$REPLACEMENT_PID" \
-    "$PREVIOUS_HELPER" \
+    "$PREVIOUS_PROGRAM" \
     active)
   [ "$REPLACEMENT_INSTANCE" != "$CURRENT_INSTANCE" ] \
     || fail "KeepAlive cycle $cycle reused daemon instance $CURRENT_INSTANCE"
@@ -784,36 +967,44 @@ while [ "$cycle" -le 3 ]; do
   cycle=$((cycle + 1))
 done
 
-note "case 3/3: candidate bind failure rolls back to the previous helper"
-bootout_exact_test_job "$DAEMON_SERVICE"
-wait_for_job_unloaded "$DAEMON_SERVICE"
-wait_for_port_available "$DAEMON_PORT"
-start_blocker "$DAEMON_PORT"
-: >"$DAEMON_LOG"
-/bin/cp "$CANDIDATE_PLIST" "$DAEMON_PLIST"
-bootstrap_test_job "$DAEMON_SERVICE" "$DAEMON_PLIST"
-assert_loaded_program "$DAEMON_SERVICE" "$CANDIDATE_HELPER"
-wait_for_run_count "$DAEMON_SERVICE" 2
-wait_for_bind_failures 2
-
-bootout_exact_test_job "$DAEMON_SERVICE"
-wait_for_job_unloaded "$DAEMON_SERVICE"
+note "case 3/3: DaemonLauncher rolls a bind-failing candidate back"
 bootout_exact_test_job "$BLOCKER_SERVICE"
 wait_for_job_unloaded "$BLOCKER_SERVICE"
-wait_for_port_available "$DAEMON_PORT"
-
-/bin/cp "$PREVIOUS_PLIST" "$DAEMON_PLIST"
-bootstrap_test_job "$DAEMON_SERVICE" "$DAEMON_PLIST"
+: >"$DAEMON_LOG"
+: >"$BLOCKER_LOG"
+write_blocker_plist "$DAEMON_PORT"
+run_harness \
+  switch-and-rollback \
+  "$DAEMON_LABEL" \
+  "$HELPER_COPY" \
+  "$CONFIG_PATH" \
+  "$DAEMON_PLIST" \
+  "$DAEMON_LOG" \
+  "$TEST_HOME" \
+  "$BUILD_ID" \
+  "$CURRENT_PID" \
+  "$CURRENT_INSTANCE" \
+  "$PREVIOUS_PROGRAM" \
+  "$DAEMON_SERVICE" \
+  "$BLOCKER_SERVICE" \
+  "$DOMAIN" \
+  "$BLOCKER_PLIST" \
+  "$BLOCKER_LOG"
 wait_for_health "$DAEMON_PORT"
 RECOVERED_PID=$(wait_for_job_pid "$DAEMON_SERVICE")
-assert_loaded_program "$DAEMON_SERVICE" "$PREVIOUS_HELPER"
+assert_loaded_program "$DAEMON_SERVICE" "$PREVIOUS_PROGRAM"
 RECOVERED_INSTANCE=$(fetch_and_assert_lifecycle \
   "$DAEMON_PORT" \
   "$RECOVERED_PID" \
-  "$PREVIOUS_HELPER" \
+  "$PREVIOUS_PROGRAM" \
   active)
 [ "$RECOVERED_INSTANCE" != "$CURRENT_INSTANCE" ] \
   || fail "rollback reused the previous daemon instance $CURRENT_INSTANCE"
+[ ! -e "$THREADRELAY_TEST_HOME/threadrelay-runtime-switch.json" ] \
+  || fail "successful rollback left the runtime-switch journal behind"
+[ ! -e "$ACTIVE_LOCATOR" ] \
+  || /usr/bin/grep -q "$RECOVERED_INSTANCE" "$ACTIVE_LOCATOR" \
+  || fail "active daemon locator does not describe the recovered instance"
 
 verify_formal_unchanged \
   || fail "production daemon state changed during the isolated matrix"
