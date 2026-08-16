@@ -7,6 +7,7 @@ private func threadRelayFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 enum DaemonLaunchError: LocalizedError, Equatable {
     case helperMissing
     case helperNotExecutable
+    case launchdLabelInvalid(String)
     case runtimeBuildIdentifierInvalid(String)
     case runtimeDirectoryUnavailable
     case runtimeStageFailed
@@ -36,6 +37,8 @@ enum DaemonLaunchError: LocalizedError, Equatable {
             return "应用内未找到后台服务。请重新安装 ThreadRelay。"
         case .helperNotExecutable:
             return "应用内的后台服务不可执行。请重新安装 ThreadRelay。"
+        case let .launchdLabelInvalid(label):
+            return "后台服务测试标识无效：\(label)"
         case let .runtimeBuildIdentifierInvalid(identifier):
             return "后台服务构建标识无效：\(identifier)"
         case .runtimeDirectoryUnavailable:
@@ -89,13 +92,121 @@ enum DaemonLaunchError: LocalizedError, Equatable {
 
 struct DaemonLaunchConfiguration: Equatable {
     static let label = "io.github.mps233.threadrelay.daemon"
+    fileprivate static let skipDesktopIntegrationEnvironment =
+        "THREADRELAY_SKIP_DESKTOP_INTEGRATION"
+#if DEBUG
+    private static let testLabelPrefix = "io.github.mps233.threadrelay.tests."
+#endif
 
+    let launchdLabel: String
+    private let skipsDesktopIntegration: Bool
     let helperURL: URL
     let configURL: URL
     let launchAgentURL: URL
     let logURL: URL
     let homeURL: URL
     let buildIdentifier: String?
+
+    init(
+        helperURL: URL,
+        configURL: URL,
+        launchAgentURL: URL,
+        logURL: URL,
+        homeURL: URL,
+        buildIdentifier: String?
+    ) {
+        self.init(
+            launchdLabel: Self.label,
+            skipsDesktopIntegration: false,
+            helperURL: helperURL,
+            configURL: configURL,
+            launchAgentURL: launchAgentURL,
+            logURL: logURL,
+            homeURL: homeURL,
+            buildIdentifier: buildIdentifier
+        )
+    }
+
+#if DEBUG
+    init(
+        testLaunchdLabel: String,
+        helperURL: URL,
+        configURL: URL,
+        launchAgentURL: URL,
+        logURL: URL,
+        homeURL: URL,
+        buildIdentifier: String?
+    ) throws {
+        guard Self.isValidTestLaunchdLabel(testLaunchdLabel) else {
+            throw DaemonLaunchError.launchdLabelInvalid(testLaunchdLabel)
+        }
+        self.init(
+            launchdLabel: testLaunchdLabel,
+            skipsDesktopIntegration: true,
+            helperURL: helperURL,
+            configURL: configURL,
+            launchAgentURL: launchAgentURL,
+            logURL: logURL,
+            homeURL: homeURL,
+            buildIdentifier: buildIdentifier
+        )
+    }
+#endif
+
+    private init(
+        launchdLabel: String,
+        skipsDesktopIntegration: Bool,
+        helperURL: URL,
+        configURL: URL,
+        launchAgentURL: URL,
+        logURL: URL,
+        homeURL: URL,
+        buildIdentifier: String?
+    ) {
+        self.launchdLabel = launchdLabel
+        self.skipsDesktopIntegration = skipsDesktopIntegration
+        self.helperURL = helperURL
+        self.configURL = configURL
+        self.launchAgentURL = launchAgentURL
+        self.logURL = logURL
+        self.homeURL = homeURL
+        self.buildIdentifier = buildIdentifier
+    }
+
+#if DEBUG
+    private static func isValidTestLaunchdLabel(_ label: String) -> Bool {
+        guard label.hasPrefix(testLabelPrefix),
+              label != Self.label,
+              label.utf8.count <= 128
+        else {
+            return false
+        }
+        let suffix = label.dropFirst(testLabelPrefix.count)
+        let allowed = CharacterSet(
+            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        )
+        let edgeAllowed = CharacterSet(
+            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        )
+        guard !suffix.isEmpty,
+              suffix.rangeOfCharacter(from: allowed.inverted) == nil,
+              String(suffix.prefix(1)).rangeOfCharacter(from: edgeAllowed.inverted) == nil,
+              String(suffix.suffix(1)).rangeOfCharacter(from: edgeAllowed.inverted) == nil,
+              !suffix.contains("..")
+        else {
+            return false
+        }
+        return true
+    }
+#endif
+
+    var launchdServiceTarget: String {
+        "gui/\(getuid())/\(launchdLabel)"
+    }
+
+    fileprivate var desktopIntegrationEnvironmentValue: String? {
+        skipsDesktopIntegration ? "1" : nil
+    }
 
     static func current(
         bundleURL: URL = Bundle.main.bundleURL,
@@ -189,11 +300,14 @@ struct DaemonLaunchConfiguration: Equatable {
             "THREADRELAY_HOME": configURL.deletingLastPathComponent().path,
         ]
         environment["THREADRELAY_BUNDLE_BUILD"] = resolvedBuildIdentifier
+        if let value = desktopIntegrationEnvironmentValue {
+            environment[Self.skipDesktopIntegrationEnvironment] = value
+        }
         if runtimeSwitchHold {
             environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] = "1"
         }
         let propertyList: [String: Any] = [
-            "Label": Self.label,
+            "Label": launchdLabel,
             "ProgramArguments": [
                 stagedHelperURL.path,
                 "--config",
@@ -607,7 +721,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
 
         let launchctl = URL(fileURLWithPath: "/bin/launchctl")
         let domain = "gui/\(getuid())"
-        let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
+        let serviceTarget = configuration.launchdServiceTarget
         let printResult = try commandRunner(launchctl, ["print", serviceTarget])
 
         if printResult.exitCode == 0 {
@@ -649,7 +763,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             try prepareRuntime(configuration: configuration, commandRunner: commandRunner)
 
             let launchctl = URL(fileURLWithPath: "/bin/launchctl")
-            let serviceTarget = "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"
+            let serviceTarget = configuration.launchdServiceTarget
             let printResult = try commandRunner(launchctl, ["print", serviceTarget])
             guard printResult.exitCode == 0 else {
                 throw DaemonLaunchError.launchAgentSnapshotUnavailable
@@ -711,7 +825,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
 
         let launchctl = URL(fileURLWithPath: "/bin/launchctl")
         let domain = "gui/\(getuid())"
-        let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
+        let serviceTarget = configuration.launchdServiceTarget
         let printResult = try commandRunner(launchctl, ["print", serviceTarget])
         try requireLoadedAgent(
             printResult,
@@ -779,7 +893,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         let journal = try validatedTransaction(transaction, configuration: configuration)
         let launchctl = URL(fileURLWithPath: "/bin/launchctl")
         let domain = "gui/\(getuid())"
-        let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
+        let serviceTarget = configuration.launchdServiceTarget
         var previousIsLoaded = false
         let printResult = try commandRunner(launchctl, ["print", serviceTarget])
 
@@ -866,7 +980,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             throw DaemonLaunchError.runtimeSwitchRecoveryRequired
         }
         let launchctl = URL(fileURLWithPath: "/bin/launchctl")
-        let serviceTarget = "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"
+        let serviceTarget = configuration.launchdServiceTarget
         let printResult = try commandRunner(launchctl, ["print", serviceTarget])
         guard printResult.exitCode == 0,
               loadedAgentMatches(
@@ -958,7 +1072,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
 
             let launchctl = URL(fileURLWithPath: "/bin/launchctl")
             let domain = "gui/\(getuid())"
-            let serviceTarget = "\(domain)/\(DaemonLaunchConfiguration.label)"
+            let serviceTarget = configuration.launchdServiceTarget
             let printResult = try commandRunner(launchctl, ["print", serviceTarget])
             if printResult.exitCode != 0 {
                 try writeLaunchAgentData(
@@ -1075,7 +1189,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                   options: [],
                   format: nil
               ) as? [String: Any],
-              propertyList["Label"] as? String == DaemonLaunchConfiguration.label,
+              propertyList["Label"] as? String == configuration.launchdLabel,
               let arguments = propertyList["ProgramArguments"] as? [String],
               arguments.count == 4,
               let programPath = arguments.first,
@@ -1089,7 +1203,9 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
               environment["THREADRELAY_HOME"]
                   == configuration.configURL.deletingLastPathComponent().path,
               environment["THREADRELAY_BUNDLE_BUILD"]
-                  == URL(fileURLWithPath: programPath).deletingLastPathComponent().lastPathComponent
+                  == URL(fileURLWithPath: programPath).deletingLastPathComponent().lastPathComponent,
+              environment[DaemonLaunchConfiguration.skipDesktopIntegrationEnvironment]
+                  == configuration.desktopIntegrationEnvironmentValue
         else {
             throw DaemonLaunchError.launchAgentSnapshotUnavailable
         }
@@ -1283,6 +1399,10 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         guard loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
             == configuration.configURL.deletingLastPathComponent().path,
             loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD") == expectedBuild,
+            loadedEnvironmentValue(
+                from: output,
+                key: DaemonLaunchConfiguration.skipDesktopIntegrationEnvironment
+            ) == configuration.desktopIntegrationEnvironmentValue,
             loadedEnvironmentValue(from: output, key: "THREADRELAY_RUNTIME_SWITCH_HOLD") == nil
         else {
             return false
@@ -1448,7 +1568,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             options: [],
             format: nil
         ) as? [String: Any],
-        propertyList["Label"] as? String == DaemonLaunchConfiguration.label,
+        propertyList["Label"] as? String == configuration.launchdLabel,
         let arguments = propertyList["ProgramArguments"] as? [String],
         arguments.count == 4,
         let programPath = arguments.first,
@@ -1463,6 +1583,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin",
         environment["THREADRELAY_HOME"]
             == configuration.configURL.deletingLastPathComponent().path,
+        environment[DaemonLaunchConfiguration.skipDesktopIntegrationEnvironment]
+            == configuration.desktopIntegrationEnvironmentValue,
         let build = environment["THREADRELAY_BUNDLE_BUILD"],
         build == URL(fileURLWithPath: programPath).deletingLastPathComponent().lastPathComponent,
         Set(environment.keys).subtracting([
@@ -1470,6 +1592,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             "PATH",
             "THREADRELAY_HOME",
             "THREADRELAY_BUNDLE_BUILD",
+            DaemonLaunchConfiguration.skipDesktopIntegrationEnvironment,
             "THREADRELAY_RUNTIME_SWITCH_HOLD",
         ]).isEmpty,
         environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] == nil

@@ -121,7 +121,207 @@ final class APIContractTests: XCTestCase {
             try configuration.stagedHelperURL().path,
             legacyDirectory.appendingPathComponent("runtimes/dev/threadrelay-daemon").path
         )
+        XCTAssertEqual(configuration.launchdLabel, DaemonLaunchConfiguration.label)
+        XCTAssertEqual(
+            configuration.launchdServiceTarget,
+            "gui/\(getuid())/\(DaemonLaunchConfiguration.label)"
+        )
     }
+
+#if DEBUG
+    func testDaemonLaunchConfigurationRejectsUnsafeTestLaunchdLabels() {
+        let root = URL(fileURLWithPath: "/fixture", isDirectory: true)
+        let labels = [
+            DaemonLaunchConfiguration.label,
+            "io.github.mps233.threadrelay.tests.",
+            "io.github.mps233.threadrelay.tests.-leading",
+            "io.github.mps233.threadrelay.tests.trailing-",
+            "io.github.mps233.threadrelay.tests.two..dots",
+            "io.github.mps233.threadrelay.tests.bad/value",
+            "io.github.mps233.threadrelay.tests.bad value",
+            "io.github.mps233.threadrelay.other.test",
+            "io.github.mps233.threadrelay.tests.\(String(repeating: "a", count: 100))",
+        ]
+
+        for label in labels {
+            XCTAssertThrowsError(
+                try DaemonLaunchConfiguration(
+                    testLaunchdLabel: label,
+                    helperURL: root.appendingPathComponent("threadrelay-daemon"),
+                    configURL: root.appendingPathComponent("config.toml"),
+                    launchAgentURL: root.appendingPathComponent("daemon.plist"),
+                    logURL: root.appendingPathComponent("daemon.log"),
+                    homeURL: root,
+                    buildIdentifier: "test"
+                )
+            ) { error in
+                XCTAssertEqual(error as? DaemonLaunchError, .launchdLabelInvalid(label))
+            }
+        }
+    }
+
+    func testDaemonLauncherUsesInjectedTestLabelForServiceAndRuntimeJournal() async throws {
+        let testLabel = "io.github.mps233.threadrelay.tests.\(UUID().uuidString.lowercased())"
+        let fixture = try makeDaemonLauncherFixture(testLaunchdLabel: testLabel)
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let stagedRuntime = try fixture.configuration.stagedHelperURL()
+        let loadedOutput = launchctlOutput(
+            program: stagedRuntime,
+            configuration: fixture.configuration,
+            build: "389",
+            pid: 246
+        )
+        let printCount = IntCounter()
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.0 (build 389)\n")
+            }
+            if arguments.first == "print" {
+                return printCount.next() == 1
+                    ? CommandResult(exitCode: 1, output: "not loaded")
+                    : CommandResult(exitCode: 0, output: loadedOutput)
+            }
+            if arguments.first == "bootstrap" {
+                return CommandResult(exitCode: 0, output: "")
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        try await launcher.startIfNeeded()
+        let transaction = try await launcher.prepareRuntimeSwitch(
+            expectedPID: 246,
+            expectedInstanceId: "test-instance",
+            expectedExecutable: stagedRuntime.path
+        )
+
+        XCTAssertEqual(fixture.configuration.launchdLabel, testLabel)
+        XCTAssertEqual(
+            fixture.configuration.launchdServiceTarget,
+            "gui/\(getuid())/\(testLabel)"
+        )
+        XCTAssertTrue(
+            commands.arguments
+                .filter { $0.first == "print" }
+                .allSatisfy { $0 == ["print", fixture.configuration.launchdServiceTarget] }
+        )
+        let launchAgent = try daemonLaunchAgentPropertyList(
+            at: fixture.configuration.launchAgentURL
+        )
+        XCTAssertEqual(launchAgent["Label"] as? String, testLabel)
+        XCTAssertEqual(
+            (launchAgent["EnvironmentVariables"] as? [String: String])?[
+                "THREADRELAY_SKIP_DESKTOP_INTEGRATION"
+            ],
+            "1"
+        )
+        for data in [
+            transaction.journal.previousLaunchAgentData,
+            transaction.journal.candidateLaunchAgentData,
+        ] {
+            let propertyList = try XCTUnwrap(
+                PropertyListSerialization.propertyList(
+                    from: data,
+                    options: [],
+                    format: nil
+                ) as? [String: Any]
+            )
+            XCTAssertEqual(propertyList["Label"] as? String, testLabel)
+        }
+
+        let originalJournal = transaction.journal
+        var tamperedCandidate = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: originalJournal.candidateLaunchAgentData,
+                options: [],
+                format: nil
+            ) as? [String: Any]
+        )
+        tamperedCandidate["Label"] = DaemonLaunchConfiguration.label
+        let tamperedJournal = DaemonRuntimeSwitchJournal(
+            schemaVersion: originalJournal.schemaVersion,
+            transactionId: originalJournal.transactionId,
+            phase: originalJournal.phase,
+            previousLaunchAgentData: originalJournal.previousLaunchAgentData,
+            previousProgramPath: originalJournal.previousProgramPath,
+            previousBuild: originalJournal.previousBuild,
+            previousInstanceId: originalJournal.previousInstanceId,
+            previousPID: originalJournal.previousPID,
+            candidateLaunchAgentData: try PropertyListSerialization.data(
+                fromPropertyList: tamperedCandidate,
+                format: .xml,
+                options: 0
+            ),
+            candidateProgramPath: originalJournal.candidateProgramPath,
+            candidateBuild: originalJournal.candidateBuild,
+            createdAtMilliseconds: originalJournal.createdAtMilliseconds,
+            updatedAtMilliseconds: originalJournal.updatedAtMilliseconds
+        )
+        let journalURL = runtimeSwitchJournalURL(for: fixture.configuration)
+        try JSONEncoder().encode(tamperedJournal).write(to: journalURL, options: .atomic)
+        do {
+            try await launcher.commitRuntimeSwitch(
+                DaemonRuntimeSwitch(journal: tamperedJournal)
+            )
+            XCTFail("Expected a production label inside the test journal to be rejected")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(error, .runtimeSwitchRecoveryRequired)
+        }
+        try JSONEncoder().encode(originalJournal).write(to: journalURL, options: .atomic)
+
+        var candidateWithoutIsolation = try XCTUnwrap(
+            PropertyListSerialization.propertyList(
+                from: originalJournal.candidateLaunchAgentData,
+                options: [],
+                format: nil
+            ) as? [String: Any]
+        )
+        var candidateEnvironment = try XCTUnwrap(
+            candidateWithoutIsolation["EnvironmentVariables"] as? [String: String]
+        )
+        candidateEnvironment.removeValue(forKey: "THREADRELAY_SKIP_DESKTOP_INTEGRATION")
+        candidateWithoutIsolation["EnvironmentVariables"] = candidateEnvironment
+        let unisolatedJournal = DaemonRuntimeSwitchJournal(
+            schemaVersion: originalJournal.schemaVersion,
+            transactionId: originalJournal.transactionId,
+            phase: originalJournal.phase,
+            previousLaunchAgentData: originalJournal.previousLaunchAgentData,
+            previousProgramPath: originalJournal.previousProgramPath,
+            previousBuild: originalJournal.previousBuild,
+            previousInstanceId: originalJournal.previousInstanceId,
+            previousPID: originalJournal.previousPID,
+            candidateLaunchAgentData: try PropertyListSerialization.data(
+                fromPropertyList: candidateWithoutIsolation,
+                format: .xml,
+                options: 0
+            ),
+            candidateProgramPath: originalJournal.candidateProgramPath,
+            candidateBuild: originalJournal.candidateBuild,
+            createdAtMilliseconds: originalJournal.createdAtMilliseconds,
+            updatedAtMilliseconds: originalJournal.updatedAtMilliseconds
+        )
+        try JSONEncoder().encode(unisolatedJournal).write(to: journalURL, options: .atomic)
+        do {
+            try await launcher.commitRuntimeSwitch(
+                DaemonRuntimeSwitch(journal: unisolatedJournal)
+            )
+            XCTFail("Expected an unisolated test candidate to be rejected")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(error, .runtimeSwitchRecoveryRequired)
+        }
+        try JSONEncoder().encode(originalJournal).write(to: journalURL, options: .atomic)
+
+        try await launcher.cancelRuntimeSwitch(transaction)
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: runtimeSwitchJournalURL(for: fixture.configuration).path
+            )
+        )
+    }
+#endif
 
     func testGUIRecoveryConfigurationRestartsOnlyUnexpectedExit() throws {
         let root = FileManager.default.temporaryDirectory
@@ -4894,7 +5094,9 @@ final class APIContractTests: XCTestCase {
             .appendingPathComponent("threadrelay-runtime-switch.json")
     }
 
-    private func makeDaemonLauncherFixture() throws -> (
+    private func makeDaemonLauncherFixture(
+        testLaunchdLabel: String? = nil
+    ) throws -> (
         root: URL,
         configuration: DaemonLaunchConfiguration
     ) {
@@ -4915,16 +5117,46 @@ final class APIContractTests: XCTestCase {
             [.posixPermissions: 0o755],
             ofItemAtPath: helper.path
         )
-        return (
-            root,
-            DaemonLaunchConfiguration(
+        let launchdLabel = testLaunchdLabel ?? DaemonLaunchConfiguration.label
+        let launchAgentURL = root
+            .appendingPathComponent("home/Library/LaunchAgents", isDirectory: true)
+            .appendingPathComponent("\(launchdLabel).plist")
+        let configuration: DaemonLaunchConfiguration
+#if DEBUG
+        if let testLaunchdLabel {
+            configuration = try DaemonLaunchConfiguration(
+                testLaunchdLabel: testLaunchdLabel,
                 helperURL: helper,
                 configURL: root.appendingPathComponent("data/config.toml"),
-                launchAgentURL: root.appendingPathComponent("home/Library/LaunchAgents/daemon.plist"),
+                launchAgentURL: launchAgentURL,
                 logURL: root.appendingPathComponent("data/logs/daemon.log"),
                 homeURL: root.appendingPathComponent("home", isDirectory: true),
                 buildIdentifier: "389"
             )
+        } else {
+            configuration = DaemonLaunchConfiguration(
+                helperURL: helper,
+                configURL: root.appendingPathComponent("data/config.toml"),
+                launchAgentURL: launchAgentURL,
+                logURL: root.appendingPathComponent("data/logs/daemon.log"),
+                homeURL: root.appendingPathComponent("home", isDirectory: true),
+                buildIdentifier: "389"
+            )
+        }
+#else
+        XCTAssertNil(testLaunchdLabel)
+        configuration = DaemonLaunchConfiguration(
+            helperURL: helper,
+            configURL: root.appendingPathComponent("data/config.toml"),
+            launchAgentURL: launchAgentURL,
+            logURL: root.appendingPathComponent("data/logs/daemon.log"),
+            homeURL: root.appendingPathComponent("home", isDirectory: true),
+            buildIdentifier: "389"
+        )
+#endif
+        return (
+            root,
+            configuration
         )
     }
 
@@ -5002,6 +5234,9 @@ final class APIContractTests: XCTestCase {
         ]
         if runtimeSwitchHold {
             environment["THREADRELAY_RUNTIME_SWITCH_HOLD"] = "1"
+        }
+        if configuration.launchdLabel != DaemonLaunchConfiguration.label {
+            environment["THREADRELAY_SKIP_DESKTOP_INTEGRATION"] = "1"
         }
         environment.merge(environmentOverrides) { _, override in override }
         let environmentLines = environment.keys.sorted()

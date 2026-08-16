@@ -46,6 +46,9 @@ use crate::{
     config::AppConfig,
 };
 
+// Isolated fault tests set this explicitly; normal launch configurations never do.
+const SKIP_DESKTOP_INTEGRATION_ENV: &str = "THREADRELAY_SKIP_DESKTOP_INTEGRATION";
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
     if matches!(cli.command, Command::Version) {
@@ -208,6 +211,8 @@ fn run_gui_command() -> anyhow::Result<()> {
 async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<()> {
     let daemon_identity = daemon_process::DaemonIdentity::new();
     let _daemon_lock = daemon_process::DaemonInstanceLock::acquire(&config_path, &daemon_identity)?;
+    let desktop_integration_enabled =
+        !environment_switch_enabled(std::env::var_os(SKIP_DESKTOP_INTEGRATION_ENV).as_deref());
     let runtime_switch_hold = std::env::var("THREADRELAY_RUNTIME_SWITCH_HOLD")
         .ok()
         .is_some_and(|value| value == "1");
@@ -276,66 +281,79 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     // to every desktop window on Windows. Keep that work out of the service's
     // startup path so the local API can respond even if another application is
     // slow or hung while handling the broadcast.
-    let backend_url = state.config.lock().await.remote_control_base_url();
-    let environment_state = state.clone();
-    tokio::spawn(async move {
-        tracing::info!(target: "threadrelay::startup", "starting Codex App environment synchronization");
-        let result = tokio::task::spawn_blocking(move || {
-            tracing::info!(target: "threadrelay::startup", "Codex App environment synchronization entered blocking worker");
-            let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
-            let proxy_cleanup = codex_app_config::cleanup_legacy_app_server_proxy_environment();
-            (gui_api_base, proxy_cleanup)
-        })
-        .await;
+    if desktop_integration_enabled {
+        let backend_url = state.config.lock().await.remote_control_base_url();
+        let environment_state = state.clone();
+        tokio::spawn(async move {
+            tracing::info!(target: "threadrelay::startup", "starting Codex App environment synchronization");
+            let result = tokio::task::spawn_blocking(move || {
+                tracing::info!(target: "threadrelay::startup", "Codex App environment synchronization entered blocking worker");
+                let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
+                let proxy_cleanup = codex_app_config::cleanup_legacy_app_server_proxy_environment();
+                (gui_api_base, proxy_cleanup)
+            })
+            .await;
 
-        match result {
-            Ok((gui_api_base, proxy_cleanup)) => {
-                tracing::info!(
-                    target: "threadrelay::startup",
-                    configured = gui_api_base.configured,
-                    proxy_cleanup_ok = proxy_cleanup.is_ok(),
-                    "Codex App environment synchronization finished"
-                );
-                environment_state
-                    .push_event(
-                        "info",
-                        "codex_app_direct_api_environment_checked",
-                        format!(
-                            "configured={} value={} error={}",
-                            gui_api_base.configured,
-                            gui_api_base.value.as_deref().unwrap_or_default(),
-                            gui_api_base.error.as_deref().unwrap_or_default()
-                        ),
-                    )
-                    .await;
-                environment_state
-                    .push_event(
-                        if proxy_cleanup.is_ok() {
-                            "info"
-                        } else {
-                            "warn"
-                        },
-                        "codex_app_server_proxy_environment_cleanup_checked",
-                        match proxy_cleanup {
-                            Ok(()) => "cleaned=true".to_string(),
-                            Err(error) => format!("cleaned=false error={error}"),
-                        },
-                    )
-                    .await;
+            match result {
+                Ok((gui_api_base, proxy_cleanup)) => {
+                    tracing::info!(
+                        target: "threadrelay::startup",
+                        configured = gui_api_base.configured,
+                        proxy_cleanup_ok = proxy_cleanup.is_ok(),
+                        "Codex App environment synchronization finished"
+                    );
+                    environment_state
+                        .push_event(
+                            "info",
+                            "codex_app_direct_api_environment_checked",
+                            format!(
+                                "configured={} value={} error={}",
+                                gui_api_base.configured,
+                                gui_api_base.value.as_deref().unwrap_or_default(),
+                                gui_api_base.error.as_deref().unwrap_or_default()
+                            ),
+                        )
+                        .await;
+                    environment_state
+                        .push_event(
+                            if proxy_cleanup.is_ok() {
+                                "info"
+                            } else {
+                                "warn"
+                            },
+                            "codex_app_server_proxy_environment_cleanup_checked",
+                            match proxy_cleanup {
+                                Ok(()) => "cleaned=true".to_string(),
+                                Err(error) => format!("cleaned=false error={error}"),
+                            },
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    tracing::warn!(target: "threadrelay::startup", error = %error, "Codex App environment synchronization worker failed");
+                    environment_state
+                        .push_event(
+                            "warn",
+                            "codex_app_direct_api_environment_check_failed",
+                            format!("error={error}"),
+                        )
+                        .await;
+                }
             }
-            Err(error) => {
-                tracing::warn!(target: "threadrelay::startup", error = %error, "Codex App environment synchronization worker failed");
-                environment_state
-                    .push_event(
-                        "warn",
-                        "codex_app_direct_api_environment_check_failed",
-                        format!("error={error}"),
-                    )
-                    .await;
-            }
-        }
-    });
-    tokio::spawn(run_daemon_startup_tasks(state.clone()));
+        });
+    } else {
+        state
+            .push_event(
+                "info",
+                "desktop_integration_skipped",
+                format!("requested_by={SKIP_DESKTOP_INTEGRATION_ENV}"),
+            )
+            .await;
+    }
+    tokio::spawn(run_daemon_startup_tasks(
+        state.clone(),
+        desktop_integration_enabled,
+    ));
 
     let companion = compatible_loopback_addr(addr);
     let mut companion_tasks = Vec::new();
@@ -387,22 +405,24 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         }
     }
     primary_result?;
-    match vscode_extension_patch::restore_remote_control() {
-        Ok(report) => {
-            tracing::info!(
-                target: "threadrelay::vscode_extension_patch",
-                action = %report.action,
-                extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
-                message = %report.message,
-                "VS Code Codex extension restore finished"
-            );
-        }
-        Err(err) => {
-            tracing::warn!(
-                target: "threadrelay::vscode_extension_patch",
-                error = %err,
-                "VS Code Codex extension restore failed"
-            );
+    if desktop_integration_enabled {
+        match vscode_extension_patch::restore_remote_control() {
+            Ok(report) => {
+                tracing::info!(
+                    target: "threadrelay::vscode_extension_patch",
+                    action = %report.action,
+                    extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
+                    message = %report.message,
+                    "VS Code Codex extension restore finished"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "threadrelay::vscode_extension_patch",
+                    error = %err,
+                    "VS Code Codex extension restore failed"
+                );
+            }
         }
     }
     Ok(())
@@ -437,34 +457,39 @@ async fn serve_http(
     Ok(())
 }
 
-async fn run_daemon_startup_tasks(state: crate::app_state::SharedState) {
-    match vscode_extension_patch::enable_remote_control() {
-        Ok(report) => {
-            state
-                .push_event(
-                    "info",
-                    "vscode_codex_extension_patch",
-                    format!(
-                        "action={} extension_js={} message={}",
-                        report.action,
-                        report
-                            .extension_js
-                            .as_ref()
-                            .map(|path| path.display().to_string())
-                            .unwrap_or_default(),
-                        report.message
-                    ),
-                )
-                .await;
-        }
-        Err(err) => {
-            state
-                .push_event(
-                    "warn",
-                    "vscode_codex_extension_patch_failed",
-                    err.to_string(),
-                )
-                .await;
+async fn run_daemon_startup_tasks(
+    state: crate::app_state::SharedState,
+    desktop_integration_enabled: bool,
+) {
+    if desktop_integration_enabled {
+        match vscode_extension_patch::enable_remote_control() {
+            Ok(report) => {
+                state
+                    .push_event(
+                        "info",
+                        "vscode_codex_extension_patch",
+                        format!(
+                            "action={} extension_js={} message={}",
+                            report.action,
+                            report
+                                .extension_js
+                                .as_ref()
+                                .map(|path| path.display().to_string())
+                                .unwrap_or_default(),
+                            report.message
+                        ),
+                    )
+                    .await;
+            }
+            Err(err) => {
+                state
+                    .push_event(
+                        "warn",
+                        "vscode_codex_extension_patch_failed",
+                        err.to_string(),
+                    )
+                    .await;
+            }
         }
     }
     if state.config.lock().await.bridge.enabled {
@@ -474,6 +499,10 @@ async fn run_daemon_startup_tasks(state: crate::app_state::SharedState) {
             .push_event("warn", "bridge_disabled", "bridge disabled by config")
             .await;
     }
+}
+
+fn environment_switch_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value.and_then(std::ffi::OsStr::to_str) == Some("1")
 }
 
 fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
@@ -805,5 +834,15 @@ mod tests {
         let public_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 3847);
 
         assert_eq!(compatible_loopback_addr(public_addr), None);
+    }
+
+    #[test]
+    fn desktop_integration_skip_requires_an_explicit_one_value() {
+        assert!(environment_switch_enabled(Some(std::ffi::OsStr::new("1"))));
+        assert!(!environment_switch_enabled(Some(std::ffi::OsStr::new(
+            "true"
+        ))));
+        assert!(!environment_switch_enabled(Some(std::ffi::OsStr::new("0"))));
+        assert!(!environment_switch_enabled(None));
     }
 }
