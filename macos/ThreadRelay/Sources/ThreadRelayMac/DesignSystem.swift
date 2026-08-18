@@ -13,6 +13,86 @@ enum ThreadRelayRadius {
     static let overlay: CGFloat = 16
 }
 
+/// Section heading used by work-area pages that follow the macOS Settings
+/// hierarchy: the label sits outside the grouped surface it describes.
+struct SettingsSectionHeader: View {
+    let title: String
+    var subtitle: String? = nil
+    var trailing: String? = nil
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 12)
+
+            if let trailing, !trailing.isEmpty {
+                Text(trailing)
+                    .font(.caption.weight(.medium).monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+        }
+    }
+}
+
+/// Neutral grouped surface matching the body of a native grouped `Form`.
+/// Glass remains reserved for floating chrome such as the quota dock.
+struct SettingsGroupSurface<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            content
+        }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .settingsGroupedBackground()
+    }
+}
+
+private struct SettingsGroupedBackgroundModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content.background {
+            SettingsGroupedSurfaceBackground()
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+    }
+}
+
+/// Shared fill for ordinary content surfaces. Its values match the neutral
+/// row surface used by the native grouped forms in Codex access and Settings.
+struct SettingsGroupedSurfaceBackground: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        Color(
+            .sRGB,
+            white: colorScheme == .dark ? 47.0 / 255.0 : 1,
+            opacity: 1
+        )
+    }
+}
+
+extension View {
+    func settingsGroupedBackground() -> some View {
+        modifier(SettingsGroupedBackgroundModifier())
+    }
+}
+
 /// AppKit owns the complete search-field geometry, appearance and interaction.
 struct NativeSearchField: NSViewRepresentable {
     @Binding var text: String
