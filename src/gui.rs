@@ -2385,6 +2385,7 @@ fn ai_gw_service_option(
     label: &str,
     logo: Option<ProviderLogoKind>,
     first_in_group: bool,
+    visible: bool,
 ) -> RadioButton {
     let row_panel = Panel::builder(parent).build();
     row_panel.set_background_color(theme::theme().bg_card_alt);
@@ -2423,6 +2424,7 @@ fn ai_gw_service_option(
     row.add(&radio, 1, SizerFlag::AlignCenterVertical, 0);
     row.add_spacer(12);
     row_panel.set_sizer(row, true);
+    row_panel.show(visible);
     parent_sizer.add(&row_panel, 0, SizerFlag::Expand | SizerFlag::Bottom, 8);
     radio
 }
@@ -2525,6 +2527,7 @@ fn show_ai_gw_channel_dialog(
         text.ai_gw_service_openai(),
         Some(ProviderLogoKind::OpenAi),
         true,
+        true,
     );
     let radio_grok = ai_gw_service_option(
         &service_panel,
@@ -2532,12 +2535,14 @@ fn show_ai_gw_channel_dialog(
         text.ai_gw_service_grok(),
         Some(ProviderLogoKind::Grok),
         false,
+        true,
     );
     let radio_deepseek = ai_gw_service_option(
         &service_panel,
         &service_sizer,
         text.ai_gw_service_deepseek(),
         Some(ProviderLogoKind::DeepSeek),
+        false,
         false,
     );
     let radio_deepseek_responses = ai_gw_service_option(
@@ -2546,6 +2551,7 @@ fn show_ai_gw_channel_dialog(
         text.ai_gw_service_deepseek_responses(),
         Some(ProviderLogoKind::DeepSeek),
         false,
+        true,
     );
     let radio_anthropic = ai_gw_service_option(
         &service_panel,
@@ -2553,6 +2559,7 @@ fn show_ai_gw_channel_dialog(
         text.ai_gw_service_anthropic(),
         Some(ProviderLogoKind::Anthropic),
         false,
+        true,
     );
     let radio_glm = ai_gw_service_option(
         &service_panel,
@@ -2560,6 +2567,7 @@ fn show_ai_gw_channel_dialog(
         text.ai_gw_service_glm(),
         Some(ProviderLogoKind::Zhipu),
         false,
+        true,
     );
     service_sizer.add_stretch_spacer(1);
     service_panel.set_sizer(service_sizer, true);
@@ -3962,12 +3970,8 @@ mod model_mapping_tests {
         ];
 
         assert_eq!(
-            filter_fetched_models_for_provider(&ProviderType::ChatCompletions, models.clone()),
-            vec!["deepseek-v4-pro"]
-        );
-        assert_eq!(
             filter_fetched_models_for_provider(&ProviderType::DeepSeekResponses, models.clone()),
-            vec!["deepseek-v4-flash"]
+            vec!["deepseek-v4-flash", "deepseek-v4-pro"]
         );
         assert_eq!(
             filter_fetched_models_for_provider(&ProviderType::OpenAiResponses, models.clone()),
@@ -3983,12 +3987,11 @@ mod model_mapping_tests {
         ];
 
         assert_eq!(
-            filter_fetched_models_for_provider(&ProviderType::ChatCompletions, models.clone()),
-            vec!["deepseek-ai/DeepSeek-V4-Pro"]
-        );
-        assert_eq!(
             filter_fetched_models_for_provider(&ProviderType::DeepSeekResponses, models),
-            vec!["deepseek-ai/DeepSeek-V4-Flash"]
+            vec![
+                "deepseek-ai/DeepSeek-V4-Pro",
+                "deepseek-ai/DeepSeek-V4-Flash",
+            ]
         );
     }
 
@@ -4381,23 +4384,17 @@ fn filter_fetched_models_for_provider(
     provider_type: &ProviderType,
     models: Vec<String>,
 ) -> Vec<String> {
-    let expected = match provider_type {
-        ProviderType::ChatCompletions => Some("deepseek-v4-pro"),
-        ProviderType::DeepSeekResponses => Some("deepseek-v4-flash"),
-        _ => None,
-    };
-    let Some(expected) = expected else {
+    if provider_type != &ProviderType::DeepSeekResponses {
         return models;
-    };
+    }
 
     models
         .into_iter()
         .filter(|model| {
-            model
-                .trim()
-                .rsplit('/')
-                .next()
-                .is_some_and(|slug| slug.eq_ignore_ascii_case(expected))
+            model.trim().rsplit('/').next().is_some_and(|slug| {
+                slug.eq_ignore_ascii_case("deepseek-v4-pro")
+                    || slug.eq_ignore_ascii_case("deepseek-v4-flash")
+            })
         })
         .collect()
 }

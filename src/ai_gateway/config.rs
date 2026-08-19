@@ -704,7 +704,7 @@ mod tests {
             providerType = "grok_responses"
             baseUrl = "https://api.x.ai/v1"
             apiKey = "xai-xxx"
-            models = ["grok-4.5"]
+            models = ["grok-4.6"]
         "#;
         let config: AiGatewayConfig = toml::from_str(toml_str).unwrap();
         assert!(config.enabled);

@@ -138,30 +138,24 @@ pub fn extract_model_ids(value: &Value) -> Vec<String> {
     models
 }
 
-/// DeepSeek 专用过滤：`chat_completions` 只保留 `deepseek-v4-pro`，
-/// `deepseek_responses` 只保留 `deepseek-v4-flash`（大小写不敏感，允许
-/// `vendor/deepseek-v4-pro` 之类带命名空间前缀的 id）。其他类型不过滤。
+/// DeepSeek Responses 专用过滤：只保留 Pro 和 Flash（大小写不敏感，
+/// 允许 `vendor/deepseek-v4-pro` 之类带命名空间前缀的 id）。其他协议
+/// 不假定具体厂商，因此不过滤。
 pub fn filter_fetched_models_for_provider(
     provider_type: &ProviderType,
     models: Vec<String>,
 ) -> Vec<String> {
-    let expected = match provider_type {
-        ProviderType::ChatCompletions => Some("deepseek-v4-pro"),
-        ProviderType::DeepSeekResponses => Some("deepseek-v4-flash"),
-        _ => None,
-    };
-    let Some(expected) = expected else {
+    if provider_type != &ProviderType::DeepSeekResponses {
         return models;
-    };
+    }
 
     models
         .into_iter()
         .filter(|model| {
-            model
-                .trim()
-                .rsplit('/')
-                .next()
-                .is_some_and(|slug| slug.eq_ignore_ascii_case(expected))
+            model.trim().rsplit('/').next().is_some_and(|slug| {
+                slug.eq_ignore_ascii_case("deepseek-v4-pro")
+                    || slug.eq_ignore_ascii_case("deepseek-v4-flash")
+            })
         })
         .collect()
 }
@@ -363,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_filters_match_legacy_gui_semantics() {
+    fn deepseek_responses_accepts_pro_and_flash_without_filtering_other_protocols() {
         let models = vec![
             "deepseek-v4-pro".to_string(),
             "DeepSeek-V4-Pro".to_string(),
@@ -375,15 +369,14 @@ mod tests {
 
         assert_eq!(
             filter_fetched_models_for_provider(&ProviderType::ChatCompletions, models.clone()),
-            vec![
-                "deepseek-v4-pro".to_string(),
-                "DeepSeek-V4-Pro".to_string(),
-                "vendor/deepseek-v4-pro".to_string(),
-            ]
+            models.clone()
         );
         assert_eq!(
             filter_fetched_models_for_provider(&ProviderType::DeepSeekResponses, models.clone()),
             vec![
+                "deepseek-v4-pro".to_string(),
+                "DeepSeek-V4-Pro".to_string(),
+                "vendor/deepseek-v4-pro".to_string(),
                 "deepseek-v4-flash".to_string(),
                 "ns/deepseek-v4-flash".to_string(),
             ]

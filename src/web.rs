@@ -1919,7 +1919,12 @@ mod tests {
 
         let deepseek_responses = template_by_id("deepseek-responses");
         assert_eq!(deepseek_responses["providerType"], "deepseek_responses");
-        assert_eq!(deepseek_responses["models"], json!(["deepseek-v4-flash"]));
+        assert_eq!(deepseek_responses["models"], json!(["deepseek-v4-pro"]));
+        assert!(
+            templates
+                .iter()
+                .all(|template| template["providerType"] != "chat_completions")
+        );
 
         let glm = template_by_id("glm");
         assert_eq!(glm["providerType"], "anthropic_messages");

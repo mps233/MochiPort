@@ -44,8 +44,19 @@ impl ProviderTemplate {
     }
 }
 
-/// 内置服务商模板，顺序与旧 GUI 服务商单选按钮一致。
-static PROVIDER_TEMPLATES: [ProviderTemplate; 6] = [
+/// 自定义 Chat Completions 保持可编辑兼容，但不作为推荐的新建入口展示。
+static CHAT_COMPATIBLE_TEMPLATE: ProviderTemplate = ProviderTemplate {
+    id: "chat-compatible",
+    display_name: "Chat Completions (other providers)",
+    provider_type: ProviderType::ChatCompletions,
+    compatibility: None,
+    base_url: "",
+    models_url: None,
+    models: &[],
+};
+
+/// 面向新建流程展示的内置服务商模板。
+static PROVIDER_TEMPLATES: [ProviderTemplate; 5] = [
     ProviderTemplate {
         id: "openai",
         display_name: "OpenAI",
@@ -65,22 +76,13 @@ static PROVIDER_TEMPLATES: [ProviderTemplate; 6] = [
         models: &[],
     },
     ProviderTemplate {
-        id: "deepseek",
-        display_name: "DeepSeek Chat",
-        provider_type: ProviderType::ChatCompletions,
-        compatibility: None,
-        base_url: "https://api.deepseek.com/v1",
-        models_url: None,
-        models: &[],
-    },
-    ProviderTemplate {
         id: "deepseek-responses",
         display_name: "DeepSeek Responses",
         provider_type: ProviderType::DeepSeekResponses,
         compatibility: None,
         base_url: "https://api.deepseek.com/v1",
         models_url: None,
-        models: &["deepseek-v4-flash"],
+        models: &["deepseek-v4-pro"],
     },
     ProviderTemplate {
         id: "anthropic",
@@ -114,7 +116,7 @@ pub fn default_template_for(provider_type: &ProviderType) -> &'static ProviderTe
     let id = match provider_type {
         ProviderType::OpenAiResponses => "openai",
         ProviderType::GrokResponses => "grok",
-        ProviderType::ChatCompletions => "deepseek",
+        ProviderType::ChatCompletions => return &CHAT_COMPATIBLE_TEMPLATE,
         ProviderType::DeepSeekResponses => "deepseek-responses",
         ProviderType::AnthropicMessages => "anthropic",
     };
@@ -151,8 +153,20 @@ mod tests {
             );
             assert!(!template.id.trim().is_empty());
             assert!(!template.display_name.trim().is_empty());
-            assert!(template.base_url.starts_with("https://"));
+            assert!(template.base_url.is_empty() || template.base_url.starts_with("https://"));
         }
+    }
+
+    #[test]
+    fn chat_compatible_template_remains_available_but_is_not_recommended() {
+        let template = default_template_for(&ProviderType::ChatCompletions);
+        assert_eq!(template.id, "chat-compatible");
+        assert!(template.base_url.is_empty());
+        assert!(
+            provider_templates()
+                .iter()
+                .all(|candidate| candidate.provider_type != ProviderType::ChatCompletions)
+        );
     }
 
     #[test]
@@ -167,7 +181,7 @@ mod tests {
         );
         assert_eq!(
             default_template_for(&ProviderType::ChatCompletions).id,
-            "deepseek"
+            "chat-compatible"
         );
         assert_eq!(
             default_template_for(&ProviderType::DeepSeekResponses).id,
@@ -201,7 +215,7 @@ mod tests {
         assert_eq!(provider.name, "deepseek-responses");
         assert_eq!(provider.provider_type, ProviderType::DeepSeekResponses);
         assert_eq!(provider.base_url, "https://api.deepseek.com/v1");
-        assert_eq!(provider.models, vec!["deepseek-v4-flash".to_string()]);
+        assert_eq!(provider.models, vec!["deepseek-v4-pro".to_string()]);
         assert!(provider.api_key.is_empty());
         assert!(provider.model_aliases.is_empty());
 
