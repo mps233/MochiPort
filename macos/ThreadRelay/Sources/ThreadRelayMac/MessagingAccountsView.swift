@@ -155,17 +155,6 @@ private enum MessagingAccountState: Equatable {
         }
     }
 
-    var symbol: String {
-        switch self {
-        case .disabled: "pause.circle"
-        case .connected: "checkmark.circle.fill"
-        case .connecting: "arrow.2.circlepath"
-        case .error: "exclamationmark.triangle.fill"
-        case .incomplete: "circle.dotted"
-        case .offline: "minus.circle"
-        }
-    }
-
     var tint: Color {
         switch self {
         case .disabled, .offline, .incomplete: .secondary
@@ -195,8 +184,80 @@ private enum MessagingAccountFilter: String, CaseIterable, Identifiable {
         }
     }
 
+    var symbol: String {
+        switch self {
+        case .all: "rectangle.stack.fill"
+        case .feishu: "bubble.left.and.bubble.right"
+        case .telegram: "paperplane.fill"
+        case .wechat: "message.fill"
+        case .wecom: "person.2.fill"
+        }
+    }
+
     func matches(_ account: MessagingAccountSummary) -> Bool {
         self == .all || rawValue == account.platform.rawValue
+    }
+}
+
+private struct MessagingAccountFilterControl: View {
+    @Binding var selection: MessagingAccountFilter
+    @Namespace private var selectionNamespace
+
+    var body: some View {
+        Group {
+            if #available(macOS 26.0, *) {
+                segments
+                    .glassEffect(.regular.interactive(), in: .capsule)
+            } else {
+                segments
+                    .background(.quaternary.opacity(0.5), in: Capsule())
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("消息渠道")
+    }
+
+    private var segments: some View {
+        HStack(spacing: 2) {
+            ForEach(MessagingAccountFilter.allCases) { item in
+                segment(item)
+            }
+        }
+        .padding(3)
+    }
+
+    private func segment(_ item: MessagingAccountFilter) -> some View {
+        let isSelected = selection == item
+
+        return Button {
+            guard selection != item else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                selection = item
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: item.symbol)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(item.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+        .background {
+            if isSelected {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .matchedGeometryEffect(id: "selectedMessagingFilter", in: selectionNamespace)
+            }
+        }
+        .accessibilityLabel(item.title)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .help("只显示\(item.title)账号")
     }
 }
 
@@ -238,14 +299,16 @@ struct MessagingAccountsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                header
+            VStack(alignment: .leading, spacing: ThreadRelayPageLayout.sectionSpacing) {
                 availabilityNotice
                 filterBar
+                accountSummaryBar
                 accountPanel
             }
-            .frame(maxWidth: 860, alignment: .leading)
-            .padding(ThreadRelaySpacing.page)
+            .frame(maxWidth: ThreadRelayPageLayout.maxContentWidth, alignment: .leading)
+            .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+            .padding(.top, ThreadRelayPageLayout.topPadding)
+            .padding(.bottom, ThreadRelayPageLayout.bottomPadding)
         }
         .scrollIndicators(.never)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -335,57 +398,29 @@ struct MessagingAccountsView: View {
         }
     }
 
-    private var header: some View {
+    private var accountSummaryBar: some View {
         HStack(alignment: .center, spacing: ThreadRelaySpacing.standard) {
-            ManagementPageHeader(
-                title: "消息渠道",
-                subtitle: summaryText,
-                symbol: "bubble.left.and.bubble.right"
-            )
-            Spacer(minLength: ThreadRelaySpacing.standard)
+            Text(summaryText)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
             if let onAdd {
                 Button(action: onAdd) {
                     Label("添加账号", systemImage: "plus")
                 }
                 .buttonStyle(.borderedProminent)
-                .controlSize(.large)
                 .disabled(availability != .available)
                 .help("添加消息渠道账号")
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var filterBar: some View {
-        HStack(spacing: ThreadRelaySpacing.compact) {
-            ForEach(MessagingAccountFilter.allCases) { item in
-                filterChip(item)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("渠道筛选")
-    }
-
-    private func filterChip(_ item: MessagingAccountFilter) -> some View {
-        let selected = filter == item
-        return Button {
-            filter = item
-        } label: {
-            Text(item.title)
-                .font(.callout.weight(.medium))
-                .padding(.horizontal, 13)
-                .padding(.vertical, 6)
-                .foregroundStyle(selected ? Color.white : Color.primary)
-                .background(
-                    selected
-                        ? AnyShapeStyle(Color.accentColor)
-                        : AnyShapeStyle(Color.primary.opacity(0.07)),
-                    in: Capsule()
-                )
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
+        MessagingAccountFilterControl(selection: $filter)
+        .frame(width: 440)
+        .accessibilityIdentifier("messaging-accounts.channel-filter")
     }
 
     private var accountPanel: some View {
@@ -403,12 +438,7 @@ struct MessagingAccountsView: View {
                 }
             }
         }
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: ThreadRelayRadius.content))
-        .overlay {
-            RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
-                .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var emptyState: some View {
@@ -480,26 +510,24 @@ struct MessagingAccountsView: View {
 
                         Image(systemName: account.platform.symbol)
                             .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(.primary.opacity(0.72))
                             .frame(width: 28, height: 28)
-                            .background(Color.primary.opacity(0.06), in: Circle())
+                            .background(.quaternary, in: Circle())
 
                         VStack(alignment: .leading, spacing: 3) {
-                            HStack(spacing: 7) {
-                                Text(account.displayName?.trimmedNonEmpty ?? account.platform.title)
-                                    .font(.body.weight(.semibold))
-                                    .lineLimit(1)
+                            Text(account.displayName?.trimmedNonEmpty ?? account.platform.title)
+                                .font(.body.weight(.medium))
+                                .lineLimit(1)
+                            HStack(spacing: 6) {
                                 Text(account.platform.title)
-                                    .font(.caption2.weight(.medium))
-                                    .foregroundStyle(.secondary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 3)
-                                    .background(Color.primary.opacity(0.06), in: Capsule())
+                                Text("·")
+                                Text(account.accountID)
+                                    .font(.caption2.monospaced())
                             }
-                            Text(account.accountID)
-                                .font(.caption)
+                            .font(.caption)
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
+                                .truncationMode(.middle)
                         }
                         Spacer(minLength: 4)
                     }
@@ -508,7 +536,7 @@ struct MessagingAccountsView: View {
                 .buttonStyle(.plain)
                 .help(isExpanded ? "收起账号详情" : "展开账号详情")
 
-                statusBadge(for: account)
+                accountStatus(for: account)
 
                 Toggle(
                     "",
@@ -539,22 +567,25 @@ struct MessagingAccountsView: View {
                 .help(isEnabled(account) ? "停用账号" : "启用账号")
 
                 if onDelete != nil, mutationsEnabled {
-                    Button {
-                        pendingDeletion = account
+                    Menu {
+                        Button("删除账号", role: .destructive) {
+                            pendingDeletion = account
+                        }
                     } label: {
-                        Image(systemName: "trash")
+                        Image(systemName: "ellipsis.circle")
                             .frame(width: 24, height: 24)
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .foregroundStyle(.red)
-                    .help("删除账号")
-                    .accessibilityLabel("删除账号")
-                    .padding(.leading, 4)
+                    .foregroundStyle(.secondary)
+                    .menuStyle(.borderlessButton)
+                    .menuIndicator(.hidden)
+                    .help("更多账号操作")
+                    .accessibilityLabel("更多账号操作")
                 }
             }
             .padding(.horizontal, 16)
-            .frame(minHeight: 68)
+            .frame(minHeight: 64)
 
             if isExpanded {
                 accountDetails(account)
@@ -584,16 +615,19 @@ struct MessagingAccountsView: View {
         .accessibilityIdentifier("messaging-account.\(account.id)")
     }
 
-    private func statusBadge(for account: MessagingAccountSummary) -> some View {
+    private func accountStatus(for account: MessagingAccountSummary) -> some View {
         let state = state(for: account)
-        return Label(state.title, systemImage: state.symbol)
-            .font(.caption.weight(.medium))
-            .foregroundStyle(state.tint)
-            .labelStyle(.titleAndIcon)
-            .padding(.horizontal, 8)
-            .frame(minHeight: 24)
-            .background(state.tint.opacity(0.1), in: Capsule())
-            .fixedSize(horizontal: true, vertical: false)
+        return HStack(spacing: 6) {
+            Circle()
+                .fill(state.tint)
+                .frame(width: 7, height: 7)
+            Text(state.title)
+                .font(.callout)
+                .foregroundStyle(state.tint)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("连接状态：\(state.title)")
     }
 
     private func accountDetails(_ account: MessagingAccountSummary) -> some View {
