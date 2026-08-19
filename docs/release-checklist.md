@@ -2,6 +2,9 @@
 
 Use this before publishing the repository or creating a release.
 
+For post-change GUI/daemon handoff rules, see
+[`docs/threadrelay-change-handoff.zh-CN.md`](threadrelay-change-handoff.zh-CN.md).
+
 ## Repository Hygiene
 
 - [ ] Confirm `LICENSE`, `NOTICE`, and third-party attribution files are current.
@@ -19,16 +22,18 @@ cargo test
 cargo build --release --features gui --bin threadrelay
 ```
 
-For the formal macOS app, set a numeric `BUILD_NUMBER` and use the handoff
-script. It runs the Rust and Xcode test suites, assembles
-`outputs/ThreadRelay.app`, switches the active app and daemon, and verifies that
-their builds match:
+For the formal macOS app, build the Rust daemon and Xcode app with the same
+numeric build number, then assemble the bundle without changing the running
+GUI or daemon:
 
 ```sh
-scripts/formal-macos-handoff.sh --build "$BUILD_NUMBER"
+THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release --bin threadrelay
+THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
+scripts/assemble-swiftui-macos-app.sh "$BUILD_NUMBER" "$XCODE_APP" target/release/threadrelay outputs/ThreadRelay.app
 ```
 
-- [ ] Confirm the handoff reports the expected app and daemon build.
+- [ ] Confirm the assembled app and embedded daemon report the expected build.
+- [ ] Restart the GUI or daemon manually only when the release procedure calls for it.
 
 ## Clean Local Artifacts
 

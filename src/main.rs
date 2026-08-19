@@ -213,9 +213,6 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     let _daemon_lock = daemon_process::DaemonInstanceLock::acquire(&config_path, &daemon_identity)?;
     let desktop_integration_enabled =
         !environment_switch_enabled(std::env::var_os(SKIP_DESKTOP_INTEGRATION_ENV).as_deref());
-    let runtime_switch_hold = std::env::var("THREADRELAY_RUNTIME_SWITCH_HOLD")
-        .ok()
-        .is_some_and(|value| value == "1");
     let bind = config.bind.clone();
     outbound_http::init(&config.outbound_proxy, config.local_listen_port())?;
     let chain_log_path = chain_log_path(&config);
@@ -227,16 +224,6 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         Some(shutdown_tx),
         Some(daemon_identity),
     );
-    if runtime_switch_hold {
-        state.lifecycle_admission.begin_candidate_hold();
-        state
-            .push_event(
-                "info",
-                "runtime_switch_hold_started",
-                "candidate daemon is waiting for an authenticated runtime switch commit",
-            )
-            .await;
-    }
     {
         let config = state.config.lock().await;
         state
@@ -289,19 +276,30 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             let mutation = environment_state.codex_app_mutations.lock().await;
             let result = tokio::task::spawn_blocking(move || {
                 tracing::info!(target: "threadrelay::startup", "Codex App environment synchronization entered blocking worker");
-                let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
-                let proxy_cleanup = codex_app_config::cleanup_legacy_app_server_proxy_environment();
-                (gui_api_base, proxy_cleanup)
+                let preserve_direct_api_mode =
+                    codex_app_config::should_preserve_direct_api_mode(None, &backend_url);
+                let gui_api_base = if preserve_direct_api_mode {
+                    codex_app_config::inspect_gui_api_base_url(&backend_url)
+                } else {
+                    codex_app_config::configure_gui_environment(&backend_url, true)
+                };
+                let proxy_cleanup = if preserve_direct_api_mode {
+                    Ok(())
+                } else {
+                    codex_app_config::cleanup_legacy_app_server_proxy_environment()
+                };
+                (gui_api_base, proxy_cleanup, preserve_direct_api_mode)
             })
             .await;
             drop(mutation);
 
             match result {
-                Ok((gui_api_base, proxy_cleanup)) => {
+                Ok((gui_api_base, proxy_cleanup, preserve_direct_api_mode)) => {
                     tracing::info!(
                         target: "threadrelay::startup",
                         configured = gui_api_base.configured,
                         proxy_cleanup_ok = proxy_cleanup.is_ok(),
+                        preserve_direct_api_mode,
                         "Codex App environment synchronization finished"
                     );
                     environment_state

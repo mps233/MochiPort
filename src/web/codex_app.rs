@@ -100,6 +100,9 @@ pub(super) struct ManageCodexAppStatus {
     providers: Vec<ManageCodexAppProviderStatus>,
     image_generation_enabled: bool,
     connection_mode: LocalConnectionMode,
+    provider_mode: codex_app_config::CodexProviderMode,
+    provider_mode_message: String,
+    active_provider: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -991,6 +994,35 @@ pub(super) async fn repair_codex_app_gui_environment(
     )
 }
 
+pub(super) async fn switch_codex_app_to_direct_api_mode(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let Ok(_mutation) = state.codex_app_mutations.try_lock() else {
+        return codex_app_mutation_conflict();
+    };
+    let config = state.config.lock().await.clone();
+    let backend_url = config.remote_control_base_url();
+    match codex_app_config::switch_codex_app_to_direct_api_mode(None, &backend_url) {
+        Ok(report) => {
+            state
+                .push_event(
+                    "info",
+                    "codex_app_direct_api_mode_enabled",
+                    format!("provider={}", report.active_provider),
+                )
+                .await;
+            (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "report": report })),
+            )
+        }
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        ),
+    }
+}
+
 pub(super) async fn codex_app_status(
     State(state): State<SharedState>,
 ) -> Json<codex_app_config::CodexAppConfigStatus> {
@@ -1040,6 +1072,9 @@ pub(super) async fn manage_codex_app_status(
             .collect(),
         image_generation_enabled: status.image_generation_enabled,
         connection_mode: status.connection_mode,
+        provider_mode: status.provider_mode,
+        provider_mode_message: status.provider_mode_message,
+        active_provider: status.active_provider,
     })
 }
 

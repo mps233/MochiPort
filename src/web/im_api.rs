@@ -404,18 +404,13 @@ pub(super) async fn start_bridge_task(
     event_message: &'static str,
 ) -> bool {
     if state.lifecycle_admission.state() != crate::app_state::LifecycleAdmissionState::Active {
-        let (event_kind, event_message) = if state.lifecycle_admission.is_candidate_hold() {
-            (
-                "bridge_waiting_for_runtime_switch_commit",
-                "bridge start deferred while the daemon runtime switch is held",
-            )
-        } else {
-            (
+        state
+            .push_event(
+                "info",
                 "bridge_start_deferred_during_lifecycle_drain",
                 "bridge start deferred while the daemon lifecycle is draining",
             )
-        };
-        state.push_event("info", event_kind, event_message).await;
+            .await;
         return false;
     }
     let config = state.config.lock().await.clone();

@@ -1,6 +1,38 @@
 import AppKit
 import SwiftUI
 
+private struct ManagementPageInsets: ViewModifier {
+    let topPadding: CGFloat
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            content
+                .contentMargins(
+                    .horizontal,
+                    ThreadRelayPageLayout.horizontalPadding,
+                    for: .scrollContent
+                )
+                .contentMargins(
+                    .top,
+                    topPadding,
+                    for: .scrollContent
+                )
+        } else {
+            content
+                .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+                .padding(.top, topPadding)
+        }
+    }
+}
+
+private extension View {
+    func managementPageInsets(
+        topPadding: CGFloat = ThreadRelayPageLayout.topPadding
+    ) -> some View {
+        modifier(ManagementPageInsets(topPadding: topPadding))
+    }
+}
+
 struct CodexAccessView: View {
     @EnvironmentObject private var model: AppModel
     @State private var confirmsUninstall = false
@@ -37,14 +69,14 @@ struct CodexAccessView: View {
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
+        .managementPageInsets()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
             if model.isLoading(.codex) {
                 CodexLoadingSurface()
             }
         }
+        .background(Color(nsColor: .windowBackgroundColor))
         .task { await model.loadSection(.codex) }
         .alert("卸载 Codex 接入？", isPresented: $confirmsUninstall) {
             Button("取消", role: .cancel) {}
@@ -824,82 +856,64 @@ struct SessionsView: View {
         model.codexSessions.filter { selectedIDs.contains($0.id) }
     }
 
-    private var headerSubtitle: String {
-        let sessions = model.codexSessions
-        guard !sessions.isEmpty else {
-            return "查看真实 Codex 会话并在直连 Provider 与 AI Gateway 之间移动。"
-        }
-        let gatewayCount = sessions.filter { $0.modelProvider == "ai-gateway" }.count
-        let projectCount = Set(sessions.compactMap { projectPath(for: $0) }).count
-        return "\(sessions.count) 个会话 · \(projectCount) 个项目 · 直连 \(sessions.count - gatewayCount) · 网关 \(gatewayCount)"
-    }
-
     var body: some View {
-        List(selection: $selectedIDs) {
-            SettingsSectionHeader(
-                title: "会话历史",
-                subtitle: headerSubtitle,
-                trailing: filteredSessions.isEmpty ? nil : "\(filteredSessions.count) 个"
-            )
-            .padding(.bottom, 4)
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-
-            if let error = model.sectionErrors[.sessions] {
-                InlineManagementError(
-                    message: error,
-                    retry: { Task { await model.loadSection(.sessions, force: true) } },
-                    dismiss: { model.dismissSectionError(.sessions) }
-                )
-                .padding(.bottom, 12)
-                .listRowInsets(EdgeInsets())
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
-            }
-
+        VStack(alignment: .leading, spacing: 0) {
             sessionToolbar
-                .listRowInsets(EdgeInsets())
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color(nsColor: .windowBackgroundColor))
+                .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+                .padding(.top, ThreadRelayPageLayout.topPadding)
+                .padding(.bottom, 12)
 
-            if filteredSessions.isEmpty, !model.isLoading(.sessions) {
-                ManagementEmptyState(
-                    title: query.isEmpty ? "没有可见会话" : "没有匹配的会话",
-                    message: query.isEmpty
-                        ? "Codex App 产生会话后会显示在这里。"
-                        : "调整搜索词后重试。",
-                    symbol: "text.bubble"
-                )
-                .frame(maxWidth: .infinity, minHeight: 240)
-                .listRowSeparator(.hidden)
-            } else {
-                sessionTableHeader
-                    .textCase(nil)
+            List(selection: $selectedIDs) {
+                if let error = model.sectionErrors[.sessions] {
+                    InlineManagementError(
+                        message: error,
+                        retry: { Task { await model.loadSection(.sessions, force: true) } },
+                        dismiss: { model.dismissSectionError(.sessions) }
+                    )
+                    .padding(.bottom, 12)
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
-                    .listRowBackground(Color(nsColor: .windowBackgroundColor))
+                    .listRowBackground(Color.clear)
+                }
 
-                ForEach(Array(tableSessions.enumerated()), id: \.element.id) { index, session in
-                    sessionListRow(session)
-                        .tag(session.id)
+                if filteredSessions.isEmpty, !model.isLoading(.sessions) {
+                    ManagementEmptyState(
+                        title: query.isEmpty ? "没有可见会话" : "没有匹配的会话",
+                        message: query.isEmpty
+                            ? "Codex App 产生会话后会显示在这里。"
+                            : "调整搜索词后重试。",
+                        symbol: "text.bubble"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 240)
+                    .listRowSeparator(.hidden)
+                } else {
+                    sessionTableHeader
+                        .textCase(nil)
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
-                        .contextMenu {
-                            moveMenuEntries(for: session)
-                            Divider()
-                            Button("复制会话 ID") {
-                                NSPasteboard.general.clearContents()
-                                NSPasteboard.general.setString(session.id, forType: .string)
+                        .listRowBackground(Color(nsColor: .windowBackgroundColor))
+
+                    ForEach(Array(tableSessions.enumerated()), id: \.element.id) { index, session in
+                        sessionListRow(session)
+                            .tag(session.id)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .contextMenu {
+                                moveMenuEntries(for: session)
+                                Divider()
+                                Button("复制会话 ID") {
+                                    NSPasteboard.general.clearContents()
+                                    NSPasteboard.general.setString(session.id, forType: .string)
+                                }
                             }
-                        }
+                    }
                 }
             }
+            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .scrollContentBackground(.hidden)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .listStyle(.inset(alternatesRowBackgrounds: true))
-        .scrollContentBackground(.hidden)
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
             if model.isLoading(.sessions), model.codexSessions.isEmpty {
                 ProgressView("正在读取会话…")
@@ -929,7 +943,6 @@ struct SessionsView: View {
                     .accessibilityIdentifier("sessions.selection-count")
             }
         }
-        .padding(.vertical, 6)
     }
 
     private var sessionTableHeader: some View {
@@ -1183,6 +1196,95 @@ private struct SessionRowContent: View {
     }
 }
 
+private enum GatewaySection: String, CaseIterable, Identifiable {
+    case general
+    case providers
+    case models
+    case accountPool
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .general: "常规"
+        case .providers: "供应商"
+        case .models: "模型"
+        case .accountPool: "账号池"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .general: "switch.2"
+        case .providers: "server.rack"
+        case .models: "cube"
+        case .accountPool: "person.2"
+        }
+    }
+}
+
+private struct GatewaySectionControl: View {
+    @Binding var selection: GatewaySection
+    @Namespace private var selectionNamespace
+
+    var body: some View {
+        Group {
+            if #available(macOS 26.0, *) {
+                segments
+                    .glassEffect(.regular.interactive(), in: .capsule)
+            } else {
+                segments
+                    .background(.quaternary.opacity(0.5), in: Capsule())
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("AI 网关设置区域")
+    }
+
+    private var segments: some View {
+        HStack(spacing: 2) {
+            ForEach(GatewaySection.allCases) { section in
+                segment(section)
+            }
+        }
+        .padding(3)
+    }
+
+    private func segment(_ section: GatewaySection) -> some View {
+        let isSelected = selection == section
+
+        return Button {
+            guard selection != section else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                selection = section
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: section.symbol)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(section.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+        .background {
+            if isSelected {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .matchedGeometryEffect(id: "selectedGatewaySection", in: selectionNamespace)
+            }
+        }
+        .accessibilityLabel(section.title)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .help("显示\(section.title)")
+    }
+}
+
 struct GatewayView: View {
     @EnvironmentObject private var model: AppModel
     private enum GatewayProviderFilter: String, CaseIterable, Identifiable {
@@ -1221,19 +1323,44 @@ struct GatewayView: View {
     @State private var sub2ApiFormInitialized = false
     @State private var sub2ApiSaving = false
     @State private var confirmSub2ApiDisconnect = false
+    @State private var section: GatewaySection = .general
+    @State private var preferencesSaving = false
+    @State private var sub2ApiEditing = false
 
     var body: some View {
-        ManagementScrollPage(
-            maxContentWidth: 1040,
-            loading: model.isLoading(.gateway),
-            error: model.sectionErrors[.gateway],
-            retry: { Task { await model.loadSection(.gateway, force: true) } }
-        ) {
-            if let gateway = model.gateway {
-                gatewaySummary(gateway)
-                settingsCard
-                sub2ApiAccountPoolCard(gateway)
-                providersCard(gateway.providers)
+        Group {
+            switch section {
+            case .providers:
+                gatewayRoot
+                    .searchable(text: $providerQuery, placement: .toolbar, prompt: "搜索供应商")
+            case .models:
+                gatewayRoot
+                    .searchable(text: $visibleModelQuery, placement: .toolbar, prompt: "搜索模型")
+            case .general, .accountPool:
+                gatewayRoot
+            }
+        }
+        .toolbar {
+            if section == .providers {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        editor = GatewayProviderEditorState(provider: nil)
+                    } label: {
+                        Label("添加供应商", systemImage: "plus")
+                    }
+                    .help("添加供应商")
+                }
+            }
+            if section == .models, modelsDirty {
+                ToolbarItem(placement: .primaryAction) {
+                    Button {
+                        saveVisibleModels()
+                    } label: {
+                        Label("保存模型", systemImage: "checkmark")
+                    }
+                    .disabled(!settingsReady || model.isLoading(.gateway))
+                    .help("保存 Codex 可见模型")
+                }
             }
         }
         .task {
@@ -1294,7 +1421,49 @@ struct GatewayView: View {
         }
     }
 
-    private func gatewaySummary(_ gateway: ManageGateway) -> some View {
+    private var gatewayRoot: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            GatewaySectionControl(selection: $section)
+                .frame(width: 440)
+                .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+                .padding(.top, ThreadRelayPageLayout.topPadding)
+                .padding(.bottom, 12)
+
+            if let error = model.sectionErrors[.gateway] {
+                InlineManagementError(
+                    message: error,
+                    retry: { Task { await model.loadSection(.gateway, force: true) } },
+                    dismiss: { model.dismissSectionError(.gateway) }
+                )
+                .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+                .padding(.bottom, 12)
+            }
+
+            if let gateway = model.gateway {
+                switch section {
+                case .general:
+                    generalPage(gateway)
+                case .providers:
+                    providersPage(gateway.providers)
+                case .models:
+                    modelsPage
+                case .accountPool:
+                    accountPoolPage
+                }
+            } else {
+                Spacer(minLength: 0)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay {
+            if model.isLoading(.gateway), model.gateway == nil {
+                ProgressView("正在读取 AI 网关…")
+            }
+        }
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private func generalPage(_ gateway: ManageGateway) -> some View {
         let enabledProviders = gateway.providers.filter(\.enabled).count
         let modelCount = Set(gateway.providers.flatMap(\.models)).count
         let loggingDetail: String = {
@@ -1302,55 +1471,351 @@ struct GatewayView: View {
             return gateway.requestLogDetailsEnabled ? "摘要 + 详情" : "仅摘要"
         }()
 
-        return ManagementCard(title: "运行概览") {
-            LazyVGrid(
-                columns: [
-                    GridItem(.flexible(), alignment: .leading),
-                    GridItem(.flexible(), alignment: .leading),
-                    GridItem(.flexible(), alignment: .leading),
-                    GridItem(.flexible(), alignment: .leading),
-                ],
-                alignment: .leading,
-                spacing: 18
-            ) {
-                GatewaySummaryMetric(
-                    title: "网关状态",
-                    value: gateway.enabled ? "运行中" : "已停用",
-                    symbol: gateway.enabled ? "checkmark.circle.fill" : "pause.circle",
-                    tint: gateway.enabled ? .green : .secondary
-                )
-                GatewaySummaryMetric(
-                    title: "Provider 已启用",
-                    value: "\(enabledProviders) / \(gateway.providers.count)",
-                    symbol: "server.rack",
-                    tint: .accentColor
-                )
-                GatewaySummaryMetric(
-                    title: "上游模型",
-                    value: "\(modelCount)",
-                    symbol: "cube",
-                    tint: .secondary
-                )
-                GatewaySummaryMetric(
-                    title: "请求日志",
-                    value: loggingDetail,
-                    symbol: "chart.bar",
-                    tint: .secondary
-                )
+        return Form {
+            Section("状态") {
+                HStack(spacing: 12) {
+                    Label(
+                        gateway.enabled ? "网关运行中" : "网关已停用",
+                        systemImage: gateway.enabled ? "checkmark.circle.fill" : "pause.circle"
+                    )
+                    .foregroundStyle(gateway.enabled ? Color.green : .secondary)
+                    Spacer(minLength: 12)
+                    Text("\(enabledProviders) / \(gateway.providers.count) 个供应商 · \(modelCount) 个模型 · 日志\(loggingDetail)")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                }
             }
 
-            Divider()
+            Section("网关") {
+                GatewayPreferenceRow(
+                    title: "使用 AI Gateway",
+                    detail: enabled ? "请求会先进入本地网关，再按权重路由到供应商。" : "关闭后，本地网关不会接管请求。"
+                ) {
+                    Toggle("使用 AI Gateway", isOn: gatewayEnabledBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(preferencesSaving)
+                }
+            }
 
-            HStack(spacing: 8) {
-                StatusCapsule(
-                    text: gateway.enabled ? "请求正在经过本地网关" : "网关未参与路由",
-                    positive: gateway.enabled
-                )
-                Text("Provider 的启停可以单独控制，网关总开关不会修改上游配置。")
+            Section("路由") {
+                GatewayPreferenceRow(
+                    title: "过滤图像生成工具",
+                    detail: "不把内置图像工具转发给不支持它的上游。"
+                ) {
+                    Toggle("过滤图像生成工具", isOn: filterImagesBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(preferencesSaving)
+                }
+            }
+
+            Section("请求日志") {
+                GatewayPreferenceRow(
+                    title: "记录请求摘要",
+                    detail: "保存模型、状态、耗时和令牌统计，便于排查失败请求。"
+                ) {
+                    Toggle("记录请求摘要", isOn: requestLoggingBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(preferencesSaving)
+                }
+                GatewayPreferenceRow(
+                    title: "记录请求与响应详情",
+                    detail: requestLogging ? "额外保存脱敏后的请求和响应内容。" : "先打开请求摘要，才能记录详情。"
+                ) {
+                    Toggle("记录请求与响应详情", isOn: requestDetailsBinding)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .disabled(!requestLogging || preferencesSaving)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .managementPageInsets(topPadding: 0)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var modelsPage: some View {
+        List {
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Codex 可见模型")
+                            .font(.headline)
+                        Text("只控制 Codex 模型选择器，不改变供应商路由。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 12)
+                    Text("已选 \(mergedVisibleModels.count) 个")
+                        .font(.caption.monospacedDigit().weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                .listRowSeparator(.hidden)
+            }
+
+            Section("目录模型") {
+                if filteredVisibleCatalogModels.isEmpty {
+                    Text("没有匹配的目录模型。")
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(filteredVisibleCatalogModels) { entry in
+                        let selected = selectedCatalogModels.contains(entry.id)
+                        Button {
+                            catalogBinding(entry.id).wrappedValue.toggle()
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selected ? Color.accentColor : .secondary)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(entry.displayName)
+                                        .font(.body.weight(.medium))
+                                    Text(entry.id)
+                                        .font(.caption2.monospaced())
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("可见模型 \(entry.displayName)")
+                        .accessibilityValue(selected ? "已选择" : "未选择")
+                    }
+                }
+            }
+
+            Section("自定义模型") {
+                if customVisibleModels.isEmpty {
+                    Text("还没有自定义模型。可添加目录之外的模型名称。")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(customVisibleModels, id: \.self) { modelID in
+                        HStack {
+                            Image(systemName: "cube")
+                                .foregroundStyle(.secondary)
+                            Text(modelID)
+                                .font(.body.monospaced())
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 8)
+                            Button {
+                                removeVisibleModel(modelID)
+                            } label: {
+                                Image(systemName: "minus.circle")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.secondary)
+                            .help("移除模型")
+                            .accessibilityLabel("移除模型 \(modelID)")
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    TextField("输入模型名称后添加", text: $customVisibleModelInput)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { addVisibleModel() }
+                    Button {
+                        addVisibleModel()
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(customVisibleModelInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .help("添加自定义模型")
+                    .accessibilityLabel("添加自定义模型")
+                }
+
+                DisclosureGroup("批量编辑自定义模型", isExpanded: $manualVisibleModelsExpanded) {
+                    TextEditor(text: $visibleModels)
+                        .font(.body.monospaced())
+                        .frame(minHeight: 90)
+                        .padding(5)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 7)
+                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                        }
+                        .padding(.top, 6)
+                }
+            }
+        }
+        .listStyle(.inset(alternatesRowBackgrounds: true))
+        .scrollContentBackground(.hidden)
+        .managementPageInsets(topPadding: 0)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func providersPage(_ providers: [ManageGatewayProvider]) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("\(filteredProviders(providers).count) / \(providers.count) 个供应商")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                Spacer(minLength: 12)
+                Picker("供应商筛选", selection: $providerFilter) {
+                    ForEach(GatewayProviderFilter.allCases) { filter in
+                        Text(filter.title).tag(filter)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 300)
+            }
+            .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+            .padding(.bottom, 8)
+
+            List {
+                if providers.isEmpty {
+                    ManagementEmptyState(
+                        title: "尚未添加供应商",
+                        message: "添加协议、Base URL、模型和 API Key 后即可开始路由。",
+                        symbol: "server.rack"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 220)
+                    .listRowSeparator(.hidden)
+                } else if filteredProviders(providers).isEmpty {
+                    ManagementEmptyState(
+                        title: "没有匹配的供应商",
+                        message: "换一个名称、协议或筛选条件试试。",
+                        symbol: "magnifyingglass"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 180)
+                    .listRowSeparator(.hidden)
+                } else {
+                    providerTableHeader
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color(nsColor: .windowBackgroundColor))
+                    ForEach(filteredProviders(providers)) { provider in
+                        GatewayProviderListRow(
+                            provider: provider,
+                            onEdit: { editor = GatewayProviderEditorState(provider: provider) },
+                            onDelete: { providerToDelete = provider }
+                        )
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                    }
+                }
+            }
+            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .scrollContentBackground(.hidden)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var accountPoolPage: some View {
+        Form {
+            Section("Sub2API 账号池") {
+                sub2ApiAccountPoolContent
+            }
+        }
+        .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .managementPageInsets(topPadding: 0)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var providerTableHeader: some View {
+        HStack(spacing: 12) {
+            Text("供应商")
+                .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+            Text("协议")
+                .frame(width: 140, alignment: .leading)
+            Text("模型")
+                .frame(width: 70, alignment: .trailing)
+            Text("权重")
+                .frame(width: 70, alignment: .trailing)
+            Text("状态")
+                .frame(width: 90, alignment: .leading)
+            Text("")
+                .frame(width: 70)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+    }
+
+    private var sub2ApiAccountPoolContent: some View {
+        let admin = model.sub2ApiAdmin
+        let configured = admin?.configured == true
+        let hasSavedKey = admin?.secretSet == true
+        let trimmedURL = sub2ApiBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedKey = sub2ApiAdminKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canSave = !trimmedURL.isEmpty
+            && (hasSavedKey || !trimmedKey.isEmpty)
+            && !sub2ApiSaving
+
+        return Group {
+            HStack(spacing: 10) {
+                Image(systemName: configured ? "checkmark.circle.fill" : "circle.dashed")
+                    .foregroundStyle(configured ? Color.green : .secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(configured ? "管理连接已就绪" : "尚未连接账号池")
+                        .font(.body.weight(.medium))
+                    Text(configured ? "概览会显示账号状态、倍率和上游余额。" : "连接后可以在概览查看账号池状态。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 12)
+                if configured {
+                    Button(sub2ApiEditing ? "取消" : "修改") {
+                        sub2ApiEditing.toggle()
+                    }
+                    if !sub2ApiEditing {
+                        Button("断开", role: .destructive) {
+                            confirmSub2ApiDisconnect = true
+                        }
+                        .disabled(sub2ApiSaving)
+                    }
+                }
+            }
+
+            if !configured || sub2ApiEditing {
+                Divider()
+                LabeledContent("管理地址") {
+                    TextField("https://sub2api.example.com", text: $sub2ApiBaseURL)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(maxWidth: 560)
+                        .accessibilityLabel("Sub2API 管理地址")
+                }
+                LabeledContent("Admin API Key") {
+                    SecureField(
+                        hasSavedKey ? "留空以继续使用已保存的密钥" : "输入管理密钥",
+                        text: $sub2ApiAdminKey
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .frame(maxWidth: 560)
+                    .accessibilityLabel("Sub2API Admin API Key")
+                }
+                HStack {
+                    Label(
+                        hasSavedKey ? "管理密钥已保存在本机，界面不会回显。" : "需要管理权限的 API Key。",
+                        systemImage: hasSavedKey ? "key.fill" : "key"
+                    )
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                Spacer(minLength: 8)
+                    Spacer(minLength: 12)
+                    Button {
+                        Task { await saveSub2ApiAccountPool() }
+                    } label: {
+                        if sub2ApiSaving {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Label(configured ? "更新连接" : "连接", systemImage: "link")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!canSave)
+                }
             }
         }
     }
@@ -1791,6 +2256,94 @@ struct GatewayView: View {
         return merged
     }
 
+    private var gatewayEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { enabled },
+            set: { newValue in
+                guard newValue != enabled, !preferencesSaving else { return }
+                enabled = newValue
+                saveGatewayPreferences()
+            }
+        )
+    }
+
+    private var filterImagesBinding: Binding<Bool> {
+        Binding(
+            get: { filterImages },
+            set: { newValue in
+                guard newValue != filterImages, !preferencesSaving else { return }
+                filterImages = newValue
+                saveGatewayPreferences()
+            }
+        )
+    }
+
+    private var requestLoggingBinding: Binding<Bool> {
+        Binding(
+            get: { requestLogging },
+            set: { newValue in
+                guard newValue != requestLogging, !preferencesSaving else { return }
+                requestLogging = newValue
+                if !newValue { requestDetails = false }
+                saveGatewayPreferences()
+            }
+        )
+    }
+
+    private var requestDetailsBinding: Binding<Bool> {
+        Binding(
+            get: { requestDetails },
+            set: { newValue in
+                guard newValue != requestDetails, !preferencesSaving else { return }
+                requestDetails = newValue
+                saveGatewayPreferences()
+            }
+        )
+    }
+
+    private var modelsDirty: Bool {
+        guard let gateway = model.gateway else { return false }
+        return Set(mergedVisibleModels) != Set(gateway.codexVisibleModels)
+    }
+
+    private func saveGatewayPreferences() {
+        guard settingsReady, !preferencesSaving else { return }
+        preferencesSaving = true
+        let snapshot = (
+            enabled: enabled,
+            filterImages: filterImages,
+            requestLogging: requestLogging,
+            requestDetails: requestLogging && requestDetails,
+            models: mergedVisibleModels
+        )
+        Task {
+            let saved = await model.saveGatewaySettings(
+                enabled: snapshot.enabled,
+                filterImageGenerationTool: snapshot.filterImages,
+                requestLoggingEnabled: snapshot.requestLogging,
+                requestLogDetailsEnabled: snapshot.requestDetails,
+                codexVisibleModels: snapshot.models
+            )
+            if !saved {
+                synchronizeGateway(model.gateway)
+            }
+            preferencesSaving = false
+        }
+    }
+
+    private func saveVisibleModels() {
+        guard settingsReady, modelsDirty, !model.isLoading(.gateway) else { return }
+        Task {
+            _ = await model.saveGatewaySettings(
+                enabled: enabled,
+                filterImageGenerationTool: filterImages,
+                requestLoggingEnabled: requestLogging,
+                requestLogDetailsEnabled: requestLogging && requestDetails,
+                codexVisibleModels: mergedVisibleModels
+            )
+        }
+    }
+
     private var settingsDirty: Bool {
         guard let gateway = model.gateway else { return false }
         return enabled != gateway.enabled
@@ -2111,6 +2664,135 @@ private struct GatewayProviderRow: View {
                     if !acknowledged {
                         localEnabled = !newValue
                     }
+                    toggleInFlight = false
+                }
+            }
+        )
+    }
+}
+
+private struct GatewayProviderListRow: View {
+    @EnvironmentObject private var model: AppModel
+    let provider: ManageGatewayProvider
+    let onEdit: () -> Void
+    let onDelete: () -> Void
+
+    @State private var localEnabled: Bool
+    @State private var toggleInFlight = false
+
+    init(
+        provider: ManageGatewayProvider,
+        onEdit: @escaping () -> Void,
+        onDelete: @escaping () -> Void
+    ) {
+        self.provider = provider
+        self.onEdit = onEdit
+        self.onDelete = onDelete
+        _localEnabled = State(initialValue: provider.enabled)
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(localEnabled ? Color.green : Color.secondary.opacity(0.4))
+                    .frame(width: 7, height: 7)
+                ProviderLogoView(
+                    providerType: provider.providerType,
+                    compatibility: provider.compatibility,
+                    providerName: provider.name,
+                    size: 24
+                )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(provider.name)
+                        .font(.body.weight(.medium))
+                        .lineLimit(1)
+                    Text(provider.baseUrl)
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+
+            Text(gatewayProtocolDisplayName(provider.providerType, compatibility: provider.compatibility))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: 140, alignment: .leading)
+
+            Text("\(provider.models.count)")
+                .font(.callout.monospacedDigit())
+                .frame(width: 70, alignment: .trailing)
+
+            Text("\(provider.weight)")
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 70, alignment: .trailing)
+
+            Toggle("启用 Provider", isOn: toggleBinding)
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+                .frame(width: 90, alignment: .leading)
+                .disabled(toggleInFlight)
+                .help(localEnabled ? "停用 Provider" : "启用 Provider")
+                .accessibilityLabel("启用 Provider \(provider.name)")
+
+            Menu {
+                Button("编辑", action: onEdit)
+                Button("复制 Base URL") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(provider.baseUrl, forType: .string)
+                }
+                Divider()
+                Button("删除", role: .destructive, action: onDelete)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .frame(width: 70, alignment: .trailing)
+            .help("供应商操作")
+            .accessibilityLabel("供应商操作 \(provider.name)")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .contentShape(Rectangle())
+        .onChange(of: provider.enabled) { enabled in
+            localEnabled = enabled
+        }
+    }
+
+    private var toggleBinding: Binding<Bool> {
+        Binding(
+            get: { localEnabled },
+            set: { newValue in
+                guard newValue != localEnabled, !toggleInFlight else { return }
+                localEnabled = newValue
+                toggleInFlight = true
+                let updated = ManageGatewayProvider(
+                    name: provider.name,
+                    enabled: newValue,
+                    providerType: provider.providerType,
+                    compatibility: provider.compatibility,
+                    baseUrl: provider.baseUrl,
+                    modelsUrl: provider.modelsUrl,
+                    models: provider.models,
+                    modelAliases: provider.modelAliases,
+                    promptCacheRetention: provider.promptCacheRetention,
+                    weight: provider.weight,
+                    timeoutSecs: provider.timeoutSecs,
+                    secretSet: provider.secretSet
+                )
+                Task {
+                    let acknowledged = await model.saveGatewayProvider(
+                        originalName: provider.name,
+                        provider: updated,
+                        apiKey: nil,
+                        clearAPIKey: false
+                    )
+                    if !acknowledged { localEnabled = !newValue }
                     toggleInFlight = false
                 }
             }
@@ -2946,79 +3628,26 @@ struct RequestLogsView: View {
     var body: some View {
         ZStack {
             VStack(alignment: .leading, spacing: 0) {
-                SettingsSectionHeader(
-                    title: "请求记录",
-                    subtitle: "查看 AI Gateway 的真实请求摘要和按需加载的脱敏详情。",
-                    trailing: model.requestLogs.isEmpty ? nil : "\(model.requestLogs.count) 条"
-                )
-                .padding(.horizontal, ThreadRelaySpacing.page)
-                .padding(.top, 20)
-                .padding(.bottom, 8)
-
-                SettingsGroupSurface {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 10) {
-                            NativeSearchField("搜索请求 ID、模型、渠道、Provider 或状态", text: $query)
-                                .frame(minWidth: 300, idealWidth: 440, maxWidth: .infinity)
-                                .frame(height: 28)
-                            Button {
-                                Task { await model.loadSection(.requestLogs, force: true) }
-                            } label: {
-                                Group {
-                                    if model.isLoading(.requestLogs) {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                    } else {
-                                        Image(systemName: "arrow.clockwise")
-                                    }
-                                }
-                                .frame(width: 16, height: 16)
-                            }
-                            .disabled(model.isLoading(.requestLogs) || clearing)
-                            .help("刷新请求日志")
-                            .accessibilityLabel("刷新请求日志")
-                            Menu {
-                                Button("清理 3 天前的日志…") {
-                                    confirmsClearOld = true
-                                }
-                                Button("清空全部日志…", role: .destructive) {
-                                    confirmsClear = true
-                                }
-                            } label: {
-                                if clearing {
-                                    HStack(spacing: 6) {
-                                        ProgressView()
-                                            .controlSize(.small)
-                                        Text("正在清理…")
-                                    }
-                                } else {
-                                    Label("清理", systemImage: "trash")
-                                }
-                            }
-                            .fixedSize()
-                            .disabled(clearing)
-                            .accessibilityLabel("清理请求日志")
-                        }
-
-                        filterBar
-                            .pickerStyle(.menu)
-                            .controlSize(.regular)
-                    }
-                }
-                .padding(.horizontal, ThreadRelaySpacing.page)
-                .padding(.bottom, 16)
-
-                if let error = model.sectionErrors[.requestLogs] {
-                    InlineManagementError(
-                        message: error,
-                        retry: { Task { await model.loadSection(.requestLogs, force: true) } },
-                        dismiss: { model.dismissSectionError(.requestLogs) }
-                    )
-                    .padding(.horizontal, 28)
+                filterBar
+                    .pickerStyle(.menu)
+                    .controlSize(.regular)
+                    .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+                    .padding(.top, ThreadRelayPageLayout.topPadding)
                     .padding(.bottom, 12)
-                }
 
-                Group {
+                List(selection: $selectedID) {
+                    if let error = model.sectionErrors[.requestLogs] {
+                        InlineManagementError(
+                            message: error,
+                            retry: { Task { await model.loadSection(.requestLogs, force: true) } },
+                            dismiss: { model.dismissSectionError(.requestLogs) }
+                        )
+                        .padding(.bottom, 12)
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                    }
+
                     if model.requestLogs.isEmpty, !model.isLoading(.requestLogs) {
                         ManagementEmptyState(
                             title: hasActiveFilters ? "没有匹配的请求" : "没有请求日志",
@@ -3027,58 +3656,54 @@ struct RequestLogsView: View {
                                 : "在 AI 网关中开启请求日志后，新请求会显示在这里。",
                             symbol: "list.bullet.rectangle"
                         )
-                    } else if model.requestLogs.isEmpty {
-                        ProgressView("正在读取请求日志…")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .frame(maxWidth: .infinity, minHeight: 240)
+                        .listRowSeparator(.hidden)
                     } else {
-                        List(selection: $selectedID) {
-                            ForEach(model.requestLogs) { log in
-                                RequestLogRow(log: log)
-                                    .tag(log.id)
-                                    // Keep the list on the page's neutral system
-                                    // surface instead of the default control tint.
-                                    .listRowBackground(Color.clear)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        showDetail(id: log.id)
-                                    }
-                            }
+                        requestLogTableHeader
+                            .textCase(nil)
+                            .listRowInsets(EdgeInsets())
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color(nsColor: .windowBackgroundColor))
 
-                            if model.requestLogHasMore {
-                                HStack {
-                                    Spacer()
-                                    Button {
-                                        Task { _ = await model.loadMoreRequestLogs() }
-                                    } label: {
-                                        if model.requestLogLoadingMore {
-                                            HStack(spacing: 7) {
-                                                ProgressView()
-                                                    .controlSize(.small)
-                                                Text("正在加载…")
-                                            }
-                                        } else {
-                                            Label("加载更多", systemImage: "chevron.down")
-                                        }
-                                    }
-                                    .disabled(model.requestLogLoadingMore)
-                                    Spacer()
-                                }
-                                .padding(.vertical, 8)
-                                .listRowBackground(Color.clear)
+                        ForEach(model.requestLogs) { log in
+                            RequestLogRow(log: log)
+                                .tag(log.id)
+                                .listRowInsets(EdgeInsets())
                                 .listRowSeparator(.hidden)
-                            }
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    showDetail(id: log.id)
+                                }
                         }
-                        .listStyle(.inset)
-                        .scrollContentBackground(.hidden)
-                        .background(Color.clear)
-                        .scrollIndicators(.never)
+
+                        if model.requestLogHasMore {
+                            HStack {
+                                Spacer()
+                                Button {
+                                    Task { _ = await model.loadMoreRequestLogs() }
+                                } label: {
+                                    if model.requestLogLoadingMore {
+                                        HStack(spacing: 7) {
+                                            ProgressView()
+                                                .controlSize(.small)
+                                            Text("正在加载…")
+                                        }
+                                    } else {
+                                        Label("加载更多", systemImage: "chevron.down")
+                                    }
+                                }
+                                .disabled(model.requestLogLoadingMore)
+                                Spacer()
+                            }
+                            .padding(.vertical, 8)
+                            .listRowBackground(Color.clear)
+                            .listRowSeparator(.hidden)
+                        }
                     }
                 }
+                .listStyle(.inset(alternatesRowBackgrounds: true))
+                .scrollContentBackground(.hidden)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .settingsGroupedBackground()
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .padding(.horizontal, ThreadRelaySpacing.page)
-                .padding(.bottom, ThreadRelaySpacing.page)
             }
             .opacity(activeDetailID == nil ? 1 : 0)
             .allowsHitTesting(activeDetailID == nil)
@@ -3090,7 +3715,22 @@ struct RequestLogsView: View {
             }
         }
         .animation(.easeInOut(duration: 0.16), value: activeDetailID)
+        .overlay {
+            if model.isLoading(.requestLogs), model.requestLogs.isEmpty {
+                ProgressView("正在读取请求日志…")
+            }
+        }
         .background(Color(nsColor: .windowBackgroundColor))
+        .searchable(
+            text: $query,
+            placement: .toolbar,
+            prompt: "搜索请求 ID、模型、渠道、Provider 或状态"
+        )
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                cleanupMenu
+            }
+        }
         .task(id: filters) {
             if filters.query != model.requestLogFilters.query {
                 try? await Task.sleep(for: .milliseconds(300))
@@ -3257,6 +3897,49 @@ struct RequestLogsView: View {
         }
     }
 
+    private var requestLogTableHeader: some View {
+        HStack(spacing: 12) {
+            Text("模型")
+                .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+            Text("渠道")
+                .frame(width: 110, alignment: .leading)
+            Text("状态")
+                .frame(width: 90, alignment: .leading)
+            Text("耗时 / 用量")
+                .frame(width: 150, alignment: .trailing)
+            Text("时间")
+                .frame(width: 90, alignment: .trailing)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 5)
+    }
+
+    private var cleanupMenu: some View {
+        Menu {
+            Button("清理 3 天前的日志…") {
+                confirmsClearOld = true
+            }
+            Button("清空全部日志…", role: .destructive) {
+                confirmsClear = true
+            }
+        } label: {
+            if clearing {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在清理…")
+                }
+            } else {
+                Label("清理", systemImage: "trash")
+            }
+        }
+        .disabled(clearing)
+        .help("清理请求日志")
+        .accessibilityLabel("清理请求日志")
+    }
+
     private var statusPicker: some View {
         Picker("状态", selection: $statusFilter) {
             Text("全部状态").tag(String?.none)
@@ -3306,47 +3989,68 @@ private struct RequestLogRow: View {
     let log: ManageRequestLog
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
-                Text(log.modelId)
-                    .font(.headline)
-                    .lineLimit(1)
-                if log.stream {
-                    Image(systemName: "bolt.horizontal")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .help("流式")
-                        .accessibilityLabel("流式")
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Text(log.modelId)
+                        .font(.body.weight(.medium))
+                        .lineLimit(1)
+                    if log.stream {
+                        Image(systemName: "bolt.horizontal")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .help("流式")
+                            .accessibilityLabel("流式")
+                    }
                 }
-                Spacer()
-                StatusCapsule(text: log.status, positive: isPositiveStatus(log.status))
-            }
-            HStack(spacing: 7) {
-                Text(log.channel)
-                Text("·")
-                Text(log.latencyMs.map { "\($0) ms" } ?? "等待耗时")
-                if let tokens = log.totalTokens {
-                    Text("·")
-                    Text("\(tokens) tokens")
-                }
-                if let cost = log.costUsd {
-                    Text("·")
-                    Text(String(format: "$%.6f", cost))
-                }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            HStack {
                 Text(log.requestId)
                     .font(.caption2.monospaced())
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
-                Spacer()
-                Text(relativeDate(milliseconds: log.createdAtMs))
-                    .font(.caption2)
+                    .truncationMode(.middle)
             }
-            .foregroundStyle(.tertiary)
+            .frame(minWidth: 180, maxWidth: .infinity, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(log.channel)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+                Text(log.providerType)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(width: 110, alignment: .leading)
+
+            StatusCapsule(text: log.status, positive: isPositiveStatus(log.status))
+                .frame(width: 90, alignment: .leading)
+
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(log.latencyMs.map { "\($0) ms" } ?? "等待耗时")
+                    .font(.callout.monospacedDigit())
+                HStack(spacing: 5) {
+                    if let tokens = log.totalTokens {
+                        Text("\(tokens) tokens")
+                    }
+                    if let cost = log.costUsd {
+                        Text(String(format: "$%.6f", cost))
+                    }
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            }
+            .frame(width: 150, alignment: .trailing)
+
+            Text(relativeDate(milliseconds: log.createdAtMs))
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .trailing)
         }
-        .padding(.vertical, 5)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .contentShape(Rectangle())
+        .help("请求 ID：\(log.requestId)")
     }
 }
 
@@ -3768,7 +4472,7 @@ private struct ManagementScrollPage<Content: View>: View {
     @ViewBuilder let content: Content
 
     init(
-        maxContentWidth: CGFloat = 860,
+        maxContentWidth: CGFloat = ThreadRelayPageLayout.maxContentWidth,
         loading: Bool,
         error: String?,
         retry: @escaping () -> Void,
@@ -3783,18 +4487,17 @@ private struct ManagementScrollPage<Content: View>: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: ThreadRelayPageLayout.sectionSpacing) {
                 if let error {
                     InlineManagementError(message: error, retry: retry)
                 }
                 content
             }
             .frame(maxWidth: maxContentWidth, alignment: .leading)
-            .padding(.horizontal, ThreadRelaySpacing.page)
-            .padding(.top, 20)
-            .padding(.bottom, ThreadRelaySpacing.page)
+            .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+            .padding(.top, ThreadRelayPageLayout.topPadding)
+            .padding(.bottom, ThreadRelayPageLayout.bottomPadding)
         }
-        .scrollIndicators(.never)
         .overlay {
             if loading {
                 ProgressView()

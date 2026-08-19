@@ -81,12 +81,18 @@ struct RootView: View {
             .navigationTitle((model.selection ?? .overview).title)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                GatewayQuotaDock()
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
             .overlay(alignment: .bottom) {
                 if let feedback = model.actionFeedback {
                     ActionFeedbackCapsule(feedback: feedback) {
                         model.actionFeedback = nil
                     }
-                    .padding(.bottom, 14)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 68)
                     .transition(.opacity.combined(with: .move(edge: .bottom)))
                 }
             }
@@ -173,8 +179,8 @@ private struct OverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                OverviewHeader(
+            VStack(alignment: .leading, spacing: ThreadRelayPageLayout.sectionSpacing) {
+                OverviewMasthead(
                     status: model.serviceStatus,
                     dashboardState: model.dashboardState,
                     lastCheckedAt: model.lastCheckedAt,
@@ -185,98 +191,130 @@ private struct OverviewView: View {
                 )
 
                 if let update = model.availableUpdate, !model.updateNoticeDismissed {
-                    UpdateNoticeCapsule(
+                    OverviewUpdateNotice(
                         version: update.version,
                         onOpen: { openURL(update.url) },
                         onDismiss: { model.updateNoticeDismissed = true }
                     )
                 }
 
-                OverviewCardSurface {
-                    ConnectionTopologyView()
-                }
+                OverviewSignalStrip(
+                    dashboard: model.dashboard,
+                    dashboardState: model.dashboardState,
+                    serviceStatus: model.serviceStatus,
+                    remoteDetail: remoteDetail,
+                    bridgeDetail: bridgeDetail
+                )
 
-                ManagementCard(title: "AI 网关", symbol: "point.3.connected.trianglepath.dotted") {
-                    OverviewStatusRow(
-                        title: "网关",
-                        detail: dashboardDetail(model.dashboard?.aiGatewayEnabled),
-                        symbol: "point.3.connected.trianglepath.dotted",
-                        tint: boolTint(model.dashboard?.aiGatewayEnabled)
-                    )
-                    Divider()
-                    OverviewStatusRow(
-                        title: "供应商",
-                        detail: providerDetail,
-                        symbol: "server.rack",
-                        tint: model.dashboard == nil ? .secondary : .positive
-                    )
-                    Divider()
-                    OverviewSub2ApiAccountPoolSummary(
-                        admin: model.sub2ApiAdmin,
-                        pool: model.sub2ApiAccountPool,
-                        isLoading: model.sub2ApiAccountPoolLoading,
-                        loadError: model.sub2ApiAccountPoolError,
-                        onRefresh: {
-                            manualSub2ApiRefreshTask?.cancel()
-                            manualSub2ApiRefreshTask = Task {
-                                await model.refreshSub2ApiAccountPool(
-                                    forceBillingRefresh: true
+                OverviewSectionHeading(
+                    title: "连接拓扑",
+                    subtitle: "客户端和消息渠道通过本地服务的实时连接"
+                )
+                ConnectionTopologyView(showsHeader: false)
+
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 350), spacing: 28)],
+                    spacing: 28
+                ) {
+                    OverviewDetailSection(
+                        title: "AI 网关",
+                        subtitle: "请求路由与供应商"
+                    ) {
+                        OverviewKeyValueRow(
+                            title: "网关",
+                            detail: dashboardDetail(model.dashboard?.aiGatewayEnabled),
+                            symbol: "point.3.connected.trianglepath.dotted",
+                            tint: boolTint(model.dashboard?.aiGatewayEnabled)
+                        )
+                        Divider()
+                        OverviewKeyValueRow(
+                            title: "供应商",
+                            detail: providerDetail,
+                            symbol: "server.rack",
+                            tint: model.dashboard == nil ? .secondary : .positive
+                        )
+                        Divider()
+                        Button {
+                            model.selection = .gateway
+                        } label: {
+                            Label("打开网关设置", systemImage: "arrow.up.right")
+                        }
+                        .buttonStyle(.link)
+                    }
+
+                    OverviewDetailSection(
+                        title: "本地服务",
+                        subtitle: "进程、运行时与任务保护"
+                    ) {
+                        OverviewKeyValueRow(
+                            title: "后台服务",
+                            detail: daemonDetail,
+                            symbol: model.serviceStatus.symbol,
+                            tint: model.serviceStatus.tint
+                        )
+                        if let lifecycle = model.lifecycle {
+                            Divider()
+                            OverviewKeyValueRow(
+                                title: "运行时",
+                                detail: runtimeDetail(lifecycle),
+                                symbol: "shippingbox",
+                                tint: lifecycle.management.canControl ? .positive : .secondary
+                            )
+                            if model.daemonBuildMismatch {
+                                Divider()
+                                OverviewKeyValueRow(
+                                    title: "版本不一致",
+                                    detail: model.daemonUpgradePending
+                                        ? model.daemonUpgradeDetail
+                                        : "界面与后台服务构建不一致",
+                                    symbol: "exclamationmark.triangle",
+                                    tint: .caution
                                 )
                             }
-                        },
-                        onConnect: { model.selection = .gateway }
-                    )
-                }
-
-                ManagementCard(title: "本地服务", symbol: "server.rack") {
-                    OverviewStatusRow(
-                        title: "后台服务",
-                        detail: daemonDetail,
-                        symbol: model.serviceStatus.symbol,
-                        tint: model.serviceStatus.tint
-                    )
-                    if let lifecycle = model.lifecycle {
-                        Divider()
-                        OverviewStatusRow(
-                            title: "运行时",
-                            detail: runtimeDetail(lifecycle),
-                            symbol: "shippingbox",
-                            tint: lifecycle.management.canControl ? .positive : .secondary
-                        )
-                        if model.daemonBuildMismatch {
                             Divider()
-                            OverviewStatusRow(
-                                title: model.daemonUpgradePending ? "后台升级" : "版本一致性",
-                                detail: model.daemonUpgradePending
-                                    ? model.daemonUpgradeDetail
-                                    : "界面与后台服务构建不一致",
-                                symbol: "exclamationmark.triangle",
-                                tint: .caution
+                            OverviewKeyValueRow(
+                                title: "受保护任务",
+                                detail: protectedWorkDetail(lifecycle.protectedWorkItems),
+                                symbol: "pause.circle",
+                                tint: lifecycle.protectedWorkItems.total == 0 ? .positive : .caution
                             )
                         }
                         Divider()
-                        OverviewStatusRow(
-                            title: "受保护任务",
-                            detail: protectedWorkDetail(lifecycle.protectedWorkItems),
-                            symbol: "pause.circle",
-                            tint: lifecycle.protectedWorkItems.total == 0 ? .positive : .caution
-                        )
-                    }
-                    Divider()
-                    HStack(spacing: 16) {
-                        Button("复制诊断信息") {
-                            copyDiagnostics()
+                        HStack(spacing: 16) {
+                            Button {
+                                copyDiagnostics()
+                            } label: {
+                                Label("复制诊断", systemImage: "doc.on.doc")
+                            }
+                            Button {
+                                Task { await openLogDirectory() }
+                            } label: {
+                                Label("打开日志", systemImage: "folder")
+                            }
                         }
-                        Button("打开日志") {
-                            Task { await openLogDirectory() }
-                        }
+                        .buttonStyle(.link)
                     }
-                    .buttonStyle(.link)
                 }
 
+                OverviewSectionHeading(
+                    title: "Sub2API 账号池",
+                    subtitle: "按站点合并渠道；展开站点查看账号余额与倍率",
+                    trailing: sub2ApiAccountCount,
+                    isRefreshing: model.sub2ApiAccountPoolLoading,
+                    onRefresh: sub2ApiRefreshAction
+                )
+                OverviewSub2ApiAccountPoolSummary(
+                    admin: model.sub2ApiAdmin,
+                    pool: model.sub2ApiAccountPool,
+                    isLoading: model.sub2ApiAccountPoolLoading,
+                    loadError: model.sub2ApiAccountPoolError,
+                    onConnect: { model.selection = .gateway }
+                )
             }
-            .frame(maxWidth: 860, alignment: .leading)
-            .padding(ThreadRelaySpacing.page)
+            .frame(maxWidth: ThreadRelayPageLayout.maxContentWidth, alignment: .leading)
+            .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+            .padding(.top, ThreadRelayPageLayout.topPadding)
+            .padding(.bottom, ThreadRelayPageLayout.bottomPadding)
         }
         .scrollIndicators(.never)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -288,6 +326,23 @@ private struct OverviewView: View {
             manualSub2ApiRefreshTask = nil
             model.cancelSub2ApiAccountPoolRefresh()
         }
+    }
+
+    private var bridgeDetail: String {
+        guard let dashboard = model.dashboard else { return unavailableDetail }
+        return dashboard.bridgeRunning ? "运行中" : "未运行"
+    }
+
+    private func refreshSub2Api() {
+        manualSub2ApiRefreshTask?.cancel()
+        manualSub2ApiRefreshTask = Task {
+            await model.refreshSub2ApiAccountPool(forceBillingRefresh: true)
+        }
+    }
+
+    private var sub2ApiRefreshAction: (() -> Void)? {
+        guard model.sub2ApiAdmin?.configured == true else { return nil }
+        return { refreshSub2Api() }
     }
 
     private var remoteDetail: String {
@@ -340,6 +395,11 @@ private struct OverviewView: View {
         return "已配置 \(dashboard.aiGatewayProviderCount) 个"
     }
 
+    private var sub2ApiAccountCount: String? {
+        guard let accounts = model.sub2ApiAccountPool?.accounts else { return nil }
+        return "\(accounts.count) 个账号"
+    }
+
     private var unavailableDetail: String {
         switch model.dashboardState {
         case .legacy: "需要更新"
@@ -371,7 +431,7 @@ private struct OverviewView: View {
             "服务就绪：\(readyDescription(dashboard?.service.ready))",
             "后台构建：\(model.lifecycle?.runtime.buildNumber.map(String.init) ?? "旧版/未知")",
             "构建一致性：\(model.daemonBuildMismatch ? "不一致" : "未发现差异")",
-            "后台升级：\(model.daemonUpgradePending ? model.daemonUpgradeDetail : "无")",
+            "后台版本：\(model.daemonUpgradePending ? model.daemonUpgradeDetail : "无差异")",
             "远程控制：\(remoteDetail)",
             "AI 网关：\(dashboardDetail(dashboard?.aiGatewayEnabled))",
         ]
@@ -390,24 +450,117 @@ private struct OverviewView: View {
     }
 }
 
-/// Dismissible informational capsule shown at the top of the overview when
-/// a newer release is available. Dismissal only lasts for this app session.
-private struct UpdateNoticeCapsule: View {
+private struct OverviewSectionHeading: View {
+    let title: String
+    let subtitle: String?
+    let trailing: String?
+    let isRefreshing: Bool
+    let onRefresh: (() -> Void)?
+
+    init(
+        title: String,
+        subtitle: String? = nil,
+        trailing: String? = nil,
+        isRefreshing: Bool = false,
+        onRefresh: (() -> Void)? = nil
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.trailing = trailing
+        self.isRefreshing = isRefreshing
+        self.onRefresh = onRefresh
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.headline)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 12)
+            if let trailing {
+                Text(trailing)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            if let onRefresh {
+                Button(action: onRefresh) {
+                    ZStack {
+                        Image(systemName: "arrow.clockwise")
+                            .opacity(isRefreshing ? 0 : 1)
+                        ProgressView()
+                            .controlSize(.small)
+                            .opacity(isRefreshing ? 1 : 0)
+                    }
+                    .frame(width: 18, height: 18)
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshing)
+                .help("刷新账号余额与倍率")
+                .accessibilityLabel("刷新 Sub2API 账号池")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct OverviewDetailSection<Content: View>: View {
+    let title: String
+    let subtitle: String?
+    @ViewBuilder let content: Content
+
+    init(
+        title: String,
+        subtitle: String? = nil,
+        @ViewBuilder content: () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            OverviewSectionHeading(title: title, subtitle: subtitle)
+            VStack(alignment: .leading, spacing: 12) {
+                content
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct OverviewUpdateNotice: View {
     let version: String
     let onOpen: () -> Void
     let onDismiss: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle.fill")
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.blue)
             Button {
                 onOpen()
             } label: {
-                Label("发现新版本 \(version) — 打开下载页", systemImage: "arrow.down.circle")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ThreadRelay \(version) 可用")
+                        .font(.callout.weight(.medium))
+                    Text("打开下载页查看新版")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.blue)
             .help("打开发布下载页")
             .accessibilityLabel("发现新版本 \(version)，打开下载页")
+            Spacer(minLength: 12)
             Button {
                 onDismiss()
             } label: {
@@ -418,39 +571,12 @@ private struct UpdateNoticeCapsule: View {
             .help("本次会话不再提示")
             .accessibilityLabel("关闭新版本提示")
         }
-        .font(.callout)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 6)
-        .background(Color.blue.opacity(0.09), in: Capsule())
+        .padding(.vertical, 2)
         .accessibilityIdentifier("overview.update-notice")
     }
 }
 
-/// Chrome-only card wrapper for overview content that carries its own title
-/// row (for example the connection topology), matching `ManagementCard`.
-private struct OverviewCardSurface<Content: View>: View {
-    @ViewBuilder let content: Content
-
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
-    }
-
-    var body: some View {
-        content
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                Color(nsColor: .controlBackgroundColor),
-                in: RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
-                    .stroke(Color.primary.opacity(0.07), lineWidth: 1)
-            }
-    }
-}
-
-private struct OverviewHeader: View {
+private struct OverviewMasthead: View {
     let status: ServiceStatus
     let dashboardState: DashboardState
     let lastCheckedAt: Date?
@@ -465,48 +591,26 @@ private struct OverviewHeader: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: ThreadRelaySpacing.standard) {
-            HStack(alignment: .center, spacing: 14) {
-                Image(systemName: status.symbol)
-                    .font(.system(size: 23, weight: .medium))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(status.tint.color)
-                    .frame(width: 42, height: 42)
-                    .background(status.tint.color.opacity(0.11), in: RoundedRectangle(cornerRadius: 11))
-                VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
+                Circle()
+                    .fill(status.tint.color)
+                    .frame(width: 10, height: 10)
+                    .shadow(color: status.tint.color.opacity(0.35), radius: 4)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(status.title)
-                        .font(.title2.weight(.semibold))
+                        .font(.title3.weight(.semibold))
                     Text(status.detail)
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                 }
-                Spacer(minLength: ThreadRelaySpacing.standard)
-                if let lastCheckedAt {
-                    VStack(alignment: .trailing, spacing: 3) {
-                        Text("上次检查")
-                            .font(.caption2)
-                            .foregroundStyle(.tertiary)
-                        HStack(spacing: 6) {
-                            // Kept in the layout at all times so periodic
-                            // refreshes never shift the page height.
-                            ProgressView()
-                                .controlSize(.small)
-                                .opacity(dashboardState.isRefreshing ? 1 : 0)
-                                .accessibilityHidden(!dashboardState.isRefreshing)
-                            Text(lastCheckedAt.formatted(date: .omitted, time: .shortened))
-                                .font(.callout.weight(.medium))
-                                .monospacedDigit()
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                }
+                Spacer(minLength: 16)
+                refreshStamp
             }
             if let notice {
                 Label(notice.text, systemImage: notice.symbol)
                     .font(.callout)
                     .foregroundStyle(notice.color)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(notice.color.opacity(0.09), in: Capsule())
             }
             if showsRecovery {
                 HStack(spacing: 12) {
@@ -537,6 +641,21 @@ private struct OverviewHeader: View {
         }
     }
 
+    @ViewBuilder
+    private var refreshStamp: some View {
+        if let lastCheckedAt {
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                    .opacity(dashboardState.isRefreshing ? 1 : 0)
+                    .accessibilityHidden(!dashboardState.isRefreshing)
+                Text("更新于 \(lastCheckedAt.formatted(date: .omitted, time: .shortened))")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
     /// Routine refreshes must not add or remove a banner row: `.refreshing`
     /// never shows one, and `.loading` only does before any data exists.
     private var notice: (text: String, symbol: String, color: Color)? {
@@ -563,7 +682,123 @@ private struct OverviewHeader: View {
     }
 }
 
-private struct OverviewStatusRow: View {
+private struct OverviewSignalStrip: View {
+    let dashboard: ManageDashboard?
+    let dashboardState: DashboardState
+    let serviceStatus: ServiceStatus
+    let remoteDetail: String
+    let bridgeDetail: String
+
+    private var clientCount: Int? {
+        guard let clients = dashboard?.executionClients else { return nil }
+        return [clients.codexApp, clients.vscode, clients.cli].count(where: \.connected)
+    }
+
+    private var channelCount: Int? {
+        guard let channels = dashboard?.messageChannels else { return nil }
+        return [channels.telegram, channels.feishu, channels.wechat, channels.wecom]
+            .count(where: { $0.connectedAccountCount > 0 })
+    }
+
+    private var unavailableText: String {
+        switch dashboardState {
+        case .stale: "上次状态"
+        case .offline, .unavailable: "不可用"
+        case .legacy: "需更新"
+        default: "检查中"
+        }
+    }
+
+    var body: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 0) {
+                signalCells
+            }
+            VStack(spacing: 0) {
+                signalCells
+            }
+        }
+        .padding(.vertical, 14)
+        .overlay(alignment: .top) { Divider() }
+        .overlay(alignment: .bottom) { Divider() }
+        .accessibilityIdentifier("overview.signal-strip")
+    }
+
+    @ViewBuilder
+    private var signalCells: some View {
+        OverviewSignalCell(
+            title: "服务",
+            value: serviceStatus.title,
+            symbol: "server.rack",
+            tint: serviceStatus.tint
+        )
+        OverviewSignalDivider()
+        OverviewSignalCell(
+            title: "客户端",
+            value: clientCount.map { "\($0) 个在线" } ?? unavailableText,
+            symbol: "laptopcomputer.and.iphone",
+            tint: clientCount.map { $0 > 0 ? .positive : .secondary } ?? .secondary
+        )
+        OverviewSignalDivider()
+        OverviewSignalCell(
+            title: "消息渠道",
+            value: channelCount.map { "\($0) 个在线" } ?? unavailableText,
+            symbol: "bubble.left.and.bubble.right",
+            tint: channelCount.map { $0 > 0 ? .positive : .secondary } ?? .secondary
+        )
+        OverviewSignalDivider()
+        OverviewSignalCell(
+            title: "远程控制",
+            value: remoteDetail,
+            symbol: "network",
+            tint: dashboard?.remoteControlHealthy == true ? .positive : .secondary
+        )
+        OverviewSignalDivider()
+        OverviewSignalCell(
+            title: "消息桥接",
+            value: bridgeDetail,
+            symbol: "arrow.left.arrow.right",
+            tint: dashboard?.bridgeRunning == true ? .positive : .secondary
+        )
+    }
+}
+
+private struct OverviewSignalCell: View {
+    let title: String
+    let value: String
+    let symbol: String
+    let tint: StatusTint
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: symbol)
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(tint.color)
+                .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(value)
+                    .font(.callout.weight(.medium))
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 8)
+        }
+        .frame(maxWidth: .infinity, minHeight: 38, alignment: .leading)
+        .padding(.horizontal, 12)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct OverviewSignalDivider: View {
+    var body: some View {
+        Divider()
+            .frame(maxHeight: 34)
+    }
+}
+
+private struct OverviewKeyValueRow: View {
     let title: String
     let detail: String
     let symbol: String
@@ -572,14 +807,15 @@ private struct OverviewStatusRow: View {
     var body: some View {
         HStack(spacing: ThreadRelaySpacing.standard) {
             Image(systemName: symbol)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: 14, weight: .medium))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(tint.color)
-                .frame(width: 28, height: 28)
-                .background(tint.color.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
+                .frame(width: 20)
             Text(title)
+                .font(.callout)
             Spacer(minLength: ThreadRelaySpacing.standard)
             Text(detail)
+                .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
         }
@@ -593,59 +829,14 @@ private struct OverviewSub2ApiAccountPoolSummary: View {
     let pool: ManageSub2ApiAccountPoolResponse.Pool?
     let isLoading: Bool
     let loadError: String?
-    let onRefresh: () -> Void
     let onConnect: () -> Void
     @State private var showsAllAccounts = false
 
     private var configured: Bool { admin?.configured == true }
     private let collapsedAccountLimit = 6
 
-    private var headerTint: StatusTint {
-        guard configured else { return .secondary }
-        return loadError == nil ? .positive : .caution
-    }
-
-    private var headerDetail: String {
-        if isLoading, pool == nil { return "正在读取" }
-        if let accounts = pool?.accounts { return "\(accounts.count) 个账号" }
-        return configured ? "暂无账号" : "未连接"
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: ThreadRelaySpacing.standard) {
-                Image(systemName: "person.3.sequence")
-                    .font(.system(size: 13, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(headerTint.color)
-                    .frame(width: 28, height: 28)
-                    .background(
-                        headerTint.color.opacity(0.1),
-                        in: RoundedRectangle(cornerRadius: 8)
-                    )
-                Text("Sub2API 账号池")
-                Spacer(minLength: ThreadRelaySpacing.standard)
-                Text(headerDetail)
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.trailing)
-                if configured {
-                    Button(action: onRefresh) {
-                        ZStack {
-                            Image(systemName: "arrow.clockwise")
-                                .opacity(isLoading ? 0 : 1)
-                            ProgressView()
-                                .controlSize(.small)
-                                .opacity(isLoading ? 1 : 0)
-                        }
-                        .frame(width: 18, height: 18)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(isLoading)
-                    .help("刷新账号余额与倍率")
-                    .accessibilityLabel("刷新 Sub2API 账号池")
-                }
-            }
-
             VStack(alignment: .leading, spacing: 12) {
                 if !configured {
                     HStack(spacing: 10) {
@@ -710,7 +901,6 @@ private struct OverviewSub2ApiAccountPoolSummary: View {
                     .lineLimit(1)
                 }
             }
-            .padding(.leading, 40)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .accessibilityIdentifier("overview.sub2api-account-pool")

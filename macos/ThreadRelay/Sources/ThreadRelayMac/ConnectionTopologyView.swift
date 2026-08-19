@@ -5,6 +5,7 @@ import SwiftUI
 /// lines, so it remains legible when the window is resized or text is scaled.
 struct ConnectionTopologyView: View {
     @EnvironmentObject private var model: AppModel
+    var showsHeader = true
 
     private let nodeHeight: CGFloat = 56
     private let nodeSpacing: CGFloat = 10
@@ -12,20 +13,27 @@ struct ConnectionTopologyView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("连接拓扑")
-                        .font(.title3.weight(.semibold))
-                        .tracking(-0.2)
-                    Text("本地服务与接入端的实时状态")
-                        .font(.subheadline)
+            if showsHeader {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("连接拓扑")
+                            .font(.headline)
+                        Text("本地服务与接入端的实时状态")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 12)
+                    Text(summary)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
+                        .monospacedDigit()
                 }
-                Spacer(minLength: 12)
+            } else {
                 Text(summary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
 
             GeometryReader { proxy in
@@ -293,7 +301,10 @@ private struct TopologyNodeView: View {
         }
         .padding(.horizontal, 11)
         .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56)
-        .topologyNodeSurface(cornerRadius: ThreadRelayRadius.content)
+        .topologyNodeSurface(
+            cornerRadius: ThreadRelayRadius.content,
+            tint: node.tint
+        )
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("topology.node.\(node.id)")
     }
@@ -326,7 +337,10 @@ private struct TopologyServiceNode: View {
         }
         .padding(14)
         .frame(minHeight: 118, maxHeight: 118, alignment: .leading)
-        .topologyNodeSurface(cornerRadius: ThreadRelayRadius.overlay)
+        .topologyNodeSurface(
+            cornerRadius: ThreadRelayRadius.overlay,
+            tint: status.tint
+        )
     }
 }
 
@@ -470,14 +484,39 @@ private extension StatusTint {
 
 private extension View {
     @ViewBuilder
-    func topologyNodeSurface(cornerRadius: CGFloat) -> some View {
+    func topologyNodeSurface(
+        cornerRadius: CGFloat,
+        tint: StatusTint
+    ) -> some View {
+        let connectedGlassTint = Color(
+            red: 0.88,
+            green: 0.97,
+            blue: 0.90
+        )
+        let shape = RoundedRectangle(
+            cornerRadius: cornerRadius,
+            style: .continuous
+        )
+
         if #available(macOS 26.0, *) {
-            glassEffect(.regular, in: RoundedRectangle(cornerRadius: cornerRadius))
+            glassEffect(
+                .regular.tint(tint == .positive ? connectedGlassTint.opacity(0.035) : nil),
+                in: shape
+            )
         } else {
-            background(.regularMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
+            background(.regularMaterial, in: shape)
                 .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius)
-                        .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+                    if tint == .positive {
+                        shape.fill(connectedGlassTint.opacity(0.02))
+                    }
+                }
+                .overlay {
+                    shape.strokeBorder(
+                        tint == .positive
+                            ? connectedGlassTint.opacity(0.10)
+                            : Color.primary.opacity(0.08),
+                        lineWidth: 0.5
+                    )
                 }
         }
     }

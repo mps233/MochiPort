@@ -63,7 +63,6 @@ impl LifecycleAdmissionState {
 /// Coordinates admission of new protected work with a lifecycle drain.
 pub struct LifecycleAdmission {
     state: AtomicU8,
-    candidate_hold: AtomicU8,
     active_permits: AtomicUsize,
     drained: Notify,
 }
@@ -72,7 +71,6 @@ impl LifecycleAdmission {
     pub fn new() -> Self {
         Self {
             state: AtomicU8::new(LifecycleAdmissionState::Active as u8),
-            candidate_hold: AtomicU8::new(0),
             active_permits: AtomicUsize::new(0),
             drained: Notify::new(),
         }
@@ -111,69 +109,6 @@ impl LifecycleAdmission {
             .is_ok()
     }
 
-    /// Start a newly launched runtime in a hold state.  The daemon remains
-    /// reachable for its management API, but no bridge work may be admitted
-    /// until the controlling GUI commits the runtime switch.
-    pub fn begin_candidate_hold(&self) -> bool {
-        if self
-            .state
-            .compare_exchange(
-                LifecycleAdmissionState::Active as u8,
-                LifecycleAdmissionState::Draining as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return false;
-        }
-        self.candidate_hold.store(1, Ordering::Release);
-        true
-    }
-
-    pub fn is_candidate_hold(&self) -> bool {
-        self.candidate_hold.load(Ordering::Acquire) != 0
-            && self.state() == LifecycleAdmissionState::Draining
-    }
-
-    /// Consume a candidate hold when the daemon is asked to shut down before
-    /// the switch is committed.  The state stays draining so the normal
-    /// shutdown path can finish without admitting new work.
-    pub fn take_candidate_hold_for_shutdown(&self) -> bool {
-        self.candidate_hold.swap(0, Ordering::AcqRel) != 0
-            && self.state() == LifecycleAdmissionState::Draining
-    }
-
-    /// Restore a candidate hold after a guarded shutdown request is rejected.
-    pub fn restore_candidate_hold(&self) -> bool {
-        if self.state() != LifecycleAdmissionState::Draining {
-            return false;
-        }
-        self.candidate_hold.store(1, Ordering::Release);
-        true
-    }
-
-    /// Release a candidate hold and allow normal bridge admission.
-    pub fn commit_candidate_hold(&self) -> bool {
-        if self.candidate_hold.load(Ordering::Acquire) == 0 {
-            return false;
-        }
-        if self
-            .state
-            .compare_exchange(
-                LifecycleAdmissionState::Draining as u8,
-                LifecycleAdmissionState::Active as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_err()
-        {
-            return false;
-        }
-        self.candidate_hold.store(0, Ordering::Release);
-        true
-    }
-
     pub async fn wait_for_drain(&self) {
         loop {
             let notified = self.drained.notified();
@@ -185,25 +120,17 @@ impl LifecycleAdmission {
     }
 
     pub fn commit_shutdown(&self) -> bool {
-        let committed = self
-            .state
+        self.state
             .compare_exchange(
                 LifecycleAdmissionState::Draining as u8,
                 LifecycleAdmissionState::ShutdownCommitted as u8,
                 Ordering::AcqRel,
                 Ordering::Acquire,
             )
-            .is_ok();
-        if committed {
-            self.candidate_hold.store(0, Ordering::Release);
-        }
-        committed
+            .is_ok()
     }
 
     pub fn cancel_draining(&self) -> bool {
-        if self.is_candidate_hold() {
-            return false;
-        }
         self.state
             .compare_exchange(
                 LifecycleAdmissionState::Draining as u8,
@@ -759,36 +686,6 @@ mod tests {
         assert!(admission.try_admit().is_some());
     }
 
-    #[tokio::test]
-    async fn candidate_hold_stays_draining_until_commit() {
-        let admission = Arc::new(LifecycleAdmission::new());
-        assert!(admission.begin_candidate_hold());
-        assert_eq!(admission.state(), LifecycleAdmissionState::Draining);
-        assert!(admission.is_candidate_hold());
-        assert!(admission.try_admit().is_none());
-        assert!(!admission.begin_draining());
-        assert!(admission.commit_candidate_hold());
-        assert_eq!(admission.state(), LifecycleAdmissionState::Active);
-        assert!(!admission.is_candidate_hold());
-        assert!(admission.try_admit().is_some());
-    }
-
-    #[tokio::test]
-    async fn candidate_hold_can_be_consumed_for_safe_shutdown_and_restored() {
-        let admission = Arc::new(LifecycleAdmission::new());
-        assert!(admission.begin_candidate_hold());
-        assert!(admission.take_candidate_hold_for_shutdown());
-        assert!(!admission.is_candidate_hold());
-        assert!(admission.restore_candidate_hold());
-        assert!(admission.is_candidate_hold());
-        assert!(admission.take_candidate_hold_for_shutdown());
-        assert!(admission.commit_shutdown());
-        assert_eq!(
-            admission.state(),
-            LifecycleAdmissionState::ShutdownCommitted
-        );
-        assert!(!admission.is_candidate_hold());
-    }
     use crate::config::TelegramConfig;
 
     fn telegram_account(

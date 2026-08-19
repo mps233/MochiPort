@@ -224,7 +224,7 @@ struct SettingsView: View {
                     } label: {
                         Label(
                             model.daemonTransitionInProgress
-                                ? "正在切换后台服务"
+                                ? "正在重启后台服务"
                                 : "安全重启后台服务",
                             systemImage: "arrow.clockwise.circle"
                         )

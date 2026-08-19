@@ -71,14 +71,14 @@ pub fn router(state: SharedState) -> Router {
             post(manage_api::rotate_management_credential),
         )
         .route("/lifecycle/restart", post(manage_api::restart_lifecycle))
-        .route(
-            "/lifecycle/runtime-switch/commit",
-            post(manage_api::commit_runtime_switch),
-        )
         .route("/dashboard", get(manage_dashboard))
         .route("/log-directory", get(manage_log_directory))
         .route("/codex/status", get(codex_app::manage_codex_app_status))
         .route("/codex/configure", post(codex_app::configure_codex_app))
+        .route(
+            "/codex/direct-api-mode",
+            post(codex_app::switch_codex_app_to_direct_api_mode),
+        )
         .route(
             "/codex/repair",
             post(codex_app::repair_codex_app_gui_environment),
@@ -131,6 +131,10 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/gateway/provider/usage",
             post(manage_workspace::fetch_provider_usage),
+        )
+        .route(
+            "/gateway/provider/recent-account",
+            post(manage_workspace::fetch_provider_recent_account),
         )
         .route("/gateway/sub2api", get(manage_workspace::sub2api_admin))
         .route(
@@ -287,6 +291,10 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/api/codex-app/configure",
             post(codex_app::configure_codex_app),
+        )
+        .route(
+            "/api/codex-app/direct-api-mode",
+            post(codex_app::switch_codex_app_to_direct_api_mode),
         )
         .route(
             "/api/codex-app/provider/websocket",
@@ -1389,6 +1397,11 @@ mod tests {
                 "/api/v1/manage/gateway/sub2api/accounts",
                 Some("{}"),
             ),
+            (
+                Method::POST,
+                "/api/v1/manage/gateway/provider/recent-account",
+                Some(r#"{"providerName":"primary"}"#),
+            ),
         ] {
             let response = request_response(app.clone(), method, path, None, body).await;
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "path={path}");
@@ -1703,6 +1716,102 @@ mod tests {
                 .expect("read admin keys")
                 .iter()
                 .all(|key| key == ADMIN_KEY)
+        );
+    }
+
+    #[tokio::test]
+    async fn manage_provider_recent_account_matches_stored_key_without_returning_secrets() {
+        use std::sync::{Arc, Mutex};
+
+        const ADMIN_KEY: &str = "recent-account-admin-key-must-not-leak";
+        let recorded_admin_keys = Arc::new(Mutex::new(Vec::new()));
+        let recorded = recorded_admin_keys.clone();
+        let mock = Router::new().route(
+            "/api/v1/admin/usage",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.lock().expect("record admin key").push(
+                        headers
+                            .get("x-api-key")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    Json(json!({
+                        "code": 0,
+                        "message": "success",
+                        "data": {
+                            "items": [
+                                {
+                                    "account_id": 1,
+                                    "account": { "id": 1, "name": "wrong account" },
+                                    "api_key": { "key": "another-provider-key" },
+                                    "created_at": "2026-08-17T00:01:00+08:00"
+                                },
+                                {
+                                    "account_id": 2,
+                                    "account": { "id": 2, "name": "mdkj" },
+                                    "api_key": { "key": CANARY_PROVIDER_KEY },
+                                    "created_at": "2026-08-17T00:00:00+08:00"
+                                }
+                            ],
+                            "pages": 1
+                        }
+                    }))
+                }
+            }),
+        );
+        let address = spawn_mock_server(mock).await;
+        let mut config = AppConfig::default();
+        config.ai_gateway.providers = vec![ProviderConfig {
+            name: "primary".to_string(),
+            api_key: CANARY_PROVIDER_KEY.to_string(),
+            ..ProviderConfig::default()
+        }];
+        config.ai_gateway.sub2api_admin = Sub2ApiAdminConfig {
+            base_url: format!("http://{address}"),
+            admin_api_key: ADMIN_KEY.to_string(),
+        };
+        let (state, _temp, token) = management_state_with_config(config);
+        let response = request_response(
+            router(state),
+            Method::POST,
+            "/api/v1/manage/gateway/provider/recent-account",
+            Some(&token),
+            Some(r#"{"providerName":"primary"}"#),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["providerName"], "primary");
+        assert_eq!(
+            payload["account"],
+            json!({
+                "accountId": 2,
+                "accountName": "mdkj",
+                "createdAt": "2026-08-17T00:00:00+08:00"
+            })
+        );
+        assert_eq!(payload.as_object().expect("response object").len(), 3);
+        assert_eq!(
+            payload["account"]
+                .as_object()
+                .expect("account response object")
+                .len(),
+            3
+        );
+        let response_text = payload.to_string();
+        assert!(!response_text.contains(CANARY_PROVIDER_KEY));
+        assert!(!response_text.contains(ADMIN_KEY));
+        assert_eq!(
+            recorded_admin_keys
+                .lock()
+                .expect("read recorded admin keys")
+                .as_slice(),
+            [ADMIN_KEY]
         );
     }
 
@@ -3411,52 +3520,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_switch_commit_releases_candidate_hold_and_returns_managed_snapshot() {
-        let (state, _temp, token) = management_test_state();
-        let app = router(state.clone());
-        let claim_body = lifecycle_lease_request(&state, "swiftui-test-installation")
-            .await
-            .to_string();
-        let claim = request_response(
-            app.clone(),
-            Method::POST,
-            "/api/v1/manage/lifecycle/lease/claim",
-            Some(&token),
-            Some(&claim_body),
-        )
-        .await;
-        assert_eq!(claim.status(), StatusCode::OK);
-        let generation = response_json(claim).await["management"]["leaseGeneration"]
-            .as_u64()
-            .expect("candidate hold lease generation");
-
-        assert!(state.lifecycle_admission.begin_candidate_hold());
-        let commit_body = json!({
-            "installationId": "swiftui-test-installation",
-            "daemonInstanceId": state.daemon_identity.instance_id,
-            "leaseGeneration": generation,
-        })
-        .to_string();
-        let commit = request_response(
-            app,
-            Method::POST,
-            "/api/v1/manage/lifecycle/runtime-switch/commit",
-            Some(&token),
-            Some(&commit_body),
-        )
-        .await;
-        assert_eq!(commit.status(), StatusCode::OK);
-        let payload = response_json(commit).await;
-        assert_eq!(payload["runtime"]["state"], json!("active"));
-        assert_eq!(payload["management"]["canControl"], json!(true));
-        assert!(!state.lifecycle_admission.is_candidate_hold());
-        assert_eq!(
-            state.lifecycle_admission.state(),
-            crate::app_state::LifecycleAdmissionState::Active
-        );
-    }
-
-    #[tokio::test]
     async fn lifecycle_lease_claims_and_restart_respects_protected_work() {
         let (state, _temp, token) = management_test_state();
         {
@@ -4032,114 +4095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn candidate_hold_reports_draining_and_rejects_normal_claim() {
-        let (state, _temp, token) = management_test_state();
-        assert!(state.lifecycle_admission.begin_candidate_hold());
-        assert!(state.lifecycle_admission.is_candidate_hold());
-        assert!(
-            !start_bridge_if_ready(&state, "candidate bridge start test").await,
-            "candidate hold must keep the bridge stopped"
-        );
-        assert!(state.bridge_task.lock().await.is_none());
-
-        let instance_id = state.daemon_identity.instance_id.clone();
-        let body = json!({
-            "installationId": "swiftui-test-installation",
-            "daemonInstanceId": instance_id,
-        })
-        .to_string();
-        let app = router(state.clone());
-
-        let lifecycle = route_response(app.clone(), "/api/v1/manage/lifecycle", Some(&token)).await;
-        assert_eq!(lifecycle.status(), StatusCode::OK);
-        assert_eq!(
-            response_json(lifecycle).await["runtime"]["state"],
-            json!("draining")
-        );
-
-        let claim = request_response(
-            app,
-            Method::POST,
-            "/api/v1/manage/lifecycle/lease/claim",
-            Some(&token),
-            Some(&body),
-        )
-        .await;
-        assert_eq!(claim.status(), StatusCode::CONFLICT);
-        assert!(
-            response_json(claim).await["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("runtime-switch/commit"))
-        );
-        assert!(state.lifecycle_admission.is_candidate_hold());
-    }
-
-    #[tokio::test]
-    async fn runtime_switch_commit_validates_and_activates_the_candidate() {
-        let (state, _temp, token) = management_test_state();
-        let candidate_instance_id = state.daemon_identity.instance_id.clone();
-        seed_test_lifecycle_lease(&state, "swiftui-test-installation", "previous-daemon", 7);
-        assert!(state.lifecycle_admission.begin_candidate_hold());
-        let app = router(state.clone());
-
-        for body in [
-            json!({
-                "installationId": "swiftui-test-installation",
-                "daemonInstanceId": "stale-candidate",
-                "leaseGeneration": 7,
-            }),
-            json!({
-                "installationId": "other-installation",
-                "daemonInstanceId": candidate_instance_id,
-                "leaseGeneration": 7,
-            }),
-            json!({
-                "installationId": "swiftui-test-installation",
-                "daemonInstanceId": candidate_instance_id,
-                "leaseGeneration": 6,
-            }),
-        ] {
-            let response = request_response(
-                app.clone(),
-                Method::POST,
-                "/api/v1/manage/lifecycle/runtime-switch/commit",
-                Some(&token),
-                Some(&body.to_string()),
-            )
-            .await;
-            assert_eq!(response.status(), StatusCode::CONFLICT);
-            assert!(state.lifecycle_admission.is_candidate_hold());
-        }
-
-        let body = json!({
-            "installationId": "swiftui-test-installation",
-            "daemonInstanceId": candidate_instance_id,
-            "leaseGeneration": 7,
-        })
-        .to_string();
-        let committed = request_response(
-            app,
-            Method::POST,
-            "/api/v1/manage/lifecycle/runtime-switch/commit",
-            Some(&token),
-            Some(&body),
-        )
-        .await;
-        assert_eq!(committed.status(), StatusCode::OK);
-        let lifecycle = response_json(committed).await;
-        assert_eq!(lifecycle["runtime"]["state"], json!("active"));
-        assert_eq!(lifecycle["management"]["state"], json!("managed"));
-        assert_eq!(lifecycle["management"]["canControl"], json!(true));
-        assert_eq!(
-            lifecycle["management"]["installationId"],
-            json!("swiftui-test-installation")
-        );
-        assert_eq!(lifecycle["management"]["leaseGeneration"], json!(8));
-        assert!(!state.lifecycle_admission.is_candidate_hold());
-    }
-
-    #[tokio::test]
-    async fn cross_daemon_lease_handoff_rejects_stale_instance_generation_and_candidate_claim() {
+    async fn cross_daemon_lease_handoff_rejects_stale_instance_and_generation() {
         let (state, _temp, token) = management_test_state();
         let current_instance_id = state.daemon_identity.instance_id.clone();
         let previous_instance_id = "previous-daemon";
@@ -4227,51 +4183,6 @@ mod tests {
                 .is_some_and(|message| message.contains("换代"))
         );
 
-        assert!(state.lifecycle_admission.begin_candidate_hold());
-        let claim_during_candidate_hold = request_response(
-            app.clone(),
-            Method::POST,
-            "/api/v1/manage/lifecycle/lease/claim",
-            Some(&token),
-            Some(&claim_body),
-        )
-        .await;
-        assert_eq!(claim_during_candidate_hold.status(), StatusCode::CONFLICT);
-        assert!(
-            response_json(claim_during_candidate_hold).await["error"]
-                .as_str()
-                .is_some_and(|message| message.contains("runtime-switch/commit"))
-        );
-
-        for (daemon_instance_id, generation, expected_error) in [
-            (previous_instance_id, handoff_generation, "实例已变化"),
-            (current_instance_id.as_str(), 7, "换代"),
-        ] {
-            let stale_commit_body = json!({
-                "installationId": installation_id,
-                "daemonInstanceId": daemon_instance_id,
-                "leaseGeneration": generation,
-            })
-            .to_string();
-            let stale_commit = request_response(
-                app.clone(),
-                Method::POST,
-                "/api/v1/manage/lifecycle/runtime-switch/commit",
-                Some(&token),
-                Some(&stale_commit_body),
-            )
-            .await;
-            assert_eq!(stale_commit.status(), StatusCode::CONFLICT);
-            assert!(
-                response_json(stale_commit).await["error"]
-                    .as_str()
-                    .is_some_and(|message| message.contains(expected_error))
-            );
-            assert!(
-                state.lifecycle_admission.is_candidate_hold(),
-                "rejected handoff must keep candidate admission fenced"
-            );
-        }
         let retained_control: Value = serde_json::from_slice(
             &std::fs::read(manage_api::control_file_path(&state.config_path))
                 .expect("read retained handoff control file"),
@@ -4285,42 +4196,5 @@ mod tests {
             retained_control["lease"]["generation"],
             json!(handoff_generation)
         );
-    }
-
-    #[tokio::test]
-    async fn candidate_hold_accepts_a_guarded_restart_with_the_previous_lease() {
-        let (state, _temp, token) = management_test_state();
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        *state.shutdown_tx.lock().await = Some(shutdown_tx);
-        let candidate_instance_id = state.daemon_identity.instance_id.clone();
-        seed_test_lifecycle_lease(&state, "swiftui-test-installation", "previous-daemon", 7);
-        assert!(state.lifecycle_admission.begin_candidate_hold());
-        let app = router(state.clone());
-        let body = json!({
-            "installationId": "swiftui-test-installation",
-            "daemonInstanceId": candidate_instance_id,
-            "leaseGeneration": 7,
-        })
-        .to_string();
-
-        let restart = request_response(
-            app,
-            Method::POST,
-            "/api/v1/manage/lifecycle/restart",
-            Some(&token),
-            Some(&body),
-        )
-        .await;
-        assert_eq!(restart.status(), StatusCode::OK);
-        assert_eq!(response_json(restart).await["state"], json!("restarting"));
-        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx)
-            .await
-            .expect("shutdown signal timeout")
-            .expect("shutdown signal sender");
-        assert_eq!(
-            state.lifecycle_admission.state(),
-            crate::app_state::LifecycleAdmissionState::ShutdownCommitted
-        );
-        assert!(!state.lifecycle_admission.is_candidate_hold());
     }
 }

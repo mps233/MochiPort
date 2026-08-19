@@ -35,18 +35,11 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install CMake
-        run: brew install cmake
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
-
-      - name: Reset wxWidgets CMake Cache
-        run: |
-          set -euo pipefail
-          rm -rf target/release/wxwidgets_cmake_build
-          rm -rf target/release/wxdragon_sys_cmake_build
 
       - name: Import Developer ID Certificate
         if: env.HAS_MACOS_CODESIGN == 'true'
@@ -69,30 +62,41 @@ jobs:
       - name: Build App Bundle
         run: |
           set -euo pipefail
-          APP_NAME="ThreadRelay"
-          APP="target/dist/$APP_NAME.app"
-          CONTENTS="$APP/Contents"
-          MACOS="$CONTENTS/MacOS"
-          RESOURCES="$CONTENTS/Resources"
+          BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}"
+          XCODE_DERIVED_DATA="$RUNNER_TEMP/ThreadRelayDerivedData"
 
-          # Install cross-compilation targets for universal binary
-          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+          THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" \
+            cargo build --locked --release --bin threadrelay --target aarch64-apple-darwin
+          THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" \
+            cargo build --locked --release --bin threadrelay --target x86_64-apple-darwin
 
-          # Build wxWidgets as universal (arm64 + x86_64) and compile for native arch
-          export WX_OSX_ARCHITECTURES="arm64;x86_64"
-          THREADRELAY_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}" \
-            PATH="$(brew --prefix)/bin:$PATH" cargo build --locked --release --features gui --bin threadrelay --target aarch64-apple-darwin
-
-          # Compile for Intel (wxWidgets libs are already fat, no rebuild needed)
-          THREADRELAY_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}" \
-            PATH="$(brew --prefix)/bin:$PATH" cargo build --locked --release --features gui --bin threadrelay --target x86_64-apple-darwin
-
-          # Create universal binary
           mkdir -p target/release
           lipo -create \
             target/aarch64-apple-darwin/release/threadrelay \
             target/x86_64-apple-darwin/release/threadrelay \
             -output target/release/threadrelay
+
+          THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" \
+            scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
+
+          rm -rf "$XCODE_DERIVED_DATA"
+          xcodebuild \
+            -project macos/ThreadRelay/ThreadRelay.xcodeproj \
+            -scheme ThreadRelay \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath "$XCODE_DERIVED_DATA" \
+            ARCHS='arm64 x86_64' \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+          mkdir -p target/dist
+          scripts/assemble-swiftui-macos-app.sh \
+            "$BUILD_NUMBER" \
+            "$XCODE_DERIVED_DATA/Build/Products/Release/ThreadRelay.app" \
+            target/release/threadrelay \
+            target/dist/ThreadRelay.app
 
           CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           if [ -z "$CARGO_VERSION" ]; then
@@ -109,19 +113,6 @@ jobs:
             echo "MACOS_DMG_NAME=ThreadRelay-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
             echo "MACOS_APP_ZIP_NAME=ThreadRelay-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
           } >> "$GITHUB_ENV"
-
-          rm -rf "$APP"
-          mkdir -p "$MACOS" "$RESOURCES/brand/providers"
-          cp "packaging/macos/Info.plist" "$CONTENTS/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${CARGO_VERSION%%[-+]*}" "$CONTENTS/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER:-1}" "$CONTENTS/Info.plist"
-          cp "packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
-          python3 packaging/generate-third-party-licenses.py "$RESOURCES/THIRD_PARTY_LICENSES.txt"
-          cp LICENSE NOTICE "$RESOURCES/"
-          cp packaging/brand/LICENSE.lucide-icons "$RESOURCES/brand/"
-          cp packaging/brand/providers/LICENSE.lobehub-icons packaging/brand/providers/SOURCES.md "$RESOURCES/brand/providers/"
-          cp "target/release/threadrelay" "$MACOS/$APP_NAME"
-          chmod +x "$MACOS/$APP_NAME"
 
       - name: Sign And Notarize
         if: env.HAS_MACOS_CODESIGN == 'true'
@@ -220,6 +211,12 @@ jobs:
             return "$status"
           }
 
+          codesign --force --timestamp --options runtime \
+            --sign "$APPLE_CODESIGN_IDENTITY" \
+            "$APP/Contents/Helpers/threadrelay-gui-supervisor"
+          codesign --force --timestamp --options runtime \
+            --sign "$APPLE_CODESIGN_IDENTITY" \
+            "$APP/Contents/Helpers/threadrelay-daemon"
           codesign --force --timestamp --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$APPLE_CODESIGN_IDENTITY" \

@@ -1,0 +1,29 @@
+# ThreadRelay 项目工作规则
+
+本文件适用于整个仓库。进行代码修改、构建交接和界面验证时，应遵守以下规则。
+
+## ThreadRelay 界面截图
+
+- 默认只截 ThreadRelay 当前需要检查的应用窗口，不截整个屏幕。
+- 正式 App 必须使用完整路径定位：
+  `/Users/miaopasi/codexhub/outputs/ThreadRelay.app`。
+- 不要只用应用名称或 Bundle ID 定位，因为 Xcode 构建产物和正式 App 可能使用相同 Bundle ID。
+- 截图中不得出现桌面、菜单栏、Dock、终端、Codex 或其他应用窗口。
+- 如果 ThreadRelay 同时存在多个窗口，只截与当前任务对应的窗口；界面改动默认截主窗口中的目标页面。
+- 优先通过 Computer Use 针对上述完整 App 路径读取窗口状态，并使用该窗口返回的截图。
+- 发送截图前检查图片四周：边界应与 ThreadRelay 窗口边界一致。若仍包含屏幕背景或其他窗口，必须重新按窗口范围截图，不能把全屏截图直接交付。
+- 只有用户明确要求查看桌面整体布局、多个窗口关系或全屏效果时，才允许截全屏。
+
+## 构建和运行交接
+
+GUI 与 daemon 的分类、构建、重启和身份核对规则见
+[`docs/threadrelay-change-handoff.zh-CN.md`](docs/threadrelay-change-handoff.zh-CN.md)。
+
+- 仅 SwiftUI/GUI 改动可以更新并重启正式 GUI，但不得替换或重启 daemon。
+- daemon 相关改动不得自动替换、切换、停止或重启正在运行的 daemon；构建完成后通知用户手动处理。
+- 不恢复自动 runtime staging、切换 journal、自动回滚或强制重启流程。
+
+## 工作区与 Git
+
+- 工作区可能包含用户尚未提交的其他改动；不得回退、覆盖或顺手提交无关内容。
+- 除非用户明确要求，否则不要提交、推送或创建 Pull Request。

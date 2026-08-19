@@ -754,6 +754,67 @@ pub(super) async fn fetch_provider_usage(
     )
 }
 
+/// 查询已保存 Provider API Key 最近一次命中的 Sub2API 上游账号。
+///
+/// Provider API Key 和 Sub2API 管理密钥都只在 daemon 内使用；响应只包含
+/// Provider 名称和账号的非敏感标识信息。
+pub(super) async fn fetch_provider_recent_account(
+    State(state): State<SharedState>,
+    Json(request): Json<FetchProviderUsageRequest>,
+) -> impl IntoResponse {
+    let requested_provider_name = request.provider_name.trim();
+    if requested_provider_name.is_empty() {
+        return operation_error(StatusCode::BAD_REQUEST, "providerName is required");
+    }
+
+    let provider_and_admin = {
+        let config = state.config.lock().await;
+        config
+            .ai_gateway
+            .providers
+            .iter()
+            .find(|provider| provider.name == requested_provider_name)
+            .map(|provider| {
+                (
+                    provider.name.clone(),
+                    provider.api_key.clone(),
+                    config.ai_gateway.sub2api_admin.clone(),
+                )
+            })
+    };
+    let Some((provider_name, provider_api_key, admin)) = provider_and_admin else {
+        return operation_error(StatusCode::NOT_FOUND, "provider not found");
+    };
+    if provider_api_key.trim().is_empty() {
+        return operation_error(
+            StatusCode::BAD_REQUEST,
+            "provider API key is not configured",
+        );
+    }
+    if !admin.is_configured() {
+        return operation_error(StatusCode::BAD_REQUEST, "尚未连接 Sub2API 账号池");
+    }
+
+    match sub2api_accounts::fetch_recent_provider_account(
+        &crate::outbound_http::get_sensitive(),
+        &admin.base_url,
+        &admin.admin_api_key,
+        &provider_api_key,
+    )
+    .await
+    {
+        Ok(account) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "providerName": provider_name,
+                "account": account,
+            })),
+        ),
+        Err(error) => operation_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
 pub(super) async fn sub2api_admin(State(state): State<SharedState>) -> impl IntoResponse {
     let config = state.config.lock().await;
     Json(sub2api_admin_snapshot(&config.ai_gateway.sub2api_admin))

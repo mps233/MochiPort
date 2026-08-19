@@ -13,36 +13,15 @@ enum ThreadRelayRadius {
     static let overlay: CGFloat = 16
 }
 
-/// Section heading used by work-area pages that follow the macOS Settings
-/// hierarchy: the label sits outside the grouped surface it describes.
-struct SettingsSectionHeader: View {
-    let title: String
-    var subtitle: String? = nil
-    var trailing: String? = nil
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.headline)
-                if let subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-            }
-
-            Spacer(minLength: 12)
-
-            if let trailing, !trailing.isEmpty {
-                Text(trailing)
-                    .font(.caption.weight(.medium).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-            }
-        }
-    }
+/// Shared geometry for pages hosted in the main detail column. The native
+/// navigation title identifies the page; these values keep the content area
+/// predictable as users move between sections.
+enum ThreadRelayPageLayout {
+    static let maxContentWidth: CGFloat = 960
+    static let horizontalPadding: CGFloat = 28
+    static let topPadding: CGFloat = 20
+    static let bottomPadding: CGFloat = 28
+    static let sectionSpacing: CGFloat = 24
 }
 
 /// Neutral grouped surface matching the body of a native grouped `Form`.

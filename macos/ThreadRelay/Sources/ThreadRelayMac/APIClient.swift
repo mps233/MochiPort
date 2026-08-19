@@ -126,6 +126,9 @@ struct ManageCodexStatus: Decodable, Equatable {
     let providers: [Provider]
     let imageGenerationEnabled: Bool
     let connectionMode: String
+    let providerMode: String?
+    let providerModeMessage: String?
+    let activeProvider: String?
 }
 
 struct ManageCodexSessionsResponse: Decodable, Equatable {
@@ -454,6 +457,18 @@ struct ManageSub2ApiAccountPoolResponse: Decodable, Equatable, Sendable {
 
     let ok: Bool
     let pool: Pool
+}
+
+struct ManageProviderRecentAccountResponse: Decodable, Equatable, Sendable {
+    struct Account: Decodable, Equatable, Sendable {
+        let accountId: Int64
+        let accountName: String
+        let createdAt: String
+    }
+
+    let ok: Bool
+    let providerName: String
+    let account: Account?
 }
 
 struct ManageCodexPreflightResponse: Decodable, Equatable {
@@ -1251,21 +1266,6 @@ struct APIClient: Sendable {
         )
     }
 
-    func commitRuntimeSwitch(
-        installationId: String,
-        daemonInstanceId: String,
-        leaseGeneration: Int64
-    ) async throws -> ManageLifecycle {
-        try await performManagePOST(
-            path: "api/v1/manage/lifecycle/runtime-switch/commit",
-            body: LifecycleRuntimeSwitchCommitRequest(
-                installationId: installationId,
-                daemonInstanceId: daemonInstanceId,
-                leaseGeneration: leaseGeneration
-            )
-        )
-    }
-
     func imAccounts() async throws -> [ManageIMAccount] {
         let connection = connectionLoader()
         let candidates = connection.credentials()
@@ -1395,6 +1395,13 @@ struct APIClient: Sendable {
     func configureCodex() async throws -> ManageActionResponse {
         try await performManagePOST(
             path: "api/v1/manage/codex/configure",
+            body: EmptyRequestBody()
+        )
+    }
+
+    func switchCodexToDirectApiMode() async throws -> ManageActionResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/codex/direct-api-mode",
             body: EmptyRequestBody()
         )
     }
@@ -1716,6 +1723,16 @@ struct APIClient: Sendable {
         )
     }
 
+    func fetchGatewayProviderRecentAccount(
+        providerName: String
+    ) async throws -> ManageProviderRecentAccountResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/gateway/provider/recent-account",
+            body: FetchProviderUsageRequest(providerName: providerName),
+            timeout: 15
+        )
+    }
+
     private struct IMAccountEnabledRequest: Encodable {
         let platform: String
         let accountId: String
@@ -1848,12 +1865,6 @@ struct APIClient: Sendable {
         let daemonInstanceId: String
         let force: Bool
         let leaseGeneration: Int64?
-    }
-
-    private struct LifecycleRuntimeSwitchCommitRequest: Encodable {
-        let installationId: String
-        let daemonInstanceId: String
-        let leaseGeneration: Int64
     }
 
     private struct EnhancedLaunchOperationRequest: Encodable {

@@ -11,6 +11,11 @@ XCODE_APP=$2
 DAEMON_BINARY=$3
 OUTPUT_APP=$4
 GUI_SUPERVISOR=packaging/macos/threadrelay-gui-supervisor
+APP_ICON=packaging/macos/AppIcon.icns
+THIRD_PARTY_LICENSE_GENERATOR=packaging/generate-third-party-licenses.py
+LUCIDE_LICENSE=packaging/brand/LICENSE.lucide-icons
+PROVIDER_LICENSE=packaging/brand/providers/LICENSE.lobehub-icons
+PROVIDER_SOURCES=packaging/brand/providers/SOURCES.md
 
 case "$BUILD" in
   ''|0|*[!0-9]*)
@@ -31,6 +36,13 @@ if [ ! -f "$GUI_SUPERVISOR" ]; then
   echo "GUI supervisor script is unavailable" >&2
   exit 1
 fi
+for RESOURCE in "$APP_ICON" "$THIRD_PARTY_LICENSE_GENERATOR" LICENSE NOTICE \
+  "$LUCIDE_LICENSE" "$PROVIDER_LICENSE" "$PROVIDER_SOURCES"; do
+  if [ ! -f "$RESOURCE" ]; then
+    echo "required bundle resource is unavailable: $RESOURCE" >&2
+    exit 1
+  fi
+done
 
 case "$OUTPUT_APP" in
   *.app) ;;
@@ -131,11 +143,25 @@ trap 'exit 1' HUP INT TERM
 
 /usr/bin/ditto "$XCODE_APP" "$STAGED_APP"
 mkdir -p "$STAGED_APP/Contents/Helpers"
+mkdir -p "$STAGED_APP/Contents/Resources/brand/providers"
 cp "$DAEMON_BINARY" "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
 chmod 755 "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
 cp "$GUI_SUPERVISOR" "$STAGED_APP/Contents/Helpers/threadrelay-gui-supervisor"
 chmod 755 "$STAGED_APP/Contents/Helpers/threadrelay-gui-supervisor"
+cp "$APP_ICON" "$STAGED_APP/Contents/Resources/AppIcon.icns"
+python3 "$THIRD_PARTY_LICENSE_GENERATOR" \
+  "$STAGED_APP/Contents/Resources/THIRD_PARTY_LICENSES.txt"
+cp LICENSE NOTICE "$STAGED_APP/Contents/Resources/"
+cp "$LUCIDE_LICENSE" "$STAGED_APP/Contents/Resources/brand/"
+cp "$PROVIDER_LICENSE" "$PROVIDER_SOURCES" \
+  "$STAGED_APP/Contents/Resources/brand/providers/"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$STAGED_APP/Contents/Info.plist"
+if /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" \
+  "$STAGED_APP/Contents/Info.plist" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$STAGED_APP/Contents/Info.plist"
+else
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$STAGED_APP/Contents/Info.plist"
+fi
 
 codesign --force --deep --sign - "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"

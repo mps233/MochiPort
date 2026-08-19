@@ -23,6 +23,8 @@ const MAX_ACCOUNTS: usize = 10_000;
 // The endpoint is requested with a page size of 1,000; this keeps the total
 // request time bounded alongside MAX_ACCOUNTS instead of trusting `pages`.
 const MAX_ACCOUNT_PAGES: usize = 10;
+const USAGE_PAGE_SIZE: usize = 100;
+const MAX_USAGE_PAGES: usize = 10;
 const PROBE_BATCH_SIZE: usize = 20;
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
@@ -105,6 +107,16 @@ pub struct AccountBalanceSnapshot {
     pub observed_at: Option<String>,
 }
 
+/// Most recent Sub2API usage record whose API key exactly matches a saved
+/// ThreadRelay Provider. The matching key remains inside the daemon.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentProviderAccountSnapshot {
+    pub account_id: i64,
+    pub account_name: String,
+    pub created_at: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct ApiEnvelope<T> {
     code: i64,
@@ -119,6 +131,36 @@ struct AccountPage {
     items: Vec<AdminAccount>,
     #[serde(default)]
     pages: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsagePage {
+    #[serde(default)]
+    items: Vec<AdminUsageRecord>,
+    #[serde(default)]
+    pages: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminUsageRecord {
+    account_id: Option<i64>,
+    account: Option<UsageAccount>,
+    api_key: Option<UsageApiKey>,
+    #[serde(default)]
+    created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageAccount {
+    id: i64,
+    #[serde(default)]
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageApiKey {
+    #[serde(default)]
+    key: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -197,6 +239,74 @@ pub async fn fetch_account_pool(
     )
     .await
     .map_err(|_| Sub2ApiAccountPoolError::TemporarilyUnavailable)?
+}
+
+pub async fn fetch_recent_provider_account(
+    client: &reqwest::Client,
+    base_url: &str,
+    admin_api_key: &str,
+    provider_api_key: &str,
+) -> Result<Option<RecentProviderAccountSnapshot>, Sub2ApiAccountPoolError> {
+    tokio::time::timeout(
+        TOTAL_REQUEST_TIMEOUT,
+        fetch_recent_provider_account_inner(client, base_url, admin_api_key, provider_api_key),
+    )
+    .await
+    .map_err(|_| Sub2ApiAccountPoolError::TemporarilyUnavailable)?
+}
+
+async fn fetch_recent_provider_account_inner(
+    client: &reqwest::Client,
+    base_url: &str,
+    admin_api_key: &str,
+    provider_api_key: &str,
+) -> Result<Option<RecentProviderAccountSnapshot>, Sub2ApiAccountPoolError> {
+    let provider_api_key = provider_api_key.trim();
+    if provider_api_key.is_empty() {
+        return Err(Sub2ApiAccountPoolError::Unauthorized);
+    }
+
+    let root = provider_api_root(base_url);
+    for page in 1..=MAX_USAGE_PAGES {
+        let url = format!(
+            "{root}/api/v1/admin/usage?page={page}&page_size={USAGE_PAGE_SIZE}&sort_by=created_at&sort_order=desc"
+        );
+        let envelope: ApiEnvelope<UsagePage> = send_json(
+            client
+                .get(url)
+                .header("x-api-key", sensitive_header(admin_api_key)?),
+        )
+        .await?;
+        if envelope.code != 0 {
+            return Err(classify_api_message(&envelope.message));
+        }
+
+        let UsagePage { items, pages } = envelope.data;
+        if items.len() > USAGE_PAGE_SIZE
+            || (pages == 0 && !items.is_empty())
+            || (pages > 0 && page > pages)
+        {
+            return Err(Sub2ApiAccountPoolError::InvalidResponse);
+        }
+        if pages == 0 {
+            return Ok(None);
+        }
+
+        for record in items {
+            let Some(api_key) = record.api_key.as_ref() else {
+                continue;
+            };
+            if api_key.key.trim() != provider_api_key {
+                continue;
+            }
+            return normalize_recent_provider_account(record).map(Some);
+        }
+
+        if page >= pages {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 async fn fetch_account_pool_inner(
@@ -450,6 +560,36 @@ fn probe_map(results: Vec<ProbeResult>) -> HashMap<i64, ProbeResult> {
         .collect()
 }
 
+fn normalize_recent_provider_account(
+    record: AdminUsageRecord,
+) -> Result<RecentProviderAccountSnapshot, Sub2ApiAccountPoolError> {
+    let nested_id = record.account.as_ref().map(|account| account.id);
+    if record.account_id.is_some() && nested_id.is_some() && record.account_id != nested_id {
+        return Err(Sub2ApiAccountPoolError::InvalidResponse);
+    }
+    let account_id = record
+        .account_id
+        .or(nested_id)
+        .filter(|id| *id > 0)
+        .ok_or(Sub2ApiAccountPoolError::InvalidResponse)?;
+    let account_name = record
+        .account
+        .and_then(|account| nonempty(account.name))
+        .unwrap_or_else(|| format!("账号 {account_id}"));
+    let created_at = record.created_at.trim().to_string();
+    if account_name.chars().count() > 256
+        || created_at.is_empty()
+        || created_at.chars().count() > 128
+    {
+        return Err(Sub2ApiAccountPoolError::InvalidResponse);
+    }
+    Ok(RecentProviderAccountSnapshot {
+        account_id,
+        account_name,
+        created_at,
+    })
+}
+
 fn normalize_account(
     account: AdminAccount,
     billing_result: Option<&ProbeResult>,
@@ -644,11 +784,12 @@ mod tests {
     use super::*;
     use axum::{
         Json, Router,
+        extract::Query,
         http::{HeaderMap, StatusCode, header::LOCATION},
         routing::get,
     };
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
 
@@ -846,6 +987,123 @@ mod tests {
             fetch_accounts(&client, &format!("http://{address}"), "admin-key").await,
             Err(Sub2ApiAccountPoolError::InvalidResponse)
         ));
+    }
+
+    #[tokio::test]
+    async fn recent_provider_account_paginates_and_matches_the_full_key() {
+        const ADMIN_KEY: &str = "admin-key-must-not-leak";
+        const PROVIDER_KEY: &str = "provider-key-must-not-leak";
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = requests.clone();
+        let app = Router::new().route(
+            "/api/v1/admin/usage",
+            get(
+                move |headers: HeaderMap, Query(query): Query<HashMap<String, String>>| {
+                    let recorded = recorded.clone();
+                    async move {
+                        let page = query
+                            .get("page")
+                            .and_then(|value| value.parse::<usize>().ok())
+                            .expect("usage page");
+                        recorded.lock().expect("record usage request").push((
+                            page,
+                            query.get("page_size").cloned(),
+                            headers
+                                .get("x-api-key")
+                                .and_then(|value| value.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string(),
+                        ));
+                        let item = if page == 1 {
+                            serde_json::json!({
+                                "account_id": 1,
+                                "account": { "id": 1, "name": "other" },
+                                "api_key": { "key": "different-provider-key" },
+                                "created_at": "2026-08-16T23:59:00+08:00"
+                            })
+                        } else {
+                            serde_json::json!({
+                                "account_id": 2,
+                                "account": { "id": 2, "name": "mdkj" },
+                                "api_key": { "key": PROVIDER_KEY },
+                                "created_at": "2026-08-17T00:00:00+08:00"
+                            })
+                        };
+                        Json(serde_json::json!({
+                            "code": 0,
+                            "message": "success",
+                            "data": { "items": [item], "pages": 3 }
+                        }))
+                    }
+                },
+            ),
+        );
+        let address = spawn_server(app).await;
+        let account = fetch_recent_provider_account(
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            ADMIN_KEY,
+            PROVIDER_KEY,
+        )
+        .await
+        .expect("recent account request")
+        .expect("matching account");
+
+        assert_eq!(
+            account,
+            RecentProviderAccountSnapshot {
+                account_id: 2,
+                account_name: "mdkj".to_string(),
+                created_at: "2026-08-17T00:00:00+08:00".to_string(),
+            }
+        );
+        assert_eq!(
+            requests.lock().expect("read usage requests").as_slice(),
+            &[
+                (1, Some(USAGE_PAGE_SIZE.to_string()), ADMIN_KEY.to_string()),
+                (2, Some(USAGE_PAGE_SIZE.to_string()), ADMIN_KEY.to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_provider_account_scan_is_bounded() {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let recorded = requests.clone();
+        let app = Router::new().route(
+            "/api/v1/admin/usage",
+            get(move || {
+                let recorded = recorded.clone();
+                async move {
+                    recorded.fetch_add(1, Ordering::SeqCst);
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "message": "success",
+                        "data": {
+                            "items": [{
+                                "account_id": 1,
+                                "account": { "id": 1, "name": "other" },
+                                "api_key": { "key": "different-provider-key" },
+                                "created_at": "2026-08-17T00:00:00+08:00"
+                            }],
+                            "pages": MAX_USAGE_PAGES + 100
+                        }
+                    }))
+                }
+            }),
+        );
+        let address = spawn_server(app).await;
+        let account = fetch_recent_provider_account(
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            "admin-key",
+            "missing-provider-key",
+        )
+        .await
+        .expect("bounded usage scan");
+
+        assert_eq!(account, None);
+        assert_eq!(requests.load(Ordering::SeqCst), MAX_USAGE_PAGES);
     }
 
     #[tokio::test]

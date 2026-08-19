@@ -77,6 +77,7 @@ const MANAGED_BACKUP_MANIFEST: &str = "manifest.json";
 const MANAGED_BACKUP_AUTH: &str = "auth.json";
 const PROXY_ENVIRONMENT_BACKUP_VERSION: u32 = 1;
 const PROXY_ENVIRONMENT_BACKUP_FILE: &str = "proxy-environment.json";
+const CODEX_CONNECTION_MODE_FILE: &str = ".threadrelay-codex-connection-mode.json";
 
 #[derive(Debug, Clone)]
 pub struct ConfigureCodexAppOptions {
@@ -164,6 +165,31 @@ pub struct CodexAppConfigStatus {
     pub providers: Vec<CodexAppProviderStatus>,
     pub image_generation_enabled: bool,
     pub connection_mode: LocalConnectionMode,
+    pub provider_mode: CodexProviderMode,
+    pub provider_mode_message: String,
+    pub active_provider: Option<String>,
+}
+
+/// Which process currently owns Codex's provider routing.
+///
+/// `direct-api` means Codex calls the selected third-party API provider
+/// directly, without going through ThreadRelay's local gateway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CodexProviderMode {
+    Threadrelay,
+    DirectApi,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexProviderModeSwitchReport {
+    pub mode: CodexProviderMode,
+    pub active_provider: String,
+    pub removed_local_route: bool,
+    pub removed_local_provider: bool,
+    pub gui_api_base: CodexAppGuiApiBaseStatus,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -309,6 +335,8 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     #[cfg(not(test))]
     chain_log::write_line("[codex_app_config] event=gui_environment_configure_done");
 
+    write_provider_mode(&codex_home, CodexProviderMode::Threadrelay)?;
+
     Ok(ConfigureCodexAppReport {
         codex_home,
         config_path,
@@ -346,6 +374,8 @@ pub fn uninstall_codex_app(
     cleanup_app_server_proxy_environment().map_err(anyhow::Error::msg)?;
     #[cfg(test)]
     let gui_api_base = inspect_gui_api_base_url(backend_url);
+
+    let _ = remove_provider_mode_marker(&codex_home);
 
     Ok(UninstallCodexAppReport {
         codex_home,
@@ -399,6 +429,13 @@ pub fn inspect_codex_app_config_for_mode(
     let (provider, providers, image_generation_enabled) = inspect_provider_catalog(&config_path);
     let provider_ok = inspect_managed_ai_gateway_provider(&config_path, backend_url);
     let connection_mode = inspect_connection_mode(&config_path, backend_url);
+    let active_provider = provider.as_ref().map(|provider| provider.name.clone());
+    let provider_mode = inspect_provider_mode(
+        &codex_home,
+        &config_path,
+        backend_url,
+        active_provider.as_deref(),
+    );
 
     let gui_api_base = inspect_gui_api_base_url(backend_url);
     let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
@@ -421,7 +458,98 @@ pub fn inspect_codex_app_config_for_mode(
         providers,
         image_generation_enabled,
         connection_mode,
+        provider_mode,
+        provider_mode_message: provider_mode_message(provider_mode, active_provider.as_deref()),
+        active_provider,
     }
+}
+
+pub fn switch_codex_app_to_direct_api_mode(
+    codex_home: Option<PathBuf>,
+    backend_url: &str,
+) -> Result<CodexProviderModeSwitchReport> {
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    let config_path = codex_home.join("config.toml");
+    if !config_path.exists() {
+        return Err(anyhow!(
+            "config.toml not found; initialize Codex configuration first"
+        ));
+    }
+
+    let mut doc = parse_existing_config_toml_for_update(&config_path)?;
+    let active_provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let managed_names = threadrelay_local_provider_names(&doc, backend_url);
+    let target_provider = active_provider
+        .as_deref()
+        .filter(|name| !managed_names.contains(*name))
+        .filter(|name| provider_is_external(&doc, name, backend_url))
+        .map(str::to_string)
+        .or_else(|| preferred_external_provider(&doc, backend_url, &managed_names))
+        .ok_or_else(|| anyhow!("未找到可用的第三方 API Provider，请先配置一个可直连的 Provider"))?;
+
+    doc["model_provider"] = toml_edit::value(target_provider.as_str());
+    let removed_local_route = doc
+        .get("chatgpt_base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(|value| backend_urls_equivalent(value, backend_url));
+    if removed_local_route {
+        doc.remove("chatgpt_base_url");
+    }
+
+    let mut removed_local_provider = false;
+    for provider_name in managed_names {
+        if provider_name != target_provider {
+            remove_provider_table(&mut doc, &provider_name);
+            removed_local_provider = true;
+        }
+    }
+    let raw = normalize_config_toml_order(&doc.to_string());
+    backup_existing(&config_path)?;
+    write_file_atomically(&config_path, raw.as_bytes())?;
+
+    let gui_api_base = cleanup_gui_environment(backend_url);
+    cleanup_legacy_app_server_proxy_environment().map_err(anyhow::Error::msg)?;
+    write_provider_mode(&codex_home, CodexProviderMode::DirectApi)?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=direct_api_mode_enabled provider={} removed_local_route={} removed_local_provider={}",
+        target_provider, removed_local_route, removed_local_provider
+    ));
+
+    Ok(CodexProviderModeSwitchReport {
+        mode: CodexProviderMode::DirectApi,
+        active_provider: target_provider,
+        removed_local_route,
+        removed_local_provider,
+        gui_api_base,
+    })
+}
+
+/// Used by daemon startup. This is intentionally read-only: it must never
+/// modify Codex files or environment variables while direct API mode is active.
+pub fn should_preserve_direct_api_mode(codex_home: Option<PathBuf>, backend_url: &str) -> bool {
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    let config_path = codex_home.join("config.toml");
+    let active_provider = parse_existing_config_toml(&config_path)
+        .ok()
+        .and_then(|doc| {
+            doc.get("model_provider")
+                .and_then(|item| item.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    inspect_provider_mode(
+        &codex_home,
+        &config_path,
+        backend_url,
+        active_provider.as_deref(),
+    ) == CodexProviderMode::DirectApi
 }
 
 #[cfg(test)]
@@ -2083,6 +2211,26 @@ fn managed_provider_names_in_config(
     names
 }
 
+fn threadrelay_local_provider_names(
+    doc: &toml_edit::DocumentMut,
+    backend_url: &str,
+) -> HashSet<String> {
+    let mut names = managed_provider_names_in_config(doc, backend_url, true);
+    let local_gateway_url = ai_gateway_base_url_from_backend_url(backend_url);
+    let local_ai_gateway = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|providers| providers.get(AI_GATEWAY_PROVIDER_NAME))
+        .and_then(|item| item.as_table())
+        .and_then(|provider| provider.get("base_url"))
+        .and_then(|item| item.as_str())
+        .is_some_and(|value| backend_urls_equivalent(value.trim(), &local_gateway_url));
+    if local_ai_gateway {
+        names.insert(AI_GATEWAY_PROVIDER_NAME.to_string());
+    }
+    names
+}
+
 fn ai_gateway_base_url_from_backend_url(backend_url: &str) -> String {
     let backend = backend_url.trim_end_matches('/');
     if let Some(base) = backend.strip_suffix("/backend-api") {
@@ -2140,6 +2288,122 @@ fn inspect_connection_mode(path: &Path, backend_url: &str) -> LocalConnectionMod
         LocalConnectionMode::VpnCompatible
     } else {
         LocalConnectionMode::Standard
+    }
+}
+
+fn provider_mode_marker_path(codex_home: &Path) -> PathBuf {
+    codex_home.join(CODEX_CONNECTION_MODE_FILE)
+}
+
+fn write_provider_mode(codex_home: &Path, mode: CodexProviderMode) -> Result<()> {
+    let path = provider_mode_marker_path(codex_home);
+    let raw = serde_json::to_vec_pretty(&json!({ "mode": mode }))?;
+    write_file_atomically(
+        &path,
+        format!("{}\n", String::from_utf8_lossy(&raw)).as_bytes(),
+    )
+}
+
+fn remove_provider_mode_marker(codex_home: &Path) -> Result<()> {
+    match std::fs::remove_file(provider_mode_marker_path(codex_home)) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn read_provider_mode_marker(codex_home: &Path) -> Option<CodexProviderMode> {
+    let raw = std::fs::read_to_string(provider_mode_marker_path(codex_home)).ok()?;
+    serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()?
+        .get("mode")
+        .cloned()
+        .and_then(|value| serde_json::from_value(value).ok())
+}
+
+fn inspect_provider_mode(
+    codex_home: &Path,
+    config_path: &Path,
+    backend_url: &str,
+    active_provider: Option<&str>,
+) -> CodexProviderMode {
+    let Ok(doc) = parse_existing_config_toml(config_path) else {
+        return read_provider_mode_marker(codex_home).unwrap_or(CodexProviderMode::Unknown);
+    };
+    let managed_names = threadrelay_local_provider_names(&doc, backend_url);
+    if let Some(active_provider) = active_provider {
+        if !managed_names.contains(active_provider)
+            && provider_is_external(&doc, active_provider, backend_url)
+        {
+            return CodexProviderMode::DirectApi;
+        }
+        if managed_names.contains(active_provider) {
+            return CodexProviderMode::Threadrelay;
+        }
+    }
+    let local_route = doc
+        .get("chatgpt_base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(|value| backend_urls_equivalent(value, backend_url));
+    if local_route {
+        CodexProviderMode::Threadrelay
+    } else {
+        read_provider_mode_marker(codex_home).unwrap_or(CodexProviderMode::Unknown)
+    }
+}
+
+fn provider_is_external(
+    doc: &toml_edit::DocumentMut,
+    provider_name: &str,
+    backend_url: &str,
+) -> bool {
+    let Some(provider) = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|providers| providers.get(provider_name))
+        .and_then(|item| item.as_table())
+    else {
+        return false;
+    };
+    let Some(base_url) = provider
+        .get("base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    !backend_urls_equivalent(base_url, &ai_gateway_base_url_from_backend_url(backend_url))
+        && !threadrelay_local_provider_names(doc, backend_url).contains(provider_name)
+}
+
+fn preferred_external_provider(
+    doc: &toml_edit::DocumentMut,
+    backend_url: &str,
+    managed_names: &HashSet<String>,
+) -> Option<String> {
+    let providers = doc.get("model_providers")?.as_table()?;
+    let mut names = providers
+        .iter()
+        .map(|(name, _)| name.to_string())
+        .filter(|name| !managed_names.contains(name))
+        .filter(|name| provider_is_external(doc, name, backend_url))
+        .collect::<Vec<_>>();
+    names.sort_by_key(|name| (name != "custom", name.clone()));
+    names.into_iter().next()
+}
+
+fn provider_mode_message(mode: CodexProviderMode, active_provider: Option<&str>) -> String {
+    match mode {
+        CodexProviderMode::Threadrelay => "请求经过 ThreadRelay 本地 AI 网关".to_string(),
+        CodexProviderMode::DirectApi => format!(
+            "请求直接发送到第三方 API{}",
+            active_provider
+                .map(|provider| format!("（{provider}）"))
+                .unwrap_or_default()
+        ),
+        CodexProviderMode::Unknown => "尚未识别当前 Codex Provider 接管方".to_string(),
     }
 }
 
@@ -5459,5 +5723,62 @@ base_url = "https://api.example.invalid"
             codex_app_gui_api_base_url("http://localhost:3847/backend-api/"),
             "http://localhost:3847/api"
         );
+    }
+
+    #[test]
+    fn switch_to_direct_api_mode_keeps_external_provider_and_auth() {
+        let codex_home = unique_temp_dir();
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        let config_path = codex_home.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "dummy-token"
+
+[model_providers.custom]
+name = "custom"
+base_url = "https://api.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "direct-key"
+"#,
+        )
+        .expect("write config");
+        let auth_path = codex_home.join("auth.json");
+        std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"direct-key"}"#).expect("write auth");
+
+        let report = switch_codex_app_to_direct_api_mode(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        )
+        .expect("switch mode");
+        let config = std::fs::read_to_string(&config_path).expect("read config");
+        assert_eq!(report.active_provider, "custom");
+        assert!(!config.contains("chatgpt_base_url"));
+        assert!(!config.contains("[model_providers.ai-gateway]"));
+        assert!(config.contains("model_provider = \"custom\""));
+        assert!(config.contains("[model_providers.custom]"));
+        assert_eq!(
+            inspect_codex_app_config_for_mode(
+                Some(codex_home.clone()),
+                "http://127.0.0.1:3847/backend-api",
+                true
+            )
+            .provider_mode,
+            CodexProviderMode::DirectApi
+        );
+        assert_eq!(
+            std::fs::read_to_string(&auth_path).expect("read auth"),
+            r#"{"OPENAI_API_KEY":"direct-key"}"#
+        );
+
+        let _ = std::fs::remove_dir_all(codex_home);
     }
 }

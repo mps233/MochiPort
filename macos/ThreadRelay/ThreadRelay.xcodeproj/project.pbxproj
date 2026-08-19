@@ -22,6 +22,7 @@
 		A10000000000000000000011 /* UpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000011 /* UpdateChecker.swift */; };
 		A10000000000000000000012 /* ProviderBranding.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* ProviderBranding.swift */; };
 		A10000000000000000000013 /* ProviderLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ProviderLogos */; };
+		A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* GatewayQuotaDock.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -45,6 +46,7 @@
 		A20000000000000000000011 /* UpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateChecker.swift; sourceTree = "<group>"; };
 		A20000000000000000000012 /* ProviderBranding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderBranding.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* ProviderLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ProviderLogos; sourceTree = "<group>"; };
+		A20000000000000000000014 /* GatewayQuotaDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayQuotaDock.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -90,6 +92,7 @@
 				A2000000000000000000000F /* ManagementViews.swift */,
 				A20000000000000000000011 /* UpdateChecker.swift */,
 				A20000000000000000000012 /* ProviderBranding.swift */,
+				A20000000000000000000014 /* GatewayQuotaDock.swift */,
 				A20000000000000000000013 /* ProviderLogos */,
 			);
 			path = Sources/ThreadRelayMac;
@@ -224,6 +227,7 @@
 				A1000000000000000000000F /* ManagementViews.swift in Sources */,
 				A10000000000000000000011 /* UpdateChecker.swift in Sources */,
 				A10000000000000000000012 /* ProviderBranding.swift in Sources */,
+				A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			};

@@ -192,12 +192,8 @@ struct MessagingOnboardingView: View {
             Divider().padding(.leading, 46)
             platformRow(.wecom, detail: "扫码授权企业微信机器人")
         }
-        .background(Color(nsColor: .controlBackgroundColor))
-        .clipShape(RoundedRectangle(cornerRadius: ThreadRelayRadius.content))
-        .overlay {
-            RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
-        }
+        .settingsGroupedBackground()
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
     private func platformRow(
