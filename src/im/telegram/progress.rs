@@ -144,7 +144,7 @@ pub(crate) fn diff_summary_from_item(item: &Value) -> Option<TelegramDiffSummary
     let file_count = changes.len().max(files.len());
     let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
     let omitted_paths = file_count.saturating_sub(paths.len());
-    (file_count > 0).then(|| TelegramDiffSummary {
+    (file_count > 0).then_some(TelegramDiffSummary {
         file_count,
         additions,
         deletions,
@@ -234,7 +234,7 @@ pub(crate) fn diff_summary_from_diff(diff: &str) -> Option<TelegramDiffSummary> 
     file_count = file_count.max(files.len());
     let paths: Vec<String> = files.iter().map(|file| file.path.clone()).collect();
     let omitted_paths = file_count.saturating_sub(paths.len());
-    (file_count > 0).then(|| TelegramDiffSummary {
+    (file_count > 0).then_some(TelegramDiffSummary {
         file_count,
         additions,
         deletions,
@@ -938,10 +938,7 @@ fn command_progress_title(snapshot: &TelegramCommandProgressSnapshot, text: ImTe
             snapshot.failed,
             snapshot.retry_count,
         )
-    } else if total == 0 && has_supplemental {
-        text.telegram_task_progress_title(snapshot.completed, snapshot.failed)
-            .to_string()
-    } else if has_plan_progress(snapshot) {
+    } else if (total == 0 && has_supplemental) || has_plan_progress(snapshot) {
         text.telegram_task_progress_title(snapshot.completed, snapshot.failed)
             .to_string()
     } else {
@@ -1169,7 +1166,7 @@ fn render_entry(
     if let Some(output) = entry.failure_output.as_deref()
         && failure_output_chars > 0
     {
-        line.push_str("\n");
+        line.push('\n');
         line.push_str(text.telegram_command_progress_error_summary());
         line.push_str("\n```text\n");
         line.push_str(&truncate_tail(output, failure_output_chars));
@@ -1387,7 +1384,7 @@ fn diff_file_display_name(path: &str) -> String {
 fn file_name(path: &str) -> &str {
     let trimmed = path.trim().trim_matches('"');
     trimmed
-        .rsplit(|ch| ch == '/' || ch == '\\')
+        .rsplit(['/', '\\'])
         .find(|part| !part.is_empty())
         .unwrap_or(trimmed)
 }

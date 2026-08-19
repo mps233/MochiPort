@@ -273,17 +273,13 @@ pub struct RemoteControlServerConnection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RemoteControlSourceKind {
     CodexApp,
     Vscode,
     Cli,
+    #[default]
     Unknown,
-}
-
-impl Default for RemoteControlSourceKind {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 pub struct PendingRemoteRequest {
@@ -588,7 +584,7 @@ fn restore_persisted_im_bindings(
 ) -> (RuntimeState, bool) {
     let original_bindings = persisted.im_thread_bindings.clone();
     let mut bindings = original_bindings.iter().collect::<Vec<_>>();
-    bindings.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+    bindings.sort_unstable_by_key(|(left, _)| *left);
 
     let mut runtime = RuntimeState::default();
     let mut restored_bindings = HashMap::new();

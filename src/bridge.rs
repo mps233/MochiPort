@@ -1,5 +1,9 @@
 use anyhow::Result;
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tokio::{
     sync::{Mutex, mpsc},
     task::JoinSet,
@@ -645,7 +649,7 @@ async fn handle_inbound(
     feishu_flow::handle_inbound(state, api, outbound_tx, message).await
 }
 
-fn attachment_root(state_path: &PathBuf) -> PathBuf {
+fn attachment_root(state_path: &Path) -> PathBuf {
     state_path
         .parent()
         .map(PathBuf::from)
@@ -710,19 +714,18 @@ async fn codex_event_router(
                     .await
                     .resolve_approval_request_with_context(request_id);
                 if let Some(resolved) = resolved {
-                    if resolved.was_current {
-                        if let Some((conversation_key, next_approval)) = resolved
+                    if resolved.was_current
+                        && let Some((conversation_key, next_approval)) = resolved
                             .next_current
                             .map(|next| (resolved.conversation_key.clone(), next))
-                        {
-                            let _ = events::send_next_approval(
-                                &state,
-                                &outbound_tx,
-                                &conversation_key,
-                                &next_approval,
-                            )
-                            .await;
-                        }
+                    {
+                        let _ = events::send_next_approval(
+                            &state,
+                            &outbound_tx,
+                            &conversation_key,
+                            &next_approval,
+                        )
+                        .await;
                     }
                     state
                         .push_event(

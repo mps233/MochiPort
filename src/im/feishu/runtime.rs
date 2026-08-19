@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::HashMap,
     time::{Duration, Instant},
 };
@@ -218,10 +218,10 @@ pub async fn ensure_started_streaming_card_state(
         entry.receive_id_type = receive_id_type.to_string();
         entry.receive_id = receive_id.to_string();
         entry.kind = kind.to_string();
-        if let Some(text) = initial_text.filter(|value| !value.trim().is_empty()) {
-            if entry.text.trim().is_empty() {
-                entry.text = text;
-            }
+        if let Some(text) = initial_text.filter(|value| !value.trim().is_empty())
+            && entry.text.trim().is_empty()
+        {
+            entry.text = text;
         }
         entry.dirty = true;
         write_stream_log("started", thread_id, item_id, entry, "");

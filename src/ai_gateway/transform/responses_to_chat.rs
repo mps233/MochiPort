@@ -85,10 +85,10 @@ pub fn build_chat_request_with_tool_names(
     }
 
     // 9. text.format → response_format
-    if let Some(text) = &request.text {
-        if let Some(format) = &text.format {
-            apply_response_format(&mut body, format, deepseek_mode);
-        }
+    if let Some(text) = &request.text
+        && let Some(format) = &text.format
+    {
+        apply_response_format(&mut body, format, deepseek_mode);
     }
 
     // 10. DeepSeek 后处理
@@ -119,12 +119,12 @@ pub fn build_chat_request_with_tool_names(
             ensure_thinking_tool_call_reasoning_content(&mut body);
 
             // 10f. thinking 启用时移除无效参数
-            body.as_object_mut().map(|m| {
+            if let Some(m) = body.as_object_mut() {
                 m.remove("temperature");
                 m.remove("top_p");
                 m.remove("presence_penalty");
                 m.remove("frequency_penalty");
-            });
+            }
         }
     }
 
@@ -225,25 +225,25 @@ fn build_chat_function_object(
         .cloned()
         .unwrap_or_default();
 
-    if !function.contains_key("name") {
-        if let Some(name) = tool.get("name") {
-            function.insert("name".to_string(), name.clone());
-        }
+    if !function.contains_key("name")
+        && let Some(name) = tool.get("name")
+    {
+        function.insert("name".to_string(), name.clone());
     }
-    if !function.contains_key("description") {
-        if let Some(description) = tool.get("description") {
-            function.insert("description".to_string(), description.clone());
-        }
+    if !function.contains_key("description")
+        && let Some(description) = tool.get("description")
+    {
+        function.insert("description".to_string(), description.clone());
     }
-    if !function.contains_key("parameters") {
-        if let Some(parameters) = tool.get("parameters") {
-            function.insert("parameters".to_string(), parameters.clone());
-        }
+    if !function.contains_key("parameters")
+        && let Some(parameters) = tool.get("parameters")
+    {
+        function.insert("parameters".to_string(), parameters.clone());
     }
-    if !function.contains_key("strict") {
-        if let Some(strict) = tool.get("strict") {
-            function.insert("strict".to_string(), strict.clone());
-        }
+    if !function.contains_key("strict")
+        && let Some(strict) = tool.get("strict")
+    {
+        function.insert("strict".to_string(), strict.clone());
     }
     let parameters = normalize_chat_function_parameters(function.remove("parameters"));
     function.insert("parameters".to_string(), parameters);
@@ -252,9 +252,7 @@ fn build_chat_function_object(
     let encoded_name = tool_name_map.encode_function(namespace, name);
     function.insert("name".to_string(), json!(encoded_name));
 
-    if function.get("name").and_then(|v| v.as_str()).is_none() {
-        return None;
-    }
+    function.get("name").and_then(|v| v.as_str())?;
 
     Some(Value::Object(function))
 }
@@ -369,13 +367,13 @@ fn convert_tool_choice_to_chat(tool_choice: &Value, tool_name_map: &mut ToolName
         });
     }
 
-    if obj.get("type").and_then(|v| v.as_str()) == Some("custom") {
-        if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
-            return json!({
-                "type": "function",
-                "function": {"name": tool_name_map.encode_custom(name)},
-            });
-        }
+    if obj.get("type").and_then(|v| v.as_str()) == Some("custom")
+        && let Some(name) = obj.get("name").and_then(|v| v.as_str())
+    {
+        return json!({
+            "type": "function",
+            "function": {"name": tool_name_map.encode_custom(name)},
+        });
     }
 
     tool_choice.clone()
@@ -861,15 +859,13 @@ fn inject_json_output_instruction(body: &mut Value, format: &TextFormat) {
         return;
     };
 
-    if let Some(first) = messages.first_mut() {
-        if first.get("role").and_then(Value::as_str) == Some("system") {
-            if let Some(content) = first.get_mut("content") {
-                if let Some(existing) = content.as_str() {
-                    *content = json!(format!("{existing}\n\n{instruction}"));
-                    return;
-                }
-            }
-        }
+    if let Some(first) = messages.first_mut()
+        && first.get("role").and_then(Value::as_str) == Some("system")
+        && let Some(content) = first.get_mut("content")
+        && let Some(existing) = content.as_str()
+    {
+        *content = json!(format!("{existing}\n\n{instruction}"));
+        return;
     }
 
     messages.insert(
@@ -942,7 +938,7 @@ fn json_schema_example(schema: &Value) -> Value {
         Some("number") => json!(0),
         Some("boolean") => json!(false),
         Some("null") => Value::Null,
-        Some("string") | _ => json!("string"),
+        _ => json!("string"),
     }
 }
 
@@ -1014,10 +1010,10 @@ fn ensure_thinking_tool_call_reasoning_content(body: &mut Value) {
         }
 
         // 记录最近的 reasoning_content
-        if let Some(rc) = msg.get("reasoning_content").and_then(|v| v.as_str()) {
-            if !rc.is_empty() {
-                last_reasoning_content = Some(rc.to_string());
-            }
+        if let Some(rc) = msg.get("reasoning_content").and_then(|v| v.as_str())
+            && !rc.is_empty()
+        {
+            last_reasoning_content = Some(rc.to_string());
         }
 
         // 有 tool_calls 但缺少 reasoning_content 时，从前一个回填
@@ -1030,10 +1026,11 @@ fn ensure_thinking_tool_call_reasoning_content(body: &mut Value) {
             .and_then(|v| v.as_str())
             .is_some_and(|s| !s.is_empty());
 
-        if has_tool_calls && !has_reasoning {
-            if let Some(rc) = &last_reasoning_content {
-                msg["reasoning_content"] = json!(rc);
-            }
+        if has_tool_calls
+            && !has_reasoning
+            && let Some(rc) = &last_reasoning_content
+        {
+            msg["reasoning_content"] = json!(rc);
         }
     }
 }

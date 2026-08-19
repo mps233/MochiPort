@@ -1,5 +1,5 @@
 pub(super) fn normalize_card_markdown(text: &str) -> String {
-    sanitize_markdown_image_links(&text.replace("\r\n", "\n").trim())
+    sanitize_markdown_image_links(text.replace("\r\n", "\n").trim())
 }
 
 fn sanitize_markdown_image_links(text: &str) -> String {

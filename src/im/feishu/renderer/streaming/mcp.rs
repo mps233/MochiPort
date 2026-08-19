@@ -53,17 +53,17 @@ fn extract_mcp_tool_title(content: &str) -> Option<String> {
     let mut tool = None;
     for line in content.lines() {
         let trimmed = line.trim();
-        if server.is_none() {
-            if let Some(value) = trimmed.strip_prefix("**服务**:") {
-                server = Some(value.trim().trim_matches('`').to_string());
-                continue;
-            }
+        if server.is_none()
+            && let Some(value) = trimmed.strip_prefix("**服务**:")
+        {
+            server = Some(value.trim().trim_matches('`').to_string());
+            continue;
         }
-        if tool.is_none() {
-            if let Some(value) = trimmed.strip_prefix("**工具**:") {
-                tool = Some(value.trim().trim_matches('`').to_string());
-                continue;
-            }
+        if tool.is_none()
+            && let Some(value) = trimmed.strip_prefix("**工具**:")
+        {
+            tool = Some(value.trim().trim_matches('`').to_string());
+            continue;
         }
     }
     match (

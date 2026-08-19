@@ -76,10 +76,10 @@ fn anthropic_cache_creation_split(usage: &Value) -> (i64, i64) {
 }
 
 pub(super) fn merge_i64_field(target: &mut Value, source: &Value, field: &str) {
-    if let Some(value) = source.get(field).and_then(Value::as_i64) {
-        if value != 0 || target.get(field).and_then(Value::as_i64).is_none() {
-            target[field] = json!(value);
-        }
+    if let Some(value) = source.get(field).and_then(Value::as_i64)
+        && (value != 0 || target.get(field).and_then(Value::as_i64).is_none())
+    {
+        target[field] = json!(value);
     }
 }
 

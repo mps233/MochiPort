@@ -647,17 +647,17 @@ async fn ensure_remote_control_client_initialized(
             false
         } else {
             let has_connection_map = !remote.connections.is_empty();
-            let connection_initialized = remote
-                .connections
-                .is_empty()
-                .then_some(false)
-                .unwrap_or_else(|| {
+            let connection_initialized = if remote.connections.is_empty() {
+                false
+            } else {
+                {
                     remote
                         .connections
                         .values()
                         .find(|connection| connection.connection_epoch == connection_epoch)
                         .is_some_and(|connection| connection.initialized)
-                });
+                }
+            };
             let client = ensure_client_state_locked(&mut remote, &client_key);
             let client_initializing = client.pending.values().any(|pending| {
                 pending.method == "initialize" && pending.connection_epoch == connection_epoch

@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::BTreeMap,
     fs::FileTimes,
     path::{Path, PathBuf},
@@ -109,10 +109,10 @@ fn resolve_rollout_path(
         return Ok(path);
     }
 
-    if let Some(path) = find_rollout_path_in_state_db(codex_home, thread_id)? {
-        if path.exists() {
-            return Ok(path);
-        }
+    if let Some(path) = find_rollout_path_in_state_db(codex_home, thread_id)?
+        && path.exists()
+    {
+        return Ok(path);
     }
 
     Err(anyhow!(

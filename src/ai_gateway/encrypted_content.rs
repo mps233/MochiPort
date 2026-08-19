@@ -175,6 +175,7 @@ pub(crate) fn remove_all_responses_encrypted_content(value: &mut Value) -> Encry
     prepare_input(value, &placeholder, true, true)
 }
 
+#[allow(clippy::collapsible_match)]
 fn prepare_input(
     value: &mut Value,
     scope: &EncryptedContentScope,

@@ -902,10 +902,10 @@ fn resolve_codex_installation_id(codex_home: &Path) -> Result<String> {
     file.read_to_string(&mut contents)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let trimmed = contents.trim();
-    if !trimmed.is_empty() {
-        if let Ok(existing) = uuid::Uuid::parse_str(trimmed) {
-            return Ok(existing.to_string());
-        }
+    if !trimmed.is_empty()
+        && let Ok(existing) = uuid::Uuid::parse_str(trimmed)
+    {
+        return Ok(existing.to_string());
     }
 
     let installation_id = uuid::Uuid::new_v4().to_string();
@@ -1824,7 +1824,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     disable_host_owned_codex_apps(&mut doc);
     remove_legacy_openai_bundled_marketplace(&mut doc);
     upsert_enabled_plugins(&mut doc, REQUIRED_OPENAI_BUNDLED_PLUGIN_IDS);
-    if let Some(openai_curated) = find_openai_curated_marketplace_root(&codex_home) {
+    if let Some(openai_curated) = find_openai_curated_marketplace_root(codex_home) {
         upsert_local_marketplace(&mut doc, OPENAI_CURATED_MARKETPLACE_NAME, &openai_curated);
         filter_curated_marketplace_manifests(&openai_curated);
     }
@@ -2251,10 +2251,10 @@ fn codex_connection_url(url: &str, mode: LocalConnectionMode) -> String {
     let Some(host) = parsed.host_str() else {
         return url.to_string();
     };
-    if matches!(host, "127.0.0.1" | "::1" | "localhost") {
-        if parsed.set_host(Some("localhost")).is_ok() {
-            return parsed.to_string();
-        }
+    if matches!(host, "127.0.0.1" | "::1" | "localhost")
+        && parsed.set_host(Some("localhost")).is_ok()
+    {
+        return parsed.to_string();
     }
     url.to_string()
 }
@@ -2669,7 +2669,7 @@ fn parse_config_toml_document(raw: &str, path: &Path) -> Result<toml_edit::Docum
     match raw.parse::<toml_edit::DocumentMut>() {
         Ok(doc) => Ok(doc),
         Err(err) => {
-            let repaired = dedupe_duplicate_key_lines(&raw);
+            let repaired = dedupe_duplicate_key_lines(raw);
             if repaired == raw {
                 return Err(err).with_context(|| format!("failed to parse {}", path.display()));
             }
@@ -3136,11 +3136,11 @@ fn remove_created_plugin_defaults(doc: &mut toml_edit::DocumentMut) {
         if let Some(plugins) = doc.get_mut("plugins").and_then(|item| item.as_table_mut()) {
             for plugin_id in REQUIRED_OPENAI_BUNDLED_PLUGIN_IDS {
                 let remove_plugin = plugins
-                    .get(*plugin_id)
+                    .get(plugin_id)
                     .and_then(|item| item.as_table())
                     .is_some_and(is_created_plugin_default);
                 if remove_plugin {
-                    plugins.remove(*plugin_id);
+                    plugins.remove(plugin_id);
                 }
             }
             plugins.is_empty()
@@ -3208,10 +3208,10 @@ fn restore_or_remove_managed_file(
     if !target_path.exists() {
         return Ok(false);
     }
-    if let Some(remove_guard) = remove_guard {
-        if !remove_guard(target_path)? {
-            return Ok(false);
-        }
+    if let Some(remove_guard) = remove_guard
+        && !remove_guard(target_path)?
+    {
+        return Ok(false);
     }
     std::fs::remove_file(target_path)
         .with_context(|| format!("failed to remove {}", target_path.display()))?;
@@ -4514,7 +4514,7 @@ enabled = false
             assert_eq!(
                 doc.get("plugins")
                     .and_then(|item| item.as_table())
-                    .and_then(|plugins| plugins.get(*plugin_id))
+                    .and_then(|plugins| plugins.get(plugin_id))
                     .and_then(|item| item.as_table())
                     .and_then(|plugin| plugin.get("enabled"))
                     .and_then(|item| item.as_bool()),

@@ -320,9 +320,7 @@ fn stream_internal_web_search_response(
         )
         .await
         {
-            let _ = tx
-                .send(Err(io::Error::new(io::ErrorKind::Other, err.message)))
-                .await;
+            let _ = tx.send(Err(io::Error::other(err.message))).await;
         }
     });
 
@@ -482,10 +480,7 @@ async fn stream_anthropic_round(
                 }
                 Ok(chunk)
             }
-            Err(e) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            )),
+            Err(e) => Err(std::io::Error::other(e.to_string())),
         });
 
     let mut converted = AnthropicSseToResponsesSse::new(

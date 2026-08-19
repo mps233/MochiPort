@@ -502,7 +502,7 @@ fn publish_active_daemon_locator_at(
     let parent = path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| AuthError::InvalidDiscoveryFile)?;
+        .ok_or(AuthError::InvalidDiscoveryFile)?;
     fs::create_dir_all(parent).map_err(AuthError::Io)?;
 
     let temporary = parent.join(format!(
@@ -745,7 +745,7 @@ async fn lifecycle_lease_operation(
     // Keep lease mutations behind the same in-process lifecycle mutex used by
     // restart. This prevents a heartbeat/release from changing ownership in
     // the middle of a local drain.
-    match update_lifecycle_lease_async(&state, installation_id.clone(), operation).await {
+    match update_lifecycle_lease_async(state, installation_id.clone(), operation).await {
         Ok(()) => Json(lifecycle_snapshot(state).await).into_response(),
         Err(error) => lease_error_response(error),
     }

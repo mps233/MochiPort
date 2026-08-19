@@ -1,3 +1,5 @@
+#![allow(clippy::items_after_test_module)]
+
 use std::{
     cell::RefCell,
     collections::BTreeMap,
@@ -99,6 +101,7 @@ struct UpdateDownload {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)]
 enum UpdatePlatform {
     Windows,
     Macos,

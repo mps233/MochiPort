@@ -31,10 +31,10 @@ impl AnthropicStreamState {
     }
 
     pub(super) fn handle_message_delta(&mut self, event: &Value) {
-        if let Some(delta) = event.get("delta") {
-            if let Some(stop_reason) = delta.get("stop_reason").and_then(Value::as_str) {
-                self.stop_reason = Some(stop_reason.to_string());
-            }
+        if let Some(delta) = event.get("delta")
+            && let Some(stop_reason) = delta.get("stop_reason").and_then(Value::as_str)
+        {
+            self.stop_reason = Some(stop_reason.to_string());
         }
         if let Some(usage) = event.get("usage").and_then(convert_anthropic_stream_usage) {
             self.merge_usage(usage);

@@ -1,7 +1,8 @@
 use crate::config::LocalConnectionMode;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub(super) enum GuiLocale {
+    #[default]
     ZhCn,
     EnUs,
 }
@@ -20,12 +21,6 @@ impl GuiLocale {
             Self::ZhCn => "zh-CN",
             Self::EnUs => "en-US",
         }
-    }
-}
-
-impl Default for GuiLocale {
-    fn default() -> Self {
-        Self::ZhCn
     }
 }
 

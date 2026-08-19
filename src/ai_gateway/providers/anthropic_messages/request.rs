@@ -12,6 +12,7 @@ use super::request_tools::{build_anthropic_tools, convert_tool_choice_to_anthrop
 use super::types::DEFAULT_MAX_TOKENS;
 
 #[cfg(test)]
+#[allow(clippy::result_large_err)]
 pub(super) fn build_anthropic_request(
     request: &GatewayRequest,
     profile: AnthropicProviderProfile,

@@ -460,7 +460,7 @@ fn custom_input_from_arguments(arguments: Value) -> String {
 fn tool_search_arguments(arguments: Value) -> Value {
     let mut arguments = match arguments {
         Value::String(arguments) => {
-            serde_json::from_str::<Value>(&arguments).unwrap_or_else(|_| Value::String(arguments))
+            serde_json::from_str::<Value>(&arguments).unwrap_or(Value::String(arguments))
         }
         arguments => arguments,
     };

@@ -172,7 +172,7 @@ pub(super) fn apply_textctrl_theme(input: &TextCtrl) {
 
 fn table_row_colour(row: usize) -> Colour {
     let t = theme::theme();
-    if row % 2 == 0 {
+    if row.is_multiple_of(2) {
         t.table_row
     } else {
         t.table_row_alt
@@ -538,34 +538,26 @@ pub(super) fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
 
 fn render_status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     match kind {
-        StatusIconKind::Codex => {
-            return svg_brand_bitmap(
-                "codex.svg",
-                include_bytes!("../../packaging/brand/codex.svg"),
-                size,
-            );
-        }
-        StatusIconKind::VsCodeCodex => {
-            return svg_brand_bitmap(
-                "vscode-logo.svg",
-                include_bytes!("../../packaging/brand/vscode-logo.svg"),
-                size,
-            );
-        }
-        StatusIconKind::CodexCli => {
-            return svg_brand_bitmap(
-                "codex-cli.svg",
-                include_bytes!("../../packaging/brand/codex-cli.svg"),
-                size,
-            );
-        }
-        StatusIconKind::Service => {
-            return svg_brand_bitmap(
-                "service-server.svg",
-                include_bytes!("../../packaging/brand/service-server.svg"),
-                size,
-            );
-        }
+        StatusIconKind::Codex => svg_brand_bitmap(
+            "codex.svg",
+            include_bytes!("../../packaging/brand/codex.svg"),
+            size,
+        ),
+        StatusIconKind::VsCodeCodex => svg_brand_bitmap(
+            "vscode-logo.svg",
+            include_bytes!("../../packaging/brand/vscode-logo.svg"),
+            size,
+        ),
+        StatusIconKind::CodexCli => svg_brand_bitmap(
+            "codex-cli.svg",
+            include_bytes!("../../packaging/brand/codex-cli.svg"),
+            size,
+        ),
+        StatusIconKind::Service => svg_brand_bitmap(
+            "service-server.svg",
+            include_bytes!("../../packaging/brand/service-server.svg"),
+            size,
+        ),
     }
 }
 
@@ -577,34 +569,26 @@ pub(super) fn disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> 
 
 fn render_disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     match kind {
-        StatusIconKind::Codex => {
-            return disabled_svg_brand_bitmap(
-                "codex.svg",
-                include_bytes!("../../packaging/brand/codex.svg"),
-                size,
-            );
-        }
-        StatusIconKind::VsCodeCodex => {
-            return disabled_svg_brand_bitmap(
-                "vscode-logo.svg",
-                include_bytes!("../../packaging/brand/vscode-logo.svg"),
-                size,
-            );
-        }
-        StatusIconKind::CodexCli => {
-            return disabled_svg_brand_bitmap(
-                "codex-cli.svg",
-                include_bytes!("../../packaging/brand/codex-cli.svg"),
-                size,
-            );
-        }
-        StatusIconKind::Service => {
-            return disabled_svg_brand_bitmap(
-                "service-server.svg",
-                include_bytes!("../../packaging/brand/service-server.svg"),
-                size,
-            );
-        }
+        StatusIconKind::Codex => disabled_svg_brand_bitmap(
+            "codex.svg",
+            include_bytes!("../../packaging/brand/codex.svg"),
+            size,
+        ),
+        StatusIconKind::VsCodeCodex => disabled_svg_brand_bitmap(
+            "vscode-logo.svg",
+            include_bytes!("../../packaging/brand/vscode-logo.svg"),
+            size,
+        ),
+        StatusIconKind::CodexCli => disabled_svg_brand_bitmap(
+            "codex-cli.svg",
+            include_bytes!("../../packaging/brand/codex-cli.svg"),
+            size,
+        ),
+        StatusIconKind::Service => disabled_svg_brand_bitmap(
+            "service-server.svg",
+            include_bytes!("../../packaging/brand/service-server.svg"),
+            size,
+        ),
     }
 }
 

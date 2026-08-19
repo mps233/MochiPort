@@ -333,7 +333,7 @@ pub(super) async fn send_envelopes_on_connection(
 }
 
 pub(super) async fn send_ws_control_ping(state: &SharedState, connection_epoch: u64) -> Result<()> {
-    chain_log::write_line("[remote_control] event=client_ping payload_len=0".to_string());
+    chain_log::write_line("[remote_control] event=client_ping payload_len=0");
     info!(
         target: "threadrelay::remote_control",
         event = "remote_control_client_ping",

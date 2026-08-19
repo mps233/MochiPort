@@ -98,11 +98,11 @@ fn result_list_item(result: &Value) -> Value {
         (None, Some(url)) => line.push(rich_blocks::url(rich_blocks::text("未命名结果"), url)),
         (None, None) => line.push(rich_blocks::text("未命名结果")),
     }
-    if let Some(domain) = domain {
-        if has_title {
-            line.push(rich_blocks::text(" · "));
-            line.push(rich_blocks::code(domain));
-        }
+    if let Some(domain) = domain
+        && has_title
+    {
+        line.push(rich_blocks::text(" · "));
+        line.push(rich_blocks::code(domain));
     }
 
     let mut blocks = vec![rich_blocks::paragraph(rich_blocks::rich_text(line))];

@@ -348,7 +348,7 @@ impl RequestLogStore {
                     .dropped_writes
                     .fetch_add(1, Ordering::Relaxed)
                     .saturating_add(1);
-                if dropped == 1 || dropped % 100 == 0 {
+                if dropped == 1 || dropped.is_multiple_of(100) {
                     warn!(
                         dropped,
                         "AI Gateway request log queue is unavailable; dropping log writes"
@@ -515,15 +515,14 @@ pub fn migrate_legacy_database(config: &AppConfig, target_path: &Path) {
     if let Some(parent) = target_path
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
+        && let Err(err) = fs::create_dir_all(parent)
     {
-        if let Err(err) = fs::create_dir_all(parent) {
-            warn!(
-                error = %err,
-                path = %parent.display(),
-                "failed to create AI Gateway request log directory"
-            );
-            return;
-        }
+        warn!(
+            error = %err,
+            path = %parent.display(),
+            "failed to create AI Gateway request log directory"
+        );
+        return;
     }
 
     let source_conn = match Connection::open(&source_path) {
@@ -2520,10 +2519,7 @@ mod tests {
         let context = insert_running_test_log(&db_path, "req-failed");
         let store = context.store.clone();
         let log_id = context.log_id;
-        let inner = stream::iter(vec![Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "upstream closed",
-        ))]);
+        let inner = stream::iter(vec![Err(std::io::Error::other("upstream closed"))]);
         let mut wrapped = ResponsesSseLogStream::new(inner, context);
 
         let item = wrapped.next().await.unwrap();

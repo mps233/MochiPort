@@ -442,10 +442,8 @@ impl RuntimeState {
         let entries = self
             .route_by_thread
             .iter()
-            .filter_map(|(thread_id, route)| {
-                (route.conversation_key == conversation_key)
-                    .then(|| (thread_id.clone(), route.clone()))
-            })
+            .filter(|&(_, route)| route.conversation_key == conversation_key)
+            .map(|(thread_id, route)| (thread_id.clone(), route.clone()))
             .collect::<Vec<_>>();
         for (thread_id, route) in &entries {
             self.route_by_thread.remove(thread_id);
@@ -587,12 +585,12 @@ impl RuntimeState {
         if self.current_turn_id(thread_id) != Some(turn_id) {
             return None;
         }
-        if let Some(existing) = self.terminal_status_fallback_by_thread.get_mut(thread_id) {
-            if existing.turn_id == turn_id {
-                let should_start_server_driver = !existing.server_driver_started;
-                existing.server_driver_started = true;
-                return Some((existing.token, should_start_server_driver));
-            }
+        if let Some(existing) = self.terminal_status_fallback_by_thread.get_mut(thread_id)
+            && existing.turn_id == turn_id
+        {
+            let should_start_server_driver = !existing.server_driver_started;
+            existing.server_driver_started = true;
+            return Some((existing.token, should_start_server_driver));
         }
         let token = self.next_terminal_status_fallback_token();
         self.terminal_status_fallback_by_thread.insert(
@@ -1520,12 +1518,12 @@ impl RuntimeState {
         if progress.turn_id != turn_id || progress.completed {
             return None;
         }
-        if progress.diff_summary.is_none() {
-            if let Some(fallback) = fallback {
-                progress.diff_summary = Some(limit_telegram_diff_summary(fallback));
-                progress.revision = progress.revision.saturating_add(1);
-                progress.dirty = true;
-            }
+        if progress.diff_summary.is_none()
+            && let Some(fallback) = fallback
+        {
+            progress.diff_summary = Some(limit_telegram_diff_summary(fallback));
+            progress.revision = progress.revision.saturating_add(1);
+            progress.dirty = true;
         }
         progress
             .dirty
@@ -1821,12 +1819,11 @@ impl RuntimeState {
         if !retain_command_progress {
             self.clear_telegram_command_progress_for_thread(thread_id);
         }
-        if let Some(turn_id) = turn_id.or(completed_turn_id.as_deref()) {
-            if let Some(commentary) = self.telegram_commentary_by_thread.get_mut(thread_id)
-                && commentary.turn_id == turn_id
-            {
-                commentary.completed = true;
-            }
+        if let Some(turn_id) = turn_id.or(completed_turn_id.as_deref())
+            && let Some(commentary) = self.telegram_commentary_by_thread.get_mut(thread_id)
+            && commentary.turn_id == turn_id
+        {
+            commentary.completed = true;
         }
         self.turn_finished_at_by_thread
             .insert(thread_id.to_string(), crate::types::now_ms());

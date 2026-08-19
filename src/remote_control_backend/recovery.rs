@@ -231,7 +231,7 @@ async fn finish_remote_control_client_recovery(
     let stream_id = client.stream_id.clone();
     let attempt = client.recovery_attempt;
     client.recovery_started_at_ms = None;
-    if is_legacy_default_client_key(&client_key) {
+    if is_legacy_default_client_key(client_key) {
         sync_default_client_legacy_locked(&mut remote);
     }
     remote.last_error = None;
@@ -263,10 +263,10 @@ pub(super) async fn resubscribe_bound_threads_after_recovery(
         runtime
             .route_by_thread
             .iter()
-            .filter_map(|(thread_id, route)| {
+            .filter(|&(_, route)| {
                 route_remote_client_key_matches(&route.remote_client_key, &client_key)
-                    .then(|| (thread_id.clone(), "bound_route"))
             })
+            .map(|(thread_id, _)| (thread_id.clone(), "bound_route"))
             .collect::<Vec<_>>()
     };
     targets.sort_by(|left, right| left.0.cmp(&right.0));

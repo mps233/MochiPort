@@ -30,9 +30,9 @@ pub fn is_agent_message_item(item: &Value) -> bool {
     match item.get("type").and_then(|v| v.as_str()) {
         Some("agentMessage") | Some("agent_message") => true,
         Some("message") => item.get("role").and_then(|v| v.as_str()) == Some("assistant"),
-        Some("event_msg") | Some("response_item") => item
-            .get("payload")
-            .is_some_and(|payload| is_agent_message_item(payload)),
+        Some("event_msg") | Some("response_item") => {
+            item.get("payload").is_some_and(is_agent_message_item)
+        }
         Some("task_complete") => true,
         _ => false,
     }
@@ -314,17 +314,17 @@ pub fn approval_decision_by_input(
     } else {
         normalized.parse::<usize>().ok()
     };
-    if let Some(index) = index {
-        if index > 0 {
-            return pending
-                .decisions
-                .get(index - 1)
-                .cloned()
-                .map(|decision| (index, decision));
-        }
+    if let Some(index) = index
+        && index > 0
+    {
+        return pending
+            .decisions
+            .get(index - 1)
+            .cloned()
+            .map(|decision| (index, decision));
     }
 
-    let decision = match normalized.as_str() {
+    match normalized.as_str() {
         "/y" | "/yes" | "y" | "yes" => pending
             .decisions
             .iter()
@@ -336,8 +336,7 @@ pub fn approval_decision_by_input(
             .position(|option| is_negative_decision(&option.decision))
             .map(|index| (index + 1, pending.decisions[index].clone())),
         _ => None,
-    };
-    decision
+    }
 }
 
 fn command_approval_summary(params: &Value) -> String {
@@ -428,10 +427,10 @@ fn permissions_approval_summary(params: &Value) -> String {
     if let Some(cwd) = params.get("cwd").and_then(|v| v.as_str()) {
         lines.push(format!("cwd: `{cwd}`"));
     }
-    if let Some(permissions) = params.get("permissions") {
-        if let Some(summary) = permission_profile_summary("permissions", permissions) {
-            lines.push(summary);
-        }
+    if let Some(permissions) = params.get("permissions")
+        && let Some(summary) = permission_profile_summary("permissions", permissions)
+    {
+        lines.push(summary);
     }
     if let Some(item_id) = params.get("itemId").and_then(|v| v.as_str()) {
         lines.push(format!("itemId: `{item_id}`"));
@@ -546,15 +545,15 @@ fn permission_profile_summary(label: &str, permissions: &Value) -> Option<String
         parts.push("network".to_string());
     }
     if let Some(file_system) = permissions.get("fileSystem") {
-        if let Some(read) = string_array(file_system.get("read")) {
-            if !read.is_empty() {
-                parts.push(format!("read {}", read.join(", ")));
-            }
+        if let Some(read) = string_array(file_system.get("read"))
+            && !read.is_empty()
+        {
+            parts.push(format!("read {}", read.join(", ")));
         }
-        if let Some(write) = string_array(file_system.get("write")) {
-            if !write.is_empty() {
-                parts.push(format!("write {}", write.join(", ")));
-            }
+        if let Some(write) = string_array(file_system.get("write"))
+            && !write.is_empty()
+        {
+            parts.push(format!("write {}", write.join(", ")));
         }
         if let Some(entries) = file_system.get("entries").and_then(|v| v.as_array()) {
             let entry_text = entries
@@ -632,14 +631,16 @@ fn command_approval_decisions(params: &Value) -> Vec<ApprovalDecisionOption> {
             )
             .unwrap());
         }
-    } else if params.get("additionalPermissions").is_none() {
-        if let Some(amendment) = params.get("proposedExecpolicyAmendment") {
-            decisions.push(command_decision_option(
+    } else if params.get("additionalPermissions").is_none()
+        && let Some(amendment) = params.get("proposedExecpolicyAmendment")
+    {
+        decisions.push(
+            command_decision_option(
                 &json!({ "acceptWithExecpolicyAmendment": { "execpolicy_amendment": amendment } }),
                 params,
             )
-            .unwrap());
-        }
+            .unwrap(),
+        );
     }
     decisions.push(command_decision_option(&json!("cancel"), params).unwrap());
     decisions
@@ -824,7 +825,8 @@ fn command_decision_option(decision: &Value, params: &Value) -> Option<ApprovalD
             return None;
         }
         format!("Yes, and don't ask again for commands that start with `{prefix}`")
-    } else if let Some(amendment) = decision.get("applyNetworkPolicyAmendment") {
+    } else {
+        let amendment = decision.get("applyNetworkPolicyAmendment")?;
         let action = amendment
             .get("network_policy_amendment")
             .or_else(|| amendment.get("networkPolicyAmendment"))
@@ -836,8 +838,6 @@ fn command_decision_option(decision: &Value, params: &Value) -> Option<ApprovalD
         } else {
             "Yes, and allow this host in the future".to_string()
         }
-    } else {
-        return None;
     };
     Some(decision_option(&label, decision.clone()))
 }

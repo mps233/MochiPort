@@ -551,7 +551,7 @@ fn refresh_rows(
             .cmp(&b.provider)
             .then_with(|| b.updated_at.cmp(&a.updated_at))
     });
-    right.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    right.sort_by_key(|row| std::cmp::Reverse(row.updated_at));
 
     replace_rows(left_rows, left_list, left);
     replace_rows(right_rows, right_list, right);

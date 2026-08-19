@@ -10,6 +10,7 @@ const DEFAULT_PROVIDER_WEIGHT: u32 = 100;
 /// AI Gateway 顶层配置，对应 config.toml 中 `[aiGateway]` 段。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
+#[derive(Default)]
 pub struct AiGatewayConfig {
     pub enabled: bool,
     /// 兼容旧配置的遗留字段；路由不使用默认/兜底 provider。
@@ -58,22 +59,6 @@ impl Sub2ApiAdminConfig {
 
 fn default_false() -> bool {
     false
-}
-
-impl Default for AiGatewayConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            default_provider: String::new(),
-            prompt_cache_retention: None,
-            providers: Vec::new(),
-            codex_visible_models: Vec::new(),
-            filter_image_generation_tool: false,
-            request_logging_enabled: false,
-            request_log_details_enabled: false,
-            sub2api_admin: Sub2ApiAdminConfig::default(),
-        }
-    }
 }
 
 impl AiGatewayConfig {

@@ -1,4 +1,4 @@
-﻿use std::time::{Duration, Instant};
+use std::time::{Duration, Instant};
 use std::{fs, path::Path};
 
 use anyhow::{Result, anyhow};
@@ -238,10 +238,10 @@ impl FeishuApi {
         // Fast path: cached + still valid.
         {
             let cache = TENANT_TOKEN_CACHE.read().await;
-            if let Some(token) = cache.get(&cache_key) {
-                if Instant::now() < token.refresh_after {
-                    return Ok(token.value.clone());
-                }
+            if let Some(token) = cache.get(&cache_key)
+                && Instant::now() < token.refresh_after
+            {
+                return Ok(token.value.clone());
             }
         }
 
@@ -258,10 +258,10 @@ impl FeishuApi {
         // Re-check after acquiring the lock.
         {
             let cache = TENANT_TOKEN_CACHE.read().await;
-            if let Some(token) = cache.get(&cache_key) {
-                if Instant::now() < token.refresh_after {
-                    return Ok(token.value.clone());
-                }
+            if let Some(token) = cache.get(&cache_key)
+                && Instant::now() < token.refresh_after
+            {
+                return Ok(token.value.clone());
             }
         }
 

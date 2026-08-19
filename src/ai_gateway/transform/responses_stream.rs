@@ -91,10 +91,7 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))));
+                    return Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))));
                 }
                 Poll::Ready(None) => {
                     // 流结束，确保所有事件都已生成
@@ -268,17 +265,17 @@ impl ResponsesStreamState {
         let delta = choice.get("delta").unwrap_or(&Value::Null);
 
         // reasoning_content
-        if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-            if !reasoning.is_empty() {
-                self.handle_reasoning_delta(reasoning, queue);
-            }
+        if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str())
+            && !reasoning.is_empty()
+        {
+            self.handle_reasoning_delta(reasoning, queue);
         }
 
         // content
-        if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-            if !content.is_empty() {
-                self.handle_content_delta(content, queue);
-            }
+        if let Some(content) = delta.get("content").and_then(|v| v.as_str())
+            && !content.is_empty()
+        {
+            self.handle_content_delta(content, queue);
         }
 
         // tool_calls
@@ -618,28 +615,28 @@ impl ResponsesStreamState {
         }
 
         // 积累 arguments
-        if let Some(args) = func.get("arguments").and_then(|v| v.as_str()) {
-            if !args.is_empty() {
-                let pending = {
-                    let tc_state = self.tool_calls.get_mut(&index).unwrap();
-                    tc_state.arguments.push_str(args);
-                    tool_delta_event(tc_state, args)
-                };
+        if let Some(args) = func.get("arguments").and_then(|v| v.as_str())
+            && !args.is_empty()
+        {
+            let pending = {
+                let tc_state = self.tool_calls.get_mut(&index).unwrap();
+                tc_state.arguments.push_str(args);
+                tool_delta_event(tc_state, args)
+            };
 
-                if let Some(pending) = pending {
-                    let seq = self.next_seq();
-                    emit_sse(
-                        queue,
-                        pending.event_type,
-                        json!({
-                            "type": pending.event_type,
-                            "sequence_number": seq,
-                            "item_id": pending.item_id,
-                            "output_index": pending.output_index,
-                            "delta": pending.delta,
-                        }),
-                    );
-                }
+            if let Some(pending) = pending {
+                let seq = self.next_seq();
+                emit_sse(
+                    queue,
+                    pending.event_type,
+                    json!({
+                        "type": pending.event_type,
+                        "sequence_number": seq,
+                        "item_id": pending.item_id,
+                        "output_index": pending.output_index,
+                        "delta": pending.delta,
+                    }),
+                );
             }
         }
     }
@@ -1008,7 +1005,7 @@ fn read_hex_u16(input: &str, offset: usize) -> Option<u16> {
 }
 
 fn emit_sse(queue: &mut VecDeque<Bytes>, event_type: &str, data: Value) {
-    let line = format!("event: {}\ndata: {}\n\n", event_type, data.to_string());
+    let line = format!("event: {}\ndata: {}\n\n", event_type, data);
     queue.push_back(Bytes::from(line));
 }
 
@@ -1095,7 +1092,7 @@ mod tests {
             for line in text.lines() {
                 if let Some(et) = line.strip_prefix("event: ") {
                     event_type = et.to_string();
-                } else if let Some(d) = sse_data_value(&line) {
+                } else if let Some(d) = sse_data_value(line) {
                     data = d.to_string();
                 }
             }

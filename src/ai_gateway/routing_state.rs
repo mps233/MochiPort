@@ -141,6 +141,6 @@ mod tests {
         state.bind("fresh", "r", now + BINDING_TTL);
         state.evict_stale(now + BINDING_TTL + Duration::from_secs(1));
         assert_eq!(state.binding_for("fresh", now + BINDING_TTL), Some("r"));
-        assert!(state.bindings.get("old").is_none());
+        assert!(!state.bindings.contains_key("old"));
     }
 }

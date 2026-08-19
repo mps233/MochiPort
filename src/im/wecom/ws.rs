@@ -52,7 +52,7 @@ pub async fn listen_ws(
             "plug_version": env!("CARGO_PKG_VERSION")
         }
     });
-    sink.send(Message::Text(auth.to_string().into())).await?;
+    sink.send(Message::Text(auth.to_string())).await?;
     wait_for_auth(&mut source, &auth_req_id).await?;
 
     let (send_tx, mut send_rx) = mpsc::unbounded_channel();
@@ -119,12 +119,11 @@ pub async fn listen_ws(
                                             )
                                             .await;
                             }
-                        } else if value.get("cmd").and_then(Value::as_str) == Some("aibot_msg_callback") {
-                            if let Some(message) = normalize_message(&state, &api, &account_id, &value).await {
+                        } else if value.get("cmd").and_then(Value::as_str) == Some("aibot_msg_callback")
+                            && let Some(message) = normalize_message(&state, &api, &account_id, &value).await {
                                 update_last_inbound(&state, &account_id).await;
                                 inbound_tx.send(message).await.context("WeCom inbound channel closed")?;
                             }
-                        }
                     }
                     Message::Ping(payload) => sink.send(Message::Pong(payload)).await?,
                     Message::Close(frame) => break Err(anyhow::anyhow!("WeCom WebSocket closed: {frame:?}")),
@@ -142,7 +141,7 @@ pub async fn listen_ws(
                     "cmd": "ping",
                     "headers": { "req_id": request_id("ping") }
                 });
-                sink.send(Message::Text(ping.to_string().into())).await?;
+                sink.send(Message::Text(ping.to_string())).await?;
             }
         }
     };
@@ -198,7 +197,7 @@ where
         "headers": { "req_id": req_id },
         "body": command.body
     });
-    sink.send(Message::Text(frame.to_string().into())).await?;
+    sink.send(Message::Text(frame.to_string())).await?;
     pending.insert(req_id, command.result);
     Ok(())
 }
@@ -596,7 +595,7 @@ fn decrypt_media(encrypted: &[u8], aes_key: &str) -> Result<Vec<u8>> {
         .context("invalid WeCom media AES key")?;
     anyhow::ensure!(key.len() == 32, "invalid WeCom media AES key length");
     anyhow::ensure!(
-        encrypted.len() % 16 == 0,
+        encrypted.len().is_multiple_of(16),
         "invalid WeCom media ciphertext length"
     );
     let cipher = aes::Aes256::new_from_slice(&key)?;

@@ -9,17 +9,13 @@ pub enum ChatType {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ImPlatformKind {
+    #[default]
     Feishu,
     Telegram,
     Wechat,
     Wecom,
-}
-
-impl Default for ImPlatformKind {
-    fn default() -> Self {
-        Self::Feishu
-    }
 }
 
 impl ImPlatformKind {

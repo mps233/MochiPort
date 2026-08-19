@@ -672,8 +672,9 @@ async fn send_thread_create_options(
     if field == "cwd" {
         insert_custom_cwd_option(&mut options, text);
     }
-    let total_pages = ((options.len() + WECHAT_CREATE_OPTION_PAGE_SIZE - 1)
-        / WECHAT_CREATE_OPTION_PAGE_SIZE)
+    let total_pages = options
+        .len()
+        .div_ceil(WECHAT_CREATE_OPTION_PAGE_SIZE)
         .max(1);
     let page = page.clamp(1, total_pages);
     let start = (page - 1) * WECHAT_CREATE_OPTION_PAGE_SIZE;
@@ -1889,7 +1890,7 @@ fn wecom_card_command(text: &str) -> Option<String> {
 }
 
 fn truncate_line(text: &str, max_chars: usize) -> String {
-    let text = text.replace('\r', " ").replace('\n', " ");
+    let text = text.replace(['\r', '\n'], " ");
     if text.chars().count() <= max_chars {
         return text;
     }

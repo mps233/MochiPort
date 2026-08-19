@@ -84,6 +84,7 @@ impl DaemonInstanceLock {
         for lock_path in [legacy_daemon_lock_path(config_path), path.clone()] {
             let file = OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(&lock_path)
@@ -310,6 +311,7 @@ mod tests {
         let legacy_lock_path = legacy_daemon_lock_path(&config_path);
         let legacy_lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&legacy_lock_path)

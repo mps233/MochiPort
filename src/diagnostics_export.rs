@@ -52,7 +52,7 @@ pub fn export_connection_diagnostics_to_path(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let file =
-        File::create(&path).with_context(|| format!("failed to create {}", path.display()))?;
+        File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
     let mut zip = ZipWriter::new(file);
     let options = SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 

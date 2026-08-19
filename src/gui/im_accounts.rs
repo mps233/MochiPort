@@ -238,9 +238,9 @@ fn refresh_im_status_from_rows(text: GuiText, status: &ImStatusPanel, rows: &[[S
     set_im_channel_row(&status.wecom, state, &detail, tone);
 }
 
-fn im_channel_summary_from_rows<'a>(
+fn im_channel_summary_from_rows(
     text: GuiText,
-    rows: &'a [[String; 5]],
+    rows: &[[String; 5]],
     platform: &str,
 ) -> (&'static str, String, StateTone) {
     let platform_rows = rows

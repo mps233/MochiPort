@@ -57,7 +57,7 @@ pub fn get() -> Client {
         .get()
         .and_then(|lock| lock.read().ok())
         .map(|client| client.clone())
-        .unwrap_or_else(Client::new)
+        .unwrap_or_default()
 }
 
 /// Returns the outbound client for requests carrying credentials in custom

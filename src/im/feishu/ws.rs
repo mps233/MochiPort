@@ -239,7 +239,7 @@ pub async fn listen_ws(
                     key: "biz_rt".to_string(),
                     value: "0".to_string(),
                 });
-                let _ = write.send(WsMessage::Binary(ack.encode_to_vec().into())).await;
+                let _ = write.send(WsMessage::Binary(ack.encode_to_vec())).await;
 
                 let payload = frame.payload.unwrap_or_default();
                 match serde_json::from_slice::<FeishuWsEvent>(&payload) {
@@ -278,9 +278,7 @@ where
         }],
         payload: None,
     };
-    write
-        .send(WsMessage::Binary(ping.encode_to_vec().into()))
-        .await?;
+    write.send(WsMessage::Binary(ping.encode_to_vec())).await?;
     Ok(())
 }
 

@@ -313,7 +313,7 @@ pub(super) async fn observe_app_server_message(
                             client.current_thread_id = Some(thread_id);
                         }
                     }
-                    if is_legacy_default_client_key(&client_key) {
+                    if is_legacy_default_client_key(client_key) {
                         sync_default_client_legacy_locked(&mut remote);
                     }
                 } else {
@@ -362,7 +362,7 @@ pub(super) async fn observe_app_server_message(
                         client.last_app_pong_status = Some("active".to_string());
                         client.recovery_started_at_ms = None;
                     }
-                    if is_legacy_default_client_key(&client_key) {
+                    if is_legacy_default_client_key(client_key) {
                         sync_default_client_legacy_locked(&mut remote);
                     }
                 }
@@ -477,7 +477,7 @@ pub(super) async fn observe_app_server_message(
                             client.current_turn_id = Some(turn_id);
                         }
                     }
-                    if is_legacy_default_client_key(&client_key) {
+                    if is_legacy_default_client_key(client_key) {
                         sync_default_client_legacy_locked(&mut remote);
                     }
                 } else {
@@ -494,14 +494,13 @@ pub(super) async fn observe_app_server_message(
             // The IM event router owns RuntimeState cleanup so it can flush platform progress first.
             let mut remote = state.remote_control.inner.lock().await;
             if let Some(client_key) = client_key.as_deref() {
-                if let Some(client) = remote.clients.get_mut(client_key) {
-                    if thread_id.is_none()
-                        || client.current_thread_id.as_deref() == thread_id.as_deref()
-                    {
-                        client.current_turn_id = None;
-                    }
+                if let Some(client) = remote.clients.get_mut(client_key)
+                    && (thread_id.is_none()
+                        || client.current_thread_id.as_deref() == thread_id.as_deref())
+                {
+                    client.current_turn_id = None;
                 }
-                if is_legacy_default_client_key(&client_key) {
+                if is_legacy_default_client_key(client_key) {
                     sync_default_client_legacy_locked(&mut remote);
                 }
             } else if thread_id.is_none()
@@ -520,7 +519,7 @@ pub(super) async fn observe_app_server_message(
                     client.current_thread_id = None;
                     client.current_turn_id = None;
                 }
-                if is_legacy_default_client_key(&client_key) {
+                if is_legacy_default_client_key(client_key) {
                     sync_default_client_legacy_locked(&mut remote);
                 }
             } else if remote.current_thread_id.as_deref() == Some(thread_id.as_str()) {
@@ -589,7 +588,7 @@ pub(super) async fn observe_thread_status_changed(
             {
                 cleared_turn_id = client.current_turn_id.take();
             }
-            if is_legacy_default_client_key(&client_key) {
+            if is_legacy_default_client_key(client_key) {
                 sync_default_client_legacy_locked(&mut remote);
             }
             cleared_turn_id

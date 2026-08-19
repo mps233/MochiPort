@@ -292,13 +292,13 @@ fn installed_plugin_config_ids() -> Vec<String> {
 
     plugins
         .iter()
-        .filter_map(|(id, item)| {
+        .filter(|&(_, item)| {
             item.as_table()
                 .and_then(|table| table.get("enabled"))
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false)
-                .then(|| id.to_string())
         })
+        .map(|(id, _)| id.to_string())
         .collect()
 }
 
@@ -433,7 +433,7 @@ fn local_bundled_skill_root_candidate_paths(plugin_name: &str) -> Result<Vec<Pat
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             cached_paths.push((modified, skills_root));
         }
-        cached_paths.sort_by(|left, right| right.0.cmp(&left.0));
+        cached_paths.sort_by_key(|right| std::cmp::Reverse(right.0));
         paths.extend(cached_paths.into_iter().map(|(_, path)| path));
     }
 

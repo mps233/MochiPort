@@ -1453,13 +1453,13 @@ async fn schedule_terminal_status_fallback(
                 return;
             }
             let failed = status_type == "systemError";
-            let command_snapshot = (route.platform == ImPlatformKind::Telegram)
+
+            (route.platform == ImPlatformKind::Telegram)
                 .then(|| {
                     runtime
                         .finish_telegram_command_progress_with_outcome(&thread_id, &turn_id, failed)
                 })
-                .flatten();
-            command_snapshot
+                .flatten()
         };
         if let Some(snapshot) = command_snapshot {
             deliver_telegram_command_progress(&state, &api_registry, &thread_id, &route, snapshot)

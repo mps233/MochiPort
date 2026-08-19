@@ -73,10 +73,11 @@ impl AnthropicStreamState {
             arguments: String::new(),
             custom_emitted_input: String::new(),
         };
-        if let Some(input) = block.get("input") {
-            if !input.is_null() && input != &json!({}) {
-                state.arguments = serde_json::to_string(input).unwrap_or_default();
-            }
+        if let Some(input) = block.get("input")
+            && !input.is_null()
+            && input != &json!({})
+        {
+            state.arguments = serde_json::to_string(input).unwrap_or_default();
         }
         self.content_blocks.insert(index, state);
     }
@@ -283,7 +284,6 @@ impl AnthropicStreamState {
             };
             state.result = Some(result);
             self.close_web_search_block(index, queue);
-            return;
         }
     }
 

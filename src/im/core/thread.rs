@@ -792,14 +792,14 @@ fn normalize_thread_cwd(choice: Option<String>, custom: Option<String>) -> Resul
     if choice.as_deref() == Some("__custom__") && custom.is_none() {
         return Err(anyhow!("选择自定义目录时需要填写绝对路径"));
     }
-    let Some(value) = custom.or_else(|| match choice.as_deref() {
+    let Some(value) = custom.or(match choice.as_deref() {
         Some("__default__" | "__custom__") | None => None,
         Some(_) => choice,
     }) else {
         return Ok(None);
     };
     let expanded = expand_home_prefix(&value);
-    let path = PathBuf::from(expanded);
+    let path = expanded;
     if !path.is_absolute() {
         return Err(anyhow!("项目目录必须是绝对路径，或留空不指定目录"));
     }
@@ -817,15 +817,15 @@ fn normalize_thread_cwd(choice: Option<String>, custom: Option<String>) -> Resul
 }
 
 pub(crate) fn expand_home_prefix(value: &str) -> PathBuf {
-    if value == "~" {
-        if let Some(home) = user_home_dir() {
-            return PathBuf::from(home);
-        }
+    if value == "~"
+        && let Some(home) = user_home_dir()
+    {
+        return PathBuf::from(home);
     }
-    if let Some(rest) = value.strip_prefix("~/") {
-        if let Some(home) = user_home_dir() {
-            return Path::new(&home).join(rest);
-        }
+    if let Some(rest) = value.strip_prefix("~/")
+        && let Some(home) = user_home_dir()
+    {
+        return Path::new(&home).join(rest);
     }
     PathBuf::from(value)
 }

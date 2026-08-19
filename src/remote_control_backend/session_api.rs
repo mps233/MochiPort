@@ -1,4 +1,4 @@
-﻿use std::time::Duration;
+use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
@@ -819,10 +819,10 @@ pub async fn clear_turn_for_client(state: &SharedState, client_key: &str, turn_i
     let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
     let client_key = resolve_remote_client_key_locked(&mut remote, &requested_client_key);
-    if let Some(client) = remote.clients.get_mut(&client_key) {
-        if turn_id.is_none() || client.current_turn_id.as_deref() == turn_id {
-            client.current_turn_id = None;
-        }
+    if let Some(client) = remote.clients.get_mut(&client_key)
+        && (turn_id.is_none() || client.current_turn_id.as_deref() == turn_id)
+    {
+        client.current_turn_id = None;
     }
     if is_legacy_default_client_key(&client_key) {
         sync_default_client_legacy_locked(&mut remote);
@@ -837,11 +837,11 @@ pub async fn clear_thread_for_client(
     let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
     let client_key = resolve_remote_client_key_locked(&mut remote, &requested_client_key);
-    if let Some(client) = remote.clients.get_mut(&client_key) {
-        if thread_id.is_none() || client.current_thread_id.as_deref() == thread_id {
-            client.current_thread_id = None;
-            client.current_turn_id = None;
-        }
+    if let Some(client) = remote.clients.get_mut(&client_key)
+        && (thread_id.is_none() || client.current_thread_id.as_deref() == thread_id)
+    {
+        client.current_thread_id = None;
+        client.current_turn_id = None;
     }
     if is_legacy_default_client_key(&client_key) {
         sync_default_client_legacy_locked(&mut remote);
@@ -950,7 +950,8 @@ pub(super) async fn should_track_notification_thread_for_client(
     if is_bound_thread {
         return true;
     }
-    let is_current_or_pending_request_thread = {
+
+    {
         let remote = state.remote_control.inner.lock().await;
         remote
             .clients
@@ -965,8 +966,7 @@ pub(super) async fn should_track_notification_thread_for_client(
                     })
             })
             .unwrap_or(false)
-    };
-    is_current_or_pending_request_thread
+    }
 }
 
 pub(super) fn route_remote_client_key_matches(route_client_key: &str, client_key: &str) -> bool {

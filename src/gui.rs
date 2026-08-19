@@ -5444,7 +5444,7 @@ fn show_about_dialog(parent: &Frame) {
     );
 
     let description = StaticText::builder(&panel)
-        .with_label(&GuiText::new(load_gui_locale()).about_description())
+        .with_label(GuiText::new(load_gui_locale()).about_description())
         .build();
     description.set_foreground_color(theme::theme().ink_secondary);
     description.wrap(460);

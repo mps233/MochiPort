@@ -2,8 +2,9 @@ use serde::Deserialize;
 
 use crate::{app_state::SharedState, im_runtime::PendingApproval};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ImLocale {
+    #[default]
     ZhCn,
     EnUs,
 }
@@ -15,12 +16,6 @@ impl ImLocale {
             "en" | "en-us" | "en_us" | "us" => Some(Self::EnUs),
             _ => None,
         }
-    }
-}
-
-impl Default for ImLocale {
-    fn default() -> Self {
-        Self::ZhCn
     }
 }
 

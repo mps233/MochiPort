@@ -31,10 +31,13 @@ pub struct GatewayRequest {
 
     // cache
     #[serde(default)]
+    #[allow(dead_code)]
     pub prompt_cache_key: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub prompt_cache_retention: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub previous_response_id: Option<String>,
 }
 

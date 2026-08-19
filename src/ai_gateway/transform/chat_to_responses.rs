@@ -49,63 +49,63 @@ pub fn convert_chat_response_with_tool_names(
         .unwrap_or("stop");
 
     // 1. reasoning_content → reasoning item
-    if let Some(reasoning_content) = message.get("reasoning_content").and_then(|v| v.as_str()) {
-        if !reasoning_content.is_empty() {
-            output.push(ResponseItem {
-                item_type: ItemType::Reasoning,
-                id: Some(generate_item_id()),
-                role: None,
-                content: None,
-                text: None,
-                name: None,
-                namespace: None,
-                call_id: None,
-                arguments: None,
-                input: None,
-                output: None,
-                status: Some("completed".into()),
-                execution: None,
-                tools: None,
-                image_url: None,
-                detail: None,
-                action: None,
-                summary: Some(vec![SummaryPart {
-                    part_type: "summary_text".into(),
-                    text: reasoning_content.to_string(),
-                }]),
-                encrypted_content: message
-                    .get("reasoning_signature")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            });
-        }
+    if let Some(reasoning_content) = message.get("reasoning_content").and_then(|v| v.as_str())
+        && !reasoning_content.is_empty()
+    {
+        output.push(ResponseItem {
+            item_type: ItemType::Reasoning,
+            id: Some(generate_item_id()),
+            role: None,
+            content: None,
+            text: None,
+            name: None,
+            namespace: None,
+            call_id: None,
+            arguments: None,
+            input: None,
+            output: None,
+            status: Some("completed".into()),
+            execution: None,
+            tools: None,
+            image_url: None,
+            detail: None,
+            action: None,
+            summary: Some(vec![SummaryPart {
+                part_type: "summary_text".into(),
+                text: reasoning_content.to_string(),
+            }]),
+            encrypted_content: message
+                .get("reasoning_signature")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        });
     }
 
     // 2. content → message item (role=assistant)
-    if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
-        if !content.is_empty() {
-            output.push(ResponseItem {
-                item_type: ItemType::Message,
-                id: Some(generate_item_id()),
-                role: Some("assistant".into()),
-                content: Some(ItemContent::Parts(vec![ContentPart::output_text(content)])),
-                text: None,
-                name: None,
-                namespace: None,
-                call_id: None,
-                arguments: None,
-                input: None,
-                output: None,
-                status: Some("completed".into()),
-                execution: None,
-                tools: None,
-                image_url: None,
-                detail: None,
-                action: None,
-                summary: None,
-                encrypted_content: None,
-            });
-        }
+    if let Some(content) = message.get("content").and_then(|v| v.as_str())
+        && !content.is_empty()
+    {
+        output.push(ResponseItem {
+            item_type: ItemType::Message,
+            id: Some(generate_item_id()),
+            role: Some("assistant".into()),
+            content: Some(ItemContent::Parts(vec![ContentPart::output_text(content)])),
+            text: None,
+            name: None,
+            namespace: None,
+            call_id: None,
+            arguments: None,
+            input: None,
+            output: None,
+            status: Some("completed".into()),
+            execution: None,
+            tools: None,
+            image_url: None,
+            detail: None,
+            action: None,
+            summary: None,
+            encrypted_content: None,
+        });
     }
 
     // 3. tool_calls → function_call items

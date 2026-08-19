@@ -61,6 +61,7 @@ pub(super) fn incomplete_details_for_stop_reason(stop_reason: Option<&str>) -> O
     }
 }
 
+#[allow(clippy::collapsible_match)]
 fn convert_anthropic_content(
     items: &[Value],
     tool_name_map: &ToolNameMap,

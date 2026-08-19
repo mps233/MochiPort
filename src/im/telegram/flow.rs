@@ -1272,8 +1272,9 @@ async fn send_telegram_thread_create_options(
     let text = im_text_for_state(state);
     let (title, body, options) =
         create_options_for_field(&defaults, &request.create_draft, field, text)?;
-    let total_pages = ((options.len() + TELEGRAM_CREATE_OPTION_PAGE_SIZE - 1)
-        / TELEGRAM_CREATE_OPTION_PAGE_SIZE)
+    let total_pages = options
+        .len()
+        .div_ceil(TELEGRAM_CREATE_OPTION_PAGE_SIZE)
         .max(1);
     let page = page.clamp(1, total_pages);
     let start = (page - 1) * TELEGRAM_CREATE_OPTION_PAGE_SIZE;

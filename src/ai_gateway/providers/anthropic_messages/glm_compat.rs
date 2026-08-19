@@ -125,11 +125,12 @@ fn tool_block_start(text: &str, marker_start: usize) -> usize {
     let mut start = marker_start;
 
     start = consume_previous_inline_whitespace(text, start, line_start);
-    if let Some((prev_start, prev)) = previous_char(text, start) {
-        if !prev.is_ascii() && !prev.is_alphanumeric() {
-            start = prev_start;
-            start = consume_previous_inline_whitespace(text, start, line_start);
-        }
+    if let Some((prev_start, prev)) = previous_char(text, start)
+        && !prev.is_ascii()
+        && !prev.is_alphanumeric()
+    {
+        start = prev_start;
+        start = consume_previous_inline_whitespace(text, start, line_start);
     }
     if text[line_start..start].ends_with("**") {
         start -= 2;

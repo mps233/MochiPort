@@ -731,12 +731,12 @@ fn selected_visible_models(tab: &CodexTab) -> Vec<String> {
     tab.model_slugs
         .iter()
         .enumerate()
-        .filter_map(|(index, slug)| {
+        .filter(|&(index, _slug)| {
             tab.model_checks
                 .get(index)
                 .is_some_and(CheckBox::is_checked)
-                .then(|| slug.clone())
         })
+        .map(|(_index, slug)| slug.clone())
         .collect()
 }
 

@@ -481,7 +481,7 @@ fn parent_pid(pid: u32) -> Option<u32> {
             .args(["-p", &pid.to_string(), "-o", "ppid="])
             .output()
             .ok()?;
-        return String::from_utf8_lossy(&output.stdout).trim().parse().ok();
+        String::from_utf8_lossy(&output.stdout).trim().parse().ok()
     }
     #[cfg(not(unix))]
     {
@@ -525,11 +525,11 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
     // the PID has already changed, returning early must not leave launchd
     // without the supervisor that keeps the current GUI alive.
     let gui_pid = args.gui_pid.filter(|pid| *pid > 1);
-    if let Some(gui_pid) = gui_pid {
-        if !process_matches_executable(gui_pid, &args.old_executable_path) {
-            log_line(&log_path, "gui_identity_mismatch");
-            anyhow::bail!("old GUI pid does not match the expected executable");
-        }
+    if let Some(gui_pid) = gui_pid
+        && !process_matches_executable(gui_pid, &args.old_executable_path)
+    {
+        log_line(&log_path, "gui_identity_mismatch");
+        anyhow::bail!("old GUI pid does not match the expected executable");
     }
 
     stop_gui_recovery_agent(&log_path)?;
@@ -1014,10 +1014,10 @@ fn process_is_alive(pid: u32) -> bool {
     }
     #[cfg(unix)]
     {
-        return Command::new("/bin/ps")
+        Command::new("/bin/ps")
             .args(["-p", &pid.to_string(), "-o", "pid="])
             .output()
-            .is_ok_and(|output| !String::from_utf8_lossy(&output.stdout).trim().is_empty());
+            .is_ok_and(|output| !String::from_utf8_lossy(&output.stdout).trim().is_empty())
     }
     #[cfg(windows)]
     {
@@ -1044,7 +1044,7 @@ fn process_matches_executable(pid: u32, expected_executable: &Path) -> bool {
             .env("COLUMNS", "4096")
             .args(["-ww", "-p", &pid.to_string(), "-o", "args="])
             .output();
-        return output.ok().is_some_and(|output| {
+        output.ok().is_some_and(|output| {
             let args = String::from_utf8_lossy(&output.stdout);
             let args = args.trim();
             args == expected
@@ -1052,7 +1052,7 @@ fn process_matches_executable(pid: u32, expected_executable: &Path) -> bool {
                     .strip_prefix(expected.as_ref())
                     .and_then(|rest| rest.chars().next())
                     .is_some_and(char::is_whitespace)
-        });
+        })
     }
     #[cfg(not(unix))]
     {
@@ -1097,10 +1097,10 @@ fn send_exact_daemon_signal(pid: u32, force: bool) -> bool {
         let Some(args) = exact_signal_args(pid, force) else {
             return false;
         };
-        return Command::new("/bin/kill")
+        Command::new("/bin/kill")
             .args(args)
             .status()
-            .is_ok_and(|status| status.success());
+            .is_ok_and(|status| status.success())
     }
     #[cfg(not(unix))]
     {
@@ -1141,7 +1141,7 @@ fn launch_bundle(bundle_path: &Path) -> anyhow::Result<()> {
             .arg("-n")
             .arg(bundle_path)
             .spawn()?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "windows")]
     {
@@ -1300,14 +1300,14 @@ fn read_bundle_metadata(bundle_path: &Path) -> Result<BundleMetadata, String> {
         }
         let value: Value = serde_json::from_slice(&output.stdout)
             .map_err(|error| format!("invalid Info.plist JSON: {error}"))?;
-        return Ok(BundleMetadata {
+        Ok(BundleMetadata {
             bundle_path: bundle_path.display().to_string(),
             bundle_identifier: plist_string(&value, "CFBundleIdentifier")?,
             executable: plist_string(&value, "CFBundleExecutable")?,
             package_type: plist_string(&value, "CFBundlePackageType")?,
             short_version: plist_string(&value, "CFBundleShortVersionString")?,
             build: plist_string(&value, "CFBundleVersion")?,
-        });
+        })
     }
     #[cfg(not(target_os = "macos"))]
     {

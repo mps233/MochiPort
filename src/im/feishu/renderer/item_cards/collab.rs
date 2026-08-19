@@ -115,42 +115,42 @@ pub(in crate::im::feishu::renderer) fn build_collab_agent_tool_call_card(
         }));
     }
 
-    if item.get("tool").and_then(|v| v.as_str()) == Some("wait") {
-        if let Some(states) = item.get("agentsStates").and_then(|v| v.as_object()) {
-            let mut lines = Vec::new();
-            for (agent_id, state) in states.iter().take(6) {
-                let status = state
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let message = state
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .map(|v| truncate_single_line(v, 120));
-                let mut line = format!(
-                    "- `{}`: `{}`",
-                    normalize_card_markdown(agent_id),
-                    normalize_card_markdown(status)
-                );
-                if let Some(message) = message {
-                    line.push_str(&format!(
-                        " <font color='grey'>· {}</font>",
-                        normalize_card_markdown(&message)
-                    ));
-                }
-                lines.push(line);
+    if item.get("tool").and_then(|v| v.as_str()) == Some("wait")
+        && let Some(states) = item.get("agentsStates").and_then(|v| v.as_object())
+    {
+        let mut lines = Vec::new();
+        for (agent_id, state) in states.iter().take(6) {
+            let status = state
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let message = state
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(|v| truncate_single_line(v, 120));
+            let mut line = format!(
+                "- `{}`: `{}`",
+                normalize_card_markdown(agent_id),
+                normalize_card_markdown(status)
+            );
+            if let Some(message) = message {
+                line.push_str(&format!(
+                    " <font color='grey'>· {}</font>",
+                    normalize_card_markdown(&message)
+                ));
             }
-            if !lines.is_empty() {
-                if !elements.is_empty() {
-                    elements.push(serde_json::json!({ "tag": "hr" }));
-                }
-                elements.push(serde_json::json!({
-                    "tag": "markdown",
-                    "content": lines.join("\n")
-                }));
+            lines.push(line);
+        }
+        if !lines.is_empty() {
+            if !elements.is_empty() {
+                elements.push(serde_json::json!({ "tag": "hr" }));
             }
+            elements.push(serde_json::json!({
+                "tag": "markdown",
+                "content": lines.join("\n")
+            }));
         }
     }
 

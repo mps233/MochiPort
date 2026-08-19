@@ -355,7 +355,7 @@ async fn passthrough_to_endpoint(
         let byte_stream = upstream_resp.bytes_stream().map(|result| {
             result.map_err(|e| {
                 error!(error = %e, "upstream SSE stream error");
-                std::io::Error::new(std::io::ErrorKind::Other, e)
+                std::io::Error::other(e)
             })
         });
         let body = if let Some(log_context) = log_context {

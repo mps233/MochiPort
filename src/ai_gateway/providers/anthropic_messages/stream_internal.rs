@@ -95,10 +95,10 @@ impl InternalSseEnvelope {
         if let Some(usage) = &self.usage {
             response["usage"] = usage.clone();
         }
-        if status == "incomplete" {
-            if let Some(details) = &self.incomplete_details {
-                response["incomplete_details"] = details.clone();
-            }
+        if status == "incomplete"
+            && let Some(details) = &self.incomplete_details
+        {
+            response["incomplete_details"] = details.clone();
         }
         response
     }
@@ -223,10 +223,10 @@ impl InternalSseEnvelope {
 
         // Capture completed items so the terminal response object mirrors what
         // was streamed. `response.output_item.done` carries the finished item.
-        if event_type == "response.output_item.done" {
-            if let Some(item) = data.get("item") {
-                self.completed_output.push(item.clone());
-            }
+        if event_type == "response.output_item.done"
+            && let Some(item) = data.get("item")
+        {
+            self.completed_output.push(item.clone());
         }
 
         let seq = self.next_seq();
@@ -244,18 +244,18 @@ impl InternalSseEnvelope {
         // round is counted once; absorbing every envelope would multiply the
         // round's usage by the number of envelope events (e.g. 3x), inflating
         // the reported input token count and tripping premature compaction.
-        if is_round_terminal_envelope(event_type) {
-            if let Some(usage) = response.get("usage") {
-                self.merge_usage(usage);
-            }
+        if is_round_terminal_envelope(event_type)
+            && let Some(usage) = response.get("usage")
+        {
+            self.merge_usage(usage);
         }
         match event_type {
             "response.incomplete" => {
                 self.status = "incomplete".to_string();
-                if let Some(details) = response.get("incomplete_details") {
-                    if !details.is_null() {
-                        self.incomplete_details = Some(details.clone());
-                    }
+                if let Some(details) = response.get("incomplete_details")
+                    && !details.is_null()
+                {
+                    self.incomplete_details = Some(details.clone());
                 }
             }
             "response.failed" => {

@@ -109,10 +109,10 @@ impl AnthropicStreamState {
                         self.handle_citation_delta(citation, queue);
                     }
                 }
-                if let Some(text) = block.get("text").and_then(Value::as_str) {
-                    if !text.is_empty() {
-                        self.handle_text_delta(text, queue);
-                    }
+                if let Some(text) = block.get("text").and_then(Value::as_str)
+                    && !text.is_empty()
+                {
+                    self.handle_text_delta(text, queue);
                 }
             }
             Some("tool_use") => {

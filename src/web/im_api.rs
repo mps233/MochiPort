@@ -705,10 +705,10 @@ async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_
         let removed = runtime
             .route_by_thread
             .iter()
-            .filter_map(|(thread_id, route)| {
-                (route.platform.key() == platform && route.account_id == account_id)
-                    .then(|| (thread_id.clone(), route.clone()))
+            .filter(|&(_, route)| {
+                route.platform.key() == platform && route.account_id == account_id
             })
+            .map(|(thread_id, route)| (thread_id.clone(), route.clone()))
             .collect::<Vec<_>>();
         runtime.route_by_thread.retain(|_, route| {
             !(route.platform.key() == platform && route.account_id == account_id)

@@ -1228,10 +1228,11 @@ fn is_codex_renderer_target(target: &AttachedTarget) -> bool {
 
 fn attached_target_commands(target: &AttachedTarget, source: &str) -> Vec<(&'static str, Value)> {
     if !is_codex_renderer_target(target) {
-        return target
-            .waiting_for_debugger
-            .then(|| vec![("Runtime.runIfWaitingForDebugger", json!({}))])
-            .unwrap_or_default();
+        return if target.waiting_for_debugger {
+            vec![("Runtime.runIfWaitingForDebugger", json!({}))]
+        } else {
+            Default::default()
+        };
     }
     if target.waiting_for_debugger {
         vec![
@@ -1297,7 +1298,7 @@ async fn send_cdp_request(
         control,
         CDP_COMMAND_TIMEOUT,
         &format!("发送 CDP {method}"),
-        socket.send(Message::Text(request.to_string().into())),
+        socket.send(Message::Text(request.to_string())),
     )
     .await??;
     Ok(id)
@@ -1548,9 +1549,7 @@ where
         CDP_COMMAND_TIMEOUT,
         &format!("发送 CDP {method}"),
         socket.send(Message::Text(
-            json!({ "id": id, "method": method, "params": params })
-                .to_string()
-                .into(),
+            json!({ "id": id, "method": method, "params": params }).to_string(),
         )),
     )
     .await??;
@@ -1686,14 +1685,14 @@ async fn inject_until_ready(
                                 .expect("active injection exists after status check");
                             return Ok((connection, status));
                         }
-                        if should_reapply {
-                            if let Err(err) = reapply_script(connection, source, control).await {
-                                if error_is_cancelled(&err) {
-                                    return Err(err);
-                                }
-                                last_error = Some(err.to_string());
-                                active = None;
+                        if should_reapply
+                            && let Err(err) = reapply_script(connection, source, control).await
+                        {
+                            if error_is_cancelled(&err) {
+                                return Err(err);
                             }
+                            last_error = Some(err.to_string());
+                            active = None;
                         }
                     }
                     Err(err) => {
@@ -1714,9 +1713,11 @@ async fn inject_until_ready(
             if let Some(error) = last_error.as_deref() {
                 details.push(format!("CDP：{error}"));
             }
-            let detail = (!details.is_empty())
-                .then(|| format!("（{}）", details.join("；")))
-                .unwrap_or_default();
+            let detail = if !details.is_empty() {
+                format!("（{}）", details.join("；"))
+            } else {
+                Default::default()
+            };
             bail!("Codex App 已启动，但增强配置（模型列表/语言）未在 45 秒内生效{detail}");
         }
         controlled_sleep(control, ENHANCED_STATUS_POLL_INTERVAL).await?;

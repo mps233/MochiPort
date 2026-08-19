@@ -239,9 +239,7 @@ async fn inbound_from_message(
 
 fn is_context_refresh_marker(text: &str) -> bool {
     let marker = text.trim();
-    WECHAT_CONTEXT_REFRESH_MARKERS
-        .iter()
-        .any(|candidate| marker == *candidate)
+    WECHAT_CONTEXT_REFRESH_MARKERS.contains(&marker)
 }
 
 fn message_text(message: &WechatMessage) -> String {

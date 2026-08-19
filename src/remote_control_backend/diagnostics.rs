@@ -382,7 +382,7 @@ fn command_output_delta_log_summary(
 ) -> Option<String> {
     let count = diagnostics.output_delta_count;
     let should_log = count == 1
-        || count % 50 == 0
+        || count.is_multiple_of(50)
         || worker_capacity <= REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY / 8;
     should_log.then(|| {
         format!(

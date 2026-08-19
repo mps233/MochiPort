@@ -88,7 +88,7 @@ impl TelegramAdapter {
                             err
                         ),
                     );
-                    let message_id = self.api.send_text(target, &chunk).await?;
+                    let message_id = self.api.send_text(target, chunk).await?;
                     log_adapter(
                         "send_text_chunk_sent",
                         format!(
@@ -667,7 +667,7 @@ impl TelegramAdapter {
             Err(err) => return Err(err),
         }
 
-        match self.api.send_rich_message(target, &rich_message).await {
+        match self.api.send_rich_message(target, rich_message).await {
             Ok(message_id) => {
                 log_adapter(
                     "send_rich_message_done",
@@ -1081,7 +1081,7 @@ fn resolved_approval_text(
     decision_label: &str,
     text: ImText,
 ) -> String {
-    vec![
+    [
         text.approval_resolved_title().to_string(),
         format!(
             "{}: `{}`",
@@ -1296,8 +1296,7 @@ fn thread_list_html_text(
 
 fn truncate_display_text(text: &str, max_chars: usize) -> String {
     let text = text
-        .replace('\r', " ")
-        .replace('\n', " ")
+        .replace(['\r', '\n'], " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");

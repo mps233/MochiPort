@@ -103,10 +103,7 @@ where
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
-                    return Poll::Ready(Some(Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ))));
+                    return Poll::Ready(Some(Err(std::io::Error::other(e.to_string()))));
                 }
                 Poll::Ready(None) => {
                     if !this.line_buf.is_empty() {
