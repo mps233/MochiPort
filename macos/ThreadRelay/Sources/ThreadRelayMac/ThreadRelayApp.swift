@@ -200,9 +200,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct ThreadRelayApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
+    @StateObject private var glass: AIGlassCoordinator
 
     init() {
         _model = StateObject(wrappedValue: AppModel(fixtureStatus: Self.fixtureStatusFromEnvironment()))
+        _glass = StateObject(wrappedValue: AIGlassCoordinator())
     }
 
     private static func fixtureStatusFromEnvironment() -> ServiceStatus? {
@@ -248,17 +250,18 @@ struct ThreadRelayApp: App {
         }
 
         MenuBarExtra {
-            MenuBarStatusView()
-                .environmentObject(model)
+            MenuBarStatusView(glass: glass, model: model)
         } label: {
-            Image(systemName: model.serviceStatus.symbol)
-                .symbolRenderingMode(.hierarchical)
+            MenuBarStatusLabel(status: model.serviceStatus,
+                               glass: glass,
+                               settings: glass.settings)
         }
-        .menuBarExtraStyle(.menu)
+        .menuBarExtraStyle(.window)
 
         Settings {
             SettingsView()
                 .environmentObject(model)
+                .environmentObject(glass)
                 .preferredColorScheme(preferredColorScheme)
         }
     }
@@ -377,87 +380,130 @@ private struct WindowVisibilityObserver: NSViewRepresentable {
     }
 }
 
-private struct MenuBarStatusView: View {
-    @EnvironmentObject private var model: AppModel
-    @Environment(\.openWindow) private var openWindow
-    @Environment(\.openURL) private var openURL
+private struct MenuBarStatusLabel: View {
+    let status: ServiceStatus
+    @ObservedObject var glass: AIGlassCoordinator
+    @Bindable var settings: AppSettings
 
-    private var serviceUnavailable: Bool {
-        if case .unavailable = model.serviceStatus { return true }
-        return false
+    private var tint: Color {
+        switch status {
+        case .checking: .secondary
+        case .available: .green
+        case .bridgeAvailable: .orange
+        case .unavailable: .red
+        }
+    }
+
+    private var title: String {
+        switch status {
+        case .checking: "连接中"
+        case .available: "在线"
+        case .bridgeAvailable: "兼容"
+        case .unavailable: "离线"
+        }
     }
 
     var body: some View {
-        Text("ThreadRelay")
-            .font(.headline)
-        Label(model.serviceStatus.title, systemImage: model.serviceStatus.symbol)
-        Text(model.serviceStatus.detail)
-            .foregroundStyle(.secondary)
-        if let lifecycle = model.lifecycle {
-            Divider()
-            Label(
-                model.ownsDaemonLease
-                    ? "已托管后台服务"
-                    : model.daemonLeaseConflict ? "其他安装已托管" : "仅查看后台服务",
-                systemImage: model.ownsDaemonLease ? "lock.open" : "eye"
-            )
-            let build = lifecycle.runtime.buildNumber.map { " · 构建 \($0)" } ?? ""
-            Text("v\(lifecycle.runtime.productVersion)\(build) · \(lifecycle.protectedWorkItems.total) 项受保护任务")
-                .foregroundStyle(.secondary)
-                .font(.caption)
-            if model.daemonBuildMismatch {
-                Label(
-                    model.daemonUpgradePending
-                        ? model.daemonUpgradeDetail
-                        : "界面与后台服务构建不一致",
-                    systemImage: "exclamationmark.triangle"
-                )
-                    .foregroundStyle(.orange)
-                    .font(.caption)
+        // Use the concrete Label<Text, Image> form supported by MenuBarExtra.
+        // A free-form HStack or custom text icon can be measured as an
+        // icon-only status item and silently drop the numeric title.
+        Label(displayText, systemImage: "sparkles")
+        .labelStyle(.titleAndIcon)
+        .font(.system(size: 11, weight: .medium).monospacedDigit())
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("ThreadRelay \(displayText) · " + title)
+        .help("ThreadRelay：" + status.title)
+    }
+
+    private var displayText: String {
+        let text = displayItems.map(value(for:)).joined(separator: " ")
+        return text.isEmpty ? "—" : text
+    }
+
+    private func formatTokens(_ value: Int) -> String {
+        switch value {
+        case 1_000_000...: String(format: "%.1fM", Double(value) / 1_000_000)
+        case 1_000...: String(format: "%.0fK", Double(value) / 1_000)
+        default: String(value)
+        }
+    }
+
+    private var displayItems: [MenubarItem] {
+        MenubarItem.ordered(settings.menubarItems)
+    }
+
+    private func value(for item: MenubarItem) -> String {
+        let now = Date()
+        switch item {
+        case .todayTokens:
+            return formatTokens(glass.store.todayTokens(now: now))
+        case .burnRate:
+            return formatRate(glass.store.tokensPerMinute(windowMinutes: 3, now: now)) + "/m"
+        case .usagePercent:
+            return Theme.formatUsagePercent(glass.store.maxUsedPercent)
+        case .resetCountdown:
+            return nearestResetCountdown(now: now) ?? "—"
+        }
+    }
+
+    private func formatRate(_ value: Double) -> String {
+        switch value {
+        case 1_000_000...: return String(format: "%.1fM", value / 1_000_000)
+        case 1_000...: return String(format: "%.0fK", value / 1_000)
+        default: return String(Int(value.rounded()))
+        }
+    }
+
+    private func nearestResetCountdown(now: Date) -> String? {
+        let dates = glass.store.limits.values
+            .flatMap { $0 }
+            .compactMap(\.resetsAt)
+            .filter { $0 > now }
+        guard let nearest = dates.min() else { return nil }
+        return EventEngine.countdown(to: nearest, from: now)
+    }
+}
+
+/// The menu bar uses ai-glass's real dashboard implementation. HUD-specific
+/// panels and hotkeys are intentionally absent; history and notifications stay
+/// available through the coordinator.
+private struct MenuBarStatusView: View {
+    @ObservedObject var glass: AIGlassCoordinator
+    @ObservedObject var model: AppModel
+
+    var body: some View {
+        DashboardView(
+            store: glass.store,
+            statsStore: glass.statsStore,
+            settings: glass.settings,
+            providerUsage: model.gatewayProviderUsage,
+            providerChannel: model.gatewayProviderChannel,
+            eventLog: glass.eventLog,
+            updateState: glass.updateState,
+            onSettings: openSettings)
+            .padding(8)
+            .modifier(MenuBarWindowBackgroundModifier())
+            .task {
+                while !Task.isCancelled {
+                    await model.refreshGatewayProviderUsage()
+                    try? await Task.sleep(for: .seconds(60))
+                }
             }
-        }
-        Divider()
-        Button("打开 ThreadRelay") {
-            openWindow(id: "main")
-        }
-        Button("刷新") {
-            Task { await model.refresh() }
-        }
-        Button(
-            model.daemonRecoveryInProgress || model.daemonTransitionInProgress
-                ? "正在处理本地服务…"
-                : "启动本地服务"
-        ) {
-            Task { await model.startDaemonManually() }
-        }
-        .disabled(
-            !serviceUnavailable
-                || model.daemonRecoveryInProgress
-                || model.daemonTransitionInProgress
-        )
-        if let update = model.availableUpdate {
-            Button("下载新版本 \(update.version)") {
-                openURL(update.url)
-            }
-            .accessibilityLabel("下载新版本 \(update.version)")
-        }
-        if #available(macOS 14, *) {
-            SettingsLink {
-                Text("设置…")
-            }
+    }
+
+    private func openSettings() {
+        NSApplication.shared.sendAction(
+            Selector(("showSettingsWindow:")), to: nil, from: nil)
+    }
+}
+
+private struct MenuBarWindowBackgroundModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content.containerBackground(.clear, for: .window)
         } else {
-            Button("设置…") {
-                NSApplication.shared.sendAction(
-                    Selector(("showSettingsWindow:")),
-                    to: nil,
-                    from: nil
-                )
-            }
+            content
         }
-        Divider()
-        Button("退出 ThreadRelay") {
-            NSApplication.shared.terminate(nil)
-        }
-        .keyboardShortcut("q")
     }
 }

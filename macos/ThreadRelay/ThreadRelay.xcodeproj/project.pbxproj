@@ -23,6 +23,34 @@
 		A10000000000000000000012 /* ProviderBranding.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* ProviderBranding.swift */; };
 		A10000000000000000000013 /* ProviderLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ProviderLogos */; };
 		A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* GatewayQuotaDock.swift */; };
+		B100000000000000000000 /* AIGlassUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000000 /* AIGlassUpdateChecker.swift */; };
+		B100000000000000000003 /* BriefingEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000003 /* BriefingEngine.swift */; };
+		B100000000000000000006 /* CodexLogParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000006 /* CodexLogParser.swift */; };
+		B100000000000000000007 /* Collectors.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000007 /* Collectors.swift */; };
+		B100000000000000000008 /* CostEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000008 /* CostEstimator.swift */; };
+		B100000000000000000009 /* DailyStatsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000009 /* DailyStatsStore.swift */; };
+		B10000000000000000000A /* DepletionEstimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000A /* DepletionEstimator.swift */; };
+		B10000000000000000000B /* DirectoryWatcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000B /* DirectoryWatcher.swift */; };
+		B10000000000000000000C /* EventEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000C /* EventEngine.swift */; };
+		B10000000000000000000D /* EventLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000D /* EventLog.swift */; };
+		B10000000000000000000F /* ISO8601.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000F /* ISO8601.swift */; };
+		B100000000000000000010 /* IncrementalLineReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000010 /* IncrementalLineReader.swift */; };
+		B100000000000000000011 /* LogLocator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000011 /* LogLocator.swift */; };
+		B100000000000000000012 /* MilestoneTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000012 /* MilestoneTracker.swift */; };
+		B100000000000000000013 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000013 /* Models.swift */; };
+		B100000000000000000015 /* RealModeMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000015 /* RealModeMessages.swift */; };
+		B100000000000000000016 /* UsageStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000016 /* UsageStore.swift */; };
+		B100000000000000000017 /* AppSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000017 /* AppSettings.swift */; };
+		B100000000000000000018 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000018 /* DashboardView.swift */; };
+		B100000000000000000019 /* HeatmapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000019 /* HeatmapView.swift */; };
+		B10000000000000000001A /* LaunchAtLogin.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000001A /* LaunchAtLogin.swift */; };
+		B10000000000000000001B /* Notifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000001B /* Notifier.swift */; };
+		B10000000000000000001C /* SoundPlayer.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000001C /* SoundPlayer.swift */; };
+		B10000000000000000001D /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000001D /* Theme.swift */; };
+		B10000000000000000001E /* UpdateState.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000001E /* UpdateState.swift */; };
+		B10000000000000000001F /* HUDEventPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000001F /* HUDEventPresentation.swift */; };
+		B100000000000000000020 /* AIGlassCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000020 /* AIGlassCoordinator.swift */; };
+		B100000000000000000021 /* AIGlassSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000021 /* AIGlassSettingsView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +75,34 @@
 		A20000000000000000000012 /* ProviderBranding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderBranding.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* ProviderLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ProviderLogos; sourceTree = "<group>"; };
 		A20000000000000000000014 /* GatewayQuotaDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayQuotaDock.swift; sourceTree = "<group>"; };
+		B200000000000000000000 /* AIGlassUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/AIGlassUpdateChecker.swift; sourceTree = "<group>"; };
+		B200000000000000000003 /* BriefingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/BriefingEngine.swift; sourceTree = "<group>"; };
+		B200000000000000000006 /* CodexLogParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/CodexLogParser.swift; sourceTree = "<group>"; };
+		B200000000000000000007 /* Collectors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/Collectors.swift; sourceTree = "<group>"; };
+		B200000000000000000008 /* CostEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/CostEstimator.swift; sourceTree = "<group>"; };
+		B200000000000000000009 /* DailyStatsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/DailyStatsStore.swift; sourceTree = "<group>"; };
+		B20000000000000000000A /* DepletionEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/DepletionEstimator.swift; sourceTree = "<group>"; };
+		B20000000000000000000B /* DirectoryWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/DirectoryWatcher.swift; sourceTree = "<group>"; };
+		B20000000000000000000C /* EventEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/EventEngine.swift; sourceTree = "<group>"; };
+		B20000000000000000000D /* EventLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/EventLog.swift; sourceTree = "<group>"; };
+		B20000000000000000000F /* ISO8601.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/ISO8601.swift; sourceTree = "<group>"; };
+		B200000000000000000010 /* IncrementalLineReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/IncrementalLineReader.swift; sourceTree = "<group>"; };
+		B200000000000000000011 /* LogLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/LogLocator.swift; sourceTree = "<group>"; };
+		B200000000000000000012 /* MilestoneTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/MilestoneTracker.swift; sourceTree = "<group>"; };
+		B200000000000000000013 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/Models.swift; sourceTree = "<group>"; };
+		B200000000000000000015 /* RealModeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/RealModeMessages.swift; sourceTree = "<group>"; };
+		B200000000000000000016 /* UsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/UsageStore.swift; sourceTree = "<group>"; };
+		B200000000000000000017 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/AppSettings.swift; sourceTree = "<group>"; };
+		B200000000000000000018 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/DashboardView.swift; sourceTree = "<group>"; };
+		B200000000000000000019 /* HeatmapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/HeatmapView.swift; sourceTree = "<group>"; };
+		B20000000000000000001A /* LaunchAtLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/LaunchAtLogin.swift; sourceTree = "<group>"; };
+		B20000000000000000001B /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/Notifier.swift; sourceTree = "<group>"; };
+		B20000000000000000001C /* SoundPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/SoundPlayer.swift; sourceTree = "<group>"; };
+		B20000000000000000001D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/Theme.swift; sourceTree = "<group>"; };
+		B20000000000000000001E /* UpdateState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/UpdateState.swift; sourceTree = "<group>"; };
+		B20000000000000000001F /* HUDEventPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/HUDEventPresentation.swift; sourceTree = "<group>"; };
+		B200000000000000000020 /* AIGlassCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCoordinator.swift; sourceTree = "<group>"; };
+		B200000000000000000021 /* AIGlassSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassSettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -228,6 +284,34 @@
 				A10000000000000000000011 /* UpdateChecker.swift in Sources */,
 				A10000000000000000000012 /* ProviderBranding.swift in Sources */,
 				A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */,
+				B100000000000000000000 /* AIGlassUpdateChecker.swift in Sources */ ,
+				B100000000000000000003 /* BriefingEngine.swift in Sources */ ,
+				B100000000000000000006 /* CodexLogParser.swift in Sources */ ,
+				B100000000000000000007 /* Collectors.swift in Sources */ ,
+				B100000000000000000008 /* CostEstimator.swift in Sources */ ,
+				B100000000000000000009 /* DailyStatsStore.swift in Sources */ ,
+				B10000000000000000000A /* DepletionEstimator.swift in Sources */ ,
+				B10000000000000000000B /* DirectoryWatcher.swift in Sources */ ,
+				B10000000000000000000C /* EventEngine.swift in Sources */ ,
+				B10000000000000000000D /* EventLog.swift in Sources */ ,
+				B10000000000000000000F /* ISO8601.swift in Sources */ ,
+				B100000000000000000010 /* IncrementalLineReader.swift in Sources */ ,
+				B100000000000000000011 /* LogLocator.swift in Sources */ ,
+				B100000000000000000012 /* MilestoneTracker.swift in Sources */ ,
+				B100000000000000000013 /* Models.swift in Sources */ ,
+				B100000000000000000015 /* RealModeMessages.swift in Sources */ ,
+				B100000000000000000016 /* UsageStore.swift in Sources */ ,
+				B100000000000000000017 /* AppSettings.swift in Sources */ ,
+				B100000000000000000018 /* DashboardView.swift in Sources */ ,
+				B100000000000000000019 /* HeatmapView.swift in Sources */ ,
+				B10000000000000000001A /* LaunchAtLogin.swift in Sources */ ,
+				B10000000000000000001B /* Notifier.swift in Sources */ ,
+				B10000000000000000001C /* SoundPlayer.swift in Sources */ ,
+				B10000000000000000001D /* Theme.swift in Sources */ ,
+				B10000000000000000001E /* UpdateState.swift in Sources */ ,
+				B10000000000000000001F /* HUDEventPresentation.swift in Sources */ ,
+				B100000000000000000020 /* AIGlassCoordinator.swift in Sources */ ,
+				B100000000000000000021 /* AIGlassSettingsView.swift in Sources */ ,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			};
@@ -240,8 +324,8 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
-		A80000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Debug; };
-		A80000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 13.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Release; };
+		A80000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 26.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Debug; };
+		A80000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = { CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 26.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Release; };
 		A80000000000000000000003 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = A20000000000000000000006 /* Version.xcconfig */;
@@ -254,7 +338,7 @@
 					INFOPLIST_FILE = Config/ThreadRelay-Info.plist;
 					THREADRELAY_DISPLAY_NAME = "ThreadRelay Preview";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay.preview;
 				PRODUCT_NAME = ThreadRelay;
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -273,7 +357,7 @@
 				INFOPLIST_FILE = Config/ThreadRelay-Info.plist;
 				THREADRELAY_DISPLAY_NAME = ThreadRelay;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay;
 				PRODUCT_NAME = ThreadRelay;
 				SWIFT_COMPILATION_MODE = wholemodule;
@@ -291,7 +375,7 @@
 					ENABLE_TESTABILITY = YES;
 					GENERATE_INFOPLIST_FILE = YES;
 					LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @loader_path/../../MacOS";
-					MACOSX_DEPLOYMENT_TARGET = 13.0;
+					MACOSX_DEPLOYMENT_TARGET = 26.0;
 					PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay.preview.tests;
 					PRODUCT_NAME = ThreadRelayMacTests;
 					SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -310,7 +394,7 @@
 					ENABLE_TESTABILITY = YES;
 					GENERATE_INFOPLIST_FILE = YES;
 					LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @loader_path/../../MacOS";
-					MACOSX_DEPLOYMENT_TARGET = 13.0;
+					MACOSX_DEPLOYMENT_TARGET = 26.0;
 					PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay.tests;
 					PRODUCT_NAME = ThreadRelayMacTests;
 					SWIFT_STRICT_CONCURRENCY = complete;

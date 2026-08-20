@@ -56,12 +56,36 @@ THREADRELAY_BUILD_NUMBER=1 scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 ```
 
-Use the same `THREADRELAY_BUILD_NUMBER` when compiling the Rust daemon. The
-assembly script rejects a bundle when its embedded daemon was built with a
-different number, so the GUI and daemon cannot silently drift apart:
+For daemon-affecting changes, the default handoff builds and assembles the
+formal App immediately. Use the same build number for both architectures and
+the SwiftUI bundle; the assembly script rejects a mismatch. This updates
+`outputs/ThreadRelay.app`, but never replaces or restarts the daemon that is
+already running. The complete handoff rule is in
+[`docs/threadrelay-change-handoff.zh-CN.md`](../../docs/threadrelay-change-handoff.zh-CN.md).
 
 ```sh
-THREADRELAY_BUILD_NUMBER=389 cargo build --release --bin threadrelay
-THREADRELAY_BUILD_NUMBER=389 scripts/generate-swift-version.sh \
+BUILD_NUMBER=439
+THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+  --target aarch64-apple-darwin --bin threadrelay
+THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+  --target x86_64-apple-darwin --bin threadrelay
+mkdir -p target/release
+lipo -create \
+  target/aarch64-apple-darwin/release/threadrelay \
+  target/x86_64-apple-darwin/release/threadrelay \
+  -output target/release/threadrelay
+chmod 755 target/release/threadrelay
+THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
+xcodebuild \
+  -project macos/ThreadRelay/ThreadRelay.xcodeproj \
+  -scheme ThreadRelay \
+  -configuration Release \
+  -derivedDataPath macos/ThreadRelay/.build/xcode \
+  build
+scripts/assemble-swiftui-macos-app.sh \
+  "$BUILD_NUMBER" \
+  macos/ThreadRelay/.build/xcode/Build/Products/Release/ThreadRelay.app \
+  target/release/threadrelay \
+  outputs/ThreadRelay.app
 ```

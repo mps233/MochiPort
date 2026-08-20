@@ -1,16 +1,21 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::{
-    app_state::{ImAccountRuntimeState, SharedState, im_account_key},
+    app_state::{ImAccountProfile, ImAccountRuntimeState, SharedState, im_account_key},
     bridge, chain_log,
-    config::AppConfig,
+    config::{AppConfig, FeishuConfig, TelegramConfig},
     im::feishu::{FeishuApi, FeishuSettings},
     im::telegram::{api::TelegramApi, types::TelegramSettings},
     types::ImPlatformKind,
 };
+
+const IM_ACCOUNT_PROFILE_REFRESH_MS: u128 = 60 * 60 * 1_000;
+const IM_ACCOUNT_AVATAR_MAX_DATA_BYTES: usize = 512 * 1024;
 
 pub(super) async fn start_bridge(State(state): State<SharedState>) -> impl IntoResponse {
     {
@@ -161,6 +166,7 @@ pub(super) struct ImAccountItem {
     platform: String,
     account_id: String,
     display_name: Option<String>,
+    avatar_data: Option<String>,
     enabled: bool,
     configured: bool,
     secret_set: bool,
@@ -201,9 +207,10 @@ pub(super) async fn manage_im_accounts(
 
 pub(super) async fn im_accounts_snapshot(state: &SharedState) -> ImAccountsResponse {
     let config = state.config.lock().await.clone();
+    refresh_im_account_profiles(state, &config).await;
     let runtime = state.im_accounts.lock().await.clone();
     ImAccountsResponse {
-        accounts: im_account_items(&config, &runtime),
+        accounts: im_account_items(state, &config, &runtime),
     }
 }
 
@@ -545,13 +552,144 @@ pub(super) fn im_bridge_configured(config: &AppConfig) -> bool {
         || wecom_active(config)
 }
 
+async fn refresh_im_account_profiles(state: &SharedState, config: &AppConfig) {
+    let _refresh_guard = state.im_account_profile_refresh.lock().await;
+    let now = crate::types::now_ms();
+    enum ProfileAccount {
+        Feishu(FeishuConfig),
+        Telegram(TelegramConfig),
+    }
+    let accounts = config
+        .effective_feishu_accounts()
+        .into_iter()
+        .map(|account| {
+            (
+                ImPlatformKind::Feishu,
+                account.account_id.clone(),
+                ProfileAccount::Feishu(account),
+            )
+        })
+        .chain(
+            config
+                .effective_telegram_accounts()
+                .into_iter()
+                .map(|account| {
+                    (
+                        ImPlatformKind::Telegram,
+                        account.account_id.clone(),
+                        ProfileAccount::Telegram(account),
+                    )
+                }),
+        )
+        .collect::<Vec<_>>();
+
+    for (platform, account_id, profile_account) in accounts {
+        let key = im_account_key(platform, &account_id);
+        let fresh = state
+            .im_account_profiles
+            .lock()
+            .await
+            .get(&key)
+            .and_then(|profile| profile.avatar_checked_at_ms)
+            .is_some_and(|checked| now.saturating_sub(checked) < IM_ACCOUNT_PROFILE_REFRESH_MS);
+        let configured = match &profile_account {
+            ProfileAccount::Feishu(account) => account.is_configured(),
+            ProfileAccount::Telegram(account) => account.is_configured(),
+        };
+        if fresh || !configured {
+            continue;
+        }
+
+        let mut profile = ImAccountProfile {
+            avatar_checked_at_ms: Some(now),
+            ..Default::default()
+        };
+        match platform {
+            ImPlatformKind::Telegram => {
+                let ProfileAccount::Telegram(account) = profile_account else {
+                    continue;
+                };
+                let api = TelegramApi::new(TelegramSettings::from_app_config(&account));
+                let result = tokio::time::timeout(Duration::from_secs(5), async {
+                    let user = api.get_me().await?;
+                    let photos = api.get_user_profile_photos(user.id, 1).await?;
+                    let photo = photos
+                        .photos
+                        .first()
+                        .and_then(|sizes| sizes.iter().max_by_key(|size| size.width * size.height));
+                    let Some(photo) = photo else {
+                        return Ok::<_, anyhow::Error>(None);
+                    };
+                    let file = api.get_file(&photo.file_id).await?;
+                    let Some(path) = file.file_path else {
+                        return Ok(None);
+                    };
+                    let bytes = api.download_file(&path).await?;
+                    let mime = mime_guess::from_path(&path)
+                        .first_raw()
+                        .filter(|mime| mime.starts_with("image/"))
+                        .unwrap_or("image/jpeg")
+                        .to_string();
+                    Ok(Some((bytes, mime)))
+                })
+                .await;
+                if let Ok(Ok(Some((bytes, mime)))) = result {
+                    profile.avatar_data = image_data_url(bytes, &mime);
+                    profile.avatar_mime_type = Some(mime);
+                }
+            }
+            ImPlatformKind::Feishu => {
+                let ProfileAccount::Feishu(account) = profile_account else {
+                    continue;
+                };
+                let api = FeishuApi::new(FeishuSettings::from_app_config(&account));
+                let result = tokio::time::timeout(Duration::from_secs(5), async {
+                    let info = api.get_application_info(account.app_id.trim()).await?;
+                    let Some(url) = info.avatar_url else {
+                        return Ok::<_, anyhow::Error>(None);
+                    };
+                    Ok(Some(api.download_application_avatar(&url).await?))
+                })
+                .await;
+                if let Ok(Ok(Some((bytes, mime)))) = result {
+                    profile.avatar_data = image_data_url(bytes, &mime);
+                    profile.avatar_mime_type = Some(mime);
+                }
+            }
+            _ => {}
+        }
+        state.im_account_profiles.lock().await.insert(key, profile);
+    }
+}
+
+fn image_data_url(bytes: Vec<u8>, mime_type: &str) -> Option<String> {
+    if bytes.is_empty() || bytes.len() > IM_ACCOUNT_AVATAR_MAX_DATA_BYTES {
+        return None;
+    }
+    let mime = mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if !mime.starts_with("image/") {
+        return None;
+    }
+    Some(format!(
+        "data:{mime};base64,{}",
+        BASE64_STANDARD.encode(bytes)
+    ))
+}
+
 fn im_account_items(
+    state: &SharedState,
     config: &AppConfig,
     runtime: &HashMap<String, ImAccountRuntimeState>,
 ) -> Vec<ImAccountItem> {
     let mut accounts = Vec::new();
     for account in config.effective_feishu_accounts() {
         accounts.push(im_account_item(
+            state,
             ImPlatformKind::Feishu,
             &account.account_id,
             non_empty_string(&account.display_name)
@@ -565,6 +703,7 @@ fn im_account_items(
     }
     for account in config.effective_telegram_accounts() {
         accounts.push(im_account_item(
+            state,
             ImPlatformKind::Telegram,
             &account.account_id,
             non_empty_string(&account.display_name).or_else(|| Some("Telegram 机器人".to_string())),
@@ -576,6 +715,7 @@ fn im_account_items(
     }
     for account in config.effective_wechat_accounts() {
         accounts.push(im_account_item(
+            state,
             ImPlatformKind::Wechat,
             &account.account_id,
             non_empty_string(&account.display_name).or_else(|| Some("微信机器人".to_string())),
@@ -587,6 +727,7 @@ fn im_account_items(
     }
     for account in config.effective_wecom_accounts() {
         accounts.push(im_account_item(
+            state,
             ImPlatformKind::Wecom,
             &account.account_id,
             non_empty_string(&account.display_name).or_else(|| Some("企业微信机器人".to_string())),
@@ -600,6 +741,7 @@ fn im_account_items(
 }
 
 fn im_account_item(
+    state: &SharedState,
     platform: ImPlatformKind,
     account_id: &str,
     display_name: Option<String>,
@@ -609,10 +751,17 @@ fn im_account_item(
     runtime: &HashMap<String, ImAccountRuntimeState>,
 ) -> ImAccountItem {
     let runtime = runtime.get(&im_account_key(platform, account_id));
+    let avatar_data = state
+        .im_account_profiles
+        .try_lock()
+        .ok()
+        .and_then(|profiles| profiles.get(&im_account_key(platform, account_id)).cloned())
+        .and_then(|profile| profile.avatar_data);
     ImAccountItem {
         platform: platform.key().to_string(),
         account_id: account_id.to_string(),
         display_name,
+        avatar_data,
         enabled,
         configured,
         secret_set,
@@ -751,6 +900,11 @@ async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_
             .await;
     }
     if let Some(kind) = im_platform_from_key(platform) {
+        state
+            .im_account_profiles
+            .lock()
+            .await
+            .remove(&im_account_key(kind, account_id));
         state
             .im_accounts
             .lock()

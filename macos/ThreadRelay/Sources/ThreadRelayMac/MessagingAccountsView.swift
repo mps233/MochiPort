@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// A UI-facing snapshot of one configured messaging account.
@@ -37,6 +38,7 @@ struct MessagingAccountSummary: Identifiable, Equatable {
     let platform: Platform
     let accountID: String
     let displayName: String?
+    let avatarData: String?
     let enabled: Bool
     let configured: Bool
     let secretSet: Bool
@@ -53,6 +55,7 @@ struct MessagingAccountSummary: Identifiable, Equatable {
         platform: Platform,
         accountID: String,
         displayName: String? = nil,
+        avatarData: String? = nil,
         enabled: Bool = true,
         configured: Bool = true,
         secretSet: Bool = true,
@@ -66,6 +69,7 @@ struct MessagingAccountSummary: Identifiable, Equatable {
         self.platform = platform
         self.accountID = accountID
         self.displayName = displayName
+        self.avatarData = avatarData
         self.enabled = enabled
         self.configured = configured
         self.secretSet = secretSet
@@ -85,6 +89,7 @@ struct MessagingAccountSummary: Identifiable, Equatable {
             platform: platform,
             accountID: account.accountId,
             displayName: account.displayName,
+            avatarData: account.avatarData,
             enabled: account.enabled,
             configured: account.configured,
             secretSet: account.secretSet,
@@ -162,6 +167,43 @@ private enum MessagingAccountState: Equatable {
         case .connecting: .orange
         case .error: .red
         }
+    }
+}
+
+/// Displays a daemon-fetched account avatar and falls back to the bundled
+/// platform symbol when the remote profile is unavailable.
+private struct MessagingAccountAvatar: View {
+    let account: MessagingAccountSummary
+    var size: CGFloat = 28
+
+    var body: some View {
+        Group {
+            if let image = image {
+                Image(nsImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Image(systemName: account.platform.symbol)
+                    .font(.system(size: size * 0.52, weight: .semibold))
+                    .foregroundStyle(.primary.opacity(0.72))
+                    .frame(width: size, height: size)
+                    .background(.quaternary)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(Circle())
+        .overlay {
+            Circle().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5)
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var image: NSImage? {
+        guard let avatarData = account.avatarData,
+              let separator = avatarData.firstIndex(of: ","),
+              let data = Data(base64Encoded: String(avatarData[avatarData.index(after: separator)...]))
+        else { return nil }
+        return NSImage(data: data)
     }
 }
 
@@ -508,11 +550,7 @@ struct MessagingAccountsView: View {
                             .foregroundStyle(.tertiary)
                             .frame(width: 10)
 
-                        Image(systemName: account.platform.symbol)
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(.primary.opacity(0.72))
-                            .frame(width: 28, height: 28)
-                            .background(.quaternary, in: Circle())
+                        MessagingAccountAvatar(account: account)
 
                         VStack(alignment: .leading, spacing: 3) {
                             Text(account.displayName?.trimmedNonEmpty ?? account.platform.title)
@@ -566,23 +604,6 @@ struct MessagingAccountsView: View {
                 .accessibilityLabel(isEnabled(account) ? "停用账号" : "启用账号")
                 .help(isEnabled(account) ? "停用账号" : "启用账号")
 
-                if onDelete != nil, mutationsEnabled {
-                    Menu {
-                        Button("删除账号", role: .destructive) {
-                            pendingDeletion = account
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                            .frame(width: 24, height: 24)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .menuStyle(.borderlessButton)
-                    .menuIndicator(.hidden)
-                    .help("更多账号操作")
-                    .accessibilityLabel("更多账号操作")
-                }
             }
             .padding(.horizontal, 16)
             .frame(minHeight: 64)

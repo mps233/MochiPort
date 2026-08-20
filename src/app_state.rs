@@ -186,6 +186,8 @@ pub struct AppState {
     pub wechat_onboard: Mutex<Option<WechatOnboardSession>>,
     pub wecom_onboard: Mutex<Option<WecomOnboardSession>>,
     pub safe_relaunch: Mutex<Option<crate::safe_relaunch::PendingSafeRelaunch>>,
+    pub im_account_profiles: Mutex<HashMap<String, ImAccountProfile>>,
+    pub im_account_profile_refresh: Mutex<()>,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     pub lifecycle_admission: Arc<LifecycleAdmission>,
     pub enhanced_launch_operations: Arc<crate::codex_app_enhanced::EnhancedLaunchOperationManager>,
@@ -464,6 +466,16 @@ impl ImAccountRuntimeState {
     }
 }
 
+/// Cached presentation metadata for a messaging account. This stays separate
+/// from connection runtime state so loading an avatar cannot make an account
+/// look connected or alter the daemon status snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct ImAccountProfile {
+    pub avatar_data: Option<String>,
+    pub avatar_mime_type: Option<String>,
+    pub avatar_checked_at_ms: Option<u128>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WechatOnboardSession {
     pub generation: u64,
@@ -519,6 +531,8 @@ impl AppState {
             wechat_onboard: Mutex::new(None),
             wecom_onboard: Mutex::new(None),
             safe_relaunch: Mutex::new(None),
+            im_account_profiles: Mutex::new(HashMap::new()),
+            im_account_profile_refresh: Mutex::new(()),
             shutdown_tx: Mutex::new(shutdown_tx),
             lifecycle_admission: Arc::new(LifecycleAdmission::new()),
             enhanced_launch_operations: Arc::new(

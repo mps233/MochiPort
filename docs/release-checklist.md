@@ -22,12 +22,22 @@ cargo test
 cargo build --release --features gui --bin threadrelay
 ```
 
-For the formal macOS app, build the Rust daemon and Xcode app with the same
-numeric build number, then assemble the bundle without changing the running
-GUI or daemon:
+For every daemon-affecting change, build the Rust daemon and Xcode app with the
+same numeric build number, then assemble the formal bundle. This packaging step
+is automatic in the handoff workflow, but it never changes the running GUI or
+daemon:
 
 ```sh
-THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release --bin threadrelay
+THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+  --target aarch64-apple-darwin --bin threadrelay
+THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+  --target x86_64-apple-darwin --bin threadrelay
+mkdir -p target/release
+lipo -create \
+  target/aarch64-apple-darwin/release/threadrelay \
+  target/x86_64-apple-darwin/release/threadrelay \
+  -output target/release/threadrelay
+chmod 755 target/release/threadrelay
 THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
 scripts/assemble-swiftui-macos-app.sh "$BUILD_NUMBER" "$XCODE_APP" target/release/threadrelay outputs/ThreadRelay.app
 ```

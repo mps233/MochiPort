@@ -2272,6 +2272,7 @@ mod tests {
                             "unit": "USD",
                             "planName": "钱包余额",
                             "isValid": true,
+                            "usage": { "today": { "cost": 0.12, "actual_cost": 0.09 } },
                         }))
                     }
                 }),
@@ -2362,6 +2363,8 @@ mod tests {
         assert_eq!(payload["usage"]["effectiveRateMultiplier"], 0.9);
         assert_eq!(payload["usage"]["resolvedRateMultiplier"], 0.6);
         assert_eq!(payload["usage"]["appliedPeakMultiplier"], 1.5);
+        assert_eq!(payload["usage"]["todayCost"], 0.12);
+        assert_eq!(payload["usage"]["todayActualCost"], 0.09);
         assert!(!payload.to_string().contains(CANARY_PROVIDER_KEY));
         assert!(!payload.to_string().contains(&address.to_string()));
 
@@ -2658,6 +2661,7 @@ mod tests {
                 account,
                 &[
                     "accountId",
+                    "avatarData",
                     "configured",
                     "connected",
                     "connecting",

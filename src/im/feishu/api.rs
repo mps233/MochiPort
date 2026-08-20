@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 use std::{fs, path::Path};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
+use futures_util::StreamExt;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -19,6 +20,7 @@ const FEISHU_API_BASE: &str = "https://open.feishu.cn/open-apis";
 const FEISHU_WS_BASE: &str = "https://open.feishu.cn";
 const DEFAULT_TOKEN_TTL: Duration = Duration::from_secs(7200);
 const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(120);
+const FEISHU_AVATAR_MAX_BYTES: u64 = 2 * 1024 * 1024;
 // Process-wide tenant token cache to avoid fetching a token for every message send.
 // Keyed by (app_id, app_secret) since both define the credential pair.
 static TENANT_TOKEN_CACHE: Lazy<RwLock<HashMap<String, CachedTenantToken>>> =
@@ -72,6 +74,12 @@ pub(super) struct WsEndpoint {
 #[derive(Clone)]
 pub struct FeishuApi {
     settings: FeishuSettings,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FeishuApplicationInfo {
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 impl FeishuApi {
@@ -174,7 +182,7 @@ impl FeishuApi {
         Ok(payload)
     }
 
-    pub async fn get_application_display_name(&self, app_id: &str) -> Result<Option<String>> {
+    pub async fn get_application_info(&self, app_id: &str) -> Result<FeishuApplicationInfo> {
         let token = self.get_tenant_access_token().await?;
         let response = self
             .http_client()
@@ -228,7 +236,64 @@ impl FeishuApi {
             .or_else(|| app.get("app_name").and_then(|v| v.as_str()))
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
-        Ok(display_name)
+        let avatar_url = app
+            .get("avatar_url")
+            .or_else(|| app.get("avatarUrl"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        Ok(FeishuApplicationInfo {
+            display_name,
+            avatar_url,
+        })
+    }
+
+    pub async fn get_application_display_name(&self, app_id: &str) -> Result<Option<String>> {
+        Ok(self.get_application_info(app_id).await?.display_name)
+    }
+
+    pub async fn download_application_avatar(&self, avatar_url: &str) -> Result<(Vec<u8>, String)> {
+        let avatar_url = avatar_url.trim();
+        if avatar_url.is_empty() {
+            return Err(anyhow!("feishu application avatar URL is empty"));
+        }
+        let parsed_url = reqwest::Url::parse(avatar_url)
+            .map_err(|err| anyhow!("invalid feishu application avatar URL: {err}"))?;
+        if parsed_url.scheme() != "https" {
+            return Err(anyhow!("feishu application avatar URL must use HTTPS"));
+        }
+        // The URL returned by Feishu is already a public or signed asset URL.
+        // Do not forward the tenant token to that potentially different host.
+        let response = self.http_client().get(parsed_url).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!(
+                "feishu application avatar download failed: status={status}"
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|bytes| bytes > FEISHU_AVATAR_MAX_BYTES)
+        {
+            return Err(anyhow!("feishu application avatar exceeds the 2 MB limit"));
+        }
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("image/png")
+            .to_string();
+        let mut bytes = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.context("failed to read feishu application avatar")?;
+            if bytes.len().saturating_add(chunk.len()) as u64 > FEISHU_AVATAR_MAX_BYTES {
+                return Err(anyhow!("feishu application avatar exceeds the 2 MB limit"));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok((bytes, content_type))
     }
 
     pub(super) async fn get_tenant_access_token(&self) -> Result<String> {

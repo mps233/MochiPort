@@ -49,15 +49,46 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
 ## daemon 改动交接
 
 1. 运行与改动相关的 Rust、Swift 测试和构建。
-2. 可以生成构建产物，但不得对当前运行中的 daemon 执行以下操作：
+2. daemon 改动完成后默认直接生成正式 macOS App 产物，不需要用户再次单独要求“打包”。构建号必须显式指定，并同时用于 Rust daemon 和 SwiftUI App：
+
+   ```sh
+   BUILD_NUMBER=439
+   THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+     --target aarch64-apple-darwin --bin threadrelay
+   THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+     --target x86_64-apple-darwin --bin threadrelay
+   mkdir -p target/release
+   lipo -create \
+     target/aarch64-apple-darwin/release/threadrelay \
+     target/x86_64-apple-darwin/release/threadrelay \
+     -output target/release/threadrelay
+   chmod 755 target/release/threadrelay
+   THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh \
+     macos/ThreadRelay/Config/Version.xcconfig
+   xcodebuild \
+     -project macos/ThreadRelay/ThreadRelay.xcodeproj \
+     -scheme ThreadRelay \
+     -configuration Release \
+     -derivedDataPath macos/ThreadRelay/.build/xcode \
+     build
+   scripts/assemble-swiftui-macos-app.sh \
+     "$BUILD_NUMBER" \
+     macos/ThreadRelay/.build/xcode/Build/Products/Release/ThreadRelay.app \
+     target/release/threadrelay \
+     outputs/ThreadRelay.app
+   ```
+
+   实际使用时将 `BUILD_NUMBER` 改为本次发布使用的下一个正整数；不要复用已经发布的构建号。
+
+3. 可以生成和更新构建产物，但不得对当前运行中的 daemon 执行以下操作：
 
    - kill、bootstrap、kickstart 或 unload
    - 自动替换或切换 runtime
    - 自动重启、回滚或故障恢复
    - 通过 GUI 关闭旧 daemon 并启动新 daemon
 
-3. 不要因为 GUI 启动、版本不一致或构建完成而自动安装新 helper。
-4. 向用户明确说明：改动已构建完成，但需要用户在确认合适的时机后手动重启后台服务。
+4. 不要因为 GUI 启动、版本不一致、构建完成或正式 App 产物更新而自动安装新 helper。
+5. 向用户明确说明：正式 App 已打包完成，但 daemon 改动要等用户在确认合适的时机后手动重启后台服务才会生效。
 
 设置页保留的“安全重启后台服务”是用户主动操作，不属于自动交接流程。该操作只能针对当前已确认身份的 daemon，并由 daemon 先检查受保护工作项。
 

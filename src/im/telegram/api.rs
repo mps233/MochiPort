@@ -76,6 +76,12 @@ pub struct TelegramUser {
     pub last_name: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramUserProfilePhotos {
+    pub total_count: u32,
+    pub photos: Vec<Vec<TelegramPhotoSize>>,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TelegramChat {
     pub id: i64,
@@ -612,6 +618,21 @@ impl TelegramApi {
 
     pub async fn get_me(&self) -> Result<TelegramUser> {
         self.post("getMe", &serde_json::json!({})).await
+    }
+
+    pub async fn get_user_profile_photos(
+        &self,
+        user_id: i64,
+        limit: u8,
+    ) -> Result<TelegramUserProfilePhotos> {
+        self.post(
+            "getUserProfilePhotos",
+            &serde_json::json!({
+                "user_id": user_id,
+                "limit": limit.clamp(1, 100),
+            }),
+        )
+        .await
     }
 
     pub fn settings(&self) -> &TelegramSettings {

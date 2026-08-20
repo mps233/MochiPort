@@ -43,6 +43,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var codexSessions: [ManageCodexSession] = []
     @Published private(set) var codexSessionProviders: [String] = []
     @Published private(set) var gateway: ManageGateway?
+    /// Real Sub2API daily cost for the first enabled provider with a saved key.
+    /// The menu-bar dashboard uses this when available and falls back to its
+    /// local Sub2API-compatible estimate otherwise.
+    @Published private(set) var gatewayProviderUsage: ManageProviderUsageResponse?
+    /// Most recently used Sub2API channel for the dashboard provider.
+    /// This is kept separate from the provider-level total balance.
+    @Published private(set) var gatewayProviderChannel: ManageSub2ApiAccountPoolResponse.Account?
     @Published private(set) var sub2ApiAdmin: ManageSub2ApiAdmin?
     @Published private(set) var sub2ApiAccountPool: ManageSub2ApiAccountPoolResponse.Pool?
     @Published private(set) var sub2ApiAccountPoolLoading = false
@@ -492,6 +499,8 @@ final class AppModel: ObservableObject {
         codexSessions = []
         codexSessionProviders = []
         gateway = nil
+        gatewayProviderUsage = nil
+        gatewayProviderChannel = nil
         sub2ApiAdmin = nil
         invalidateSub2ApiAccountPool()
         settings = nil
@@ -515,6 +524,8 @@ final class AppModel: ObservableObject {
             imAccounts = []
         case .gateway:
             gateway = nil
+            gatewayProviderUsage = nil
+            gatewayProviderChannel = nil
             sub2ApiAdmin = nil
             invalidateSub2ApiAccountPool()
         case .requestLogs:
@@ -1615,6 +1626,8 @@ final class AppModel: ObservableObject {
                     planName: "Fixture",
                     accountValid: true,
                     accountStatus: "active",
+                    todayCost: nil,
+                    todayActualCost: nil,
                     groupRateMultiplier: 1,
                     userRateMultiplier: 1,
                     resolvedRateMultiplier: 1,
@@ -1630,6 +1643,53 @@ final class AppModel: ObservableObject {
             )
         }
         return try await apiClient.fetchGatewayProviderUsage(providerName: providerName)
+    }
+
+    /// Refreshes the usage snapshot used by the menu-bar dashboard. The first
+    /// enabled provider with a saved key matches the gateway quota dock's
+    /// default selection. A failed or unsupported probe is kept as nil so the
+    /// dashboard can use its local Sub2API-compatible estimate.
+    func refreshGatewayProviderUsage() async {
+        guard fixtureStatus == nil else {
+            gatewayProviderUsage = nil
+            gatewayProviderChannel = nil
+            return
+        }
+        let currentGateway: ManageGateway?
+        if let gateway {
+            currentGateway = gateway
+        } else {
+            currentGateway = try? await apiClient.gateway()
+        }
+        guard let provider = currentGateway?.providers.first(where: { $0.enabled && $0.secretSet }) else {
+            gatewayProviderUsage = nil
+            gatewayProviderChannel = nil
+            return
+        }
+        gatewayProviderUsage = try? await apiClient.fetchGatewayProviderUsage(
+            providerName: provider.name
+        )
+        guard !Task.isCancelled else { return }
+
+        // Provider usage is the total balance. Resolve the latest account
+        // separately so the dashboard can show the actual channel balance.
+        gatewayProviderChannel = nil
+        if let recent = try? await apiClient.fetchGatewayProviderRecentAccount(
+            providerName: provider.name
+        ), let accountID = recent.account?.accountId {
+            await refreshSub2ApiAccountPool()
+            // The quota dock may already be refreshing the shared account
+            // pool. Wait for that request to publish its result before
+            // resolving the dashboard's current channel, otherwise the
+            // overview can briefly render a missing multiplier.
+            while sub2ApiAccountPoolLoading, !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard !Task.isCancelled else { return }
+            gatewayProviderChannel = sub2ApiAccountPool?.accounts.first {
+                $0.id == accountID
+            }
+        }
     }
 
     func fetchGatewayProviderRecentAccount(
@@ -2147,6 +2207,7 @@ final class AppModel: ObservableObject {
                 platform: "telegram",
                 accountId: "preview-telegram-new",
                 displayName: "预览 Telegram 机器人",
+                avatarData: nil,
                 enabled: true,
                 configured: true,
                 secretSet: true,
@@ -2362,6 +2423,7 @@ final class AppModel: ObservableObject {
             platform: platform,
             accountId: accountId,
             displayName: displayName,
+            avatarData: nil,
             enabled: true,
             configured: true,
             secretSet: true,
@@ -2466,6 +2528,7 @@ final class AppModel: ObservableObject {
                 platform: "telegram",
                 accountId: "preview-telegram",
                 displayName: "Telegram 机器人",
+                avatarData: nil,
                 enabled: true,
                 configured: true,
                 secretSet: true,
@@ -2480,6 +2543,7 @@ final class AppModel: ObservableObject {
                 platform: "feishu",
                 accountId: "preview-feishu",
                 displayName: "工作空间",
+                avatarData: nil,
                 enabled: true,
                 configured: true,
                 secretSet: true,
@@ -2494,6 +2558,7 @@ final class AppModel: ObservableObject {
                 platform: "wechat",
                 accountId: "preview-wechat",
                 displayName: "客服微信",
+                avatarData: nil,
                 enabled: true,
                 configured: true,
                 secretSet: true,
@@ -2508,6 +2573,7 @@ final class AppModel: ObservableObject {
                 platform: "wecom",
                 accountId: "preview-wecom",
                 displayName: "企业微信",
+                avatarData: nil,
                 enabled: false,
                 configured: false,
                 secretSet: false,

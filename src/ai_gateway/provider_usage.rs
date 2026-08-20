@@ -45,6 +45,10 @@ pub struct ProviderUsageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub today_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub today_actual_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub group_rate_multiplier: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_rate_multiplier: Option<f64>,
@@ -84,6 +88,8 @@ struct BalanceInfo {
     plan_name: Option<String>,
     account_valid: Option<bool>,
     account_status: Option<String>,
+    today_cost: Option<f64>,
+    today_actual_cost: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,6 +148,8 @@ pub async fn fetch_provider_usage(
         plan_name: None,
         account_valid: None,
         account_status: None,
+        today_cost: None,
+        today_actual_cost: None,
         group_rate_multiplier: None,
         user_rate_multiplier: None,
         resolved_rate_multiplier: None,
@@ -163,6 +171,8 @@ pub async fn fetch_provider_usage(
         snapshot.plan_name = balance.plan_name;
         snapshot.account_valid = balance.account_valid;
         snapshot.account_status = balance.account_status;
+        snapshot.today_cost = balance.today_cost;
+        snapshot.today_actual_cost = balance.today_actual_cost;
     }
     if let Probe::Available(billing) = billing {
         snapshot.group_rate_multiplier = Some(billing.group_rate_multiplier);
@@ -294,6 +304,14 @@ fn parse_balance(value: &Value) -> Option<BalanceInfo> {
         Some("disabled" | "inactive" | "quota_exhausted" | "expired") => Some(false),
         _ => Some(reported_valid),
     };
+    let today_cost = value
+        .pointer("/usage/today/cost")
+        .and_then(Value::as_f64)
+        .filter(|amount| amount.is_finite() && *amount >= 0.0);
+    let today_actual_cost = value
+        .pointer("/usage/today/actual_cost")
+        .and_then(Value::as_f64)
+        .filter(|amount| amount.is_finite() && *amount >= 0.0);
     Some(BalanceInfo {
         remaining: raw_remaining.filter(|_| !unlimited),
         unlimited,
@@ -302,6 +320,8 @@ fn parse_balance(value: &Value) -> Option<BalanceInfo> {
         plan_name: optional_string("planName", 120),
         account_valid,
         account_status,
+        today_cost,
+        today_actual_cost,
     })
 }
 
@@ -369,12 +389,15 @@ mod tests {
             "balance": 12.5,
             "unit": "USD",
             "planName": "钱包余额",
-            "isValid": true
+            "isValid": true,
+            "usage": { "today": { "cost": 0.12, "actual_cost": 0.09 } }
         }))
         .expect("wallet balance");
         assert_eq!(wallet.remaining, Some(12.5));
         assert!(!wallet.unlimited);
         assert_eq!(wallet.mode.as_deref(), Some("unrestricted"));
+        assert_eq!(wallet.today_cost, Some(0.12));
+        assert_eq!(wallet.today_actual_cost, Some(0.09));
 
         let quota = parse_balance(&json!({
             "mode": "quota_limited",

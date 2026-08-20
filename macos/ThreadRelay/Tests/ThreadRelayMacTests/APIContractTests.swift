@@ -1122,6 +1122,7 @@ final class APIContractTests: XCTestCase {
                 platform: "telegram",
                 accountId: "telegram-main",
                 displayName: "主 Telegram",
+                avatarData: nil,
                 enabled: true,
                 configured: true,
                 secretSet: true,
@@ -3686,7 +3687,7 @@ final class APIContractTests: XCTestCase {
             XCTAssertNil(body?["apiKey"])
             return MockResponse(
                 statusCode: 200,
-                json: #"{"ok":true,"providerName":"primary","usage":{"source":"sub2api","balanceStatus":"available","billingStatus":"available","remaining":42.5,"unlimited":false,"unit":"USD","balanceMode":"credit","planName":"Pro","accountValid":true,"accountStatus":"active","groupRateMultiplier":1.2,"userRateMultiplier":0.8,"resolvedRateMultiplier":0.96,"effectiveRateMultiplier":1.44,"peakRateEnabled":true,"peakStart":"08:00","peakEnd":"10:00","peakRateMultiplier":1.5,"appliedPeakMultiplier":1.5,"timezone":"Asia/Shanghai","observedAt":"2026-08-15T12:00:00Z"}}"#
+                json: #"{"ok":true,"providerName":"primary","usage":{"source":"sub2api","balanceStatus":"available","billingStatus":"available","remaining":42.5,"unlimited":false,"unit":"USD","balanceMode":"credit","planName":"Pro","accountValid":true,"accountStatus":"active","todayCost":0.12,"todayActualCost":0.09,"groupRateMultiplier":1.2,"userRateMultiplier":0.8,"resolvedRateMultiplier":0.96,"effectiveRateMultiplier":1.44,"peakRateEnabled":true,"peakStart":"08:00","peakEnd":"10:00","peakRateMultiplier":1.5,"appliedPeakMultiplier":1.5,"timezone":"Asia/Shanghai","observedAt":"2026-08-15T12:00:00Z"}}"#
             )
         }
 
@@ -3698,10 +3699,29 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(response.usage.remaining, 42.5)
         XCTAssertEqual(response.usage.unit, "USD")
         XCTAssertEqual(response.usage.accountStatus, "active")
+        XCTAssertEqual(response.usage.todayCost, 0.12)
+        XCTAssertEqual(response.usage.todayActualCost, 0.09)
         XCTAssertEqual(response.usage.resolvedRateMultiplier, 0.96)
         XCTAssertEqual(response.usage.effectiveRateMultiplier, 1.44)
         XCTAssertEqual(response.usage.appliedPeakMultiplier, 1.5)
         XCTAssertEqual(timeouts.values, ["30.0"])
+    }
+
+    func testCostEstimatorMatchesSub2ApiCodexFallbackAndMultiplier() {
+        let event = TokenEvent(
+            service: .codex,
+            timestamp: Date(),
+            model: "gpt-5.3-codex",
+            inputTokens: 1_000_000,
+            outputTokens: 500_000,
+            cacheReadTokens: 100_000,
+            cacheCreationTokens: 50_000
+        )
+
+        // Sub2API fallback: $1.50 input, $12 output, $0.15 cache-read,
+        // $1.50 cache-write per million tokens, then ×0.6.
+        let estimated = CostEstimator.cost(of: event, multiplier: 0.6)
+        XCTAssertEqual(estimated, 4.554, accuracy: 0.000_001)
     }
 
     func testProviderUsageFormattingCoversPartialStatusesAndUnlimitedBalance() throws {

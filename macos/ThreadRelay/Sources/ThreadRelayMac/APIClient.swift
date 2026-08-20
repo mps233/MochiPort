@@ -15,6 +15,7 @@ struct ManageIMAccount: Decodable, Equatable, Identifiable {
     let platform: String
     let accountId: String
     let displayName: String?
+    let avatarData: String?
     let enabled: Bool
     let configured: Bool
     let secretSet: Bool
@@ -384,6 +385,8 @@ struct ManageProviderUsageResponse: Decodable, Equatable, Sendable {
         let planName: String?
         let accountValid: Bool?
         let accountStatus: String?
+        let todayCost: Double?
+        let todayActualCost: Double?
         let groupRateMultiplier: Double?
         let userRateMultiplier: Double?
         let resolvedRateMultiplier: Double?

@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var glass: AIGlassCoordinator
     @Environment(\.openURL) private var openURL
     @AppStorage("closeBehavior") private var closeBehavior = "menuBar"
     @State private var language = "zh-CN"
@@ -32,6 +33,9 @@ struct SettingsView: View {
 
             serviceSettings
                 .tabItem { Label("本地服务", systemImage: "server.rack") }
+
+            AIGlassSettingsView(settings: glass.settings)
+                .tabItem { Label("使用量", systemImage: "chart.bar.xaxis") }
 
             diagnosticsSettings
                 .tabItem { Label("更新与诊断", systemImage: "stethoscope") }

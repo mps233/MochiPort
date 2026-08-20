@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "ThreadRelayMac",
     platforms: [
-        .macOS(.v13),
+        .macOS(.v14),
     ],
     products: [
         .executable(name: "ThreadRelayMac", targets: ["ThreadRelayMac"]),
