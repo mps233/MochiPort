@@ -23,6 +23,7 @@
 		A10000000000000000000012 /* ProviderBranding.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000012 /* ProviderBranding.swift */; };
 		A10000000000000000000013 /* ProviderLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ProviderLogos */; };
 		A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* GatewayQuotaDock.swift */; };
+		A10000000000000000000015 /* ClientLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* ClientLogos */; };
 		B100000000000000000000 /* AIGlassUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000000 /* AIGlassUpdateChecker.swift */; };
 		B100000000000000000003 /* BriefingEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000003 /* BriefingEngine.swift */; };
 		B100000000000000000006 /* CodexLogParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000006 /* CodexLogParser.swift */; };
@@ -51,6 +52,7 @@
 		B10000000000000000001F /* HUDEventPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000001F /* HUDEventPresentation.swift */; };
 		B100000000000000000020 /* AIGlassCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000020 /* AIGlassCoordinator.swift */; };
 		B100000000000000000021 /* AIGlassSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000021 /* AIGlassSettingsView.swift */; };
+		B100000000000000000022 /* TokenCompanionAnimator.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000022 /* TokenCompanionAnimator.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -75,6 +77,7 @@
 		A20000000000000000000012 /* ProviderBranding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderBranding.swift; sourceTree = "<group>"; };
 		A20000000000000000000013 /* ProviderLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ProviderLogos; sourceTree = "<group>"; };
 		A20000000000000000000014 /* GatewayQuotaDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayQuotaDock.swift; sourceTree = "<group>"; };
+		A20000000000000000000015 /* ClientLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ClientLogos; sourceTree = "<group>"; };
 		B200000000000000000000 /* AIGlassUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/AIGlassUpdateChecker.swift; sourceTree = "<group>"; };
 		B200000000000000000003 /* BriefingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/BriefingEngine.swift; sourceTree = "<group>"; };
 		B200000000000000000006 /* CodexLogParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/CodexLogParser.swift; sourceTree = "<group>"; };
@@ -103,6 +106,7 @@
 		B20000000000000000001F /* HUDEventPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/HUDEventPresentation.swift; sourceTree = "<group>"; };
 		B200000000000000000020 /* AIGlassCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCoordinator.swift; sourceTree = "<group>"; };
 		B200000000000000000021 /* AIGlassSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassSettingsView.swift; sourceTree = "<group>"; };
+		B200000000000000000022 /* TokenCompanionAnimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIGlassUI/TokenCompanionAnimator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -150,6 +154,8 @@
 				A20000000000000000000012 /* ProviderBranding.swift */,
 				A20000000000000000000014 /* GatewayQuotaDock.swift */,
 				A20000000000000000000013 /* ProviderLogos */,
+				A20000000000000000000015 /* ClientLogos */,
+				B200000000000000000022 /* TokenCompanionAnimator.swift */,
 			);
 			path = Sources/ThreadRelayMac;
 			sourceTree = SOURCE_ROOT;
@@ -260,7 +266,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
-			A70000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000013 /* ProviderLogos in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+			A70000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000013 /* ProviderLogos in Resources */, A10000000000000000000015 /* ClientLogos in Resources */); runOnlyForDeploymentPostprocessing = 0; };
 			A70000000000000000000004 /* Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
@@ -312,6 +318,7 @@
 				B10000000000000000001F /* HUDEventPresentation.swift in Sources */ ,
 				B100000000000000000020 /* AIGlassCoordinator.swift in Sources */ ,
 				B100000000000000000021 /* AIGlassSettingsView.swift in Sources */ ,
+				B100000000000000000022 /* TokenCompanionAnimator.swift in Sources */ ,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			};

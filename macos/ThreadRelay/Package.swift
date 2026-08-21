@@ -16,6 +16,7 @@ let package = Package(
             path: "Sources/ThreadRelayMac",
             resources: [
                 .copy("Resources/ProviderLogos"),
+                .copy("Resources/ClientLogos"),
             ]
         ),
         .testTarget(

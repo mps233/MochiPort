@@ -4,16 +4,37 @@ import SwiftUI
 ///
 /// 최근 15주 × 7일(월~일) 그리드. 열 = 주(왼쪽=과거, 오른쪽=최신),
 /// 행 = 요일(위=월, 아래=일). 셀 농도 = 일 토큰 / 기간 최대 토큰을 5단계로 양자화.
-/// hover 시 그리드 하단에 고정 캡션(날짜 + 토큰)을 표시한다(팝오버 금지).
+/// hover 시 고정 캡션(날짜 + 토큰)을 표시한다(팝오버 금지).
 /// 오늘 셀은 테두리로 강조하고, 등장 시 주 단위 stagger로 농도가 0→값으로 차오른다(1회성).
 struct HeatmapView: View {
+    enum LegendPlacement {
+        case bottom
+        case trailing
+        case none
+    }
+
     let statsStore: DailyStatsStore
     let enabledServices: Set<ServiceID>
+    let cellSize: CGFloat
+    let cellSpacing: CGFloat
+    let legendPlacement: LegendPlacement
 
     private static let weeks = 15
-    private static let cellSize: CGFloat = 9
-    private static let cellSpacing: CGFloat = 3
-    private static let cellCorner: CGFloat = 2
+    private static let trailingLegendSpacing: CGFloat = 14
+
+    init(
+        statsStore: DailyStatsStore,
+        enabledServices: Set<ServiceID>,
+        cellSize: CGFloat = 9,
+        cellSpacing: CGFloat = 3,
+        legendPlacement: LegendPlacement = .bottom
+    ) {
+        self.statsStore = statsStore
+        self.enabledServices = enabledServices
+        self.cellSize = cellSize
+        self.cellSpacing = cellSpacing
+        self.legendPlacement = legendPlacement
+    }
 
     @State private var appeared = false
     @State private var hovered: GridDay? = nil
@@ -96,48 +117,99 @@ struct HeatmapView: View {
         return 4
     }
 
-    // 민트(safeGreen) 계열 농도. 라이트/다크 시맨틱 대비 위해 0단계는 .quaternary.
+    // Neutral grayscale levels keep usage visualizations quiet and let the
+    // state indicators reserve color for connection health.
     private func cellColor(level: Int) -> Color {
         switch level {
-        case 1: return Theme.safeGreen.opacity(0.30)
-        case 2: return Theme.safeGreen.opacity(0.55)
-        case 3: return Theme.safeGreen.opacity(0.78)
-        case 4: return Theme.safeGreen.opacity(1.0)
+        case 1: return Color.primary.opacity(0.18)
+        case 2: return Color.primary.opacity(0.32)
+        case 3: return Color.primary.opacity(0.48)
+        case 4: return Color.primary.opacity(0.66)
         default: return Color.primary.opacity(0.10)
         }
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack(alignment: .top, spacing: Self.cellSpacing) {
-                ForEach(grid) { week in
-                    VStack(spacing: Self.cellSpacing) {
-                        ForEach(0..<7, id: \.self) { row in
-                            cell(week.days[row], staggerIndex: week.index)
-                        }
+        Group {
+            if legendPlacement == .trailing {
+                GeometryReader { proxy in
+                    let fittedCellSize = fittedCellSize(
+                        for: proxy.size.width,
+                        height: proxy.size.height
+                    )
+                    HStack(alignment: .center, spacing: Self.trailingLegendSpacing) {
+                        gridContent(cellSize: fittedCellSize)
+                        caption(cellSize: fittedCellSize)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
+                .frame(minHeight: 176)
+            } else if legendPlacement == .none {
+                GeometryReader { proxy in
+                    let fittedCellSize = fittedCellSizeWithoutLegend(
+                        for: proxy.size.width,
+                        height: proxy.size.height
+                    )
+                    gridContent(cellSize: fittedCellSize)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                }
+                .frame(minHeight: 176)
+            } else {
+                VStack(spacing: 8) {
+                    gridContent(cellSize: cellSize)
+                    caption(cellSize: cellSize)
+                }
+                .padding(.vertical, 4)
             }
-            caption
         }
-        .padding(.vertical, 4)
         .onAppear {
             guard !appeared else { return }
             withAnimation(.easeOut(duration: 0.5)) { appeared = true }
         }
     }
 
+    private func gridContent(cellSize: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: cellSpacing) {
+            ForEach(grid) { week in
+                VStack(spacing: cellSpacing) {
+                    ForEach(0..<7, id: \.self) { row in
+                        cell(week.days[row], staggerIndex: week.index, size: cellSize)
+                    }
+                }
+            }
+        }
+    }
+
+    private func fittedCellSize(for width: CGFloat, height: CGFloat) -> CGFloat {
+        // Reserve room for the trailing legend, then use the available width
+        // to make the 15-week grid read as a full-width overview element.
+        // The vertical legend is narrow, so use the released horizontal room
+        // to make the 15-week grid read as a full-width overview element.
+        // The vertical legend uses the same cell width as the grid, so the
+        // combined layout contains 16 cell columns in total.
+        let fixedWidth = 14 * cellSpacing + Self.trailingLegendSpacing
+        let fittedWidth = (width - fixedWidth) / 16
+        let fittedHeight = (height - 6 * cellSpacing) / 7
+        let fitted = min(fittedWidth, fittedHeight)
+        return min(28, max(cellSize, fitted))
+    }
+
+    private func fittedCellSizeWithoutLegend(for width: CGFloat, height: CGFloat) -> CGFloat {
+        let fittedWidth = (width - 14 * cellSpacing) / 15
+        let fittedHeight = (height - 6 * cellSpacing) / 7
+        let fitted = min(fittedWidth, fittedHeight)
+        return min(28, max(cellSize, fitted))
+    }
+
     @ViewBuilder
-    private func cell(_ gridDay: GridDay?, staggerIndex: Int) -> some View {
+    private func cell(_ gridDay: GridDay?, staggerIndex: Int, size: CGFloat) -> some View {
         if let gridDay {
             let lvl = level(for: gridDay.tokens)
             let isToday = calendar.isDate(gridDay.day, inSameDayAs: todayStart)
-            RoundedRectangle(cornerRadius: Self.cellCorner)
-                .fill(cellColor(level: lvl))
-                .frame(width: Self.cellSize, height: Self.cellSize)
+            heatmapSquare(level: lvl, size: size)
                 .overlay(
-                    RoundedRectangle(cornerRadius: Self.cellCorner)
-                        .strokeBorder(isToday ? Theme.safeGreen : .clear, lineWidth: 1.2)
+                    RoundedRectangle(cornerRadius: cellCornerRadius(for: size))
+                        .strokeBorder(isToday ? Color.primary.opacity(0.72) : .clear, lineWidth: 1.2)
                 )
                 // 주 단위 stagger: 최신 주일수록 살짝 늦게 차오른다(1회성).
                 .opacity(appeared ? 1 : 0)
@@ -149,13 +221,13 @@ struct HeatmapView: View {
         } else {
             // 빈 칸(미래/격자 패딩) — 자리만 차지.
             Color.clear
-                .frame(width: Self.cellSize, height: Self.cellSize)
+                .frame(width: size, height: size)
         }
     }
 
-    // 그리드 하단 고정 캡션. hover 중인 셀의 날짜+토큰, 없으면 범례.
+    // 그리드 하단 또는 오른쪽의 고정 범례/hover 캡션.
     @ViewBuilder
-    private var caption: some View {
+    private func caption(cellSize: CGFloat) -> some View {
         if let hovered {
             HStack(spacing: 6) {
                 Text(Self.captionDateFormatter.string(from: hovered.day))
@@ -164,17 +236,35 @@ struct HeatmapView: View {
             }
             .font(.system(size: 10))
             .foregroundStyle(.secondary)
+        } else if legendPlacement == .trailing {
+            VStack(spacing: 4) {
+                Text("多").font(.system(size: 9)).foregroundStyle(.secondary)
+                ForEach((0..<5).reversed(), id: \.self) { lvl in
+                    heatmapSquare(level: lvl, size: cellSize)
+                }
+                Text("少").font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+            .fixedSize()
         } else {
             HStack(spacing: 4) {
                 Text("少").font(.system(size: 9)).foregroundStyle(.secondary)
                 ForEach(0..<5, id: \.self) { lvl in
-                    RoundedRectangle(cornerRadius: Self.cellCorner)
-                        .fill(cellColor(level: lvl))
-                        .frame(width: Self.cellSize, height: Self.cellSize)
+                    heatmapSquare(level: lvl, size: cellSize)
                 }
                 Text("多").font(.system(size: 9)).foregroundStyle(.secondary)
             }
+            .fixedSize()
         }
+    }
+
+    private func heatmapSquare(level: Int, size: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: cellCornerRadius(for: size))
+            .fill(cellColor(level: level))
+            .frame(width: size, height: size)
+    }
+
+    private func cellCornerRadius(for size: CGFloat) -> CGFloat {
+        max(2, min(4, size * 0.2))
     }
 
     private func formatTokens(_ n: Int) -> String {

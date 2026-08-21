@@ -110,6 +110,19 @@ struct RootView: View {
             model.scheduleStartupUpdateCheck()
         }
         .toolbar {
+            if model.selection == .overview {
+                ToolbarItem(placement: .primaryAction) {
+                    OverviewStatusToolbarButton(
+                        status: model.serviceStatus,
+                        dashboardState: model.dashboardState,
+                        dashboard: model.dashboard,
+                        lastCheckedAt: model.lastCheckedAt,
+                        recoveryInProgress: model.daemonRecoveryInProgress,
+                        recoveryError: model.daemonRecoveryError,
+                        onRecover: { Task { await model.startDaemonManually() } }
+                    )
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button {
                     Task {
@@ -174,22 +187,13 @@ struct RootView: View {
 
 private struct OverviewView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var glass: AIGlassCoordinator
     @Environment(\.openURL) private var openURL
     @State private var manualSub2ApiRefreshTask: Task<Void, Never>?
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: ThreadRelayPageLayout.sectionSpacing) {
-                OverviewMasthead(
-                    status: model.serviceStatus,
-                    dashboardState: model.dashboardState,
-                    lastCheckedAt: model.lastCheckedAt,
-                    hasDashboard: model.dashboard != nil,
-                    recoveryInProgress: model.daemonRecoveryInProgress,
-                    recoveryError: model.daemonRecoveryError,
-                    onRecover: { Task { await model.startDaemonManually() } }
-                )
-
                 if let update = model.availableUpdate, !model.updateNoticeDismissed {
                     OverviewUpdateNotice(
                         version: update.version,
@@ -198,19 +202,19 @@ private struct OverviewView: View {
                     )
                 }
 
-                OverviewSignalStrip(
-                    dashboard: model.dashboard,
-                    dashboardState: model.dashboardState,
-                    serviceStatus: model.serviceStatus,
-                    remoteDetail: remoteDetail,
-                    bridgeDetail: bridgeDetail
+                OverviewUsageInsightsView(
+                    store: glass.store,
+                    statsStore: glass.statsStore,
+                    providerUsage: model.gatewayProviderUsage
                 )
+                .task {
+                    while !Task.isCancelled {
+                        await model.refreshGatewayProviderUsage()
+                        try? await Task.sleep(for: .seconds(60))
+                    }
+                }
 
-                OverviewSectionHeading(
-                    title: "连接拓扑",
-                    subtitle: "客户端和消息渠道通过本地服务的实时连接"
-                )
-                ConnectionTopologyView(showsHeader: false)
+                ConnectionTopologyView()
 
                 LazyVGrid(
                     columns: [GridItem(.adaptive(minimum: 350), spacing: 28)],
@@ -576,6 +580,128 @@ private struct OverviewUpdateNotice: View {
     }
 }
 
+private struct OverviewStatusToolbarButton: View {
+    let status: ServiceStatus
+    let dashboardState: DashboardState
+    let dashboard: ManageDashboard?
+    let lastCheckedAt: Date?
+    let recoveryInProgress: Bool
+    let recoveryError: String?
+    let onRecover: () -> Void
+    @State private var isPresented = false
+
+    private var clientCount: Int? {
+        guard let clients = dashboard?.executionClients else { return nil }
+        return [clients.codexApp, clients.vscode, clients.cli].count(where: \.connected)
+    }
+
+    private var channelCount: Int? {
+        guard let channels = dashboard?.messageChannels else { return nil }
+        return [channels.telegram, channels.feishu, channels.wechat, channels.wecom]
+            .count(where: { $0.connectedAccountCount > 0 })
+    }
+
+    private var unavailableText: String {
+        switch dashboardState {
+        case .stale: "上次状态"
+        case .offline, .unavailable: "不可用"
+        case .legacy: "需更新"
+        default: "检查中"
+        }
+    }
+
+    private var remoteDetail: String {
+        guard let dashboard else { return unavailableText }
+        return dashboard.remoteControlHealthy
+            ? "状态正常"
+            : dashboard.remoteControlConnected ? "已连接" : "离线"
+    }
+
+    private var bridgeDetail: String {
+        guard let dashboard else { return unavailableText }
+        return dashboard.bridgeRunning ? "运行中" : "未运行"
+    }
+
+    private var showsRecovery: Bool {
+        if case .unavailable = status { return true }
+        return false
+    }
+
+    private var toolbarSymbol: String {
+        switch status {
+        case .checking: "arrow.clockwise"
+        case .available: "server.rack"
+        case .bridgeAvailable: "server.rack"
+        case .unavailable: "exclamationmark.triangle"
+        }
+    }
+
+    var body: some View {
+        Button {
+            isPresented.toggle()
+        } label: {
+            Label("服务状态", systemImage: toolbarSymbol)
+        }
+        .help("查看服务状态")
+        .accessibilityLabel("服务状态：\(status.title)")
+        .accessibilityIdentifier("overview.service-status-button")
+        .popover(isPresented: $isPresented, attachmentAnchor: .rect(.bounds), arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 9) {
+                    Image(systemName: status.symbol)
+                        .font(.system(size: 15, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(status.tint.color)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("服务状态")
+                            .font(.headline)
+                        Text(status.title)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    if let lastCheckedAt {
+                        Text(lastCheckedAt.formatted(date: .omitted, time: .shortened))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                OverviewSignalStrip(
+                    dashboard: dashboard,
+                    dashboardState: dashboardState,
+                    serviceStatus: status,
+                    remoteDetail: remoteDetail,
+                    bridgeDetail: bridgeDetail
+                )
+
+                if showsRecovery {
+                    Button {
+                        onRecover()
+                    } label: {
+                        if recoveryInProgress {
+                            Label("正在启动…", systemImage: "arrow.clockwise")
+                        } else {
+                            Label("启动本地服务", systemImage: "play.circle.fill")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(recoveryInProgress)
+                    .accessibilityIdentifier("overview.recover-daemon")
+                }
+                if let recoveryError {
+                    Text(recoveryError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(3)
+                }
+            }
+            .padding(14)
+            .frame(width: 310)
+        }
+    }
+}
+
 private struct OverviewMasthead: View {
     let status: ServiceStatus
     let dashboardState: DashboardState
@@ -590,55 +716,76 @@ private struct OverviewMasthead: View {
         return false
     }
 
+    private var isCompact: Bool {
+        notice == nil && !showsRecovery
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .center, spacing: 12) {
-                Circle()
-                    .fill(status.tint.color)
-                    .frame(width: 10, height: 10)
-                    .shadow(color: status.tint.color.opacity(0.35), radius: 4)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(status.title)
-                        .font(.title3.weight(.semibold))
-                    Text(status.detail)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
+        Group {
+            if isCompact {
+                HStack {
+                    Spacer(minLength: 0)
+                    statusIcon
                 }
-                Spacer(minLength: 16)
-                refreshStamp
-            }
-            if let notice {
-                Label(notice.text, systemImage: notice.symbol)
-                    .font(.callout)
-                    .foregroundStyle(notice.color)
-            }
-            if showsRecovery {
-                HStack(spacing: 12) {
-                    Button {
-                        onRecover?()
-                    } label: {
-                        if recoveryInProgress {
-                            HStack(spacing: 7) {
-                                ProgressView()
-                                    .controlSize(.small)
-                                Text("正在启动…")
-                            }
-                        } else {
-                            Label("启动本地服务", systemImage: "play.circle.fill")
+                .frame(minHeight: 20)
+            } else {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(alignment: .center, spacing: 12) {
+                        statusIcon
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(status.title)
+                                .font(.title3.weight(.semibold))
+                            Text(status.detail)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
                         }
+                        Spacer(minLength: 16)
+                        refreshStamp
                     }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(recoveryInProgress)
-                    .accessibilityIdentifier("overview.recover-daemon")
-                    if let recoveryError {
-                        Text(recoveryError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .lineLimit(2)
+                    if let notice {
+                        Label(notice.text, systemImage: notice.symbol)
+                            .font(.callout)
+                            .foregroundStyle(notice.color)
+                    }
+                    if showsRecovery {
+                        HStack(spacing: 12) {
+                            Button {
+                                onRecover?()
+                            } label: {
+                                if recoveryInProgress {
+                                    HStack(spacing: 7) {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                        Text("正在启动…")
+                                    }
+                                } else {
+                                    Label("启动本地服务", systemImage: "play.circle.fill")
+                                }
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(recoveryInProgress)
+                            .accessibilityIdentifier("overview.recover-daemon")
+                            if let recoveryError {
+                                Text(recoveryError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                    .lineLimit(2)
+                            }
+                        }
                     }
                 }
             }
         }
+        .accessibilityIdentifier("overview.service-status")
+    }
+
+    private var statusIcon: some View {
+        Image(systemName: status.symbol)
+            .font(.system(size: 15, weight: .semibold))
+            .symbolRenderingMode(.hierarchical)
+            .foregroundStyle(status.tint.color)
+            .help("\(status.title)：\(status.detail)")
+            .accessibilityLabel("服务状态：\(status.title)，\(status.detail)")
     }
 
     @ViewBuilder

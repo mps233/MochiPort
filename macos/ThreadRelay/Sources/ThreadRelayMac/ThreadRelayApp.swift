@@ -220,6 +220,7 @@ struct ThreadRelayApp: App {
         Window("ThreadRelay", id: "main") {
             RootView()
                 .environmentObject(model)
+                .environmentObject(glass)
                 .preferredColorScheme(preferredColorScheme)
                 .frame(minWidth: 760, minHeight: 540)
                 .background(WindowVisibilityObserver { visible in

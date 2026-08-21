@@ -136,6 +136,12 @@ private struct OverviewTab: View {
         let now = Date()
         let enabled: [ServiceID] = [.codex]
         let rows = serviceRows(enabled)
+        let metrics = UsageMetricSnapshot(
+            store: store,
+            services: enabled,
+            providerUsage: providerUsage,
+            now: now
+        )
         VStack(spacing: 10) {
             ForEach(rows, id: \.service) { row in
                 ServiceRow(service: row.service,
@@ -151,11 +157,11 @@ private struct OverviewTab: View {
                            staggerBase: row.base)
             }
             HStack(spacing: 8) {
-                StatCard(value: Double(todayTokens(enabled, now: now)),
+                StatCard(value: metrics.todayTokens,
                          format: { formatTokens(Int($0)) }, label: "今日 Token")
-                StatCard(value: todayCost(enabled, now: now),
-                         format: formatCost, label: "今日成本")
-                StatCard(value: tokensPerMinute(enabled, now: now),
+                StatCard(value: metrics.todayCost,
+                         format: metrics.formatCost, label: "今日成本")
+                StatCard(value: metrics.tokensPerMinute,
                          format: { formatTokens(Int($0)) }, label: "当前 Token/分钟")
             }
         }
@@ -193,45 +199,6 @@ private struct OverviewTab: View {
         return result
     }
 
-    private func todayTokens(_ services: [ServiceID], now: Date) -> Int {
-        let start = Calendar.current.startOfDay(for: now)
-        return store.events
-            .filter { services.contains($0.service) && $0.timestamp >= start }
-            .reduce(0) { $0 + $1.totalTokens }
-    }
-    /// 오늘 이벤트의 추정 비용 (API 환산 추정치, enabled 서비스만).
-    private func todayCost(_ services: [ServiceID], now: Date) -> Double {
-        if let live = liveTodayCost { return live }
-        let start = Calendar.current.startOfDay(for: now)
-        let today = store.events.filter { services.contains($0.service) && $0.timestamp >= start }
-        let multiplier = providerUsage?.usage.effectiveRateMultiplier
-            ?? providerUsage?.usage.resolvedRateMultiplier
-            ?? 1.0
-        return CostEstimator.cost(of: today, multiplier: multiplier)
-    }
-
-    private var liveTodayCost: Double? {
-        guard let usage = providerUsage?.usage else { return nil }
-        if let actual = usage.todayActualCost, actual.isFinite, actual >= 0 {
-            return actual
-        }
-        guard let base = usage.todayCost,
-              base.isFinite,
-              base >= 0,
-              let multiplier = usage.effectiveRateMultiplier ?? usage.resolvedRateMultiplier,
-              multiplier.isFinite,
-              multiplier >= 0
-        else { return nil }
-        return base * multiplier
-    }
-    private func tokensPerMinute(_ services: [ServiceID], now: Date) -> Double {
-        services.reduce(0) { $0 + store.tokensPerMinute(service: $1, windowMinutes: 3, now: now) }
-    }
-    private func formatCost(_ usd: Double) -> String {
-        guard usd >= 0.01 else { return "$0" }
-        let prefix = liveTodayCost != nil ? "$" : "~$"
-        return String(format: "%@%.2f", prefix, usd)
-    }
 }
 
 private func formatTokens(_ n: Int) -> String {
@@ -239,6 +206,56 @@ private func formatTokens(_ n: Int) -> String {
     case 1_000_000...: return String(format: "%.1fM", Double(n) / 1_000_000)
     case 1_000...: return String(format: "%.0fK", Double(n) / 1_000)
     default: return "\(n)"
+    }
+}
+
+@MainActor
+private struct UsageMetricSnapshot {
+    let todayTokens: Double
+    let todayCost: Double
+    let tokensPerMinute: Double
+    private let hasLiveTodayCost: Bool
+
+    init(
+        store: UsageStore,
+        services: [ServiceID],
+        providerUsage: ManageProviderUsageResponse?,
+        now: Date
+    ) {
+        let start = Calendar.current.startOfDay(for: now)
+        let events = store.events.filter {
+            services.contains($0.service) && $0.timestamp >= start
+        }
+        todayTokens = Double(events.reduce(0) { $0 + $1.totalTokens })
+        tokensPerMinute = services.reduce(0) {
+            $0 + store.tokensPerMinute(service: $1, windowMinutes: 3, now: now)
+        }
+
+        let usage = providerUsage?.usage
+        let liveCost: Double?
+        if let actual = usage?.todayActualCost, actual.isFinite, actual >= 0 {
+            liveCost = actual
+        } else if let base = usage?.todayCost,
+                  base.isFinite,
+                  base >= 0,
+                  let multiplier = usage?.effectiveRateMultiplier ?? usage?.resolvedRateMultiplier,
+                  multiplier.isFinite,
+                  multiplier >= 0 {
+            liveCost = base * multiplier
+        } else {
+            liveCost = nil
+        }
+
+        hasLiveTodayCost = liveCost != nil
+        let multiplier = usage?.effectiveRateMultiplier
+            ?? usage?.resolvedRateMultiplier
+            ?? 1.0
+        todayCost = liveCost ?? CostEstimator.cost(of: events, multiplier: multiplier)
+    }
+
+    func formatCost(_ usd: Double) -> String {
+        guard usd >= 0.01 else { return "$0" }
+        return String(format: "%@%.2f", hasLiveTodayCost ? "$" : "~$", usd)
     }
 }
 
@@ -478,30 +495,446 @@ private struct StatCard: View {
     let value: Double
     let format: (Double) -> String
     let label: String
-    @State private var displayed: Double = 0
 
     var body: some View {
         VStack(spacing: 2) {
-            Text(format(displayed))
-                .font(.system(size: 14, weight: .bold).monospacedDigit())
-                .contentTransition(.numericText())
+            AnimatedMetricValue(
+                value: value,
+                format: format,
+                font: .system(size: 14, weight: .bold)
+            )
             Text(label).font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 8)
         .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
-        .task {
-            displayed = 0
-            for step in 1...6 {
-                try? await Task.sleep(for: .milliseconds(75))
-                guard !Task.isCancelled else { return }
-                withAnimation(.easeOut(duration: 0.09)) {
-                    displayed = value * Double(step) / 6.0
+    }
+}
+
+/// Shared numeric entrance/update animation for the menu-bar dashboard and
+/// the wider overview surface.
+private struct AnimatedMetricValue: View {
+    let value: Double
+    let format: (Double) -> String
+    let font: Font
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var displayed: Double = 0
+
+    var body: some View {
+        Text(format(displayed))
+            .font(font.monospacedDigit())
+            .contentTransition(.numericText())
+            .task {
+                guard !reduceMotion else {
+                    displayed = value
+                    return
+                }
+                displayed = 0
+                for step in 1...6 {
+                    try? await Task.sleep(for: .milliseconds(75))
+                    guard !Task.isCancelled else { return }
+                    withAnimation(.easeOut(duration: 0.09)) {
+                        displayed = value * Double(step) / 6.0
+                    }
+                }
+            }
+            .onChange(of: value) { _, newValue in
+                if reduceMotion {
+                    displayed = newValue
+                } else {
+                    withAnimation(.spring(duration: 0.4)) { displayed = newValue }
+                }
+            }
+    }
+}
+
+/// Small monochrome companion generated from the svg-character-animator
+/// state machine. The generated view owns its breathing and blink motion.
+private struct TokenMascotView: View {
+    let value: Double
+
+    var body: some View {
+        TokenCompanionAnimator()
+            .frame(width: 76, height: 58)
+            .accessibilityHidden(true)
+            .allowsHitTesting(false)
+            .opacity(value.isFinite ? 1 : 0)
+    }
+}
+
+/// Legacy Canvas implementation retained temporarily as a visual fallback
+/// while the generated companion is validated in the formal app build.
+private struct LegacyTokenMascotView: View {
+    let value: Double
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var reactionStart: Date?
+
+    private let canvasSize = CGSize(width: 76, height: 58)
+
+    var body: some View {
+        Group {
+            if reduceMotion {
+                drawing(at: 0, reaction: 0)
+            } else {
+                TimelineView(.animation(minimumInterval: 1.0 / 24.0)) { timeline in
+                    drawing(
+                        at: timeline.date.timeIntervalSinceReferenceDate,
+                        reaction: reactionAmount(at: timeline.date)
+                    )
                 }
             }
         }
-        .onChange(of: value) { _, newValue in
-            withAnimation(.spring(duration: 0.4)) { displayed = newValue }
+        .frame(width: canvasSize.width, height: canvasSize.height)
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+        .onAppear { reactionStart = Date() }
+        .onChange(of: value) { _, _ in
+            reactionStart = Date()
+        }
+    }
+
+    private func drawing(at time: TimeInterval, reaction: CGFloat) -> some View {
+        Canvas { context, size in
+            let scale = min(size.width / canvasSize.width, size.height / canvasSize.height)
+            let offsetX = (size.width - canvasSize.width * scale) / 2
+            let offsetY = (size.height - canvasSize.height * scale) / 2
+            context.translateBy(x: offsetX, y: offsetY)
+            context.scaleBy(x: scale, y: scale)
+
+            let phase = reduceMotion ? 0 : time
+            let breath = CGFloat(sin(phase * 0.9)) * 0.025
+            let bob = CGFloat(sin(phase * 0.9)) * 0.8
+            let sway = CGFloat(sin(phase * 0.55)) * 1.2
+            let blink = reduceMotion ? 0 : blinkAmount(at: time)
+            let eyeHeight = 5.0 - (4.0 * blink)
+            let line = Color.primary.opacity(0.62)
+            let softLine = Color.primary.opacity(0.38)
+            let fill = Color.primary.opacity(0.085)
+            let cheek = Color.primary.opacity(0.30)
+            let stroke = StrokeStyle(lineWidth: 1.45, lineCap: .round, lineJoin: .round)
+
+            context.translateBy(x: 38 + sway, y: 29 + bob)
+            context.scaleBy(x: 1 - breath * 0.25, y: 1 + breath)
+
+            let body = Path(roundedRect: CGRect(x: -18, y: -14, width: 36, height: 30), cornerRadius: 13)
+            context.fill(body, with: .color(fill))
+            context.stroke(body, with: .color(line), style: stroke)
+
+            let leftEar = Path(ellipseIn: CGRect(x: -16, y: -20, width: 10, height: 10))
+            let rightEar = Path(ellipseIn: CGRect(x: 6, y: -20, width: 10, height: 10))
+            context.fill(leftEar, with: .color(fill))
+            context.fill(rightEar, with: .color(fill))
+            context.stroke(leftEar, with: .color(softLine), style: stroke)
+            context.stroke(rightEar, with: .color(softLine), style: stroke)
+
+            drawEye(at: CGPoint(x: -7, y: -2), height: eyeHeight, in: &context, color: line, style: stroke)
+            drawEye(at: CGPoint(x: 7, y: -2), height: eyeHeight, in: &context, color: line, style: stroke)
+
+            context.fill(
+                Path(ellipseIn: CGRect(x: -13.5, y: 3.5, width: 4.5, height: 2.8)),
+                with: .color(cheek.opacity(0.72 + Double(reaction) * 0.28))
+            )
+            context.fill(
+                Path(ellipseIn: CGRect(x: 9, y: 3.5, width: 4.5, height: 2.8)),
+                with: .color(cheek.opacity(0.72 + Double(reaction) * 0.28))
+            )
+
+            context.fill(
+                Path(ellipseIn: CGRect(x: -1.1, y: 3.5, width: 2.2, height: 1.8)),
+                with: .color(line)
+            )
+
+            var mouth = Path()
+            mouth.move(to: CGPoint(x: -4.5, y: 7))
+            mouth.addQuadCurve(
+                to: CGPoint(x: 4.5, y: 7),
+                control: CGPoint(x: 0, y: 9.5 + (reaction * 3.2))
+            )
+            context.stroke(mouth, with: .color(line), style: stroke)
+
+            var leftArm = Path()
+            leftArm.move(to: CGPoint(x: -18, y: 0))
+            leftArm.addQuadCurve(
+                to: CGPoint(x: -24, y: 2 - reaction * 2.0),
+                control: CGPoint(x: -21, y: 4 - reaction * 2.0)
+            )
+            context.stroke(leftArm, with: .color(softLine), style: stroke)
+
+            var rightArm = Path()
+            rightArm.move(to: CGPoint(x: 18, y: 0))
+            rightArm.addQuadCurve(
+                to: CGPoint(x: 24, y: 2 - reaction * 2.0),
+                control: CGPoint(x: 21, y: 4 - reaction * 2.0)
+            )
+            context.stroke(rightArm, with: .color(softLine), style: stroke)
+
+            context.stroke(
+                Path(roundedRect: CGRect(x: -12, y: 13, width: 7, height: 5), cornerRadius: 2.5),
+                with: .color(softLine),
+                style: stroke
+            )
+            context.stroke(
+                Path(roundedRect: CGRect(x: 5, y: 13, width: 7, height: 5), cornerRadius: 2.5),
+                with: .color(softLine),
+                style: stroke
+            )
+
+            if reaction > 0.02 {
+                let sparkleOpacity = Double(reaction * 0.75)
+                var sparkle = Path()
+                sparkle.move(to: CGPoint(x: 27, y: -14))
+                sparkle.addLine(to: CGPoint(x: 27, y: -9))
+                sparkle.move(to: CGPoint(x: 24.5, y: -11.5))
+                sparkle.addLine(to: CGPoint(x: 29.5, y: -11.5))
+                context.stroke(
+                    sparkle,
+                    with: .color(Color.primary.opacity(sparkleOpacity)),
+                    style: StrokeStyle(lineWidth: 1.2, lineCap: .round)
+                )
+            }
+        }
+    }
+
+    private func drawEye(
+        at center: CGPoint,
+        height: CGFloat,
+        in context: inout GraphicsContext,
+        color: Color,
+        style: StrokeStyle
+    ) {
+        if height > 3.5 {
+            context.fill(
+                Path(ellipseIn: CGRect(x: center.x - 1.6, y: center.y - 1.6, width: 3.2, height: 3.2)),
+                with: .color(color)
+            )
+        } else {
+            var eye = Path()
+            eye.move(to: CGPoint(x: center.x - 1.8, y: center.y))
+            eye.addLine(to: CGPoint(x: center.x + 1.8, y: center.y))
+            context.stroke(eye, with: .color(color), style: style)
+        }
+    }
+
+    private func blinkAmount(at time: TimeInterval) -> CGFloat {
+        let cycle = time.truncatingRemainder(dividingBy: 5.2)
+        let start = 0.35
+        let duration = 0.18
+        guard cycle >= start, cycle < start + duration else { return 0 }
+        let progress = (cycle - start) / duration
+        return CGFloat(sin(progress * Double.pi))
+    }
+
+    private func reactionAmount(at date: Date) -> CGFloat {
+        guard let reactionStart else { return 0 }
+        let elapsed = date.timeIntervalSince(reactionStart)
+        guard elapsed >= 0, elapsed < 0.72 else { return 0 }
+        return CGFloat(sin((elapsed / 0.72) * Double.pi))
+    }
+}
+
+private struct OverviewUsageMetricCard: View {
+    let value: Double
+    let format: (Double) -> String
+    let label: String
+    let emphasis: Emphasis
+
+    enum Emphasis {
+        case hero
+        case standard
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                AnimatedMetricValue(
+                    value: value,
+                    format: format,
+                    font: .system(size: emphasis == .hero ? 25 : 17, weight: .bold)
+                )
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                Text(label)
+                    .font(.system(size: emphasis == .hero ? 11 : 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+
+            Spacer(minLength: 4)
+
+            switch emphasis {
+            case .hero:
+                TokenMascotView(value: value)
+            case .standard:
+                EmptyView()
+            }
+        }
+        .padding(.horizontal, emphasis == .hero ? 14 : 11)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, minHeight: emphasis == .hero ? 94 : 72,
+               alignment: .leading)
+        .background(background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .strokeBorder(border, lineWidth: 0.5)
+        }
+    }
+
+    private var background: Color {
+        emphasis == .hero
+            ? Color.primary.opacity(0.055)
+            : Color.primary.opacity(0.035)
+    }
+
+    private var border: Color {
+        emphasis == .hero
+            ? Color.primary.opacity(0.12)
+            : Color.primary.opacity(0.08)
+    }
+}
+
+/// The menu-bar usage dashboard embedded in the overview page. It keeps the
+/// original animated metrics and trend content, but uses a wider responsive
+/// arrangement appropriate for the main window.
+struct OverviewUsageInsightsView: View {
+    let store: UsageStore
+    let statsStore: DailyStatsStore?
+    let providerUsage: ManageProviderUsageResponse?
+    @State private var range: UsageTrendRange = .week
+
+    var body: some View {
+        let metrics = UsageMetricSnapshot(
+            store: store,
+            services: [.codex],
+            providerUsage: providerUsage,
+            now: Date()
+        )
+
+        VStack(alignment: .leading, spacing: 12) {
+            header
+
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 18) {
+                    metricRail(metrics)
+                        .frame(width: 220)
+                    UsageTrendContent(
+                        store: store,
+                        statsStore: statsStore,
+                        range: $range,
+                        chartHeight: 176,
+                        heatmapCellSize: 16,
+                        heatmapCellSpacing: 4,
+                        heatmapLegendPlacement: .none
+                    )
+                    .frame(maxWidth: .infinity)
+                }
+                .frame(minWidth: 680)
+
+                VStack(spacing: 12) {
+                    metricRow(metrics)
+                    UsageTrendContent(
+                        store: store,
+                        statsStore: statsStore,
+                        range: $range,
+                        chartHeight: 176,
+                        heatmapCellSize: 16,
+                        heatmapCellSpacing: 4,
+                        heatmapLegendPlacement: .none
+                    )
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("overview.usage-insights")
+    }
+
+    @ViewBuilder
+    private var header: some View {
+        if statsStore != nil {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    headingText
+                    Spacer(minLength: 12)
+                    rangePicker
+                        .frame(width: 210)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    headingText
+                    rangePicker
+                        .frame(width: 210)
+                }
+            }
+        } else {
+            headingText
+        }
+    }
+
+    private var headingText: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text("用量与趋势")
+                .font(.headline)
+            Text("今日消耗与最近的 Token 走势")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
+    }
+
+    private var rangePicker: some View {
+        Picker("用量范围", selection: $range) {
+            ForEach(UsageTrendRange.allCases) { range in
+                Text(range.rawValue).tag(range)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .controlSize(.small)
+        .accessibilityLabel("用量范围")
+    }
+
+    private func metricRail(_ metrics: UsageMetricSnapshot) -> some View {
+        VStack(spacing: 8) {
+            OverviewUsageMetricCard(
+                value: metrics.todayTokens,
+                format: { formatTokens(Int($0)) },
+                label: "今日 Token",
+                emphasis: .hero
+            )
+            metricRow(metrics)
+        }
+    }
+
+    private func metricRow(_ metrics: UsageMetricSnapshot) -> some View {
+        HStack(spacing: 8) {
+            OverviewUsageMetricCard(
+                value: metrics.todayCost,
+                format: metrics.formatCost,
+                label: "今日成本",
+                emphasis: .standard
+            )
+            OverviewUsageMetricCard(
+                value: metrics.tokensPerMinute,
+                format: { "\(formatTokens(Int($0)))/m" },
+                label: "当前 Token/分钟",
+                emphasis: .standard
+            )
+        }
+    }
+}
+
+private enum UsageTrendRange: String, CaseIterable, Identifiable {
+    case week = "7天"
+    case month = "30天"
+    case heatmap = "热力图"
+
+    var id: String { rawValue }
+
+    var days: Int {
+        switch self {
+        case .week: 7
+        case .month: 30
+        case .heatmap: 105
         }
     }
 }
@@ -513,23 +946,36 @@ private struct TrendsTab: View {
     let settings: AppSettings
     /// 세그먼트 변경 시 잔디(높이 ≠ 차트)로 패널 크기가 달라지므로 리사이즈를 트리거한다.
     var onResize: () -> Void = {}
-    @State private var range: Range = .week
-    /// 0.0→1.0으로 증가하며 BarMark y값에만 곱해진다.
-    /// 축/눈금/레이아웃은 최종 데이터로 고정되어 움직이지 않는다.
-    @State private var growFactor: Double = 0
+    @State private var range: UsageTrendRange = .week
 
-    enum Range: String, CaseIterable, Identifiable {
-        case week = "7天", month = "30天", heatmap = "热力图"
-        var id: String { rawValue }
-        var days: Int {
-            switch self {
-            case .week: return 7
-            case .month: return 30
-            case .heatmap: return 105
+    var body: some View {
+        VStack(spacing: 8) {
+            if statsStore != nil {
+                Picker("", selection: $range) {
+                    ForEach(UsageTrendRange.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .onChange(of: range) { _, _ in
+                    // 잔디↔차트 높이가 달라 패널 크기 재조정 필요.
+                    onResize()
+                }
             }
+            UsageTrendContent(
+                store: store,
+                statsStore: statsStore,
+                range: $range,
+                chartHeight: 160,
+                heatmapCellSize: 9,
+                heatmapCellSpacing: 3,
+                keepsStableHeight: false
+            )
         }
     }
+}
 
+private struct UsageTrendContent: View {
     /// id가 (day, service)로 안정적이어야 growFactor 변화 시 Chart가 같은 바로 인식해
     /// y값을 보간(차오름)한다. UUID()는 body 평가마다 바뀌어 애니메이션이 끊겼다.
     private struct Point: Identifiable {
@@ -539,20 +985,30 @@ private struct TrendsTab: View {
         var id: String { "\(day.timeIntervalSinceReferenceDate)-\(service.rawValue)" }
     }
 
+    let store: UsageStore
+    let statsStore: DailyStatsStore?
+    @Binding var range: UsageTrendRange
+    let chartHeight: CGFloat
+    let heatmapCellSize: CGFloat
+    let heatmapCellSpacing: CGFloat
+    var heatmapLegendPlacement: HeatmapView.LegendPlacement = .bottom
+    var keepsStableHeight = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// 0.0→1.0으로 증가하며 BarMark y값에만 곱해진다.
+    /// 축/눈금/레이아웃은 최종 데이터로 고정되어 움직이지 않는다.
+    @State private var growFactor: Double = 0
+
     private let enabled: [ServiceID] = [.codex]
 
     /// 데이터 소스만 분기: 7일은 store(in-memory), 30일은 statsStore(SQLite, UTC day).
     private var rawData: [(day: Date, service: ServiceID, tokens: Int)] {
-        let rows: [(day: Date, service: ServiceID, tokens: Int)]
         switch range {
         case .week:
-            rows = store.dailyTotalsByService(days: 7, now: Date())
+            store.dailyTotalsByService(days: 7, now: Date())
         case .month, .heatmap:
             // 저장 포맷이 UTC day이므로 Calendar.utc로 조회해야 일관성 유지.
-            // 잔디 모드에선 차트를 그리지 않으므로 30일치만 조회(미사용).
-            rows = statsStore?.dailyTotalsByService(days: 30, now: Date(), calendar: .utc) ?? []
+            statsStore?.dailyTotalsByService(days: 30, now: Date(), calendar: .utc) ?? []
         }
-        return rows
     }
 
     /// 전체 날짜 범위 (x축 도메인 고정: 오늘 기준 days일 전 ~ 오늘).
@@ -565,36 +1021,33 @@ private struct TrendsTab: View {
         return start...end
     }
 
+    @ViewBuilder
     var body: some View {
-        VStack(spacing: 8) {
-            if statsStore != nil {
-                Picker("", selection: $range) {
-                    ForEach(Range.allCases) { Text($0.rawValue).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .controlSize(.small)
-                .onChange(of: range) { _, _ in
-                    startGrow()
-                    // 잔디↔차트 높이가 달라 패널 크기 재조정 필요.
-                    onResize()
-                }
-            }
-            if range == .heatmap, let statsStore {
-                HeatmapView(statsStore: statsStore, enabledServices: [.codex])
-            } else {
-                chart
-            }
+        if range == .heatmap, let statsStore {
+            HeatmapView(
+                statsStore: statsStore,
+                enabledServices: [.codex],
+                cellSize: heatmapCellSize,
+                cellSpacing: heatmapCellSpacing,
+                legendPlacement: heatmapLegendPlacement
+            )
+            .frame(maxWidth: .infinity,
+                   minHeight: keepsStableHeight ? chartHeight : nil,
+                   maxHeight: keepsStableHeight ? chartHeight : nil,
+                   alignment: .center)
+            .id(range)
+        } else {
+            chart
+                .id(range)
         }
-        .onAppear { startGrow() }
     }
 
-    /// 0 프레임을 무애니메이션으로 먼저 커밋한 뒤 다음 틱에 1로 스프링 — 같은 트랜잭션에서
-    /// 0→1을 연달아 쓰면 리셋이 합쳐져 성장이 생략될 수 있다 (range 전환 시).
+    /// Commit the zero frame first, then spring the bars to their final values.
     private func startGrow() {
-        var tx = Transaction()
-        tx.disablesAnimations = true
-        withTransaction(tx) { growFactor = 0 }
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { growFactor = reduceMotion ? 1 : 0 }
+        guard !reduceMotion else { return }
         Task { @MainActor in
             withAnimation(.spring(duration: 0.8)) { growFactor = 1 }
         }
@@ -616,11 +1069,10 @@ private struct TrendsTab: View {
                 .cornerRadius(3)
         }
         .chartForegroundStyleScale(domain: services.map(\.displayName),
-                                   range: services.map { Theme.color(for: $0) })
+                                   range: services.map { _ in Color.primary.opacity(0.72) })
         .chartXScale(domain: xDomain)
         .chartYScale(domain: 0...maxY)
         .chartXAxis {
-            // 30일은 일 단위 라벨이 겹치므로 주(7일) 간격으로만 표기.
             if range == .month {
                 AxisMarks(values: .stride(by: .day, count: 7)) {
                     AxisValueLabel(format: .dateTime.month(.defaultDigits).day(), centered: false)
@@ -645,7 +1097,8 @@ private struct TrendsTab: View {
         }
         .chartLegend(position: .bottom)
         .font(.system(size: 9))
-        .frame(height: 160)
+        .frame(height: chartHeight)
+        .onAppear { startGrow() }
     }
 
     /// Keep large token totals readable on the axis instead of letting
@@ -653,13 +1106,13 @@ private struct TrendsTab: View {
     private func formatAxisTokens(_ value: Double) -> String {
         switch value {
         case 1_000_000_000...:
-            return String(format: "%.1fB", value / 1_000_000_000)
+            String(format: "%.1fB", value / 1_000_000_000)
         case 1_000_000...:
-            return String(format: "%.0fM", value / 1_000_000)
+            String(format: "%.0fM", value / 1_000_000)
         case 1_000...:
-            return String(format: "%.0fK", value / 1_000)
+            String(format: "%.0fK", value / 1_000)
         default:
-            return String(Int(value.rounded()))
+            String(Int(value.rounded()))
         }
     }
 }
@@ -721,7 +1174,7 @@ private struct StackBar: View {
                 ForEach(ServiceID.allCases) { service in
                     let tokens = byService[service] ?? 0
                     if tokens > 0 {
-                        Theme.color(for: service)
+                        Color.primary.opacity(0.68)
                             .frame(width: geo.size.width * Double(tokens) / denom * factor)
                     }
                 }
