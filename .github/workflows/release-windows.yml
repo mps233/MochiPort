@@ -163,8 +163,18 @@ jobs:
           if (-not (Test-Path $wix)) {
             throw "WiX 7 executable was not installed at $wix"
           }
+          & $wix eula accept wix7
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not accept the WiX 7 OSMF EULA"
+          }
           & $wix extension add -g WixToolset.UI.wixext/7.0.0
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not install the WiX UI extension"
+          }
           & $wix extension list -g
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not list the WiX extension cache"
+          }
           & $wix --version
 
       - name: Build MSI
