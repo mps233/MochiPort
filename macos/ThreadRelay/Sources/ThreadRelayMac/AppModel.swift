@@ -2402,8 +2402,8 @@ final class AppModel: ObservableObject {
         return result
     }
 
-    private func forwardOnboardingErrors<T>(
-        _ operation: () async throws -> T
+    private func forwardOnboardingErrors<T: Sendable>(
+        _ operation: @Sendable () async throws -> T
     ) async throws -> T {
         do {
             return try await operation()
