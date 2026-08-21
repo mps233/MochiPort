@@ -895,8 +895,13 @@ mod tests {
         let logs = root.join("logs");
         std::fs::create_dir_all(&logs).expect("create logs dir");
         for index in 0..(MAX_LOG_FILES + 2) {
-            std::fs::write(logs.join(format!("codexhub-{index}.log")), "small log\n")
-                .expect("write log");
+            // Keep the large fixture first in the deterministic filename
+            // tiebreaker used when the filesystem gives files the same mtime.
+            std::fs::write(
+                logs.join(format!("threadrelay-z-{index}.log")),
+                "small log\n",
+            )
+            .expect("write log");
         }
         let large_log = logs.join("threadrelay-chain.log");
         let large_contents = format!(
