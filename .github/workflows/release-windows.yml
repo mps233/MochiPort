@@ -159,13 +159,13 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           dotnet tool install --global wix --version 7.0.0
-          wix extension add -g WixToolset.UI.wixext/7.0.0
           $wix = Join-Path $env:USERPROFILE ".dotnet\tools\wix.exe"
-          if (Test-Path $wix) {
-            & $wix --version
-          } else {
-            wix --version
+          if (-not (Test-Path $wix)) {
+            throw "WiX 7 executable was not installed at $wix"
           }
+          & $wix extension add -g WixToolset.UI.wixext/7.0.0
+          & $wix extension list -g
+          & $wix --version
 
       - name: Build MSI
         shell: pwsh
@@ -178,7 +178,7 @@ jobs:
           $sourceDir = (Resolve-Path "target\msi-source").Path
           $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
           & $wix build "packaging\windows\ThreadRelay.wxs" `
-            -ext WixToolset.UI.wixext `
+            -ext WixToolset.UI.wixext/7.0.0 `
             -acceptEula wix7 `
             -arch x64 `
             -d "ProductVersion=$env:PRODUCT_VERSION" `
