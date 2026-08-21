@@ -172,7 +172,7 @@ private enum MessagingAccountState: Equatable {
 
 /// Displays a daemon-fetched account avatar and falls back to the bundled
 /// platform symbol when the remote profile is unavailable.
-private struct MessagingAccountAvatar: View {
+struct MessagingAccountAvatar: View {
     let account: MessagingAccountSummary
     var size: CGFloat = 28
 

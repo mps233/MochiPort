@@ -1,39 +1,31 @@
+import AppKit
 import SwiftUI
 
-/// A compact, read-only map of the clients and message channels attached to
-/// the local ThreadRelay service. The map intentionally uses geometry for the
-/// lines, so it remains legible when the window is resized or text is scaled.
+/// A compact, deterministic map of the clients and message channels attached
+/// to ThreadRelay. This intentionally behaves like a bridge diagram rather
+/// than a free-form service graph: there are only two endpoint rails and one
+/// local service in the middle.
 struct ConnectionTopologyView: View {
     @EnvironmentObject private var model: AppModel
-    var showsHeader = true
 
-    private let nodeHeight: CGFloat = 56
+    private let nodeHeight: CGFloat = 52
     private let nodeSpacing: CGFloat = 10
     private let topologyHeight: CGFloat = 286
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if showsHeader {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("连接拓扑")
-                            .font(.headline)
-                        Text("本地服务与接入端的实时状态")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 12)
-                    Text(summary)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("连接拓扑")
+                        .font(.headline)
+                    Text("客户端和消息渠道通过本地服务的实时连接")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                        .monospacedDigit()
                 }
-            } else {
+                Spacer(minLength: 12)
                 Text(summary)
-                    .font(.caption)
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .frame(maxWidth: .infinity, alignment: .trailing)
             }
 
             GeometryReader { proxy in
@@ -47,41 +39,18 @@ struct ConnectionTopologyView: View {
 
     @ViewBuilder
     private func topologyLayout(in size: CGSize) -> some View {
-        let layoutWidth = min(size.width, 660)
-        let contentWidth = max(0, layoutWidth - 16)
-        let sideWidth = min(190, max(132, contentWidth * 0.27))
-        let serviceWidth = min(190, max(166, contentWidth * 0.27))
-        let gap = max(12, (contentWidth - sideWidth * 2 - serviceWidth) / 2)
-        let layoutSize = CGSize(width: layoutWidth, height: size.height)
-
-        if #available(macOS 26.0, *) {
-            GlassEffectContainer(spacing: 12) {
-                topologyStack(
-                    size: layoutSize,
-                    sideWidth: sideWidth,
-                    serviceWidth: serviceWidth,
-                    gap: gap
-                )
-            }
-            .frame(width: layoutWidth, height: size.height)
-            .frame(maxWidth: .infinity)
-        } else {
-            topologyStack(
-                size: layoutSize,
-                sideWidth: sideWidth,
-                serviceWidth: serviceWidth,
-                gap: gap
-            )
-            .frame(width: layoutWidth, height: size.height)
-            .frame(maxWidth: .infinity)
-        }
+        let metrics = TopologyLayoutMetrics(size: size)
+        topologyStack(
+            size: CGSize(width: metrics.layoutWidth, height: size.height),
+            metrics: metrics
+        )
+        .frame(width: metrics.layoutWidth, height: size.height)
+        .frame(maxWidth: .infinity)
     }
 
     private func topologyStack(
         size: CGSize,
-        sideWidth: CGFloat,
-        serviceWidth: CGFloat,
-        gap: CGFloat
+        metrics: TopologyLayoutMetrics
     ) -> some View {
         ZStack {
             TopologyConnectorCanvas(
@@ -90,26 +59,31 @@ struct ConnectionTopologyView: View {
                 rightCount: rightNodes.count,
                 nodeHeight: nodeHeight,
                 nodeSpacing: nodeSpacing,
-                sideWidth: sideWidth,
-                serviceWidth: serviceWidth,
-                gap: gap,
-                layoutPadding: 8,
+                sideWidth: metrics.sideWidth,
+                serviceWidth: metrics.serviceWidth,
+                gap: metrics.gap,
+                layoutPadding: metrics.layoutPadding,
                 leftBranchTints: leftNodes.map(\.tint),
                 rightBranchTints: rightNodes.map(\.tint)
             )
 
-            HStack(alignment: .center, spacing: gap) {
-                nodeColumn(leftNodes, width: sideWidth, side: .left)
+            HStack(alignment: .center, spacing: metrics.gap) {
+                nodeColumn(leftNodes, width: metrics.sideWidth, side: .left)
                 TopologyServiceNode(
                     status: model.serviceStatus,
                     remoteTint: remoteTint,
                     bridgeTint: bridgeTint
                 )
-                .frame(width: serviceWidth)
+                .frame(width: metrics.serviceWidth)
                 .accessibilityIdentifier("topology.node.local-service")
-                nodeColumn(rightNodes, width: sideWidth, side: .right)
+                nodeColumn(rightNodes, width: metrics.sideWidth, side: .right)
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, metrics.layoutPadding)
+            .frame(
+                width: size.width,
+                height: size.height,
+                alignment: .leading
+            )
         }
         .frame(width: size.width, height: size.height)
     }
@@ -125,6 +99,7 @@ struct ConnectionTopologyView: View {
             }
         }
         .frame(width: width)
+        .frame(maxHeight: .infinity, alignment: .center)
         .accessibilityIdentifier("topology.column.\(side.rawValue)")
     }
 
@@ -133,27 +108,33 @@ struct ConnectionTopologyView: View {
         return [
             TopologyNode(
                 id: "codex-app",
-                title: "Codex 应用",
-                compactTitle: "Codex",
+                title: "Codex 远程控制",
+                compactTitle: "Codex 远程控制",
                 detail: endpointDetail(clients?.codexApp),
                 symbol: "chevron.left.forwardslash.chevron.right",
-                tint: endpointTint(clients?.codexApp)
+                tint: endpointTint(clients?.codexApp),
+                accounts: [],
+                logo: .codex
             ),
             TopologyNode(
                 id: "vscode",
-                title: "VS Code",
-                compactTitle: "VS Code",
+                title: "Codex for VSCode",
+                compactTitle: "Codex VSCode",
                 detail: sessionEndpointDetail(clients?.vscode),
                 symbol: "chevron.left.forwardslash.chevron.right",
-                tint: sessionEndpointTint(clients?.vscode)
+                tint: sessionEndpointTint(clients?.vscode),
+                accounts: [],
+                logo: .vscode
             ),
             TopologyNode(
                 id: "cli",
-                title: "命令行（CLI）",
-                compactTitle: "命令行",
+                title: "Codex CLI",
+                compactTitle: "Codex CLI",
                 detail: sessionEndpointDetail(clients?.cli),
                 symbol: "terminal",
-                tint: sessionEndpointTint(clients?.cli)
+                tint: sessionEndpointTint(clients?.cli),
+                accounts: [],
+                logo: .codexCLI
             ),
         ]
     }
@@ -176,6 +157,16 @@ struct ConnectionTopologyView: View {
         _ symbol: String,
         legacy: Bool
     ) -> TopologyNode {
+        let accounts = model.imAccounts
+            .compactMap(MessagingAccountSummary.init)
+            .filter { $0.platform.rawValue == id }
+            .sorted { lhs, rhs in
+                if lhs.connected != rhs.connected { return lhs.connected && !rhs.connected }
+                let lhsName = lhs.displayName ?? lhs.accountID
+                let rhsName = rhs.displayName ?? rhs.accountID
+                return lhsName.localizedCaseInsensitiveCompare(rhsName) == .orderedAscending
+            }
+
         if legacy {
             return TopologyNode(
                 id: id,
@@ -183,7 +174,9 @@ struct ConnectionTopologyView: View {
                 compactTitle: title,
                 detail: "兼容模式",
                 symbol: symbol,
-                tint: .caution
+                tint: .caution,
+                accounts: accounts,
+                logo: nil
             )
         }
         return TopologyNode(
@@ -192,13 +185,15 @@ struct ConnectionTopologyView: View {
             compactTitle: title,
             detail: channelDetail(channel),
             symbol: symbol,
-            tint: channelTint(channel)
+            tint: channelTint(channel),
+            accounts: accounts,
+            logo: nil
         )
     }
 
     private var summary: String {
-        let connectedClients = leftNodes.filter { $0.tint == .positive }.count
-        let connectedChannels = rightNodes.filter { $0.tint == .positive }.count
+        let connectedClients = leftNodes.count(where: { $0.tint == .positive })
+        let connectedChannels = rightNodes.count(where: { $0.tint == .positive })
         return "\(connectedClients) 客户端 · \(connectedChannels) 渠道在线"
     }
 
@@ -258,6 +253,77 @@ struct ConnectionTopologyView: View {
     }
 }
 
+private struct TopologyLayoutMetrics {
+    let layoutWidth: CGFloat
+    let sideWidth: CGFloat
+    let serviceWidth: CGFloat
+    let gap: CGFloat
+    let layoutPadding: CGFloat = 8
+
+    init(size: CGSize) {
+        layoutWidth = min(size.width, 720)
+        let contentWidth = max(0, layoutWidth - 16)
+        let columnGap = min(24, max(10, contentWidth * 0.035))
+        let columnsWidth = max(0, contentWidth - columnGap * 2)
+        let preferredServiceWidth = min(202, max(120, columnsWidth * 0.30))
+        let availableSideWidth = max(0, (columnsWidth - preferredServiceWidth) / 2)
+
+        // Keep the rails readable while allowing the whole diagram to shrink
+        // as one unit instead of letting fixed minimums push columns out of
+        // the window at smaller widths.
+        if availableSideWidth >= 84 {
+            sideWidth = min(184, availableSideWidth)
+            serviceWidth = preferredServiceWidth
+            gap = columnGap + max(0, (availableSideWidth - sideWidth) / 2)
+        } else {
+            let compactServiceWidth = min(preferredServiceWidth, max(96, columnsWidth * 0.34))
+            sideWidth = max(72, (columnsWidth - compactServiceWidth) / 2)
+            serviceWidth = max(96, columnsWidth - sideWidth * 2)
+            gap = columnGap
+        }
+    }
+}
+
+private enum ClientLogoKind: String, Hashable {
+    case codex
+    case vscode
+    case codexCLI = "codex-cli"
+}
+
+/// Loads the local client brand marks used by the topology. The SF Symbol
+/// remains a deliberate fallback so the topology stays legible if a resource
+/// is unavailable in an older bundle.
+@MainActor
+private enum ClientLogoStore {
+    private static var cache: [ClientLogoKind: NSImage?] = [:]
+
+    static func image(for kind: ClientLogoKind) -> NSImage? {
+        if let cached = cache[kind] {
+            return cached
+        }
+
+        let loaded = loadImage(named: kind.rawValue)
+        cache[kind] = loaded
+        return loaded
+    }
+
+    private static func loadImage(named name: String) -> NSImage? {
+        #if SWIFT_PACKAGE
+        let bundle = Bundle.module
+        #else
+        let bundle = Bundle.main
+        #endif
+        guard let url = bundle.url(
+            forResource: name,
+            withExtension: "svg",
+            subdirectory: "ClientLogos"
+        ) else {
+            return nil
+        }
+        return NSImage(contentsOf: url)
+    }
+}
+
 private enum TopologyNodeSide: String {
     case left
     case right
@@ -270,17 +336,21 @@ private struct TopologyNode: Identifiable {
     let detail: String
     let symbol: String
     let tint: StatusTint
+    let accounts: [MessagingAccountSummary]
+    let logo: ClientLogoKind?
 }
 
 private struct TopologyNodeView: View {
     let node: TopologyNode
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 9) {
-            Image(systemName: node.symbol)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(node.tint.color)
-                .frame(width: 20)
+            // Both endpoint rails use the same reading order.  The channel
+            // avatar belongs beside its name, while the status dot stays at
+            // the trailing edge as a compact state cue.
+            TopologyNodeIcon(node: node)
+
             VStack(alignment: .leading, spacing: 2) {
                 ViewThatFits(in: .horizontal) {
                     Text(node.title)
@@ -288,25 +358,107 @@ private struct TopologyNodeView: View {
                     Text(node.compactTitle)
                 }
                 .font(.subheadline.weight(.semibold))
+                .minimumScaleFactor(0.84)
                 .lineLimit(1)
                 Text(node.detail)
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+                    .minimumScaleFactor(0.84)
                     .lineLimit(1)
             }
-            Spacer(minLength: 4)
-            Circle()
-                .fill(node.tint.color)
-                .frame(width: 7, height: 7)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            statusMark
         }
         .padding(.horizontal, 11)
-        .frame(maxWidth: .infinity, minHeight: 56, maxHeight: 56)
-        .topologyNodeSurface(
-            cornerRadius: ThreadRelayRadius.content,
-            tint: node.tint
-        )
+        .frame(maxWidth: .infinity, minHeight: 52, maxHeight: 52)
+        .topologyEndpointSurface(tint: node.tint, isHovering: isHovering)
+        .contentShape(RoundedRectangle(cornerRadius: ThreadRelayRadius.content, style: .continuous))
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.16), value: isHovering)
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("topology.node.\(node.id)")
+    }
+
+    private var statusMark: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(node.tint.color)
+                .frame(width: 6, height: 6)
+        }
+        .frame(width: 15, alignment: .trailing)
+    }
+}
+
+private struct TopologyNodeIcon: View {
+    let node: TopologyNode
+
+    var body: some View {
+        if node.accounts.isEmpty {
+            if let logo = node.logo,
+               let image = ClientLogoStore.image(for: logo) {
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.94))
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .padding(3)
+                }
+                .frame(width: 28, height: 28)
+                .clipShape(Circle())
+                .overlay {
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.52), lineWidth: 0.6)
+                }
+            } else {
+                Image(systemName: node.symbol)
+                    .font(.system(size: 14, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(node.tint.color)
+                    .frame(width: 28, height: 28)
+            }
+        } else {
+            TopologyAvatarStack(accounts: node.accounts)
+        }
+    }
+}
+
+private struct TopologyAvatarStack: View {
+    let accounts: [MessagingAccountSummary]
+    private let visibleLimit = 3
+    private let avatarSize: CGFloat = 27
+    private let overlap: CGFloat = 9
+
+    private var visibleAccounts: ArraySlice<MessagingAccountSummary> {
+        accounts.prefix(visibleLimit)
+    }
+
+    var body: some View {
+        HStack(spacing: -overlap) {
+            ForEach(Array(visibleAccounts)) { account in
+                MessagingAccountAvatar(account: account, size: avatarSize)
+                    .opacity(account.connected ? 1 : 0.46)
+                    .zIndex(account.connected ? 1 : 0)
+            }
+            if accounts.count > visibleLimit {
+                Text("+\(accounts.count - visibleLimit)")
+                    .font(.caption2.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: avatarSize, height: avatarSize)
+                    .background(.quaternary, in: Circle())
+                    .overlay { Circle().strokeBorder(Color.primary.opacity(0.08), lineWidth: 0.5) }
+                    .zIndex(2)
+            }
+        }
+        .frame(width: avatarWidth, height: avatarSize, alignment: .leading)
+        .accessibilityHidden(true)
+    }
+
+    private var avatarWidth: CGFloat {
+        let visibleCount = min(accounts.count, visibleLimit)
+        let count = accounts.count > visibleLimit ? visibleCount + 1 : visibleCount
+        return avatarSize + CGFloat(max(0, count - 1)) * (avatarSize - overlap)
     }
 }
 
@@ -318,9 +470,15 @@ private struct TopologyServiceNode: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Image(systemName: "server.rack")
-                    .font(.system(size: 21, weight: .semibold))
-                    .foregroundStyle(status.tint.color)
+                ZStack {
+                    Circle()
+                        .fill(status.tint.color.opacity(0.12))
+                    Image(systemName: "server.rack")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundStyle(status.tint.color)
+                }
+                .frame(width: 35, height: 35)
+
                 VStack(alignment: .leading, spacing: 2) {
                     Text("ThreadRelay")
                         .font(.headline.weight(.semibold))
@@ -328,19 +486,35 @@ private struct TopologyServiceNode: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Spacer(minLength: 4)
             }
-            Divider()
-            HStack(spacing: 8) {
+
+            HStack(spacing: 6) {
+                TopologyServiceStatus(title: status.title, tint: status.tint)
+                Spacer(minLength: 2)
                 TopologyStatusMark(label: "远程控制", tint: remoteTint)
                 TopologyStatusMark(label: "消息桥接", tint: bridgeTint)
             }
         }
         .padding(14)
         .frame(minHeight: 118, maxHeight: 118, alignment: .leading)
-        .topologyNodeSurface(
-            cornerRadius: ThreadRelayRadius.overlay,
-            tint: status.tint
-        )
+        .topologyServiceSurface(tint: status.tint)
+    }
+}
+
+private struct TopologyServiceStatus: View {
+    let title: String
+    let tint: StatusTint
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(tint.color)
+                .frame(width: 6, height: 6)
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
     }
 }
 
@@ -352,10 +526,11 @@ private struct TopologyStatusMark: View {
         HStack(spacing: 4) {
             Circle()
                 .fill(tint.color)
-                .frame(width: 6, height: 6)
+                .frame(width: 5, height: 5)
             Text(label)
                 .font(.caption2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
         }
     }
 }
@@ -383,7 +558,6 @@ private struct TopologyConnectorCanvas: View {
             let rightNodeEdge = serviceRight + gap
             let middleY = size.height / 2
 
-            // Inactive links first so live links always render above them.
             for activePass in [false, true] {
                 for (index, center) in leftCenters.enumerated() {
                     let tint = branchTint(leftBranchTints, index)
@@ -392,7 +566,8 @@ private struct TopologyConnectorCanvas: View {
                         context: &context,
                         from: CGPoint(x: leftNodeEdge, y: center),
                         to: CGPoint(x: serviceLeft, y: middleY),
-                        tint: tint
+                        tint: tint,
+                        arrowDirection: 1
                     )
                 }
                 for (index, center) in rightCenters.enumerated() {
@@ -400,9 +575,10 @@ private struct TopologyConnectorCanvas: View {
                     guard (tint != .secondary) == activePass else { continue }
                     drawLink(
                         context: &context,
-                        from: CGPoint(x: rightNodeEdge, y: center),
-                        to: CGPoint(x: serviceRight, y: middleY),
-                        tint: tint
+                        from: CGPoint(x: serviceRight, y: middleY),
+                        to: CGPoint(x: rightNodeEdge, y: center),
+                        tint: tint,
+                        arrowDirection: 1
                     )
                 }
             }
@@ -420,53 +596,54 @@ private struct TopologyConnectorCanvas: View {
         tints.indices.contains(index) ? tints[index] : .secondary
     }
 
-    /// One smooth curve per node, colored by that node's own state, so an
-    /// unconnected endpoint never inherits the green of a shared trunk.
     private func drawLink(
         context: inout GraphicsContext,
         from: CGPoint,
         to: CGPoint,
-        tint: StatusTint
+        tint: StatusTint,
+        arrowDirection: CGFloat
     ) {
+        let branchX = (from.x + to.x) / 2
         var path = Path()
         path.move(to: from)
-        let midX = (from.x + to.x) / 2
-        path.addCurve(
-            to: to,
-            control1: CGPoint(x: midX, y: from.y),
-            control2: CGPoint(x: midX, y: to.y)
-        )
+        path.addLine(to: CGPoint(x: branchX, y: from.y))
+        path.addLine(to: CGPoint(x: branchX, y: to.y))
+        path.addLine(to: to)
 
         guard tint != .secondary else {
             context.stroke(
                 path,
-                with: .color(Color.secondary.opacity(0.42)),
-                style: StrokeStyle(lineWidth: 1.2, lineCap: .round, dash: [0.5, 5])
+                with: .color(Color.secondary.opacity(0.26)),
+                style: StrokeStyle(lineWidth: 1, lineCap: .round, lineJoin: .round, dash: [2, 4])
             )
             return
         }
 
-        // Soft glow beneath a gradient core reads as a live, powered link.
         context.drawLayer { layer in
-            layer.addFilter(.blur(radius: 2.4))
+            layer.addFilter(.blur(radius: 2.2))
             layer.stroke(
                 path,
-                with: .color(tint.color.opacity(0.42)),
-                style: StrokeStyle(lineWidth: 3.4, lineCap: .round)
+                with: .color(tint.color.opacity(0.18)),
+                style: StrokeStyle(lineWidth: 3.8, lineCap: .round, lineJoin: .round)
             )
         }
         context.stroke(
             path,
-            with: .linearGradient(
-                Gradient(colors: [tint.color.opacity(0.58), tint.color]),
-                startPoint: from,
-                endPoint: to
-            ),
-            style: StrokeStyle(lineWidth: 1.6, lineCap: .round)
+            with: .color(tint.color.opacity(0.72)),
+            style: StrokeStyle(lineWidth: 1.35, lineCap: .round, lineJoin: .round)
         )
+
+        let arrowPoint = CGPoint(x: to.x - arrowDirection * 5, y: to.y)
+        var arrow = Path()
+        arrow.move(to: arrowPoint)
+        arrow.addLine(to: CGPoint(x: arrowPoint.x - arrowDirection * 7, y: arrowPoint.y - 3.8))
+        arrow.addLine(to: CGPoint(x: arrowPoint.x - arrowDirection * 7, y: arrowPoint.y + 3.8))
+        arrow.closeSubpath()
+        context.fill(arrow, with: .color(tint.color.opacity(0.82)))
+
         for point in [from, to] {
-            let port = CGRect(x: point.x - 2.4, y: point.y - 2.4, width: 4.8, height: 4.8)
-            context.fill(Path(ellipseIn: port), with: .color(tint.color))
+            let port = CGRect(x: point.x - 2.2, y: point.y - 2.2, width: 4.4, height: 4.4)
+            context.fill(Path(ellipseIn: port), with: .color(tint.color.opacity(0.82)))
         }
     }
 }
@@ -484,37 +661,48 @@ private extension StatusTint {
 
 private extension View {
     @ViewBuilder
-    func topologyNodeSurface(
-        cornerRadius: CGFloat,
-        tint: StatusTint
-    ) -> some View {
-        let connectedGlassTint = Color(
-            red: 0.88,
-            green: 0.97,
-            blue: 0.90
-        )
+    func topologyEndpointSurface(tint _: StatusTint, isHovering: Bool) -> some View {
         let shape = RoundedRectangle(
-            cornerRadius: cornerRadius,
+            cornerRadius: ThreadRelayRadius.content,
+            style: .continuous
+        )
+        let fillOpacity = isHovering ? 0.05 : 0.025
+
+        self
+            .background {
+                shape
+                    .fill(Color.primary.opacity(fillOpacity))
+            }
+            .overlay {
+                shape.strokeBorder(
+                    Color.primary.opacity(isHovering ? 0.16 : 0.075),
+                    lineWidth: 0.5
+                )
+            }
+            .shadow(
+                color: Color.black.opacity(isHovering ? 0.07 : 0.025),
+                radius: isHovering ? 8 : 3,
+                y: isHovering ? 3 : 1
+            )
+    }
+
+    @ViewBuilder
+    func topologyServiceSurface(tint _: StatusTint) -> some View {
+        let shape = RoundedRectangle(
+            cornerRadius: ThreadRelayRadius.overlay,
             style: .continuous
         )
 
         if #available(macOS 26.0, *) {
-            glassEffect(
-                .regular.tint(tint == .positive ? connectedGlassTint.opacity(0.035) : nil),
-                in: shape
-            )
+            self.glassEffect(.regular, in: shape)
         } else {
-            background(.regularMaterial, in: shape)
-                .overlay {
-                    if tint == .positive {
-                        shape.fill(connectedGlassTint.opacity(0.02))
-                    }
+            self
+                .background {
+                    shape.fill(.regularMaterial)
                 }
                 .overlay {
                     shape.strokeBorder(
-                        tint == .positive
-                            ? connectedGlassTint.opacity(0.10)
-                            : Color.primary.opacity(0.08),
+                        Color.primary.opacity(0.09),
                         lineWidth: 0.5
                     )
                 }
