@@ -548,8 +548,8 @@ private struct AnimatedMetricValue: View {
     }
 }
 
-/// Small monochrome companion generated from the svg-character-animator
-/// state machine. The generated view owns its breathing and blink motion.
+/// Small Mochi companion for the usage hero card. The native SwiftUI
+/// view owns its breathing, blink, and relay-ring motion.
 private struct TokenMascotView: View {
     let value: Double
 
@@ -1000,15 +1000,14 @@ private struct UsageTrendContent: View {
 
     private let enabled: [ServiceID] = [.codex]
 
-    /// 데이터 소스만 분기: 7일은 store(in-memory), 30일은 statsStore(SQLite, UTC day).
+    /// Restart-stable trend data comes from the persistent statistics store.
+    /// The in-memory store remains available while that database is unavailable.
     private var rawData: [(day: Date, service: ServiceID, tokens: Int)] {
-        switch range {
-        case .week:
-            store.dailyTotalsByService(days: 7, now: Date())
-        case .month, .heatmap:
-            // 저장 포맷이 UTC day이므로 Calendar.utc로 조회해야 일관성 유지.
-            statsStore?.dailyTotalsByService(days: 30, now: Date(), calendar: .utc) ?? []
-        }
+        let now = Date()
+        let days = range == .week ? 7 : 30
+        // Stored day keys are UTC, matching the database writer.
+        return statsStore?.dailyTotalsByService(days: days, now: now, calendar: .utc)
+            ?? store.dailyTotalsByService(days: days, now: now)
     }
 
     /// 전체 날짜 범위 (x축 도메인 고정: 오늘 기준 days일 전 ~ 오늘).

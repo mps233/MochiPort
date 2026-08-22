@@ -1,6 +1,6 @@
 //! API Key 级别的余额与计费倍率探测。
 //!
-//! 首个支持的协议是 Sub2API。调用方只会拿到结构化结果和脱敏状态，
+//! 目前支持 Sub2API 和 New API。调用方只会拿到结构化结果和脱敏状态，
 //! 上游响应正文、请求 URL 与 Bearer 凭据均不会进入返回值。
 
 use std::time::Duration;
@@ -13,6 +13,9 @@ use super::config::provider_api_root;
 
 pub const PROVIDER_USAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const PROVIDER_USAGE_RESPONSE_LIMIT: usize = 256 * 1024;
+// New API reports quota points. Its public conversion is 500,000 points per
+// USD, so normalize the value before handing it to the rest of the app.
+const NEW_API_QUOTA_POINTS_PER_USD: f64 = 500_000.0;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -132,13 +135,21 @@ pub async fn fetch_provider_usage(
     let root = provider_api_root(base_url);
     let usage_url = format!("{root}/v1/usage");
     let billing_url = format!("{root}/v1/sub2api/billing");
-    let (balance, billing) = tokio::join!(
+    let new_api_usage_url = format!("{root}/api/usage/token");
+    let (balance, billing, new_api_balance) = tokio::join!(
         fetch_balance(client, &usage_url, api_key),
         fetch_billing(client, &billing_url, api_key),
+        fetch_new_api_balance(client, &new_api_usage_url, api_key),
     );
 
+    // Prefer the established Sub2API snapshot when it is available. New API
+    // is a fallback for gateways whose compatible `/v1/usage` endpoint is not
+    // exposed. Do not merge the two protocols: their quota units and billing
+    // semantics are different.
+    let use_new_api = matches!(&balance, Probe::Unavailable(_))
+        && matches!(&new_api_balance, Probe::Available(_));
     let mut snapshot = ProviderUsageSnapshot {
-        source: "sub2api",
+        source: if use_new_api { "new_api" } else { "sub2api" },
         balance_status: balance.status(),
         billing_status: billing.status(),
         remaining: None,
@@ -163,7 +174,23 @@ pub async fn fetch_provider_usage(
         observed_at: None,
     };
 
-    if let Probe::Available(balance) = balance {
+    if use_new_api {
+        snapshot.balance_status = CapabilityStatus::Available;
+        // New API exposes token quota but has no equivalent current-rate
+        // endpoint. Keep this explicit so the UI can say "未提供".
+        snapshot.billing_status = CapabilityStatus::Unsupported;
+        if let Probe::Available(balance) = new_api_balance {
+            snapshot.remaining = balance.remaining;
+            snapshot.unlimited = balance.unlimited;
+            snapshot.unit = Some(balance.unit);
+            snapshot.balance_mode = balance.mode;
+            snapshot.plan_name = balance.plan_name;
+            snapshot.account_valid = balance.account_valid;
+            snapshot.account_status = balance.account_status;
+            snapshot.today_cost = balance.today_cost;
+            snapshot.today_actual_cost = balance.today_actual_cost;
+        }
+    } else if let Probe::Available(balance) = balance {
         snapshot.remaining = balance.remaining;
         snapshot.unlimited = balance.unlimited;
         snapshot.unit = Some(balance.unit);
@@ -174,18 +201,20 @@ pub async fn fetch_provider_usage(
         snapshot.today_cost = balance.today_cost;
         snapshot.today_actual_cost = balance.today_actual_cost;
     }
-    if let Probe::Available(billing) = billing {
-        snapshot.group_rate_multiplier = Some(billing.group_rate_multiplier);
-        snapshot.user_rate_multiplier = billing.user_rate_multiplier;
-        snapshot.resolved_rate_multiplier = Some(billing.resolved_rate_multiplier);
-        snapshot.effective_rate_multiplier = Some(billing.effective_rate_multiplier);
-        snapshot.peak_rate_enabled = Some(billing.peak_rate_enabled);
-        snapshot.peak_start = billing.peak_start;
-        snapshot.peak_end = billing.peak_end;
-        snapshot.peak_rate_multiplier = billing.peak_rate_multiplier;
-        snapshot.applied_peak_multiplier = billing.applied_peak_multiplier;
-        snapshot.timezone = billing.timezone;
-        snapshot.observed_at = Some(billing.observed_at);
+    if !use_new_api {
+        if let Probe::Available(billing) = billing {
+            snapshot.group_rate_multiplier = Some(billing.group_rate_multiplier);
+            snapshot.user_rate_multiplier = billing.user_rate_multiplier;
+            snapshot.resolved_rate_multiplier = Some(billing.resolved_rate_multiplier);
+            snapshot.effective_rate_multiplier = Some(billing.effective_rate_multiplier);
+            snapshot.peak_rate_enabled = Some(billing.peak_rate_enabled);
+            snapshot.peak_start = billing.peak_start;
+            snapshot.peak_end = billing.peak_end;
+            snapshot.peak_rate_multiplier = billing.peak_rate_multiplier;
+            snapshot.applied_peak_multiplier = billing.applied_peak_multiplier;
+            snapshot.timezone = billing.timezone;
+            snapshot.observed_at = Some(billing.observed_at);
+        }
     }
     snapshot
 }
@@ -196,6 +225,21 @@ async fn fetch_balance(client: &reqwest::Client, url: &str, api_key: &str) -> Pr
         Err(status) => return Probe::Unavailable(status),
     };
     match parse_balance(&value) {
+        Some(balance) => Probe::Available(balance),
+        None => Probe::Unavailable(CapabilityStatus::InvalidResponse),
+    }
+}
+
+async fn fetch_new_api_balance(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) -> Probe<BalanceInfo> {
+    let value = match fetch_json(client, url, api_key).await {
+        Ok(value) => value,
+        Err(status) => return Probe::Unavailable(status),
+    };
+    match parse_new_api_balance(&value) {
         Some(balance) => Probe::Available(balance),
         None => Probe::Unavailable(CapabilityStatus::InvalidResponse),
     }
@@ -268,10 +312,19 @@ fn parse_balance(value: &Value) -> Option<BalanceInfo> {
             .map(str::to_string)
     };
     let mode = optional_string("mode", 64);
-    if !matches!(mode.as_deref(), Some("quota_limited" | "unrestricted")) {
+    // Some compatible gateways expose a wallet snapshot without Sub2API's
+    // optional `mode` field. When present, keep validating the known values;
+    // when absent, the finite balance fields below are sufficient evidence.
+    if mode
+        .as_deref()
+        .is_some_and(|mode| !matches!(mode, "quota_limited" | "unrestricted"))
+    {
         return None;
     }
-    let reported_valid = value.get("isValid").and_then(Value::as_bool)?;
+    let reported_valid = value
+        .get("isValid")
+        .and_then(Value::as_bool)
+        .or_else(|| value.get("is_active").and_then(Value::as_bool))?;
 
     let wallet_balance = value.get("balance").and_then(Value::as_f64);
     let raw_remaining = wallet_balance.or_else(|| {
@@ -280,6 +333,9 @@ fn parse_balance(value: &Value) -> Option<BalanceInfo> {
             .and_then(Value::as_f64)
             .or_else(|| value.pointer("/quota/remaining").and_then(Value::as_f64))
     });
+    if mode.is_none() && raw_remaining.is_none() {
+        return None;
+    }
     if raw_remaining
         .is_some_and(|amount| !amount.is_finite() || (wallet_balance.is_none() && amount < -1.0))
     {
@@ -298,7 +354,12 @@ fn parse_balance(value: &Value) -> Option<BalanceInfo> {
     if unit.is_empty() || unit.chars().count() > 16 {
         return None;
     }
-    let account_status = optional_string("status", 32);
+    let account_status = optional_string("status", 32).or_else(|| {
+        value
+            .get("is_active")
+            .and_then(Value::as_bool)
+            .map(|active| if active { "active" } else { "inactive" }.to_string())
+    });
     let account_valid = match account_status.as_deref() {
         Some("active") => Some(reported_valid),
         Some("disabled" | "inactive" | "quota_exhausted" | "expired") => Some(false),
@@ -323,6 +384,50 @@ fn parse_balance(value: &Value) -> Option<BalanceInfo> {
         today_cost,
         today_actual_cost,
     })
+}
+
+fn parse_new_api_balance(value: &Value) -> Option<BalanceInfo> {
+    let data = value.get("data")?;
+    let unlimited = data.get("unlimited_quota").and_then(Value::as_bool)?;
+    let available_points = data.get("total_available").and_then(json_f64);
+    let remaining = if unlimited {
+        None
+    } else {
+        let points = available_points?;
+        if points < 0.0 {
+            return None;
+        }
+        Some(points / NEW_API_QUOTA_POINTS_PER_USD)
+    };
+    let plan_name = data
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && name.chars().count() <= 120)
+        .map(str::to_string);
+
+    Some(BalanceInfo {
+        remaining,
+        unlimited,
+        unit: "USD".to_string(),
+        mode: Some(if unlimited {
+            "unrestricted".to_string()
+        } else {
+            "quota_limited".to_string()
+        }),
+        plan_name,
+        account_valid: Some(true),
+        account_status: Some("active".to_string()),
+        today_cost: None,
+        today_actual_cost: None,
+    })
+}
+
+fn json_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
 }
 
 fn valid_billing(info: &BillingInfo) -> bool {
@@ -449,6 +554,83 @@ mod tests {
         .expect("overdrawn wallet");
         assert_eq!(overdrawn_wallet.remaining, Some(-2.5));
         assert!(!overdrawn_wallet.unlimited);
+    }
+
+    #[test]
+    fn balance_parses_shenwenai_wallet_snapshot_without_mode() {
+        let balance = parse_balance(&json!({
+            "is_active": true,
+            "isValid": true,
+            "planName": "ShenwenAI",
+            "unit": "USD",
+            "total": 59.6667,
+            "used": 7.27338899,
+            "remaining": 52.39331101,
+            "balance": 52.39331101
+        }))
+        .expect("ShenwenAI wallet balance");
+
+        assert_eq!(balance.remaining, Some(52.39331101));
+        assert!(!balance.unlimited);
+        assert_eq!(balance.unit, "USD");
+        assert_eq!(balance.mode, None);
+        assert_eq!(balance.plan_name.as_deref(), Some("ShenwenAI"));
+        assert_eq!(balance.account_valid, Some(true));
+        assert_eq!(balance.account_status.as_deref(), Some("active"));
+    }
+
+    #[test]
+    fn new_api_usage_converts_quota_points_to_usd() {
+        let balance = parse_new_api_balance(&json!({
+            "data": {
+                "total_granted": 2_000_000,
+                "total_used": 750_000,
+                "total_available": 1_250_000,
+                "unlimited_quota": false,
+                "name": "New API Key"
+            }
+        }))
+        .expect("New API usage");
+
+        assert_eq!(balance.remaining, Some(2.5));
+        assert!(!balance.unlimited);
+        assert_eq!(balance.unit, "USD");
+        assert_eq!(balance.mode.as_deref(), Some("quota_limited"));
+        assert_eq!(balance.plan_name.as_deref(), Some("New API Key"));
+        assert_eq!(balance.account_valid, Some(true));
+        assert_eq!(balance.account_status.as_deref(), Some("active"));
+
+        let unlimited = parse_new_api_balance(&json!({
+            "data": {
+                "unlimited_quota": true,
+                "name": "Unlimited"
+            }
+        }))
+        .expect("unlimited New API usage");
+        assert!(unlimited.unlimited);
+        assert_eq!(unlimited.remaining, None);
+    }
+
+    #[test]
+    fn new_api_usage_rejects_missing_or_negative_quota() {
+        assert!(
+            parse_new_api_balance(&json!({
+                "data": { "unlimited_quota": false }
+            }))
+            .is_none()
+        );
+        assert!(
+            parse_new_api_balance(&json!({
+                "data": { "unlimited_quota": false, "total_available": -1 }
+            }))
+            .is_none()
+        );
+        assert!(
+            parse_new_api_balance(&json!({
+                "data": { "unlimited_quota": "false", "total_available": 1 }
+            }))
+            .is_none()
+        );
     }
 
     #[test]

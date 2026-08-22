@@ -939,7 +939,18 @@ final class APIContractTests: XCTestCase {
     func testNavigationContainsPhaseZeroSections() {
         XCTAssertEqual(
             AppSection.allCases.map(\.title),
-            ["概览", "Codex 接入", "会话", "消息渠道", "AI 网关", "请求日志"]
+            ["概览", "Codex 接入", "AI 网关", "消息渠道", "会话", "请求日志"]
+        )
+    }
+
+    func testNavigationGroupsFollowSetupOrder() {
+        XCTAssertEqual(
+            AppSectionGroup.allCases.flatMap { $0.sections }.map(\.title),
+            ["概览", "Codex 接入", "AI 网关", "消息渠道", "会话", "请求日志"]
+        )
+        XCTAssertEqual(
+            AppSectionGroup.allCases.map(\.title),
+            [nil, "配置", "诊断"]
         )
     }
 
@@ -3751,10 +3762,20 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(providerUsageBalanceText(usage), "无限")
         XCTAssertNil(providerUsageMultiplierText(usage.effectiveRateMultiplier))
         XCTAssertEqual(providerUsageStatusText(usage.billingStatus), "服务商不支持查询")
+        XCTAssertEqual(providerUsageBillingText(usage), "服务商不支持查询")
         XCTAssertEqual(
             providerUsagePeakText(usage),
             "峰时 ×1.25 · 22:00–06:00 · Asia/Shanghai"
         )
+
+        let newAPIData = Data(
+            #"{"ok":true,"providerName":"new-api","usage":{"source":"new_api","balanceStatus":"available","billingStatus":"unsupported","remaining":2.5,"unlimited":false,"unit":"USD","accountValid":true,"accountStatus":"active"}}"#.utf8
+        )
+        let newAPIUsage = try JSONDecoder()
+            .decode(ManageProviderUsageResponse.self, from: newAPIData)
+            .usage
+        XCTAssertEqual(providerUsageBalanceText(newAPIUsage), "2.5 USD")
+        XCTAssertEqual(providerUsageBillingText(newAPIUsage), "未提供")
     }
 
     func testGatewayQuotaDockUsesSeparateProgressAndLowBalanceThresholds() throws {

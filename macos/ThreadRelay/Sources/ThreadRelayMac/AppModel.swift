@@ -993,9 +993,23 @@ final class AppModel: ObservableObject {
     @discardableResult
     func configureCodex() async -> Bool {
         await performManagementAction(section: .codex) {
-            _ = try await self.apiClient.configureCodex()
+            let currentGateway = try await self.gatewaySnapshot()
+            let gatewayWasEnabled = currentGateway.enabled
+            if !gatewayWasEnabled {
+                self.gateway = try await self.updateGateway(currentGateway, enabled: true)
+            }
+
+            do {
+                _ = try await self.apiClient.configureCodex()
+            } catch {
+                if !gatewayWasEnabled {
+                    self.gateway = try? await self.updateGateway(currentGateway, enabled: false)
+                }
+                throw error
+            }
+
             try await self.requireSectionRefresh(.codex)
-            return "已写入 Codex 配置"
+            return "已连接 ThreadRelay"
         }
     }
 
@@ -1004,7 +1018,7 @@ final class AppModel: ObservableObject {
         await performManagementAction(section: .codex) {
             _ = try await self.apiClient.switchCodexToDirectApiMode()
             try await self.requireSectionRefresh(.codex)
-            return "已切换到第三方 API 直连模式"
+            return "已切换到原来的连接"
         }
     }
 
@@ -1020,10 +1034,33 @@ final class AppModel: ObservableObject {
     @discardableResult
     func uninstallCodex() async -> Bool {
         await performManagementAction(section: .codex) {
+            let currentGateway = try await self.gatewaySnapshot()
             _ = try await self.apiClient.uninstallCodex()
+            self.gateway = try await self.updateGateway(currentGateway, enabled: false)
             try await self.requireSectionRefresh(.codex)
-            return "已卸载 Codex 接入"
+            return "已恢复原来的 Codex 设置，ThreadRelay 已关闭"
         }
+    }
+
+    private func gatewaySnapshot() async throws -> ManageGateway {
+        if let gateway {
+            return gateway
+        }
+        return try await apiClient.gateway()
+    }
+
+    private func updateGateway(
+        _ current: ManageGateway,
+        enabled: Bool
+    ) async throws -> ManageGateway {
+        guard current.enabled != enabled else { return current }
+        return try await apiClient.updateGateway(
+            enabled: enabled,
+            filterImageGenerationTool: current.filterImageGenerationTool,
+            requestLoggingEnabled: current.requestLoggingEnabled,
+            requestLogDetailsEnabled: current.requestLogDetailsEnabled,
+            codexVisibleModels: current.codexVisibleModels
+        )
     }
 
     @discardableResult
@@ -2711,9 +2748,9 @@ enum StatusTint {
 enum AppSection: String, CaseIterable, Identifiable {
     case overview
     case codex
-    case sessions
-    case messaging
     case gateway
+    case messaging
+    case sessions
     case requestLogs
 
     var id: String { rawValue }
@@ -2722,9 +2759,9 @@ enum AppSection: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "概览"
         case .codex: "Codex 接入"
-        case .sessions: "会话"
-        case .messaging: "消息渠道"
         case .gateway: "AI 网关"
+        case .messaging: "消息渠道"
+        case .sessions: "会话"
         case .requestLogs: "请求日志"
         }
     }
@@ -2733,9 +2770,9 @@ enum AppSection: String, CaseIterable, Identifiable {
         switch self {
         case .overview: "rectangle.grid.1x2"
         case .codex: "chevron.left.forwardslash.chevron.right"
-        case .sessions: "clock.arrow.circlepath"
-        case .messaging: "bubble.left.and.bubble.right"
         case .gateway: "point.3.connected.trianglepath.dotted"
+        case .messaging: "bubble.left.and.bubble.right"
+        case .sessions: "clock.arrow.circlepath"
         case .requestLogs: "list.bullet.rectangle"
         }
     }
@@ -2743,24 +2780,25 @@ enum AppSection: String, CaseIterable, Identifiable {
     var group: AppSectionGroup {
         switch self {
         case .overview: .overview
-        case .codex, .sessions: .workspace
-        case .messaging, .gateway, .requestLogs: .connections
+        case .codex, .gateway: .configuration
+        case .messaging, .sessions: .configuration
+        case .requestLogs: .diagnostics
         }
     }
 }
 
 enum AppSectionGroup: String, CaseIterable, Identifiable {
     case overview
-    case workspace
-    case connections
+    case configuration
+    case diagnostics
 
     var id: String { rawValue }
 
     var title: String? {
         switch self {
         case .overview: nil
-        case .workspace: "工作区"
-        case .connections: "连接"
+        case .configuration: "配置"
+        case .diagnostics: "诊断"
         }
     }
 

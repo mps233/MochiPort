@@ -700,7 +700,8 @@ pub(super) async fn fetch_provider_models(
 /// 查询已保存 Provider 当前 API Key 的余额与计费倍率。
 ///
 /// API Key 只从 daemon 配置读取，既不接受客户端传入，也不会进入响应。
-/// Sub2API 的余额与倍率接口会并行探测，允许其中一个能力单独可用。
+/// Sub2API 的余额与倍率接口，以及 New API 的余额接口会并行探测；
+/// 不同协议只使用各自的结果，不会混合额度单位或倍率。
 pub(super) async fn fetch_provider_usage(
     State(state): State<SharedState>,
     Json(request): Json<FetchProviderUsageRequest>,

@@ -12,7 +12,7 @@ ThreadRelay 是一个本地优先的 Agent 会话中继：把本机 Codex App、
 | --- | --- |
 | 远程和本地同屏操作 | 支持飞书、微信、Telegram 远程连接本地 Codex App、Codex VS Code 插件和 Codex CLI，同一个 Codex 会话可以在 IM 和本地客户端之间同步操作。 |
 | 本地 Codex 接入 | 不修改任何 Codex 前端代码，通过本地 backend 连接 Codex App、VS Code 插件和 Codex CLI。 |
-| Codex 会话管理 | 在 GUI 中管理 Codex 历史会话；切换 provider 或接入 AI Gateway 后，可以把旧会话移动到当前入口，让 Codex App 左侧继续看到。 |
+| Codex 会话管理 | 通过当前 Codex App 的 remote-control 连接直接读取本机会话并在 GUI 中管理；不需要复制或迁移会话文件，需要时可单独调整会话的 Provider。 |
 | 支持 IM 端管理 Codex 会话 | 利用 Codex 原生 remote-control 协议，在 IM 里创建会话、恢复会话、处理审批。 |
 | 内置 AI Gateway | 让 Codex App 继续使用原生 Responses 入口，同时可以在本地 GUI 中接入 OpenAI、DeepSeek、Anthropic/Claude、智谱 GLM 等模型渠道。 |
 
@@ -39,7 +39,7 @@ AI Gateway 是 `threadrelay` 内置的本地模型入口。Codex App 仍然按�
 
 ## 快速使用
 
-Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway -> 写入 Codex 配置 -> 重启 Codex。只有需要飞书、微信、Telegram 远程控制时，才需要接入 IM。Codex CLI 需要按第 7 步单独启动 app-server。
+ThreadRelay 的主路径是：下载程序 -> 配置模型服务 -> 接入 Telegram、飞书、微信或企业微信中的一个 -> 接入 Codex -> 从消息软件开始使用。只想在本地 Codex App 或 VS Code 插件里使用 AI Gateway 时，可以跳过消息渠道。Codex CLI 需要按第 7 步单独启动 app-server。
 
 ### 0. 前置条件
 
@@ -47,7 +47,7 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 - Codex App、Codex VS Code 插件或 Codex CLI
 - 不需要 ChatGPT 账号，也不需要“加速网络”
 - 至少一个模型服务 API Key：OpenAI Responses、DeepSeek、Anthropic/Claude、智谱 GLM 或其它兼容渠道
-- 可选 IM 通道：只有需要飞书、微信、Telegram 远程控制时才需要
+- 至少一个消息渠道：Telegram、飞书、微信或企业微信；这是从消息软件使用 Codex 的主入口
 
 ### 1. 安装
 
@@ -63,7 +63,7 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 
 状态概览显示本地服务运行后继续下一步。
 
-### 3. 接入 IM 通道（可选，远程控制时需要）
+### 3. 接入消息渠道（主路径必需）
 
 切到“聊天工具接入”页面，选择一个通道：
 
@@ -72,7 +72,7 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 - 微信：点击“扫码连接微信”，使用微信扫码确认。
 - 企业微信：点击“添加企业微信机器人”，使用企业微信扫码确认。支持私聊/群聊文本、流式与最终回复、图片文件、初始/历史会话选择卡片和审批模板卡片。
 
-接入成功后，状态概览里的“IM 通道”会显示可用。之后正常使用不需要反复扫码或重新填 token；只有更换机器人时才需要重新接入。
+接入成功后，状态概览里的“IM 通道”会显示可用。主路径至少接入一个渠道即可，之后正常使用不需要反复扫码或重新填 token；只有更换机器人时才需要重新接入。
 
 ### 4. 配置 AI Gateway
 
@@ -88,17 +88,19 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 
 如果渠道不支持 Codex 请求里的生图工具，勾选“过滤生图工具”即可实时移除 `image_generation` 工具，不需要再改 Codex 配置。
 
-### 5. 写入 Codex 配置
+### 5. 连接 Codex
 
-在 “Codex 接入” 页面点击“写入 Codex 配置”。这一步会让 Codex App 和 Codex VS Code 插件连接到本机 `threadrelay`，并把模型请求交给本地 AI Gateway。
+在 “Codex 接入” 页面打开“连接 ThreadRelay”。这一个开关会同时打开 ThreadRelay，并让 Codex App 和 Codex VS Code 插件连接到本机服务。
 
-写入后如果想回到原来的 Codex 连接方式，点击“恢复 Codex 原有配置”即可。GUI 只在已经写入过配置时显示恢复入口，避免第一次使用时误操作。
+关闭这个开关会先恢复 Codex 原来的连接，再关闭 ThreadRelay。GUI 只在已经写入过配置时显示恢复入口，避免第一次使用时误操作。
 
 ### 6. 打开 Codex
 
 正常启动 Codex App 或 Codex VS Code 插件，并打开 remote-control / 控制这台电脑。
 
 连接成功后，`ThreadRelay` 里会看到 Codex 控制通道变为已连接。
+
+ThreadRelay 会通过当前 Codex App 的 remote-control 连接直接读取它的本机会话，不需要导入、复制或迁移会话文件。Codex App 未运行、未连接 remote-control，或会话尚未写入 state DB 时，会话列表可能为空。
 
 不需要在 Codex App 的“连接”设置页里看到远程连接设备列表。这个项目走的是本地 backend + IM bridge，只要 `ThreadRelay` 的状态概览都正常，就可以直接在已接入的 IM 里使用。
 
@@ -170,9 +172,9 @@ AI Gateway 解决的是“Codex 只认原生模型入口，但用户想用更多
 
 审批卡片在选择后会高亮并标记为已处理，避免聊天里堆了很多卡片后分不清哪些已经操作过。
 
-## 恢复 Codex 原有配置
+## 恢复原来的设置
 
-GUI 里点击“恢复 Codex 原有配置”即可恢复写入前的 Codex 连接方式。恢复后，Codex App 不再通过本地 AI Gateway 发模型请求。
+GUI 里点击“恢复原来的设置”即可恢复写入前的 Codex 连接方式。恢复后，Codex App 不再通过 ThreadRelay 发模型请求。
 
 这一步不会卸载 Codex，也不会删除 Codex 的会话历史。
 

@@ -12,7 +12,7 @@ This project is derived from [`happy-loki/codexhub`](https://github.com/happy-lo
 | --- | --- |
 | Remote and local side by side | Use Feishu, WeChat, and Telegram to control local Codex App, the Codex VS Code extension, and Codex CLI. The same Codex session can stay synchronized between IM and local clients. |
 | Local Codex access | Does not modify Codex frontend code. Connect Codex App, the VS Code extension, and Codex CLI through the local backend. |
-| Codex session management | Manage Codex session history from the GUI. After switching providers or enabling AI Gateway, move old sessions into the current entry so they still appear in the Codex App sidebar. |
+| Codex session management | Read sessions directly from the current Codex App over its remote-control connection and manage them in the GUI. No session files need to be copied or migrated; change a session's provider only when needed. |
 | Manage Codex sessions from IM | Use the native Codex remote-control protocol to create and resume Codex sessions from IM. |
 | Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
 
@@ -38,7 +38,7 @@ AI Gateway is a local model entry built into `threadrelay`. Codex App keeps send
 
 ## Quick Start
 
-For Codex App and the VS Code extension, the usual flow is: download the app -> configure AI Gateway -> write Codex config -> restart Codex. Connect an IM channel only when you need Feishu, WeChat, or Telegram remote control. Codex CLI still requires starting its own app-server in step 7.
+The main ThreadRelay flow is: download the app -> configure a model provider -> connect Telegram, Feishu, WeChat, or WeCom -> connect Codex -> start using Codex from the messaging app. If you only want to use the AI Gateway from the local Codex App or VS Code extension, you can skip messaging channels. Codex CLI still requires starting its own app-server in step 7.
 
 ### 0. Prerequisites
 
@@ -46,7 +46,7 @@ For Codex App and the VS Code extension, the usual flow is: download the app -> 
 - Codex App, the Codex VS Code extension, or Codex CLI
 - No ChatGPT account and no acceleration network required
 - At least one model API key: OpenAI Responses, DeepSeek, Anthropic/Claude, Zhipu GLM, or another compatible provider
-- Optional IM channel: needed only for Feishu, WeChat, or Telegram remote control
+- At least one messaging channel: Telegram, Feishu, WeChat, or WeCom; this is the main entry point for using Codex from chat
 
 ### 1. Install
 
@@ -62,7 +62,7 @@ Open `ThreadRelay`. The GUI ensures that the local backend is running. On macOS,
 
 Continue when the status overview shows the local service is running.
 
-### 3. Connect An IM Channel (Optional, For Remote Control)
+### 3. Connect A Messaging Channel (Required For The Main Flow)
 
 Open the `消息接入` page and choose one channel:
 
@@ -71,7 +71,7 @@ Open the `消息接入` page and choose one channel:
 - WeChat: click `扫码连接微信` and confirm in WeChat.
 - WeCom: click `添加企业微信机器人` and confirm by scanning with WeCom. Direct/group text, streaming and final replies, image/file transfer, initial/history thread selection cards, and interactive approval template cards are supported.
 
-After a channel is connected, the `IM 通道` status panel becomes available. Normal use does not require scanning or entering the token again unless you switch bots.
+After a channel is connected, the `IM 通道` status panel becomes available. The main flow only needs one channel; normal use does not require scanning or entering the token again unless you switch bots.
 
 ### 4. Configure AI Gateway
 
@@ -87,17 +87,19 @@ If the upstream model name differs from the name you want to expose in Codex, us
 
 If a provider rejects Codex's image generation tool, enable `Filter image generation tool`. It takes effect immediately and removes `image_generation` from outgoing AI Gateway requests.
 
-### 5. Write Codex Config
+### 5. Let ThreadRelay Take Over Codex
 
-Click `Write Codex Config` on the `Codex 接入` page. This points Codex App and the Codex VS Code extension at the local `threadrelay` service and routes model requests through the local AI Gateway.
+Turn on `连接 ThreadRelay` on the `Codex 接入` page. This single switch starts the local ThreadRelay connection for Codex App and the Codex VS Code extension.
 
-To go back to the previous Codex connection, click `Restore Codex Config`. The restore action is shown only after Codex config has been written.
+Turning the switch off first restores the Codex connection from before setup, then stops ThreadRelay for Codex. The restore action is shown only after Codex config has been written.
 
 ### 6. Open Codex
 
 Open Codex App or the Codex VS Code extension normally, then enable remote-control / control this computer.
 
 When connected, `ThreadRelay` shows the Codex control channel as connected.
+
+ThreadRelay reads the current Codex App's local sessions through its remote-control connection. No import, file copy, or session migration is required. The list can be empty when Codex App is not running, remote-control is disconnected, or a session has not been written to the Codex state database yet.
 
 You do not need to see a remote device list in Codex App's connection settings. This project uses a local backend plus IM bridge. If the `ThreadRelay` status overview is normal, you can use it directly from the connected IM channel.
 
@@ -173,7 +175,7 @@ Approval prompts are updated after selection where the platform supports it.
 
 ## Restore Codex Config
 
-Click `Restore Codex Config` in the GUI to restore the Codex connection from before setup. After restore, Codex App no longer sends model requests through the local AI Gateway.
+Click `Restore Previous Settings` in the GUI to restore the Codex connection from before setup. After restore, Codex App no longer sends model requests through ThreadRelay.
 
 This does not uninstall Codex and does not delete Codex session history.
 

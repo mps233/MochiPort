@@ -35,9 +35,13 @@ private extension View {
 
 struct CodexAccessView: View {
     @EnvironmentObject private var model: AppModel
-    @State private var confirmsUninstall = false
+    @State private var confirmsRestore = false
     @State private var showsEnhancedDetails = false
     @State private var showsTechnicalDetails = false
+
+    private var gatewayServiceEnabled: Bool? {
+        model.gateway?.enabled ?? model.dashboard?.aiGatewayEnabled
+    }
 
     var body: some View {
         Form {
@@ -49,19 +53,22 @@ struct CodexAccessView: View {
             }
 
             if let status = model.codexStatus {
-                Section("Codex App") {
-                    CodexStatusFormRow(status: status)
+                Section("Codex") {
+                    CodexStatusFormRow(
+                        status: status,
+                        gatewayEnabled: gatewayServiceEnabled
+                    )
                 }
-                requestPathSection(status)
+                requestPathSection(status, gatewayEnabled: gatewayServiceEnabled)
                 providerSection(status)
                 environmentSection(status)
                 diagnosticsSection(status)
                 enhancedLaunchSection
             } else if !model.isLoading(.codex), model.sectionErrors[.codex] == nil {
-                Section("Codex App") {
+                Section("Codex") {
                     ManagementEmptyState(
-                        title: "尚未读取 Codex 状态",
-                        message: "刷新后会显示配置、授权和请求路径。",
+                        title: "还没连接 Codex",
+                        message: "打开开关后，这里会显示连接状态。",
                         symbol: "app.badge.checkmark"
                     )
                 }
@@ -78,13 +85,13 @@ struct CodexAccessView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .task { await model.loadSection(.codex) }
-        .alert("卸载 Codex 接入？", isPresented: $confirmsUninstall) {
+        .alert("恢复原来的设置？", isPresented: $confirmsRestore) {
             Button("取消", role: .cancel) {}
-            Button("卸载", role: .destructive) {
+            Button("恢复", role: .destructive) {
                 Task { await model.uninstallCodex() }
             }
         } message: {
-            Text("只移除 ThreadRelay 管理的 Codex 配置，并保留其他用户配置。")
+            Text("会恢复 Codex 原来的连接，并关闭 ThreadRelay。不会删除会话记录。")
         }
         .sheet(
             isPresented: Binding(
@@ -118,15 +125,15 @@ struct CodexAccessView: View {
                         } else {
                             Label(
                                 status.configured
-                                    ? (model.codexEnhancedLaunchError == nil ? "增强启动" : "重新尝试")
-                                    : "接入 Codex",
+                                    ? (model.codexEnhancedLaunchError == nil ? "启动 Codex" : "重新尝试")
+                                    : "连接 Codex",
                                 systemImage: status.configured ? "play.fill" : "link.badge.plus"
                             )
                         }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(status.configured && model.codexEnhancedLaunchInProgress)
-                    .accessibilityLabel(status.configured ? "增强启动 Codex App" : "接入 Codex App")
+                    .accessibilityLabel(status.configured ? "启动 Codex" : "连接 Codex")
                 }
             }
             ToolbarItemGroup(placement: .automatic) {
@@ -138,8 +145,8 @@ struct CodexAccessView: View {
                             Image(systemName: "wrench.and.screwdriver")
                         }
                         .disabled(!(status.configOk && status.authOk))
-                        .help("修复 GUI 环境")
-                        .accessibilityLabel("修复 GUI 环境")
+                        .help("检查设置")
+                        .accessibilityLabel("检查设置")
                     }
 
                     Button {
@@ -147,88 +154,101 @@ struct CodexAccessView: View {
                     } label: {
                         Image(systemName: "arrow.triangle.2.circlepath")
                     }
-                    .help("刷新 Codex 可见模型")
-                    .accessibilityLabel("刷新 Codex 可见模型")
+                    .help("刷新模型列表")
+                    .accessibilityLabel("刷新模型列表")
 
                     Menu {
                         if status.providerMode != "direct-api" {
-                            Button(status.configured ? "重新写入配置" : "接入 Codex App") {
+                            Button(status.configured ? "重新连接" : "连接 Codex") {
+                                Task { await model.configureCodex() }
+                            }
+                            Divider()
+                        } else {
+                            Button("连接 ThreadRelay") {
                                 Task { await model.configureCodex() }
                             }
                             Divider()
                         }
-                        Button("卸载接入", role: .destructive) {
-                            confirmsUninstall = true
+                        Button("恢复原来的设置", role: .destructive) {
+                            confirmsRestore = true
                         }
                         .disabled(!(status.configured || status.configOk || status.authOk))
                     } label: {
                         Image(systemName: "ellipsis")
                     }
                     .menuStyle(.borderlessButton)
-                    .help("更多维护操作")
-                    .accessibilityLabel("更多维护操作")
+                    .help("更多操作")
+                    .accessibilityLabel("更多操作")
                 }
             }
         }
     }
 
-    private func requestPathSection(_ status: ManageCodexStatus) -> some View {
-        Section {
-            CodexGatewayToggleRow(
+    private func requestPathSection(
+        _ status: ManageCodexStatus,
+        gatewayEnabled: Bool?
+    ) -> some View {
+        return Section {
+            CodexRequestPathRow(
                 mode: status.providerMode,
-                message: status.providerModeMessage,
-                activeProvider: status.activeProvider,
-                hasExternalProvider: status.providers.contains { $0.name != "ai-gateway" },
+                gatewayEnabled: gatewayEnabled,
                 isUpdating: model.isLoading(.codex),
-                setLocalGatewayEnabled: { enabled in
-                    if enabled {
-                        return await model.configureCodex()
-                    }
-                    return await model.switchCodexToDirectApiMode()
+                setGatewayEnabled: { enabled in
+                    enabled
+                        ? await model.configureCodex()
+                        : await model.uninstallCodex()
                 }
             )
-
-            LabeledContent("连接模式") {
-                Text(codexConnectionModeLabel(status.connectionMode))
-                    .foregroundStyle(.secondary)
-            }
         } header: {
-            Text("请求路径")
-        } footer: {
-            Text(status.providerMode == "direct-api"
-                ? "关闭本地网关后，Codex 会直接调用当前 Provider。"
-                : "开启本地网关后，请求会先交给 ThreadRelay，再由 Provider 处理。")
+            Text("连接 Codex")
         }
     }
 
     private func providerSection(_ status: ManageCodexStatus) -> some View {
-        Section {
-            if status.providers.isEmpty {
-                Text("尚未写入 Provider。接入 Codex App 后，当前配置会显示在这里。")
+        let activeProvider = status.providers.first { provider in
+            provider.name == status.activeProvider
+        }
+        let otherProviders = status.providers.filter { provider in
+            provider.name != activeProvider?.name
+        }
+
+        return Section {
+            if let activeProvider {
+                CodexProviderRow(provider: activeProvider)
+            } else if status.providers.isEmpty {
+                Text("还没有模型服务。")
                     .foregroundStyle(.secondary)
             } else {
-                ForEach(status.providers) { provider in
-                    CodexProviderRow(
-                        provider: provider,
-                        isActive: provider.name == status.activeProvider
-                    )
+                Text("还没有选择模型服务。")
+                    .foregroundStyle(.secondary)
+            }
+
+            if !otherProviders.isEmpty {
+                DisclosureGroup {
+                    ForEach(otherProviders) { provider in
+                        CodexProviderRow(provider: provider)
+                    }
+                } label: {
+                    HStack {
+                        Text("其他已配置服务")
+                        Spacer()
+                        Text("\(otherProviders.count) 个")
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         } header: {
-            HStack {
-                Text("Provider")
-                Spacer()
-                Text("\(status.providers.count) 个")
-                    .foregroundStyle(.secondary)
-            }
+            Text("当前模型服务")
         } footer: {
-            Text("当前 Provider 决定 Codex 请求最终发往哪个 API 服务。")
+            Text(otherProviders.isEmpty
+                ? "Codex 当前会使用这里的服务。"
+                : "Codex 当前使用上面的服务，其他服务不会参与请求。")
         }
     }
 
     private func environmentSection(_ status: ManageCodexStatus) -> some View {
-        Section("本地环境") {
-            LabeledContent("Codex Home") {
+        Section("本机设置") {
+            LabeledContent("Codex 文件夹") {
                 Text(status.codexHome)
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
@@ -237,7 +257,7 @@ struct CodexAccessView: View {
                     .textSelection(.enabled)
             }
 
-            LabeledContent("图像工具") {
+            LabeledContent("图片功能") {
                 Text(status.imageGenerationEnabled ? "已启用" : "未启用")
                     .foregroundStyle(.secondary)
             }
@@ -245,19 +265,19 @@ struct CodexAccessView: View {
     }
 
     private func diagnosticsSection(_ status: ManageCodexStatus) -> some View {
-        Section("诊断与兼容性") {
+        Section("检查设置") {
             DisclosureGroup(isExpanded: $showsTechnicalDetails) {
                 CodexDiagnosticList(status: status)
                     .padding(.top, 4)
             } label: {
-                Label("查看详细状态", systemImage: "stethoscope")
+                Label("查看详细信息", systemImage: "stethoscope")
             }
         }
     }
 
     @ViewBuilder
     private var enhancedLaunchSection: some View {
-        Section("增强启动") {
+        Section("启动 Codex") {
             if let operation = model.codexEnhancedOperation {
                 EnhancedLaunchProgressRow(
                     operation: operation,
@@ -277,53 +297,68 @@ struct CodexAccessView: View {
                 VStack(alignment: .leading, spacing: 9) {
                     EnhancedLaunchFeatureRow(
                         symbol: "checkmark.seal",
-                        text: "启动前检查 Codex App，备份配置并指向本地 ThreadRelay 服务。"
+                        text: "启动前检查并保存设置，然后连接 ThreadRelay。"
                     )
                     EnhancedLaunchFeatureRow(
                         symbol: "bolt",
-                        text: "在 Codex App 加载前应用增强配置，并持续确认是否生效。"
+                        text: "启动后确认连接是否正常。"
                     )
                     EnhancedLaunchFeatureRow(
                         symbol: "eye",
-                        text: "让 AI 网关自定义模型出现在 Codex 的模型选择器中。"
+                        text: "让自定义模型出现在 Codex 里。"
                     )
                     EnhancedLaunchFeatureRow(
                         symbol: "puzzlepiece.extension",
-                        text: "兼容中文界面、插件目录和官方初始化不可用的情况。"
+                        text: "兼容不同语言和安装方式。"
                     )
                 }
                 .padding(.top, 4)
             } label: {
-                Label("这项操作会做什么", systemImage: "sparkles")
+                Label("启动前会做什么", systemImage: "sparkles")
             }
         }
     }
+
 }
 
 private struct CodexStatusFormRow: View {
     let status: ManageCodexStatus
-
+    let gatewayEnabled: Bool?
     private var isDirectApiMode: Bool { status.providerMode == "direct-api" }
+    private var isUnknownMode: Bool {
+        status.providerMode == nil || status.providerMode == "unknown"
+    }
+    private var gatewayUnavailable: Bool {
+        status.providerMode == "threadrelay" && gatewayEnabled == false
+    }
     private var remoteControlReady: Bool {
         return !status.remoteControlSupported || status.remoteControlConfigured
     }
     private var needsAttention: Bool {
         guard !isDirectApiMode else { return false }
-        return !status.configOk || !status.authOk || !status.providerOk
+        return isUnknownMode || gatewayUnavailable || !status.configOk || !status.authOk || !status.providerOk
             || !status.guiConfigured || !remoteControlReady
     }
     private var title: String {
-        if isDirectApiMode { return "Codex App 可直接使用" }
-        return needsAttention ? "Codex App 还需要处理" : "Codex App 已准备就绪"
+        if isDirectApiMode { return "Codex 已准备好" }
+        if isUnknownMode { return "还没连接 Codex" }
+        if gatewayUnavailable { return "ThreadRelay 未开启" }
+        return needsAttention ? "还需要处理" : "Codex 已连接"
     }
     private var subtitle: String {
         if isDirectApiMode {
-            return "当前请求直接发送给 Provider。"
+            return "正在使用 Codex 原来的设置。"
+        }
+        if isUnknownMode {
+            return "打开下面的开关即可连接。"
+        }
+        if gatewayUnavailable {
+            return "请打开 ThreadRelay。"
         }
         if needsAttention {
-            return "请查看下面的请求路径或高级诊断。"
+            return "请检查下面的提示。"
         }
-        return "当前请求会经过 ThreadRelay 本地网关。"
+        return "已连接，可以使用。"
     }
     private var stateSymbol: String {
         return needsAttention ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
@@ -332,8 +367,10 @@ private struct CodexStatusFormRow: View {
         return needsAttention ? .orange : .green
     }
     private var stateTitle: String {
-        if isDirectApiMode { return "直连" }
-        return needsAttention ? "需要处理" : "运行正常"
+        if isDirectApiMode { return "原来的设置" }
+        if isUnknownMode { return "未连接" }
+        if gatewayUnavailable { return "未开启" }
+        return needsAttention ? "需处理" : "已连接"
     }
 
     var body: some View {
@@ -358,80 +395,93 @@ private struct CodexStatusFormRow: View {
     }
 }
 
-private struct CodexGatewayToggleRow: View {
+private struct CodexRequestPathRow: View {
     let mode: String?
-    let message: String?
-    let activeProvider: String?
-    let hasExternalProvider: Bool
+    let gatewayEnabled: Bool?
     let isUpdating: Bool
-    let setLocalGatewayEnabled: (Bool) async -> Bool
+    let setGatewayEnabled: (Bool) async -> Bool
 
-    @State private var pendingLocalGateway: Bool?
+    @State private var pendingEnabled: Bool?
     @State private var togglePending = false
 
-    private var isThreadRelayMode: Bool { mode == "threadrelay" || mode == nil }
-    private var localGatewayEnabled: Bool { pendingLocalGateway ?? isThreadRelayMode }
+    private var isDirectApi: Bool { mode == "direct-api" }
+    private var isThreadRelay: Bool { mode == "threadrelay" }
+    private var isKnownMode: Bool { isDirectApi || isThreadRelay }
+    private var gatewayReady: Bool {
+        isThreadRelay && gatewayEnabled != false
+    }
+    private var toggleValue: Bool {
+        pendingEnabled ?? gatewayReady
+    }
     private var toggleDisabled: Bool {
-        (mode != "direct-api" && mode != "threadrelay" && mode != nil)
-            || isUpdating
-            || togglePending
-            || (!localGatewayEnabled && !hasExternalProvider)
+        isUpdating || togglePending || !isKnownMode
+    }
+    private var detail: String {
+        if isDirectApi {
+            return "已关闭，Codex 使用原来的设置。"
+        }
+        if isThreadRelay, gatewayEnabled == false {
+            return "ThreadRelay 已关闭，打开开关即可使用。"
+        }
+        if isThreadRelay {
+            return "Codex 已连接，可以使用。"
+        }
+        return "打开开关连接 Codex。"
     }
 
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("使用本地网关")
-                    .font(.body.weight(.medium))
-                Text(message ?? (localGatewayEnabled
-                    ? "请求先经过 ThreadRelay，再由 Provider 处理"
-                    : "请求直接发送到当前 Provider"))
+                Text("使用 ThreadRelay")
+                    .font(.body.weight(.semibold))
+                Text(detail)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                if let activeProvider, !activeProvider.isEmpty {
-                    Text("当前 Provider：\(activeProvider)")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
             }
 
             Spacer(minLength: 12)
 
-            Toggle(
-                "使用本地网关",
-                isOn: Binding(
-                    get: { localGatewayEnabled },
+            if isKnownMode {
+                Toggle("使用 ThreadRelay", isOn: Binding(
+                    get: { toggleValue },
                     set: { newValue in
-                        guard !toggleDisabled else { return }
-                        pendingLocalGateway = newValue
+                        guard !toggleDisabled, newValue != toggleValue else { return }
+                        pendingEnabled = newValue
                         togglePending = true
                         Task { @MainActor in
-                            _ = await setLocalGatewayEnabled(newValue)
+                            _ = await setGatewayEnabled(newValue)
+                            pendingEnabled = nil
                             togglePending = false
-                            pendingLocalGateway = nil
                         }
                     }
-                )
-            )
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.small)
-            .disabled(toggleDisabled)
-            .accessibilityLabel("使用本地网关")
-            .help(localGatewayEnabled
-                ? "关闭后，Codex 直接调用当前 Provider"
-                : "打开后，请求会经过 ThreadRelay 本地网关")
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .accessibilityLabel("使用 ThreadRelay")
+                .help(toggleValue ? "关闭后恢复原来的设置" : "打开后连接 ThreadRelay")
+                .disabled(toggleDisabled)
+            } else {
+                Button {
+                    Task { _ = await setGatewayEnabled(true) }
+                } label: {
+                    Label("连接", systemImage: "link.badge.plus")
+                }
+                .buttonStyle(.bordered)
+                .disabled(isUpdating)
+            }
         }
+        .accessibilityElement(children: .contain)
         .onChange(of: mode) { _ in
-            pendingLocalGateway = nil
+            pendingEnabled = nil
+            togglePending = false
         }
     }
 }
 
 private struct CodexProviderRow: View {
     let provider: ManageCodexStatus.Provider
-    let isActive: Bool
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -440,16 +490,9 @@ private struct CodexProviderRow: View {
                 .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 7) {
-                    Text(provider.name)
-                        .font(.body.weight(.medium))
-                    if isActive {
-                        Text("当前使用")
-                            .font(.caption.weight(.medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Text(provider.baseUrl ?? "未设置 Base URL")
+                Text(provider.name)
+                    .font(.body.weight(.medium))
+                Text(provider.baseUrl ?? "未设置地址")
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -460,11 +503,11 @@ private struct CodexProviderRow: View {
             Spacer(minLength: 12)
 
             VStack(alignment: .trailing, spacing: 3) {
-                Text(provider.secretSet ? "密钥已设置" : "缺少密钥")
+                Text(provider.secretSet ? "已设置 Key" : "还没设置 Key")
                     .font(.caption)
                     .foregroundStyle(provider.secretSet ? Color.secondary : Color.orange)
                 if provider.supportsWebsockets {
-                    Text("支持实时连接")
+                    Text("支持实时回复")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -568,15 +611,6 @@ private struct CodexLoadingSurface: View {
         ProgressView()
             .controlSize(.large)
             .padding(18)
-    }
-}
-
-private func codexConnectionModeLabel(_ mode: String) -> String {
-    switch mode {
-    case "enhanced": return "增强连接"
-    case "local": return "本地连接"
-    case "standard": return "标准连接"
-    default: return mode.isEmpty ? "连接模式未知" : mode
     }
 }
 
@@ -806,6 +840,67 @@ private struct SessionRouteFilterControl: View {
     }
 }
 
+private enum SessionSourceState {
+    case waiting
+    case connected
+    case offline
+    case unavailable
+
+    var title: String {
+        switch self {
+        case .waiting: "等待连接"
+        case .connected: "已连接"
+        case .offline: "未连接"
+        case .unavailable: "不可用"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .waiting: "正在等待本地服务和 Codex App 就绪。"
+        case .connected: "可读取当前 Codex App 可见的本机会话。"
+        case .offline: "打开 Codex App，确认远程控制已启用，然后刷新。"
+        case .unavailable: "尚未配置 Codex App 的远程控制。"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .waiting: "hourglass"
+        case .connected: "checkmark.circle.fill"
+        case .offline: "link"
+        case .unavailable: "exclamationmark.circle"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .waiting: .secondary
+        case .connected: .green
+        case .offline: .orange
+        case .unavailable: .red
+        }
+    }
+
+    var emptyTitle: String {
+        switch self {
+        case .waiting: "正在等待 Codex App"
+        case .connected: "当前没有可见会话"
+        case .offline: "Codex App 尚未连接"
+        case .unavailable: "Codex App 尚未配置"
+        }
+    }
+
+    var emptyMessage: String {
+        switch self {
+        case .waiting: "连接建立后，会话会自动显示在这里。"
+        case .connected: "在 Codex App 中创建或打开会话后，刷新即可看到。"
+        case .offline: "请打开 Codex App，确认远程控制已启用，然后刷新。"
+        case .unavailable: "请先完成 Codex App 接入，再读取本机会话。"
+        }
+    }
+}
+
 struct SessionsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var query = ""
@@ -856,6 +951,21 @@ struct SessionsView: View {
         model.codexSessions.filter { selectedIDs.contains($0.id) }
     }
 
+    private var sessionSourceState: SessionSourceState {
+        guard let dashboard = model.dashboard else {
+            return model.isLoading(.sessions)
+                || model.dashboardState.isRefreshing
+                || model.dashboardState == .starting
+                ? .waiting
+                : .unavailable
+        }
+
+        let codexApp = dashboard.executionClients.codexApp
+        if codexApp.connected { return .connected }
+        if codexApp.configured { return .offline }
+        return .unavailable
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             sessionToolbar
@@ -876,13 +986,15 @@ struct SessionsView: View {
                     .listRowBackground(Color.clear)
                 }
 
-                if filteredSessions.isEmpty, !model.isLoading(.sessions) {
+                if filteredSessions.isEmpty,
+                   !model.isLoading(.sessions),
+                   model.sectionErrors[.sessions] == nil {
                     ManagementEmptyState(
-                        title: query.isEmpty ? "没有可见会话" : "没有匹配的会话",
+                        title: query.isEmpty ? sessionSourceState.emptyTitle : "没有匹配的会话",
                         message: query.isEmpty
-                            ? "Codex App 产生会话后会显示在这里。"
+                            ? sessionSourceState.emptyMessage
                             : "调整搜索词后重试。",
-                        symbol: "text.bubble"
+                        symbol: query.isEmpty ? sessionSourceState.symbol : "magnifyingglass"
                     )
                     .frame(maxWidth: .infinity, minHeight: 240)
                     .listRowSeparator(.hidden)
@@ -929,20 +1041,78 @@ struct SessionsView: View {
     }
 
     private var sessionToolbar: some View {
-        HStack(spacing: 12) {
-            SessionRouteFilterControl(selection: $routeFilter)
-                .frame(width: 320)
-            Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 12) {
+            sessionSourceBanner
 
-            if !selectedIDs.isEmpty {
-                Text("已选 \(selectedIDs.count) 项")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
-                    .fixedSize()
-                    .accessibilityIdentifier("sessions.selection-count")
+            HStack(spacing: 12) {
+                SessionRouteFilterControl(selection: $routeFilter)
+                    .frame(width: 320)
+                Spacer(minLength: 0)
+
+                if !selectedIDs.isEmpty {
+                    Text("已选 \(selectedIDs.count) 项")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .fixedSize()
+                        .accessibilityIdentifier("sessions.selection-count")
+                }
             }
         }
+    }
+
+    private var sessionSourceBanner: some View {
+        let state = sessionSourceState
+
+        return HStack(alignment: .top, spacing: 10) {
+            Image(systemName: state.symbol)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(state.tint)
+                .frame(width: 20, height: 20)
+
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text("读取来源：当前 Codex App")
+                        .font(.callout.weight(.semibold))
+                    Text(state.title)
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(state.tint)
+                }
+                Text(state.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 12)
+
+            if model.isLoading(.sessions) {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("正在刷新会话")
+            } else {
+                Text("共 \(model.codexSessions.count) 个")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .fixedSize()
+            }
+
+            Button {
+                Task { await model.loadSection(.sessions, force: true) }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(model.isLoading(.sessions))
+            .help("刷新本机会话")
+            .accessibilityLabel("刷新本机会话")
+        }
+        .padding(.bottom, 10)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+        .accessibilityIdentifier("sessions.source-status")
     }
 
     private var sessionTableHeader: some View {
@@ -1052,31 +1222,34 @@ struct SessionsView: View {
     }
 
     private func menuTitle(_ target: String, count: Int) -> String {
-        count > 1 ? "移动 \(count) 项到 \(target)" : "移动到 \(target)"
+        count > 1 ? "切换 \(count) 项到 \(target)" : "切换到 \(target)"
     }
 
     private var sessionActions: some View {
         Menu {
-            Button("AI Gateway") {
-                moveSessions(selectedSessions, to: nil)
-            }
-            let providers = model.codexSessionProviders.filter { $0 != "ai-gateway" }
-            if !providers.isEmpty {
-                Divider()
-                ForEach(providers, id: \.self) { provider in
-                    Button(provider) {
-                        moveSessions(selectedSessions, to: provider)
+            Section("切换 Provider") {
+                Button("AI Gateway") {
+                    moveSessions(selectedSessions, to: nil)
+                }
+                let providers = model.codexSessionProviders.filter { $0 != "ai-gateway" }
+                if !providers.isEmpty {
+                    ForEach(providers, id: \.self) { provider in
+                        Button(provider) {
+                            moveSessions(selectedSessions, to: provider)
+                        }
                     }
                 }
             }
         } label: {
-            Label("移动到…", systemImage: "arrow.left.arrow.right")
+            Image(systemName: "ellipsis")
         }
         .disabled(selectedIDs.isEmpty || moveInFlight)
-        .accessibilityLabel("移动选中的会话")
+        .menuStyle(.borderlessButton)
+        .accessibilityLabel("更多会话操作")
+        .help("更多会话操作")
     }
 
-    /// Skips sessions already on the target, then deselects the moved ones so
+    /// Skips sessions already on the target, then deselects the updated ones so
     /// only failed sessions stay selected for a retry.
     private func moveSessions(_ sessions: [ManageCodexSession], to provider: String?) {
         let target = provider ?? "ai-gateway"
@@ -1199,17 +1372,15 @@ private struct SessionRowContent: View {
 private enum GatewaySection: String, CaseIterable, Identifiable {
     case general
     case providers
-    case models
     case accountPool
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .general: "常规"
-        case .providers: "供应商"
-        case .models: "模型"
-        case .accountPool: "账号池"
+        case .general: "概览"
+        case .providers: "模型服务"
+        case .accountPool: "账号"
         }
     }
 
@@ -1217,7 +1388,6 @@ private enum GatewaySection: String, CaseIterable, Identifiable {
         switch self {
         case .general: "switch.2"
         case .providers: "server.rack"
-        case .models: "cube"
         case .accountPool: "person.2"
         }
     }
@@ -1311,7 +1481,6 @@ struct GatewayView: View {
     @State private var settingsReady = false
     @State private var modelCatalog: [ManageCodexCatalogModel] = []
     @State private var selectedCatalogModels = Set<String>()
-    @State private var visibleModelQuery = ""
     @State private var customVisibleModelInput = ""
     @State private var manualVisibleModelsExpanded = false
     @State private var editor: GatewayProviderEditorState?
@@ -1327,15 +1496,21 @@ struct GatewayView: View {
     @State private var preferencesSaving = false
     @State private var sub2ApiEditing = false
 
+    init(startAtProviders: Bool = false, startAddingProvider: Bool = false) {
+        _section = State(initialValue: startAtProviders ? .providers : .general)
+        _editor = State(
+            initialValue: startAddingProvider
+                ? GatewayProviderEditorState(provider: nil)
+                : nil
+        )
+    }
+
     var body: some View {
         Group {
             switch section {
             case .providers:
                 gatewayRoot
-                    .searchable(text: $providerQuery, placement: .toolbar, prompt: "搜索供应商")
-            case .models:
-                gatewayRoot
-                    .searchable(text: $visibleModelQuery, placement: .toolbar, prompt: "搜索模型")
+                    .searchable(text: $providerQuery, placement: .toolbar, prompt: "搜索模型服务")
             case .general, .accountPool:
                 gatewayRoot
             }
@@ -1346,20 +1521,20 @@ struct GatewayView: View {
                     Button {
                         editor = GatewayProviderEditorState(provider: nil)
                     } label: {
-                        Label("添加供应商", systemImage: "plus")
+                        Label("添加服务", systemImage: "plus")
                     }
-                    .help("添加供应商")
+                    .help("添加模型服务")
                 }
-            }
-            if section == .models, modelsDirty {
-                ToolbarItem(placement: .primaryAction) {
-                    Button {
-                        saveVisibleModels()
-                    } label: {
-                        Label("保存模型", systemImage: "checkmark")
+                if modelsDirty {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            saveVisibleModels()
+                        } label: {
+                            Label("保存模型", systemImage: "checkmark")
+                        }
+                        .disabled(!settingsReady || model.isLoading(.gateway))
+                        .help("保存 Codex 可见模型")
                     }
-                    .disabled(!settingsReady || model.isLoading(.gateway))
-                    .help("保存 Codex 可见模型")
                 }
             }
         }
@@ -1444,9 +1619,7 @@ struct GatewayView: View {
                 case .general:
                     generalPage(gateway)
                 case .providers:
-                    providersPage(gateway.providers)
-                case .models:
-                    modelsPage
+                    modelsAndProvidersPage(gateway.providers)
                 case .accountPool:
                     accountPoolPage
                 }
@@ -1466,21 +1639,17 @@ struct GatewayView: View {
     private func generalPage(_ gateway: ManageGateway) -> some View {
         let enabledProviders = gateway.providers.filter(\.enabled).count
         let modelCount = Set(gateway.providers.flatMap(\.models)).count
-        let loggingDetail: String = {
-            guard gateway.requestLoggingEnabled else { return "未记录" }
-            return gateway.requestLogDetailsEnabled ? "摘要 + 详情" : "仅摘要"
-        }()
 
         return Form {
             Section("状态") {
                 HStack(spacing: 12) {
                     Label(
-                        gateway.enabled ? "网关运行中" : "网关已停用",
+                        gateway.enabled ? "已开启" : "已关闭",
                         systemImage: gateway.enabled ? "checkmark.circle.fill" : "pause.circle"
                     )
                     .foregroundStyle(gateway.enabled ? Color.green : .secondary)
                     Spacer(minLength: 12)
-                    Text("\(enabledProviders) / \(gateway.providers.count) 个供应商 · \(modelCount) 个模型 · 日志\(loggingDetail)")
+                    Text("\(enabledProviders) 个模型服务 · \(modelCount) 个模型")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
@@ -1488,45 +1657,33 @@ struct GatewayView: View {
                 }
             }
 
-            Section("网关") {
+            Section("选项") {
                 GatewayPreferenceRow(
-                    title: "使用 AI Gateway",
-                    detail: enabled ? "请求会先进入本地网关，再按权重路由到供应商。" : "关闭后，本地网关不会接管请求。"
+                    title: "关闭图片功能",
+                    detail: "部分模型不支持图片功能时可以打开。"
                 ) {
-                    Toggle("使用 AI Gateway", isOn: gatewayEnabledBinding)
+                    Toggle("关闭图片功能", isOn: filterImagesBinding)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .disabled(preferencesSaving)
                 }
             }
 
-            Section("路由") {
+            Section("使用记录") {
                 GatewayPreferenceRow(
-                    title: "过滤图像生成工具",
-                    detail: "不把内置图像工具转发给不支持它的上游。"
+                    title: "保存使用记录",
+                    detail: "保存简单记录，方便查看使用情况。"
                 ) {
-                    Toggle("过滤图像生成工具", isOn: filterImagesBinding)
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .disabled(preferencesSaving)
-                }
-            }
-
-            Section("请求日志") {
-                GatewayPreferenceRow(
-                    title: "记录请求摘要",
-                    detail: "保存模型、状态、耗时和令牌统计，便于排查失败请求。"
-                ) {
-                    Toggle("记录请求摘要", isOn: requestLoggingBinding)
+                    Toggle("保存使用记录", isOn: requestLoggingBinding)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .disabled(preferencesSaving)
                 }
                 GatewayPreferenceRow(
-                    title: "记录请求与响应详情",
-                    detail: requestLogging ? "额外保存脱敏后的请求和响应内容。" : "先打开请求摘要，才能记录详情。"
+                    title: "保存详细记录",
+                    detail: requestLogging ? "保存更多内容，方便排查问题。" : "请先打开使用记录。"
                 ) {
-                    Toggle("记录请求与响应详情", isOn: requestDetailsBinding)
+                    Toggle("保存详细记录", isOn: requestDetailsBinding)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .disabled(!requestLogging || preferencesSaving)
@@ -1539,27 +1696,68 @@ struct GatewayView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var modelsPage: some View {
+    private func modelsAndProvidersPage(_ providers: [ManageGatewayProvider]) -> some View {
         List {
             Section {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Codex 可见模型")
+                HStack(alignment: .center, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("模型服务")
                             .font(.headline)
-                        Text("只控制 Codex 模型选择器，不改变供应商路由。")
-                            .font(.caption)
+                        Text("\(providers.count) 个服务")
+                            .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 12)
-                    Text("已选 \(mergedVisibleModels.count) 个")
-                        .font(.caption.monospacedDigit().weight(.medium))
-                        .foregroundStyle(.secondary)
+                    Picker("服务筛选", selection: $providerFilter) {
+                        ForEach(GatewayProviderFilter.allCases) { filter in
+                            Text(filter.title).tag(filter)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 300)
                 }
+                .padding(.vertical, 4)
                 .listRowSeparator(.hidden)
+
+                if providers.isEmpty {
+                    ManagementEmptyState(
+                        title: "还没有模型服务",
+                        message: "点击右上角“添加服务”开始设置。",
+                        symbol: "server.rack"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 150)
+                    .listRowSeparator(.hidden)
+                } else if filteredProviders(providers).isEmpty {
+                    ManagementEmptyState(
+                        title: "没有匹配的模型服务",
+                        message: "换一个名称或筛选条件试试。",
+                        symbol: "magnifyingglass"
+                    )
+                    .frame(maxWidth: .infinity, minHeight: 120)
+                    .listRowSeparator(.hidden)
+                } else {
+                    providerTableHeader
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color(nsColor: .windowBackgroundColor))
+                    ForEach(filteredProviders(providers)) { provider in
+                        GatewayProviderListRow(
+                            provider: provider,
+                            onEdit: { editor = GatewayProviderEditorState(provider: provider) },
+                            onDelete: { providerToDelete = provider }
+                        )
+                        .listRowInsets(EdgeInsets())
+                        .listRowSeparator(.hidden)
+                    }
+                }
             }
 
-            Section("目录模型") {
-                if filteredVisibleCatalogModels.isEmpty {
+            Section {
+                if modelCatalog.isEmpty {
+                    Text("暂时没有目录模型，可在下方添加自定义模型。")
+                        .foregroundStyle(.secondary)
+                } else if filteredVisibleCatalogModels.isEmpty {
                     Text("没有匹配的目录模型。")
                         .foregroundStyle(.secondary)
                 } else {
@@ -1587,65 +1785,122 @@ struct GatewayView: View {
                         .accessibilityValue(selected ? "已选择" : "未选择")
                     }
                 }
+            } header: {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text("Codex 可用模型")
+                    Spacer(minLength: 12)
+                    Text("已选 \(mergedVisibleModels.count) 个")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("自定义模型") {
-                if customVisibleModels.isEmpty {
-                    Text("还没有自定义模型。可添加目录之外的模型名称。")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(customVisibleModels, id: \.self) { modelID in
-                        HStack {
-                            Image(systemName: "cube")
-                                .foregroundStyle(.secondary)
-                            Text(modelID)
-                                .font(.body.monospaced())
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                            Spacer(minLength: 8)
-                            Button {
-                                removeVisibleModel(modelID)
-                            } label: {
-                                Image(systemName: "minus.circle")
-                            }
-                            .buttonStyle(.plain)
+                VStack(alignment: .leading, spacing: 0) {
+                    if customVisibleModels.isEmpty {
+                        Text("暂无自定义模型，在下方输入名称添加。")
+                            .font(.callout)
                             .foregroundStyle(.secondary)
-                            .help("移除模型")
-                            .accessibilityLabel("移除模型 \(modelID)")
+                            .padding(.vertical, 6)
+                    } else {
+                        ForEach(Array(customVisibleModels.enumerated()), id: \.offset) { index, modelID in
+                            HStack(spacing: 9) {
+                                Image(systemName: "cube")
+                                    .font(.callout)
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 18)
+                                Text(modelID)
+                                    .font(.body.monospaced())
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer(minLength: 8)
+                                Button {
+                                    removeVisibleModel(modelID)
+                                } label: {
+                                    Image(systemName: "xmark.circle")
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.secondary)
+                                .help("移除模型")
+                                .accessibilityLabel("移除模型 \(modelID)")
+                            }
+                            .padding(.vertical, 5)
+
+                            if index < customVisibleModels.count - 1 {
+                                Divider()
+                                    .padding(.leading, 27)
+                            }
                         }
                     }
-                }
 
-                HStack(spacing: 8) {
-                    TextField("输入模型名称后添加", text: $customVisibleModelInput)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { addVisibleModel() }
-                    Button {
-                        addVisibleModel()
-                    } label: {
-                        Image(systemName: "plus")
+                    if !customVisibleModels.isEmpty {
+                        Divider()
+                            .padding(.vertical, 10)
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(customVisibleModelInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    .help("添加自定义模型")
-                    .accessibilityLabel("添加自定义模型")
-                }
 
-                DisclosureGroup("批量编辑自定义模型", isExpanded: $manualVisibleModelsExpanded) {
+                    HStack(spacing: 8) {
+                        TextField("输入模型名称，按回车添加", text: $customVisibleModelInput)
+                            .textFieldStyle(.plain)
+                            .onSubmit { addVisibleModel() }
+                        Button {
+                            addVisibleModel()
+                        } label: {
+                            Image(systemName: "plus")
+                                .font(.system(size: 12, weight: .semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .disabled(customVisibleModelInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .help("添加自定义模型")
+                        .accessibilityLabel("添加自定义模型")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(
+                        Color(nsColor: .textBackgroundColor),
+                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.primary.opacity(0.10), lineWidth: 1)
+                    }
+                }
+                .padding(.vertical, 4)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
+
+                DisclosureGroup(isExpanded: $manualVisibleModelsExpanded) {
                     TextEditor(text: $visibleModels)
                         .font(.body.monospaced())
                         .frame(minHeight: 90)
-                        .padding(5)
+                        .padding(6)
+                        .scrollContentBackground(.hidden)
+                        .background(
+                            Color(nsColor: .textBackgroundColor),
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
                         .overlay {
-                            RoundedRectangle(cornerRadius: 7)
-                                .stroke(Color.primary.opacity(0.12), lineWidth: 1)
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(Color.primary.opacity(0.10), lineWidth: 1)
                         }
-                        .padding(.top, 6)
+                        .padding(.top, 8)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "pencil.line")
+                        Text("批量编辑")
+                        Spacer()
+                        Text("每行一个")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .font(.subheadline.weight(.medium))
+                .padding(.vertical, 6)
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
             }
         }
-        .listStyle(.inset(alternatesRowBackgrounds: true))
+        .listStyle(.inset)
         .scrollContentBackground(.hidden)
         .managementPageInsets(topPadding: 0)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1821,26 +2076,28 @@ struct GatewayView: View {
     }
 
     private var settingsCard: some View {
-        ManagementCard(title: "路由与日志") {
-            GatewayPreferenceRow(
-                title: "启用 AI Gateway",
-                detail: enabled ? "请求会先进入本地网关，再按权重路由到 Provider。" : "关闭后，本地网关不会接管请求。"
+            ManagementCard(title: "选项") {
+                GatewayPreferenceRow(
+                title: "ThreadRelay",
+                detail: "服务状态由“连接 Codex”页面的开关管理。"
             ) {
-                Toggle("启用 AI Gateway", isOn: $enabled)
-                    .labelsHidden()
-                    .toggleStyle(.switch)
+                Label(
+                    enabled ? "已启用" : "已停用",
+                    systemImage: enabled ? "checkmark.circle.fill" : "pause.circle"
+                )
+                .foregroundStyle(enabled ? Color.green : .secondary)
             }
 
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("路由策略")
+                Text("图片功能")
                     .font(.headline)
                 GatewayPreferenceRow(
-                    title: "过滤图像生成工具",
-                    detail: "不把内置图像工具转发给不支持它的上游。"
+                    title: "关闭图片功能",
+                    detail: "部分模型不支持图片功能时可以打开。"
                 ) {
-                    Toggle("过滤图像生成工具", isOn: $filterImages)
+                    Toggle("关闭图片功能", isOn: $filterImages)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
@@ -1849,21 +2106,21 @@ struct GatewayView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("可观测性")
+                Text("使用记录")
                     .font(.headline)
                 GatewayPreferenceRow(
-                    title: "记录请求摘要",
-                    detail: "保存模型、状态、耗时和令牌统计，便于排查失败请求。"
+                    title: "保存使用记录",
+                    detail: "保存简单记录，方便查看使用情况。"
                 ) {
-                    Toggle("记录请求摘要", isOn: $requestLogging)
+                    Toggle("保存使用记录", isOn: $requestLogging)
                         .labelsHidden()
                         .toggleStyle(.switch)
                 }
                 GatewayPreferenceRow(
-                    title: "记录请求与响应详情",
-                    detail: requestLogging ? "会额外保存脱敏后的请求和响应内容。" : "先打开请求摘要，才能记录详情。"
+                    title: "保存详细记录",
+                    detail: requestLogging ? "保存更多内容，方便排查问题。" : "请先打开使用记录。"
                 ) {
-                    Toggle("记录请求与响应详情", isOn: $requestDetails)
+                    Toggle("保存详细记录", isOn: $requestDetails)
                         .labelsHidden()
                         .toggleStyle(.switch)
                         .disabled(!requestLogging)
@@ -1875,9 +2132,9 @@ struct GatewayView: View {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Codex 可见模型")
+                        Text("Codex 里的模型")
                             .font(.headline)
-                        Text("只控制 Codex 模型选择器，不改变 Provider 路由。")
+                        Text("只决定 Codex 里显示哪些模型。")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1896,27 +2153,6 @@ struct GatewayView: View {
                                 .font(.caption.monospacedDigit())
                                 .foregroundStyle(.secondary)
                         }
-
-                        HStack(spacing: 7) {
-                            Image(systemName: "magnifyingglass")
-                                .foregroundStyle(.secondary)
-                            TextField("搜索目录模型…", text: $visibleModelQuery)
-                                .textFieldStyle(.plain)
-                            if !visibleModelQuery.isEmpty {
-                                Button {
-                                    visibleModelQuery = ""
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(.secondary)
-                                .help("清除搜索")
-                                .accessibilityLabel("清除模型搜索")
-                            }
-                        }
-                        .padding(.horizontal, 9)
-                        .padding(.vertical, 7)
-                        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 7))
 
                         if filteredVisibleCatalogModels.isEmpty {
                             Text("没有匹配的目录模型。")
@@ -2215,7 +2451,7 @@ struct GatewayView: View {
     }
 
     private var filteredVisibleCatalogModels: [ManageCodexCatalogModel] {
-        let query = visibleModelQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let query = providerQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !query.isEmpty else { return modelCatalog }
         return modelCatalog.filter {
             $0.id.lowercased().contains(query) || $0.displayName.lowercased().contains(query)
@@ -2254,17 +2490,6 @@ struct GatewayView: View {
             if seen.insert(custom).inserted { merged.append(custom) }
         }
         return merged
-    }
-
-    private var gatewayEnabledBinding: Binding<Bool> {
-        Binding(
-            get: { enabled },
-            set: { newValue in
-                guard newValue != enabled, !preferencesSaving else { return }
-                enabled = newValue
-                saveGatewayPreferences()
-            }
-        )
     }
 
     private var filterImagesBinding: Binding<Bool> {
@@ -2454,6 +2679,7 @@ struct GatewayView: View {
                 || provider.baseUrl.localizedCaseInsensitiveContains(query)
                 || gatewayProtocolDisplayName(provider.providerType, compatibility: provider.compatibility)
                     .localizedCaseInsensitiveContains(query)
+                || provider.models.contains { $0.localizedCaseInsensitiveContains(query) }
         }
     }
 }
@@ -3117,7 +3343,7 @@ private struct GatewayProviderEditor: View {
             Text(
                 providerUsageMultiplierText(
                     usage.effectiveRateMultiplier ?? usage.resolvedRateMultiplier
-                ) ?? providerUsageStatusText(usage.billingStatus)
+                ) ?? providerUsageBillingText(usage)
             )
             .font(.body.monospacedDigit().weight(.medium))
         }
@@ -4625,6 +4851,13 @@ func providerUsageStatusText(_ status: String) -> String {
     case "invalid_response": "响应格式异常"
     default: "状态未知"
     }
+}
+
+func providerUsageBillingText(_ usage: ManageProviderUsageResponse.Usage) -> String {
+    if usage.source == "new_api", usage.billingStatus == "unsupported" {
+        return "未提供"
+    }
+    return providerUsageStatusText(usage.billingStatus)
 }
 
 func providerUsageBalanceText(_ usage: ManageProviderUsageResponse.Usage) -> String {

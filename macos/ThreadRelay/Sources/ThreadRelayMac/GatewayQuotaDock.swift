@@ -929,7 +929,7 @@ private struct GatewayQuotaDetailsPopover: View {
                     "当前倍率",
                     value: providerUsageMultiplierText(
                         usage.effectiveRateMultiplier ?? usage.resolvedRateMultiplier
-                    ) ?? providerUsageStatusText(usage.billingStatus)
+                    ) ?? providerUsageBillingText(usage)
                 )
                 if let plan = usage.planName, !plan.isEmpty {
                     LabeledContent("账户方案", value: plan)

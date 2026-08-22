@@ -4,6 +4,7 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @State private var showsAccountOnboarding = false
+    @State private var opensGatewayProviders = false
 
     var body: some View {
         NavigationSplitView {
@@ -26,7 +27,14 @@ struct RootView: View {
             Group {
                 switch model.selection ?? .overview {
                 case .overview:
-                    OverviewView()
+                    OverviewView(
+                        onOpenGateway: {
+                            opensGatewayProviders = true
+                            model.selection = .gateway
+                        },
+                        onOpenMessaging: { model.selection = .messaging },
+                        onOpenCodex: { model.selection = .codex }
+                    )
                 case .codex:
                     CodexAccessView()
                 case .sessions:
@@ -75,7 +83,10 @@ struct RootView: View {
                         }
                     }
                 case .gateway:
-                    GatewayView()
+                    GatewayView(
+                        startAtProviders: opensGatewayProviders,
+                        startAddingProvider: opensGatewayProviders
+                    )
                 }
             }
             .navigationTitle((model.selection ?? .overview).title)
@@ -173,6 +184,11 @@ struct RootView: View {
                 )
             )
         }
+        .onChange(of: model.selection) { _, selection in
+            if selection != .gateway {
+                opensGatewayProviders = false
+            }
+        }
     }
 
     @ViewBuilder
@@ -189,6 +205,9 @@ private struct OverviewView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var glass: AIGlassCoordinator
     @Environment(\.openURL) private var openURL
+    let onOpenGateway: () -> Void
+    let onOpenMessaging: () -> Void
+    let onOpenCodex: () -> Void
     @State private var manualSub2ApiRefreshTask: Task<Void, Never>?
 
     var body: some View {
@@ -201,6 +220,12 @@ private struct OverviewView: View {
                         onDismiss: { model.updateNoticeDismissed = true }
                     )
                 }
+
+                OverviewStartHereView(
+                    onOpenGateway: onOpenGateway,
+                    onOpenMessaging: onOpenMessaging,
+                    onOpenCodex: onOpenCodex
+                )
 
                 OverviewUsageInsightsView(
                     store: glass.store,
@@ -451,6 +476,199 @@ private struct OverviewView: View {
     private func openLogDirectory() async {
         guard let directory = await model.logDirectory() else { return }
         NSWorkspace.shared.open(directory)
+    }
+}
+
+private struct OverviewStartHereView: View {
+    let onOpenGateway: () -> Void
+    let onOpenMessaging: () -> Void
+    let onOpenCodex: () -> Void
+    @AppStorage("overview.startHereExpanded") private var isExpanded = true
+
+    private let startStepColumns = [
+        GridItem(.flexible(minimum: 180), spacing: 22, alignment: .topLeading),
+        GridItem(.flexible(minimum: 180), spacing: 22, alignment: .topLeading),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.9)) {
+                    isExpanded.toggle()
+                }
+            } label: {
+                HStack(alignment: .top, spacing: 14) {
+                    Image(systemName: "link")
+                        .font(.system(size: 20, weight: .medium))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("从这里开始")
+                            .font(.title3.weight(.semibold))
+                        Text("ThreadRelay 把电脑上的 Codex 连接到 Telegram、飞书等消息软件。你在手机里发消息，Codex 在电脑上完成任务。")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 12)
+
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 28)
+                        .background(Color.primary.opacity(0.06), in: Circle())
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(isExpanded ? "收起使用引导" : "展开使用引导")
+            .accessibilityLabel(isExpanded ? "收起使用引导" : "展开使用引导")
+            .accessibilityValue(isExpanded ? "已展开" : "已收起")
+            .accessibilityIdentifier("overview.start-here.toggle")
+
+            if isExpanded {
+                Divider()
+                    .opacity(0.55)
+
+                Text("第一次使用只需要四步")
+                    .font(.headline)
+
+                LazyVGrid(columns: startStepColumns, alignment: .leading, spacing: 18) {
+                    startStep(
+                        number: "1",
+                        title: "添加模型服务",
+                        detail: "填写 API 地址和 Key，保存即可。",
+                        action: "配置模型",
+                        symbol: "server.rack",
+                        isProminent: true,
+                        onAction: onOpenGateway
+                    )
+                    startStep(
+                        number: "2",
+                        title: "连接消息渠道",
+                        detail: "连接 Telegram、飞书、微信或企业微信中的一个。",
+                        action: "连接消息渠道",
+                        symbol: "message.badge.waveform",
+                        isProminent: false,
+                        onAction: onOpenMessaging
+                    )
+                    startStep(
+                        number: "3",
+                        title: "连接 Codex",
+                        detail: "打开开关，让 Codex 连接 ThreadRelay。",
+                        action: "连接 Codex",
+                        symbol: "link",
+                        isProminent: false,
+                        onAction: onOpenCodex
+                    )
+                    startStep(
+                        number: "4",
+                        title: "从消息软件开始使用",
+                        detail: "在手机上给机器人发一条消息。",
+                        action: nil,
+                        symbol: "checkmark.circle",
+                        isProminent: false,
+                        onAction: nil
+                    )
+                }
+
+                HStack(alignment: .center, spacing: 10) {
+                    Label("至少连接一个消息软件，之后就能在手机上使用 Codex。", systemImage: "info.circle")
+                        .font(.footnote)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Spacer(minLength: 12)
+                }
+            }
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .startHereGlassSurface()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("overview.start-here")
+    }
+
+    @ViewBuilder
+    private func startStep(
+        number: String,
+        title: String,
+        detail: String,
+        action: String?,
+        symbol: String,
+        isProminent: Bool,
+        onAction: (() -> Void)?
+    ) -> some View {
+        HStack(alignment: .top, spacing: 9) {
+            Text(number)
+                .font(.caption.weight(.semibold).monospacedDigit())
+                .foregroundStyle(.secondary)
+                .frame(width: 26, height: 26)
+                .background(Color.primary.opacity(0.045), in: Circle())
+                .overlay {
+                    Circle()
+                        .strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5)
+                }
+
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if let action, let onAction {
+                    if isProminent {
+                        Button {
+                            onAction()
+                        } label: {
+                            Label(action, systemImage: symbol)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .tint(Color.accentColor)
+                        .controlSize(.small)
+                    } else {
+                        Button {
+                            onAction()
+                        } label: {
+                            Label(action, systemImage: symbol)
+                        }
+                        .buttonStyle(.link)
+                        .controlSize(.small)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+}
+
+private extension View {
+    @ViewBuilder
+    func startHereGlassSurface() -> some View {
+        let shape = RoundedRectangle(
+            cornerRadius: ThreadRelayRadius.overlay,
+            style: .continuous
+        )
+
+        if #available(macOS 26.0, *) {
+            self.glassEffect(.regular, in: shape)
+        } else {
+            self
+                .background(.regularMaterial, in: shape)
+                .overlay {
+                    shape.strokeBorder(
+                        Color.primary.opacity(0.11),
+                        lineWidth: 0.5
+                    )
+                }
+        }
     }
 }
 

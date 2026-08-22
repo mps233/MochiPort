@@ -682,7 +682,8 @@ fn normalize_balance(
     let Some(snapshot) = result.snapshot.as_ref() else {
         return empty_balance("temporarily_unavailable");
     };
-    let remaining = finite_field(&snapshot.data, "remaining");
+    let remaining = finite_field(&snapshot.data, "remaining")
+        .or_else(|| finite_field(&snapshot.data, "balance"));
     let unlimited = snapshot
         .data
         .get("unlimited")
@@ -698,9 +699,23 @@ fn normalize_balance(
         unlimited,
         unit: text_field(&snapshot.data, "unit"),
         mode: text_field(&snapshot.data, "mode"),
-        plan_name: text_field(&snapshot.data, "plan_name"),
-        account_valid: snapshot.data.get("account_valid").and_then(Value::as_bool),
-        account_status: text_field(&snapshot.data, "account_status"),
+        plan_name: text_field(&snapshot.data, "plan_name")
+            .or_else(|| text_field(&snapshot.data, "planName")),
+        account_valid: snapshot
+            .data
+            .get("account_valid")
+            .and_then(Value::as_bool)
+            .or_else(|| snapshot.data.get("isValid").and_then(Value::as_bool))
+            .or_else(|| snapshot.data.get("is_active").and_then(Value::as_bool)),
+        account_status: text_field(&snapshot.data, "account_status")
+            .or_else(|| text_field(&snapshot.data, "status"))
+            .or_else(|| {
+                snapshot
+                    .data
+                    .get("is_active")
+                    .and_then(Value::as_bool)
+                    .map(|active| if active { "active" } else { "inactive" }.to_string())
+            }),
         observed_at: snapshot.received_at.clone(),
     }
 }
@@ -945,6 +960,39 @@ mod tests {
             normalize_balance(Some(&unlimited), true, false).state,
             "available"
         );
+    }
+
+    #[test]
+    fn available_balance_accepts_shenwenai_wallet_snapshot_aliases() {
+        let result = ProbeResult {
+            account_id: 1,
+            snapshot: Some(ProbeSnapshot {
+                status: "ok".to_string(),
+                data: serde_json::json!({
+                    "is_active": true,
+                    "isValid": true,
+                    "planName": "ShenwenAI",
+                    "unit": "USD",
+                    "total": 59.6667,
+                    "used": 7.27338899,
+                    "remaining": 52.39331101,
+                    "balance": 52.39331101
+                }),
+                received_at: Some("2026-08-21T21:00:00+08:00".to_string()),
+                fresh_until: None,
+                last_error: String::new(),
+            }),
+            error: String::new(),
+        };
+
+        let normalized = normalize_balance(Some(&result), true, false);
+
+        assert_eq!(normalized.state, "available");
+        assert_eq!(normalized.remaining, Some(52.39331101));
+        assert_eq!(normalized.unit.as_deref(), Some("USD"));
+        assert_eq!(normalized.plan_name.as_deref(), Some("ShenwenAI"));
+        assert_eq!(normalized.account_valid, Some(true));
+        assert_eq!(normalized.account_status.as_deref(), Some("active"));
     }
 
     #[tokio::test]

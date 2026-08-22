@@ -2380,6 +2380,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manage_provider_usage_supports_new_api_token_usage() {
+        use std::sync::{Arc, Mutex};
+
+        let recorded_auth: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let usage_auth = recorded_auth.clone();
+        let mock = Router::new().route(
+            "/api/usage/token",
+            axum::routing::get(move |headers: axum::http::HeaderMap| {
+                let recorded = usage_auth.clone();
+                async move {
+                    recorded.lock().expect("record New API auth").push(
+                        headers
+                            .get(AUTHORIZATION)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string(),
+                    );
+                    Json(json!({
+                        "success": true,
+                        "data": {
+                            "total_granted": 2_000_000,
+                            "total_used": 750_000,
+                            "total_available": 1_250_000,
+                            "unlimited_quota": false,
+                            "name": "New API Key"
+                        }
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind New API usage server");
+        let address = listener.local_addr().expect("New API usage server address");
+        tokio::spawn(async move {
+            axum::serve(listener, mock)
+                .await
+                .expect("serve New API usage endpoint");
+        });
+
+        let mut config = AppConfig::default();
+        config.ai_gateway.providers = vec![ProviderConfig {
+            name: "new-api".to_string(),
+            base_url: format!("http://{address}/v1"),
+            api_key: CANARY_PROVIDER_KEY.to_string(),
+            ..ProviderConfig::default()
+        }];
+        let (state, _temp, token) = management_state_with_config(config);
+        let response = request_response(
+            router(state),
+            Method::POST,
+            "/api/v1/manage/gateway/provider/usage",
+            Some(&token),
+            Some(r#"{"providerName":"new-api"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload["ok"], true);
+        assert_eq!(payload["usage"]["source"], "new_api");
+        assert_eq!(payload["usage"]["balanceStatus"], "available");
+        assert_eq!(payload["usage"]["billingStatus"], "unsupported");
+        assert_eq!(payload["usage"]["remaining"], 2.5);
+        assert_eq!(payload["usage"]["unit"], "USD");
+        assert_eq!(payload["usage"]["balanceMode"], "quota_limited");
+        assert_eq!(payload["usage"]["planName"], "New API Key");
+        assert_eq!(payload["usage"]["accountValid"], true);
+        assert_eq!(payload["usage"]["accountStatus"], "active");
+        assert!(payload["usage"].get("effectiveRateMultiplier").is_none());
+        assert!(!payload.to_string().contains(CANARY_PROVIDER_KEY));
+        assert!(!payload.to_string().contains(&address.to_string()));
+        assert_eq!(
+            recorded_auth.lock().expect("read New API auth").as_slice(),
+            [format!("Bearer {CANARY_PROVIDER_KEY}")]
+        );
+    }
+
+    #[tokio::test]
     async fn manage_provider_usage_preserves_partial_results_without_upstream_body() {
         let upstream_secret = "upstream-error-body-must-not-leak";
         let mock = Router::new()

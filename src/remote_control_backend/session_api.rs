@@ -25,7 +25,10 @@ use super::{
     remote_control_stale_reason_locked, send_envelopes_on_connection,
 };
 
-const INTERACTIVE_ROOT_SOURCE_KINDS: [&str; 2] = ["cli", "vscode"];
+// Codex Desktop stores its root threads as `appServer`; CLI and VS Code use
+// the other two interactive source kinds. Keep all three here so the session
+// history view works regardless of which Codex client created the thread.
+const INTERACTIVE_ROOT_SOURCE_KINDS: [&str; 3] = ["cli", "vscode", "appServer"];
 
 pub async fn request_for_client(
     state: &SharedState,

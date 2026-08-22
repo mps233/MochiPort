@@ -1883,7 +1883,7 @@ async fn status_snapshot_excludes_inactive_connections() {
 }
 
 #[tokio::test]
-async fn session_history_falls_back_to_another_connection_and_uses_fast_root_sources() {
+async fn session_history_falls_back_to_another_connection_and_uses_all_root_sources() {
     let state = test_state();
     let (failed_tx, failed_rx) = tokio::sync::mpsc::unbounded_channel();
     drop(failed_rx);
@@ -1937,7 +1937,7 @@ async fn session_history_falls_back_to_another_connection_and_uses_fast_root_sou
 
     assert_eq!(
         envelope["message"]["params"]["sourceKinds"],
-        json!(["cli", "vscode"])
+        json!(["cli", "vscode", "appServer"])
     );
     assert_eq!(envelope["message"]["params"]["useStateDbOnly"], true);
     assert_eq!(envelope["message"]["params"]["modelProviders"], json!([]));

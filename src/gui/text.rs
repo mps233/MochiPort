@@ -559,32 +559,32 @@ impl GuiText {
     pub(super) fn codex_session_history_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "把以前的 Codex 会话归到当前入口，之后可以在 Codex App、VS Code 插件或 CLI 里继续打开。"
+                "直接读取当前 Codex App 的会话，不复制或迁移会话文件；需要时可在这里调整会话使用的 Provider。"
             }
             GuiLocale::EnUs => {
-                "Move existing Codex sessions into the current entry so they can be opened from Codex App, VS Code, or CLI."
+                "Read sessions directly from the current Codex App without copying or migrating files; adjust a session's provider here only when needed."
             }
         }
     }
 
     pub(super) fn open_codex_session_history(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "会话历史修复管理",
-            GuiLocale::EnUs => "Manage Session History",
+            GuiLocale::ZhCn => "查看 Codex 会话",
+            GuiLocale::EnUs => "View Codex Sessions",
         }
     }
 
     pub(super) fn session_history_title(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex 会话管理",
-            GuiLocale::EnUs => "Codex Session History",
+            GuiLocale::ZhCn => "Codex 会话",
+            GuiLocale::EnUs => "Codex Sessions",
         }
     }
 
     pub(super) fn other_provider_sessions(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "其它会话",
-            GuiLocale::EnUs => "Other Sessions",
+            GuiLocale::ZhCn => "其它 Provider 会话",
+            GuiLocale::EnUs => "Other Provider Sessions",
         }
     }
 
@@ -604,39 +604,43 @@ impl GuiText {
 
     pub(super) fn move_to_ai_gateway(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "归到 AI Gateway",
-            GuiLocale::EnUs => "Move to AI Gateway",
+            GuiLocale::ZhCn => "设置为 AI Gateway",
+            GuiLocale::EnUs => "Set Provider to AI Gateway",
         }
     }
 
     pub(super) fn move_to_ai_gateway_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "把选中的会话移动到 AI Gateway",
-            GuiLocale::EnUs => "Move selected sessions to AI Gateway",
+            GuiLocale::ZhCn => "把选中的会话 Provider 设置为 AI Gateway；不会复制会话文件",
+            GuiLocale::EnUs => {
+                "Set the selected sessions' provider to AI Gateway; no session files are copied"
+            }
         }
     }
 
     pub(super) fn move_back_provider(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "移动到 Provider...",
-            GuiLocale::EnUs => "Move to Provider...",
+            GuiLocale::ZhCn => "设置为 Provider...",
+            GuiLocale::EnUs => "Set Provider...",
         }
     }
 
     pub(super) fn move_back_provider_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "把选中的会话移动到其它 Provider",
-            GuiLocale::EnUs => "Move selected sessions to another provider",
+            GuiLocale::ZhCn => "把选中的会话 Provider 设置为其它 Provider；不会迁移会话文件",
+            GuiLocale::EnUs => {
+                "Set the selected sessions' provider to another provider; no session files are migrated"
+            }
         }
     }
 
     pub(super) fn session_history_selection_hint(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "可按 Ctrl 多选、Shift 连续选择，也可以右键操作。移动后如果 Codex 侧边栏仍看不到，请在 Codex 里重新添加对应 workspace。"
+                "列表直接读取当前 Codex App 的会话。可按 Ctrl 多选、Shift 连续选择，也可以右键调整 Provider；这里不需要导入或迁移会话文件。"
             }
             GuiLocale::EnUs => {
-                "Use Ctrl for multiple selection, Shift for ranges, or right-click. If moved sessions still do not appear in Codex, add the workspace again in Codex."
+                "The list is read directly from the current Codex App. Use Ctrl for multiple selection, Shift for ranges, or right-click to adjust a provider; no session import or migration is required."
             }
         }
     }
@@ -684,16 +688,16 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => {
                 if count <= 1 {
-                    "把选中的会话移动到：".to_string()
+                    "把选中的会话 Provider 设置为：".to_string()
                 } else {
-                    format!("把选中的 {count} 个会话移动到：")
+                    format!("把选中的 {count} 个会话 Provider 设置为：")
                 }
             }
             GuiLocale::EnUs => {
                 if count <= 1 {
-                    "Move the selected session to:".to_string()
+                    "Set the selected session's provider to:".to_string()
                 } else {
-                    format!("Move {count} selected sessions to:")
+                    format!("Set the provider for {count} selected sessions to:")
                 }
             }
         }
@@ -701,8 +705,8 @@ impl GuiText {
 
     pub(super) fn move_sessions_confirm(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "移动",
-            GuiLocale::EnUs => "Move",
+            GuiLocale::ZhCn => "设置",
+            GuiLocale::EnUs => "Set Provider",
         }
     }
 
@@ -719,16 +723,16 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => {
                 if count <= 1 {
-                    "会话归属已更新。".to_string()
+                    "会话 Provider 已更新。".to_string()
                 } else {
-                    format!("{count} 个会话归属已更新。")
+                    format!("{count} 个会话的 Provider 已更新。")
                 }
             }
             GuiLocale::EnUs => {
                 if count <= 1 {
-                    "Session updated.".to_string()
+                    "Session provider updated.".to_string()
                 } else {
-                    format!("{count} sessions updated.")
+                    format!("Provider updated for {count} sessions.")
                 }
             }
         }
