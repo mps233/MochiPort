@@ -31,7 +31,7 @@ Rust daemon 是配置和凭据的唯一事实来源。SwiftUI 不复制业务配
 - stable Bundle ID：`io.github.mps233.threadrelay`
 - SwiftUI preview Bundle ID：`io.github.mps233.threadrelay.preview`
 - 产品语义版本：根目录 `Cargo.toml` 的 package version
-- 构建号：显式 `MOCHIPORT_BUILD_NUMBER`
+- UI 构建号：显式 `MOCHIPORT_UI_BUILD_NUMBER`；daemon 构建号：显式 `MOCHIPORT_DAEMON_BUILD_NUMBER`
 - 正式 Xcode App 目标：macOS 26；SwiftPM manifest 保持 macOS 14 作为本地测试最低版本
 - stable 与 preview 使用同一签名 Team ID；Team ID 在首次正式签名前由发布环境提供并冻结
 

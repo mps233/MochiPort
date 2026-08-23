@@ -159,9 +159,8 @@ SwiftUI 首版不负责把旧 `Application Support/CodexHub` 数据搬到新目�
 
 ### 5.4 版本、升级身份与兼容窗口
 
-- 产品语义版本继续以根目录 `Cargo.toml` 的 package version 为唯一来源。
-- 构建号由显式 `MOCHIPORT_BUILD_NUMBER` 提供；CI 使用 GitHub run number，本地正式打包必须显式传入。
-- 构建脚本生成 Swift 使用的 `Version.xcconfig`，并校验 Xcode、Cargo、Info.plist、helper `--version` 和发布清单一致；仅在采用 Sparkle 时增加 appcast 校验。
+- UI 产品语义版本和构建号由 `MOCHIPORT_UI_VERSION` / `MOCHIPORT_UI_BUILD_NUMBER` 提供；daemon 版本来自 Rust `Cargo.toml`，构建号由 `MOCHIPORT_DAEMON_BUILD_NUMBER` 提供。
+- UI 与 daemon 独立检查和发布更新；构建脚本分别校验 Xcode、daemon `--version`、Info.plist 和发布清单，不再要求两者共享同一构建号。
 - `/healthz` 仅返回 `service=threadrelay`、API 主版本和 `ready`；受鉴权运行状态接口另行返回 `productVersion`、`buildNumber`、`apiMajor`、PID、启动时间和 runtime 状态。
 - Bundle ID 固定为 `io.github.mps233.threadrelay`，正式签名 Team ID 在 SwiftUI 迁移前后保持一致。
 - `swiftui-preview` 使用独立 Bundle ID 和更新 feed，可与 stable GUI 并行安装；两者复用同一兼容 daemon，不各自启动服务。

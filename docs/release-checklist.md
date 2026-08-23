@@ -23,15 +23,18 @@ cargo test
 cargo build --release --features gui --bin mochiport
 ```
 
-For every daemon-affecting change, build the Rust daemon and Xcode app with the
-same numeric build number, then assemble the formal bundle. This packaging step
+For every daemon-affecting change, build the Rust daemon and Xcode app with
+independent version/build values, then assemble the formal bundle. This packaging step
 is automatic in the handoff workflow, but it never changes the running GUI or
 daemon:
 
 ```sh
-MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+UI_VERSION=0.5.2
+UI_BUILD_NUMBER=445
+DAEMON_BUILD_NUMBER=439
+MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
   --target aarch64-apple-darwin --bin mochiport
-MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
   --target x86_64-apple-darwin --bin mochiport
 mkdir -p target/release
 lipo -create \
@@ -39,13 +42,15 @@ lipo -create \
   target/x86_64-apple-darwin/release/mochiport \
   -output target/release/mochiport
 chmod 755 target/release/mochiport
-MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
-scripts/assemble-swiftui-macos-app.sh "$BUILD_NUMBER" "$XCODE_APP" target/release/mochiport outputs/MochiPort.app
+MOCHIPORT_UI_VERSION="$UI_VERSION" MOCHIPORT_UI_BUILD_NUMBER="$UI_BUILD_NUMBER" \
+  scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
+scripts/assemble-swiftui-macos-app.sh "$DAEMON_BUILD_NUMBER" "$XCODE_APP" target/release/mochiport outputs/MochiPort.app
 ```
 
 - [ ] Confirm the assembled app and embedded daemon report the expected build.
 - [ ] Restart the GUI or daemon manually only when the release procedure calls for it.
 - [ ] Confirm the release contains `latest-macos.json`, `latest-windows.json`, and `latest-linux.json` with MochiPort asset URLs.
+- [ ] Publish daemon metadata only from a signed macOS build; unsigned releases intentionally publish UI metadata only.
 
 ## Clean Local Artifacts
 

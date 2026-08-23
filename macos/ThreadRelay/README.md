@@ -50,25 +50,27 @@ the shared `ThreadRelayPreview` scheme in Xcode and run it. The scheme sets
 review the other service states. The fixture path is read-only and only
 changes in-memory view state.
 
-Generate the shared Xcode version settings from the Rust package version with:
+Generate the UI version settings independently from the Rust daemon with:
 
 ```sh
-MOCHIPORT_BUILD_NUMBER=1 scripts/generate-swift-version.sh \
+MOCHIPORT_UI_VERSION=0.5.2 MOCHIPORT_UI_BUILD_NUMBER=445 \
+  scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 ```
 
 For daemon-affecting changes, the default handoff builds and assembles the
-formal App immediately. Use the same build number for both architectures and
-the SwiftUI bundle; the assembly script rejects a mismatch. This updates
+formal App immediately. Use one build number for both daemon architectures and
+an independently selected UI version/build; the assembly script rejects a
+daemon mismatch. This updates
 `outputs/MochiPort.app`, but never replaces or restarts the daemon that is
 already running. The complete handoff rule is in
 [`docs/threadrelay-change-handoff.zh-CN.md`](../../docs/threadrelay-change-handoff.zh-CN.md).
 
 ```sh
-BUILD_NUMBER=439
-MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+DAEMON_BUILD_NUMBER=439
+MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
   --target aarch64-apple-darwin --bin mochiport
-MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
   --target x86_64-apple-darwin --bin mochiport
 mkdir -p target/release
 lipo -create \
@@ -76,7 +78,8 @@ lipo -create \
   target/x86_64-apple-darwin/release/mochiport \
   -output target/release/mochiport
 chmod 755 target/release/mochiport
-MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh \
+MOCHIPORT_UI_VERSION=0.5.2 MOCHIPORT_UI_BUILD_NUMBER=445 \
+  scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 xcodebuild \
   -project macos/ThreadRelay/ThreadRelay.xcodeproj \
@@ -85,7 +88,7 @@ xcodebuild \
   -derivedDataPath macos/ThreadRelay/.build/xcode \
   build
 scripts/assemble-swiftui-macos-app.sh \
-  "$BUILD_NUMBER" \
+  "$DAEMON_BUILD_NUMBER" \
   macos/ThreadRelay/.build/xcode/Build/Products/Release/MochiPort.app \
   target/release/mochiport \
   outputs/MochiPort.app

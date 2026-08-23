@@ -49,13 +49,15 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
 ## daemon 改动交接
 
 1. 运行与改动相关的 Rust、Swift 测试和构建。
-2. daemon 改动完成后默认直接生成正式 macOS App 产物，不需要用户再次单独要求“打包”。构建号必须显式指定，并同时用于 Rust daemon 和 SwiftUI App：
+2. daemon 改动完成后默认直接生成正式 macOS App 产物，不需要用户再次单独要求“打包”。UI 与 daemon 的版本、构建号独立指定；组装时传入 daemon 构建号：
 
    ```sh
-   BUILD_NUMBER=439
-   MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+   UI_VERSION=0.5.2
+   UI_BUILD_NUMBER=445
+   DAEMON_BUILD_NUMBER=439
+   MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
      --target aarch64-apple-darwin --bin mochiport
-   MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+   MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
      --target x86_64-apple-darwin --bin mochiport
    mkdir -p target/release
    lipo -create \
@@ -63,7 +65,8 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
      target/x86_64-apple-darwin/release/mochiport \
      -output target/release/mochiport
    chmod 755 target/release/mochiport
-   MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh \
+   MOCHIPORT_UI_VERSION="$UI_VERSION" MOCHIPORT_UI_BUILD_NUMBER="$UI_BUILD_NUMBER" \
+     scripts/generate-swift-version.sh \
      macos/ThreadRelay/Config/Version.xcconfig
    xcodebuild \
      -project macos/ThreadRelay/ThreadRelay.xcodeproj \
@@ -72,13 +75,13 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
      -derivedDataPath macos/ThreadRelay/.build/xcode \
      build
    scripts/assemble-swiftui-macos-app.sh \
-     "$BUILD_NUMBER" \
+     "$DAEMON_BUILD_NUMBER" \
      macos/ThreadRelay/.build/xcode/Build/Products/Release/MochiPort.app \
      target/release/mochiport \
      outputs/MochiPort.app
    ```
 
-   实际使用时将 `BUILD_NUMBER` 改为本次发布使用的下一个正整数；不要复用已经发布的构建号。
+   实际使用时分别将 `UI_BUILD_NUMBER` 和 `DAEMON_BUILD_NUMBER` 改为本次发布使用的下一个正整数；不要复用已经发布的构建号。
 
 3. 可以生成和更新构建产物，但不得对当前运行中的 daemon 执行以下操作：
 
