@@ -353,7 +353,6 @@ struct MessagingAccountsView: View {
             .padding(.bottom, ThreadRelayPageLayout.bottomPadding)
         }
         .scrollIndicators(.never)
-        .background(Color(nsColor: .windowBackgroundColor))
         .searchable(text: $searchText, prompt: "搜索账号")
         .onChange(of: accounts) { newAccounts in
             // Drop optimistic values once the parent has acknowledged them.

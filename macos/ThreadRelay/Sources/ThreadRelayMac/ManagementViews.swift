@@ -83,7 +83,6 @@ struct CodexAccessView: View {
                 CodexLoadingSurface()
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
         .task { await model.loadSection(.codex) }
         .alert("恢复原来的设置？", isPresented: $confirmsRestore) {
             Button("取消", role: .cancel) {}
@@ -1633,7 +1632,6 @@ struct GatewayView: View {
                 ProgressView("正在读取 AI 网关…")
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func generalPage(_ gateway: ManageGateway) -> some View {
@@ -3946,7 +3944,6 @@ struct RequestLogsView: View {
                 ProgressView("正在读取请求日志…")
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
         .searchable(
             text: $query,
             placement: .toolbar,
@@ -4055,7 +4052,6 @@ struct RequestLogsView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private func showDetail(id: Int64) {
