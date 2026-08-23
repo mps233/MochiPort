@@ -22,6 +22,71 @@ enum SingleInstanceError: LocalizedError, Equatable {
     }
 }
 
+enum AppIconVariant: Equatable {
+    case light
+    case dark
+
+    var resourceName: String {
+        switch self {
+        case .light: "AppIcon"
+        case .dark: "AppIcon-dark"
+        }
+    }
+}
+
+func appIconVariant(for appearance: NSAppearance) -> AppIconVariant {
+    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? .dark : .light
+}
+
+/// Keeps the Dock tile aligned with macOS, independently of MochiPort's theme override.
+@MainActor
+final class AppIconController {
+    private let application: NSApplication
+    private let bundle: Bundle
+    private var appearanceObservation: NSKeyValueObservation?
+    private var appliedVariant: AppIconVariant?
+
+    init(
+        application: NSApplication = .shared,
+        bundle: Bundle = .main
+    ) {
+        self.application = application
+        self.bundle = bundle
+    }
+
+    func start() {
+        guard appearanceObservation == nil else { return }
+        applyCurrentAppearance()
+        appearanceObservation = application.observe(
+            \.effectiveAppearance,
+            options: [.initial, .new]
+        ) { [weak self] _, _ in
+            Task { @MainActor [weak self] in
+                self?.applyCurrentAppearance()
+            }
+        }
+    }
+
+    private func applyCurrentAppearance() {
+        let variant = appIconVariant(for: application.effectiveAppearance)
+        guard variant != appliedVariant else { return }
+        guard let iconURL = bundle.url(
+            forResource: variant.resourceName,
+            withExtension: "icns"
+        ), let icon = NSImage(contentsOf: iconURL) else {
+            NSLog(
+                "MochiPort 无法加载 %@.icns，继续使用包内默认图标。",
+                variant.resourceName
+            )
+            return
+        }
+
+        application.applicationIconImage = icon
+        application.dockTile.display()
+        appliedVariant = variant
+    }
+}
+
 /// An advisory lock held for the lifetime of the GUI process.  Launch Services
 /// prevents normal double-click launches, while this guard also covers direct
 /// executable launches and two launches racing before Launch Services settles.
@@ -101,12 +166,14 @@ final class SingleInstanceGuard: @unchecked Sendable {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var instanceGuard: SingleInstanceGuard?
+    private let appIconController = AppIconController()
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         do {
             instanceGuard = try SingleInstanceGuard.acquire(
                 lockURL: SingleInstanceGuard.defaultLockURL()
             )
+            appIconController.start()
             do {
                 try GUIRecoveryLauncher().startIfNeeded()
                 clearNormalExitMarker()
