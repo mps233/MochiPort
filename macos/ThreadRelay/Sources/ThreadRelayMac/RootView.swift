@@ -100,6 +100,11 @@ struct RootView: View {
                 }
             }
             .navigationTitle((model.selection ?? .overview).title)
+            // Let macOS 26 provide the title-bar material and scroll-edge
+            // treatment. A hand-painted background or gradient here prevents
+            // the toolbar from sampling the live content beneath it.
+            .toolbarBackgroundVisibility(.hidden, for: .automatic)
+            .scrollEdgeEffectStyle(.soft, for: .top)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 GatewayQuotaDock()
