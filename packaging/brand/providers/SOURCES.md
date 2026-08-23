@@ -23,7 +23,8 @@ Fallback local assets:
 - WeChat: `packaging/brand/wechat-logo.svg`; from Simple Icons (https://simpleicons.org), CC0 1.0 Universal
 - Feishu: `packaging/brand/feishu-logo.png`; official GitHub avatar from https://avatars.githubusercontent.com/u/54944174?s=200&v=4
 - VS Code: `packaging/brand/vscode-logo.svg`; custom SVG using official VS Code brand colors (#007ACC)
-- App icon: `packaging/icons/dolphin-rounded-256.png`; this is the ThreadRelay application icon.
+- App icon source: `packaging/macos/AppIcon.svg`; the assembled macOS application uses
+  the rasterized `packaging/macos/AppIcon.icns` generated from this mascot artwork.
 
 The `references/` directory is intentionally ignored by git, so extracted and fallback assets live under `packaging/brand/` or `packaging/icons/` for compile-time embedding in the GUI.
 

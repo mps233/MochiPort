@@ -24,7 +24,8 @@ use crate::{
         telegram::{
             adapter::TelegramAdapter, api::TelegramApiError,
             collab_progress as telegram_collab_progress, commentary as telegram_commentary,
-            progress as telegram_progress, search as telegram_search, typing as telegram_typing,
+            flow as telegram_flow, progress as telegram_progress, search as telegram_search,
+            typing as telegram_typing,
         },
         wechat::adapter::WechatAdapter,
     },
@@ -370,6 +371,21 @@ pub(crate) async fn finish_telegram_command_progress_with_api(
     if let Some(snapshot) = snapshot {
         deliver_telegram_command_progress_with_api(state, api, thread_id, route, snapshot).await;
     }
+}
+
+async fn start_next_telegram_queued_turn_if_ready(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    route: &RouteTarget,
+) {
+    if route.platform != ImPlatformKind::Telegram {
+        return;
+    }
+    let Some(api) = api_registry.telegram_for_route(route) else {
+        log_missing_api(state, route, "telegram_queued_turn").await;
+        return;
+    };
+    telegram_flow::start_next_telegram_queued_turn(state, api, route).await;
 }
 
 async fn finish_telegram_command_progress_with_api_and_outcome(
@@ -1493,6 +1509,7 @@ async fn schedule_terminal_status_fallback(
             )
             .await;
         }
+        start_next_telegram_queued_turn_if_ready(&state, &api_registry, &route).await;
         state
             .push_event(
                 "warn",
@@ -1606,7 +1623,7 @@ pub(crate) async fn handle_codex_notification(
                     log_missing_api(&state, &route, "error_typing").await;
                 }
             }
-            state
+            let turn_completed = state
                 .runtime
                 .lock()
                 .await
@@ -1623,6 +1640,9 @@ pub(crate) async fn handle_codex_notification(
                 summary.as_deref(),
             )
             .await;
+            if turn_completed {
+                start_next_telegram_queued_turn_if_ready(&state, &api_registry, &route).await;
+            }
         }
         "thread/started" => {}
         "thread/status/changed" => {
@@ -2469,7 +2489,7 @@ pub(crate) async fn handle_codex_notification(
                 )
                 .await;
             }
-            state
+            let turn_completed = state
                 .runtime
                 .lock()
                 .await
@@ -2485,6 +2505,9 @@ pub(crate) async fn handle_codex_notification(
                 failure_summary.as_deref(),
             )
             .await;
+            if turn_completed {
+                start_next_telegram_queued_turn_if_ready(&state, &api_registry, &route).await;
+            }
         }
         _ => {}
     }

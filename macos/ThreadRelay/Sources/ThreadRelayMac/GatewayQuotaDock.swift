@@ -238,6 +238,9 @@ struct GatewayQuotaDock: View {
     }
 
     private var recentAccount: ManageSub2ApiAccountPoolResponse.Account? {
+        // The selected Provider owns its API-key quota. Account-pool data is
+        // only a fallback when the Provider cannot report a usable balance.
+        if providerUsage?.usage.balanceStatus == "available" { return nil }
         guard let accountID = recentAccountResponse?.account?.accountId else { return nil }
         return model.sub2ApiAccountPool?.accounts.first { $0.id == accountID }
     }
@@ -401,16 +404,12 @@ struct GatewayQuotaDock: View {
     private var accountTitle: String {
         gatewayQuotaSiteDisplayName(recentAccount?.siteUrl)
             ?? recentAccount?.name
-            ?? recentAccountResponse?.account?.accountName
             ?? selectedProvider?.name
             ?? "AI Gateway"
     }
 
     private var accountSubtitle: String {
         if let recentAccount { return recentAccount.name }
-        if let accountName = recentAccountResponse?.account?.accountName {
-            return accountName
-        }
         if recentAccountLoading { return "正在识别最近使用账号" }
         if recentAccountError != nil { return providerSubtitle }
         return providerSubtitle

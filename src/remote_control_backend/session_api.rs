@@ -808,6 +808,43 @@ pub async fn interrupt_turn_for_client(
     .map(|_| ())
 }
 
+pub async fn steer_turn_for_client(
+    state: &SharedState,
+    client_key: &str,
+    thread_id: &str,
+    turn_id: &str,
+    text: &str,
+    attachments: &[InboundAttachment],
+) -> Result<String> {
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[im_trace] event=remote_to_codex_turn_steer client_key={} thread={} turn={} text_len={} attachments={} preview={}",
+            client_key,
+            thread_id,
+            turn_id,
+            text.chars().count(),
+            attachments.len(),
+            log_text_preview(text, 360)
+        )
+    });
+    let response = request_for_client(
+        state,
+        client_key,
+        "turn/steer",
+        json!({
+            "threadId": thread_id,
+            "expectedTurnId": turn_id,
+            "input": turn_input_items(text, attachments),
+        }),
+    )
+    .await?;
+    response
+        .get("turnId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("turn/steer response missing turnId: {response}"))
+}
+
 pub async fn current_thread_for_client(state: &SharedState, client_key: &str) -> Option<String> {
     let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
@@ -1018,4 +1055,29 @@ fn turn_input_items(text: &str, attachments: &[InboundAttachment]) -> Vec<Value>
         }));
     }
     items
+}
+
+#[cfg(test)]
+mod tests {
+    use super::turn_input_items;
+    use crate::types::InboundAttachment;
+
+    #[test]
+    fn turn_input_items_preserve_text_and_local_images_for_steer() {
+        let items = turn_input_items(
+            "  adjust the plan  ",
+            &[InboundAttachment {
+                kind: "image".to_string(),
+                name: Some("screen.png".to_string()),
+                mime_type: Some("image/png".to_string()),
+                text_hint: None,
+                local_path: Some("/tmp/screen.png".to_string()),
+            }],
+        );
+
+        assert_eq!(items[0]["type"], "text");
+        assert_eq!(items[0]["text"], "adjust the plan");
+        assert_eq!(items[1]["type"], "localImage");
+        assert_eq!(items[1]["path"], "/tmp/screen.png");
+    }
 }

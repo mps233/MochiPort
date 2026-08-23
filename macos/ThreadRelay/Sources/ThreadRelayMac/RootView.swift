@@ -327,7 +327,6 @@ private struct OverviewView: View {
 
                 OverviewSectionHeading(
                     title: "Sub2API 账号池",
-                    subtitle: "按站点合并渠道；展开站点查看账号余额与倍率",
                     trailing: sub2ApiAccountCount,
                     isRefreshing: model.sub2ApiAccountPoolLoading,
                     onRefresh: sub2ApiRefreshAction
@@ -1195,79 +1194,47 @@ private struct OverviewSub2ApiAccountPoolSummary: View {
     let isLoading: Bool
     let loadError: String?
     let onConnect: () -> Void
-    @State private var showsAllAccounts = false
 
     private var configured: Bool { admin?.configured == true }
-    private let collapsedAccountLimit = 6
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 12) {
-                if !configured {
-                    HStack(spacing: 10) {
-                        Label("尚未连接账号管理接口", systemImage: "link.badge.plus")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                        Spacer(minLength: 12)
-                        Button("前往连接", action: onConnect)
-                    }
-                    .frame(minHeight: 36)
-                } else if pool?.accounts.isEmpty != false {
-                    OverviewSub2ApiAccountPoolEmptyState(
-                        isLoading: isLoading,
-                        loadError: loadError
-                    )
-                } else if let pool {
-                    if let loadError {
-                        Label("刷新失败，正在显示上次结果", systemImage: "clock.badge.exclamationmark")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .help(loadError)
-                    }
-                    if let warnings = pool.warnings, !warnings.isEmpty {
-                        Label(
-                            sub2ApiWarningsText(warnings),
-                            systemImage: "exclamationmark.triangle"
-                        )
+            if !configured {
+                HStack(spacing: 10) {
+                    Label("还没有连接账号池", systemImage: "link.badge.plus")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 12)
+                    Button("去连接", action: onConnect)
+                }
+                .frame(minHeight: 36)
+            } else if pool?.accounts.isEmpty != false {
+                OverviewSub2ApiAccountPoolEmptyState(
+                    isLoading: isLoading,
+                    loadError: loadError
+                )
+            } else if let pool {
+                if let loadError {
+                    Label("显示上次结果，刷新失败", systemImage: "clock.badge.exclamationmark")
                         .font(.caption)
                         .foregroundStyle(.orange)
-                    }
+                        .help(loadError)
+                }
+                if let warnings = pool.warnings, !warnings.isEmpty {
+                    Label(sub2ApiWarningsText(warnings), systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
-                    OverviewSub2ApiAccountTable(
-                        accounts: pool.accounts,
-                        accountLimit: showsAllAccounts ? nil : collapsedAccountLimit
-                    )
+                OverviewSub2ApiAccountTable(accounts: pool.accounts)
 
-                    if pool.accounts.count > collapsedAccountLimit {
-                        Button {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 1)) {
-                                showsAllAccounts.toggle()
-                            }
-                        } label: {
-                            Label(
-                                showsAllAccounts
-                                    ? "收起账号"
-                                    : "展开全部 \(pool.accounts.count) 个账号",
-                                systemImage: showsAllAccounts ? "chevron.up" : "chevron.down"
-                            )
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    }
-
-                    HStack(spacing: 6) {
-                        Text("更新于 \(sub2ApiFetchedTime(pool.fetchedAtMs))")
-                        Text("·")
-                        Text("同站点渠道已合并，展开查看账号明细")
-                    }
+                Text("更新于 \(sub2ApiFetchedTime(pool.fetchedAtMs))")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
-                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier("overview.sub2api-account-pool")
     }
 }
@@ -1307,8 +1274,6 @@ private struct OverviewSub2ApiAccountGroup: Identifiable {
 
 private struct OverviewSub2ApiAccountTable: View {
     let accounts: [ManageSub2ApiAccountPoolResponse.Account]
-    let accountLimit: Int?
-    @State private var expandedGroupKeys = Set<String>()
 
     private var groups: [OverviewSub2ApiAccountGroup] {
         var result: [OverviewSub2ApiAccountGroup] = []
@@ -1331,85 +1296,57 @@ private struct OverviewSub2ApiAccountTable: View {
         return result
     }
 
-    private var visibleGroups: [OverviewSub2ApiAccountGroup] {
-        guard let accountLimit else { return groups }
-        var result: [OverviewSub2ApiAccountGroup] = []
-        var visibleAccountCount = 0
-        for group in groups {
-            guard visibleAccountCount < accountLimit else { break }
-            result.append(group)
-            visibleAccountCount += group.accounts.count
-        }
-        return result
-    }
-
     var body: some View {
         VStack(spacing: 0) {
-            ForEach(Array(visibleGroups.enumerated()), id: \.element.id) { index, group in
+            HStack(spacing: 12) {
+                Text("站点 / 账号")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text("状态")
+                    .frame(width: 88, alignment: .leading)
+                Text("余额")
+                    .frame(width: 96, alignment: .trailing)
+            }
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.tertiary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+            .background(Color.primary.opacity(0.025))
+
+            ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
                 if group.accounts.count == 1, let account = group.accounts.first {
                     OverviewSub2ApiAccountRow(account: account)
                 } else {
-                    DisclosureGroup(isExpanded: expansionBinding(for: group.key)) {
-                        VStack(spacing: 0) {
-                            ForEach(Array(group.accounts.enumerated()), id: \.element.id) { childIndex, account in
-                                OverviewSub2ApiAccountRow(
-                                    account: account,
-                                    nested: true,
-                                    showsBalance: childBalancesDiffer(in: group)
-                                )
-                                if childIndex < group.accounts.count - 1 {
-                                    Divider()
-                                }
+                    OverviewSub2ApiAccountGroupRow(group: group)
+                    VStack(spacing: 0) {
+                        ForEach(Array(group.accounts.enumerated()), id: \.element.id) { childIndex, account in
+                            OverviewSub2ApiAccountRow(
+                                account: account,
+                                nested: true
+                            )
+                            if childIndex < group.accounts.count - 1 {
+                                Divider()
+                                    .padding(.leading, 22)
                             }
                         }
-                        .padding(.leading, 24)
-                        .padding(.bottom, 2)
-                    } label: {
-                        OverviewSub2ApiAccountGroupSummary(group: group)
-                            .contentShape(Rectangle())
-                            .onTapGesture {
-                                toggleExpansion(for: group.key)
-                            }
                     }
-                    .tint(.secondary)
+                    .background(Color.primary.opacity(0.018))
                 }
 
-                if index < visibleGroups.count - 1 {
+                if index < groups.count - 1 {
                     Divider()
+                        .padding(.horizontal, 16)
                 }
             }
         }
-    }
-
-    private func expansionBinding(for key: String) -> Binding<Bool> {
-        Binding(
-            get: { expandedGroupKeys.contains(key) },
-            set: { expanded in
-                if expanded {
-                    expandedGroupKeys.insert(key)
-                } else {
-                    expandedGroupKeys.remove(key)
-                }
-            }
-        )
-    }
-
-    private func toggleExpansion(for key: String) {
-        withAnimation(.spring(response: 0.25, dampingFraction: 1)) {
-            if expandedGroupKeys.contains(key) {
-                expandedGroupKeys.remove(key)
-            } else {
-                expandedGroupKeys.insert(key)
-            }
+        .background {
+            Color(nsColor: .underPageBackgroundColor)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         }
-    }
-
-    private func childBalancesDiffer(in group: OverviewSub2ApiAccountGroup) -> Bool {
-        Set(group.accounts.map { sub2ApiBalanceText($0.upstreamBalance) }).count > 1
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
 
-private struct OverviewSub2ApiAccountGroupSummary: View {
+private struct OverviewSub2ApiAccountGroupRow: View {
     let group: OverviewSub2ApiAccountGroup
 
     private var availableCount: Int {
@@ -1418,25 +1355,13 @@ private struct OverviewSub2ApiAccountGroupSummary: View {
         })
     }
 
-    private var statusText: String {
-        if availableCount == group.accounts.count { return "全部可用" }
-        if availableCount == 0 { return "均不可用" }
-        return "\(availableCount)/\(group.accounts.count) 可用"
-    }
-
-    private var statusTint: Color {
-        if availableCount == group.accounts.count { return .green }
-        if availableCount == 0 { return .red }
-        return .orange
-    }
-
     private var balanceSummaryText: String {
         let values = group.accounts.map { sub2ApiBalanceText($0.upstreamBalance) }
         var uniqueValues: [String] = []
         for value in values where !uniqueValues.contains(value) {
             uniqueValues.append(value)
         }
-        return uniqueValues.count > 1 ? "各渠道不同" : (uniqueValues.first ?? "—")
+        return uniqueValues.count > 1 ? "各账号不同" : (uniqueValues.first ?? "—")
     }
 
     private var balanceTint: Color {
@@ -1455,38 +1380,39 @@ private struct OverviewSub2ApiAccountGroupSummary: View {
                 Text(sub2ApiSiteLabel(group.siteUrl))
                     .font(.callout.weight(.semibold))
                     .lineLimit(1)
-                Text("\(group.accounts.count) 个渠道")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                Text("\(group.accounts.count) 个账号 · \(availableCount) 个可用")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .help(group.siteUrl ?? "")
 
-            VStack(alignment: .trailing, spacing: 3) {
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(statusTint)
-                        .frame(width: 6, height: 6)
-                    Text(statusText)
-                        .lineLimit(1)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-                Text("余额 \(balanceSummaryText)")
-                    .font(.caption.monospacedDigit().weight(.medium))
-                    .foregroundStyle(balanceTint)
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(availableCount == group.accounts.count ? Color.green : availableCount == 0 ? Color.red : Color.orange)
+                    .frame(width: 6, height: 6)
+                Text(availableCount == group.accounts.count ? "可用" : "\(availableCount)/\(group.accounts.count)")
                     .lineLimit(1)
-                    .minimumScaleFactor(0.78)
             }
-            .frame(minWidth: 116, alignment: .trailing)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(width: 88, alignment: .leading)
+
+            Text(balanceSummaryText)
+                .font(.callout.monospacedDigit().weight(.medium))
+                .foregroundStyle(balanceTint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(width: 96, alignment: .trailing)
         }
-        .padding(.vertical, 9)
-        .frame(minHeight: 50)
+        .background(Color.primary.opacity(0.035))
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .frame(minHeight: 64)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
-            "\(sub2ApiSiteLabel(group.siteUrl))，\(group.accounts.count) 个渠道，\(statusText)，余额 \(balanceSummaryText)"
+            "\(sub2ApiSiteLabel(group.siteUrl))，\(group.accounts.count) 个账号，\(availableCount) 个可用，余额 \(balanceSummaryText)"
         )
     }
 }
@@ -1494,16 +1420,13 @@ private struct OverviewSub2ApiAccountGroupSummary: View {
 private struct OverviewSub2ApiAccountRow: View {
     let account: ManageSub2ApiAccountPoolResponse.Account
     let nested: Bool
-    let showsBalance: Bool
 
     init(
         account: ManageSub2ApiAccountPoolResponse.Account,
-        nested: Bool = false,
-        showsBalance: Bool = true
+        nested: Bool = false
     ) {
         self.account = account
         self.nested = nested
-        self.showsBalance = showsBalance
     }
 
     private var accountTint: Color {
@@ -1523,60 +1446,47 @@ private struct OverviewSub2ApiAccountRow: View {
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(account.name)
-                    .font(nested ? .callout : .callout.weight(.medium))
+                    .font(.callout)
                     .lineLimit(1)
-                Text(sub2ApiAccountKindText(account))
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(sub2ApiAccountKindText(account))
+                    Text("·")
+                    Text("倍率 \(sub2ApiMultiplierText(account.localRateMultiplier)) / 上游 \(sub2ApiUpstreamRateText(account.upstreamBilling))")
+                        .help(sub2ApiCapabilityStateText(account.upstreamBilling.state))
+                }
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(
+                    account.upstreamBilling.stale
+                        ? Color.orange
+                        : Color(nsColor: .tertiaryLabelColor)
+                )
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
             }
+            .padding(.leading, nested ? 22 : 0)
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            VStack(alignment: .trailing, spacing: 4) {
-                HStack(spacing: 10) {
-                    HStack(spacing: 5) {
-                        Circle()
-                            .fill(accountTint)
-                            .frame(width: 6, height: 6)
-                        Text(sub2ApiAccountStatusText(account))
-                            .lineLimit(1)
-                    }
-                    .foregroundStyle(.secondary)
+            OverviewSub2ApiStatus(
+                text: sub2ApiAccountStatusText(account),
+                tint: accountTint
+            )
+            .frame(width: 88, alignment: .leading)
 
-                    OverviewSub2ApiMetric(
-                        title: "本地",
-                        value: sub2ApiMultiplierText(account.localRateMultiplier)
-                    )
-                    OverviewSub2ApiMetric(
-                        title: "上游",
-                        value: sub2ApiUpstreamRateText(account.upstreamBilling),
-                        symbol: account.upstreamBilling.stale ? "clock.badge.exclamationmark" : nil,
-                        tint: account.upstreamBilling.stale ? .orange : nil
-                    )
-                    .help(sub2ApiCapabilityStateText(account.upstreamBilling.state))
-                }
-                .font(.caption)
+            Text(sub2ApiBalanceText(account.upstreamBalance))
+                .font(.caption.monospacedDigit().weight(.medium))
+                .foregroundStyle(balanceTint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+                .help(sub2ApiBalanceHelp(account.upstreamBalance))
+                .frame(width: 96, alignment: .trailing)
 
-                if showsBalance {
-                    HStack(spacing: 4) {
-                        Text("余额")
-                            .foregroundStyle(.tertiary)
-                        Text(sub2ApiBalanceText(account.upstreamBalance))
-                            .font(.caption.monospacedDigit().weight(.medium))
-                            .foregroundStyle(balanceTint)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.78)
-                    }
-                    .help(sub2ApiBalanceHelp(account.upstreamBalance))
-                }
-            }
-            .frame(minWidth: 270, alignment: .trailing)
         }
-        .padding(.vertical, nested ? 8 : 9)
-        .frame(minHeight: nested ? (showsBalance ? 52 : 46) : 56)
+        .padding(.horizontal, nested ? 8 : 16)
+        .padding(.vertical, nested ? 9 : 10)
+        .frame(minHeight: nested ? 56 : 56)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             "\(account.name)，\(sub2ApiAccountStatusText(account))，本地倍率 \(sub2ApiMultiplierText(account.localRateMultiplier))，上游倍率 \(sub2ApiUpstreamRateText(account.upstreamBilling))，余额 \(sub2ApiBalanceText(account.upstreamBalance))"
@@ -1584,27 +1494,20 @@ private struct OverviewSub2ApiAccountRow: View {
     }
 }
 
-private struct OverviewSub2ApiMetric: View {
-    let title: String
-    let value: String
-    var symbol: String?
-    var tint: Color?
+private struct OverviewSub2ApiStatus: View {
+    let text: String
+    let tint: Color
 
     var body: some View {
-        HStack(spacing: 3) {
-            Text(title)
-                .foregroundStyle(.tertiary)
-            if let symbol {
-                Image(systemName: symbol)
-                    .font(.caption2)
-                    .foregroundStyle(tint ?? .secondary)
-            }
-            Text(value)
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(tint ?? .secondary)
+        HStack(spacing: 5) {
+            Circle()
+                .fill(tint)
+                .frame(width: 6, height: 6)
+            Text(text)
                 .lineLimit(1)
-                .minimumScaleFactor(0.78)
         }
+        .font(.caption)
+        .foregroundStyle(.secondary)
     }
 }
 

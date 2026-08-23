@@ -9,13 +9,16 @@ use tokio::time::{Duration, sleep};
 use crate::{
     app_state::{ImAccountRuntimeState, SharedState, im_account_key},
     chain_log,
+    im::core::i18n::im_text_for_state,
     types::{
         ChatType, ImPlatformKind, InboundAction, InboundMessage, ThreadRouteDirection, now_ms,
     },
 };
 
 use super::{
-    api::{TelegramApi, TelegramApiError, TelegramCallbackQuery, TelegramMessage},
+    api::{
+        TelegramApi, TelegramApiError, TelegramBotCommand, TelegramCallbackQuery, TelegramMessage,
+    },
     types::TelegramSettings,
 };
 
@@ -157,6 +160,20 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
                     *offset = Some(update.update_id + 1);
                 }
                 set_polling_state(state, &api.settings().account_id(), true, true, None).await;
+                let text = im_text_for_state(state);
+                let commands = text
+                    .telegram_command_menu()
+                    .into_iter()
+                    .map(|(command, description)| TelegramBotCommand {
+                        command: command.to_string(),
+                        description: description.to_string(),
+                    })
+                    .collect::<Vec<_>>();
+                if let Err(err) = api.set_my_commands(&commands).await {
+                    state
+                        .push_event("warn", "telegram_command_menu_failed", format!("err={err}"))
+                        .await;
+                }
                 state
                     .push_event(
                         "info",

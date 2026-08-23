@@ -2,245 +2,176 @@
 
 [English](README.en.md)
 
-ThreadRelay 是一个本地优先的 Agent 会话中继：把本机 Codex App、Codex VS Code 插件和 Codex CLI 的会话接入 Telegram、飞书、微信与企业微信，同时提供会话管理和 AI Gateway。
+> 当前版本：`0.5.2` · macOS build `444`
 
-本项目由 [`happy-loki/codexhub`](https://github.com/happy-loki/codexhub) 派生，现由 ThreadRelay 维护者独立演进。ThreadRelay 与上游作者及 OpenAI 均无官方隶属或背书关系。
+ThreadRelay 是一个本地优先的 Codex 会话中继。它把本机的 Codex App、Codex VS Code 插件和 Codex CLI 接入 Telegram、飞书、微信或企业微信，让你可以在消息软件里创建和恢复会话、查看任务进度、处理审批，并在本地客户端继续操作同一个 thread。
 
-## 产品预览
+ThreadRelay 也内置 AI Gateway：Codex 只需要连接一个本地模型入口，实际请求可以按模型路由到 OpenAI、DeepSeek、Grok/xAI、Anthropic/Claude、智谱 GLM 或其它兼容服务。
 
-| 功能 | 说明 |
-| --- | --- |
-| 远程和本地同屏操作 | 支持飞书、微信、Telegram 远程连接本地 Codex App、Codex VS Code 插件和 Codex CLI，同一个 Codex 会话可以在 IM 和本地客户端之间同步操作。 |
-| 本地 Codex 接入 | 不修改任何 Codex 前端代码，通过本地 backend 连接 Codex App、VS Code 插件和 Codex CLI。 |
-| Codex 会话管理 | 通过当前 Codex App 的 remote-control 连接直接读取本机会话并在 GUI 中管理；不需要复制或迁移会话文件，需要时可单独调整会话的 Provider。 |
-| 支持 IM 端管理 Codex 会话 | 利用 Codex 原生 remote-control 协议，在 IM 里创建会话、恢复会话、处理审批。 |
-| 内置 AI Gateway | 让 Codex App 继续使用原生 Responses 入口，同时可以在本地 GUI 中接入 OpenAI、DeepSeek、Anthropic/Claude、智谱 GLM 等模型渠道。 |
+## 当前能力
 
-<p align="center">
-  <img src="docs/assets/product/main.png" alt="ThreadRelay GUI 状态和配置界面" width="900">
-</p>
-<p align="center">
-  <img src="docs/assets/product/codex-app-chat.png" alt="Codex App 会话同步和图片结果" width="900">
-</p>
-<p align="center">
-  <img src="docs/assets/product/deepseek.jpg" alt="Codex App 通过 AI Gateway 使用 DeepSeek 模型" width="900">
-</p>
-
-AI Gateway 是 `threadrelay` 内置的本地模型入口。Codex App 仍然按它熟悉的方式发送请求，`threadrelay` 在本地把请求转到你配置的模型渠道，并把返回结果整理回 Codex 能消费的格式。渠道、模型列表、模型映射、请求日志和生图工具过滤都可以在 GUI 里完成。
+- **本地 Codex 接入**：通过官方 remote-control 路径连接 Codex App、VS Code 插件和 Codex CLI，不替换 Codex 可执行文件，也不安装包装命令。
+- **多消息渠道**：支持 Telegram、飞书、微信和企业微信；每个 IM 会话可以绑定一个 Codex thread。
+- **Telegram 任务控制**：运行中普通文字默认调整当前任务方向，也可以使用 `/steer`；使用 `/queue` 将后续消息按 FIFO 排队。
+- **审批与进度**：Telegram 使用 inline keyboard，飞书/企业微信使用各自的卡片；命令步骤、子代理活动和回复进度会按 turn 聚合。
+- **AI Gateway**：支持 OpenAI Responses、DeepSeek Responses、Grok/xAI Responses、Chat Completions 和 Anthropic Messages 协议，并提供模型别名、可见模型、权重路由、超时和请求日志。
+- **Sub2API 账号池**：在 GUI 中连接 Sub2API 管理 API，以只读方式查看账号可用性、余额、倍率和最近命中的账号；账号列表默认展开，不会修改 Sub2API 账号池。
+- **桌面管理界面**：概览、Codex 接入、AI 网关、消息渠道、会话和请求日志都可以在 ThreadRelay 中管理。
 
 <p align="center">
-  <img src="docs/assets/product/feishu-mobile-image.jpg" alt="飞书移动端展示 Codex 图片结果" width="360">
-  <img src="docs/assets/product/tg.jpg" alt="Telegram 移动端创建 Codex thread" width="360">
+  <img src="docs/assets/product/threadrelay-overview.png" alt="ThreadRelay 当前连接拓扑和消息渠道概览" width="900">
 </p>
 <p align="center">
-  <img src="docs/assets/product/syn.png" alt="飞书 IM 与本地 Codex CLI 同步会话" width="900">
+  <img src="docs/assets/product/threadrelay-ai-gateway.png" alt="ThreadRelay 当前 AI 网关模型服务和可见模型界面" width="900">
 </p>
 
+## 快速开始
 
-## 快速使用
+### 1. 准备环境
 
-ThreadRelay 的主路径是：下载程序 -> 配置模型服务 -> 接入 Telegram、飞书、微信或企业微信中的一个 -> 接入 Codex -> 从消息软件开始使用。只想在本地 Codex App 或 VS Code 插件里使用 AI Gateway 时，可以跳过消息渠道。Codex CLI 需要按第 7 步单独启动 app-server。
-
-### 0. 前置条件
-
-- macOS、Windows 或 Linux 设备
+- macOS、Windows 或 Linux
 - Codex App、Codex VS Code 插件或 Codex CLI
-- 不需要 ChatGPT 账号，也不需要“加速网络”
-- 至少一个模型服务 API Key：OpenAI Responses、DeepSeek、Anthropic/Claude、智谱 GLM 或其它兼容渠道
-- 至少一个消息渠道：Telegram、飞书、微信或企业微信；这是从消息软件使用 Codex 的主入口
+- 至少一个模型服务 API Key
+- 如果要从消息软件操作 Codex，再准备一个消息渠道账号
 
-### 1. 安装
+Codex remote-control 仍需要 ChatGPT 兼容的认证模式；仅有 API key 的 Codex auth 无法启动 remote-control。ThreadRelay 的 GUI/CLI 会负责写入本地连接所需的配置，模型服务的 API key 仍由你自己提供。
 
-从 [ThreadRelay Releases](https://github.com/mps233/threadrelay/releases) 下载 `ThreadRelay.dmg`，拖到 Applications 后打开。Linux 下载 `ThreadRelay Linux x86_64.AppImage` 后赋予执行权限即可双击运行。
+### 2. 安装并启动
 
-第一次打开时，如果 macOS 提示来自互联网，按系统提示确认即可。macOS 客户端会安装当前用户范围的 LaunchAgent，用于保持本地 backend 运行并在 GUI 异常退出时恢复；正常退出 GUI 不会重新打开窗口。Windows 直接运行 release 包里的 `ThreadRelay.exe`。Linux 如果桌面环境没有自动赋权，可以先执行 `chmod +x "ThreadRelay Linux x86_64.AppImage"`。
+从 [ThreadRelay Releases](https://github.com/mps233/threadrelay/releases) 下载对应平台的程序：
 
-后续可以在菜单 `Help -> Check for Updates` 手动检查 GitHub Releases 是否有新版本。当前 MVP 只引导打开下载页，不会静默替换本机程序。
+| 平台 | 文件 | 启动方式 |
+| --- | --- | --- |
+| macOS | `ThreadRelay.dmg` | 拖入 Applications 后打开 |
+| Windows | `ThreadRelay.exe` 或安装包 | 直接运行 |
+| Linux | `ThreadRelay Linux x86_64.AppImage` | `chmod +x` 后运行 |
 
-### 2. 打开应用
+打开 GUI 后，ThreadRelay 会启动本地 backend。macOS 使用当前用户范围的 LaunchAgent 保持 backend 运行；正常退出 GUI 不会自动重新打开窗口。
 
-打开 `ThreadRelay`。GUI 会确保本地 backend 已启动；在 macOS 上，退出 GUI 后由 LaunchAgent 托管的 backend 会继续运行。
+### 3. 接入消息渠道
 
-状态概览显示本地服务运行后继续下一步。
+进入 **消息渠道** 页面，选择并接入一个或多个渠道：
 
-### 3. 接入消息渠道（主路径必需）
+- **Telegram**：填入 BotFather token。当前只处理私聊，群聊消息和群聊按钮会被忽略；支持文本、图片/文件、会话创建/恢复、审批、草稿流式回复以及任务/子代理进度。
+- **飞书**：扫码创建机器人，使用 WebSocket 接收事件和消息卡片。
+- **微信**：扫码登录微信 iLink Bot，使用长轮询收发消息。
+- **企业微信**：扫码接入 AI Bot，支持私聊/群聊文本、流式回复、图片/文件、会话选择和审批卡片。
 
-切到“聊天工具接入”页面，选择一个通道：
+可以为同一平台配置多个账号，并在页面中单独启停或删除。Telegram 的 `allowedChatIds`、飞书的 `allowedOpenIds`/`allowedChatIds` 等白名单建议在实际使用时配置。
 
-- 飞书：点击“扫码使用新机器人”，按二维码流程完成接入。
-- Telegram：填写 BotFather 提供的 Bot Token，点击“保存并接入”。当前支持私聊文本、图片/文件输入、原位菜单与审批状态更新、同一 turn 的命令和子代理协作进度聚合，以及 Agent 回复草稿流式展示；群聊不会接入。
-- 微信：点击“扫码连接微信”，使用微信扫码确认。
-- 企业微信：点击“添加企业微信机器人”，使用企业微信扫码确认。支持私聊/群聊文本、流式与最终回复、图片文件、初始/历史会话选择卡片和审批模板卡片。
+### 4. 连接 Codex
 
-接入成功后，状态概览里的“IM 通道”会显示可用。主路径至少接入一个渠道即可，之后正常使用不需要反复扫码或重新填 token；只有更换机器人时才需要重新接入。
+在 **Codex 接入** 页面打开“连接 ThreadRelay”，然后正常启动 Codex App 或 Codex VS Code 插件，并开启 remote-control/“控制这台电脑”。ThreadRelay 会通过本地 remote-control 读取会话列表，不需要复制或迁移会话文件。
 
-### 4. 配置 AI Gateway
+如果多个 Codex 客户端同时连接，新的 IM 会话按固定优先级选择执行端：Codex App > Codex VS Code 插件 > Codex CLI；绑定后会继续使用原执行端，直到退出或重新绑定。
 
-切到 “Codex 接入” 页面，在 AI Gateway 区域添加模型渠道。GUI 会提供常用服务商模板，也可以手工填写：
+### 5. 使用 Codex CLI
 
-- 渠道名称
-- 服务商类型
-- 第三方 Base URL
-- API Key
-- 模型列表
-
-如果上游模型名和你希望在 Codex 里看到的名字不一致，可以在“编辑模型映射”里把一个上游模型映射成一个或多个 Codex 可见模型。例如上游要求 `GLM-5.2`，Codex 里可以显示成 `glm-5.2`。
-
-如果渠道不支持 Codex 请求里的生图工具，勾选“过滤生图工具”即可实时移除 `image_generation` 工具，不需要再改 Codex 配置。
-
-### 5. 连接 Codex
-
-在 “Codex 接入” 页面打开“连接 ThreadRelay”。这一个开关会同时打开 ThreadRelay，并让 Codex App 和 Codex VS Code 插件连接到本机服务。
-
-关闭这个开关会先恢复 Codex 原来的连接，再关闭 ThreadRelay。GUI 只在已经写入过配置时显示恢复入口，避免第一次使用时误操作。
-
-### 6. 打开 Codex
-
-正常启动 Codex App 或 Codex VS Code 插件，并打开 remote-control / 控制这台电脑。
-
-连接成功后，`ThreadRelay` 里会看到 Codex 控制通道变为已连接。
-
-ThreadRelay 会通过当前 Codex App 的 remote-control 连接直接读取它的本机会话，不需要导入、复制或迁移会话文件。Codex App 未运行、未连接 remote-control，或会话尚未写入 state DB 时，会话列表可能为空。
-
-不需要在 Codex App 的“连接”设置页里看到远程连接设备列表。这个项目走的是本地 backend + IM bridge，只要 `ThreadRelay` 的状态概览都正常，就可以直接在已接入的 IM 里使用。
-
-如果 Codex App、Codex VS Code 插件和 Codex CLI 同时连接到 `ThreadRelay`，IM 端新建或恢复会话时会按固定优先级选择执行端：Codex App > Codex VS Code 插件 > Codex CLI。会话绑定后，后续消息会继续发给当时选中的执行端，直到该 IM 会话退出或重新绑定。
-
-### 7. 使用 Codex CLI
-
-如果希望 Codex CLI 和飞书 / Telegram / 微信交互，不需要替换 `codex` 命令，也不需要安装包装脚本。macOS、Windows 和 Linux 都按下面三步操作。
-
-1. 打开 `ThreadRelay` 桌面程序，完成 IM 通道和 Codex 接入，并保持程序运行。
-
-2. 在要操作的项目目录打开终端，启动 Codex app-server：
+保持 ThreadRelay GUI 运行，在项目目录启动 app-server：
 
 ```bash
 codex app-server --listen ws://127.0.0.1:3849 --remote-control
 ```
 
-3. 再在同一个项目目录打开一个终端，连接本地 Codex TUI：
+再在同一目录连接本地 TUI：
 
 ```bash
 codex --remote ws://127.0.0.1:3849
 ```
 
-完成后可以在 IM 里给机器人发消息，也可以在本地 Codex TUI 里继续使用同一个 Codex app-server。端口 `3849` 被占用时可以换成其它本机端口，但第 2 步和第 3 步里的地址必须一致。
+端口 `3849` 可以替换，但两个命令中的地址必须一致。连接完成后，CLI 和消息软件可以继续操作同一个 app-server。
 
-### 8. 在 IM 里开始使用
+## Telegram 使用方式
 
-在飞书、Telegram 私聊、微信或企业微信里给机器人发消息。
+Telegram 使用 Bot API long polling。Bot 菜单会自动显示规范命令；旧的 `/s`、`/q` 仍可用，但不会出现在菜单中。
 
-如果当前 IM 会话还没有绑定 Codex thread，机器人会先让你选择新建 thread 或恢复已有 thread。选择后，后续对话就会进入对应的 Codex thread。
+### 任务运行语义
 
-微信链路依赖客户端下发的 context token。长任务或手机端长时间不活动时，微信客户端可能让 token 过期，导致本地 backend 暂时无法继续发送消息。遇到这种情况，在微信里发送 `!` 或 `?` 可以刷新 token；这两个激活消息只用于恢复发送链路，不会转发给 Codex。
+- 没有运行任务时，直接发送普通文字会启动一条新的 turn。
+- 有任务运行时，直接发送普通文字会调用 `turn/steer`，把它作为当前任务的新方向追加进去。
+- 需要明确表达时使用 `/steer <新的方向>`。
+- 使用 `/queue <要稍后执行的内容>` 将消息加入当前会话的 FIFO 队列，每个会话最多 8 条；没有运行任务时，机器人会提示直接发送消息。
+- 当前任务完成、失败或被停止后，队列会自动执行下一条。
+- `/stop` 只中断当前任务并保留队列；`/exit` 会中断任务、清空队列并解除会话绑定。
 
-## 网络与代理
+### 命令
 
-ThreadRelay 的“网络”菜单提供三种出站模式：跟随系统代理、强制直连、自定义 HTTP/SOCKS5 代理。该设置只影响 ThreadRelay 访问模型服务、微信、Telegram、飞书 HTTP API 和更新地址，不会修改 macOS `launchctl`、Windows 用户环境变量或其它应用的网络设置。
+| 命令 | 作用 |
+| --- | --- |
+| `/help` | 查看帮助；`/start` 也可作为入口 |
+| `/new` | 创建新的 Codex 会话 |
+| `/sessions` | 查看并恢复历史会话 |
+| `/status` | 查看连接、当前会话、任务状态和排队数量 |
+| `/steer <内容>` | 调整正在运行的任务方向 |
+| `/queue <内容>` | 将一条消息排到当前任务之后 |
+| `/stop` | 中断当前任务并保留会话；兼容别名 `/s` |
+| `/exit` | 退出当前会话并清空队列；兼容别名 `/q` |
 
-使用 Clash、V2Ray 等本地代理时，可以选择“自定义 HTTP/SOCKS5 代理”，填写 `http://127.0.0.1:7890` 或 `socks5://127.0.0.1:1080`。daemon 正在运行时设置会立即生效。本地 GUI、Codex App、VS Code 与 ThreadRelay 之间的回环通信不会使用这个出站代理。
+会话选择和审批优先使用消息中的按钮。按钮不可用时，按消息提示发送编号或审批回复（例如 `/1`、`/y`、`/n`）。
 
-TUN / Network Extension 类型的 VPN 工作在 HTTP 代理层以下。如果它拦截回环流量，仍需要在 VPN 软件中排除 `localhost`、`127.0.0.1` 和 `::1`。
+## AI Gateway 与 Sub2API
 
-## AI Gateway
+### AI Gateway
 
-AI Gateway 解决的是“Codex 只认原生模型入口，但用户想用更多模型渠道”的问题。你在 GUI 里配置渠道后，Codex App 看到的仍然是普通模型列表；真正的上游请求由 `threadrelay` 负责转发和转换。
+进入 **AI 网关** 页面添加模型服务。每个 provider 可以配置协议、Base URL、API Key、模型列表、模型别名、权重和超时；Codex 侧只看到 ThreadRelay 暴露的模型目录。
 
-当前重点能力：
+当前支持：
 
-- OpenAI Responses 渠道：适合原生 Responses 或兼容 Responses 的模型服务。
-- DeepSeek Responses 渠道：原生对接 DeepSeek `/v1/responses`，支持官方 hosted web search、function 和 `apply_patch`。
-- DeepSeek Chat / Chat Completions 渠道：保留旧接入方式，把 Codex 请求转换成 Chat Completions，再把返回结果转换回 Codex 可消费的格式。
-- Anthropic Messages 渠道：用于 Claude / Anthropic 兼容模型，支持文本、图片、工具调用、思考输出和 web search 的协议转换。
-- 智谱 GLM 渠道：按 Anthropic 兼容方式接入，并处理 GLM web search 的返回差异。
-- 模型映射：解决上游模型名大小写、别名、第三方转发命名不一致的问题。
-- Codex 可见模型：控制 Codex App 模型列表里展示哪些模型。
-- 请求日志：记录 Codex 原始请求、发给上游的请求、返回结果、错误、token、缓存、耗时和请求包大小，方便排查首帧慢、超时和协议转换问题。
-- 过滤生图工具：默认关闭；打开后 AI Gateway 会从请求中移除 Codex 的 `image_generation` 工具，适合不支持生图工具的渠道。
+- OpenAI Responses
+- DeepSeek Responses
+- Grok/xAI Responses
+- Chat Completions
+- Anthropic Messages（可用于 Claude 和兼容 GLM 的配置）
 
-这些能力都在 GUI 中操作，不需要用户手写配置文件。
+可选能力包括 Codex 可见模型白名单、同模型多 provider 的优先级/稳定路由、prompt cache 设置、请求日志摘要与详情，以及移除不被上游支持的 `image_generation` 工具。具体 web search、工具调用和思考输出能力取决于 provider 协议与上游服务。
 
-## 交流与支持
+### Sub2API 账号池
 
-有问题可以到 [ThreadRelay Issues](https://github.com/mps233/threadrelay/issues) 提交反馈。
+在 **AI 网关 -> 账号** 中填写 Sub2API 管理地址和 Admin API Key。ThreadRelay 只读取管理 API：
 
-## IM 命令  一个/q 命令就够了. 其它按照提示操作
+- 展示账号在线/可用状态、上游余额和倍率；
+- 展示最近一次实际命中的账号；
+- 支持手动刷新，并在短时间内复用上次结果；
+- 不使用 Admin API Key 代替模型 provider key；
+- 不创建、删除、编辑或切换 Sub2API 账号。
 
-```text
-/q         中断并清除当前绑定
-```
+管理密钥只保存在本机，界面不会回显。未配置 Sub2API 时，AI Gateway 的模型服务仍可独立使用。
 
-审批卡片在选择后会高亮并标记为已处理，避免聊天里堆了很多卡片后分不清哪些已经操作过。
+## 网络、配置与安全
 
-## 恢复原来的设置
-
-GUI 里点击“恢复原来的设置”即可恢复写入前的 Codex 连接方式。恢复后，Codex App 不再通过 ThreadRelay 发模型请求。
-
-这一步不会卸载 Codex，也不会删除 Codex 的会话历史。
-
-## 项目边界
-
-`threadrelay` 只支持干净的 Codex remote-control 路径。
-
-它不会：
-
-- 安装 `codex` 包装命令
-- 替换 Codex CLI
-- 通过 shim 启动 Codex App
-- 替换 Codex App、Codex CLI 或 VS Code 插件的原始可执行文件
-
-macOS 客户端只在当前用户范围内安装 ThreadRelay 自己的 LaunchAgent，不安装系统级服务。它负责保持本地 backend 运行，并只在 GUI 异常退出时恢复界面；用户正常退出 GUI 后不会自动重开窗口。
-
-## 技术说明
-
-主链路：
+ThreadRelay 默认只监听本机：
 
 ```text
-Codex App / Codex VS Code 插件 / Codex CLI app-server
-  |
-  | chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
-  | 用户打开 remote-control，或启动 codex app-server --remote-control
-  v
-官方 Codex app-server
-  |
-  | outbound remote-control websocket
-  v
-threadrelay 本地 backend
-  |
-  | 飞书 websocket 事件 / 消息卡片 API
-  | Telegram long polling / Bot API
-  | 微信 iLink long polling / sendmessage
-  | 企业微信 AI Bot WebSocket / aibot_send_msg
-  v
-IM 通道
+http://127.0.0.1:3847
 ```
 
-本项目实现官方 remote-control endpoint：
+不要把 daemon 端口直接暴露到公网。GUI 的“网络”设置只影响 ThreadRelay 发往模型服务、Telegram、飞书、微信和更新地址的出站请求，可选系统代理、直连或自定义 HTTP/SOCKS5 代理；GUI、Codex 和 daemon 的回环通信不使用这个出站代理。
 
-```text
-POST /backend-api/wham/remote/control/server/enroll
-GET  /backend-api/wham/remote/control/server
-```
+手写配置时，建议从 [`config.example.toml`](config.example.toml) 开始。ThreadRelay 配置和 Codex App 配置是两套文件，不要混用；字段说明见 [`docs/configuration.md`](docs/configuration.md)。
 
-Codex remote-control 要求 ChatGPT 兼容的 auth mode。这个项目采用本地 `ChatgptAuthTokens` 形态，用来通过 Codex 客户端的 remote-control 账号检查。API-key-only auth 不能启动 remote-control。
+以下内容都是 secret，不要提交到 Git：
 
-Thread 绑定模型：
+- IM Bot token、企业微信 secret 和微信 token
+- 模型 provider API key
+- Sub2API Admin API Key
+- Codex 本地认证数据
 
-- Codex app-server 仍然维护 thread 生命周期和历史
-- 一个 IM 会话同一时间只绑定一个 Codex thread
-- 如果 IM 会话还没绑定 thread，bridge 会先给出新建或恢复 thread 的入口
-- 从 IM 恢复某个 thread 后，会订阅这个 thread 后续的 remote-control 事件
-- IM 发起的 turn 会按 turn id 记录来源，避免 userMessage 回显
+飞书和 Telegram 附件会写入状态目录旁边的 `.im/attachments/`。bridge 可以代 IM 用户向 Codex 提交审批决定，因此消息渠道的访问权限应按本机 Codex 审批权限管理。
 
-## 开发
+## 恢复与项目边界
 
-```powershell
-cargo fmt
-cargo test
-cargo build --release --features gui --bin threadrelay
-```
+GUI 中的“恢复原来的设置”会恢复 ThreadRelay 写入前的 Codex 连接方式，不会卸载 Codex，也不会删除会话历史。
 
-daemon 运行时常用状态接口：
+ThreadRelay 不会：
+
+- 替换 Codex App、Codex CLI 或 VS Code 插件的原始可执行文件；
+- 安装 `codex` 包装命令或 shim；
+- 代替 Codex 管理模型、沙箱、审批策略、工作目录或环境变量；
+- 把本地 daemon 自动切换到其它 runtime，或把它暴露成系统级服务。
+
+## 诊断与开发
+
+daemon 运行时可以检查：
 
 ```text
 GET http://127.0.0.1:3847/api/status
@@ -249,27 +180,28 @@ GET http://127.0.0.1:3847/api/remote-control/backend-status
 GET http://127.0.0.1:3847/api/events
 ```
 
-## 安全说明
+常用开发命令：
 
-- daemon 默认只绑定 `127.0.0.1`，不要直接暴露到公网
-- 本地保存的 IM token、模型 API Key 和 Codex 认证信息都是 secret，不要提交
-- 飞书和 Telegram 附件会分别下载到本地状态目录旁边的 `.im/attachments/feishu/` 与 `.im/attachments/telegram/`
-- 真正使用时建议配置 `allowedOpenIds` 和 / 或 `allowedChatIds`
-- bridge 可以替 IM 用户向 Codex 提交审批决定，所以飞书 / Telegram / 微信 / 企业微信访问权限应视为等价于本地 Codex 审批权限
+```bash
+cargo fmt
+cargo test
+cargo build --release --features gui --bin threadrelay
+```
+
+故障排查可以从 [`docs/troubleshooting.md`](docs/troubleshooting.md) 开始；架构说明见 [`docs/architecture.md`](docs/architecture.md)。
 
 ## 更多文档
 
-- [架构](docs/architecture.md)
+- [配置说明](docs/configuration.md)
 - [Telegram 集成与维护边界](docs/telegram-integration.zh-CN.md)
 - [微信集成与已知边界](docs/wechat-integration.zh-CN.md)
 - [认证说明](docs/auth-notes.zh-CN.md)
-- [排障](docs/troubleshooting.md)
+- [ThreadRelay 构建和交接规则](docs/threadrelay-change-handoff.zh-CN.md)
+- [发布检查清单](docs/release-checklist.md)
 
-## 独立维护与兼容
+## 兼容说明
 
-- 新安装默认使用 `ThreadRelay` 名称、独立应用标识和 `threadrelay` 命令。
-- 已有 CodexHub 用户会继续读取旧配置目录和 `CODEXHUB_HOME`，避免丢失 IM 凭据、会话绑定与模型配置。
-- 独立发布后的更新只从 [`mps233/threadrelay`](https://github.com/mps233/threadrelay) 获取；上游更新仍可由维护者选择性合并。
+ThreadRelay 仍兼容旧 CodexHub 配置目录、`CODEXHUB_HOME` 和少量 `codexhub` 标识，用于读取已有凭据、会话绑定和 provider 配置。这些是迁移兼容值，不代表当前产品名称；新安装和新配置统一使用 ThreadRelay。兼容目录不应手动重命名，具体迁移行为由当前版本负责。
 
 ## License
 

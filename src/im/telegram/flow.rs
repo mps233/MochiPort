@@ -8,11 +8,11 @@ use crate::{
             ApprovalReplyOutcome, resolve_approval_button_reply, resolve_approval_reply,
             submit_approval_decision,
         },
-        i18n::im_text_for_state,
+        i18n::{ImText, im_text_for_state},
         outbound::ImOutboundSender,
         routing::{
-            active_turn_for_message, clear_thread_binding, remote_client_key_for_thread,
-            route_for_message,
+            active_turn_for_message, clear_thread_binding, live_thread_for_route,
+            remote_client_key_for_thread, route_for_message, turn_in_progress_for_message,
         },
         session::{create_and_bind_thread, resume_and_bind_thread},
         thread::{
@@ -33,12 +33,25 @@ use crate::{
         types::TelegramSettings,
         typing as telegram_typing,
     },
-    im_runtime::{ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
+    im_runtime::{
+        PendingTelegramTurn, RouteTarget, TELEGRAM_QUEUED_TURNS_MAX_COUNT,
+        TelegramQueueEnqueueOutcome, ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin,
+    },
     remote_control_backend,
     types::{InboundAction, InboundMessage, ThreadRouteDirection},
 };
 
 const TELEGRAM_CREATE_OPTION_PAGE_SIZE: usize = 8;
+
+fn approval_decision_fallback_text(text: ImText, label: &str) -> String {
+    text.approval_decision_submitted_label(&text.approval_decision_label(label))
+}
+
+fn command_payload(text: &str) -> &str {
+    text.find(char::is_whitespace)
+        .map(|index| text[index..].trim())
+        .unwrap_or_default()
+}
 
 #[derive(Debug, PartialEq, Eq)]
 enum TelegramThreadRoutingResultDelivery {
@@ -166,6 +179,210 @@ async fn publish_telegram_thread_routing_result(
     }
 }
 
+async fn steer_telegram_turn(
+    state: &SharedState,
+    adapter: &TelegramAdapter,
+    message: &InboundMessage,
+    text: &str,
+    attachments: &[crate::types::InboundAttachment],
+) -> Result<()> {
+    let Some((thread_id, turn_id)) = active_turn_for_message(state, message).await else {
+        let notice = if turn_in_progress_for_message(state, message).await {
+            im_text_for_state(state).telegram_turn_starting_notice()
+        } else {
+            im_text_for_state(state).no_running_turn()
+        };
+        adapter.send_text(&message.chat_id, notice).await?;
+        return Ok(());
+    };
+    let Some(remote_client_key) = remote_client_key_for_thread(state, &thread_id).await else {
+        adapter
+            .send_text(
+                &message.chat_id,
+                im_text_for_state(state).telegram_steer_failed(),
+            )
+            .await?;
+        return Ok(());
+    };
+    match remote_control_backend::steer_turn_for_client(
+        state,
+        &remote_client_key,
+        &thread_id,
+        &turn_id,
+        text,
+        attachments,
+    )
+    .await
+    {
+        Ok(steered_turn_id) => {
+            state
+                .push_event(
+                    "info",
+                    "telegram_turn_steered",
+                    format!(
+                        "conversation={} thread={} turn={} response_turn={}",
+                        message.conversation_key(),
+                        thread_id,
+                        turn_id,
+                        steered_turn_id
+                    ),
+                )
+                .await;
+            adapter
+                .send_text(
+                    &message.chat_id,
+                    im_text_for_state(state).telegram_steer_accepted(),
+                )
+                .await?;
+        }
+        Err(err) => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_turn_steer_failed",
+                    format!(
+                        "conversation={} thread={} turn={} err={err}",
+                        message.conversation_key(),
+                        thread_id,
+                        turn_id
+                    ),
+                )
+                .await;
+            adapter
+                .send_text(
+                    &message.chat_id,
+                    im_text_for_state(state).telegram_steer_failed(),
+                )
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn start_next_telegram_queued_turn(
+    state: &SharedState,
+    api: TelegramApi,
+    route: &RouteTarget,
+) {
+    if route.platform != crate::types::ImPlatformKind::Telegram {
+        return;
+    }
+    // Dequeue and turn/start must stay ordered because turn/start is not idempotent.
+    let _queue_start_guard = state.telegram_queue_start_ops.lock().await;
+    loop {
+        let queued = state
+            .runtime
+            .lock()
+            .await
+            .take_next_telegram_turn(&route.conversation_key);
+        let Some(queued) = queued else {
+            return;
+        };
+        let outcome = start_turn_for_route(
+            state,
+            route,
+            &queued.text,
+            &queued.attachments,
+            crate::types::now_ms(),
+            TurnOrigin::Telegram,
+        )
+        .await;
+        match outcome {
+            TurnStartOutcome::Started {
+                thread_id: started_thread_id,
+                turn_id,
+            } => {
+                telegram_typing::start_turn(
+                    state,
+                    api.clone(),
+                    &started_thread_id,
+                    &turn_id,
+                    route,
+                )
+                .await;
+                let adapter = TelegramAdapter::new(api.clone());
+                let _ = adapter
+                    .send_text(
+                        &route.chat_id,
+                        im_text_for_state(state).telegram_queue_started(),
+                    )
+                    .await;
+                state
+                    .push_event(
+                        "info",
+                        "telegram_queued_turn_started",
+                        format!(
+                            "conversation={} thread={} turn={} remaining={}",
+                            route.conversation_key,
+                            started_thread_id,
+                            turn_id,
+                            state
+                                .runtime
+                                .lock()
+                                .await
+                                .telegram_queue_len(&route.conversation_key)
+                        ),
+                    )
+                    .await;
+                return;
+            }
+            TurnStartOutcome::Busy => {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .requeue_telegram_turn_front(&route.conversation_key, queued);
+                return;
+            }
+            TurnStartOutcome::NoThread | TurnStartOutcome::Stale { .. } => {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .clear_telegram_queue(&route.conversation_key);
+                let adapter = TelegramAdapter::new(api.clone());
+                let _ = adapter
+                    .send_text(
+                        &route.chat_id,
+                        im_text_for_state(state).stale_thread_unbound(),
+                    )
+                    .await;
+                return;
+            }
+            TurnStartOutcome::Expired { .. } => {
+                let adapter = TelegramAdapter::new(api.clone());
+                let _ = adapter
+                    .send_text(&route.chat_id, im_text_for_state(state).inbound_expired())
+                    .await;
+            }
+            TurnStartOutcome::Failed { error } => {
+                let adapter = TelegramAdapter::new(api.clone());
+                let _ = adapter
+                    .send_text(
+                        &route.chat_id,
+                        &im_text_for_state(state).telegram_queue_start_failed(&error.to_string()),
+                    )
+                    .await;
+                state
+                    .push_event(
+                        "warn",
+                        "telegram_queued_turn_start_failed",
+                        format!(
+                            "conversation={} remaining={} err={error}",
+                            route.conversation_key,
+                            state
+                                .runtime
+                                .lock()
+                                .await
+                                .telegram_queue_len(&route.conversation_key)
+                        ),
+                    )
+                    .await;
+            }
+        }
+    }
+}
+
 pub(crate) async fn handle_inbound(
     state: SharedState,
     outbound_tx: ImOutboundSender,
@@ -253,11 +470,120 @@ pub(crate) async fn handle_inbound(
     }
 
     match command.as_deref() {
-        Some("/s") => {
-            let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await else {
+        Some("/help") | Some("/start") => {
+            adapter
+                .send_text(&message.chat_id, text.telegram_help())
+                .await?;
+            return Ok(());
+        }
+        Some("/status") => {
+            let thread_id = live_thread_for_route(&state, &route).await;
+            let (running, waiting_approval, queued) = {
+                let runtime = state.runtime.lock().await;
+                let running = thread_id
+                    .as_ref()
+                    .is_some_and(|thread_id| runtime.turn_in_progress(thread_id));
+                let waiting_approval = runtime.current_approval(&route.conversation_key).is_some();
+                let queued = runtime.telegram_queue_len(&route.conversation_key);
+                (running, waiting_approval, queued)
+            };
+            let remote_status = remote_control_backend::status_snapshot(&state).await;
+            adapter
+                .send_text(
+                    &message.chat_id,
+                    &text.telegram_status(
+                        remote_status.connected,
+                        thread_id.as_deref(),
+                        text.telegram_task_status(running, waiting_approval),
+                        queued,
+                    ),
+                )
+                .await?;
+            return Ok(());
+        }
+        Some("/new") => {
+            if turn_in_progress_for_message(&state, &message).await {
                 adapter
-                    .send_text(&message.chat_id, text.no_running_turn())
+                    .send_text(&message.chat_id, text.telegram_turn_busy_notice())
                     .await?;
+                return Ok(());
+            }
+            let remote_status = remote_control_backend::status_snapshot(&state).await;
+            if !remote_status.connected {
+                adapter
+                    .send_text(&message.chat_id, text.remote_not_connected())
+                    .await?;
+                return Ok(());
+            }
+            send_telegram_thread_create_settings(&state, &adapter, &message, None).await?;
+            return Ok(());
+        }
+        Some("/sessions") => {
+            if turn_in_progress_for_message(&state, &message).await {
+                adapter
+                    .send_text(&message.chat_id, text.telegram_turn_busy_notice())
+                    .await?;
+                return Ok(());
+            }
+            send_telegram_thread_routing_list(&state, &adapter, &message, None, None, 1).await?;
+            return Ok(());
+        }
+        Some("/steer") => {
+            let payload = command_payload(trimmed);
+            if payload.is_empty() && message.attachments.is_empty() {
+                adapter
+                    .send_text(&message.chat_id, text.telegram_steer_usage())
+                    .await?;
+                return Ok(());
+            }
+            steer_telegram_turn(&state, &adapter, &message, payload, &message.attachments).await?;
+            return Ok(());
+        }
+        Some("/queue") => {
+            let payload = command_payload(trimmed);
+            if payload.is_empty() && message.attachments.is_empty() {
+                adapter
+                    .send_text(&message.chat_id, text.telegram_queue_usage())
+                    .await?;
+                return Ok(());
+            }
+            let outcome = state.runtime.lock().await.enqueue_telegram_turn_if_active(
+                &route.conversation_key,
+                PendingTelegramTurn {
+                    text: payload.to_string(),
+                    attachments: message.attachments.clone(),
+                },
+            );
+            match outcome {
+                TelegramQueueEnqueueOutcome::Added(position) => {
+                    adapter
+                        .send_text(&message.chat_id, &text.telegram_queue_added(position))
+                        .await?;
+                }
+                TelegramQueueEnqueueOutcome::Full => {
+                    adapter
+                        .send_text(
+                            &message.chat_id,
+                            &text.telegram_queue_full(TELEGRAM_QUEUED_TURNS_MAX_COUNT),
+                        )
+                        .await?;
+                }
+                TelegramQueueEnqueueOutcome::NotRunning => {
+                    adapter
+                        .send_text(&message.chat_id, text.telegram_queue_requires_running())
+                        .await?;
+                }
+            }
+            return Ok(());
+        }
+        Some("/stop") | Some("/s") => {
+            let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await else {
+                let notice = if turn_in_progress_for_message(&state, &message).await {
+                    text.telegram_turn_starting_notice()
+                } else {
+                    text.no_running_turn()
+                };
+                adapter.send_text(&message.chat_id, notice).await?;
                 return Ok(());
             };
             let remote_client_key = remote_client_key_for_thread(&state, &thread_id)
@@ -304,9 +630,18 @@ pub(crate) async fn handle_inbound(
             adapter
                 .send_text(&message.chat_id, text.interrupted())
                 .await?;
+            start_next_telegram_queued_turn(&state, api.clone(), &route).await;
             return Ok(());
         }
-        Some("/q") => {
+        Some("/exit") | Some("/q") => {
+            if active_turn_for_message(&state, &message).await.is_none()
+                && turn_in_progress_for_message(&state, &message).await
+            {
+                adapter
+                    .send_text(&message.chat_id, text.telegram_turn_starting_notice())
+                    .await?;
+                return Ok(());
+            }
             if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
                 state
                     .runtime
@@ -344,13 +679,18 @@ pub(crate) async fn handle_inbound(
                     .await
                     .mark_turn_completed(&thread_id, Some(&turn_id));
             }
+            state
+                .runtime
+                .lock()
+                .await
+                .clear_telegram_queue(&route.conversation_key);
             clear_thread_binding(&state, &route.conversation_key).await?;
             adapter.send_text(&message.chat_id, text.exited()).await?;
             return Ok(());
         }
         Some(other) => {
             adapter
-                .send_text(&message.chat_id, &text.unsupported_command(other))
+                .send_text(&message.chat_id, &text.telegram_unknown_command(other))
                 .await?;
             return Ok(());
         }
@@ -358,7 +698,7 @@ pub(crate) async fn handle_inbound(
     }
 
     if active_turn_for_message(&state, &message).await.is_some() {
-        if !message.attachments.is_empty() {
+        if trimmed.is_empty() && !message.attachments.is_empty() {
             let attachment_count = state.runtime.lock().await.hold_pending_attachments(
                 &route.conversation_key,
                 message.attachments.clone(),
@@ -372,8 +712,18 @@ pub(crate) async fn handle_inbound(
                 .await?;
             return Ok(());
         }
+        if !trimmed.is_empty() {
+            steer_telegram_turn(&state, &adapter, &message, trimmed, &message.attachments).await?;
+        } else {
+            adapter
+                .send_text(&message.chat_id, text.telegram_turn_busy_notice())
+                .await?;
+        }
+        return Ok(());
+    }
+    if turn_in_progress_for_message(&state, &message).await {
         adapter
-            .send_text(&message.chat_id, text.turn_busy_notice())
+            .send_text(&message.chat_id, text.telegram_turn_starting_notice())
             .await?;
         return Ok(());
     }
@@ -1556,6 +1906,7 @@ async fn handle_telegram_approval_outcome(
                 .clone()
                 .or_else(|| message.card_message_id.clone());
             let next = submit_approval_decision(state, &pending, &decision).await?;
+            let text = im_text_for_state(state);
             let resolved = adapter
                 .update_resolved_approval(
                     &message.chat_id,
@@ -1563,7 +1914,7 @@ async fn handle_telegram_approval_outcome(
                     &pending,
                     option_index,
                     &decision.label,
-                    im_text_for_state(state),
+                    text,
                 )
                 .await;
             let update_succeeded = match resolved {
@@ -1588,8 +1939,7 @@ async fn handle_telegram_approval_outcome(
                 adapter
                     .send_text(
                         &message.chat_id,
-                        &im_text_for_state(state)
-                            .approval_decision_submitted_label(&decision.label),
+                        &approval_decision_fallback_text(text, &decision.label),
                     )
                     .await?;
             }
@@ -1660,9 +2010,12 @@ mod tests {
 
     use anyhow::{Result, anyhow};
 
+    use crate::im::core::i18n::ImText;
+
     use super::{
         TelegramThreadRoutingResultDelivery, TelegramThreadRoutingResultSender,
-        callback_targets_current_message, deliver_telegram_thread_routing_result,
+        approval_decision_fallback_text, callback_targets_current_message,
+        deliver_telegram_thread_routing_result,
     };
 
     struct ScriptedThreadRoutingResultSender {
@@ -1713,6 +2066,33 @@ mod tests {
     fn accepts_current_callback_and_text_replies() {
         assert!(callback_targets_current_message(Some("10"), Some("10")));
         assert!(callback_targets_current_message(Some("10"), None));
+    }
+
+    #[test]
+    fn approval_failure_fallback_uses_the_localized_decision_label() {
+        assert_eq!(
+            approval_decision_fallback_text(ImText::zh_cn(), "Yes, proceed"),
+            "已提交：允许执行"
+        );
+    }
+
+    #[test]
+    fn command_parser_normalizes_standard_commands_and_legacy_aliases() {
+        assert_eq!(
+            super::command("/STOP@ThreadRelay extra"),
+            Some("/stop".to_string())
+        );
+        assert_eq!(super::command("/s"), Some("/s".to_string()));
+        assert_eq!(super::command("/q"), Some("/q".to_string()));
+        assert_eq!(super::command("/1"), Some("/1".to_string()));
+        assert_eq!(super::command("status"), None);
+        assert_eq!(super::command("/queue hello"), Some("/queue".to_string()));
+        assert_eq!(
+            super::command("/steer@ThreadRelay new direction"),
+            Some("/steer".to_string())
+        );
+        assert_eq!(super::command_payload("/queue hello world"), "hello world");
+        assert_eq!(super::command_payload("/queue@ThreadRelay hello"), "hello");
     }
 
     #[tokio::test]

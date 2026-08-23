@@ -16,6 +16,7 @@ use crate::{
 
 const PENDING_ATTACHMENTS_MAX_AGE_MS: u128 = 10 * 60 * 1000;
 const PENDING_ATTACHMENTS_MAX_COUNT: usize = 8;
+pub(crate) const TELEGRAM_QUEUED_TURNS_MAX_COUNT: usize = 8;
 const TELEGRAM_COMMENTARY_MAX_ENTRIES: usize = 64;
 const TELEGRAM_COMMAND_PROGRESS_MAX_ENTRIES: usize = 128;
 const TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS: usize = 64;
@@ -60,6 +61,19 @@ struct TelegramCommentarySegmentState {
 struct PendingAttachments {
     attachments: Vec<InboundAttachment>,
     received_at_ms: u128,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingTelegramTurn {
+    pub text: String,
+    pub attachments: Vec<InboundAttachment>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelegramQueueEnqueueOutcome {
+    Added(usize),
+    Full,
+    NotRunning,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +192,7 @@ pub struct RuntimeState {
     pub wecom_streams_by_thread: HashMap<String, WecomStreamState>,
     pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
     pending_attachments_by_conversation: HashMap<String, PendingAttachments>,
+    pending_telegram_turns_by_conversation: HashMap<String, VecDeque<PendingTelegramTurn>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,7 +394,12 @@ impl RuntimeState {
             .keys()
             .chain(self.starting_turn_by_thread.iter())
             .collect::<HashSet<_>>()
-            .len();
+            .len()
+            + self
+                .pending_telegram_turns_by_conversation
+                .values()
+                .map(VecDeque::len)
+                .sum::<usize>();
         let im_streams = self.feishu_streaming_cards_by_item.len()
             + self
                 .telegram_typing_by_item
@@ -406,6 +426,7 @@ impl RuntimeState {
         self.terminal_status_fallback_by_thread.clear();
         self.wecom_streams_by_thread.clear();
         self.pending_attachments_by_conversation.clear();
+        self.pending_telegram_turns_by_conversation.clear();
         self.bridge_generation
     }
 
@@ -420,6 +441,7 @@ impl RuntimeState {
         self.terminal_status_fallback_by_thread.clear();
         self.wecom_streams_by_thread.clear();
         self.pending_attachments_by_conversation.clear();
+        self.pending_telegram_turns_by_conversation.clear();
     }
 
     pub fn is_bridge_generation(&self, generation: u64) -> bool {
@@ -457,6 +479,8 @@ impl RuntimeState {
             self.telegram_command_progress_by_thread.remove(thread_id);
             self.telegram_commentary_by_thread.remove(thread_id);
             self.terminal_status_fallback_by_thread.remove(thread_id);
+            self.pending_telegram_turns_by_conversation
+                .remove(&route.conversation_key);
             log_route_unbind("unbind_conversation", reason, thread_id, route);
         }
         entries
@@ -560,6 +584,11 @@ impl RuntimeState {
         self.current_turn_by_thread
             .get(thread_id)
             .map(String::as_str)
+    }
+
+    pub(crate) fn turn_in_progress(&self, thread_id: &str) -> bool {
+        self.current_turn_by_thread.contains_key(thread_id)
+            || self.starting_turn_by_thread.contains(thread_id)
     }
 
     #[cfg(test)]
@@ -1787,6 +1816,80 @@ impl RuntimeState {
             .unwrap_or_default()
     }
 
+    pub(crate) fn enqueue_telegram_turn(
+        &mut self,
+        conversation_key: &str,
+        turn: PendingTelegramTurn,
+    ) -> Option<usize> {
+        let queue = self
+            .pending_telegram_turns_by_conversation
+            .entry(conversation_key.to_string())
+            .or_default();
+        if queue.len() >= TELEGRAM_QUEUED_TURNS_MAX_COUNT {
+            return None;
+        }
+        queue.push_back(turn);
+        Some(queue.len())
+    }
+
+    pub(crate) fn enqueue_telegram_turn_if_active(
+        &mut self,
+        conversation_key: &str,
+        turn: PendingTelegramTurn,
+    ) -> TelegramQueueEnqueueOutcome {
+        let Some(thread_id) = self.route_by_thread.iter().find_map(|(thread_id, route)| {
+            (route.conversation_key == conversation_key).then(|| thread_id.clone())
+        }) else {
+            return TelegramQueueEnqueueOutcome::NotRunning;
+        };
+        if !self.turn_in_progress(&thread_id) {
+            return TelegramQueueEnqueueOutcome::NotRunning;
+        }
+        match self.enqueue_telegram_turn(conversation_key, turn) {
+            Some(position) => TelegramQueueEnqueueOutcome::Added(position),
+            None => TelegramQueueEnqueueOutcome::Full,
+        }
+    }
+
+    pub(crate) fn take_next_telegram_turn(
+        &mut self,
+        conversation_key: &str,
+    ) -> Option<PendingTelegramTurn> {
+        let queue = self
+            .pending_telegram_turns_by_conversation
+            .get_mut(conversation_key)?;
+        let turn = queue.pop_front();
+        if queue.is_empty() {
+            self.pending_telegram_turns_by_conversation
+                .remove(conversation_key);
+        }
+        turn
+    }
+
+    pub(crate) fn requeue_telegram_turn_front(
+        &mut self,
+        conversation_key: &str,
+        turn: PendingTelegramTurn,
+    ) {
+        let queue = self
+            .pending_telegram_turns_by_conversation
+            .entry(conversation_key.to_string())
+            .or_default();
+        queue.push_front(turn);
+    }
+
+    pub(crate) fn telegram_queue_len(&self, conversation_key: &str) -> usize {
+        self.pending_telegram_turns_by_conversation
+            .get(conversation_key)
+            .map(VecDeque::len)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn clear_telegram_queue(&mut self, conversation_key: &str) {
+        self.pending_telegram_turns_by_conversation
+            .remove(conversation_key);
+    }
+
     pub fn mark_turn_completed(&mut self, thread_id: &str, turn_id: Option<&str>) -> bool {
         let current_turn_id = self
             .current_turn_by_thread
@@ -2305,11 +2408,13 @@ mod tests {
     use crate::types::{ImPlatformKind, InboundAttachment};
 
     use super::{
-        PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, RouteTarget, RuntimeState,
-        TelegramCollabProgressStatus, TelegramCollabProgressUpdate, TelegramCommandProgressEntry,
+        PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, PendingTelegramTurn, RouteTarget,
+        RuntimeState, TELEGRAM_QUEUED_TURNS_MAX_COUNT, TelegramCollabProgressStatus,
+        TelegramCollabProgressUpdate, TelegramCommandProgressEntry,
         TelegramCommandProgressEntryKind, TelegramCommandProgressStatus, TelegramDiffFileSummary,
-        TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus, TelegramTypingSendAction,
-        TelegramWebSearchProgressEntry, ThreadTurnState, TurnOrigin, route_from_conversation_key,
+        TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus, TelegramQueueEnqueueOutcome,
+        TelegramTypingSendAction, TelegramWebSearchProgressEntry, ThreadTurnState, TurnOrigin,
+        route_from_conversation_key,
     };
 
     fn approval(id: i64) -> PendingApproval {
@@ -2435,6 +2540,165 @@ mod tests {
                 .take_pending_attachments(route, 1_000 + PENDING_ATTACHMENTS_MAX_AGE_MS + 1)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn telegram_turn_queue_is_fifo_and_bounded() {
+        let mut runtime = RuntimeState::default();
+        let route = "telegram:default:chat-1";
+
+        for index in 0..TELEGRAM_QUEUED_TURNS_MAX_COUNT {
+            assert_eq!(
+                runtime.enqueue_telegram_turn(
+                    route,
+                    PendingTelegramTurn {
+                        text: format!("message-{index}"),
+                        attachments: Vec::new(),
+                    }
+                ),
+                Some(index + 1)
+            );
+        }
+        assert!(
+            runtime
+                .enqueue_telegram_turn(
+                    route,
+                    PendingTelegramTurn {
+                        text: "overflow".to_string(),
+                        attachments: Vec::new(),
+                    }
+                )
+                .is_none()
+        );
+
+        for index in 0..TELEGRAM_QUEUED_TURNS_MAX_COUNT {
+            assert_eq!(
+                runtime
+                    .take_next_telegram_turn(route)
+                    .expect("queued turn")
+                    .text,
+                format!("message-{index}")
+            );
+        }
+        assert_eq!(runtime.telegram_queue_len(route), 0);
+    }
+
+    #[test]
+    fn telegram_queue_enqueue_is_atomic_with_turn_state() {
+        let mut runtime = RuntimeState::default();
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:default:chat-1".to_string(),
+            account_id: "default".to_string(),
+            chat_id: "chat-1".to_string(),
+            remote_client_key: "im:telegram:default:chat-1".to_string(),
+        };
+        runtime.bind_route("thread", route.clone());
+        let queued = |text: &str| PendingTelegramTurn {
+            text: text.to_string(),
+            attachments: Vec::new(),
+        };
+
+        assert_eq!(
+            runtime.enqueue_telegram_turn_if_active(&route.conversation_key, queued("idle")),
+            TelegramQueueEnqueueOutcome::NotRunning
+        );
+
+        runtime.try_mark_turn_starting("thread").unwrap();
+        assert_eq!(
+            runtime.enqueue_telegram_turn_if_active(&route.conversation_key, queued("starting")),
+            TelegramQueueEnqueueOutcome::Added(1)
+        );
+
+        runtime.mark_turn_started("thread", "turn");
+        assert_eq!(
+            runtime.enqueue_telegram_turn_if_active(&route.conversation_key, queued("running")),
+            TelegramQueueEnqueueOutcome::Added(2)
+        );
+
+        runtime.mark_turn_completed("thread", Some("turn"));
+        assert_eq!(
+            runtime.enqueue_telegram_turn_if_active(&route.conversation_key, queued("finished")),
+            TelegramQueueEnqueueOutcome::NotRunning
+        );
+        assert_eq!(runtime.telegram_queue_len(&route.conversation_key), 2);
+    }
+
+    #[test]
+    fn telegram_busy_requeue_never_drops_an_existing_turn() {
+        let mut runtime = RuntimeState::default();
+        let route = "telegram:default:chat-1";
+        runtime.enqueue_telegram_turn(
+            route,
+            PendingTelegramTurn {
+                text: "original-front".to_string(),
+                attachments: Vec::new(),
+            },
+        );
+        let original = runtime
+            .take_next_telegram_turn(route)
+            .expect("original queued turn");
+
+        for index in 0..TELEGRAM_QUEUED_TURNS_MAX_COUNT {
+            assert!(
+                runtime
+                    .enqueue_telegram_turn(
+                        route,
+                        PendingTelegramTurn {
+                            text: format!("concurrent-{index}"),
+                            attachments: Vec::new(),
+                        },
+                    )
+                    .is_some()
+            );
+        }
+
+        runtime.requeue_telegram_turn_front(route, original);
+
+        assert_eq!(
+            runtime.telegram_queue_len(route),
+            TELEGRAM_QUEUED_TURNS_MAX_COUNT + 1
+        );
+        assert_eq!(
+            runtime
+                .take_next_telegram_turn(route)
+                .expect("requeued original turn")
+                .text,
+            "original-front"
+        );
+        for index in 0..TELEGRAM_QUEUED_TURNS_MAX_COUNT {
+            assert_eq!(
+                runtime
+                    .take_next_telegram_turn(route)
+                    .expect("concurrently queued turn")
+                    .text,
+                format!("concurrent-{index}")
+            );
+        }
+    }
+
+    #[test]
+    fn clearing_a_route_also_clears_telegram_turn_queue() {
+        let mut runtime = RuntimeState::default();
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:default:chat-1".to_string(),
+            account_id: "default".to_string(),
+            chat_id: "chat-1".to_string(),
+            remote_client_key: "im:telegram:default:chat-1".to_string(),
+        };
+        runtime.bind_route("thread", route.clone());
+        runtime.enqueue_telegram_turn(
+            &route.conversation_key,
+            PendingTelegramTurn {
+                text: "queued".to_string(),
+                attachments: Vec::new(),
+            },
+        );
+
+        runtime.unbind_routes_for_conversation_with_reason(&route.conversation_key, "test");
+
+        assert_eq!(runtime.telegram_queue_len(&route.conversation_key), 0);
     }
 
     #[test]

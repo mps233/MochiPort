@@ -159,9 +159,10 @@ MVP 功能：
 
 - 通过 long polling 接收 Telegram Bot 消息。
 - 私聊文本消息转为 `InboundMessage`；群聊消息和群聊按钮回调直接忽略。
-- 全局命令只保留 `/s` 中断当前任务、`/q` 退出当前会话。
+- Telegram 菜单提供规范命令：`/new` 创建会话、`/sessions` 恢复历史会话、`/status` 查看状态、`/steer` 调整当前任务方向、`/queue` 排队下一条任务、`/stop` 中断任务、`/exit` 退出会话、`/help` 查看帮助；`/s` 和 `/q` 继续作为兼容别名。
+- 任务运行时直接发送普通文字会调用 `turn/steer` 追加方向；也可使用 `/steer <内容>` 明确表达。使用 `/queue <内容>` 可将消息放入当前 Telegram 会话的有限 FIFO 队列，当前 turn 完成后自动启动下一条。
 - 没有绑定 thread 时，先让用户选择新建会话或恢复历史会话，不自动创建。
-- approval 先用文本命令回复，后续再补 inline keyboard。
+- approval 使用 inline keyboard，并保留 `/1`、`/y`、`/n` 等文本回复作为备用入口。
 - Codex 最终回复用普通文本发送。
 
 MVP 之后已补齐：

@@ -17,24 +17,13 @@ This project is derived from [`happy-loki/codexhub`](https://github.com/happy-lo
 | Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
 
 <p align="center">
-  <img src="docs/assets/product/main.png" alt="ThreadRelay GUI status and config UI" width="900">
+  <img src="docs/assets/product/threadrelay-overview.png" alt="Current ThreadRelay connection topology and messaging channel overview" width="900">
 </p>
 <p align="center">
-  <img src="docs/assets/product/codex-app-chat.png" alt="Codex App session sync and image result" width="900">
-</p>
-<p align="center">
-  <img src="docs/assets/product/deepseek.jpg" alt="Codex App using DeepSeek through AI Gateway" width="900">
+  <img src="docs/assets/product/threadrelay-ai-gateway.png" alt="Current ThreadRelay AI Gateway providers and visible models" width="900">
 </p>
 
 AI Gateway is a local model entry built into `threadrelay`. Codex App keeps sending normal Responses-style requests, while `threadrelay` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
-
-<p align="center">
-  <img src="docs/assets/product/feishu-mobile-image.jpg" alt="Feishu mobile Codex image result" width="360">
-  <img src="docs/assets/product/tg.jpg" alt="Telegram mobile Codex thread creation" width="360">
-</p>
-<p align="center">
-  <img src="docs/assets/product/syn.png" alt="Feishu IM and local Codex CLI synchronized session" width="900">
-</p>
 
 ## Quick Start
 
@@ -165,11 +154,25 @@ For questions or feedback, open an issue in [ThreadRelay Issues](https://github.
 
 ## IM Commands
 
-Only `/q` is needed in normal use. Follow the card prompts for other actions.
+Telegram shows the standard commands in the bot menu. `/s` and `/q` remain available as compatibility aliases.
 
 ```text
-/q         interrupt and clear the current binding
+/new       create a new session
+/sessions  resume a previous session
+/status    show connection, task, and queue status
+/steer     steer the current task
+/queue     run one message after the current task
+/stop      interrupt the current task (alias: /s)
+/exit      exit the current session (alias: /q)
+/help      show command help
 ```
+
+While a task is running, ordinary text is sent as a direction update; you can also use
+`/steer your new direction`. Use `/queue text to run later` to add a message to the
+current conversation's FIFO queue. Queued messages start automatically after the current
+task finishes.
+
+Use the buttons or numbers shown in approval and session messages.
 
 Approval prompts are updated after selection where the platform supports it.
 

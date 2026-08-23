@@ -138,6 +138,12 @@ pub enum TelegramParseMode {
     Html,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TelegramBotCommand {
+    pub command: String,
+    pub description: String,
+}
+
 /// Rich message content accepted by Telegram's `sendRichMessage` and
 /// `editMessageText` methods.
 ///
@@ -362,6 +368,16 @@ impl TelegramApi {
             body["offset"] = serde_json::json!(offset);
         }
         self.post("getUpdates", &body).await
+    }
+
+    pub async fn set_my_commands(&self, commands: &[TelegramBotCommand]) -> Result<()> {
+        let _: bool = self
+            .post(
+                "setMyCommands",
+                &serde_json::json!({ "commands": commands }),
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn send_text(&self, chat_id: &str, text: &str) -> Result<i64> {
@@ -890,10 +906,11 @@ mod tests {
     use reqwest::StatusCode;
 
     use super::{
-        TelegramApi, TelegramApiError, TelegramInputRichMessage, TelegramInputRichMessageMedia,
-        TelegramParseMode, TelegramResponse, TelegramUpdate, edit_message_reply_markup_body,
-        edit_message_text_body, edit_rich_message_body, send_chat_action_body,
-        send_message_draft_body, send_rich_message_body, send_rich_message_draft_body,
+        TelegramApi, TelegramApiError, TelegramBotCommand, TelegramInputRichMessage,
+        TelegramInputRichMessageMedia, TelegramParseMode, TelegramResponse, TelegramUpdate,
+        edit_message_reply_markup_body, edit_message_text_body, edit_rich_message_body,
+        send_chat_action_body, send_message_draft_body, send_rich_message_body,
+        send_rich_message_draft_body,
     };
     use crate::im::telegram::types::TelegramSettings;
 
@@ -991,6 +1008,36 @@ mod tests {
             serde_json::json!([])
         );
         assert_eq!(body["disable_web_page_preview"], true);
+    }
+
+    #[test]
+    fn serializes_telegram_command_menu_without_slash_prefixes() {
+        let commands = vec![
+            TelegramBotCommand {
+                command: "new".to_string(),
+                description: "Create a new session".to_string(),
+            },
+            TelegramBotCommand {
+                command: "stop".to_string(),
+                description: "Interrupt the current task".to_string(),
+            },
+        ];
+        let body = serde_json::json!({ "commands": commands });
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "commands": [
+                    {"command": "new", "description": "Create a new session"},
+                    {"command": "stop", "description": "Interrupt the current task"},
+                ]
+            })
+        );
+        assert!(
+            !body["commands"][0]["command"]
+                .as_str()
+                .unwrap()
+                .starts_with('/')
+        );
     }
 
     #[test]

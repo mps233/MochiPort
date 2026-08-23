@@ -57,6 +57,17 @@ pub(crate) async fn active_turn_for_message(
     Some((thread_id, turn_id))
 }
 
+pub(crate) async fn turn_in_progress_for_message(
+    state: &SharedState,
+    message: &InboundMessage,
+) -> bool {
+    let route = route_for_message(message);
+    let Some(thread_id) = live_thread_for_route(state, &route).await else {
+        return false;
+    };
+    state.runtime.lock().await.turn_in_progress(&thread_id)
+}
+
 pub(crate) async fn remote_client_key_for_thread(
     state: &SharedState,
     thread_id: &str,

@@ -447,6 +447,264 @@ impl ImText {
         self.choose("审批待处理", "approval pending")
     }
 
+    pub(crate) fn approval_type_label(self) -> &'static str {
+        self.choose("类型", "Type")
+    }
+
+    pub(crate) fn approval_details_label(self) -> &'static str {
+        self.choose("请求内容", "Request")
+    }
+
+    pub(crate) fn approval_actions_label(self) -> &'static str {
+        self.choose("可选操作", "Actions")
+    }
+
+    pub(crate) fn approval_kind_label(self, kind: &str) -> String {
+        let kind = kind.trim();
+        match self.locale {
+            ImLocale::ZhCn => match kind {
+                "command" | "commandExecution" => "命令执行".to_string(),
+                "fileChange" => "文件修改".to_string(),
+                "permissions" => "权限请求".to_string(),
+                "mcpElicitation" => "外部服务请求".to_string(),
+                "review" => "变更审查".to_string(),
+                _ => kind.to_string(),
+            },
+            ImLocale::EnUs => match kind {
+                "command" | "commandExecution" => "Command execution".to_string(),
+                "fileChange" => "File change".to_string(),
+                "permissions" => "Permissions".to_string(),
+                "mcpElicitation" => "External service".to_string(),
+                "review" => "Change review".to_string(),
+                _ => kind.to_string(),
+            },
+        }
+    }
+
+    pub(crate) fn approval_decision_label(self, label: &str) -> String {
+        let label = label.trim();
+        if !matches!(self.locale, ImLocale::ZhCn) {
+            return label.to_string();
+        }
+        if let Some(prefix) = label
+            .strip_prefix("Yes, and don't ask again for commands that start with `")
+            .and_then(|value| value.strip_suffix('`'))
+        {
+            return format!("不再询问此前缀命令：`{prefix}`");
+        }
+        match label {
+            "Yes, just this once" | "Yes, allow once" => "仅本次允许".to_string(),
+            "Yes, proceed" => "允许执行".to_string(),
+            "Yes, allow for this session" => "本会话允许".to_string(),
+            "Yes, always allow" => "始终允许".to_string(),
+            "Yes, and allow this host for this conversation" => "允许此会话访问该主机".to_string(),
+            "Yes, allow these permissions for this turn" => "仅本次允许这些权限".to_string(),
+            "Yes, and allow these permissions for this session" => "本会话允许这些权限".to_string(),
+            "Yes, and don't ask again for this command in this session" => {
+                "本会话不再询问此命令".to_string()
+            }
+            "Yes, and don't ask again for these files" => "这些文件不再询问".to_string(),
+            "No, continue without running it" => "拒绝执行".to_string(),
+            "No, and tell Codex what to do differently" => {
+                "拒绝，并告诉 Codex 如何调整".to_string()
+            }
+            "No, continue without granting them" => "拒绝授权".to_string(),
+            "No, and block this host in the future" => "拒绝并屏蔽此主机".to_string(),
+            "Yes, and allow this host in the future" => "允许并记住此主机".to_string(),
+            "No, continue without it" => "拒绝".to_string(),
+            "Cancel this request" => "取消请求".to_string(),
+            "Allow" => "允许".to_string(),
+            "Deny" | "Decline" => "拒绝".to_string(),
+            _ => label.to_string(),
+        }
+    }
+
+    pub(crate) fn telegram_approval_reply_footer(self, hint: &str) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("点击下方按钮，或回复 {hint} 处理。"),
+            ImLocale::EnUs => format!("Tap a button below, or reply {hint} to choose."),
+        }
+    }
+
+    pub(crate) fn telegram_command_menu(self) -> Vec<(&'static str, &'static str)> {
+        match self.locale {
+            ImLocale::ZhCn => vec![
+                ("new", "创建新会话"),
+                ("sessions", "恢复历史会话"),
+                ("status", "查看连接和任务状态"),
+                ("steer", "调整当前任务方向"),
+                ("queue", "排队下一条任务"),
+                ("stop", "中断当前任务"),
+                ("exit", "退出当前会话"),
+                ("help", "查看命令帮助"),
+            ],
+            ImLocale::EnUs => vec![
+                ("new", "Create a new session"),
+                ("sessions", "Resume a previous session"),
+                ("status", "Show connection and task status"),
+                ("steer", "Steer the current task"),
+                ("queue", "Queue the next task"),
+                ("stop", "Interrupt the current task"),
+                ("exit", "Exit the current session"),
+                ("help", "Show command help"),
+            ],
+        }
+    }
+
+    pub(crate) fn telegram_help(self) -> &'static str {
+        self.choose(
+            "Telegram 命令\n\n会话\n/new    创建新会话\n/sessions    恢复历史会话\n/status    查看连接、任务和队列状态\n/exit    退出当前会话\n\n任务\n/steer <内容>    调整当前任务方向\n/queue <内容>    当前任务完成后执行\n/stop    中断当前任务\n\n任务运行时直接发送普通文字，也会调整当前任务方向。\n\n/help    查看这份帮助\n\n兼容别名：/s = /stop，/q = /exit。审批和会话选择请按消息中的按钮或编号操作。",
+            "Telegram commands\n\nSessions\n/new    Create a new session\n/sessions    Resume a previous session\n/status    Show connection, task, and queue status\n/exit    Exit the current session\n\nTask\n/steer <text>    Steer the current task\n/queue <text>    Run after the current task\n/stop    Interrupt the current task\n\nOrdinary text sent while a task is running also steers the current task.\n\n/help    Show this help\n\nCompatibility aliases: /s = /stop, /q = /exit. Use the buttons or numbers shown in approval and session messages.",
+        )
+    }
+
+    pub(crate) fn telegram_unknown_command(self, command: &str) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("未知命令：{command}\n发送 /help 查看可用命令。"),
+            ImLocale::EnUs => {
+                format!("Unknown command: {command}\nSend /help to see available commands.")
+            }
+        }
+    }
+
+    pub(crate) fn telegram_turn_busy_notice(self) -> &'static str {
+        self.choose(
+            "当前任务仍在运行。直接发送文字可调整方向；使用 /queue <内容> 排到后面；/stop 中断任务。",
+            "A task is still running. Send text to steer it, use /queue <text> to run it afterward, or /stop to interrupt.",
+        )
+    }
+
+    pub(crate) fn telegram_steer_accepted(self) -> &'static str {
+        self.choose(
+            "已将这条消息追加到当前任务，正在按新方向继续。",
+            "Added your message to the current task. Continuing with the updated direction.",
+        )
+    }
+
+    pub(crate) fn telegram_steer_usage(self) -> &'static str {
+        self.choose(
+            "用法：/steer <新的方向>。任务运行时直接发送普通文字也可以调整方向。",
+            "Usage: /steer <new direction>. You can also send ordinary text while a task is running.",
+        )
+    }
+
+    pub(crate) fn telegram_steer_failed(self) -> &'static str {
+        self.choose(
+            "当前任务不接受方向调整，请使用 /stop 后重新发送。",
+            "The current task does not accept steering. Use /stop and send the message again.",
+        )
+    }
+
+    pub(crate) fn telegram_queue_usage(self) -> &'static str {
+        self.choose(
+            "用法：/queue <要排队的内容>。它会在当前任务完成后自动执行。",
+            "Usage: /queue <text to queue>. It will run automatically after the current task finishes.",
+        )
+    }
+
+    pub(crate) fn telegram_queue_added(self, position: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("已排队，这是当前任务后的第 {position} 条消息。"),
+            ImLocale::EnUs => format!("Queued. This is item {position} after the current task."),
+        }
+    }
+
+    pub(crate) fn telegram_queue_full(self, max_count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => {
+                format!("排队已满（最多 {max_count} 条），请等前面的任务完成后再试。")
+            }
+            ImLocale::EnUs => format!(
+                "The queue is full (maximum {max_count}). Try again after an item finishes."
+            ),
+        }
+    }
+
+    pub(crate) fn telegram_queue_requires_running(self) -> &'static str {
+        self.choose(
+            "当前没有运行中的任务，不需要排队；直接发送内容即可。",
+            "There is no running task to queue behind. Send the text directly instead.",
+        )
+    }
+
+    pub(crate) fn telegram_queue_started(self) -> &'static str {
+        self.choose("已开始执行排队消息。", "Started the queued message.")
+    }
+
+    pub(crate) fn telegram_queue_start_failed(self, error: &str) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("排队消息连续启动失败，已跳过。\n{error}"),
+            ImLocale::EnUs => {
+                format!("The queued message could not start and was skipped.\n{error}")
+            }
+        }
+    }
+
+    pub(crate) fn telegram_turn_starting_notice(self) -> &'static str {
+        self.choose(
+            "任务正在启动，暂时无法调整或退出。请稍后重试，或使用 /queue <内容> 排到后面。",
+            "The task is still starting, so it cannot be steered or exited yet. Try again shortly, or use /queue <text>.",
+        )
+    }
+
+    pub(crate) fn telegram_status(
+        self,
+        connected: bool,
+        thread_id: Option<&str>,
+        task: &str,
+        queued: usize,
+    ) -> String {
+        let connection = match (self.locale, connected) {
+            (ImLocale::ZhCn, true) => "已连接",
+            (ImLocale::ZhCn, false) => "未连接",
+            (ImLocale::EnUs, true) => "Connected",
+            (ImLocale::EnUs, false) => "Disconnected",
+        };
+        let (session_label, task_label) = match self.locale {
+            ImLocale::ZhCn => ("会话", "任务"),
+            ImLocale::EnUs => ("Session", "Task"),
+        };
+        let session = match (self.locale, thread_id) {
+            (ImLocale::ZhCn, Some(thread_id)) => format!("已绑定 `{thread_id}`"),
+            (ImLocale::ZhCn, None) => "未绑定".to_string(),
+            (ImLocale::EnUs, Some(thread_id)) => format!("Bound `{thread_id}`"),
+            (ImLocale::EnUs, None) => "Not bound".to_string(),
+        };
+        match self.locale {
+            ImLocale::ZhCn => format!(
+                "Telegram 状态\n\n连接：{connection}\n{session_label}：{session}\n{task_label}：{task}\n排队：{queued} 条"
+            ),
+            ImLocale::EnUs => format!(
+                "Telegram status\n\nConnection: {connection}\n{session_label}: {session}\n{task_label}: {task}\nQueued: {queued}"
+            ),
+        }
+    }
+
+    pub(crate) fn telegram_task_status(
+        self,
+        running: bool,
+        waiting_approval: bool,
+    ) -> &'static str {
+        match (self.locale, running, waiting_approval) {
+            (ImLocale::ZhCn, true, true) => "等待审批",
+            (ImLocale::ZhCn, true, false) => "运行中",
+            (ImLocale::ZhCn, false, true) => "等待审批",
+            (ImLocale::ZhCn, false, false) => "空闲",
+            (ImLocale::EnUs, true, true) => "Waiting for approval",
+            (ImLocale::EnUs, true, false) => "Running",
+            (ImLocale::EnUs, false, true) => "Waiting for approval",
+            (ImLocale::EnUs, false, false) => "Idle",
+        }
+    }
+
+    pub(crate) fn approval_accept_command_label(self) -> &'static str {
+        self.choose("同意 / approve", "approve")
+    }
+
+    pub(crate) fn approval_decline_command_label(self) -> &'static str {
+        self.choose("拒绝 / decline", "decline")
+    }
+
     pub(crate) fn approval_resolved_title(self) -> &'static str {
         self.choose("审批已处理", "approval resolved")
     }
@@ -1493,5 +1751,43 @@ mod tests {
         assert_eq!(en.telegram_progress_status_label("succeeded"), "Succeeded");
         assert_eq!(en.telegram_progress_status_label("completed"), "Done");
         assert_eq!(en.telegram_turn_completed_footer(), "Completed");
+    }
+
+    #[test]
+    fn telegram_command_menu_uses_standard_names_and_status_is_localized() {
+        let zh = ImText {
+            locale: ImLocale::ZhCn,
+        };
+        let en = ImText {
+            locale: ImLocale::EnUs,
+        };
+        let zh_commands = zh
+            .telegram_command_menu()
+            .into_iter()
+            .map(|(command, _)| command)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            zh_commands,
+            vec![
+                "new", "sessions", "status", "steer", "queue", "stop", "exit", "help"
+            ]
+        );
+        assert!(zh.telegram_help().contains("/stop"));
+        assert!(zh.telegram_help().contains("/queue"));
+        assert!(zh.telegram_steer_accepted().contains("追加"));
+        assert_eq!(
+            zh.approval_decision_label("Yes, allow these permissions for this turn"),
+            "仅本次允许这些权限"
+        );
+        assert!(zh.telegram_turn_starting_notice().contains("正在启动"));
+        assert!(
+            zh.telegram_status(true, Some("thread-1"), "运行中", 0)
+                .contains("已连接")
+        );
+        assert!(
+            en.telegram_status(false, None, "Idle", 0)
+                .contains("Disconnected")
+        );
+        assert_eq!(zh.telegram_task_status(true, true), "等待审批");
     }
 }

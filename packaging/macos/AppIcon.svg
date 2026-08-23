@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  ThreadRelay macOS icon source.
+
+  The mascot uses the exact silhouette and face geometry from
+  macos/ThreadRelay/Animation/TokenCompanion.states.js. Liquid Glass effects
+  are kept on separate background, surface, and highlight layers so the
+  character remains the primary mark at every icon size.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="0.08" y1="0.02" x2="0.92" y2="0.98">
+      <stop offset="0" stop-color="#D9F3F7"/>
+      <stop offset="0.32" stop-color="#B6E7EE"/>
+      <stop offset="0.70" stop-color="#73C8D8"/>
+      <stop offset="1" stop-color="#429FB9"/>
+    </linearGradient>
+    <radialGradient id="coolRefraction" cx="0.08" cy="0.06" r="1.05">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.62"/>
+      <stop offset="0.42" stop-color="#FFFFFF" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="warmRefraction" cx="0.90" cy="0.82" r="0.62">
+      <stop offset="0" stop-color="#F8B9CA" stop-opacity="0.34"/>
+      <stop offset="0.48" stop-color="#F8B9CA" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#F8B9CA" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="glassSurface" x1="0.08" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.22"/>
+      <stop offset="0.44" stop-color="#FFFFFF" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#DAF9FF" stop-opacity="0.12"/>
+    </linearGradient>
+    <linearGradient id="glassEdge" x1="0.08" y1="0.02" x2="0.94" y2="0.96">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.92"/>
+      <stop offset="0.42" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#BDEEF7" stop-opacity="0.58"/>
+    </linearGradient>
+    <linearGradient id="mascotFill" x1="0.14" y1="0.02" x2="0.86" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.54" stop-color="#FEFEFE"/>
+      <stop offset="1" stop-color="#EEF3F4"/>
+    </linearGradient>
+    <linearGradient id="mascotEdge" x1="0.08" y1="0.02" x2="0.92" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.50" stop-color="#FFFFFF" stop-opacity="0.36"/>
+      <stop offset="1" stop-color="#A5DCE5" stop-opacity="0.42"/>
+    </linearGradient>
+    <linearGradient id="mascotSheen" x1="0.10" y1="0" x2="0.90" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.24"/>
+      <stop offset="0.48" stop-color="#FFFFFF" stop-opacity="0.03"/>
+      <stop offset="1" stop-color="#59C1D4" stop-opacity="0.05"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-12%" y="-12%" width="124%" height="134%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+    <filter id="mascotShadow" x="-24%" y="-38%" width="148%" height="190%">
+      <feGaussianBlur stdDeviation="24"/>
+    </filter>
+    <filter id="softBlur" x="-30%" y="-40%" width="160%" height="180%">
+      <feGaussianBlur stdDeviation="18"/>
+    </filter>
+    <filter id="edgeBlur" x="-30%" y="-50%" width="160%" height="200%">
+      <feGaussianBlur stdDeviation="3.5"/>
+    </filter>
+    <clipPath id="iconClip">
+      <rect x="30" y="30" width="964" height="964" rx="224"/>
+    </clipPath>
+    <clipPath id="mascotClip">
+      <path d="M34.3 9.4 L41.7 9.4 C56.8 9.4 69 21.7 69 36.9 C69 43.2 63.9 48.4 57.6 48.4 L18.4 48.4 C12.1 48.4 7 43.2 7 36.9 C7 21.7 19.2 9.4 34.3 9.4 Z" transform="translate(48.4 155.3) scale(12.2)"/>
+    </clipPath>
+  </defs>
+
+  <g id="background-layer">
+    <rect x="48" y="58" width="928" height="928" rx="214" fill="#254A54" fill-opacity="0.10" filter="url(#tileShadow)"/>
+    <g clip-path="url(#iconClip)">
+      <rect x="30" y="30" width="964" height="964" rx="224" fill="url(#background)"/>
+      <rect x="30" y="30" width="964" height="964" rx="224" fill="url(#coolRefraction)"/>
+      <rect x="30" y="30" width="964" height="964" rx="224" fill="url(#warmRefraction)"/>
+      <path d="M30 720 C270 620 610 660 994 882 L994 994 L30 994 Z" fill="#1BAFC9" fill-opacity="0.16"/>
+      <path d="M30 352 C286 178 624 148 994 276 L994 30 L30 30 Z" fill="#FFFFFF" fill-opacity="0.13"/>
+    </g>
+  </g>
+
+  <g id="glass-layer" clip-path="url(#iconClip)">
+    <rect x="58" y="58" width="908" height="908" rx="205" fill="url(#glassSurface)" stroke="url(#glassEdge)" stroke-width="4"/>
+    <path d="M92 410 C260 196 556 96 900 164" fill="none" stroke="#FFFFFF" stroke-opacity="0.28" stroke-width="22" stroke-linecap="round" filter="url(#softBlur)"/>
+    <path d="M84 285 C260 112 526 88 734 128" fill="none" stroke="#FFFFFF" stroke-opacity="0.48" stroke-width="5" stroke-linecap="round"/>
+    <path d="M124 906 C366 812 690 830 928 924" fill="none" stroke="#178EAA" stroke-opacity="0.13" stroke-width="44" stroke-linecap="round" filter="url(#softBlur)"/>
+  </g>
+
+  <g id="mascot-shadow-layer">
+    <path d="M34.3 9.4 L41.7 9.4 C56.8 9.4 69 21.7 69 36.9 C69 43.2 63.9 48.4 57.6 48.4 L18.4 48.4 C12.1 48.4 7 43.2 7 36.9 C7 21.7 19.2 9.4 34.3 9.4 Z" fill="#126F89" fill-opacity="0.14" filter="url(#mascotShadow)" transform="translate(48.4 177.3) scale(12.2)"/>
+  </g>
+
+  <!-- Exact Mochi silhouette from TokenCompanion.states.js, enlarged 12.2x. -->
+  <g id="mascot-body-layer">
+    <path d="M34.3 9.4 L41.7 9.4 C56.8 9.4 69 21.7 69 36.9 C69 43.2 63.9 48.4 57.6 48.4 L18.4 48.4 C12.1 48.4 7 43.2 7 36.9 C7 21.7 19.2 9.4 34.3 9.4 Z" fill="url(#mascotFill)" stroke="url(#mascotEdge)" stroke-width="0.40" stroke-linejoin="round" transform="translate(48.4 155.3) scale(12.2)"/>
+    <path d="M34.3 9.4 L41.7 9.4 C56.8 9.4 69 21.7 69 36.9 C69 43.2 63.9 48.4 57.6 48.4 L18.4 48.4 C12.1 48.4 7 43.2 7 36.9 C7 21.7 19.2 9.4 34.3 9.4 Z" fill="url(#mascotSheen)" transform="translate(48.4 155.3) scale(12.2)"/>
+    <g clip-path="url(#mascotClip)">
+      <ellipse cx="364" cy="274" rx="322" ry="116" fill="#FFFFFF" fill-opacity="0.34" filter="url(#softBlur)"/>
+      <path d="M162 517 C234 350 380 286 530 280" fill="none" stroke="#FFFFFF" stroke-opacity="0.52" stroke-width="22" stroke-linecap="round" filter="url(#edgeBlur)"/>
+      <path d="M142 697 C370 778 682 776 880 655" fill="none" stroke="#70CAD9" stroke-opacity="0.09" stroke-width="48" filter="url(#softBlur)"/>
+    </g>
+    <path d="M466.9 282 L557.1 282 C737 282 875 421 875 601" fill="none" stroke="#FFFFFF" stroke-opacity="0.46" stroke-width="3.5" stroke-linecap="round"/>
+  </g>
+
+  <!-- Exact eye and cheek geometry from TokenCompanion.states.js. -->
+  <g id="mascot-face-layer">
+    <!-- Coordinates are the actual ThreadBlobFace layout, scaled from 76x58. -->
+    <rect x="441.6" y="352.6" width="24.2" height="130.9" rx="12.1" fill="#4E4E4E"/>
+    <rect x="558.2" y="352.6" width="24.2" height="130.9" rx="12.1" fill="#4E4E4E"/>
+    <ellipse cx="362.7" cy="510.5" rx="49.8" ry="49.8" fill="#D8A5B2" fill-opacity="0.55"/>
+    <ellipse cx="661.3" cy="510.5" rx="49.8" ry="49.8" fill="#D8A5B2" fill-opacity="0.55"/>
+  </g>
+
+  <g id="specular-layer" clip-path="url(#iconClip)">
+    <path d="M132 154 C304 68 550 72 712 122" fill="none" stroke="#FFFFFF" stroke-opacity="0.56" stroke-width="8" stroke-linecap="round" filter="url(#edgeBlur)"/>
+    <rect x="46" y="46" width="932" height="932" rx="214" fill="none" stroke="#FFFFFF" stroke-opacity="0.34" stroke-width="2.5"/>
+  </g>
+</svg>

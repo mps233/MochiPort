@@ -14,6 +14,8 @@ use super::api::{TelegramApi, TelegramApiError, TelegramInputRichMessage, Telegr
 const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4096;
 const TELEGRAM_CONTINUATION_OVERHEAD: usize = 30;
 const TELEGRAM_CHUNK_DELAY_MS: u64 = 100;
+const TELEGRAM_APPROVAL_SUMMARY_MAX_CHARS: usize = 2800;
+const TELEGRAM_APPROVAL_DECISION_MAX_CHARS: usize = 120;
 
 #[derive(Clone)]
 pub struct TelegramAdapter {
@@ -337,7 +339,7 @@ impl TelegramAdapter {
         im_text: ImText,
     ) -> Result<String> {
         let text = telegram_cleanup_text(&approval_text(approval, im_text));
-        let Some(keyboard) = approval_keyboard(approval) else {
+        let Some(keyboard) = approval_keyboard(approval, im_text) else {
             return self.send_text(target, &text).await;
         };
         let chunks = telegram_text_chunks(&text);
@@ -1050,29 +1052,94 @@ impl TelegramAdapter {
 }
 
 fn approval_text(approval: &PendingApproval, text: ImText) -> String {
-    let mut lines = vec![
-        text.approval_request_heading().to_string(),
-        format!("request_kind: `{}`", approval.request_kind),
-        String::new(),
-        approval.summary.trim().to_string(),
-        String::new(),
-        format!("{}:", text.available_decisions_label()),
-    ];
-    if approval.decisions.is_empty() {
-        lines.push("/y".to_string());
-        lines.push("/n".to_string());
+    let kind = text.approval_kind_label(&approval.request_kind);
+    let mut summary = truncate_approval_summary(&approval.summary);
+    let mut action_lines = if approval.decisions.is_empty() {
+        vec![
+            format!("`/y` · {}", text.approval_accept_command_label()),
+            format!("`/n` · {}", text.approval_decline_command_label()),
+        ]
     } else {
-        lines.extend(
-            approval
-                .decisions
-                .iter()
-                .enumerate()
-                .map(|(index, decision)| format!("/{} {}", index + 1, decision.label)),
-        );
+        approval
+            .decisions
+            .iter()
+            .enumerate()
+            .map(|(index, decision)| {
+                format!(
+                    "`/{}` · {}",
+                    index + 1,
+                    approval_decision_display_label(text, &decision.label)
+                )
+            })
+            .collect()
+    };
+    let mut footer = text.telegram_approval_reply_footer(&text.approval_reply_hint(approval));
+
+    // Approval cards need to remain a single message because only one message
+    // id is retained for the later resolved-state edit. Keep the summary and
+    // action list readable while trimming oversized protocol payloads.
+    loop {
+        let rendered = render_approval_text(&kind, &summary, &action_lines, &footer, text);
+        if rendered.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS {
+            return rendered;
+        }
+
+        let excess = rendered
+            .chars()
+            .count()
+            .saturating_sub(TELEGRAM_MAX_MESSAGE_CHARS);
+        if !summary.is_empty() {
+            let keep = summary.chars().count().saturating_sub(excess);
+            summary = truncate_text_with_ellipsis(&summary, keep);
+        } else if action_lines.len() > 1 {
+            action_lines.pop();
+        } else {
+            // A pathological number of options can also make the reply hint
+            // itself too long. It is only a convenience string; the buttons
+            // and the visible first option remain usable after this trim.
+            let without_footer = render_approval_text(&kind, &summary, &action_lines, "", text);
+            let footer_budget =
+                TELEGRAM_MAX_MESSAGE_CHARS.saturating_sub(without_footer.chars().count());
+            footer = truncate_text_with_ellipsis(&footer, footer_budget);
+        }
     }
+}
+
+fn render_approval_text(
+    kind: &str,
+    summary: &str,
+    action_lines: &[String],
+    footer: &str,
+    text: ImText,
+) -> String {
+    let mut lines = vec![
+        format!("**{}**", text.approval_pending_title()),
+        text.field_line(text.approval_type_label(), &format!("`{kind}`")),
+        String::new(),
+        format!("**{}**", text.approval_details_label()),
+        summary.to_string(),
+        String::new(),
+        format!("**{}**", text.approval_actions_label()),
+    ];
+    lines.extend(action_lines.iter().cloned());
     lines.push(String::new());
-    lines.push(text.approval_reply_footer(&text.approval_reply_hint(approval)));
+    lines.push(footer.to_string());
     lines.join("\n")
+}
+
+fn truncate_text_with_ellipsis(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+    let mut output = text
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    output.push('…');
+    output
 }
 
 fn resolved_approval_text(
@@ -1081,22 +1148,27 @@ fn resolved_approval_text(
     decision_label: &str,
     text: ImText,
 ) -> String {
+    let kind = text.approval_kind_label(&approval.request_kind);
+    let summary = truncate_approval_summary(&approval.summary);
     [
-        text.approval_resolved_title().to_string(),
+        format!("✅ **{}**", text.approval_resolved_title()),
+        text.field_line(text.approval_type_label(), &format!("`{kind}`")),
+        String::new(),
+        format!("**{}**", text.approval_details_label()),
+        summary,
+        String::new(),
         format!(
-            "{}: `{}`",
-            text.approval_request_heading(),
-            approval.request_kind
+            "**{}**",
+            text.approval_selected_label(
+                option_index,
+                &approval_decision_display_label(text, decision_label)
+            )
         ),
-        String::new(),
-        approval.summary.trim().to_string(),
-        String::new(),
-        text.approval_selected_label(option_index, decision_label.trim()),
     ]
     .join("\n")
 }
 
-fn approval_keyboard(approval: &PendingApproval) -> Option<serde_json::Value> {
+fn approval_keyboard(approval: &PendingApproval, text: ImText) -> Option<serde_json::Value> {
     let fingerprint = approval_request_fingerprint(&approval.request_key());
     let rows = approval
         .decisions
@@ -1104,7 +1176,7 @@ fn approval_keyboard(approval: &PendingApproval) -> Option<serde_json::Value> {
         .enumerate()
         .map(|(index, decision)| {
             vec![approval_button(
-                &decision.label,
+                &approval_button_label(text, &decision.label),
                 &format!("ap:{fingerprint}:{}", index + 1),
             )]
         })
@@ -1152,9 +1224,34 @@ fn button(text: &str, callback_data: &str) -> serde_json::Value {
 
 fn approval_button(text: &str, callback_data: &str) -> serde_json::Value {
     json!({
-        "text": text.trim(),
+        "text": truncate_button_text(text),
         "callback_data": callback_data,
     })
+}
+
+fn approval_button_label(text: ImText, label: &str) -> String {
+    approval_decision_display_label(text, label)
+}
+
+fn approval_decision_display_label(text: ImText, label: &str) -> String {
+    truncate_display_text(
+        &text.approval_decision_label(label).replace('`', ""),
+        TELEGRAM_APPROVAL_DECISION_MAX_CHARS,
+    )
+}
+
+fn truncate_approval_summary(summary: &str) -> String {
+    let summary = telegram_cleanup_text(summary);
+    let summary = summary.trim();
+    if summary.chars().count() <= TELEGRAM_APPROVAL_SUMMARY_MAX_CHARS {
+        return summary.to_string();
+    }
+    let mut output = summary
+        .chars()
+        .take(TELEGRAM_APPROVAL_SUMMARY_MAX_CHARS.saturating_sub(1))
+        .collect::<String>();
+    output.push('…');
+    output
 }
 
 fn thread_entries_table_html(entries: &[TelegramThreadListEntry], text: ImText) -> String {
@@ -1664,8 +1761,9 @@ mod tests {
     };
 
     use super::{
-        TELEGRAM_MAX_MESSAGE_CHARS, TelegramAdapter, empty_inline_keyboard, resolved_approval_text,
-        telegram_cleanup_text, telegram_context_compaction_messages, telegram_text_chunks,
+        TELEGRAM_MAX_MESSAGE_CHARS, TelegramAdapter, approval_keyboard, approval_text,
+        empty_inline_keyboard, resolved_approval_text, telegram_cleanup_text,
+        telegram_context_compaction_messages, telegram_markdown_to_html, telegram_text_chunks,
         telegram_turn_completed_chunks, telegram_turn_completed_messages,
         telegram_user_message_chunks, telegram_user_message_messages,
     };
@@ -1872,9 +1970,157 @@ mod tests {
         let text = resolved_approval_text(&approval, 1, "Allow", ImText::zh_cn());
 
         assert!(text.contains("审批已处理"));
-        assert!(text.contains("已选择 /1：Allow"));
+        assert!(text.contains("已选择 /1：允许"));
         assert!(text.contains("Run `cargo test`"));
         assert!(!text.contains("回复 /1 处理"));
+    }
+
+    #[test]
+    fn approval_text_uses_localized_sections_and_fallback_commands() {
+        let approval = PendingApproval {
+            request_id: json!("request-1"),
+            request_kind: "command".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({}),
+            summary: "Run `cargo test`".to_string(),
+            decisions: vec![ApprovalDecisionOption {
+                label: "Yes, just this once".to_string(),
+                decision: json!("approved"),
+            }],
+            message_id: None,
+            remote_client_key: None,
+        };
+
+        let text = approval_text(&approval, ImText::zh_cn());
+
+        assert!(text.starts_with("**审批待处理**\n类型：`命令执行`"));
+        assert!(text.contains("**请求内容**"));
+        assert!(text.contains("**可选操作**\n`/1` · 仅本次允许"));
+        assert!(text.contains("点击下方按钮，或回复 /1 处理。"));
+        assert!(!text.contains("request_kind"));
+    }
+
+    #[test]
+    fn approval_keyboard_localizes_labels_without_changing_callback_shape() {
+        let approval = PendingApproval {
+            request_id: json!("request-1"),
+            request_kind: "command".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({}),
+            summary: "Run `cargo test`".to_string(),
+            decisions: vec![ApprovalDecisionOption {
+                label: "Yes, just this once".to_string(),
+                decision: json!("approved"),
+            }],
+            message_id: None,
+            remote_client_key: None,
+        };
+
+        let keyboard = approval_keyboard(&approval, ImText::zh_cn()).expect("keyboard");
+        let button = &keyboard["inline_keyboard"][0][0];
+        assert_eq!(button["text"], "仅本次允许");
+        assert!(
+            button["callback_data"]
+                .as_str()
+                .is_some_and(|value| { value.starts_with("ap:") && value.ends_with(":1") })
+        );
+    }
+
+    #[test]
+    fn approval_text_keeps_plain_reply_commands_for_rich_text_fallback() {
+        let approval = PendingApproval {
+            request_id: json!("request-1"),
+            request_kind: "command".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({}),
+            summary: "Run `cargo test`".to_string(),
+            decisions: vec![ApprovalDecisionOption {
+                label: "Yes, proceed".to_string(),
+                decision: json!("approved"),
+            }],
+            message_id: None,
+            remote_client_key: None,
+        };
+
+        let plain = approval_text(&approval, ImText::zh_cn());
+        let rich = telegram_markdown_to_html(&plain);
+
+        assert!(plain.contains("`/1`"));
+        assert!(plain.contains("点击下方按钮，或回复 /1 处理。"));
+        assert!(rich.contains("<code>/1</code>"));
+        assert!(rich.contains("<b>审批待处理</b>"));
+    }
+
+    #[test]
+    fn approval_cards_bound_oversized_summaries_to_one_message() {
+        let approval = PendingApproval {
+            request_id: json!("request-1"),
+            request_kind: "command".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({}),
+            summary: "x".repeat(8_000),
+            decisions: vec![ApprovalDecisionOption {
+                label: "Yes, proceed".to_string(),
+                decision: json!("approved"),
+            }],
+            message_id: None,
+            remote_client_key: None,
+        };
+
+        let pending = approval_text(&approval, ImText::zh_cn());
+        let resolved = resolved_approval_text(&approval, 0, "Yes, proceed", ImText::zh_cn());
+
+        assert!(pending.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
+        assert!(resolved.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
+        assert!(pending.contains('…'));
+        assert!(resolved.contains('…'));
+    }
+
+    #[test]
+    fn approval_cards_with_many_options_stay_on_one_editable_message() {
+        let approval = PendingApproval {
+            request_id: json!("request-many-options"),
+            request_kind: "command".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({}),
+            summary: "Run a command".to_string(),
+            decisions: (0..600)
+                .map(|index| ApprovalDecisionOption {
+                    label: format!("Option {index}: allow this command for this session"),
+                    decision: json!("approved"),
+                })
+                .collect(),
+            message_id: None,
+            remote_client_key: None,
+        };
+
+        let pending = approval_text(&approval, ImText::zh_cn());
+        assert!(pending.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
+        assert_eq!(telegram_text_chunks(&pending).len(), 1);
+        assert!(pending.contains("`/1`"));
+        assert!(!pending.contains("`/600`"));
+    }
+
+    #[test]
+    fn approval_text_trims_summary_before_dropping_decision_rows() {
+        let approval = PendingApproval {
+            request_id: json!("request-summary-and-options"),
+            request_kind: "command".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({}),
+            summary: "x".repeat(8_000),
+            decisions: vec![ApprovalDecisionOption {
+                label: "Yes, proceed".to_string(),
+                decision: json!("approved"),
+            }],
+            message_id: None,
+            remote_client_key: None,
+        };
+
+        let pending = approval_text(&approval, ImText::zh_cn());
+        assert!(pending.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS);
+        assert!(pending.contains("请求内容"));
+        assert!(pending.contains("`/1` · 允许执行"));
     }
 
     #[test]
