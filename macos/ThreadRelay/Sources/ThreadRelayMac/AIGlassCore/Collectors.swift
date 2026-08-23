@@ -12,6 +12,9 @@ public final class CodexCollector {
     private var latestLimitsTimestamp: Date = .distantPast
     /// 文件 path → project name 缓存（session_meta）。
     private var projectCache: [String: String?] = [:]
+    /// UsageStore is memory-only, so rehydrate the recent event tail once per
+    /// process before switching back to persisted incremental offsets.
+    private var didHydrateRecentHistory = false
 
     public init(root: URL) { self.root = root }
 
@@ -44,12 +47,19 @@ public final class CodexCollector {
     public func collect(into store: UsageStore) {
         var batch: [(TokenEvent, String?)] = []
         var latestLimits: [LimitWindow]?
+        let shouldHydrateRecentHistory = !didHydrateRecentHistory
         for file in LogLocator.recentFiles(under: root, suffix: ".jsonl") {
             let proj = project(for: file)
             let modifiedAt = try? file.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate
             let persistOffset = modifiedAt.map { !Calendar.current.isDateInToday($0) } ?? false
-            for line in reader.newLines(of: file, persistOffset: persistOffset) {
+            // A fresh UsageStore has no historical events after a GUI restart.
+            // Read the recent tail from the beginning once; subsequent refreshes
+            // retain the normal incremental behavior, including today's files.
+            for line in reader.newLines(
+                of: file,
+                persistOffset: shouldHydrateRecentHistory ? false : persistOffset
+            ) {
                 guard let parsed = CodexLogParser.parse(line: line) else { continue }
                 if let event = parsed.event {
                     // 文件轮换后即使重新解析，也通过稳定键避免重复计数。
@@ -73,5 +83,6 @@ public final class CodexCollector {
         }
         if !batch.isEmpty { store.addEvents(batch) }
         if let latestLimits { store.setLimits(latestLimits, for: .codex) }
+        didHydrateRecentHistory = true
     }
 }

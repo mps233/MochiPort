@@ -939,6 +939,21 @@ private enum UsageTrendRange: String, CaseIterable, Identifiable {
     }
 }
 
+/// Returns a padded domain for a natural-day chart.
+///
+/// Bars are anchored at local midnight. Padding each side by half a day keeps
+/// the first and last bars fully inside the plot area instead of clipping them
+/// at the chart edge.
+func usageTrendDateDomain(days: Int, now: Date, calendar: Calendar = .current) -> ClosedRange<Date> {
+    let safeDays = max(1, days)
+    let today = calendar.startOfDay(for: now)
+    let start = calendar.date(byAdding: .day, value: -(safeDays - 1), to: today) ?? today
+    let end = calendar.date(byAdding: .day, value: 1, to: today) ?? today
+    let paddedStart = calendar.date(byAdding: .hour, value: -12, to: start) ?? start
+    let paddedEnd = calendar.date(byAdding: .hour, value: 12, to: end) ?? end
+    return paddedStart...paddedEnd
+}
+
 private struct TrendsTab: View {
     let store: UsageStore
     /// nil이면 30일/잔디 토글 숨김.
@@ -1000,24 +1015,29 @@ private struct UsageTrendContent: View {
 
     private let enabled: [ServiceID] = [.codex]
 
-    /// Restart-stable trend data comes from the persistent statistics store.
-    /// The in-memory store remains available while that database is unavailable.
+    /// The seven-day view follows local natural days from the recent event tail.
+    /// This keeps events after local midnight visible immediately, even though
+    /// the long-term SQLite archive is still bucketed by UTC day.
     private var rawData: [(day: Date, service: ServiceID, tokens: Int)] {
         let now = Date()
         let days = range == .week ? 7 : 30
-        // Stored day keys are UTC, matching the database writer.
+        if range == .week {
+            return store.dailyTotalsByService(days: days, now: now, calendar: .current)
+        }
+
+        // The 30-day archive is still keyed by UTC for restart-stable history.
         return statsStore?.dailyTotalsByService(days: days, now: now, calendar: .utc)
-            ?? store.dailyTotalsByService(days: days, now: now)
+            ?? store.dailyTotalsByService(days: days, now: now, calendar: .utc)
     }
 
-    /// 전체 날짜 범위 (x축 도메인 고정: 오늘 기준 days일 전 ~ 오늘).
+    /// The chart uses the same calendar as its data source.
+    private var chartCalendar: Calendar {
+        range == .week ? .current : .utc
+    }
+
+    /// 전체 날짜 범위 (양 끝에 반나절 여백 포함).
     private var xDomain: ClosedRange<Date> {
-        let now = Date()
-        let start = Calendar.current.startOfDay(for: now)
-            .addingTimeInterval(-Double(range.days - 1) * 86400)
-        let end = Calendar.current.startOfDay(for: now)
-            .addingTimeInterval(86400)
-        return start...end
+        usageTrendDateDomain(days: range.days, now: Date(), calendar: chartCalendar)
     }
 
     @ViewBuilder
@@ -1068,18 +1088,18 @@ private struct UsageTrendContent: View {
                 .cornerRadius(3)
         }
         .chartForegroundStyleScale(domain: services.map(\.displayName),
-                                   range: services.map { _ in Color.primary.opacity(0.72) })
+                                   range: services.map { _ in Color.primary })
         .chartXScale(domain: xDomain)
         .chartYScale(domain: 0...maxY)
         .chartXAxis {
             if range == .month {
                 AxisMarks(values: .stride(by: .day, count: 7)) {
-                    AxisValueLabel(format: .dateTime.month(.defaultDigits).day(), centered: false)
+                    AxisValueLabel(format: Self.utcMonthDayFormat, centered: false)
                     AxisGridLine()
                 }
             } else {
                 AxisMarks(values: .stride(by: .day)) {
-                    AxisValueLabel(format: .dateTime.day(), centered: true)
+                    AxisValueLabel(format: Self.dayFormat, centered: true)
                 }
             }
         }
@@ -1099,6 +1119,18 @@ private struct UsageTrendContent: View {
         .frame(height: chartHeight)
         .onAppear { startGrow() }
     }
+
+    private static let dayFormat = Date.FormatStyle(
+        locale: .current,
+        calendar: .current,
+        timeZone: .current
+    ).day()
+
+    private static let utcMonthDayFormat = Date.FormatStyle(
+        locale: .current,
+        calendar: .utc,
+        timeZone: TimeZone(identifier: "UTC")!
+    ).month(.defaultDigits).day()
 
     /// Keep large token totals readable on the axis instead of letting
     /// Swift Charts fall back to scientific notation such as `1.0E8`.
