@@ -139,6 +139,21 @@ func gatewayQuotaBalanceText(_ usage: ManageProviderUsageResponse.Usage) -> Stri
     return providerUsageBalanceText(usage)
 }
 
+func gatewayQuotaSub2ApiRateText(
+    _ account: ManageSub2ApiAccountPoolResponse.Account,
+    fallbackUsage: ManageProviderUsageResponse.Usage?
+) -> String? {
+    let accountRate = account.upstreamBilling.effectiveRateMultiplier
+        ?? account.upstreamBilling.resolvedRateMultiplier
+        ?? account.localRateMultiplier
+    if let accountRate {
+        return providerUsageMultiplierText(accountRate)
+    }
+    return providerUsageMultiplierText(
+        fallbackUsage?.effectiveRateMultiplier ?? fallbackUsage?.resolvedRateMultiplier
+    )
+}
+
 func gatewayQuotaMeterPresentation(
     _ balance: ManageSub2ApiAccountPoolResponse.Account.Balance
 ) -> GatewayQuotaMeterPresentation {
@@ -238,9 +253,10 @@ struct GatewayQuotaDock: View {
     }
 
     private var recentAccount: ManageSub2ApiAccountPoolResponse.Account? {
-        // The selected Provider owns its API-key quota. Account-pool data is
-        // only a fallback when the Provider cannot report a usable balance.
-        if providerUsage?.usage.balanceStatus == "available" { return nil }
+        // The provider usage endpoint can report an aggregate wallet balance.
+        // Once the daemon identifies the latest Sub2API account used by this
+        // Provider, that account is the value the user is actually routing
+        // through and must take precedence over the aggregate snapshot.
         guard let accountID = recentAccountResponse?.account?.accountId else { return nil }
         return model.sub2ApiAccountPool?.accounts.first { $0.id == accountID }
     }
@@ -621,9 +637,7 @@ struct GatewayQuotaDock: View {
 
     private var rateText: String? {
         if let account = recentAccount {
-            let value = account.upstreamBilling.effectiveRateMultiplier
-                ?? account.upstreamBilling.resolvedRateMultiplier
-            return providerUsageMultiplierText(value)
+            return gatewayQuotaSub2ApiRateText(account, fallbackUsage: providerUsage?.usage)
         }
         guard let usage = providerUsage?.usage else { return nil }
         return providerUsageMultiplierText(
@@ -898,7 +912,10 @@ private struct GatewayQuotaDetailsPopover: View {
                 )
                 LabeledContent(
                     "当前倍率",
-                    value: sub2ApiUpstreamRateText(recentAccount.upstreamBilling)
+                    value: gatewayQuotaSub2ApiRateText(
+                        recentAccount,
+                        fallbackUsage: usageResponse?.usage
+                    ) ?? sub2ApiUpstreamRateText(recentAccount.upstreamBilling)
                 )
                 if let plan = recentAccount.upstreamBalance.planName, !plan.isEmpty {
                     LabeledContent("账户方案", value: plan)
