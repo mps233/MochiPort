@@ -7,7 +7,9 @@ contents_dir="${helpers_dir:h}"
 gui_executable="$contents_dir/MacOS/MochiPort"
 data_directory="${MOCHIPORT_HOME:-${THREADRELAY_HOME:-$HOME/Library/Application Support/MochiPort}}"
 normal_exit_marker="$data_directory/gui-normal-exit.marker"
-gui_lock_path="$data_directory/io.github.mps233.threadrelay.gui.lock"
+# The GUI's default lock lives under ThreadRelay for compatibility with the
+# shared bundle identifier. Keep an override for custom installations.
+gui_lock_path="${MOCHIPORT_GUI_LOCK_PATH:-${THREADRELAY_GUI_LOCK_PATH:-$HOME/Library/Application Support/ThreadRelay/io.github.mps233.threadrelay.gui.lock}}"
 
 current_contents_dir() {
     print -r -- "$contents_dir"
