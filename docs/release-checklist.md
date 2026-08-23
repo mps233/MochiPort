@@ -29,8 +29,8 @@ is automatic in the handoff workflow, but it never changes the running GUI or
 daemon:
 
 ```sh
-UI_VERSION=0.5.2
-UI_BUILD_NUMBER=445
+UI_VERSION=0.5.3
+UI_BUILD_NUMBER=446
 DAEMON_BUILD_NUMBER=439
 MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
   --target aarch64-apple-darwin --bin mochiport

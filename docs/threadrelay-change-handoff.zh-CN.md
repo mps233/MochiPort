@@ -52,8 +52,8 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
 2. daemon 改动完成后默认直接生成正式 macOS App 产物，不需要用户再次单独要求“打包”。UI 与 daemon 的版本、构建号独立指定；组装时传入 daemon 构建号：
 
    ```sh
-   UI_VERSION=0.5.2
-   UI_BUILD_NUMBER=445
+   UI_VERSION=0.5.3
+   UI_BUILD_NUMBER=446
    DAEMON_BUILD_NUMBER=439
    MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
      --target aarch64-apple-darwin --bin mochiport

@@ -53,7 +53,7 @@ changes in-memory view state.
 Generate the UI version settings independently from the Rust daemon with:
 
 ```sh
-MOCHIPORT_UI_VERSION=0.5.2 MOCHIPORT_UI_BUILD_NUMBER=445 \
+MOCHIPORT_UI_VERSION=0.5.3 MOCHIPORT_UI_BUILD_NUMBER=446 \
   scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 ```
@@ -78,7 +78,7 @@ lipo -create \
   target/x86_64-apple-darwin/release/mochiport \
   -output target/release/mochiport
 chmod 755 target/release/mochiport
-MOCHIPORT_UI_VERSION=0.5.2 MOCHIPORT_UI_BUILD_NUMBER=445 \
+MOCHIPORT_UI_VERSION=0.5.3 MOCHIPORT_UI_BUILD_NUMBER=446 \
   scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 xcodebuild \

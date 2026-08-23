@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-> 当前版本：`0.5.2`
+> 当前版本：`0.5.3`
 
 MochiPort 是一个本地优先的 Codex 会话中继。它把本机的 Codex App、Codex VS Code 插件和 Codex CLI 接入 Telegram、飞书、微信或企业微信，让你可以在消息软件里创建和恢复会话、查看任务进度、处理审批，并在本地客户端继续操作同一个 thread。
 
