@@ -263,16 +263,15 @@ struct DaemonLaunchConfiguration: Equatable {
                 .appendingPathComponent("logs", isDirectory: true)
                 .appendingPathComponent("threadrelay-daemon-launchd.log"),
             homeURL: homeURL,
-            buildIdentifier: Self.bundleBuildIdentifier(bundleURL: bundleURL)
+            buildIdentifier: Self.embeddedDaemonBuildIdentifier(bundleURL: bundleURL)
         )
     }
 
-    private static func bundleBuildIdentifier(bundleURL: URL) -> String? {
+    private static func embeddedDaemonBuildIdentifier(bundleURL: URL) -> String? {
         guard let bundle = Bundle(url: bundleURL),
-              let value = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-        else {
-            return nil
-        }
+              let value = (bundle.object(forInfoDictionaryKey: "MochiPortDaemonBuild")
+                  ?? bundle.object(forInfoDictionaryKey: "CFBundleVersion")) as? String
+        else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
@@ -302,9 +301,17 @@ struct DaemonLaunchConfiguration: Equatable {
             .appendingPathComponent(helperURL.lastPathComponent)
     }
 
+    func activeHelperURL() -> URL {
+        configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+            .appendingPathComponent("current", isDirectory: true)
+            .appendingPathComponent(helperURL.lastPathComponent)
+    }
+
     func propertyListData() throws -> Data {
         let resolvedBuildIdentifier = try resolvedBuildIdentifier()
-        let stagedHelperURL = try stagedHelperURL()
+        let activeHelperURL = activeHelperURL()
         var environment: [String: String] = [
             "HOME": homeURL.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -321,7 +328,7 @@ struct DaemonLaunchConfiguration: Equatable {
         let propertyList: [String: Any] = [
             "Label": launchdLabel,
             "ProgramArguments": [
-                stagedHelperURL.path,
+                activeHelperURL.path,
                 "--config",
                 configURL.path,
                 "daemon",
@@ -600,6 +607,16 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         fileManager: FileManager,
         commandRunner: @Sendable (URL, [String]) throws -> CommandResult
     ) throws {
+        let expectedBuild = try configuration.resolvedBuildIdentifier()
+        if try preserveExistingActiveRuntime(
+            configuration: configuration,
+            expectedBuild: expectedBuild,
+            fileManager: fileManager,
+            commandRunner: commandRunner
+        ) {
+            return
+        }
+
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(
             atPath: configuration.helperURL.path,
@@ -611,7 +628,6 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             throw DaemonLaunchError.helperNotExecutable
         }
 
-        let expectedBuild = try configuration.resolvedBuildIdentifier()
         let destination = try configuration.stagedHelperURL()
         let runtimeDirectory = destination.deletingLastPathComponent()
         do {
@@ -664,6 +680,125 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             throw DaemonLaunchError.runtimeStageFailed
         }
         try validateRuntimePermissions(at: destination, fileManager: fileManager)
+        try activateRuntime(
+            configuration: configuration,
+            buildIdentifier: expectedBuild,
+            fileManager: fileManager
+        )
+    }
+
+    /// Keep a daemon installed by an independent daemon update. A later UI
+    /// launch must not copy its older embedded helper over a newer active
+    /// runtime merely because launchd is currently stopped.
+    private static func preserveExistingActiveRuntime(
+        configuration: DaemonLaunchConfiguration,
+        expectedBuild: String,
+        fileManager: FileManager,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws -> Bool {
+        let runtimes = configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+        let active = runtimes.appendingPathComponent("current", isDirectory: true)
+        var info = stat()
+        guard Darwin.lstat(active.path, &info) == 0 else {
+            guard errno == ENOENT else { throw DaemonLaunchError.runtimeStageFailed }
+            return false
+        }
+        guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK) else {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
+
+        let target: String
+        do {
+            target = try fileManager.destinationOfSymbolicLink(atPath: active.path)
+        } catch {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
+        guard isSafeRuntimeBuildIdentifier(target) else {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
+
+        let helper = active.appendingPathComponent(configuration.helperURL.lastPathComponent)
+        try validateRuntimePermissions(at: helper, fileManager: fileManager)
+        let versionResult: CommandResult
+        do {
+            versionResult = try commandRunner(helper, ["--version"])
+        } catch {
+            throw DaemonLaunchError.runtimeVersionMismatch(expected: target, actual: nil)
+        }
+        let actualBuild = daemonBuildIdentifier(fromVersionOutput: versionResult.output)
+        guard versionResult.exitCode == 0, actualBuild == target else {
+            throw DaemonLaunchError.runtimeVersionMismatch(
+                expected: target,
+                actual: actualBuild
+            )
+        }
+
+        if target == expectedBuild {
+            return true
+        }
+        if let targetNumber = Int(target),
+           let expectedNumber = Int(expectedBuild),
+           targetNumber > expectedNumber
+        {
+            return true
+        }
+        return false
+    }
+
+    private static func isSafeRuntimeBuildIdentifier(_ value: String) -> Bool {
+        let allowed = CharacterSet(
+            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        )
+        guard !value.isEmpty,
+              value != ".",
+              value != "..",
+              value.rangeOfCharacter(from: allowed.inverted) == nil
+        else {
+            return false
+        }
+        return true
+    }
+
+    private static func activateRuntime(
+        configuration: DaemonLaunchConfiguration,
+        buildIdentifier: String,
+        fileManager: FileManager
+    ) throws {
+        let runtimes = configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+        let active = runtimes.appendingPathComponent("current", isDirectory: true)
+        let temporary = runtimes.appendingPathComponent(
+            ".current.\(UUID().uuidString)",
+            isDirectory: true
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+        do {
+            var info = stat()
+            if Darwin.lstat(active.path, &info) == 0,
+               info.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK)
+            {
+                throw DaemonLaunchError.runtimeStageFailed
+            }
+            let linkResult = buildIdentifier.withCString { destinationPath in
+                temporary.path.withCString { linkPath in
+                    Darwin.symlink(destinationPath, linkPath)
+                }
+            }
+            guard linkResult == 0 else { throw DaemonLaunchError.runtimeStageFailed }
+            let result = temporary.path.withCString { temporaryPath in
+                active.path.withCString { activePath in
+                    Darwin.rename(temporaryPath, activePath)
+                }
+            }
+            guard result == 0 else { throw DaemonLaunchError.runtimeStageFailed }
+        } catch let error as DaemonLaunchError {
+            throw error
+        } catch {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
     }
 
     private static func validateRuntimePermissions(
@@ -703,9 +838,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         let lines = output.split(whereSeparator: \.isNewline).map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard let stagedHelperURL = try? configuration.stagedHelperURL(),
-              let expectedBuild = try? configuration.resolvedBuildIdentifier(),
-              loadedProgram(from: output) == stagedHelperURL.path,
+        guard let expectedBuild = try? configuration.resolvedBuildIdentifier(),
+              loadedProgram(from: output) == configuration.activeHelperURL().path,
               loadedHomeMatches(output, dataDirectory: configuration.configURL.deletingLastPathComponent()),
               loadedEnvironmentValue(
                   from: output,
@@ -724,7 +858,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             .filter { !$0.isEmpty }
             .map(unquote)
         return arguments == [
-            stagedHelperURL.path,
+            configuration.activeHelperURL().path,
             "--config",
             configuration.configURL.path,
             "daemon",

@@ -24,6 +24,8 @@
 		A10000000000000000000013 /* ProviderLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ProviderLogos */; };
 		A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* GatewayQuotaDock.swift */; };
 		A10000000000000000000015 /* ClientLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* ClientLogos */; };
+		A10000000000000000000016 /* DaemonUpdateInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* DaemonUpdateInstaller.swift */; };
+		A10000000000000000000017 /* UpdateCheckerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* UpdateCheckerTests.swift */; };
 		B100000000000000000000 /* AIGlassUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000000 /* AIGlassUpdateChecker.swift */; };
 		B100000000000000000003 /* BriefingEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000003 /* BriefingEngine.swift */; };
 		B100000000000000000006 /* CodexLogParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000006 /* CodexLogParser.swift */; };
@@ -78,6 +80,8 @@
 		A20000000000000000000013 /* ProviderLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ProviderLogos; sourceTree = "<group>"; };
 		A20000000000000000000014 /* GatewayQuotaDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayQuotaDock.swift; sourceTree = "<group>"; };
 		A20000000000000000000015 /* ClientLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ClientLogos; sourceTree = "<group>"; };
+		A20000000000000000000016 /* DaemonUpdateInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonUpdateInstaller.swift; sourceTree = "<group>"; };
+		A20000000000000000000017 /* UpdateCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCheckerTests.swift; sourceTree = "<group>"; };
 		B200000000000000000000 /* AIGlassUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/AIGlassUpdateChecker.swift; sourceTree = "<group>"; };
 		B200000000000000000003 /* BriefingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/BriefingEngine.swift; sourceTree = "<group>"; };
 		B200000000000000000006 /* CodexLogParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/CodexLogParser.swift; sourceTree = "<group>"; };
@@ -153,6 +157,7 @@
 				A20000000000000000000011 /* UpdateChecker.swift */,
 				A20000000000000000000012 /* ProviderBranding.swift */,
 				A20000000000000000000014 /* GatewayQuotaDock.swift */,
+				A20000000000000000000016 /* DaemonUpdateInstaller.swift */,
 				A20000000000000000000013 /* ProviderLogos */,
 				A20000000000000000000015 /* ClientLogos */,
 				B200000000000000000022 /* TokenCompanionAnimator.swift */,
@@ -180,7 +185,10 @@
 		};
 		A40000000000000000000004 /* Tests */ = {
 			isa = PBXGroup;
-			children = (A20000000000000000000009 /* APIContractTests.swift */);
+			children = (
+				A20000000000000000000009 /* APIContractTests.swift */,
+				A20000000000000000000017 /* UpdateCheckerTests.swift */,
+			);
 			path = Tests/ThreadRelayMacTests;
 			sourceTree = SOURCE_ROOT;
 		};
@@ -290,6 +298,7 @@
 				A10000000000000000000011 /* UpdateChecker.swift in Sources */,
 				A10000000000000000000012 /* ProviderBranding.swift in Sources */,
 				A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */,
+				A10000000000000000000016 /* DaemonUpdateInstaller.swift in Sources */,
 				B100000000000000000000 /* AIGlassUpdateChecker.swift in Sources */ ,
 				B100000000000000000003 /* BriefingEngine.swift in Sources */ ,
 				B100000000000000000006 /* CodexLogParser.swift in Sources */ ,
@@ -325,7 +334,10 @@
 			A70000000000000000000003 /* Test Sources */ = {
 				isa = PBXSourcesBuildPhase;
 				buildActionMask = 2147483647;
-				files = (A10000000000000000000009 /* APIContractTests.swift in Sources */);
+				files = (
+					A10000000000000000000009 /* APIContractTests.swift in Sources */,
+					A10000000000000000000017 /* UpdateCheckerTests.swift in Sources */,
+				);
 				runOnlyForDeploymentPostprocessing = 0;
 			};
 /* End PBXSourcesBuildPhase section */

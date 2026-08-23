@@ -532,6 +532,20 @@ struct ManageLifecycleCredentialMutationResponse: Decodable, Equatable, Sendable
     let managementTokenGeneration: Int64
 }
 
+struct ManageLifecycleUpdateResponse: Decodable, Equatable, Sendable {
+    let ok: Bool
+    let state: String
+    let version: String
+    let build: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case ok
+        case state
+        case version = "targetVersion"
+        case build = "targetBuild"
+    }
+}
+
 struct ManageLifecycle: Decodable, Equatable, Sendable {
     struct Service: Decodable, Equatable, Sendable {
         let service: String
@@ -1274,6 +1288,28 @@ struct APIClient: Sendable {
         )
     }
 
+    func updateLifecycle(
+        installationId: String,
+        daemonInstanceId: String,
+        leaseGeneration: Int64,
+        candidate: PreparedDaemonUpdate
+    ) async throws -> ManageLifecycleUpdateResponse {
+        try await performManagePOST(
+            path: "api/v1/manage/lifecycle/update",
+            body: LifecycleUpdateRequest(
+                installationId: installationId,
+                daemonInstanceId: daemonInstanceId,
+                leaseGeneration: leaseGeneration,
+                candidatePath: candidate.executableURL.path,
+                expectedVersion: candidate.version,
+                expectedBuild: candidate.build,
+                expectedSha256: candidate.sha256
+            ),
+            timeout: 30,
+            exposeServerError: true
+        )
+    }
+
     func imAccounts() async throws -> [ManageIMAccount] {
         let connection = connectionLoader()
         let candidates = connection.credentials()
@@ -1875,6 +1911,16 @@ struct APIClient: Sendable {
         let leaseGeneration: Int64?
     }
 
+    private struct LifecycleUpdateRequest: Encodable {
+        let installationId: String
+        let daemonInstanceId: String
+        let leaseGeneration: Int64
+        let candidatePath: String
+        let expectedVersion: String
+        let expectedBuild: Int
+        let expectedSha256: String
+    }
+
     private struct EnhancedLaunchOperationRequest: Encodable {
         let requestId: String
     }
@@ -1945,6 +1991,7 @@ struct APIClient: Sendable {
             throw APIClientError.invalidResponse
         }
         guard httpResponse.statusCode != 401 else { throw APIClientError.unauthorized }
+        guard httpResponse.statusCode != 404 else { throw APIClientError.featureUnavailable }
         guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
         do {
             let lifecycle = try JSONDecoder().decode(ManageLifecycle.self, from: data)

@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import XCTest
 
 #if canImport(ThreadRelayMac)
@@ -28,6 +29,94 @@ final class APIContractTests: XCTestCase {
         XCTAssertTrue(isNewerVersion("0.6", than: "0.5.9"))
         XCTAssertFalse(isNewerVersion("v0.5.0", than: "0.5"))
         XCTAssertFalse(isNewerVersion("0.4.9", than: "0.5.0"))
+    }
+
+    func testAppIconVariantFollowsSystemAppearance() throws {
+        let light = try XCTUnwrap(NSAppearance(named: .aqua))
+        let dark = try XCTUnwrap(NSAppearance(named: .darkAqua))
+
+        XCTAssertEqual(appIconVariant(for: light), .light)
+        XCTAssertEqual(appIconVariant(for: dark), .dark)
+    }
+
+    func testUsageTrendDomainUsesLocalSevenDayWindowAndHalfDayPadding() throws {
+        let now = try XCTUnwrap(ISO8601.date("2026-08-23T16:55:00Z"))
+        var localCalendar = Calendar(identifier: .gregorian)
+        localCalendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+
+        let domain = usageTrendDateDomain(days: 7, now: now, calendar: localCalendar)
+        let today = localCalendar.startOfDay(for: now)
+        let firstDay = try XCTUnwrap(localCalendar.date(byAdding: .day, value: -6, to: today))
+        let tomorrow = try XCTUnwrap(localCalendar.date(byAdding: .day, value: 1, to: today))
+        let expectedStart = try XCTUnwrap(localCalendar.date(byAdding: .hour, value: -12, to: firstDay))
+        let expectedEnd = try XCTUnwrap(localCalendar.date(byAdding: .hour, value: 12, to: tomorrow))
+
+        XCTAssertEqual(domain.lowerBound, expectedStart)
+        XCTAssertEqual(domain.upperBound, expectedEnd)
+        XCTAssertEqual(localCalendar.component(.day, from: firstDay), 18)
+        XCTAssertEqual(localCalendar.component(.day, from: today), 24)
+    }
+
+    @MainActor
+    func testUsageTrendEventsUseTheLocalNaturalDayAfterMidnight() throws {
+        var localCalendar = Calendar(identifier: .gregorian)
+        localCalendar.timeZone = TimeZone(identifier: "Asia/Shanghai")!
+        let now = Date()
+        let today = localCalendar.startOfDay(for: now)
+        let event = TokenEvent(
+            service: .codex,
+            timestamp: today.addingTimeInterval(60),
+            model: "gpt-5.3-codex",
+            inputTokens: 100,
+            outputTokens: 20,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0
+        )
+        let store = UsageStore()
+        store.addEvents([(event: event, dedupKey: nil)])
+
+        let rows = store.dailyTotalsByService(days: 7, now: now, calendar: localCalendar)
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.day, today)
+        XCTAssertEqual(rows.first?.tokens, 120)
+    }
+
+    @MainActor
+    func testCodexCollectorRehydratesRecentHistoryAfterRestart() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let file = root.appendingPathComponent("session.jsonl")
+        let formatter = ISO8601DateFormatter()
+        let recent = Date()
+        let older = recent.addingTimeInterval(-2 * 24 * 3600)
+        let sessionMeta = #"{"type":"session_meta","payload":{"cwd":"/tmp/project"}}"#
+        func tokenLine(at date: Date, input: Int) -> String {
+            let timestamp = formatter.string(from: date)
+            return #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":\#(input),"output_tokens":10,"cached_input_tokens":0}}}}"#
+        }
+        let contents = [sessionMeta, tokenLine(at: older, input: 100), tokenLine(at: recent, input: 200)]
+            .joined(separator: "\n") + "\n"
+        try Data(contents.utf8).write(to: file)
+        try FileManager.default.setAttributes(
+            [.modificationDate: recent.addingTimeInterval(-24 * 3600)],
+            ofItemAtPath: file.path
+        )
+
+        let firstStore = UsageStore()
+        let firstCollector = CodexCollector(root: root)
+        firstCollector.collect(into: firstStore)
+        firstCollector.collect(into: firstStore) // Persist the historical file offset.
+        XCTAssertEqual(firstStore.events.count, 2)
+
+        let restartedStore = UsageStore()
+        CodexCollector(root: root).collect(into: restartedStore)
+
+        XCTAssertEqual(restartedStore.events.count, 2)
+        XCTAssertEqual(restartedStore.events.map(\.totalTokens).sorted(), [110, 210])
     }
 
     func testSingleInstanceGuardRejectsSecondOwner() throws {
@@ -345,7 +434,7 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(
             plist["ProgramArguments"] as? [String],
             [
-                previous.path,
+                configuration.activeHelperURL().path,
                 "--config",
                 configuration.configURL.path,
                 "daemon",
@@ -591,7 +680,7 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(
             plist["ProgramArguments"] as? [String],
             [
-                try fixture.configuration.stagedHelperURL().path,
+                fixture.configuration.activeHelperURL().path,
                 "--config",
                 fixture.configuration.configURL.path,
                 "daemon",
@@ -603,6 +692,75 @@ final class APIContractTests: XCTestCase {
             fixture.configuration.configURL.deletingLastPathComponent().path
         )
         XCTAssertEqual(environment["THREADRELAY_BUNDLE_BUILD"], "389")
+    }
+
+    func testDaemonLauncherPreservesIndependentlyUpdatedRuntime() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let runtimeRoot = fixture.configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+        let updatedRuntime = runtimeRoot
+            .appendingPathComponent("451", isDirectory: true)
+            .appendingPathComponent(fixture.configuration.helperURL.lastPathComponent)
+        try FileManager.default.createDirectory(
+            at: updatedRuntime.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: updatedRuntime.path,
+                contents: Data("independent-daemon".utf8)
+            )
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: updatedRuntime.path
+        )
+        let current = runtimeRoot.appendingPathComponent("current", isDirectory: true)
+        try FileManager.default.createSymbolicLink(
+            atPath: current.path,
+            withDestinationPath: "451"
+        )
+
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 1, output: "not loaded")
+            }
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "threadrelay 0.5.3 (build 451)\n")
+            }
+            return CommandResult(exitCode: arguments.first == "bootstrap" ? 0 : 1, output: "")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { fixture.configuration },
+            commandRunner: commands.run
+        )
+
+        try await launcher.startIfNeeded()
+
+        XCTAssertEqual(commands.arguments.map(\.first), ["print", "--version", "bootstrap"])
+        XCTAssertEqual(commands.executablePaths[1], fixture.configuration.activeHelperURL())
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: try fixture.configuration.stagedHelperURL().path
+            )
+        )
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: current.path),
+            "451"
+        )
+        let plist = try daemonLaunchAgentPropertyList(at: fixture.configuration.launchAgentURL)
+        XCTAssertEqual(
+            plist["ProgramArguments"] as? [String],
+            [
+                fixture.configuration.activeHelperURL().path,
+                "--config",
+                fixture.configuration.configURL.path,
+                "daemon",
+            ]
+        )
     }
 
     func testDaemonLauncherRejectsMismatchedRuntimeBuildBeforePublishing() async throws {
@@ -1705,6 +1863,15 @@ final class APIContractTests: XCTestCase {
         XCTAssertNil(lifecycle.management.managementTokenGeneration)
     }
 
+    func testFetchLifecycleMapsNotFoundToFeatureUnavailable() async {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/lifecycle")
+            return MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+        }
+
+        await assertLifecycleError(.featureUnavailable, from: client)
+    }
+
     func testLifecycleMutationEndpointsUseVersionedRoutesAndIdentity() async throws {
         let identity = ManageDaemonIdentity(
             pid: 123,
@@ -1757,6 +1924,19 @@ final class APIContractTests: XCTestCase {
                 XCTAssertEqual(body?["force"] as? Bool, false)
                 XCTAssertEqual(body?["leaseGeneration"] as? Int, 7)
                 return MockResponse(statusCode: 200, json: #"{"ok":true,"state":"restarting"}"#)
+            case "/api/v1/manage/lifecycle/update":
+                XCTAssertEqual(body?["leaseGeneration"] as? Int, 7)
+                XCTAssertEqual(body?["candidatePath"] as? String, "/fixture/candidate")
+                XCTAssertEqual(body?["expectedVersion"] as? String, "0.5.3")
+                XCTAssertEqual(body?["expectedBuild"] as? Int, 451)
+                XCTAssertEqual(
+                    body?["expectedSha256"] as? String,
+                    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                )
+                return MockResponse(
+                    statusCode: 200,
+                    json: #"{"ok":true,"state":"restarting","targetVersion":"0.5.3","targetBuild":451}"#
+                )
             default:
                 return MockResponse(statusCode: 500, json: #"{"error":"unexpected path"}"#)
             }
@@ -1800,6 +1980,21 @@ final class APIContractTests: XCTestCase {
             leaseGeneration: 7
         )
         XCTAssertTrue(restart.ok)
+        let update = try await client.updateLifecycle(
+            installationId: "installation-a",
+            daemonInstanceId: "fixture-instance",
+            leaseGeneration: 7,
+            candidate: PreparedDaemonUpdate(
+                version: "0.5.3",
+                build: 451,
+                sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                executableURL: URL(fileURLWithPath: "/fixture/candidate")
+            )
+        )
+        XCTAssertTrue(update.ok)
+        XCTAssertEqual(update.state, "restarting")
+        XCTAssertEqual(update.version, "0.5.3")
+        XCTAssertEqual(update.build, 451)
     }
 
     func testIdempotentLifecycleMutationsRetryLostResponsesWithSameRequestId() async throws {
@@ -2724,6 +2919,50 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(model.dashboardState, .loaded)
         XCTAssertEqual(model.imAccounts, [])
         XCTAssertEqual(model.imAccountsAvailability, .needsUpdate)
+    }
+
+    @MainActor
+    func testAppModelSurfacesDaemonUpdateButDisablesItWhenLifecycleIsUnavailable() async throws {
+        let manifest = try JSONDecoder().decode(
+            UpdateManifest.self,
+            from: Data(
+                #"{"schemaVersion":2,"ui":{"version":"0.5.2","build":444,"assets":{}},"daemon":{"version":"0.5.4","build":451,"apiMajor":1,"assets":{}}}"#.utf8
+            )
+        )
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/healthz":
+                MockResponse(statusCode: 200, json: Self.healthJSON)
+            case "/api/v1/manage/dashboard":
+                MockResponse(statusCode: 200, json: Self.dashboardJSON)
+            case "/api/v1/manage/lifecycle":
+                MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            case "/api/v1/manage/im/accounts":
+                MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            default:
+                MockResponse(statusCode: 404, json: #"{"error":"not found"}"#)
+            }
+        }
+        let model = AppModel(
+            apiClient: client,
+            guiBuildLoader: { "444" },
+            guiVersionLoader: { "0.5.2" },
+            updateManifestLoader: { _ in manifest }
+        )
+
+        await model.refresh()
+        await model.checkForUpdates()
+
+        XCTAssertEqual(model.availableDaemonUpdate?.build, 451)
+        XCTAssertEqual(model.daemonUpdateCompatibility, .requiresLifecycleAPI)
+        XCTAssertEqual(
+            model.unifiedUpdateState,
+            .daemon(
+                manifest.daemon!,
+                compatibility: .requiresLifecycleAPI
+            )
+        )
+        XCTAssertFalse(model.canPrepareDaemonUpdate)
     }
 
     @MainActor
