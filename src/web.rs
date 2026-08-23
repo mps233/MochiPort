@@ -71,6 +71,7 @@ pub fn router(state: SharedState) -> Router {
             post(manage_api::rotate_management_credential),
         )
         .route("/lifecycle/restart", post(manage_api::restart_lifecycle))
+        .route("/lifecycle/update", post(manage_api::update_lifecycle))
         .route("/dashboard", get(manage_dashboard))
         .route("/log-directory", get(manage_log_directory))
         .route("/codex/status", get(codex_app::manage_codex_app_status))
@@ -748,7 +749,8 @@ async fn perform_shutdown(
                 "protectedWorkItems": protected_work_items,
             })),
         ),
-        manage_api::LifecycleShutdownResult::LeaseRejected(_) => (
+        manage_api::LifecycleShutdownResult::LeaseRejected(_)
+        | manage_api::LifecycleShutdownResult::UpdateRejected(_) => (
             StatusCode::CONFLICT,
             Json(json!({
                 "ok": false,
@@ -863,7 +865,10 @@ mod tests {
         http::{Method, header::AUTHORIZATION},
     };
     use serde_json::Value;
+    use sha2::{Digest, Sha256};
     use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
     use tower::ServiceExt;
 
@@ -989,6 +994,51 @@ mod tests {
                     .expect("test executable digest"),
                 "bind": lifecycle.bind,
             },
+        })
+    }
+
+    #[cfg(unix)]
+    fn daemon_update_candidate(
+        state: &SharedState,
+        version: &str,
+        build: u64,
+    ) -> (std::path::PathBuf, String) {
+        let runtime_root = state
+            .config_path
+            .parent()
+            .expect("config directory")
+            .join("runtimes");
+        let build_directory = runtime_root.join(build.to_string());
+        std::fs::create_dir_all(&build_directory).expect("create candidate directory");
+        let candidate = build_directory.join("mochiport-daemon");
+        let script = format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" = \"--version\" ]; then\n  printf '%s\\n' 'mochiport {version} (build {build})'\n  exit 0\nfi\nexit 2\n"
+        );
+        std::fs::write(&candidate, script.as_bytes()).expect("write candidate");
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))
+            .expect("make candidate executable");
+        let sha256 = hex::encode(Sha256::digest(script.as_bytes()));
+        (candidate, sha256)
+    }
+
+    #[cfg(unix)]
+    fn daemon_update_body(
+        state: &SharedState,
+        installation_id: &str,
+        lease_generation: u64,
+        candidate_path: &std::path::Path,
+        version: &str,
+        build: u64,
+        sha256: &str,
+    ) -> Value {
+        json!({
+            "installationId": installation_id,
+            "daemonInstanceId": state.daemon_identity.instance_id,
+            "leaseGeneration": lease_generation,
+            "candidatePath": candidate_path,
+            "expectedVersion": version,
+            "expectedBuild": build,
+            "expectedSha256": sha256,
         })
     }
 
@@ -4103,6 +4153,463 @@ mod tests {
         assert_eq!(
             state.lifecycle_admission.state(),
             crate::app_state::LifecycleAdmissionState::ShutdownCommitted
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_update_validates_candidate_switches_current_and_commits_shutdown() {
+        let (state, _temp, token) = management_test_state();
+        let installation_id = "swiftui-update-installation";
+        let lease_generation = 17;
+        seed_test_lifecycle_lease(
+            &state,
+            installation_id,
+            &state.daemon_identity.instance_id,
+            lease_generation,
+        );
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let (candidate, sha256) = daemon_update_candidate(&state, "0.5.3", 451);
+        let runtime_root = state
+            .config_path
+            .parent()
+            .expect("config directory")
+            .join("runtimes");
+        std::fs::create_dir_all(runtime_root.join("444")).expect("create previous runtime");
+        std::os::unix::fs::symlink("444", runtime_root.join("current"))
+            .expect("link previous runtime");
+        let body = daemon_update_body(
+            &state,
+            installation_id,
+            lease_generation,
+            &candidate,
+            "0.5.3",
+            451,
+            &sha256,
+        )
+        .to_string();
+        let app = router(state.clone());
+
+        let unauthorized = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            None,
+            Some(&body),
+        )
+        .await;
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json(response).await,
+            json!({
+                "ok": true,
+                "state": "restarting",
+                "targetVersion": "0.5.3",
+                "targetBuild": 451,
+            })
+        );
+        assert_eq!(
+            std::fs::read_link(
+                state
+                    .config_path
+                    .parent()
+                    .expect("config directory")
+                    .join("runtimes/current")
+            )
+            .expect("current runtime link"),
+            std::path::PathBuf::from("451")
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), shutdown_rx)
+            .await
+            .expect("shutdown signal timeout")
+            .expect("shutdown signal sender");
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::ShutdownCommitted
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_update_refuses_protected_work_without_switching_or_shutdown() {
+        let (state, _temp, token) = management_test_state();
+        let installation_id = "swiftui-update-installation";
+        let lease_generation = 18;
+        seed_test_lifecycle_lease(
+            &state,
+            installation_id,
+            &state.daemon_identity.instance_id,
+            lease_generation,
+        );
+        state
+            .runtime
+            .lock()
+            .await
+            .current_turn_by_thread
+            .insert("protected-thread".to_string(), "protected-turn".to_string());
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let (candidate, sha256) = daemon_update_candidate(&state, "0.5.3", 452);
+        let body = daemon_update_body(
+            &state,
+            installation_id,
+            lease_generation,
+            &candidate,
+            "0.5.3",
+            452,
+            &sha256,
+        )
+        .to_string();
+
+        let response = request_response(
+            router(state.clone()),
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let payload = response_json(response).await;
+        assert_eq!(payload["state"], json!("active"));
+        assert_eq!(payload["protectedWorkItems"]["total"], json!(1));
+        assert!(
+            !state
+                .config_path
+                .parent()
+                .expect("config directory")
+                .join("runtimes/current")
+                .exists()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown_rx)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_update_rejects_untrusted_candidate_before_draining() {
+        let (state, _temp, token) = management_test_state();
+        let installation_id = "swiftui-update-installation";
+        let lease_generation = 19;
+        seed_test_lifecycle_lease(
+            &state,
+            installation_id,
+            &state.daemon_identity.instance_id,
+            lease_generation,
+        );
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let (candidate, _sha256) = daemon_update_candidate(&state, "0.5.3", 453);
+        let body = daemon_update_body(
+            &state,
+            installation_id,
+            lease_generation,
+            &candidate,
+            "0.5.3",
+            453,
+            &"0".repeat(64),
+        )
+        .to_string();
+
+        let response = request_response(
+            router(state.clone()),
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(response).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("SHA-256"))
+        );
+        assert!(
+            !state
+                .config_path
+                .parent()
+                .expect("config directory")
+                .join("runtimes/current")
+                .exists()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown_rx)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_update_rejects_wrong_path_and_unsafe_permissions() {
+        let (state, _temp, token) = management_test_state();
+        let installation_id = "swiftui-update-installation";
+        let lease_generation = 21;
+        seed_test_lifecycle_lease(
+            &state,
+            installation_id,
+            &state.daemon_identity.instance_id,
+            lease_generation,
+        );
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let (candidate, sha256) = daemon_update_candidate(&state, "0.5.3", 455);
+        let app = router(state.clone());
+
+        let wrong_path_body = daemon_update_body(
+            &state,
+            installation_id,
+            lease_generation,
+            &candidate,
+            "0.5.3",
+            456,
+            &sha256,
+        )
+        .to_string();
+        let wrong_path = request_response(
+            app.clone(),
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            Some(&token),
+            Some(&wrong_path_body),
+        )
+        .await;
+        assert_eq!(wrong_path.status(), StatusCode::BAD_REQUEST);
+
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o775))
+            .expect("make candidate unsafe");
+        let unsafe_permissions_body = daemon_update_body(
+            &state,
+            installation_id,
+            lease_generation,
+            &candidate,
+            "0.5.3",
+            455,
+            &sha256,
+        )
+        .to_string();
+        let unsafe_permissions = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            Some(&token),
+            Some(&unsafe_permissions_body),
+        )
+        .await;
+        assert_eq!(unsafe_permissions.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown_rx)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_update_rejects_stale_lease_before_draining() {
+        let (state, _temp, token) = management_test_state();
+        let installation_id = "swiftui-update-installation";
+        seed_test_lifecycle_lease(
+            &state,
+            installation_id,
+            &state.daemon_identity.instance_id,
+            23,
+        );
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let (candidate, sha256) = daemon_update_candidate(&state, "0.5.3", 456);
+        let body = daemon_update_body(
+            &state,
+            installation_id,
+            22,
+            &candidate,
+            "0.5.3",
+            456,
+            &sha256,
+        )
+        .to_string();
+
+        let response = request_response(
+            router(state.clone()),
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(response).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("换代"))
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown_rx)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_update_revalidates_candidate_at_final_commit() {
+        let (state, _temp, token) = management_test_state();
+        let installation_id = "swiftui-update-installation";
+        let lease_generation = 24;
+        seed_test_lifecycle_lease(
+            &state,
+            installation_id,
+            &state.daemon_identity.instance_id,
+            lease_generation,
+        );
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+
+        let build_directory = state
+            .config_path
+            .parent()
+            .expect("config directory")
+            .join("runtimes/457");
+        std::fs::create_dir_all(&build_directory).expect("create candidate directory");
+        let candidate = build_directory.join("mochiport-daemon");
+        let probe_marker = build_directory.join("probe-complete");
+        let script = format!(
+            "#!/bin/sh\nif [ \"${{1:-}}\" != \"--version\" ]; then exit 2; fi\nif [ -e \"{}\" ]; then\n  printf '%s\\n' 'mochiport 0.5.3 (build 999)'\nelse\n  : > \"{}\"\n  printf '%s\\n' 'mochiport 0.5.3 (build 457)'\nfi\n",
+            probe_marker.display(),
+            probe_marker.display()
+        );
+        std::fs::write(&candidate, script.as_bytes()).expect("write candidate");
+        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o755))
+            .expect("make candidate executable");
+        let sha256 = hex::encode(Sha256::digest(script.as_bytes()));
+        let body = daemon_update_body(
+            &state,
+            installation_id,
+            lease_generation,
+            &candidate,
+            "0.5.3",
+            457,
+            &sha256,
+        )
+        .to_string();
+
+        let response = request_response(
+            router(state.clone()),
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(
+            response_json(response).await["error"]
+                .as_str()
+                .is_some_and(|message| message.contains("版本或构建号"))
+        );
+        assert!(
+            !state
+                .config_path
+                .parent()
+                .expect("config directory")
+                .join("runtimes/current")
+                .exists()
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown_rx)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn lifecycle_update_rejects_unsafe_current_node_at_final_commit() {
+        let (state, _temp, token) = management_test_state();
+        let installation_id = "swiftui-update-installation";
+        let lease_generation = 20;
+        seed_test_lifecycle_lease(
+            &state,
+            installation_id,
+            &state.daemon_identity.instance_id,
+            lease_generation,
+        );
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+        *state.shutdown_tx.lock().await = Some(shutdown_tx);
+        let (candidate, sha256) = daemon_update_candidate(&state, "0.5.3", 454);
+        let current = state
+            .config_path
+            .parent()
+            .expect("config directory")
+            .join("runtimes/current");
+        std::fs::write(&current, b"not a managed symlink").expect("write unsafe current node");
+        let body = daemon_update_body(
+            &state,
+            installation_id,
+            lease_generation,
+            &candidate,
+            "0.5.3",
+            454,
+            &sha256,
+        )
+        .to_string();
+
+        let response = request_response(
+            router(state.clone()),
+            Method::POST,
+            "/api/v1/manage/lifecycle/update",
+            Some(&token),
+            Some(&body),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            std::fs::read(&current).expect("read current node"),
+            b"not a managed symlink"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut shutdown_rx)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.lifecycle_admission.state(),
+            crate::app_state::LifecycleAdmissionState::Active
         );
     }
 

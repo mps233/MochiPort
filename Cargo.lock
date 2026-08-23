@@ -1248,6 +1248,52 @@ dependencies = [
 ]
 
 [[package]]
+name = "mochiport"
+version = "0.5.2"
+dependencies = [
+ "aes",
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64",
+ "cipher",
+ "ecb",
+ "embed-resource",
+ "fs2",
+ "futures-util",
+ "hex",
+ "image",
+ "md5",
+ "mime_guess",
+ "once_cell",
+ "prost",
+ "qrcode",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "toml 0.8.23",
+ "toml_edit",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "windows-sys 0.59.0",
+ "winreg",
+ "wxdragon",
+ "zip",
+ "zstd",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2193,52 +2239,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "mochiport"
-version = "0.5.2"
-dependencies = [
- "aes",
- "anyhow",
- "async-trait",
- "axum",
- "base64",
- "cipher",
- "ecb",
- "embed-resource",
- "fs2",
- "futures-util",
- "hex",
- "image",
- "md5",
- "mime_guess",
- "once_cell",
- "prost",
- "qrcode",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_path_to_error",
- "sha2 0.10.9",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-tungstenite 0.24.0",
- "toml 0.8.23",
- "toml_edit",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "windows-sys 0.59.0",
- "winreg",
- "wxdragon",
- "zip",
- "zstd",
 ]
 
 [[package]]

@@ -1,10 +1,12 @@
 fn main() {
-    let build_number = std::env::var("MOCHIPORT_BUILD_NUMBER")
+    let build_number = std::env::var("MOCHIPORT_DAEMON_BUILD_NUMBER")
+        .or_else(|_| std::env::var("MOCHIPORT_BUILD_NUMBER"))
         .or_else(|_| std::env::var("THREADRELAY_BUILD_NUMBER"))
         .ok()
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "dev".to_string());
-    println!("cargo:rustc-env=MOCHIPORT_BUILD_NUMBER={build_number}");
+    println!("cargo:rustc-env=MOCHIPORT_DAEMON_BUILD_NUMBER={build_number}");
+    println!("cargo:rerun-if-env-changed=MOCHIPORT_DAEMON_BUILD_NUMBER");
     println!("cargo:rerun-if-env-changed=MOCHIPORT_BUILD_NUMBER");
     println!("cargo:rerun-if-env-changed=THREADRELAY_BUILD_NUMBER");
 
