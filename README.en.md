@@ -43,7 +43,7 @@ Download the appropriate package from [MochiPort Releases](https://github.com/mp
 
 If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs per-user LaunchAgents that keep the local backend running and recover the GUI after an abnormal exit; a normal GUI quit does not reopen the window. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x MochiPort-*-linux-x86_64.AppImage` once.
 
-Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The MVP only opens the download page; it does not silently replace the local app.
+Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The Rust desktop client can download, verify, and launch the platform installer after confirmation; the SwiftUI macOS client opens the verified release page/update flow. Neither client silently replaces the local app.
 
 ### 2. Open The App
 

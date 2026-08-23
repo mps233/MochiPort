@@ -1,6 +1,7 @@
 # MochiPort for macOS
 
-Native SwiftUI client for macOS 13 and newer. It includes the overview,
+Native SwiftUI client for the formal macOS 26 app target. The Swift package
+manifest remains buildable on macOS 14 and newer for local tests. It includes the overview,
 Codex integration, session movement, messaging accounts, AI Gateway providers,
 request logs, and native Settings over the authenticated versioned loopback
 management API.

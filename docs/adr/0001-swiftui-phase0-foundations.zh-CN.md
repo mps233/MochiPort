@@ -32,14 +32,14 @@ Rust daemon 是配置和凭据的唯一事实来源。SwiftUI 不复制业务配
 - SwiftUI preview Bundle ID：`io.github.mps233.threadrelay.preview`
 - 产品语义版本：根目录 `Cargo.toml` 的 package version
 - 构建号：显式 `MOCHIPORT_BUILD_NUMBER`
-- 最低系统：macOS 13
+- 正式 Xcode App 目标：macOS 26；SwiftPM manifest 保持 macOS 14 作为本地测试最低版本
 - stable 与 preview 使用同一签名 Team ID；Team ID 在首次正式签名前由发布环境提供并冻结
 
 旧 `com.codexhub.app` 不能直接覆盖安装为 SwiftUI stable。它先进入最后一个 ThreadRelay wxDragon 桥接版，或与 SwiftUI preview 并行安装。
 
 ### Liquid Glass 边界
 
-macOS 26 只在真实导航、控制或浮层重叠处使用系统 `glassEffect`；macOS 13-15 使用系统 `Material` 回退。业务列表、表格、表单和日志内容使用稳定系统表面，不实现自制 blur、shader 或截图材质。
+macOS 26 只在真实导航、控制或浮层重叠处使用系统 `glassEffect`；macOS 14-25 使用系统 `Material` 回退。业务列表、表格、表单和日志内容使用稳定系统表面，不实现自制 blur、shader 或截图材质。
 
 ## 控制平面协议
 

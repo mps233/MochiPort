@@ -7,7 +7,7 @@
 | 状态 | Phase 3 已完成；Phase 2 采用 launchd 基础托管、缺失时首次启动和用户主动安全重启，不再包含 daemon 自动构建、版本切换、候选 runtime、事务 journal 或自动回滚；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页与增强启动完整状态机已完成，剩余重点为诊断导出和发布级无障碍收尾 |
 | 最近核验 | 2026-08-18；自动 daemon 构建与运行时切换代码已删除，SwiftPM 134 项通过，Rust 912 项通过（1 项忽略），Xcode 双架构 Debug 构建成功。增强启动 operation 的幂等、并发冲突、取消和失败恢复仍有契约测试覆盖 |
 | 目标版本 | 0.5.x 预览阶段 |
-| 主平台 | macOS 13 及以上 |
+| 主平台 | 正式 Xcode App 目标为 macOS 26；SwiftPM manifest 保持 macOS 14 作为本地测试最低版本 |
 | 主前端 | SwiftUI |
 | 核心后端 | 现有 Rust daemon |
 | Windows | 保留 wxDragon GUI，进入兼容维护模式 |
@@ -21,7 +21,7 @@ MochiPort 的 macOS 客户端改用 SwiftUI 重写，现有 Rust daemon、Telegr
 
 迁移完成后的平台策略如下：
 
-- macOS：SwiftUI 是唯一持续演进的正式前端，追求完整功能和原生体验；macOS 26 及以上以系统原生 Liquid Glass 为旗舰视觉实现。
+- macOS：SwiftUI 是唯一持续演进的正式前端，正式包目标为 macOS 26，并以系统原生 Liquid Glass 为旗舰视觉实现；SwiftPM 本地测试保持 macOS 14 兼容。
 - Windows：继续发布现有 wxDragon GUI，只保证安全、启动、连接和严重故障修复；新功能不再默认要求同步。
 - Linux：正式维护 daemon 和 CLI，GUI 保留为实验性能力，不阻塞核心版本发布。
 - Rust daemon：仍是所有平台的业务事实来源，Swift 代码不得复制 Telegram、飞书、会话或 AI Gateway 业务规则。
@@ -33,7 +33,7 @@ MochiPort 的 macOS 客户端改用 SwiftUI 重写，现有 Rust daemon、Telegr
 ### 3.1 目标
 
 - 提供符合 macOS 交互习惯的导航、设置、表格、搜索、菜单栏、窗口恢复和系统反馈。
-- 将原生 Liquid Glass 的层级、材质、动效和可访问性纳入设计与发布全过程；macOS 13-15 提供自然、完整的系统材质回退。
+- 将原生 Liquid Glass 的层级、材质、动效和可访问性纳入设计与发布全过程；macOS 14-25 的兼容路径使用系统材质回退。
 - 使用 SwiftUI 的状态驱动模型替代当前 GUI 中大量手动控件更新和定时刷新逻辑。
 - 保持现有配置、凭据、会话绑定、Provider、请求日志和更新数据完全兼容。
 - 保持 Rust daemon 独立运行，并通过稳定的本地 API 服务 SwiftUI、CLI 和兼容前端。
@@ -146,8 +146,8 @@ SwiftUI GUI 更新不重启 daemon。只要 API 兼容，新 GUI 继续复用旧
 | 事项 | 推荐默认值 | 原因 |
 | --- | --- | --- |
 | 主程序与 daemon | SwiftUI 主程序 + `Contents/Helpers/mochiport-daemon` | 保留 Rust 核心，并让签名、进程归属和升级边界清晰 |
-| macOS 最低版本 | macOS 13 | 可直接使用 `NavigationSplitView` 和 `MenuBarExtra`，与当前最低版本一致 |
-| Swift 状态模型 | Swift 并发、`@MainActor`、`ObservableObject` | 兼容 macOS 13，不为使用较新的 Observation framework 提高最低版本 |
+| macOS 正式包目标 | macOS 26 | 正式 Xcode App 使用当前 macOS 26 SDK 和 deployment target；SwiftPM manifest 另保留 macOS 14 本地测试兼容 |
+| Swift 状态模型 | Swift 并发、`@MainActor`、`ObservableObject` | 正式包与 SwiftPM 测试都不依赖更高的 Observation framework |
 | 第三方架构库 | 首版不引入 | 优先使用 SwiftUI、Foundation、OSLog、XCTest；更新框架按 Phase 6 决策 |
 | App Sandbox | 首个 SwiftUI 正式版不启用 | 当前需要启动 helper、访问既有配置和日志、连接本地服务并协同外部应用；先使用 Hardened Runtime、签名和公证 |
 | 凭据存储 | 首版保持现有 Rust 配置兼容 | UI 只向窄写接口提交新密钥，读接口仅返回 `secretSet`；Keychain 迁移作为独立安全项目，避免阻塞界面迁移 |
@@ -182,7 +182,7 @@ SwiftUI 首版不负责把旧 `Application Support/CodexHub` 数据搬到新目�
 - 列表保留选择、排序、搜索和键盘操作；常用命令进入菜单栏和 Command Menu。
 - 主窗口、详情窗口和 Settings 的状态恢复遵循 macOS 习惯。
 - 动画只用于解释状态变化，优先短时、可中断的系统动画，不加入装饰性动效。
-- 部署目标保持 macOS 13；SwiftUI `.inspector` 仅在 macOS 14 及以上使用，macOS 13 与窄窗口进入同内容的导航详情页。
+- 正式 Xcode App deployment target 为 macOS 26；SwiftPM 测试 target 保持 macOS 14。`.inspector` 和 Liquid Glass 按系统可用性隔离，兼容路径使用同内容的导航详情页。
 
 ### 6.2 Liquid Glass 核心产品要求
 
@@ -193,7 +193,7 @@ Liquid Glass 是 P0 级产品需求。任何核心页面即使功能完整，只
 | 导航与控制层 | macOS 26 及以上优先使用系统 `NavigationSplitView`、toolbar、search、sheet、popover、Inspector 和菜单栏瞬时界面，让系统自动采用原生 Liquid Glass |
 | 悬浮与组合控制 | 只有在控制层真实覆盖内容时才使用自定义 glass；相关控件需要共同变形或衔接时使用 `GlassEffectContainer`，并采用系统提供的 glass effect、button style 和 transition API |
 | 业务内容层 | `Table`、`List` 行、请求日志、表单、账号与 Provider 内容、总览数据区保持清晰稳定的系统表面，不逐项加玻璃、描边卡片或彩色底板 |
-| macOS 13-15 回退 | 使用对应系统版本的 SwiftUI/AppKit 控件、toolbar 和 `Material`；不使用自制 shader、叠层模糊或截图材质伪造 Liquid Glass |
+| macOS 14-25 兼容路径 | 使用对应系统版本的 SwiftUI/AppKit 控件、toolbar 和 `Material`；不使用自制 shader、叠层模糊或截图材质伪造 Liquid Glass |
 
 具体约束如下：
 
@@ -201,7 +201,7 @@ Liquid Glass 是 P0 级产品需求。任何核心页面即使功能完整，只
 - 默认使用系统常规 glass 变体；clear glass 只允许出现在视觉内容足够丰富、对比度经过验证的场景。MochiPort 以运维信息为主，原则上不使用 clear glass。
 - 玻璃只属于导航、控制和临时浮层，不覆盖主要阅读与数据内容。禁止“每个卡片一块玻璃”、多层玻璃嵌套、装饰性渐变、随意染色和常驻高光。
 - 内容区采用统一表面与细分隔线形成层级，避免碎片化卡片。颜色主要用于系统强调色、警告和错误，不用颜色填充空间。
-- macOS 26 代码必须通过 availability 隔离，部署目标继续保持 macOS 13；旧系统回退必须保持相同的信息架构、功能、键盘路径和状态语义。
+- macOS 26 代码必须通过 availability 隔离；macOS 14-25 兼容路径必须保持相同的信息架构、功能、键盘路径和状态语义。
 - 系统开启“降低透明度”“增强对比度”或“减弱动态效果”后，界面必须自动收敛到清晰、稳定且可读的表现；不得依赖透明度、颜色或形变单独表达状态。
 - 所有自定义玻璃转场必须短时、可中断，并尊重系统动态效果设置。滚动、调整窗口和切换选择时不能出现材质闪烁、边缘跳变或内容重排。
 - Phase 0 先建立总览、请求日志、Settings 和 sheet/popover 的视觉基准；后续页面复用同一套语义层级，不允许各自发明玻璃样式。
@@ -241,7 +241,7 @@ Sidebar 只保留六个一级入口：
 
 网络、外观、语言、更新、诊断和高级本地连接进入独立 `Settings` 场景，不占 Sidebar。About 与检查更新进入应用菜单；常驻服务状态同时出现在总览和菜单栏，不额外创建“服务”页面。
 
-窗口默认宽度约 1040、最小宽度约 760。macOS 14+ 且空间足够时，列表类页面可在 Content 右侧显示 Inspector；空间不足或 macOS 13 时，选择行后在 Content 内导航到详情并提供返回。Sidebar 可折叠，具体宽度由原型验证。
+窗口默认宽度约 1040、最小宽度约 760。macOS 26 且空间足够时，列表类页面可在 Content 右侧显示 Inspector；空间不足或 SwiftPM macOS 14-25 兼容路径时，选择行后在 Content 内导航到详情并提供返回。Sidebar 可折叠，具体宽度由原型验证。
 
 ### 7.2 信息与操作层级
 
@@ -261,14 +261,14 @@ Sidebar 只保留六个一级入口：
 | --- | --- | --- | --- |
 | 总览 | 顶部显示整体结论和首要恢复动作；下方依次为本地服务、执行端、消息通道、AI Gateway 四个统一 section。执行端逐行显示 Codex App、VS Code、CLI 及 remote-control 状态 | 问题行就地展开原因、最近更新时间和诊断入口；正常状态不展示冗长说明 | 未运行或崩溃时显示“启动/重新启动”；受管服务的“安全重启/停止”放 section 更多菜单；冲突时只允许重试与诊断 |
 | Codex | 用分组表单展示本地接入、增强启动和可见模型；当前状态始终靠近对应控制 | “写入配置”和“增强启动”留在各自 section；修复放在接入状态旁；“恢复原配置”和卸载放 section 更多菜单，确认后进入可取消进度 sheet | toolbar 不放会随状态变成危险命令的主按钮 |
-| 会话 | 可搜索、可排序的会话列表，显示项目、时间、执行端和当前 Provider | macOS 14+ 的 Inspector 显示完整路径、绑定状态和 Provider 移动控件；macOS 13 与窄窗口导航到详情页 | 默认没有全局主要动作；操作针对所选会话 |
-| 消息通道 | 按平台分组的账号列表，显示名称、连接状态和最近错误；行尾开关直接启停，失败时回滚；不为四个平台各建一级页面 | 添加账号使用 Onboarding sheet；选中账号后在 macOS 14+ Inspector、macOS 13/窄窗口详情页编辑，显式“保存”；删除放更多菜单并确认 | 添加账号 |
-| AI Gateway | Provider 列表展示启用状态、协议、权重和模型数量；行尾开关直接启停，失败时回滚；Gateway 全局开关放在列表上方紧凑控制行 | macOS 14+ Inspector、macOS 13/窄窗口详情页编辑 Base URL、密钥状态、模型映射和高级选项，显式“保存”；密钥只写不回显，删除放更多菜单并确认 | 添加 Provider |
-| 请求日志 | 全高 `Table`，toolbar 提供搜索、筛选和日志开关；状态、耗时、模型等列支持排序 | macOS 14+ 使用 Inspector 按“摘要、Codex 请求、上游请求、响应、事件、错误”分区并按需加载；macOS 13 与窄窗口导航到详情页，并可另开详情窗口 | 默认没有创建动作；“清空日志”放更多菜单 |
+| 会话 | 可搜索、可排序的会话列表，显示项目、时间、执行端和当前 Provider | macOS 26 的 Inspector 显示完整路径、绑定状态和 Provider 移动控件；macOS 14-25 兼容路径与窄窗口导航到详情页 | 默认没有全局主要动作；操作针对所选会话 |
+| 消息通道 | 按平台分组的账号列表，显示名称、连接状态和最近错误；行尾开关直接启停，失败时回滚；不为四个平台各建一级页面 | 添加账号使用 Onboarding sheet；选中账号后在 macOS 26 Inspector、macOS 14-25/窄窗口详情页编辑，显式“保存”；删除放更多菜单并确认 | 添加账号 |
+| AI Gateway | Provider 列表展示启用状态、协议、权重和模型数量；行尾开关直接启停，失败时回滚；Gateway 全局开关放在列表上方紧凑控制行 | macOS 26 Inspector、macOS 14-25/窄窗口详情页编辑 Base URL、密钥状态、模型映射和高级选项，显式“保存”；密钥只写不回显，删除放更多菜单并确认 | 添加 Provider |
+| 请求日志 | 全高 `Table`，toolbar 提供搜索、筛选和日志开关；状态、耗时、模型等列支持排序 | macOS 26 使用 Inspector 按“摘要、Codex 请求、上游请求、响应、事件、错误”分区并按需加载；macOS 14-25 兼容路径与窄窗口导航到详情页，并可另开详情窗口 | 默认没有创建动作；“清空日志”放更多菜单 |
 
 总览不是第二套设置页。它只回答三件事：MochiPort 能不能工作、问题在哪里、下一步该做什么。正常项目以紧凑行呈现；只有异常项目展开解释和动作，避免状态卡片铺满窗口。
 
-列表类页面的 Detail 规则保持一致：macOS 14+ 且空间足够时使用系统 Inspector；macOS 13 或空间不足时进入同内容的导航详情页。总览和 Codex 从不显示 Inspector。独立日志窗口是额外工作方式，不是任何系统版本的必需回退。
+列表类页面的 Detail 规则保持一致：macOS 26 且空间足够时使用系统 Inspector；macOS 14-25 兼容路径或空间不足时进入同内容的导航详情页。总览和 Codex 从不显示 Inspector。独立日志窗口是额外工作方式，不是任何系统版本的必需回退。
 
 会话列表支持多选。单选时 Inspector/详情页显示会话信息；选中一个或多个会话时，toolbar 出现“移动 Provider”动作，popover 选择目标并预览数量，确认后执行。部分失败时保留失败项选择并列出原因，已成功项不回滚。
 
@@ -308,7 +308,7 @@ AI Gateway 的运行开关与 Provider 列表放在该页面。请求日志页�
 
 Sidebar、toolbar、search、sheet、popover、Inspector 和菜单栏瞬时界面属于导航与控制层，在 macOS 26 交给系统呈现原生 Liquid Glass。Content 中的表格、列表行、表单、日志文本和状态 section 使用稳定内容表面与系统分隔线，不再套玻璃卡片。
 
-悬浮控制只有在真实覆盖可滚动内容且系统组件不能表达时才允许自定义 `glassEffect`。同组悬浮控件需要共同变形时才使用 `GlassEffectContainer`；首版不为了展示技术效果创造悬浮按钮或自定义 morph 动画。macOS 13-15 保持相同结构，以系统 toolbar、sidebar 和 `Material` 回退。
+悬浮控制只有在真实覆盖可滚动内容且系统组件不能表达时才允许自定义 `glassEffect`。同组悬浮控件需要共同变形时才使用 `GlassEffectContainer`；首版不为了展示技术效果创造悬浮按钮或自定义 morph 动画。macOS 14-25 保持相同结构，以系统 toolbar、sidebar 和 `Material` 回退。
 
 ## 8. API 准备
 
@@ -331,7 +331,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 交付物：
 
-- [x] 创建 `macos/ThreadRelay` SwiftUI 工程，部署目标为 macOS 13。
+- [x] 创建 `macos/ThreadRelay` SwiftUI 工程，正式 Xcode deployment target 为 macOS 26，SwiftPM manifest 为 macOS 14。
 - [x] 固化 stable/preview Bundle ID、Cargo 版本来源、构建号和 Debug/Release scheme。
 - [ ] 补齐图标、签名能力和正式包签名验证。
 - [x] 使用 Swift 并发、`@MainActor` 和 `ObservableObject` 建立 `APIClient`、错误模型、依赖注入和只读 fixture 加载能力。
@@ -344,17 +344,17 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 - [ ] 冻结 Team ID、桥接版本和完整 API 兼容窗口，并完成正式签名验证。
 - [ ] 构建并验证最后一个 wxDragon 桥接版：可与 preview 共享鉴权凭据和兼容 daemon，退出 GUI 不停止 daemon；桥接版发布后再开始真实并行预览。
 - [x] 建立语义化设计 token，但颜色和材质优先引用系统值。
-- [x] 建立 Liquid Glass 使用边界和 availability 封装；macOS 26 使用原生 API，macOS 13-15 使用系统材质回退，不实现仿制玻璃渲染器。
+- [x] 建立 Liquid Glass 使用边界和 availability 封装；macOS 26 使用原生 API，macOS 14-25 使用系统材质回退，不实现仿制玻璃渲染器。
 - [x] 为总览、请求日志、Settings 和 sheet/popover 制作可运行的视觉基准，并提供不接触真实 daemon 的 `ThreadRelayPreview` fixture scheme（工程内部名称保留）。
-- [ ] 完成 macOS 26 浅色/深色与 macOS 13-15 材质回退的截图和可读性评审。
+- [ ] 完成 macOS 26 浅色/深色与 macOS 14-25 材质回退的截图和可读性评审。
 - [x] 创建主导航、Settings、About、菜单命令和占位页面。
 - [x] 增加 Swift 单元测试 target。
 - [ ] 增加 UI 测试 target 和真实交互自动化。
 - [x] 在 CI 中加入 `xcodebuild build` 和 `xcodebuild test`，暂不替换正式产物。
 
-进入 Phase 1 前只冻结会影响兼容性或返工成本的决策：helper 身份与生命周期、本地 API 鉴权、凭据事实来源、Bundle/版本身份、更新回滚、Universal 架构范围和 macOS 13 回退。内部目录、字段命名和等待阈值可在对应 ADR 与测试中继续收敛。
+进入 Phase 1 前只冻结会影响兼容性或返工成本的决策：helper 身份与生命周期、本地 API 鉴权、凭据事实来源、Bundle/版本身份、更新回滚、Universal 架构范围和 macOS 14 SwiftPM 兼容路径。内部目录、字段命名和等待阈值可在对应 ADR 与测试中继续收敛。
 
-验收：SwiftUI 空壳能独立构建、签名和启动；API v1 安全骨架与 fixture 测试通过；不会停止或修改当前 Rust daemon；视觉基准在 macOS 26 浅色/深色及 macOS 13 回退环境完成评审，没有玻璃覆盖业务内容或自制仿制材质。
+验收：SwiftUI 空壳能独立构建、签名和启动；API v1 安全骨架与 fixture 测试通过；不会停止或修改当前 Rust daemon；视觉基准在 macOS 26 浅色/深色及 macOS 14 SwiftPM 兼容路径完成评审，没有玻璃覆盖业务内容或自制仿制材质。
 
 ### Phase 1：只读总览
 
@@ -483,15 +483,15 @@ RC 准备：
 - Bundle：校验嵌入 daemon 的架构、执行权限、签名、Entitlements、版本和哈希。
 - 发布：从已安装旧版本执行真实升级，不只验证全新安装。
 - 安全：为未认证访问、伪造 Origin、错误 Host、令牌轮换、PID 重用、helper 身份冲突和 canary secret 泄漏增加负向测试。
-- 最低系统：在 macOS 13 验证构建、启动、导航详情页回退、菜单栏、Settings 和日志详情；macOS 14 以上另测 `Inspector`。
-- 视觉：在 macOS 26 覆盖浅色、深色、降低透明度、增强对比度和减弱动态效果，在 macOS 13 覆盖系统材质回退；截图用于发现层级和布局回归，不要求跨系统像素一致。
+- 兼容路径：在 macOS 14 验证 SwiftPM 构建、启动和导航详情页回退；正式 Xcode App 在 macOS 26 验证菜单栏、Settings、日志详情和 `Inspector`。
+- 视觉：在 macOS 26 覆盖浅色、深色、降低透明度、增强对比度和减弱动态效果，在 macOS 14-25 覆盖系统材质兼容路径；截图用于发现层级和布局回归，不要求跨系统像素一致。
 
 ### 10.2 发布前手工场景
 
 - 旧数据启动后账号、凭据、绑定、Provider 和日志完整；GUI 重启不要求重新连接。
 - 既有 daemon、端口冲突、GUI/daemon 崩溃以及休眠/网络切换均按第 5 节规则工作且不误杀或自动替换进程；GUI 关闭造成的受保护工作项主动终止数为 0。
 - Codex、四种消息通道、Provider、会话移动、请求日志和设置完成各自主路径与失败恢复。
-- 浅色、深色、VoiceOver、键盘和长文本可用；macOS 26 使用原生 Liquid Glass，降低透明度/增强对比度/减弱动态效果可用，macOS 13-15 回退不缺功能。
+- 浅色、深色、VoiceOver、键盘和长文本可用；macOS 26 使用原生 Liquid Glass，降低透明度/增强对比度/减弱动态效果可用，macOS 14-25 兼容路径不缺功能。
 - 升级、校验失败、启动失败和回滚符合 Phase 6 选择的更新方案。
 
 ### 10.3 发布通道

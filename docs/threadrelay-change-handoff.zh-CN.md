@@ -108,13 +108,13 @@ GUI 更新前后 daemon 的 PID、路径和 SHA-256 应保持一致。若 daemon
 
 项目不再使用以下机制：
 
-- 自动 runtime staging 或候选 runtime
+- 自动候选 runtime、升级 staging 或 runtime 切换
 - runtime 切换 journal
 - 自动回滚和重试驱动的 daemon 重启
 - GUI 驱动的强制接管、强制停止或版本恢复
 - 为了交接创建 ZIP 压缩包
 
-普通 GUI 启动只复用已运行的兼容 daemon；只有服务不存在时，才允许完成首次安装和启动。GUI 关闭或崩溃不应停止 launchd 托管的 daemon。
+普通 GUI 启动只复用已运行的兼容 daemon；只有服务不存在时，才允许把随包 helper 安装到当前 build 的 runtime 目录并首次启动。不得因为版本不一致自动升级、切换或回滚已运行的 daemon。GUI 关闭或崩溃不应停止 launchd 托管的 daemon。
 
 ## 交接后的报告
 
