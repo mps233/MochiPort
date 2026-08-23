@@ -12,6 +12,7 @@ DAEMON_BINARY=$3
 OUTPUT_APP=$4
 GUI_SUPERVISOR=packaging/macos/threadrelay-gui-supervisor
 APP_ICON=packaging/macos/AppIcon.icns
+APP_ICON_DARK=packaging/macos/AppIcon-dark.icns
 THIRD_PARTY_LICENSE_GENERATOR=packaging/generate-third-party-licenses.py
 LUCIDE_LICENSE=packaging/brand/LICENSE.lucide-icons
 PROVIDER_LICENSE=packaging/brand/providers/LICENSE.lobehub-icons
@@ -36,7 +37,7 @@ if [ ! -f "$GUI_SUPERVISOR" ]; then
   echo "GUI supervisor script is unavailable" >&2
   exit 1
 fi
-for RESOURCE in "$APP_ICON" "$THIRD_PARTY_LICENSE_GENERATOR" LICENSE NOTICE \
+for RESOURCE in "$APP_ICON" "$APP_ICON_DARK" "$THIRD_PARTY_LICENSE_GENERATOR" LICENSE NOTICE \
   "$LUCIDE_LICENSE" "$PROVIDER_LICENSE" "$PROVIDER_SOURCES"; do
   if [ ! -f "$RESOURCE" ]; then
     echo "required bundle resource is unavailable: $RESOURCE" >&2
@@ -102,6 +103,12 @@ if [ -z "$DAEMON_BUILD" ] || [ "$DAEMON_BUILD" != "$BUILD" ]; then
   exit 1
 fi
 
+DAEMON_PRODUCT_VERSION=$(printf '%s\n' "$DAEMON_VERSION" | sed -n 's/^[^ ]* \([^ ]*\) (build .*/\1/p')
+if [ -z "$DAEMON_PRODUCT_VERSION" ]; then
+  echo "daemon product version is unavailable" >&2
+  exit 1
+fi
+
 GUI_ARCHS=$(lipo -archs "$XCODE_APP/Contents/MacOS/MochiPort")
 DAEMON_ARCHS=$(lipo -archs "$DAEMON_BINARY")
 for ARCH in $GUI_ARCHS; do
@@ -149,13 +156,29 @@ chmod 755 "$STAGED_APP/Contents/Helpers/mochiport-daemon"
 cp "$GUI_SUPERVISOR" "$STAGED_APP/Contents/Helpers/mochiport-gui-supervisor"
 chmod 755 "$STAGED_APP/Contents/Helpers/mochiport-gui-supervisor"
 cp "$APP_ICON" "$STAGED_APP/Contents/Resources/AppIcon.icns"
+cp "$APP_ICON_DARK" "$STAGED_APP/Contents/Resources/AppIcon-dark.icns"
 python3 "$THIRD_PARTY_LICENSE_GENERATOR" \
   "$STAGED_APP/Contents/Resources/THIRD_PARTY_LICENSES.txt"
 cp LICENSE NOTICE "$STAGED_APP/Contents/Resources/"
 cp "$LUCIDE_LICENSE" "$STAGED_APP/Contents/Resources/brand/"
 cp "$PROVIDER_LICENSE" "$PROVIDER_SOURCES" \
   "$STAGED_APP/Contents/Resources/brand/providers/"
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD" "$STAGED_APP/Contents/Info.plist"
+if /usr/libexec/PlistBuddy -c "Print :MochiPortDaemonVersion" \
+  "$STAGED_APP/Contents/Info.plist" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c "Set :MochiPortDaemonVersion $DAEMON_PRODUCT_VERSION" \
+    "$STAGED_APP/Contents/Info.plist"
+else
+  /usr/libexec/PlistBuddy -c "Add :MochiPortDaemonVersion string $DAEMON_PRODUCT_VERSION" \
+    "$STAGED_APP/Contents/Info.plist"
+fi
+if /usr/libexec/PlistBuddy -c "Print :MochiPortDaemonBuild" \
+  "$STAGED_APP/Contents/Info.plist" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c "Set :MochiPortDaemonBuild $BUILD" \
+    "$STAGED_APP/Contents/Info.plist"
+else
+  /usr/libexec/PlistBuddy -c "Add :MochiPortDaemonBuild string $BUILD" \
+    "$STAGED_APP/Contents/Info.plist"
+fi
 if /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" \
   "$STAGED_APP/Contents/Info.plist" >/dev/null 2>&1; then
   /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$STAGED_APP/Contents/Info.plist"

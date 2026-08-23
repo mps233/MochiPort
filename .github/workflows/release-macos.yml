@@ -2,9 +2,21 @@ name: MochiPort macOS release
 
 on:
   workflow_dispatch:
+    inputs:
+      component:
+        description: Component to publish from a manual tagged run
+        required: true
+        default: all
+        type: choice
+        options:
+          - all
+          - ui
+          - daemon
   push:
     tags:
       - "v*"
+      - "ui-v*"
+      - "daemon-v*"
 
 permissions:
   contents: write
@@ -49,6 +61,32 @@ jobs:
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
 
+      - name: Select Release Component
+        run: |
+          set -euo pipefail
+          COMPONENT="${{ inputs.component || 'all' }}"
+          TAG="${GITHUB_REF_NAME:-}"
+          VERSION_TAG="$TAG"
+          case "$TAG" in
+            daemon-v*)
+              COMPONENT=daemon
+              VERSION_TAG="${TAG#daemon-v}"
+              ;;
+            ui-v*)
+              COMPONENT=ui
+              VERSION_TAG="${TAG#ui-v}"
+              ;;
+            v*) VERSION_TAG="${TAG#v}" ;;
+          esac
+          echo "RELEASE_COMPONENT=$COMPONENT" >> "$GITHUB_ENV"
+          if [[ "$VERSION_TAG" == *-* ]]; then
+            echo "RELEASE_PRERELEASE=true" >> "$GITHUB_ENV"
+            echo "RELEASE_MAKE_LATEST=false" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_PRERELEASE=false" >> "$GITHUB_ENV"
+            echo "RELEASE_MAKE_LATEST=true" >> "$GITHUB_ENV"
+          fi
+
       - name: Import Developer ID Certificate
         if: env.HAS_MACOS_CODESIGN == 'true'
         env:
@@ -70,12 +108,12 @@ jobs:
       - name: Build App Bundle
         run: |
           set -euo pipefail
-          BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}"
+          DAEMON_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}"
           XCODE_DERIVED_DATA="$RUNNER_TEMP/MochiPortDerivedData"
 
-          MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" \
+          MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" \
             cargo build --locked --release --bin mochiport --target aarch64-apple-darwin
-          MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" \
+          MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" \
             cargo build --locked --release --bin mochiport --target x86_64-apple-darwin
 
           mkdir -p target/release
@@ -83,9 +121,6 @@ jobs:
             target/aarch64-apple-darwin/release/mochiport \
             target/x86_64-apple-darwin/release/mochiport \
             -output target/release/mochiport
-
-          MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" \
-            scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
 
           rm -rf "$XCODE_DERIVED_DATA"
           xcodebuild \
@@ -101,25 +136,26 @@ jobs:
 
           mkdir -p target/dist
           scripts/assemble-swiftui-macos-app.sh \
-            "$BUILD_NUMBER" \
+            "$DAEMON_BUILD_NUMBER" \
             "$XCODE_DERIVED_DATA/Build/Products/Release/MochiPort.app" \
             target/release/mochiport \
             target/dist/MochiPort.app
 
-          CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
-          if [ -z "$CARGO_VERSION" ]; then
-            echo "Could not read package version from Cargo.toml" >&2
+          UI_VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' target/dist/MochiPort.app/Contents/Info.plist)"
+          UI_BUILD_NUMBER="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' target/dist/MochiPort.app/Contents/Info.plist)"
+          DAEMON_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
+          if [ -z "$UI_VERSION" ] || [ -z "$UI_BUILD_NUMBER" ] || [ -z "$DAEMON_VERSION" ]; then
+            echo "Could not resolve independent UI and daemon versions" >&2
             exit 1
           fi
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            APP_VERSION="$GITHUB_REF_NAME"
-          else
-            APP_VERSION="v$CARGO_VERSION"
-          fi
           {
-            echo "APP_VERSION=$APP_VERSION"
-            echo "MACOS_DMG_NAME=MochiPort-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
-            echo "MACOS_APP_ZIP_NAME=MochiPort-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
+            echo "MOCHIPORT_UI_VERSION=$UI_VERSION"
+            echo "MOCHIPORT_UI_BUILD_NUMBER=$UI_BUILD_NUMBER"
+            echo "MOCHIPORT_DAEMON_VERSION=$DAEMON_VERSION"
+            echo "MOCHIPORT_DAEMON_BUILD_NUMBER=$DAEMON_BUILD_NUMBER"
+            echo "MACOS_DMG_NAME=MochiPort-$UI_VERSION-build$UI_BUILD_NUMBER-macos-$MACOS_FILE_SLUG.dmg"
+            echo "MACOS_APP_ZIP_NAME=MochiPort-$UI_VERSION-build$UI_BUILD_NUMBER-macos-$MACOS_FILE_SLUG.app.zip"
+            echo "MACOS_DAEMON_NAME=mochiport-daemon-$DAEMON_VERSION-build$DAEMON_BUILD_NUMBER-macos-$MACOS_FILE_SLUG"
           } >> "$GITHUB_ENV"
 
       - name: Sign And Notarize
@@ -142,6 +178,8 @@ jobs:
           ZIP="target/dist/${MACOS_APP_ZIP_NAME}"
           NOTARY_ZIP="target/dist/MochiPort-notary.zip"
           ENTITLEMENTS="packaging/macos/entitlements.plist"
+          DAEMON="target/release/mochiport"
+          DAEMON_ASSET="target/dist/${MACOS_DAEMON_NAME}"
 
           if [ -n "${APPLE_API_KEY_P8:-}" ]; then
             API_KEY_PATH="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
@@ -221,15 +259,17 @@ jobs:
 
           codesign --force --timestamp --options runtime \
             --sign "$APPLE_CODESIGN_IDENTITY" \
-            "$APP/Contents/Helpers/mochiport-gui-supervisor"
+            "$DAEMON"
+          ditto "$DAEMON" "$APP/Contents/Helpers/mochiport-daemon"
           codesign --force --timestamp --options runtime \
             --sign "$APPLE_CODESIGN_IDENTITY" \
-            "$APP/Contents/Helpers/mochiport-daemon"
+            "$APP/Contents/Helpers/mochiport-gui-supervisor"
           codesign --force --timestamp --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$APPLE_CODESIGN_IDENTITY" \
             "$APP"
 
+          codesign --verify --strict --verbose=2 "$DAEMON"
           codesign --verify --deep --strict --verbose=2 "$APP"
           ditto -c -k --keepParent "$APP" "$NOTARY_ZIP"
           notary_submit "$NOTARY_ZIP"
@@ -251,8 +291,10 @@ jobs:
 
           xcrun stapler validate "$APP"
           xcrun stapler validate "$DMG"
+          spctl --assess --type execute --verbose=4 "$DAEMON"
           spctl --assess --type execute --verbose=4 "$APP"
           spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
+          ditto "$DAEMON" "$DAEMON_ASSET"
 
       - name: Package Unsigned App
         if: env.HAS_MACOS_CODESIGN != 'true'
@@ -262,6 +304,7 @@ jobs:
           DMG="target/dist/MochiPort.dmg"
           DMG_STAGING="target/dist/dmg"
           ZIP="target/dist/${MACOS_APP_ZIP_NAME}"
+          DAEMON_ASSET="target/dist/${MACOS_DAEMON_NAME}"
 
           ditto -c -k --keepParent "$APP" "$ZIP"
           rm -rf "$DMG_STAGING"
@@ -270,6 +313,7 @@ jobs:
           ln -s /Applications "$DMG_STAGING/Applications"
           hdiutil create -volname "MochiPort" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
           mv "$DMG" "target/dist/${MACOS_DMG_NAME}"
+          ditto target/release/mochiport "$DAEMON_ASSET"
           echo "macOS artifact is unsigned because complete signing and notarization secrets were not configured." >&2
 
       - name: Write macOS Update Metadata
@@ -280,75 +324,37 @@ jobs:
           MACOS_SIGNED: ${{ env.HAS_MACOS_CODESIGN }}
         run: |
           set -euo pipefail
-          python3 - <<'PY'
-          import json
-          import os
-          import hashlib
-          from pathlib import Path
+          PREVIOUS_MANIFEST="$RUNNER_TEMP/previous-latest-macos.json"
+          curl --fail --silent --show-error --location \
+            "https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/${MACOS_MANIFEST_NAME}" \
+            --output "$PREVIOUS_MANIFEST" || rm -f "$PREVIOUS_MANIFEST"
 
-          dist = Path("target/dist")
-          dmg_name = os.environ["MACOS_DMG_NAME"]
-          app_zip_name = os.environ["MACOS_APP_ZIP_NAME"]
-          asset_key = os.environ["MACOS_ASSET_KEY"]
-          sparkle_key = os.environ["MACOS_SPARKLE_KEY"]
-          manifest_name = os.environ["MACOS_MANIFEST_NAME"]
-          intel_manifest_name = os.environ["MACOS_INTEL_MANIFEST_NAME"]
-          dmg_path = dist / dmg_name
-          app_zip_path = dist / app_zip_name
-          release_tag = os.environ["RELEASE_TAG"]
-          repository = os.environ["RELEASE_REPOSITORY"]
-          signed = os.environ["MACOS_SIGNED"] == "true"
-          release_url = f"https://github.com/{repository}/releases/tag/{release_tag}"
-          download_base_url = f"https://github.com/{repository}/releases/download/{release_tag}"
+          SIGNING_ARGUMENT=()
+          if [ "$MACOS_SIGNED" = true ]; then
+            SIGNING_ARGUMENT=(--signed)
+          fi
+          scripts/write-macos-update-manifest.py \
+            --output "target/dist/${MACOS_MANIFEST_NAME}" \
+            --previous "$PREVIOUS_MANIFEST" \
+            --component "$RELEASE_COMPONENT" \
+            --repository "$RELEASE_REPOSITORY" \
+            --release-tag "$RELEASE_TAG" \
+            "${SIGNING_ARGUMENT[@]}" \
+            --ui-version "$MOCHIPORT_UI_VERSION" \
+            --ui-build "$MOCHIPORT_UI_BUILD_NUMBER" \
+            --ui-dmg "target/dist/${MACOS_DMG_NAME}" \
+            --ui-dmg-name "$MACOS_DMG_NAME" \
+            --ui-app-zip "target/dist/${MACOS_APP_ZIP_NAME}" \
+            --ui-app-zip-name "$MACOS_APP_ZIP_NAME" \
+            --daemon-version "$MOCHIPORT_DAEMON_VERSION" \
+            --daemon-build "$MOCHIPORT_DAEMON_BUILD_NUMBER" \
+            --daemon-binary "target/dist/${MACOS_DAEMON_NAME}" \
+            --daemon-binary-name "$MACOS_DAEMON_NAME" \
+            --minimum-ui-version "$MOCHIPORT_UI_VERSION" \
+            --minimum-ui-build "$MOCHIPORT_UI_BUILD_NUMBER"
 
-          def sha256(path: Path) -> str:
-              digest = hashlib.sha256()
-              with path.open("rb") as handle:
-                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                      digest.update(chunk)
-              return digest.hexdigest()
-
-          manifest = {
-              "version": release_tag,
-              "releaseUrl": release_url,
-              "notes": "",
-              "assets": {
-                  asset_key: {
-                      "type": "dmg",
-                      "url": f"{download_base_url}/{dmg_name}",
-                      "sha256": sha256(dmg_path),
-                      "size": dmg_path.stat().st_size,
-                      "signed": signed,
-                      "notarized": signed,
-                  },
-                  sparkle_key: {
-                      "type": "app-zip",
-                      "url": f"{download_base_url}/{app_zip_name}",
-                      "sha256": sha256(app_zip_path),
-                      "size": app_zip_path.stat().st_size,
-                      "signed": signed,
-                      "notarized": signed,
-                  },
-              },
-          }
-          Path(f"target/dist/{manifest_name}").write_text(
-              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-              encoding="utf-8",
-          )
-          intel_manifest = {
-              "version": release_tag,
-              "releaseUrl": release_url,
-              "notes": "",
-              "assets": {
-                  "macos-intel": manifest["assets"][asset_key],
-                  "macos-sparkle-intel": manifest["assets"][sparkle_key],
-              },
-          }
-          Path(f"target/dist/{intel_manifest_name}").write_text(
-              json.dumps(intel_manifest, ensure_ascii=False, indent=2) + "\n",
-              encoding="utf-8",
-          )
-          PY
+          cp "target/dist/${MACOS_MANIFEST_NAME}" \
+            "target/dist/${MACOS_INTEL_MANIFEST_NAME}"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
@@ -357,6 +363,7 @@ jobs:
           path: |
             target/dist/MochiPort-*-macos-${{ matrix.file_slug }}.dmg
             target/dist/MochiPort-*-macos-${{ matrix.file_slug }}.app.zip
+            target/dist/mochiport-daemon-*-macos-${{ matrix.file_slug }}
             target/dist/${{ matrix.manifest_name }}
             target/dist/${{ matrix.intel_manifest_name }}
 
@@ -366,10 +373,11 @@ jobs:
         with:
           overwrite_files: true
           body_path: RELEASE_NOTES.md
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+          prerelease: ${{ env.RELEASE_PRERELEASE == 'true' }}
+          make_latest: ${{ env.RELEASE_MAKE_LATEST == 'true' }}
           files: |
             target/dist/MochiPort-*-macos-${{ matrix.file_slug }}.dmg
             target/dist/MochiPort-*-macos-${{ matrix.file_slug }}.app.zip
+            target/dist/mochiport-daemon-*-macos-${{ matrix.file_slug }}
             target/dist/${{ matrix.manifest_name }}
             target/dist/${{ matrix.intel_manifest_name }}

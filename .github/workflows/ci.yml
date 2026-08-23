@@ -73,7 +73,9 @@ jobs:
       - name: Generate Swift version
         run: |
           set -euo pipefail
-          MOCHIPORT_BUILD_NUMBER="${{ github.run_number }}" \
+          UI_VERSION="$(sed -n 's/^MARKETING_VERSION *= *\([^ ]*\).*/\1/p' macos/ThreadRelay/Config/Version.xcconfig | head -n 1)"
+          MOCHIPORT_UI_VERSION="$UI_VERSION" \
+            MOCHIPORT_UI_BUILD_NUMBER="${{ github.run_number }}" \
             scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
 
       - name: Build SwiftUI shell
