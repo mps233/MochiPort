@@ -333,6 +333,9 @@ fn open_state_db_write(path: &Path) -> Result<Connection> {
 }
 
 fn codexhub_app_support_dir() -> PathBuf {
+    if let Some(base) = std::env::var_os("MOCHIPORT_HOME").map(PathBuf::from) {
+        return base;
+    }
     if let Some(base) = std::env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
         return base;
     }
@@ -346,7 +349,10 @@ fn codexhub_app_support_dir() -> PathBuf {
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        prefer_existing_legacy_app_dir(base.join("ThreadRelay"), &[base.join("CodexHub")])
+        prefer_existing_legacy_app_dir(
+            base.join("MochiPort"),
+            &[base.join("ThreadRelay"), base.join("CodexHub")],
+        )
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -355,7 +361,10 @@ fn codexhub_app_support_dir() -> PathBuf {
             .map(|home| home.join("Library/Application Support"))
             .or_else(|| std::env::current_dir().ok())
             .unwrap_or_else(|| PathBuf::from("."));
-        prefer_existing_legacy_app_dir(base.join("ThreadRelay"), &[base.join("CodexHub")])
+        prefer_existing_legacy_app_dir(
+            base.join("MochiPort"),
+            &[base.join("ThreadRelay"), base.join("CodexHub")],
+        )
     }
 }
 

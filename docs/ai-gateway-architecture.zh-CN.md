@@ -2,7 +2,7 @@
 
 更新时间：2026-06-15
 
-本文记录 `codexhub` 内置 AI Gateway 的目标、协议边界、缓存策略和分期实现计划。它是后续实现的约束文档，不代表当前代码已经完成这些能力。
+本文记录 `mochiport` 内置 AI Gateway 的目标、协议边界、缓存策略和分期实现计划。它是后续实现的约束文档，不代表当前代码已经完成这些能力。
 
 Provider adapter 的长期边界见 [`ai-gateway-provider-adapter-design.zh-CN.md`](ai-gateway-provider-adapter-design.zh-CN.md)。Anthropic Messages 与智谱 GLM 的当前实现分别见 [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md) 和 [`ai-gateway-glm-anthropic-integration.zh-CN.md`](ai-gateway-glm-anthropic-integration.zh-CN.md)。
 
@@ -10,7 +10,7 @@ Provider adapter 的长期边界见 [`ai-gateway-provider-adapter-design.zh-CN.m
 
 ```text
 Codex (OpenAI Responses)
-  <-> codexhub AI Gateway
+  <-> MochiPort AI Gateway
   <-> OpenAI / gpt-5.5 (Responses)
    |-> DeepSeek (Chat Completions)
    |-> Anthropic-compatible (Messages)
@@ -20,7 +20,7 @@ Codex (OpenAI Responses)
 
 ```text
 Codex (OpenAI Responses)
-  <-> codexhub AI Gateway
+  <-> MochiPort AI Gateway
   <-> OpenAI Responses
    |-> Anthropic Messages-compatible providers
 ```
@@ -114,7 +114,7 @@ AI Gateway 要解决的是：Codex 只按 OpenAI Responses 协议发请求，但
 
 ## 4. 配置设计
 
-`codexhub` 自身配置新增一个独立段落：
+`mochiport` 自身配置新增一个独立段落：
 
 ```toml
 [aiGateway]
@@ -159,7 +159,7 @@ model_provider = "ai-gateway"
 
 Codex 可见模型由 `aiGateway.codexVisibleModels` 控制。它不是 provider 上游模型列表的简单合并，而是一个显式白名单：只有配置在该列表里，并且内置 `src/ai_gateway/models.json` 中 `supported_in_api = true`、`visibility = "list"` 的模型，才会出现在 `GET /ai-gateway/v1/models` 返回值里。
 
-`AI_GATEWAY_API_KEY` 第一阶段可以是本地占位 key。真实上游 provider key 放在 `codexhub` 运行环境里，不写入 Codex 配置。
+`AI_GATEWAY_API_KEY` 第一阶段可以是本地占位 key。真实上游 provider key 放在 `mochiport` 运行环境里，不写入 Codex 配置。
 
 ## 5. 路由设计
 
@@ -180,7 +180,7 @@ POST /ai-gateway/v1/chat/completions
 
 ### 5.1 Codex 模型列表刷新机制
 
-Codex App 前端不直接读取 `codexhub` 配置，也不监听 `aiGateway.codexVisibleModels` 文件变化。Codex 侧模型列表链路是：
+Codex App 前端不直接读取 `mochiport` 配置，也不监听 `aiGateway.codexVisibleModels` 文件变化。Codex 侧模型列表链路是：
 
 ```text
 Codex App

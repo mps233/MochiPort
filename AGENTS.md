@@ -1,17 +1,17 @@
-# ThreadRelay 项目工作规则
+# MochiPort 项目工作规则
 
 本文件适用于整个仓库。进行代码修改、构建交接和界面验证时，应遵守以下规则。
 
-## ThreadRelay 界面截图
+## MochiPort 界面截图
 
-- 默认只截 ThreadRelay 当前需要检查的应用窗口，不截整个屏幕。
+- 默认只截 MochiPort 当前需要检查的应用窗口，不截整个屏幕。
 - 正式 App 必须使用完整路径定位：
-  `/Users/miaopasi/codexhub/outputs/ThreadRelay.app`。
+  `/Users/miaopasi/codexhub/outputs/MochiPort.app`。
 - 不要只用应用名称或 Bundle ID 定位，因为 Xcode 构建产物和正式 App 可能使用相同 Bundle ID。
 - 截图中不得出现桌面、菜单栏、Dock、终端、Codex 或其他应用窗口。
-- 如果 ThreadRelay 同时存在多个窗口，只截与当前任务对应的窗口；界面改动默认截主窗口中的目标页面。
+- 如果 MochiPort 同时存在多个窗口，只截与当前任务对应的窗口；界面改动默认截主窗口中的目标页面。
 - 优先通过 Computer Use 针对上述完整 App 路径读取窗口状态，并使用该窗口返回的截图。
-- 发送截图前检查图片四周：边界应与 ThreadRelay 窗口边界一致。若仍包含屏幕背景或其他窗口，必须重新按窗口范围截图，不能把全屏截图直接交付。
+- 发送截图前检查图片四周：边界应与 MochiPort 窗口边界一致。若仍包含屏幕背景或其他窗口，必须重新按窗口范围截图，不能把全屏截图直接交付。
 - 只有用户明确要求查看桌面整体布局、多个窗口关系或全屏效果时，才允许截全屏。
 
 ## 构建和运行交接

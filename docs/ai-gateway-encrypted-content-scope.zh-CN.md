@@ -8,7 +8,7 @@
 
 当前版本优先保证 OpenAI 原生密文兼容，同时观察 Grok 在不加前缀时的连续推理、模型切换和异常恢复效果。后续可以根据真实日志重新启用 Grok scope marker；本文保留两种方案及切换条件。
 
-CodexHub 对两类私有状态采用不同策略：
+MochiPort 对两类私有状态采用不同策略：
 
 | 协议 | 返回 Codex | 后续请求 |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ CodexHub 对两类私有状态采用不同策略：
 | Grok Responses | 原样透传 `encrypted_content` | 原样回放 |
 | Anthropic Messages | 使用 typed marker 映射到 `encrypted_content` | 解包为 `thinking.signature` 或 `redacted_thinking.data` |
 
-当前实现中，OpenAI 和 Grok 的新响应暂不增加 `codexhub:enc:v1:` 前缀。这样可以先保证 OpenAI 原生密文仍是 Codex 可直接保存、回放和迁移的原生值，用户停用或卸载 CodexHub 后不会因为 CodexHub 私有前缀而破坏会话。
+当前实现中，OpenAI 和 Grok 的新响应暂不增加 `codexhub:enc:v1:` 前缀。这样可以先保证 OpenAI 原生密文仍是 Codex 可直接保存、回放和迁移的原生值，用户停用或卸载 MochiPort 后不会因为旧 `codexhub` 私有前缀而破坏会话。
 
 跨模型或跨协议族切换依赖模型目录中的不同 `comp_hash`。Codex 检测到 `comp_hash` 变化后，会在使用新模型前通过旧模型生成本地文本摘要；新的 replacement history 不再携带旧 reasoning 密文。因此正常切换流程不需要 Gateway 给 Responses 密文增加作用域前缀。
 
@@ -33,11 +33,11 @@ JSON、SSE 和 Compact 响应中的下列字段保持原值：
 }
 ```
 
-CodexHub 可以执行与密文无关的兼容转换，例如 Grok 工具名恢复，但不得修改 `encrypted_content` 的内容。
+MochiPort 可以执行与密文无关的兼容转换，例如 Grok 工具名恢复，但不得修改 `encrypted_content` 的内容。
 
 ### 请求方向
 
-无前缀的原生密文原样发送给当前 Responses Provider。CodexHub 不猜测该密文来自 OpenAI 还是 Grok，也不维护会话级旁路索引。
+无前缀的原生密文原样发送给当前 Responses Provider。MochiPort 不猜测该密文来自 OpenAI 还是 Grok，也不维护会话级旁路索引。
 
 若上游明确返回以下密文校验错误，Gateway 可以删除请求中的 Provider 私有密文并最多重试一次：
 
@@ -63,7 +63,7 @@ codexhub:enc:v1:anthropic:<footprint>:redacted_thinking:<raw data>
 
 `footprint` 是 Provider route 的 SHA-256 前 6 字节，route 由 Provider 名称、类型和 Base URL 组成；API Key 不参与计算。
 
-同一 Anthropic route 回放时，CodexHub 解包 marker 并恢复原始 block。marker 不匹配时忽略该私有 block。OpenAI、Grok 与 Anthropic 之间正常切换时，`comp_hash` 应先触发文本压缩，因此 Anthropic marker 不应进入新的 Responses Provider 请求。
+同一 Anthropic route 回放时，MochiPort 解包 marker 并恢复原始 block。marker 不匹配时忽略该私有 block。OpenAI、Grok 与 Anthropic 之间正常切换时，`comp_hash` 应先触发文本压缩，因此 Anthropic marker 不应进入新的 Responses Provider 请求。
 
 ## 旧前缀兼容
 

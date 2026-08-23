@@ -1,8 +1,8 @@
-﻿# Contributing to ThreadRelay
+﻿# Contributing to MochiPort
 
-Thanks for considering contributing to ThreadRelay.
+Thanks for considering contributing to MochiPort.
 
-ThreadRelay sits between Codex remote-control clients, IM channels, and the local AI Gateway, so small protocol changes can affect message routing, approvals, and model requests. Please keep changes conservative and easy to review.
+MochiPort sits between Codex remote-control clients, IM channels, and the local AI Gateway, so small protocol changes can affect message routing, approvals, and model requests. Please keep changes conservative and easy to review.
 
 ## Development Setup
 
@@ -23,7 +23,7 @@ cargo test approval
 - Keep Codex as the source of truth.
 - Do not change Codex cwd, model, sandbox, approval policy, or environment from the bridge.
 - Prefer forwarding official app-server protocol payloads instead of inventing bridge-specific semantics.
-- Keep Codex App launch clean: configuration should point it at the local backend, but `threadrelay` should not wrap or launch Codex.
+- Keep Codex App launch clean: configuration should point it at the local backend, but `mochiport` should not wrap or launch Codex.
 - IM interfaces should be compact and stateful; avoid repeated explanatory messages when an existing message or card can show the result.
 
 ## Pull Request Checklist

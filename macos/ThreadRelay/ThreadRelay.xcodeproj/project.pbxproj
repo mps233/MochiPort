@@ -56,7 +56,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		A20000000000000000000000 /* ThreadRelay.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ThreadRelay.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000000 /* MochiPort.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MochiPort.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000001 /* ThreadRelayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadRelayApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
@@ -172,7 +172,7 @@
 		A40000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				A20000000000000000000000 /* ThreadRelay.app */,
+				A20000000000000000000000 /* MochiPort.app */,
 				A20000000000000000000010 /* ThreadRelayMacTests.xctest */,
 			);
 			name = Products;
@@ -198,8 +198,8 @@
 			buildRules = ();
 			dependencies = ();
 			name = ThreadRelay;
-			productName = ThreadRelay;
-			productReference = A20000000000000000000000 /* ThreadRelay.app */;
+			productName = MochiPort;
+			productReference = A20000000000000000000000 /* MochiPort.app */;
 			productType = "com.apple.product-type.application";
 		};
 		A50000000000000000000002 /* ThreadRelayMacTests */ = {
@@ -343,11 +343,12 @@
 					ENABLE_TESTABILITY = YES;
 					GENERATE_INFOPLIST_FILE = NO;
 					INFOPLIST_FILE = Config/ThreadRelay-Info.plist;
-					THREADRELAY_DISPLAY_NAME = "ThreadRelay Preview";
+					MOCHIPORT_DISPLAY_NAME = "MochiPort Preview";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay.preview;
-				PRODUCT_NAME = ThreadRelay;
+				PRODUCT_MODULE_NAME = ThreadRelay;
+				PRODUCT_NAME = MochiPort;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
@@ -362,11 +363,12 @@
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Config/ThreadRelay-Info.plist;
-				THREADRELAY_DISPLAY_NAME = ThreadRelay;
+				MOCHIPORT_DISPLAY_NAME = MochiPort;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay;
-				PRODUCT_NAME = ThreadRelay;
+				PRODUCT_MODULE_NAME = ThreadRelay;
+				PRODUCT_NAME = MochiPort;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_STRICT_CONCURRENCY = complete;
 				SWIFT_VERSION = 6.0;
@@ -388,7 +390,7 @@
 					SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 					SWIFT_STRICT_CONCURRENCY = complete;
 					SWIFT_VERSION = 6.0;
-					TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ThreadRelay.app/Contents/MacOS/ThreadRelay";
+					TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MochiPort.app/Contents/MacOS/MochiPort";
 				};
 				name = Debug;
 			};
@@ -406,7 +408,7 @@
 					PRODUCT_NAME = ThreadRelayMacTests;
 					SWIFT_STRICT_CONCURRENCY = complete;
 					SWIFT_VERSION = 6.0;
-					TEST_HOST = "$(BUILT_PRODUCTS_DIR)/ThreadRelay.app/Contents/MacOS/ThreadRelay";
+					TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MochiPort.app/Contents/MacOS/MochiPort";
 				};
 				name = Release;
 			};

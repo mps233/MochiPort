@@ -1009,7 +1009,7 @@ final class AppModel: ObservableObject {
             }
 
             try await self.requireSectionRefresh(.codex)
-            return "已连接 ThreadRelay"
+            return "已连接 MochiPort"
         }
     }
 
@@ -1038,7 +1038,7 @@ final class AppModel: ObservableObject {
             _ = try await self.apiClient.uninstallCodex()
             self.gateway = try await self.updateGateway(currentGateway, enabled: false)
             try await self.requireSectionRefresh(.codex)
-            return "已恢复原来的 Codex 设置，ThreadRelay 已关闭"
+            return "已恢复原来的 Codex 设置，MochiPort 已关闭"
         }
     }
 
@@ -2534,7 +2534,7 @@ final class AppModel: ObservableObject {
                 pid: 0,
                 startedAtMs: 0
             ),
-            executable: "/Preview/ThreadRelay",
+            executable: "/Preview/MochiPort",
             configPath: "/Preview/config.toml",
             bind: "127.0.0.1:3847",
             runtime: .init(state: "active", productVersion: "0.5.0", buildNumber: nil, apiMajor: 1),

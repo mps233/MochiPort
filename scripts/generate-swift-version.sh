@@ -8,16 +8,16 @@ fi
 
 OUTPUT=$1
 VERSION=$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)
-BUILD=${THREADRELAY_BUILD_NUMBER:-}
+BUILD=${MOCHIPORT_BUILD_NUMBER:-${THREADRELAY_BUILD_NUMBER:-}}
 
 if [ -z "$VERSION" ] || [ -z "$BUILD" ]; then
-  echo "Cargo version and THREADRELAY_BUILD_NUMBER are required" >&2
+  echo "Cargo version and MOCHIPORT_BUILD_NUMBER are required" >&2
   exit 1
 fi
 
 case "$BUILD" in
   *[!0-9]*|'')
-    echo "THREADRELAY_BUILD_NUMBER must be a positive integer" >&2
+    echo "MOCHIPORT_BUILD_NUMBER must be a positive integer" >&2
     exit 2
     ;;
 esac

@@ -1,4 +1,4 @@
-# ThreadRelay for macOS
+# MochiPort for macOS
 
 Native SwiftUI client for macOS 13 and newer. It includes the overview,
 Codex integration, session movement, messaging accounts, AI Gateway providers,
@@ -8,7 +8,7 @@ management API.
 ```sh
 swift build --package-path macos/ThreadRelay
 swift test --package-path macos/ThreadRelay
-swift run --package-path macos/ThreadRelay ThreadRelayMac
+swift run --package-path macos/ThreadRelay MochiPort
 ```
 
 The app probes `GET /healthz` and reads the authenticated
@@ -45,37 +45,37 @@ check.
 
 For a deterministic visual review that never contacts the real daemon, open
 the shared `ThreadRelayPreview` scheme in Xcode and run it. The scheme sets
-`THREADRELAY_PREVIEW_FIXTURE=available`; use `bridge` or `unavailable` to
+`MOCHIPORT_PREVIEW_FIXTURE=available`; use `bridge` or `unavailable` to
 review the other service states. The fixture path is read-only and only
 changes in-memory view state.
 
 Generate the shared Xcode version settings from the Rust package version with:
 
 ```sh
-THREADRELAY_BUILD_NUMBER=1 scripts/generate-swift-version.sh \
+MOCHIPORT_BUILD_NUMBER=1 scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 ```
 
 For daemon-affecting changes, the default handoff builds and assembles the
 formal App immediately. Use the same build number for both architectures and
 the SwiftUI bundle; the assembly script rejects a mismatch. This updates
-`outputs/ThreadRelay.app`, but never replaces or restarts the daemon that is
+`outputs/MochiPort.app`, but never replaces or restarts the daemon that is
 already running. The complete handoff rule is in
 [`docs/threadrelay-change-handoff.zh-CN.md`](../../docs/threadrelay-change-handoff.zh-CN.md).
 
 ```sh
 BUILD_NUMBER=439
-THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
-  --target aarch64-apple-darwin --bin threadrelay
-THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
-  --target x86_64-apple-darwin --bin threadrelay
+MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+  --target aarch64-apple-darwin --bin mochiport
+MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+  --target x86_64-apple-darwin --bin mochiport
 mkdir -p target/release
 lipo -create \
-  target/aarch64-apple-darwin/release/threadrelay \
-  target/x86_64-apple-darwin/release/threadrelay \
-  -output target/release/threadrelay
-chmod 755 target/release/threadrelay
-THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh \
+  target/aarch64-apple-darwin/release/mochiport \
+  target/x86_64-apple-darwin/release/mochiport \
+  -output target/release/mochiport
+chmod 755 target/release/mochiport
+MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 xcodebuild \
   -project macos/ThreadRelay/ThreadRelay.xcodeproj \
@@ -85,7 +85,7 @@ xcodebuild \
   build
 scripts/assemble-swiftui-macos-app.sh \
   "$BUILD_NUMBER" \
-  macos/ThreadRelay/.build/xcode/Build/Products/Release/ThreadRelay.app \
-  target/release/threadrelay \
-  outputs/ThreadRelay.app
+  macos/ThreadRelay/.build/xcode/Build/Products/Release/MochiPort.app \
+  target/release/mochiport \
+  outputs/MochiPort.app
 ```

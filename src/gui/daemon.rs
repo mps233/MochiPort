@@ -395,9 +395,16 @@ fn fallback_port_is_available(port: u16) -> bool {
 fn command_is_codexhub(command: &str) -> bool {
     let command = command.trim().replace('\\', "/");
     let executable = command.rsplit('/').next().unwrap_or_default();
-    ["threadrelay", "threadrelay.exe", "codexhub", "codexhub.exe"]
-        .iter()
-        .any(|name| executable.eq_ignore_ascii_case(name))
+    [
+        "mochiport",
+        "mochiport.exe",
+        "threadrelay",
+        "threadrelay.exe",
+        "codexhub",
+        "codexhub.exe",
+    ]
+    .iter()
+    .any(|name| executable.eq_ignore_ascii_case(name))
 }
 
 #[cfg(unix)]
@@ -589,17 +596,21 @@ pub(super) fn append_daemon_args(command: &mut Command) {
 }
 
 pub(super) fn daemon_config_path() -> Option<PathBuf> {
-    let threadrelay_home_is_set = env::var_os("THREADRELAY_HOME").is_some();
-    let threadrelay_repo_config_is_set = env::var_os("THREADRELAY_USE_REPO_CONFIG").is_some();
-    if threadrelay_home_is_set
-        || (!threadrelay_repo_config_is_set && env::var_os("CODEXHUB_HOME").is_some())
+    let mochiport_home_is_set = env::var_os("MOCHIPORT_HOME").is_some();
+    let legacy_home_is_set =
+        env::var_os("THREADRELAY_HOME").is_some() || env::var_os("CODEXHUB_HOME").is_some();
+    let mochiport_repo_config_is_set = env::var_os("MOCHIPORT_USE_REPO_CONFIG").is_some();
+    let legacy_repo_config_is_set = env::var_os("THREADRELAY_USE_REPO_CONFIG").is_some()
+        || env::var_os("CODEXHUB_USE_REPO_CONFIG").is_some();
+    if mochiport_home_is_set
+        || (!mochiport_repo_config_is_set && !legacy_repo_config_is_set && legacy_home_is_set)
     {
         return Some(app_support_config_path());
     }
     if let Some(path) = adjacent_config_from_current_exe() {
         return Some(path);
     }
-    if threadrelay_repo_config_is_set || env::var_os("CODEXHUB_USE_REPO_CONFIG").is_some() {
+    if mochiport_repo_config_is_set || legacy_repo_config_is_set {
         return std::env::current_dir()
             .ok()
             .map(|cwd| cwd.join("config.toml"))
@@ -614,6 +625,9 @@ pub(super) fn daemon_config_path() -> Option<PathBuf> {
 }
 
 pub(super) fn app_support_config_path() -> PathBuf {
+    if let Some(base) = env::var_os("MOCHIPORT_HOME").map(PathBuf::from) {
+        return base.join("config.toml");
+    }
     if let Some(base) = env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
         return base.join("config.toml");
     }
@@ -686,13 +700,13 @@ fn daemon_startup_log_path_for_config_path(config_path: &Path) -> PathBuf {
                 config.state_path
             }
         })
-        .unwrap_or_else(|| base.join("threadrelay-state.json"));
+        .unwrap_or_else(|| base.join("mochiport-state.json"));
     state_path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or(base)
         .join("logs")
-        .join("threadrelay-daemon-startup.log")
+        .join("mochiport-daemon-startup.log")
 }
 
 #[cfg(target_os = "windows")]
@@ -702,11 +716,14 @@ pub(super) fn platform_app_support_config_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let new_path = base.join("ThreadRelay").join("config.toml");
+    let new_path = base.join("MochiPort").join("config.toml");
     let legacy_macos_path = env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
-    let mut legacy_paths = vec![base.join("CodexHub").join("config.toml")];
+    let mut legacy_paths = vec![
+        base.join("ThreadRelay").join("config.toml"),
+        base.join("CodexHub").join("config.toml"),
+    ];
     legacy_paths.extend(legacy_macos_path);
     prefer_existing_legacy_config(new_path, &legacy_paths)
 }
@@ -719,8 +736,11 @@ pub(super) fn platform_app_support_config_path() -> PathBuf {
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     prefer_existing_legacy_config(
-        base.join("ThreadRelay").join("config.toml"),
-        &[base.join("CodexHub").join("config.toml")],
+        base.join("MochiPort").join("config.toml"),
+        &[
+            base.join("ThreadRelay").join("config.toml"),
+            base.join("CodexHub").join("config.toml"),
+        ],
     )
 }
 
@@ -771,7 +791,7 @@ fn config_directory_is_writable(dir: &Path) -> bool {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or(0);
-    let probe = dir.join(format!(".threadrelay-write-probe-{nanos}"));
+    let probe = dir.join(format!(".mochiport-write-probe-{nanos}"));
     match std::fs::File::create(&probe) {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
@@ -800,12 +820,12 @@ mod tests {
     #[test]
     fn app_support_path_uses_legacy_config_until_new_config_exists() {
         let root = std::env::temp_dir().join(format!(
-            "threadrelay-gui-config-path-test-{}-{}",
+            "mochiport-gui-config-path-test-{}-{}",
             std::process::id(),
             now_ms()
         ));
-        let new_path = root.join("ThreadRelay/config.toml");
-        let legacy_path = root.join("CodexHub/config.toml");
+        let new_path = root.join("MochiPort/config.toml");
+        let legacy_path = root.join("ThreadRelay/config.toml");
 
         assert_eq!(
             prefer_existing_legacy_config(new_path.clone(), std::slice::from_ref(&legacy_path)),
@@ -823,7 +843,10 @@ mod tests {
         std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
         std::fs::write(&new_path, "").unwrap();
         assert_eq!(
-            prefer_existing_legacy_config(new_path.clone(), &[root.join("CodexHub/config.toml")]),
+            prefer_existing_legacy_config(
+                new_path.clone(),
+                &[root.join("ThreadRelay/config.toml")]
+            ),
             new_path
         );
 
@@ -842,7 +865,7 @@ mod tests {
             daemon_startup_log_path_for_config_path(&config_path),
             root.join("state")
                 .join("logs")
-                .join("threadrelay-daemon-startup.log")
+                .join("mochiport-daemon-startup.log")
         );
 
         let _ = std::fs::remove_dir_all(root);
@@ -866,6 +889,7 @@ mod tests {
         assert!(command_is_codexhub("CodexHub"));
         assert!(command_is_codexhub("codexhub"));
         assert!(command_is_codexhub("ThreadRelay"));
+        assert!(command_is_codexhub("MochiPort"));
         assert!(command_is_codexhub(
             "/Applications/ThreadRelay.app/Contents/MacOS/threadrelay"
         ));

@@ -19,7 +19,7 @@ struct RootView: View {
                     }
                 }
             }
-            .navigationTitle("ThreadRelay")
+            .navigationTitle("MochiPort")
             .navigationSplitViewColumnWidth(min: 190, ideal: 220, max: 260)
             .scrollContentBackground(.hidden)
             .background(Color(nsColor: .windowBackgroundColor))
@@ -453,7 +453,7 @@ private struct OverviewView: View {
     private func copyDiagnostics() {
         let dashboard = model.dashboard
         let lines = [
-            "ThreadRelay 状态：\(model.serviceStatus.title)",
+            "MochiPort 状态：\(model.serviceStatus.title)",
             "仪表盘状态：\(model.dashboardState.title)",
             "服务 API：\(dashboard?.service.apiMajor.description ?? "未知")",
             "服务就绪：\(readyDescription(dashboard?.service.ready))",
@@ -506,7 +506,7 @@ private struct OverviewStartHereView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("从这里开始")
                             .font(.title3.weight(.semibold))
-                        Text("ThreadRelay 把电脑上的 Codex 连接到 Telegram、飞书等消息软件。你在手机里发消息，Codex 在电脑上完成任务。")
+                        Text("MochiPort 把电脑上的 Codex 连接到 Telegram、飞书等消息软件。你在手机里发消息，Codex 在电脑上完成任务。")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -557,7 +557,7 @@ private struct OverviewStartHereView: View {
                     startStep(
                         number: "3",
                         title: "连接 Codex",
-                        detail: "打开开关，让 Codex 连接 ThreadRelay。",
+                        detail: "打开开关，让 Codex 连接 MochiPort。",
                         action: "连接 Codex",
                         symbol: "link",
                         isProminent: false,
@@ -771,7 +771,7 @@ private struct OverviewUpdateNotice: View {
                 onOpen()
             } label: {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("ThreadRelay \(version) 可用")
+                    Text("MochiPort \(version) 可用")
                         .font(.callout.weight(.medium))
                     Text("打开下载页查看新版")
                         .font(.caption)

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// A compact, deterministic map of the clients and message channels attached
-/// to ThreadRelay. This intentionally behaves like a bridge diagram rather
+/// to MochiPort. This intentionally behaves like a bridge diagram rather
 /// than a free-form service graph: there are only two endpoint rails and one
 /// local service in the middle.
 struct ConnectionTopologyView: View {
@@ -480,7 +480,7 @@ private struct TopologyServiceNode: View {
                 .frame(width: 35, height: 35)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("ThreadRelay")
+                    Text("MochiPort")
                         .font(.headline.weight(.semibold))
                     Text("本地桥接服务")
                         .font(.caption)

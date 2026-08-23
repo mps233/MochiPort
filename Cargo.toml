@@ -1,10 +1,10 @@
 [package]
-name = "threadrelay"
+name = "mochiport"
 version = "0.5.2"
 edition = "2024"
 license = "Apache-2.0"
 description = "Local-first bridge for controlling coding agents from chat"
-repository = "https://github.com/mps233/threadrelay"
+repository = "https://github.com/mps233/mochiport"
 build = "build.rs"
 autobins = false
 
@@ -65,5 +65,5 @@ wxdragon-sys = { path = "vendor/wxdragon/rust/wxdragon-sys" }
 wxdragon-macros = { path = "vendor/wxdragon/rust/wxdragon-macros" }
 
 [[bin]]
-name = "threadrelay"
+name = "mochiport"
 path = "src/main.rs"

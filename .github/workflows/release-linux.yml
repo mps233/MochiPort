@@ -1,4 +1,4 @@
-name: ThreadRelay Linux release
+name: MochiPort Linux release
 
 on:
   workflow_dispatch:
@@ -58,9 +58,9 @@ jobs:
       - name: Build Release
         run: |
           set -euo pipefail
-          THREADRELAY_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}" \
-            cargo build --locked --release --features gui --bin threadrelay
-          strip target/release/threadrelay
+          MOCHIPORT_BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}" \
+            cargo build --locked --release --features gui --bin mochiport
+          strip target/release/mochiport
 
       - name: Prepare Release Metadata
         run: |
@@ -77,15 +77,15 @@ jobs:
           fi
           {
             echo "APP_VERSION=$APP_VERSION"
-            echo "LINUX_TARBALL_NAME=ThreadRelay-$APP_VERSION-linux-x86_64.tar.gz"
-            echo "LINUX_APPIMAGE_NAME=ThreadRelay-$APP_VERSION-linux-x86_64.AppImage"
+            echo "LINUX_TARBALL_NAME=MochiPort-$APP_VERSION-linux-x86_64.tar.gz"
+            echo "LINUX_APPIMAGE_NAME=MochiPort-$APP_VERSION-linux-x86_64.AppImage"
           } >> "$GITHUB_ENV"
 
       - name: Package Tarball
         run: |
           set -euo pipefail
           DIST_ROOT="target/dist"
-          PACKAGE_NAME="ThreadRelay Linux x86_64"
+          PACKAGE_NAME="MochiPort Linux x86_64"
           PACKAGE_DIR="$DIST_ROOT/$PACKAGE_NAME"
           rm -rf "$DIST_ROOT"
           mkdir -p \
@@ -95,9 +95,9 @@ jobs:
             "$PACKAGE_DIR/brand/providers"
 
           python3 packaging/generate-third-party-licenses.py "$DIST_ROOT/THIRD_PARTY_LICENSES.txt"
-          cp target/release/threadrelay "$PACKAGE_DIR/bin/threadrelay"
-          cp packaging/linux/threadrelay.desktop "$PACKAGE_DIR/share/applications/threadrelay.desktop"
-          cp packaging/icons/dolphin-rounded-256.png "$PACKAGE_DIR/share/icons/hicolor/256x256/apps/threadrelay.png"
+          cp target/release/mochiport "$PACKAGE_DIR/bin/mochiport"
+          cp packaging/linux/mochiport.desktop "$PACKAGE_DIR/share/applications/mochiport.desktop"
+          cp packaging/icons/dolphin-rounded-256.png "$PACKAGE_DIR/share/icons/hicolor/256x256/apps/mochiport.png"
           cp README.md README.en.md LICENSE NOTICE "$DIST_ROOT/THIRD_PARTY_LICENSES.txt" "$PACKAGE_DIR/"
           cp packaging/brand/LICENSE.lucide-icons "$PACKAGE_DIR/brand/"
           cp packaging/brand/providers/LICENSE.lobehub-icons packaging/brand/providers/SOURCES.md "$PACKAGE_DIR/brand/providers/"
@@ -119,15 +119,15 @@ jobs:
             "$APPDIR/usr/bin" \
             "$APPDIR/usr/share/applications" \
             "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
-            "$APPDIR/usr/share/doc/threadrelay/brand/providers"
+            "$APPDIR/usr/share/doc/mochiport/brand/providers"
 
-          cp target/release/threadrelay "$APPDIR/usr/bin/threadrelay"
-          cp packaging/linux/threadrelay.desktop "$APPDIR/usr/share/applications/threadrelay.desktop"
-          cp packaging/icons/dolphin-rounded-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/threadrelay.png"
-          cp LICENSE NOTICE "$DIST_ROOT/THIRD_PARTY_LICENSES.txt" "$APPDIR/usr/share/doc/threadrelay/"
-          cp packaging/brand/LICENSE.lucide-icons "$APPDIR/usr/share/doc/threadrelay/brand/"
-          cp packaging/brand/providers/LICENSE.lobehub-icons packaging/brand/providers/SOURCES.md "$APPDIR/usr/share/doc/threadrelay/brand/providers/"
-          desktop-file-validate "$APPDIR/usr/share/applications/threadrelay.desktop"
+          cp target/release/mochiport "$APPDIR/usr/bin/mochiport"
+          cp packaging/linux/mochiport.desktop "$APPDIR/usr/share/applications/mochiport.desktop"
+          cp packaging/icons/dolphin-rounded-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/mochiport.png"
+          cp LICENSE NOTICE "$DIST_ROOT/THIRD_PARTY_LICENSES.txt" "$APPDIR/usr/share/doc/mochiport/"
+          cp packaging/brand/LICENSE.lucide-icons "$APPDIR/usr/share/doc/mochiport/brand/"
+          cp packaging/brand/providers/LICENSE.lobehub-icons packaging/brand/providers/SOURCES.md "$APPDIR/usr/share/doc/mochiport/brand/providers/"
+          desktop-file-validate "$APPDIR/usr/share/applications/mochiport.desktop"
 
           wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
           wget -q "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
@@ -136,9 +136,9 @@ jobs:
           export LINUXDEPLOY_OUTPUT_VERSION="${VERSION#v}"
           ./linuxdeploy-x86_64.AppImage \
             --appdir "$APPDIR" \
-            --executable "$APPDIR/usr/bin/threadrelay" \
-            --desktop-file "$APPDIR/usr/share/applications/threadrelay.desktop" \
-            --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/threadrelay.png" \
+            --executable "$APPDIR/usr/bin/mochiport" \
+            --desktop-file "$APPDIR/usr/share/applications/mochiport.desktop" \
+            --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/mochiport.png" \
             --plugin gtk \
             --output appimage
 
@@ -195,10 +195,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ThreadRelay-Linux
+          name: MochiPort-Linux
           path: |
-            target/dist/ThreadRelay-*-linux-x86_64.AppImage
-            target/dist/ThreadRelay-*-linux-x86_64.tar.gz
+            target/dist/MochiPort-*-linux-x86_64.AppImage
+            target/dist/MochiPort-*-linux-x86_64.tar.gz
             target/dist/latest-linux.json
 
       - name: Publish GitHub Release
@@ -210,6 +210,6 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/ThreadRelay-*-linux-x86_64.AppImage
-            target/dist/ThreadRelay-*-linux-x86_64.tar.gz
+            target/dist/MochiPort-*-linux-x86_64.AppImage
+            target/dist/MochiPort-*-linux-x86_64.tar.gz
             target/dist/latest-linux.json

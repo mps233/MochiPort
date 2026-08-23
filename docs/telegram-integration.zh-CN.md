@@ -1,6 +1,6 @@
 ﻿# Telegram 集成与维护边界
 
-本文档记录 ThreadRelay 当前 Telegram Bot 通道的能力、协议边界和后续维护原则，而不是把飞书和 Telegram 抽象成同一种 UI。
+本文档记录 MochiPort 当前 Telegram Bot 通道的能力、协议边界和后续维护原则，而不是把飞书和 Telegram 抽象成同一种 UI。
 
 ## 目标
 

@@ -2,7 +2,7 @@
 
 更新时间：2026-07-18
 
-状态：已实现并通过测试。本文记录 CodexHub 对 Grok `apply_patch` 和 `web_search` 的当前
+状态：已实现并通过测试。本文记录 MochiPort 对 Grok `apply_patch` 和 `web_search` 的当前
 适配边界，供后续 Codex、xAI 或兼容上游升级时复核。
 
 ## 1. 结论
@@ -10,11 +10,11 @@
 Grok Provider 的上游请求继续使用标准 OpenAI Responses：
 
 ```text
-Codex -> CodexHub /ai-gateway/v1/responses -> Grok /v1/responses
+Codex -> MochiPort /ai-gateway/v1/responses -> Grok /v1/responses
 ```
 
 这里没有把 Grok 声明成 Responses Lite，也不会向 Grok 上游附加 Responses Lite 私有请求头。
-Codex 入站请求可能包含 Lite 使用的 `input[].additional_tools` 载体；CodexHub 只在网关内部把它
+Codex 入站请求可能包含 Lite 使用的 `input[].additional_tools` 载体；MochiPort 只在网关内部把它
 合并到标准 Responses 顶层 `tools[]`，然后再按 Grok 能力转换。
 
 两个核心工具采用不同执行模型：
@@ -25,7 +25,7 @@ Codex 入站请求可能包含 Lite 使用的 `input[].additional_tools` 载体�
 | `web_search` | `type=web_search` hosted tool | Grok/xAI 上游执行 |
 
 因此，`apply_patch` 需要完整的双向协议桥接；`web_search` 只需要修正工具声明并透传上游搜索事件，
-不需要 CodexHub 再发起第二轮搜索请求。
+不需要 MochiPort 再发起第二轮搜索请求。
 
 ## 2. 总体数据流
 
@@ -33,12 +33,12 @@ Codex 入站请求可能包含 Lite 使用的 `input[].additional_tools` 载体�
 
 ```text
 Codex custom apply_patch declaration
-  -> CodexHub 转成 Grok function schema { patch: string }
+  -> MochiPort 转成 Grok function schema { patch: string }
   -> Grok 返回 function_call
-  -> CodexHub 恢复成 custom_tool_call
+  -> MochiPort 恢复成 custom_tool_call
   -> Codex 本地执行补丁
   -> Codex 下一轮发送 custom_tool_call_output
-  -> CodexHub 转成 function_call_output 发给 Grok
+  -> MochiPort 转成 function_call_output 发给 Grok
 ```
 
 `apply_patch` 不是 Grok/xAI 原生 hosted tool。模型只负责生成补丁内容，真正的文件读取、修改、
@@ -48,10 +48,10 @@ Codex custom apply_patch declaration
 
 ```text
 Codex web_search/web_search_preview declaration
-  -> CodexHub 规范化为 Grok web_search declaration
+  -> MochiPort 规范化为 Grok web_search declaration
   -> Grok 上游执行搜索
   -> 标准 Responses web_search_call 和最终回答
-  -> CodexHub 透传给 Codex
+  -> MochiPort 透传给 Codex
 ```
 
 这条路径没有本地函数调用、没有 `/v1/alpha/search` 回调，也没有网关代替模型执行搜索的第二轮
@@ -72,7 +72,7 @@ Codex 使用自由文本 custom tool：
 }
 ```
 
-Grok 标准 Responses 路径使用 JSON function tool。CodexHub 按 Grok Build 的参数约定转换为：
+Grok 标准 Responses 路径使用 JSON function tool。MochiPort 按 Grok Build 的参数约定转换为：
 
 ```json
 {
@@ -149,7 +149,7 @@ Grok 返回：
 }
 ```
 
-CodexHub 恢复为 Codex 能执行的形态：
+MochiPort 恢复为 Codex 能执行的形态：
 
 ```json
 {
@@ -175,7 +175,7 @@ CodexHub 恢复为 Codex 能执行的形态：
 *** End Patch ***
 ```
 
-Codex 本地执行器会正确拒绝它，因为标准语法要求控制行没有尾随 ` ***`。CodexHub 对 Grok
+Codex 本地执行器会正确拒绝它，因为标准语法要求控制行没有尾随 ` ***`。MochiPort 对 Grok
 function 的 `patch` 参数增加了一个严格、局部的兼容修复：只移除已知控制行末尾的单个 ` ***`，
 包括 Begin/End、Add/Delete/Update/Move 和 End of File。以 `+`、`-` 或空格开头的补丁内容不会
 修改；普通 custom tool 的 `input` 也不会进入该规则。合法补丁保持字节语义不变。
@@ -203,7 +203,7 @@ response.custom_tool_call_input.done
 response.output_item.done(custom_tool_call)
 ```
 
-CodexHub 以当前请求的 `ToolNameMap` 和 `item_id`/`call_id` 识别哪些 function 其实来自 custom
+MochiPort 以当前请求的 `ToolNameMap` 和 `item_id`/`call_id` 识别哪些 function 其实来自 custom
 tool，只改写这些事件，不会把普通 function call 错改成 custom tool。
 
 function arguments 的 delta 可能是无法单独解析的 JSON 分片。处理规则是：
@@ -295,7 +295,7 @@ custom tool、新字段和原生 SSE 语义。
 
 ## 9. 当前限制
 
-- `apply_patch` 的安全性、工作区权限和实际写盘仍由 Codex 决定，CodexHub 不执行补丁。
+- `apply_patch` 的安全性、工作区权限和实际写盘仍由 Codex 决定，MochiPort 不执行补丁。
 - hosted `web_search` 依赖目标 Grok 模型和上游账号能力；字段转换不能替代上游授权或能力开通。
 - 对分片 JSON arguments 不做猜测性增量解析，可能在流末尾一次性显示完整补丁。
 - `web_search` 没有本地或第二次请求 fallback；上游不支持时应保留真实错误，不能静默伪造结果。
@@ -303,7 +303,7 @@ custom tool、新字段和原生 SSE 语义。
 
 ## 10. 代码入口与参考
 
-CodexHub：
+MochiPort：
 
 - [`responses_lite_tools.rs`](../src/ai_gateway/responses_lite_tools.rs)：工具载体合并、Grok declaration 和 web search 映射。
 - [`openai_responses.rs`](../src/ai_gateway/providers/openai_responses.rs)：Grok 历史调用和输出规范化。

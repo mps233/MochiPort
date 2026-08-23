@@ -2,24 +2,33 @@
 
 There are two separate config surfaces:
 
-- ThreadRelay config, usually this repository's `config.toml`
+- MochiPort config, usually this repository's `config.toml`
 - Codex App config, usually `~/.codex/config.toml`
 
-Do not mix them. ThreadRelay stores IM channel and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
+Do not mix them. MochiPort stores IM channel and bridge settings. Codex App stores model provider, auth, and `chatgpt_base_url`.
 
-## ThreadRelay Config
+## MochiPort Config
 
 Use an explicit config path for predictable behavior:
 
 ```powershell
-threadrelay --config D:\path\to\config.toml daemon
+mochiport --config D:\path\to\config.toml daemon
 ```
+
+Without `--config`, installed builds prefer the current MochiPort application-data directory
+(`MochiPort/config.toml`). `MOCHIPORT_HOME` can point at a specific data directory, and
+`MOCHIPORT_USE_REPO_CONFIG=1` enables repository-local `config.toml` discovery for development.
+
+For migration, MochiPort falls back to existing `ThreadRelay` and `CodexHub` config directories,
+`THREADRELAY_HOME` / `CODEXHUB_HOME`, and their old repository-config switches when no current
+MochiPort config has been created. These names are compatibility inputs only; new automation and
+new installations should use the `MOCHIPORT_*` variables.
 
 Example:
 
 ```toml
 bind = "127.0.0.1:3847"
-statePath = "threadrelay-state.json"
+statePath = "mochiport-state.json"
 
 [outboundProxy]
 mode = "system"
@@ -66,7 +75,7 @@ Keep this on localhost. Do not expose it directly to a network.
 
 ### `outboundProxy`
 
-Controls only requests that ThreadRelay sends to external services such as model providers,
+Controls only requests that MochiPort sends to external services such as model providers,
 WeChat, Telegram, Feishu HTTP APIs, and update endpoints. It does not change the operating
 system proxy or the environment of other applications.
 
@@ -77,7 +86,7 @@ url = ""
 ```
 
 - `system` follows the operating system proxy and proxy environment variables.
-- `direct` disables proxy discovery for ThreadRelay HTTP requests.
+- `direct` disables proxy discovery for MochiPort HTTP requests.
 - `custom` uses `url` as an explicit HTTP, HTTPS, SOCKS5, or SOCKS5H proxy.
 
 Example for a local Clash mixed port:
@@ -153,7 +162,7 @@ Existing configs may still contain `mentionOnly`; it is kept for compatibility b
 
 Allowlist of Telegram private chat ids as strings.
 
-Empty means "bind the first private chat". After the first private Telegram message is accepted, ThreadRelay writes that chat id into `allowedChatIds` and rejects other private chats.
+Empty means "bind the first private chat". After the first private Telegram message is accepted, MochiPort writes that chat id into `allowedChatIds` and rejects other private chats.
 
 For stricter setup, prefill this list before starting the bridge:
 
@@ -215,7 +224,7 @@ allowedUserIds = []
 allowedChatIds = []
 ```
 
-The GUI QR flow normally writes `botId` and `secret`. ThreadRelay then subscribes to the official WeCom AI Bot WebSocket and supports direct/group text, streaming and final replies, initial/history thread routing cards, image/file input and output, and interactive approval template cards. Empty allowlists accept all users and chats. Keep `secret` private.
+The GUI QR flow normally writes `botId` and `secret`. MochiPort then subscribes to the official WeCom AI Bot WebSocket and supports direct/group text, streaming and final replies, initial/history thread routing cards, image/file input and output, and interactive approval template cards. Empty allowlists accept all users and chats. Keep `secret` private.
 
 ## Bridge
 
@@ -278,9 +287,9 @@ experimental_bearer_token = "your-third-party-key"
 ```
 
 `chatgpt_base_url` is not the model API base URL. It is the ChatGPT backend-shaped URL used by Codex App features such as remote-control enrollment.
-ThreadRelay preserves unrelated Codex App settings. Its compatibility setup only manages the local backend/provider, required bundled plugin entries, the local curated marketplace, telemetry defaults, and `features.apps = false` because the host-owned Apps MCP backend is not implemented locally.
+MochiPort preserves unrelated Codex App settings. Its compatibility setup only manages the local backend/provider, required bundled plugin entries, the local curated marketplace, telemetry defaults, and `features.apps = false` because the host-owned Apps MCP backend is not implemented locally.
 
-When ThreadRelay injects its default local AI Gateway provider, remote control continues to use the local ChatGPT-shaped identity while model requests use Actor Authorization:
+When MochiPort injects its default local AI Gateway provider, remote control continues to use the local ChatGPT-shaped identity while model requests use Actor Authorization:
 
 ```toml
 web_search = "live"
@@ -295,7 +304,7 @@ experimental_bearer_token = "dummy-token"
 http_headers = { x-openai-actor-authorization = "codexhub-local" }
 ```
 
-The provider identity remains `ai-gateway`, so OpenAI-only private-state behavior is not enabled accidentally. Actor Authorization lets current Codex builds expose native `web.run` for this custom provider; the model catalog still comes from ThreadRelay's `/models` endpoint. The header value retains the legacy `codexhub-local` compatibility marker and must not be renamed independently.
+The provider identity remains `ai-gateway`, so OpenAI-only private-state behavior is not enabled accidentally. Actor Authorization lets current Codex builds expose native `web.run` for this custom provider; the model catalog still comes from MochiPort's `/models` endpoint. The header value retains the legacy `codexhub-local` compatibility marker and must not be renamed independently.
 
 ## Codex App Auth
 
@@ -341,13 +350,13 @@ The desktop GUI provides Codex App configuration controls that write the local C
 The CLI equivalent is:
 
 ```powershell
-threadrelay --config config.toml configure-codex-app
+mochiport --config config.toml configure-codex-app
 ```
 
 Optional provider fields:
 
 ```powershell
-threadrelay --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
+mochiport --config config.toml configure-codex-app --provider-name llmx --provider-base-url https://ai.llmx.cloud --provider-key sk-... --model gpt-5.5
 ```
 
 When provider fields are supplied without `--provider-name`, `llmx` is used as the provider name.
@@ -379,7 +388,7 @@ These should stay ignored:
 
 ```text
 config.toml
-threadrelay-state.json
+mochiport-state.json
 *.log
 .im/
 target/

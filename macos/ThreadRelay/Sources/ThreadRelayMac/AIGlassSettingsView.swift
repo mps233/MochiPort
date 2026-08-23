@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// ThreadRelay 的本机使用量与通知设置。悬浮窗相关功能不在本项目中启用。
+/// MochiPort 的本机使用量与通知设置。悬浮窗相关功能不在本项目中启用。
 struct AIGlassSettingsView: View {
     @Bindable var settings: AppSettings
 
@@ -8,7 +8,7 @@ struct AIGlassSettingsView: View {
         Form {
             Section("Codex 使用量") {
                 Label("Codex", systemImage: "terminal")
-                Text("ThreadRelay 只读取本机 Codex 会话日志，不会修改 Codex 或后台服务。")
+                Text("MochiPort 只读取本机 Codex 会话日志，不会修改 Codex 或后台服务。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

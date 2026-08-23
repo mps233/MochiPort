@@ -866,11 +866,8 @@ private struct ManagementConnection {
 }
 
 enum ManagementCredentialStore {
-    static func loadLocator(
-        from path: URL? = activeDaemonLocatorPath()
-    ) -> ActiveDaemonLocator? {
-        guard let path,
-              let data = try? Data(contentsOf: path),
+    static func loadLocator(from path: URL) -> ActiveDaemonLocator? {
+        guard let data = try? Data(contentsOf: path),
               let locator = try? JSONDecoder().decode(ActiveDaemonLocator.self, from: data),
               locator.service == "threadrelay",
               locator.apiMajor == 1,
@@ -882,6 +879,12 @@ enum ManagementCredentialStore {
             return nil
         }
         return locator
+    }
+
+    static func loadLocator(
+        from paths: [URL] = activeDaemonLocatorPaths()
+    ) -> ActiveDaemonLocator? {
+        paths.lazy.compactMap { loadLocator(from: $0) }.first
     }
 
     static func loadCredentialCandidates(
@@ -926,15 +929,21 @@ enum ManagementCredentialStore {
         return candidates
     }
 
-    static func activeDaemonLocatorPath(
+    static func activeDaemonLocatorPaths(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
         applicationSupport: URL? = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first
-    ) -> URL? {
-        applicationSupport?
-            .appendingPathComponent("ThreadRelay", isDirectory: true)
-            .appendingPathComponent("threadrelay-active-daemon.json")
+    ) -> [URL] {
+        MochiPortStorage.candidateDirectories(
+            environment: environment,
+            applicationSupport: applicationSupport
+        ).flatMap { directory in
+            ["mochiport-active-daemon.json", "threadrelay-active-daemon.json"].map {
+                directory.appendingPathComponent($0)
+            }
+        }
     }
 
     static func candidatePaths(
@@ -944,18 +953,14 @@ enum ManagementCredentialStore {
             in: .userDomainMask
         ).first
     ) -> [URL] {
-        var directories: [URL] = []
-        if let home = environment["THREADRELAY_HOME"] {
-            directories.append(URL(fileURLWithPath: home, isDirectory: true))
+        MochiPortStorage.candidateDirectories(
+            environment: environment,
+            applicationSupport: applicationSupport
+        ).flatMap { directory in
+            ["mochiport-control.json", "threadrelay-control.json"].map {
+                directory.appendingPathComponent($0)
+            }
         }
-        if let home = environment["CODEXHUB_HOME"] {
-            directories.append(URL(fileURLWithPath: home, isDirectory: true))
-        }
-        if let applicationSupport {
-            directories.append(applicationSupport.appendingPathComponent("ThreadRelay", isDirectory: true))
-            directories.append(applicationSupport.appendingPathComponent("CodexHub", isDirectory: true))
-        }
-        return directories.map { $0.appendingPathComponent("threadrelay-control.json") }
     }
 
     private static func isValid(_ token: String) -> Bool {
@@ -993,9 +998,9 @@ enum APIClientError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .invalidResponse: "本地服务返回了无效响应。"
-        case .incompatibleService: "ThreadRelay 端口正被其他服务占用。"
+        case .incompatibleService: "MochiPort 端口正被其他服务占用。"
         case let .unsupportedAPIMajor(apiMajor):
-            "当前 ThreadRelay 使用了不受支持的管理 API 版本 \(apiMajor)。"
+            "当前 MochiPort 使用了不受支持的管理 API 版本 \(apiMajor)。"
         case .unauthorized: "本地服务拒绝了管理凭据。"
         case .featureUnavailable: "当前后台服务尚未支持此管理功能。"
         case let .operationFailed(message): message

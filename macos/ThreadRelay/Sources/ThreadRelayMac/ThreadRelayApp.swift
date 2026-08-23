@@ -11,13 +11,13 @@ enum SingleInstanceError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .alreadyRunning:
-            "ThreadRelay 已在运行。"
+            "MochiPort 已在运行。"
         case let .directoryUnavailable(path):
-            "无法准备 ThreadRelay 单实例锁目录：\(path)"
+            "无法准备 MochiPort 单实例锁目录：\(path)"
         case let .openFailed(error):
-            "无法打开 ThreadRelay 单实例锁（错误码 \(error)）。"
+            "无法打开 MochiPort 单实例锁（错误码 \(error)）。"
         case let .lockFailed(error):
-            "无法获取 ThreadRelay 单实例锁（错误码 \(error)）。"
+            "无法获取 MochiPort 单实例锁（错误码 \(error)）。"
         }
     }
 }
@@ -81,8 +81,10 @@ final class SingleInstanceGuard: @unchecked Sendable {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) -> URL {
-        if let override = environment["THREADRELAY_GUI_LOCK_PATH"], !override.isEmpty {
-            return URL(fileURLWithPath: override)
+        for key in ["MOCHIPORT_GUI_LOCK_PATH", "THREADRELAY_GUI_LOCK_PATH"] {
+            if let override = environment[key], !override.isEmpty {
+                return URL(fileURLWithPath: override)
+            }
         }
 
         let home = environment["HOME"]
@@ -109,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try GUIRecoveryLauncher().startIfNeeded()
                 clearNormalExitMarker()
             } catch {
-                NSLog("ThreadRelay GUI 自动恢复注册失败：%@", error.localizedDescription)
+                NSLog("MochiPort GUI 自动恢复注册失败：%@", error.localizedDescription)
                 // Keep the previous marker until launchd registration succeeds;
                 // otherwise a manual launch during a transient launchctl error
                 // could disable recovery for the next crash. Retry once while
@@ -121,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         try GUIRecoveryLauncher().startIfNeeded()
                         clearNormalExitMarker()
                     } catch {
-                        NSLog("ThreadRelay GUI 自动恢复重试失败：%@", error.localizedDescription)
+                        NSLog("MochiPort GUI 自动恢复重试失败：%@", error.localizedDescription)
                     }
                 }
             }
@@ -132,10 +134,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Fail closed: running without the lock can create duplicate
             // refresh loops and conflicting window state. Without a visible
             // alert the failure would look like the app silently not opening.
-            NSLog("ThreadRelay GUI 单实例保护不可用：%@", error.localizedDescription)
+            NSLog("MochiPort GUI 单实例保护不可用：%@", error.localizedDescription)
             let alert = NSAlert()
             alert.alertStyle = .critical
-            alert.messageText = "ThreadRelay 无法启动"
+            alert.messageText = "MochiPort 无法启动"
             alert.informativeText = error.localizedDescription
             alert.addButton(withTitle: "退出")
             alert.runModal()
@@ -162,7 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // prevents a partially-written build number from being accepted.
             try Data(currentBuildIdentifier().utf8).write(to: markerURL, options: .atomic)
         } catch {
-            NSLog("ThreadRelay GUI 正常退出标记写入失败：%@", error.localizedDescription)
+            NSLog("MochiPort GUI 正常退出标记写入失败：%@", error.localizedDescription)
         }
         return .terminateNow
     }
@@ -183,7 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // A marker is only present after a normal quit; there is nothing
             // to clear on the first launch or after an unexpected exit.
         } catch {
-            NSLog("ThreadRelay 旧的正常退出标记清理失败：%@", error.localizedDescription)
+            NSLog("MochiPort 旧的正常退出标记清理失败：%@", error.localizedDescription)
         }
     }
 
@@ -208,16 +210,19 @@ struct ThreadRelayApp: App {
     }
 
     private static func fixtureStatusFromEnvironment() -> ServiceStatus? {
-        switch ProcessInfo.processInfo.environment["THREADRELAY_PREVIEW_FIXTURE"] {
-        case "available": .available
-        case "bridge": .bridgeAvailable
-        case "unavailable": .unavailable("预览：后台服务已离线")
-        default: nil
+        let environment = ProcessInfo.processInfo.environment
+        let fixture = environment["MOCHIPORT_PREVIEW_FIXTURE"]
+            ?? environment["THREADRELAY_PREVIEW_FIXTURE"]
+        switch fixture {
+        case "available": return .available
+        case "bridge": return .bridgeAvailable
+        case "unavailable": return .unavailable("预览：后台服务已离线")
+        default: return nil
         }
     }
 
     var body: some Scene {
-        Window("ThreadRelay", id: "main") {
+        Window("MochiPort", id: "main") {
             RootView()
                 .environmentObject(model)
                 .environmentObject(glass)
@@ -231,7 +236,7 @@ struct ThreadRelayApp: App {
         .commands {
             SidebarCommands()
             CommandGroup(replacing: .appInfo) {
-                Button("关于 ThreadRelay") {
+                Button("关于 MochiPort") {
                     openAboutWindow()
                 }
             }
@@ -277,7 +282,7 @@ struct ThreadRelayApp: App {
 
     private func openAboutWindow() {
         NSApplication.shared.orderFrontStandardAboutPanel(options: [
-            .applicationName: "ThreadRelay",
+            .applicationName: "MochiPort",
             .applicationVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版",
             .version: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "本地构建",
             .credits: NSAttributedString(string: "通过聊天远程控制编程智能体的本地优先桥接工具。"),
@@ -413,8 +418,8 @@ private struct MenuBarStatusLabel: View {
         .font(.system(size: 11, weight: .medium).monospacedDigit())
         .fixedSize(horizontal: true, vertical: false)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("ThreadRelay \(displayText) · " + title)
-        .help("ThreadRelay：" + status.title)
+        .accessibilityLabel("MochiPort \(displayText) · " + title)
+        .help("MochiPort：" + status.title)
     }
 
     private var displayText: String {

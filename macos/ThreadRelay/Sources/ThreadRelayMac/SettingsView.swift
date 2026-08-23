@@ -58,7 +58,7 @@ struct SettingsView: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("ThreadRelay 会先确认没有进行中的受保护任务，再请求后台服务安全重启。")
+            Text("MochiPort 会先确认没有进行中的受保护任务，再请求后台服务安全重启。")
         }
         .confirmationDialog(
             "接管后台服务？",
@@ -118,7 +118,7 @@ struct SettingsView: View {
                     Text("浅色").tag("light")
                     Text("深色").tag("dark")
                 }
-                Text("消息语言用于后台服务回复；外观会立即应用到 ThreadRelay 窗口。")
+                Text("消息语言用于后台服务回复；外观会立即应用到 MochiPort 窗口。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -292,7 +292,7 @@ struct SettingsView: View {
         settingsForm {
             Section("版本") {
                 LabeledContent(
-                    "ThreadRelay",
+                    "MochiPort",
                     value: Bundle.main.object(
                         forInfoDictionaryKey: "CFBundleShortVersionString"
                     ) as? String ?? "开发版"
@@ -345,7 +345,7 @@ struct SettingsView: View {
                 }
                 Button(latestReleaseURL == nil ? "打开 GitHub 发布页" : "打开最新版本下载页") {
                     let fallback = URL(
-                        string: "https://github.com/mps233/threadrelay/releases/latest"
+                        string: "https://github.com/mps233/mochiport/releases/latest"
                     )
                     if let url = latestReleaseURL ?? fallback {
                         openURL(url)
@@ -425,7 +425,7 @@ struct SettingsView: View {
 
     private func copyDiagnostics() {
         var lines = [
-            "ThreadRelay \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版")",
+            "MochiPort \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版")",
             "服务：\(model.serviceStatus.title)",
             "Dashboard：\(model.dashboardState.title)",
         ]

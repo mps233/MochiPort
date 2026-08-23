@@ -692,7 +692,7 @@ async fn ensure_remote_control_client_ready(state: &SharedState, client_key: &st
         let mut remote = state.remote_control.inner.lock().await;
         if !remote.connected {
             return Err(anyhow!(
-                "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 ThreadRelay 的 /backend-api。"
+                "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 MochiPort 的 /backend-api。"
             ));
         }
         let connection_epoch = connection_epoch_for_client_key_locked(

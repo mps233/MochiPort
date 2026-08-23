@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=ThreadRelay
+Name=MochiPort
 Comment=Control coding agents from Feishu, WeChat, WeCom, and Telegram
-Exec=threadrelay
-Icon=threadrelay
+Exec=mochiport
+Icon=mochiport
 Terminal=false
 Categories=Development;Utility;

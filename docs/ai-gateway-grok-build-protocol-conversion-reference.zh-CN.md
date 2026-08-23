@@ -1,9 +1,9 @@
-# Grok Build 协议转换调研与 CodexHub 借鉴建议
+# Grok Build 协议转换调研与 MochiPort 借鉴建议
 
 更新时间：2026-07-16
 
 状态：源码调研快照。本文不代表已确定的重构计划；后续实施前应以当时的 Grok Build、
-Codex 和 CodexHub 最新代码重新核对。
+Codex 和 MochiPort 最新代码重新核对。
 
 ## 1. 调研范围
 
@@ -19,7 +19,7 @@ references/grok-build-main
 - Responses 会话历史如何进入 Anthropic Messages 请求。
 - Anthropic SSE 如何转换回统一的流式事件和会话历史。
 - 文本、图片、工具、thinking/signature、缓存和异常工具历史如何处理。
-- 哪些设计适合 CodexHub，哪些实现存在语义损失或跨 Provider 风险。
+- 哪些设计适合 MochiPort，哪些实现存在语义损失或跨 Provider 风险。
 
 该目录是代码快照，没有独立的 Git 元数据，因此本文只能记录本地调研日期，不能可靠记录其
 上游 commit。升级该参考源码后，应重新检查本文列出的文件和行为。
@@ -52,11 +52,11 @@ Responses response.output
   -> Anthropic /v1/messages
 ```
 
-这套设计最值得 CodexHub 借鉴的不是某个字段转换函数，而是：
+这套设计最值得 MochiPort 借鉴的不是某个字段转换函数，而是：
 
 > 先把不同 wire protocol 归一成协议无关 IR，再由各 Provider adapter 独立编码和解码。
 
-CodexHub 已有 `GatewayTurn` IR 和 Responses inbound decoder，但当前生产 Anthropic 路径仍直接
+MochiPort 已有 `GatewayTurn` IR 和 Responses inbound decoder，但当前生产 Anthropic 路径仍直接
 消费偏 Responses 结构的 `GatewayRequest`。后续真正推进统一 adapter 时，可以参考 Grok Build
 的分层方式，但不能直接替换现有转换器。
 
@@ -133,11 +133,11 @@ SamplingEvent::Failed
 | `System` | 顶层 `system[]` text block | 所有 System 都被提取到顶层 |
 | `User` 文本 | `role=user` + text block | 保留内容顺序 |
 | `User` data URL 图片 | base64 image source | 解析 media type 和 base64 数据 |
-| `User` HTTP 图片 | URL image source | CodexHub 当前尚未支持该分支 |
+| `User` HTTP 图片 | URL image source | MochiPort 当前尚未支持该分支 |
 | `Assistant` 文本 | `role=assistant` + text block | 可与 thinking/tool_use 合并 |
 | `Assistant.tool_calls` | `tool_use` | 参数字符串解析为 JSON |
 | `ToolResult` | `role=user` + `tool_result` | 多个结果可合并到同一 user message |
-| 工具结果图片 | `tool_result.content[]` 内 image | 与 CodexHub 当前“提升为 sibling image”不同 |
+| 工具结果图片 | `tool_result.content[]` 内 image | 与 MochiPort 当前“提升为 sibling image”不同 |
 | `Reasoning` 文本 | `thinking.thinking` | summary/content 被拼成可见 thinking |
 | `Reasoning.encrypted_content` | `thinking.signature` | 没有 Provider 来源校验，存在风险 |
 | `BackendToolCall` | assistant 文本摘要 | 丢失原始结构，只保留可读说明 |
@@ -147,7 +147,7 @@ SamplingEvent::Failed
 Grok Build 的内部模型没有独立 `developer` 角色。项目指令、系统提醒等运行时注入内容，部分会被
 建模为带 `synthetic_reason` 的 User item，而不是全部提升成 System。
 
-因此它不能直接回答 Codex 高频 developer 消息该如何分级。CodexHub 现有的 Codex developer
+因此它不能直接回答 Codex 高频 developer 消息该如何分级。MochiPort 现有的 Codex developer
 内容分类和低优先级 User 降级逻辑仍应保留。
 
 ### 4.2 Tool call ID
@@ -158,7 +158,7 @@ Grok Build 会把工具调用 ID 中不属于以下字符集的字符替换成 `
 [a-zA-Z0-9_-]
 ```
 
-这样能减少 Anthropic 拒绝请求的概率，但不同原始 ID 可能被替换成相同 ID。CodexHub 当前选择
+这样能减少 Anthropic 拒绝请求的概率，但不同原始 ID 可能被替换成相同 ID。MochiPort 当前选择
 提前校验并报错，不应直接改成无状态字符替换。若未来需要兼容非法 ID，应使用请求级双向映射，
 保证 call 和 result 使用同一映射且不发生碰撞。
 
@@ -167,7 +167,7 @@ Grok Build 会把工具调用 ID 中不属于以下字符集的字符替换成 `
 Grok Build 对工具参数执行 JSON 解析；解析失败时静默替换成 `{}`。这会让请求通过，但可能让模型
 重新执行错误工具或丢失重要参数。
 
-CodexHub 不应照搬该策略。更合适的行为是：
+MochiPort 不应照搬该策略。更合适的行为是：
 
 - 对支持字符串参数的目标协议保留原始字符串。
 - 对要求 JSON object 的协议给出明确转换错误。
@@ -176,7 +176,7 @@ CodexHub 不应照搬该策略。更合适的行为是：
 ### 4.4 Tool choice
 
 Grok Build 把 `ConversationToolChoice::None` 映射成 Anthropic `Auto`。这不是等价转换，不能作为
-CodexHub 的通用规则。
+MochiPort 的通用规则。
 
 ### 4.5 Prompt cache
 
@@ -186,7 +186,7 @@ Grok Build 只在最后一个 system block 上添加：
 {"cache_control":{"type":"ephemeral"}}
 ```
 
-没有在会话尾部增加滚动断点。CodexHub 当前已经同时处理 system 和最后一条可缓存会话消息，
+没有在会话尾部增加滚动断点。MochiPort 当前已经同时处理 system 和最后一条可缓存会话消息，
 缓存策略比该实现更完整，不需要回退。
 
 ## 5. Anthropic SSE 到统一响应的映射
@@ -213,7 +213,7 @@ prompt_tokens = input_tokens
 cached_prompt_tokens = cache_read_input_tokens
 ```
 
-这个口径与 CodexHub 当前日志统计方向一致。
+这个口径与 MochiPort 当前日志统计方向一致。
 
 ### 5.1 Stop reason
 
@@ -229,7 +229,7 @@ Grok Build 显式处理：
 | `model_context_window_exceeded` | Length |
 | 未知值 | 记录 warning 后按 Stop 完成 |
 
-CodexHub 当前主要只特殊处理 `max_tokens`。后续可以借鉴其 refusal、pause_turn、未知 stop reason
+MochiPort 当前主要只特殊处理 `max_tokens`。后续可以借鉴其 refusal、pause_turn、未知 stop reason
 测试，但需要先定义它们在 Responses 协议中的准确终态，不能直接复制内部枚举映射。
 
 ### 5.2 Grok Build 流式实现的缺口
@@ -243,7 +243,7 @@ CodexHub 当前主要只特殊处理 `max_tokens`。后续可以借鉴其 refusa
 - 多种 Provider 私有扩展事件
 
 另外，`content_block_start(tool_use)` 中的非空初始 `input` 没有完整进入 accumulator，主要依赖后续
-`input_json_delta`。CodexHub 已经处理初始 input，不应退回该实现。
+`input_json_delta`。MochiPort 已经处理初始 input，不应退回该实现。
 
 ## 6. 工具历史修复
 
@@ -256,7 +256,7 @@ Grok Build 的会话层提供了独立 `repair_history()`，分三步处理严�
 这部分比 `build_messages_request()` 本身更有参考价值。转换器不会自动修复任意错误历史，修复发生在
 统一会话层。
 
-CodexHub 的 Chat Completions 路径已有孤儿工具降级和配对修复，但 Anthropic 请求路径目前主要负责
+MochiPort 的 Chat Completions 路径已有孤儿工具降级和配对修复，但 Anthropic 请求路径目前主要负责
 分组和格式转换，没有同等完整的请求级历史修复。未来应优先在统一 IR 层实现一次，而不是分别在
 Chat 和 Anthropic adapter 内重复实现。
 
@@ -273,7 +273,7 @@ Responses 响应会把 OpenAI/xAI `encrypted_content` 保存到统一 `Reasoning
 Grok Build 在切换到更小上下文模型并达到阈值时会主动压缩，但它不会因为“Responses 切换到
 Messages”就保证压缩。因此，不能把压缩视为可靠的跨 Provider 密文清理机制。
 
-CodexHub 当前 `EncryptedContentScope` 的方向更安全：
+MochiPort 当前 `EncryptedContentScope` 的方向更安全：
 
 - Anthropic signature/redacted data 带协议和 Provider 作用域。
 - 只向匹配的 Anthropic Provider 解包回放。
@@ -282,21 +282,21 @@ CodexHub 当前 `EncryptedContentScope` 的方向更安全：
 
 该机制应继续保留，不能为对齐 Grok Build 而移除。
 
-## 8. 与 CodexHub 当前能力对比
+## 8. 与 MochiPort 当前能力对比
 
-| 维度 | Grok Build | CodexHub 当前实现 | 判断 |
+| 维度 | Grok Build | MochiPort 当前实现 | 判断 |
 | --- | --- | --- | --- |
 | 统一 IR | 生产主链路使用 `ConversationItem` | `GatewayTurn` 已存在，但 Anthropic 生产路径尚未接入 | 借鉴其落地方式 |
-| Responses Lite 工具 | 内部模型表达有限 | namespace、custom、tool_search 已支持 | CodexHub 更完整 |
-| 工具名回解 | 基本直接使用名称 | `ToolNameMap` 支持 namespace 和回解 | CodexHub 更完整 |
-| 私有密文 | 无 Provider 作用域 | `EncryptedContentScope` | CodexHub 更安全 |
-| Prompt cache | system 尾部单断点 | system + 会话尾部滚动断点 | CodexHub 更完整 |
+| Responses Lite 工具 | 内部模型表达有限 | namespace、custom、tool_search 已支持 | MochiPort 更完整 |
+| 工具名回解 | 基本直接使用名称 | `ToolNameMap` 支持 namespace 和回解 | MochiPort 更完整 |
+| 私有密文 | 无 Provider 作用域 | `EncryptedContentScope` | MochiPort 更安全 |
+| Prompt cache | system 尾部单断点 | system + 会话尾部滚动断点 | MochiPort 更完整 |
 | 用户 URL 图片 | 支持 | 目前只支持 data URL | 可借鉴 |
 | 工具结果图片 | 嵌入 `tool_result.content` | 提升为同一 user message 的 sibling image | 必须实测，不能直接改 |
 | SSE 文本/工具 | 支持 | 支持 | 基本一致 |
-| redacted thinking | 未完整支持 | 支持并区分类型 | CodexHub 更完整 |
-| citations | 未完整支持 | 支持 Responses annotation | CodexHub 更完整 |
-| Anthropic server search | 降级为文本摘要 | 支持结构化 web search call | CodexHub 更完整 |
+| redacted thinking | 未完整支持 | 支持并区分类型 | MochiPort 更完整 |
+| citations | 未完整支持 | 支持 Responses annotation | MochiPort 更完整 |
+| Anthropic server search | 降级为文本摘要 | 支持结构化 web search call | MochiPort 更完整 |
 | 工具历史修复 | 会话层三阶段修复 | Chat 有，Anthropic 尚不完整 | 借鉴统一修复层 |
 | Stop reason | refusal/未知值测试较完整 | 主要处理 max_tokens | 可补测试和语义 |
 
@@ -355,7 +355,7 @@ duplicate   -> 去重
 - 不用简单字符替换生成可能碰撞的 tool call ID。
 - 不把 `tool_choice=none` 无提示改成 `auto`。
 - 不把结构化 web search、X search、code interpreter 一律降级为普通 assistant 文本。
-- 不用 Grok Build 的 system-only cache 策略覆盖 CodexHub 当前缓存实现。
+- 不用 Grok Build 的 system-only cache 策略覆盖 MochiPort 当前缓存实现。
 - 不因 413 自动无提示删除图片后重试；若未来需要该恢复能力，必须在日志中明确记录语义降级。
 - 不直接改回 Grok Build 的嵌套工具结果图片形态；先用真实 Anthropic 和兼容上游做 A/B 验证。
 
@@ -376,7 +376,7 @@ Grok Build：
 - 自定义 Provider 配置说明：
   `crates/codegen/xai-grok-pager/docs/user-guide/11-custom-models.md`
 
-CodexHub：
+MochiPort：
 
 - 目标 IR：[`ir.rs`](../src/ai_gateway/ir.rs)
 - Responses decoder：[`responses_inbound.rs`](../src/ai_gateway/codec/responses_inbound.rs)

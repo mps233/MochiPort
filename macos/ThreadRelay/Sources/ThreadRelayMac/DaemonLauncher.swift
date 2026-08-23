@@ -2,6 +2,50 @@ import CryptoKit
 import Darwin
 import Foundation
 
+enum MochiPortStorage {
+    static let homeEnvironmentKeys = ["MOCHIPORT_HOME", "THREADRELAY_HOME", "CODEXHUB_HOME"]
+    static let applicationSupportDirectoryNames = ["MochiPort", "ThreadRelay", "CodexHub"]
+
+    static func dataDirectory(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        applicationSupport: URL,
+        fileManager: FileManager = .default
+    ) -> URL {
+        for key in homeEnvironmentKeys {
+            if let path = environment[key], !path.isEmpty {
+                return URL(fileURLWithPath: path, isDirectory: true)
+            }
+        }
+
+        let defaults = applicationSupportDirectoryNames.map {
+            applicationSupport.appendingPathComponent($0, isDirectory: true)
+        }
+        return defaults.first {
+            fileManager.fileExists(atPath: $0.appendingPathComponent("config.toml").path)
+        } ?? defaults[0]
+    }
+
+    static func candidateDirectories(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        applicationSupport: URL?
+    ) -> [URL] {
+        var candidates = homeEnvironmentKeys.compactMap { key -> URL? in
+            guard let path = environment[key], !path.isEmpty else { return nil }
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+        if let applicationSupport {
+            candidates.append(contentsOf: applicationSupportDirectoryNames.map {
+                applicationSupport.appendingPathComponent($0, isDirectory: true)
+            })
+        }
+
+        var seen = Set<String>()
+        return candidates.filter {
+            seen.insert($0.standardizedFileURL.path).inserted
+        }
+    }
+}
+
 enum DaemonLaunchError: LocalizedError, Equatable {
     case helperMissing
     case helperNotExecutable
@@ -24,9 +68,9 @@ enum DaemonLaunchError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .helperMissing:
-            return "应用内未找到后台服务。请重新安装 ThreadRelay。"
+            return "应用内未找到后台服务。请重新安装 MochiPort。"
         case .helperNotExecutable:
-            return "应用内的后台服务不可执行。请重新安装 ThreadRelay。"
+            return "应用内的后台服务不可执行。请重新安装 MochiPort。"
         case let .launchdLabelInvalid(label):
             return "后台服务测试标识无效：\(label)"
         case let .runtimeBuildIdentifierInvalid(identifier):
@@ -40,23 +84,23 @@ enum DaemonLaunchError: LocalizedError, Equatable {
         case let .runtimeVersionMismatch(expected, actual):
             return "后台服务构建不匹配（应为 \(expected)，实际为 \(actual ?? "未知")）。"
         case .guiExecutableMissing:
-            return "应用内未找到 ThreadRelay 界面程序。请重新安装 ThreadRelay。"
+            return "应用内未找到 MochiPort 界面程序。请重新安装 MochiPort。"
         case .guiExecutableNotExecutable:
-            return "应用内的 ThreadRelay 界面程序不可执行。请重新安装 ThreadRelay。"
+            return "应用内的 MochiPort 界面程序不可执行。请重新安装 MochiPort。"
         case .guiSupervisorMissing:
-            return "应用内未找到 ThreadRelay 自动恢复服务。请重新安装 ThreadRelay。"
+            return "应用内未找到 MochiPort 自动恢复服务。请重新安装 MochiPort。"
         case .guiSupervisorNotExecutable:
-            return "应用内的 ThreadRelay 自动恢复服务不可执行。请重新安装 ThreadRelay。"
+            return "应用内的 MochiPort 自动恢复服务不可执行。请重新安装 MochiPort。"
         case .launchAgentDirectoryUnavailable:
             return "无法访问当前用户的后台服务目录。"
         case .launchAgentWriteFailed:
             return "无法保存后台服务启动配置。"
         case let .loadedAgentMismatch(expected, actual):
             let actualDescription = actual.map { "当前为 \($0)" } ?? "当前路径未知"
-            return "后台服务启动配置指向了其他版本（应为 \(expected)，\(actualDescription)）。请重新安装 ThreadRelay 后重试。"
+            return "后台服务启动配置指向了其他版本（应为 \(expected)，\(actualDescription)）。请重新安装 MochiPort 后重试。"
         case let .loadedAgentUntrusted(actual):
             let detail = actual.map { "（\($0)）" } ?? ""
-            return "当前后台进程无法确认为 ThreadRelay 管理的运行版本\(detail)，已取消操作。"
+            return "当前后台进程无法确认为 MochiPort 管理的运行版本\(detail)，已取消操作。"
         case let .launchctlFailed(detail):
             return detail.isEmpty ? "无法启动后台服务。" : "无法启动后台服务：\(detail)"
         }
@@ -65,8 +109,10 @@ enum DaemonLaunchError: LocalizedError, Equatable {
 
 struct DaemonLaunchConfiguration: Equatable {
     static let label = "io.github.mps233.threadrelay.daemon"
-    fileprivate static let skipDesktopIntegrationEnvironment =
-        "THREADRELAY_SKIP_DESKTOP_INTEGRATION"
+    fileprivate static let skipDesktopIntegrationEnvironments = [
+        "MOCHIPORT_SKIP_DESKTOP_INTEGRATION",
+        "THREADRELAY_SKIP_DESKTOP_INTEGRATION",
+    ]
 #if DEBUG
     private static let testLabelPrefix = "io.github.mps233.threadrelay.tests."
 #endif
@@ -194,35 +240,21 @@ struct DaemonLaunchConfiguration: Equatable {
             isDirectory: true
         )
 
-        let configuredHome = environment["THREADRELAY_HOME"] ?? environment["CODEXHUB_HOME"]
-        let dataDirectory: URL
-        if let configuredHome, !configuredHome.isEmpty {
-            dataDirectory = URL(fileURLWithPath: configuredHome, isDirectory: true)
-        } else {
-            let threadRelayDirectory = applicationSupport.appendingPathComponent(
-                "ThreadRelay",
-                isDirectory: true
-            )
-            let legacyDirectory = applicationSupport.appendingPathComponent(
-                "CodexHub",
-                isDirectory: true
-            )
-            let threadRelayConfig = threadRelayDirectory.appendingPathComponent("config.toml")
-            let legacyConfig = legacyDirectory.appendingPathComponent("config.toml")
-            if fileManager.fileExists(atPath: threadRelayConfig.path) {
-                dataDirectory = threadRelayDirectory
-            } else if fileManager.fileExists(atPath: legacyConfig.path) {
-                dataDirectory = legacyDirectory
-            } else {
-                dataDirectory = threadRelayDirectory
-            }
-        }
+        let dataDirectory = MochiPortStorage.dataDirectory(
+            environment: environment,
+            applicationSupport: applicationSupport,
+            fileManager: fileManager
+        )
+        let helpers = bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Helpers", isDirectory: true)
+        let mochiPortHelper = helpers.appendingPathComponent("mochiport-daemon")
+        let embeddedHelper = fileManager.fileExists(atPath: mochiPortHelper.path)
+            ? mochiPortHelper
+            : helpers.appendingPathComponent("threadrelay-daemon")
 
         return Self(
-            helperURL: bundleURL
-                .appendingPathComponent("Contents", isDirectory: true)
-                .appendingPathComponent("Helpers", isDirectory: true)
-                .appendingPathComponent("threadrelay-daemon"),
+            helperURL: embeddedHelper,
             configURL: dataDirectory.appendingPathComponent("config.toml"),
             launchAgentURL: homeURL
                 .appendingPathComponent("Library/LaunchAgents", isDirectory: true)
@@ -267,7 +299,7 @@ struct DaemonLaunchConfiguration: Equatable {
             .deletingLastPathComponent()
             .appendingPathComponent("runtimes", isDirectory: true)
             .appendingPathComponent(buildIdentifier, isDirectory: true)
-            .appendingPathComponent("threadrelay-daemon")
+            .appendingPathComponent(helperURL.lastPathComponent)
     }
 
     func propertyListData() throws -> Data {
@@ -276,11 +308,15 @@ struct DaemonLaunchConfiguration: Equatable {
         var environment: [String: String] = [
             "HOME": homeURL.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "MOCHIPORT_HOME": configURL.deletingLastPathComponent().path,
             "THREADRELAY_HOME": configURL.deletingLastPathComponent().path,
+            "MOCHIPORT_BUNDLE_BUILD": resolvedBuildIdentifier,
             "THREADRELAY_BUNDLE_BUILD": resolvedBuildIdentifier,
         ]
         if let value = desktopIntegrationEnvironmentValue {
-            environment[Self.skipDesktopIntegrationEnvironment] = value
+            for key in Self.skipDesktopIntegrationEnvironments {
+                environment[key] = value
+            }
         }
         let propertyList: [String: Any] = [
             "Label": launchdLabel,
@@ -329,9 +365,13 @@ struct GUIRecoveryConfiguration: Equatable {
         )
         let contents = bundleURL.appendingPathComponent("Contents", isDirectory: true)
         let helpers = contents.appendingPathComponent("Helpers", isDirectory: true)
+        let mochiPortSupervisor = helpers.appendingPathComponent("mochiport-gui-supervisor")
+        let supervisor = fileManager.fileExists(atPath: mochiPortSupervisor.path)
+            ? mochiPortSupervisor
+            : helpers.appendingPathComponent("threadrelay-gui-supervisor")
         return Self(
-            executableURL: contents.appendingPathComponent("MacOS/ThreadRelay"),
-            supervisorURL: helpers.appendingPathComponent("threadrelay-gui-supervisor"),
+            executableURL: contents.appendingPathComponent("MacOS/MochiPort"),
+            supervisorURL: supervisor,
             launchAgentURL: daemon.launchAgentURL
                 .deletingLastPathComponent()
                 .appendingPathComponent("\(label).plist"),
@@ -348,9 +388,11 @@ struct GUIRecoveryConfiguration: Equatable {
         var environment: [String: String] = [
             "HOME": homeURL.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "MOCHIPORT_HOME": dataDirectoryURL.path,
             "THREADRELAY_HOME": dataDirectoryURL.path,
         ]
         if let buildIdentifier {
+            environment["MOCHIPORT_BUNDLE_BUILD"] = buildIdentifier
             environment["THREADRELAY_BUNDLE_BUILD"] = buildIdentifier
         }
         let propertyList: [String: Any] = [
@@ -461,10 +503,9 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
               locator.instanceId == lifecycle.service.instanceId,
               locator.pid == lifecycle.service.pid,
               locator.startedAtMs == lifecycle.service.startedAtMs,
-              pathsMatch(
+              isKnownControlFile(
                   locator.controlFile,
-                  configuration.configURL.deletingLastPathComponent()
-                      .appendingPathComponent("threadrelay-control.json").path
+                  dataDirectory: configuration.configURL.deletingLastPathComponent()
               ),
               let locatorBaseURL = locator.validatedBaseURL,
               baseURL(locatorBaseURL, matchesBind: lifecycle.bind)
@@ -495,8 +536,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                   lifecycle.configPath,
                   "daemon",
               ],
-              loadedEnvironmentValue(from: loaded.output, key: "THREADRELAY_HOME")
-                  == configuration.configURL.deletingLastPathComponent().path
+              loadedHomeMatches(loaded.output, dataDirectory: configuration.configURL.deletingLastPathComponent())
         else {
             throw DaemonLaunchError.loadedAgentUntrusted(loadedProgram(from: loaded.output))
         }
@@ -584,7 +624,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         }
 
         let temporary = runtimeDirectory.appendingPathComponent(
-            ".threadrelay-daemon.\(UUID().uuidString).tmp"
+            ".mochiport-daemon.\(UUID().uuidString).tmp"
         )
         defer { try? fileManager.removeItem(at: temporary) }
         do {
@@ -647,7 +687,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
 
     private static func daemonBuildIdentifier(fromVersionOutput output: String) -> String? {
         let line = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard line.hasPrefix("threadrelay "),
+        guard line.hasPrefix("mochiport ") || line.hasPrefix("threadrelay "),
               let buildStart = line.range(of: "(build "),
               line.hasSuffix(")")
         else { return nil }
@@ -666,13 +706,14 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         guard let stagedHelperURL = try? configuration.stagedHelperURL(),
               let expectedBuild = try? configuration.resolvedBuildIdentifier(),
               loadedProgram(from: output) == stagedHelperURL.path,
-              loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
-              == configuration.configURL.deletingLastPathComponent().path,
-              loadedEnvironmentValue(from: output, key: "THREADRELAY_BUNDLE_BUILD")
-              == expectedBuild,
+              loadedHomeMatches(output, dataDirectory: configuration.configURL.deletingLastPathComponent()),
               loadedEnvironmentValue(
                   from: output,
-                  key: DaemonLaunchConfiguration.skipDesktopIntegrationEnvironment
+                  keys: ["MOCHIPORT_BUNDLE_BUILD", "THREADRELAY_BUNDLE_BUILD"]
+              ) == expectedBuild,
+              loadedEnvironmentValue(
+                  from: output,
+                  keys: DaemonLaunchConfiguration.skipDesktopIntegrationEnvironments
               ) == configuration.desktopIntegrationEnvironmentValue,
               let argumentsStart = lines.firstIndex(where: { $0 == "arguments = {" }),
               let argumentsEnd = lines[(argumentsStart + 1)...].firstIndex(of: "}")
@@ -701,7 +742,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             .appendingPathComponent("runtimes", isDirectory: true)
             .standardizedFileURL
             .resolvingSymlinksInPath()
-        guard resolvedProgram.lastPathComponent == "threadrelay-daemon",
+        guard ["mochiport-daemon", "threadrelay-daemon"].contains(resolvedProgram.lastPathComponent),
               resolvedProgram.deletingLastPathComponent().deletingLastPathComponent() == runtimeRoot
         else {
             return false
@@ -755,6 +796,12 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             == URL(fileURLWithPath: rhs).standardizedFileURL.resolvingSymlinksInPath()
     }
 
+    private static func isKnownControlFile(_ path: String, dataDirectory: URL) -> Bool {
+        ["mochiport-control.json", "threadrelay-control.json"].contains {
+            pathsMatch(path, dataDirectory.appendingPathComponent($0).path)
+        }
+    }
+
     private static func loadedProgram(from output: String) -> String? {
         output
             .split(whereSeparator: \.isNewline)
@@ -800,6 +847,18 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
                 )
             }
             .first
+    }
+
+    private static func loadedEnvironmentValue(from output: String, keys: [String]) -> String? {
+        keys.lazy
+            .compactMap { loadedEnvironmentValue(from: output, key: $0) }
+            .first
+    }
+
+    private static func loadedHomeMatches(_ output: String, dataDirectory: URL) -> Bool {
+        ["MOCHIPORT_HOME", "THREADRELAY_HOME", "CODEXHUB_HOME"].contains {
+            loadedEnvironmentValue(from: output, key: $0) == dataDirectory.path
+        }
     }
 
     private static func writeLaunchAgent(
@@ -949,7 +1008,7 @@ struct GUIRecoveryLauncher: @unchecked Sendable {
             .first(where: { $0.hasPrefix("program = ") })
             .map({ String($0.dropFirst("program = ".count)) })
             .map(unquote),
-            program == configuration.supervisorURL.path,
+            isCompatibleSupervisorProgram(program, expected: configuration.supervisorURL),
             loadedEnvironmentValue(from: output, key: "HOME") == configuration.homeURL.path,
             loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
             == configuration.dataDirectoryURL.path,
@@ -961,7 +1020,29 @@ struct GUIRecoveryLauncher: @unchecked Sendable {
         let arguments = lines[(argumentsStart + 1)..<argumentsEnd]
             .filter { !$0.isEmpty }
             .map(unquote)
-        return arguments == [configuration.supervisorURL.path]
+        return arguments.count == 1
+            && isCompatibleSupervisorProgram(arguments[0], expected: configuration.supervisorURL)
+    }
+
+    private static func isCompatibleSupervisorProgram(
+        _ program: String,
+        expected: URL
+    ) -> Bool {
+        if program == expected.path { return true }
+        let url = URL(fileURLWithPath: program).standardizedFileURL
+        guard ["threadrelay-gui-supervisor", "mochiport-gui-supervisor"].contains(url.lastPathComponent) else {
+            return false
+        }
+        let appURL = url
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let expectedAppURL = expected.standardizedFileURL
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        return ["ThreadRelay.app", "MochiPort.app"].contains(appURL.lastPathComponent)
+            && appURL.deletingLastPathComponent() == expectedAppURL.deletingLastPathComponent()
     }
 
     private static func loadedProgram(from output: String) -> String? {

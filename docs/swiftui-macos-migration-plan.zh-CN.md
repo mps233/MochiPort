@@ -1,4 +1,4 @@
-# ThreadRelay macOS SwiftUI 迁移计划
+# MochiPort macOS SwiftUI 迁移计划
 
 ## 1. 文档状态
 
@@ -13,11 +13,11 @@
 | Windows | 保留 wxDragon GUI，进入兼容维护模式 |
 | Linux | daemon/CLI 为正式支持，wxDragon GUI 为实验性支持 |
 
-本文用于指导 ThreadRelay 从跨平台 wxDragon 桌面界面迁移到以 macOS SwiftUI 为主的产品形态。它既是实施清单，也是阶段验收和回滚依据。
+本文用于指导 MochiPort 从跨平台 wxDragon 桌面界面迁移到以 macOS SwiftUI 为主的产品形态。它既是实施清单，也是阶段验收和回滚依据。
 
 ## 2. 决策摘要
 
-ThreadRelay 的 macOS 客户端改用 SwiftUI 重写，现有 Rust daemon、Telegram、飞书、微信、企业微信、会话管理、远程控制和 AI Gateway 逻辑继续共用。Liquid Glass 是 macOS 客户端的核心产品要求和正式发布门槛，不是功能完成后的装饰性优化。
+MochiPort 的 macOS 客户端改用 SwiftUI 重写，现有 Rust daemon、Telegram、飞书、微信、企业微信、会话管理、远程控制和 AI Gateway 逻辑继续共用。Liquid Glass 是 macOS 客户端的核心产品要求和正式发布门槛，不是功能完成后的装饰性优化。
 
 迁移完成后的平台策略如下：
 
@@ -67,16 +67,17 @@ Rust daemon 已提供 `/api/gui/dashboard`、`/api/config`、Codex App、IM 账�
 ## 5. 目标架构
 
 ```text
-ThreadRelay.app
-├── Contents/MacOS/ThreadRelay                 # SwiftUI 主程序
-├── Contents/Helpers/threadrelay-daemon        # Rust 可执行文件
-├── Contents/Frameworks/                       # 仅在选择更新框架后加入
+MochiPort.app
+├── Contents/MacOS/MochiPort                 # SwiftUI 主程序
+├── Contents/Helpers/mochiport-daemon         # Rust 可执行文件
+├── Contents/Helpers/mochiport-gui-supervisor # GUI 恢复辅助程序
+├── Contents/Frameworks/                      # 仅在选择更新框架后加入
 ├── SwiftUI macOS GUI
 │   ├── URLSession API Client
 │   ├── Codable API Models
 │   ├── App/Window/MenuBar lifecycle
 │   └── SwiftUI views and view models
-└── ThreadRelay Rust daemon
+└── MochiPort Rust daemon
     ├── local HTTP/WebSocket API on 127.0.0.1:3847
     ├── Codex remote-control backend
     ├── IM adapters
@@ -89,12 +90,12 @@ ThreadRelay.app
 第一版继续采用 GUI 与 daemon 分离的双进程模型：
 
 1. SwiftUI 应用启动后探测既有 daemon。
-2. 若存在匹配的 ThreadRelay/CodexHub 兼容 daemon，则直接复用，不因 GUI 与 daemon 版本不同而自动替换或重启。
+2. 若存在匹配的 MochiPort daemon，或可识别的旧 ThreadRelay/CodexHub 兼容 daemon，则直接复用，不因 GUI 与 daemon 版本不同而自动替换或重启。
 3. 若不存在，则校验并安装随包 helper，由 launchd 首次启动。
 4. 关闭主窗口永远不停止 daemon；默认隐藏到菜单栏，用户可在 Settings 改为退出 GUI，但这仍不等于停止本地服务。
 5. 所有停止、重启和升级操作必须校验 daemon PID、instance ID、可执行文件路径和端口归属。
 
-禁止只根据进程名或端口直接杀进程。当前模型请求可能经过 ThreadRelay AI Gateway，错误关闭 `3847` 会中断正在进行的会话。
+禁止只根据进程名或端口直接杀进程。当前模型请求可能经过 MochiPort AI Gateway，错误关闭 `3847` 会中断正在进行的会话。
 
 GUI 关闭、崩溃和自身更新不得通过父进程退出、进程组、继承管道或临时目录清理带走 daemon。daemon 启动后脱离 GUI 的标准输出和错误管道，日志写入固定文件；退出主界面和停止本地服务必须是两个不同命令。
 
@@ -144,7 +145,7 @@ SwiftUI GUI 更新不重启 daemon。只要 API 兼容，新 GUI 继续复用旧
 
 | 事项 | 推荐默认值 | 原因 |
 | --- | --- | --- |
-| 主程序与 daemon | SwiftUI 主程序 + `Contents/Helpers/threadrelay-daemon` | 保留 Rust 核心，并让签名、进程归属和升级边界清晰 |
+| 主程序与 daemon | SwiftUI 主程序 + `Contents/Helpers/mochiport-daemon` | 保留 Rust 核心，并让签名、进程归属和升级边界清晰 |
 | macOS 最低版本 | macOS 13 | 可直接使用 `NavigationSplitView` 和 `MenuBarExtra`，与当前最低版本一致 |
 | Swift 状态模型 | Swift 并发、`@MainActor`、`ObservableObject` | 兼容 macOS 13，不为使用较新的 Observation framework 提高最低版本 |
 | 第三方架构库 | 首版不引入 | 优先使用 SwiftUI、Foundation、OSLog、XCTest；更新框架按 Phase 6 决策 |
@@ -159,12 +160,12 @@ SwiftUI 首版不负责把旧 `Application Support/CodexHub` 数据搬到新目�
 ### 5.4 版本、升级身份与兼容窗口
 
 - 产品语义版本继续以根目录 `Cargo.toml` 的 package version 为唯一来源。
-- 构建号由显式 `THREADRELAY_BUILD_NUMBER` 提供；CI 使用 GitHub run number，本地正式打包必须显式传入。
+- 构建号由显式 `MOCHIPORT_BUILD_NUMBER` 提供；CI 使用 GitHub run number，本地正式打包必须显式传入。
 - 构建脚本生成 Swift 使用的 `Version.xcconfig`，并校验 Xcode、Cargo、Info.plist、helper `--version` 和发布清单一致；仅在采用 Sparkle 时增加 appcast 校验。
 - `/healthz` 仅返回 `service=threadrelay`、API 主版本和 `ready`；受鉴权运行状态接口另行返回 `productVersion`、`buildNumber`、`apiMajor`、PID、启动时间和 runtime 状态。
 - Bundle ID 固定为 `io.github.mps233.threadrelay`，正式签名 Team ID 在 SwiftUI 迁移前后保持一致。
 - `swiftui-preview` 使用独立 Bundle ID 和更新 feed，可与 stable GUI 并行安装；两者复用同一兼容 daemon，不各自启动服务。
-- 最后一个 wxDragon ThreadRelay 版本作为桥接版本。仍使用 `com.codexhub.app` 的更早 CodexHub 不直接原位升级到 SwiftUI，而是先迁移到桥接版或并行安装 ThreadRelay；业务数据仍由 Rust 兼容路径读取。
+- 最后一个 wxDragon ThreadRelay 版本作为桥接版本。仍使用 `com.codexhub.app` 的更早 CodexHub 不直接原位升级到 SwiftUI，而是先迁移到桥接版或并行安装 MochiPort；业务数据仍由 Rust 兼容路径读取。
 - 管理 API 在桥接期同时支持当前 wxDragon stable 与 SwiftUI preview；形成真实发布节奏后再根据维护成本确定长期兼容窗口。配置写操作使用窄 DTO 和 revision/ETag，旧 GUI 不得覆盖未知字段。
 - Windows wxDragon 和 Linux CLI 遵循同一 API 兼容窗口；需要调整时单独发布适配版本。
 
@@ -197,7 +198,7 @@ Liquid Glass 是 P0 级产品需求。任何核心页面即使功能完整，只
 具体约束如下：
 
 - 原生组件优先于自定义 `glassEffect`。能由系统 toolbar、search、sheet、popover 或 sidebar 自动获得的效果，不重复包一层自定义玻璃。
-- 默认使用系统常规 glass 变体；clear glass 只允许出现在视觉内容足够丰富、对比度经过验证的场景。ThreadRelay 以运维信息为主，原则上不使用 clear glass。
+- 默认使用系统常规 glass 变体；clear glass 只允许出现在视觉内容足够丰富、对比度经过验证的场景。MochiPort 以运维信息为主，原则上不使用 clear glass。
 - 玻璃只属于导航、控制和临时浮层，不覆盖主要阅读与数据内容。禁止“每个卡片一块玻璃”、多层玻璃嵌套、装饰性渐变、随意染色和常驻高光。
 - 内容区采用统一表面与细分隔线形成层级，避免碎片化卡片。颜色主要用于系统强调色、警告和错误，不用颜色填充空间。
 - macOS 26 代码必须通过 availability 隔离，部署目标继续保持 macOS 13；旧系统回退必须保持相同的信息架构、功能、键盘路径和状态语义。
@@ -265,7 +266,7 @@ Sidebar 只保留六个一级入口：
 | AI Gateway | Provider 列表展示启用状态、协议、权重和模型数量；行尾开关直接启停，失败时回滚；Gateway 全局开关放在列表上方紧凑控制行 | macOS 14+ Inspector、macOS 13/窄窗口详情页编辑 Base URL、密钥状态、模型映射和高级选项，显式“保存”；密钥只写不回显，删除放更多菜单并确认 | 添加 Provider |
 | 请求日志 | 全高 `Table`，toolbar 提供搜索、筛选和日志开关；状态、耗时、模型等列支持排序 | macOS 14+ 使用 Inspector 按“摘要、Codex 请求、上游请求、响应、事件、错误”分区并按需加载；macOS 13 与窄窗口导航到详情页，并可另开详情窗口 | 默认没有创建动作；“清空日志”放更多菜单 |
 
-总览不是第二套设置页。它只回答三件事：ThreadRelay 能不能工作、问题在哪里、下一步该做什么。正常项目以紧凑行呈现；只有异常项目展开解释和动作，避免状态卡片铺满窗口。
+总览不是第二套设置页。它只回答三件事：MochiPort 能不能工作、问题在哪里、下一步该做什么。正常项目以紧凑行呈现；只有异常项目展开解释和动作，避免状态卡片铺满窗口。
 
 列表类页面的 Detail 规则保持一致：macOS 14+ 且空间足够时使用系统 Inspector；macOS 13 或空间不足时进入同内容的导航详情页。总览和 Codex 从不显示 Inspector。独立日志窗口是额外工作方式，不是任何系统版本的必需回退。
 
@@ -284,7 +285,7 @@ AI Gateway 的运行开关与 Provider 列表放在该页面。请求日志页�
 - 本地服务：本地连接模式，以及明确停止受管 daemon 的独立危险操作；只有现有 daemon 支持的连接参数才展示，高级项默认收起。
 - 更新与诊断：检查当前安装所属 feed 的更新、版本、导出诊断和打开日志目录。stable 与 preview 是不同 Bundle ID，不在设置中互相切换。
 
-菜单栏只提供当前整体状态、打开 ThreadRelay、启动或查看本地服务、检查更新和退出。它不是缩小版主窗口，不在菜单栏编辑账号、Provider 或网络设置。点击异常状态应打开主窗口并定位到相关页面；`MenuBarExtra` 无法可靠深链时至少打开总览并聚焦首要问题。
+菜单栏只提供当前整体状态、打开 MochiPort、启动或查看本地服务、检查更新和退出。它不是缩小版主窗口，不在菜单栏编辑账号、Provider 或网络设置。点击异常状态应打开主窗口并定位到相关页面；`MenuBarExtra` 无法可靠深链时至少打开总览并聚焦首要问题。
 
 应用命令保持精简并使用系统惯例：File 提供关闭窗口；View 提供显示 Sidebar、显示 Inspector（支持页面才启用）和刷新；Edit 使用系统查找命令聚焦当前列表或详情搜索；Window 提供主窗口与日志详情窗口；Help 提供帮助、隐私说明和检查更新；Settings 使用系统快捷键。删除、移动 Provider、停止服务等对象命令同时提供 toolbar/context menu 入口，首版不自创全局快捷键。
 
@@ -344,7 +345,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 - [ ] 构建并验证最后一个 wxDragon 桥接版：可与 preview 共享鉴权凭据和兼容 daemon，退出 GUI 不停止 daemon；桥接版发布后再开始真实并行预览。
 - [x] 建立语义化设计 token，但颜色和材质优先引用系统值。
 - [x] 建立 Liquid Glass 使用边界和 availability 封装；macOS 26 使用原生 API，macOS 13-15 使用系统材质回退，不实现仿制玻璃渲染器。
-- [x] 为总览、请求日志、Settings 和 sheet/popover 制作可运行的视觉基准，并提供不接触真实 daemon 的 `ThreadRelayPreview` fixture scheme。
+- [x] 为总览、请求日志、Settings 和 sheet/popover 制作可运行的视觉基准，并提供不接触真实 daemon 的 `ThreadRelayPreview` fixture scheme（工程内部名称保留）。
 - [ ] 完成 macOS 26 浅色/深色与 macOS 13-15 材质回退的截图和可读性评审。
 - [x] 创建主导航、Settings、About、菜单命令和占位页面。
 - [x] 增加 Swift 单元测试 target。

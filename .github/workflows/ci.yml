@@ -1,4 +1,4 @@
-name: ThreadRelay CI
+name: MochiPort CI
 
 on:
   push:
@@ -50,10 +50,10 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Check
-        run: cargo check --locked --features gui --bin threadrelay
+        run: cargo check --locked --features gui --bin mochiport
 
       - name: Test
-        run: cargo test --locked --features gui --bin threadrelay
+        run: cargo test --locked --features gui --bin mochiport
 
   swiftui:
     name: SwiftUI macOS shell
@@ -73,7 +73,7 @@ jobs:
       - name: Generate Swift version
         run: |
           set -euo pipefail
-          THREADRELAY_BUILD_NUMBER="${{ github.run_number }}" \
+          MOCHIPORT_BUILD_NUMBER="${{ github.run_number }}" \
             scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
 
       - name: Build SwiftUI shell
@@ -84,7 +84,7 @@ jobs:
             -scheme ThreadRelay \
             -configuration Debug \
             -destination 'platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/ThreadRelayDerivedData" \
+            -derivedDataPath "$RUNNER_TEMP/MochiPortDerivedData" \
             CODE_SIGNING_ALLOWED=NO
 
       - name: Test SwiftUI shell
@@ -95,5 +95,5 @@ jobs:
             -scheme ThreadRelay \
             -configuration Debug \
             -destination 'platform=macOS' \
-            -derivedDataPath "$RUNNER_TEMP/ThreadRelayDerivedData" \
+            -derivedDataPath "$RUNNER_TEMP/MochiPortDerivedData" \
             CODE_SIGNING_ALLOWED=NO

@@ -2,7 +2,7 @@
 
 更新时间：2026-06-04
 
-本文只记录 Codex 官方 remote-control 协议事实、当前 `codexhub` 的对接现状，以及下一步排查方向。不把 IM 绑定兜底、图片发送、Telegram/微信/飞书渲染作为协议原因。
+本文只记录 Codex 官方 remote-control 协议事实、当前 `mochiport` 的对接现状，以及下一步排查方向。不把 IM 绑定兜底、图片发送、Telegram/微信/飞书渲染作为协议原因。
 
 ## 1. 参考源码
 
@@ -33,7 +33,7 @@
 
 - `ClientEnvelope`：remote-control backend 发给 Codex app-server 的 envelope。
 - `ServerEnvelope`：Codex app-server 发给 remote-control backend 的 envelope。
-- 我们的 `codexhub` 在这个协议里扮演 remote-control backend。
+- 我们的 `mochiport` 在这个协议里扮演 remote-control backend。
 - Codex Desktop/App 的 app-server 会主动连接我们的 `/backend-api/wham/remote/control/server` WebSocket。
 
 因此我们代码里的 `OutgoingClientEnvelope` 对应官方 `ClientEnvelope`；`IncomingServerEnvelope` 对应官方 `ServerEnvelope`。

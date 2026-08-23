@@ -1,4 +1,4 @@
-name: ThreadRelay Windows release
+name: MochiPort Windows release
 
 on:
   workflow_dispatch:
@@ -60,8 +60,8 @@ jobs:
 
           "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "PRODUCT_VERSION=$productVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "WINDOWS_ZIP_NAME=ThreadRelay-$appVersion-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "WINDOWS_MSI_NAME=ThreadRelay-$appVersion-windows-x64.msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_ZIP_NAME=MochiPort-$appVersion-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_MSI_NAME=MochiPort-$appVersion-windows-x64.msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Reset wxWidgets CMake Cache
         shell: pwsh
@@ -74,8 +74,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $env:THREADRELAY_BUILD_NUMBER = "${{ github.run_number }}"
-          cargo build --locked --release --features gui --bin threadrelay
+          $env:MOCHIPORT_BUILD_NUMBER = "${{ github.run_number }}"
+          cargo build --locked --release --features gui --bin mochiport
 
       - name: Sign Binaries
         if: env.HAS_WINDOWS_CODESIGN == 'true'
@@ -97,7 +97,7 @@ jobs:
           }
 
           $files = @(
-            "target\release\threadrelay.exe"
+            "target\release\mochiport.exe"
           )
           foreach ($file in $files) {
             & $signtool.FullName sign `
@@ -115,7 +115,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $distRoot = "target\dist"
-          $zipDist = Join-Path $distRoot "ThreadRelay Windows x64"
+          $zipDist = Join-Path $distRoot "MochiPort Windows x64"
           $msiSource = "target\msi-source"
           Remove-Item -Recurse -Force $distRoot -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force $msiSource -ErrorAction SilentlyContinue
@@ -126,7 +126,7 @@ jobs:
 
           python "packaging\generate-third-party-licenses.py" (Join-Path $distRoot "THIRD_PARTY_LICENSES.txt")
 
-          Copy-Item "target\release\threadrelay.exe" (Join-Path $zipDist "ThreadRelay.exe")
+          Copy-Item "target\release\mochiport.exe" (Join-Path $zipDist "MochiPort.exe")
           Copy-Item "README.md" $zipDist
           Copy-Item "README.en.md" $zipDist
           Copy-Item "LICENSE" $zipDist
@@ -139,7 +139,7 @@ jobs:
             Copy-Item "config.example.toml" $zipDist
           }
 
-          Copy-Item "target\release\threadrelay.exe" (Join-Path $msiSource "ThreadRelay.exe")
+          Copy-Item "target\release\mochiport.exe" (Join-Path $msiSource "MochiPort.exe")
           Copy-Item "README.md" $msiSource
           Copy-Item "README.en.md" $msiSource
           Copy-Item "config.example.toml" $msiSource
@@ -187,7 +187,7 @@ jobs:
           }
           $sourceDir = (Resolve-Path "target\msi-source").Path
           $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
-          & $wix build "packaging\windows\ThreadRelay.wxs" `
+          & $wix build "packaging\windows\MochiPort.wxs" `
             -ext WixToolset.UI.wixext/7.0.0 `
             -acceptEula wix7 `
             -arch x64 `
@@ -274,11 +274,11 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
             <channel>
-              <title>ThreadRelay Windows Updates</title>
+              <title>MochiPort Windows Updates</title>
               <link>$xmlReleaseUrl</link>
-              <description>ThreadRelay Windows update feed</description>
+              <description>MochiPort Windows update feed</description>
               <item>
-                <title>ThreadRelay $xmlShortVersion</title>
+                <title>MochiPort $xmlShortVersion</title>
                 <link>$xmlReleaseUrl</link>
                 <pubDate>$pubDate</pubDate>
                 <sparkle:releaseNotesLink>$xmlReleaseUrl</sparkle:releaseNotesLink>
@@ -297,10 +297,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ThreadRelay-Windows
+          name: MochiPort-Windows
           path: |
-            target/dist/ThreadRelay-*-windows-x64.zip
-            target/dist/ThreadRelay-*-windows-x64.msi
+            target/dist/MochiPort-*-windows-x64.zip
+            target/dist/MochiPort-*-windows-x64.msi
             target/dist/latest-windows.json
             target/dist/appcast-windows.xml
 
@@ -313,7 +313,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/ThreadRelay-*-windows-x64.zip
-            target/dist/ThreadRelay-*-windows-x64.msi
+            target/dist/MochiPort-*-windows-x64.zip
+            target/dist/MochiPort-*-windows-x64.msi
             target/dist/latest-windows.json
             target/dist/appcast-windows.xml

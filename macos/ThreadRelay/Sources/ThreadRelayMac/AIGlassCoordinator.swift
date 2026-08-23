@@ -245,7 +245,7 @@ final class AIGlassCoordinator: ObservableObject {
               let release = await AIGlassUpdateChecker.fetchLatest(),
               AIGlassUpdateChecker.isNewer(release.version, than: current) else { return }
         updateState.available = release
-        if settings.notifyUpdate { notifier.notify(title: "ThreadRelay 有新版本", subtitle: "v\(release.version)") }
+        if settings.notifyUpdate { notifier.notify(title: "MochiPort 有新版本", subtitle: "v\(release.version)") }
     }
 
     private static func homePath(_ suffix: String) -> URL {

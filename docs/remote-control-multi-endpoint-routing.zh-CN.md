@@ -2,11 +2,11 @@
 
 更新时间：2026-06-07
 
-本文记录 `codexhub` 支持 Codex App、VS Code 插件、Codex CLI/TUI 同时接入 remote-control backend 的设计。当前目标不是广播，也不是每个 IM 会话手动选择执行端，而是让多个 Codex app-server 可以共存，并把 IM 请求自动发送给最高优先级的可用执行端。
+本文记录 `mochiport` 支持 Codex App、VS Code 插件、Codex CLI/TUI 同时接入 remote-control backend 的设计。当前目标不是广播，也不是每个 IM 会话手动选择执行端，而是让多个 Codex app-server 可以共存，并把 IM 请求自动发送给最高优先级的可用执行端。
 
 ## 1. 问题背景
 
-Codex App、VS Code 插件、Codex CLI/TUI 都可能启动各自的 Codex app-server，并连接 `codexhub` 暴露的 remote-control WebSocket：
+Codex App、VS Code 插件、Codex CLI/TUI 都可能启动各自的 Codex app-server，并连接 `mochiport` 暴露的 remote-control WebSocket：
 
 - `GET /backend-api/wham/remote/control/server`
 - `GET /backend-api/remote/control/server`
@@ -15,7 +15,7 @@ Codex App、VS Code 插件、Codex CLI/TUI 都可能启动各自的 Codex app-se
 
 - `Codex Desktop/0.137.0-alpha.4 ...`：Codex App
 - `codex_vscode/0.137.0-alpha.4 ...`：VS Code 插件
-- `codexhub/0.137.0 ... WindowsTerminal ...`：CLI/TUI
+- `mochiport/0.137.0 ... WindowsTerminal ...`：CLI/TUI
 
 WebSocket 握手 header 的 `user-agent` 通常为空，`x-codex-name` 是机器名，不能区分来源。可靠来源在 `initialize` 响应的 `result.userAgent` 中。
 
@@ -36,7 +36,7 @@ WebSocket 握手 header 的 `user-agent` 通常为空，`x-codex-name` 是机器
 
 第一版目标：
 
-1. Codex App、VS Code、CLI/TUI 可以同时连接到 `codexhub`。
+1. Codex App、VS Code、CLI/TUI 可以同时连接到 `mochiport`。
 2. 连接之间不互相覆盖，不因为某个连接断开把全局 remote-control 标为断开。
 3. IM 请求只发送给一个执行端，不做广播。
 4. 自动选择最高优先级且已初始化的执行端：
@@ -55,13 +55,13 @@ WebSocket 握手 header 的 `user-agent` 通常为空，`x-codex-name` 是机器
 
 ## 3. 路由原则
 
-`codexhub` 只负责选择一个 app-server 作为 IM 执行目标：
+`mochiport` 只负责选择一个 app-server 作为 IM 执行目标：
 
 ```text
 IM message -> selected app-server -> Codex thread/turn
 ```
 
-Codex App 和 VS Code 对同一个 thread 的本地同步由 Codex 官方本地机制负责。`codexhub` 不主动把同一条 IM 请求复制给多个 app-server。
+Codex App 和 VS Code 对同一个 thread 的本地同步由 Codex 官方本地机制负责。`mochiport` 不主动把同一条 IM 请求复制给多个 app-server。
 
 默认优先级：
 

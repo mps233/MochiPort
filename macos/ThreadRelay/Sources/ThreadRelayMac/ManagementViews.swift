@@ -91,7 +91,7 @@ struct CodexAccessView: View {
                 Task { await model.uninstallCodex() }
             }
         } message: {
-            Text("会恢复 Codex 原来的连接，并关闭 ThreadRelay。不会删除会话记录。")
+            Text("会恢复 Codex 原来的连接，并关闭 MochiPort。不会删除会话记录。")
         }
         .sheet(
             isPresented: Binding(
@@ -164,7 +164,7 @@ struct CodexAccessView: View {
                             }
                             Divider()
                         } else {
-                            Button("连接 ThreadRelay") {
+                            Button("连接 MochiPort") {
                                 Task { await model.configureCodex() }
                             }
                             Divider()
@@ -297,7 +297,7 @@ struct CodexAccessView: View {
                 VStack(alignment: .leading, spacing: 9) {
                     EnhancedLaunchFeatureRow(
                         symbol: "checkmark.seal",
-                        text: "启动前检查并保存设置，然后连接 ThreadRelay。"
+                        text: "启动前检查并保存设置，然后连接 MochiPort。"
                     )
                     EnhancedLaunchFeatureRow(
                         symbol: "bolt",
@@ -342,7 +342,7 @@ private struct CodexStatusFormRow: View {
     private var title: String {
         if isDirectApiMode { return "Codex 已准备好" }
         if isUnknownMode { return "还没连接 Codex" }
-        if gatewayUnavailable { return "ThreadRelay 未开启" }
+        if gatewayUnavailable { return "MochiPort 未开启" }
         return needsAttention ? "还需要处理" : "Codex 已连接"
     }
     private var subtitle: String {
@@ -353,7 +353,7 @@ private struct CodexStatusFormRow: View {
             return "打开下面的开关即可连接。"
         }
         if gatewayUnavailable {
-            return "请打开 ThreadRelay。"
+            return "请打开 MochiPort。"
         }
         if needsAttention {
             return "请检查下面的提示。"
@@ -421,7 +421,7 @@ private struct CodexRequestPathRow: View {
             return "已关闭，Codex 使用原来的设置。"
         }
         if isThreadRelay, gatewayEnabled == false {
-            return "ThreadRelay 已关闭，打开开关即可使用。"
+            return "MochiPort 已关闭，打开开关即可使用。"
         }
         if isThreadRelay {
             return "Codex 已连接，可以使用。"
@@ -432,7 +432,7 @@ private struct CodexRequestPathRow: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
-                Text("使用 ThreadRelay")
+                Text("使用 MochiPort")
                     .font(.body.weight(.semibold))
                 Text(detail)
                     .font(.caption)
@@ -443,7 +443,7 @@ private struct CodexRequestPathRow: View {
             Spacer(minLength: 12)
 
             if isKnownMode {
-                Toggle("使用 ThreadRelay", isOn: Binding(
+                Toggle("使用 MochiPort", isOn: Binding(
                     get: { toggleValue },
                     set: { newValue in
                         guard !toggleDisabled, newValue != toggleValue else { return }
@@ -459,8 +459,8 @@ private struct CodexRequestPathRow: View {
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.small)
-                .accessibilityLabel("使用 ThreadRelay")
-                .help(toggleValue ? "关闭后恢复原来的设置" : "打开后连接 ThreadRelay")
+                .accessibilityLabel("使用 MochiPort")
+                .help(toggleValue ? "关闭后恢复原来的设置" : "打开后连接 MochiPort")
                 .disabled(toggleDisabled)
             } else {
                 Button {
@@ -2078,7 +2078,7 @@ struct GatewayView: View {
     private var settingsCard: some View {
             ManagementCard(title: "选项") {
                 GatewayPreferenceRow(
-                title: "ThreadRelay",
+                title: "MochiPort",
                 detail: "服务状态由“连接 Codex”页面的开关管理。"
             ) {
                 Label(

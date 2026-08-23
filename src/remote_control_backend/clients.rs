@@ -21,7 +21,7 @@ use super::{
     RemoteControlStatusResponse, format_rfc3339_utc, status_snapshot, unix_now_u64,
 };
 
-const THREADRELAY_REMOTE_DISPLAY_NAME: &str = "ThreadRelay";
+const THREADRELAY_REMOTE_DISPLAY_NAME: &str = "MochiPort";
 
 #[derive(Debug, Deserialize)]
 pub(super) struct RenameEnvironmentRequest {

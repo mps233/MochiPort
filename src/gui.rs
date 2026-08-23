@@ -39,22 +39,22 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 #[cfg(not(target_os = "windows"))]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const CODEX_APP_GUI_UNSUPPORTED: bool = !(cfg!(target_os = "macos") || cfg!(target_os = "windows"));
-const PROJECT_HOME_URL: &str = "https://github.com/mps233/threadrelay";
+const PROJECT_HOME_URL: &str = "https://github.com/mps233/mochiport";
 #[cfg(target_os = "windows")]
 const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/mps233/threadrelay/releases/latest/download/latest-windows.json";
+    "https://github.com/mps233/mochiport/releases/latest/download/latest-windows.json";
 const MACOS_UPDATE_MANIFEST_URL: &str =
-    "https://github.com/mps233/threadrelay/releases/latest/download/latest-macos.json";
+    "https://github.com/mps233/mochiport/releases/latest/download/latest-macos.json";
 #[cfg(target_os = "macos")]
 const UPDATE_MANIFEST_URL: &str = MACOS_UPDATE_MANIFEST_URL;
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/mps233/threadrelay/releases/latest/download/latest-linux.json";
+    "https://github.com/mps233/mochiport/releases/latest/download/latest-linux.json";
 const LEGACY_UPDATE_MANIFEST_URL: &str =
-    "https://github.com/mps233/threadrelay/releases/latest/download/latest.json";
+    "https://github.com/mps233/mochiport/releases/latest/download/latest.json";
 const UPDATE_RELEASE_API_URL: &str =
-    "https://api.github.com/repos/mps233/threadrelay/releases/latest";
-const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/mps233/threadrelay/releases/latest";
+    "https://api.github.com/repos/mps233/mochiport/releases/latest";
+const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/mps233/mochiport/releases/latest";
 const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 10_000;
 const REQUEST_LOG_REFRESH_INTERVAL_MS: i32 = 5_000;
 const REQUEST_LOG_TAB_INDEX: i32 = 3;
@@ -320,7 +320,7 @@ impl GuiSingleInstanceGuard {
 
 pub fn run() {
     let Some(single_instance_guard) = GuiSingleInstanceGuard::acquire() else {
-        eprintln!("failed to create ThreadRelay GUI single instance checker");
+        eprintln!("failed to create MochiPort GUI single instance checker");
         return;
     };
     if single_instance_guard.is_another_running() {
@@ -328,7 +328,7 @@ pub fn run() {
     }
 
     if let Err(err) = wxdragon::main(|app| build_ui(app, single_instance_guard)) {
-        eprintln!("failed to start ThreadRelay GUI: {err:?}");
+        eprintln!("failed to start MochiPort GUI: {err:?}");
     }
 }
 
@@ -356,7 +356,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     // forces scrolling to find them).
     let frame_size = initial_frame_size();
     let frame = Frame::builder()
-        .with_title("ThreadRelay")
+        .with_title("MochiPort")
         // Keep the first launch within smaller laptop work areas. The tab pages
         // own their scrolling, so the frame itself should not exceed the screen.
         .with_size(frame_size)
@@ -2160,7 +2160,7 @@ fn export_connection_diagnostics_now(text: GuiText, output_path: &Path) -> Resul
 
 fn default_diagnostics_export_path() -> PathBuf {
     default_user_export_dir().join(format!(
-        "threadrelay-connection-diagnostics-{}.zip",
+        "mochiport-connection-diagnostics-{}.zip",
         timestamp_ms()
     ))
 }
@@ -2174,7 +2174,7 @@ fn prompt_diagnostics_export_path(parent: &dyn WxWidget, text: GuiText) -> Optio
     let default_file = default_path
         .file_name()
         .map(|value| value.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "threadrelay-connection-diagnostics.zip".to_string());
+        .unwrap_or_else(|| "mochiport-connection-diagnostics.zip".to_string());
     let dialog = FileDialog::builder(parent)
         .with_message(text.diagnostics_export_save_dialog_title())
         .with_default_dir(&default_dir)
@@ -2320,7 +2320,7 @@ fn install_system_menu(
             text.export_connection_diagnostics_help(),
         )
         .append_separator()
-        .append_item(ID_ABOUT, text.about(), "About ThreadRelay")
+        .append_item(ID_ABOUT, text.about(), "About MochiPort")
         .build();
     let menu_bar = MenuBar::builder()
         .append(file_menu, text.file_menu())
@@ -5420,7 +5420,7 @@ enum EndpointStatusState {
 }
 
 fn show_about_dialog(parent: &Frame) {
-    let dialog = Dialog::builder(parent, "About ThreadRelay")
+    let dialog = Dialog::builder(parent, "About MochiPort")
         .with_style(DialogStyle::DefaultDialogStyle)
         .with_size(520, 260)
         .build();
@@ -5432,7 +5432,7 @@ fn show_about_dialog(parent: &Frame) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
-        .with_label(&format!("ThreadRelay {}", env!("CARGO_PKG_VERSION")))
+        .with_label(&format!("MochiPort {}", env!("CARGO_PKG_VERSION")))
         .build();
     title.set_foreground_color(theme::theme().ink_primary);
     title.set_font(&theme::font(theme::TextRole::Title));
@@ -5490,14 +5490,14 @@ fn show_about_dialog(parent: &Frame) {
 }
 
 fn show_info(parent: &dyn WxWidget, message: &str) {
-    MessageDialog::builder(parent, message, "ThreadRelay")
+    MessageDialog::builder(parent, message, "MochiPort")
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
         .build()
         .show_modal();
 }
 
 fn show_error(parent: &dyn WxWidget, message: &str) {
-    MessageDialog::builder(parent, message, "ThreadRelay")
+    MessageDialog::builder(parent, message, "MochiPort")
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
         .build()
         .show_modal();

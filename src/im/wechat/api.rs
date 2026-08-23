@@ -626,7 +626,7 @@ fn build_common_headers() -> Result<HeaderMap> {
 fn base_info() -> Value {
     json!({
         "channel_version": env!("CARGO_PKG_VERSION"),
-        "bot_agent": format!("ThreadRelay/{}", env!("CARGO_PKG_VERSION")),
+        "bot_agent": format!("MochiPort/{}", env!("CARGO_PKG_VERSION")),
     })
 }
 

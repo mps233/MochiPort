@@ -564,6 +564,9 @@ fn legacy_database_path(config: &AppConfig) -> PathBuf {
 
 #[cfg(not(test))]
 fn app_data_dir() -> Option<PathBuf> {
+    if let Some(base) = std::env::var_os("MOCHIPORT_HOME").map(PathBuf::from) {
+        return Some(base);
+    }
     if let Some(base) = std::env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
         return Some(base);
     }
@@ -577,8 +580,8 @@ fn app_data_dir() -> Option<PathBuf> {
             .or_else(|| std::env::var_os("APPDATA"))
             .map(PathBuf::from)?;
         Some(prefer_existing_legacy_app_dir(
-            base.join("ThreadRelay"),
-            &[base.join("CodexHub")],
+            base.join("MochiPort"),
+            &[base.join("ThreadRelay"), base.join("CodexHub")],
         ))
     }
 
@@ -588,8 +591,8 @@ fn app_data_dir() -> Option<PathBuf> {
             .map(PathBuf::from)?
             .join("Library/Application Support");
         Some(prefer_existing_legacy_app_dir(
-            base.join("ThreadRelay"),
-            &[base.join("CodexHub")],
+            base.join("MochiPort"),
+            &[base.join("ThreadRelay"), base.join("CodexHub")],
         ))
     }
 }

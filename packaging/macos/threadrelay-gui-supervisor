@@ -4,8 +4,8 @@ set -u
 
 helpers_dir="${0:A:h}"
 contents_dir="${helpers_dir:h}"
-gui_executable="$contents_dir/MacOS/ThreadRelay"
-data_directory="${THREADRELAY_HOME:-$HOME/Library/Application Support/ThreadRelay}"
+gui_executable="$contents_dir/MacOS/MochiPort"
+data_directory="${MOCHIPORT_HOME:-${THREADRELAY_HOME:-$HOME/Library/Application Support/MochiPort}}"
 normal_exit_marker="$data_directory/gui-normal-exit.marker"
 gui_lock_path="$data_directory/io.github.mps233.threadrelay.gui.lock"
 
@@ -14,7 +14,11 @@ current_contents_dir() {
 }
 
 current_gui_executable() {
-    print -r -- "$contents_dir/MacOS/ThreadRelay"
+    if [[ -x "$contents_dir/MacOS/MochiPort" ]]; then
+        print -r -- "$contents_dir/MacOS/MochiPort"
+    else
+        print -r -- "$contents_dir/MacOS/ThreadRelay"
+    fi
 }
 
 current_bundle_build() {
@@ -23,6 +27,7 @@ current_bundle_build() {
 }
 
 gui_is_running() {
+    /usr/bin/pgrep -f '/Contents/MacOS/MochiPort$' >/dev/null 2>&1 && return 0
     /usr/bin/pgrep -f '/Contents/MacOS/ThreadRelay$' >/dev/null 2>&1 && return 0
     # A GUI from another bundle path can still own the shared data-domain
     # lock. Treat that as running so the supervisor does not spin on exit 73.

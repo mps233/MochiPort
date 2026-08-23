@@ -48,13 +48,14 @@ const CODEX_APP_INSTALLATION_ID: &str = "installation_id";
 const CODEX_APP_SERVER_DAEMON_DIR: &str = "app-server-daemon";
 const CODEX_APP_SERVER_DAEMON_SETTINGS: &str = "settings.json";
 const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
-const CODEX_APP_REMOTE_CONTROL_SERVER_NAME: &str = "ThreadRelay";
+const CODEX_APP_REMOTE_CONTROL_SERVER_NAME: &str = "MochiPort";
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const CODEX_CONNECTOR_DIRECTORY_CACHE_DIR: &str = "cache/codex_app_directory";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
 const CODEXHUB_HOME_ENV: &str = "CODEXHUB_HOME";
 const THREADRELAY_HOME_ENV: &str = "THREADRELAY_HOME";
+const MOCHIPORT_HOME_ENV: &str = "MOCHIPORT_HOME";
 const OPENAI_BUNDLED_MARKETPLACE_NAME: &str = "openai-bundled";
 const OPENAI_CURATED_MARKETPLACE_NAME: &str = "openai-curated";
 const CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
@@ -2396,7 +2397,7 @@ fn preferred_external_provider(
 
 fn provider_mode_message(mode: CodexProviderMode, active_provider: Option<&str>) -> String {
     match mode {
-        CodexProviderMode::Threadrelay => "请求经过 ThreadRelay 本地 AI 网关".to_string(),
+        CodexProviderMode::Threadrelay => "请求经过 MochiPort 本地 AI 网关".to_string(),
         CodexProviderMode::DirectApi => format!(
             "请求直接发送到第三方 API{}",
             active_provider
@@ -3270,6 +3271,9 @@ fn codex_home_backup_id(codex_home: &Path) -> String {
 }
 
 fn codexhub_app_support_dir() -> PathBuf {
+    if let Some(base) = std::env::var_os(MOCHIPORT_HOME_ENV).map(PathBuf::from) {
+        return base;
+    }
     if let Some(base) = std::env::var_os(THREADRELAY_HOME_ENV).map(PathBuf::from) {
         return base;
     }
@@ -3281,7 +3285,7 @@ fn codexhub_app_support_dir() -> PathBuf {
 
 #[cfg(test)]
 fn platform_codexhub_app_support_dir() -> PathBuf {
-    std::env::temp_dir().join("threadrelay-managed-backups-tests")
+    std::env::temp_dir().join("mochiport-managed-backups-tests")
 }
 
 #[cfg(all(target_os = "windows", not(test)))]
@@ -3291,7 +3295,10 @@ fn platform_codexhub_app_support_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    prefer_existing_legacy_app_dir(base.join("ThreadRelay"), &[base.join("CodexHub")])
+    prefer_existing_legacy_app_dir(
+        base.join("MochiPort"),
+        &[base.join("ThreadRelay"), base.join("CodexHub")],
+    )
 }
 
 #[cfg(all(not(target_os = "windows"), not(test)))]
@@ -3301,7 +3308,10 @@ fn platform_codexhub_app_support_dir() -> PathBuf {
         .map(|home| home.join("Library/Application Support"))
         .or_else(|| std::env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    prefer_existing_legacy_app_dir(base.join("ThreadRelay"), &[base.join("CodexHub")])
+    prefer_existing_legacy_app_dir(
+        base.join("MochiPort"),
+        &[base.join("ThreadRelay"), base.join("CodexHub")],
+    )
 }
 
 #[cfg(not(test))]
@@ -3443,7 +3453,7 @@ fn local_chatgpt_jwt(identity: &LocalAuthIdentity) -> Result<String> {
                 "id": identity.account_id,
                 "is_default": true,
                 "role": "owner",
-                "title": "ThreadRelay Local",
+                "title": "MochiPort Local",
             }]
         },
         "scp": [

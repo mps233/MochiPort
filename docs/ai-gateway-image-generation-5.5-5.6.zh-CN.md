@@ -2,7 +2,7 @@
 
 ## 1. 文档目的
 
-本文记录 Codex App 生图能力从旧版 Responses 托管工具迁移到新版独立 `image_gen` 工具后的协议变化，以及 CodexHub AI Gateway 必须提供的兼容接口。
+本文记录 Codex App 生图能力从旧版 Responses 托管工具迁移到新版独立 `image_gen` 工具后的协议变化，以及 MochiPort AI Gateway 必须提供的兼容接口。
 
 本文基于仓库中的最新 Codex 源码：
 
@@ -180,9 +180,9 @@ Content-Type: application/json
 
 Codex 源码测试明确断言了 standalone image generation 会产生两次 Responses 请求，并在两次请求之间调用独立 Images API。
 
-## 6. 为什么 CodexHub 当前返回 404
+## 6. 为什么 MochiPort 当前返回 404
 
-CodexHub 写入 Codex 配置的 model provider base URL 是：
+MochiPort 写入 Codex 配置的 model provider base URL 是：
 
 ```text
 http://127.0.0.1:3847/ai-gateway/v1
@@ -200,9 +200,9 @@ POST http://127.0.0.1:3847/ai-gateway/v1/images/generations
 POST http://127.0.0.1:3847/ai-gateway/v1/images/edits
 ```
 
-此前 CodexHub 只注册了 `/ai-gateway/v1/responses` 和 `/ai-gateway/v1/models`，没有注册 Images API，因此请求尚未进入任何上游渠道就在本地返回 404。
+此前 MochiPort 只注册了 `/ai-gateway/v1/responses` 和 `/ai-gateway/v1/models`，没有注册 Images API，因此请求尚未进入任何上游渠道就在本地返回 404。
 
-## 7. CodexHub 需要实现的能力
+## 7. MochiPort 需要实现的能力
 
 ### 7.1 路由
 
@@ -215,7 +215,7 @@ AI Gateway 需要提供：
 
 图片请求体携带 `model = "gpt-image-2"`，但不可靠地携带当前对话模型。因此不能根据当前对话使用的是 `gpt-5.6-sol`、`gpt-5.5` 或其他模型来推断图片渠道。
 
-CodexHub 使用现有模型路由规则：
+MochiPort 使用现有模型路由规则：
 
 1. 查找已启用且声明支持 `gpt-image-2` 的 Provider。
 2. 支持通过 `modelAliases` 把 `gpt-image-2` 映射成上游实际图片模型。

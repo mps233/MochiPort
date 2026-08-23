@@ -3,12 +3,12 @@
 import PackageDescription
 
 let package = Package(
-    name: "ThreadRelayMac",
+    name: "MochiPort",
     platforms: [
         .macOS(.v14),
     ],
     products: [
-        .executable(name: "ThreadRelayMac", targets: ["ThreadRelayMac"]),
+        .executable(name: "MochiPort", targets: ["ThreadRelayMac"]),
     ],
     targets: [
         .executableTarget(

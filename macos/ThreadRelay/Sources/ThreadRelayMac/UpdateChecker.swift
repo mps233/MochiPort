@@ -18,7 +18,7 @@ struct GitHubRelease: Decodable, Equatable {
     var validatedURL: URL? {
         guard htmlURL.scheme == "https",
               htmlURL.host?.lowercased() == "github.com",
-              htmlURL.path.lowercased().hasPrefix("/mps233/threadrelay/releases/")
+              htmlURL.path.lowercased().hasPrefix("/mps233/mochiport/releases/")
         else {
             return nil
         }
@@ -36,7 +36,7 @@ struct AvailableUpdate: Equatable {
 /// the silent startup check.
 enum UpdateChecker {
     static let latestReleaseAPI = URL(
-        string: "https://api.github.com/repos/mps233/threadrelay/releases/latest"
+        string: "https://api.github.com/repos/mps233/mochiport/releases/latest"
     )!
 
     /// Fetches the latest release and rejects payloads whose download page
@@ -47,7 +47,7 @@ enum UpdateChecker {
     ) async throws -> GitHubRelease {
         var request = URLRequest(url: latestReleaseAPI)
         request.timeoutInterval = 10
-        request.setValue("ThreadRelay/\(currentVersion)", forHTTPHeaderField: "User-Agent")
+        request.setValue("MochiPort/\(currentVersion)", forHTTPHeaderField: "User-Agent")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         let (data, response) = try await session.data(for: request)
         guard let response = response as? HTTPURLResponse,

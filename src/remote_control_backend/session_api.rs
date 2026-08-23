@@ -217,7 +217,7 @@ async fn request_once_with_timeout_for_client_inner(
         } else {
             if !remote.connected {
                 return Err(anyhow!(
-                    "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 ThreadRelay 的 /backend-api。"
+                    "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 MochiPort 的 /backend-api。"
                 ));
             }
             remote_control_stale_reason_locked(&remote, now_ms())

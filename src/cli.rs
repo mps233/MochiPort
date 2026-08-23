@@ -99,13 +99,13 @@ impl Cli {
             Some("uninstall-codex-app") => parse_uninstall_codex_app(&remaining[1..])?,
             Some("safe-relaunch-helper") => parse_safe_relaunch_helper(&remaining[1..])?,
             Some("install-shim") | Some("uninstall-shim") | Some("shim") => anyhow::bail!(
-                "CLI shim support has been removed. Use `threadrelay configure-codex-app` and Codex App remote-control instead."
+                "CLI shim support has been removed. Use `mochiport configure-codex-app` and Codex App remote-control instead."
             ),
             Some("-h") | Some("--help") | Some("help") => {
                 print_help();
                 std::process::exit(0);
             }
-            Some(other) => anyhow::bail!("unknown command `{other}`. Run `threadrelay help`."),
+            Some(other) => anyhow::bail!("unknown command `{other}`. Run `mochiport help`."),
         };
 
         Ok(Self {
@@ -306,17 +306,17 @@ fn parse_positive_u32(name: &str, value: &str) -> anyhow::Result<u32> {
 
 pub fn print_help() {
     println!(
-        r#"threadrelay
+        r#"mochiport
 
 Usage:
-  threadrelay --version
-  threadrelay [--config PATH] gui
-  threadrelay [--config PATH] daemon
-  threadrelay [--config PATH] on
-  threadrelay [--config PATH] off
-  threadrelay [--config PATH] status
-  threadrelay [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
-  threadrelay [--config PATH] uninstall-codex-app [--codex-home PATH]
+  mochiport --version
+  mochiport [--config PATH] gui
+  mochiport [--config PATH] daemon
+  mochiport [--config PATH] on
+  mochiport [--config PATH] off
+  mochiport [--config PATH] status
+  mochiport [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
+  mochiport [--config PATH] uninstall-codex-app [--codex-home PATH]
 
 Default command is gui when built with the gui feature, otherwise daemon.
 "#

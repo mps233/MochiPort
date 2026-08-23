@@ -136,7 +136,7 @@ pub fn apply_async_proxy(
                 tracing::warn!(
                     target: "threadrelay::network",
                     local_port,
-                    "system proxy points to ThreadRelay; disabling it to avoid proxy recursion"
+                    "system proxy points to MochiPort; disabling it to avoid proxy recursion"
                 );
                 Ok(builder.no_proxy())
             } else {
@@ -196,7 +196,7 @@ fn reject_local_proxy_recursion(
 ) -> Result<()> {
     if local_port.is_some_and(|port| proxy_points_to_loopback_port(config.url.trim(), port)) {
         return Err(anyhow!(
-            "custom outbound proxy points to ThreadRelay's own local port"
+            "custom outbound proxy points to MochiPort's own local port"
         ));
     }
     Ok(())

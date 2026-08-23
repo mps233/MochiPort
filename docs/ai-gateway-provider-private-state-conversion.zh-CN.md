@@ -13,7 +13,7 @@
 
 ## 1. 为什么需要单独处理
 
-Codex 只看到一个 OpenAI Responses 入口，但 CodexHub 后面可能连接不同 Provider。部分 Provider 会返回只能由原渠道继续使用的不透明状态：
+Codex 只看到一个 OpenAI Responses 入口，但 MochiPort 后面可能连接不同 Provider。部分 Provider 会返回只能由原渠道继续使用的不透明状态：
 
 | Provider 协议 | 原生字段 | 作用 |
 | --- | --- | --- |
@@ -30,7 +30,7 @@ Codex 只看到一个 OpenAI Responses 入口，但 CodexHub 后面可能连接�
 2. 当前观察版本中 OpenAI/Grok Responses 密文原样透传，保持 OpenAI 原生会话可移植性。
 3. Anthropic 因为需要保存原始 block 类型，继续使用 typed marker。
 4. 跨协议切换由不同 `comp_hash` 触发 Codex 本地文本压缩，不靠 Responses 密文前缀判断。
-5. CodexHub 内部 Anthropic marker 绝不能发送给上游。
+5. MochiPort 内部 Anthropic marker 绝不能发送给上游。
 
 以下内容不属于本文处理范围：
 
@@ -52,7 +52,7 @@ Codex 使用 Responses `reasoning` item 保存私有状态：
 }
 ```
 
-CodexHub 的 `ResponseItem` 也使用：
+MochiPort 的 `ResponseItem` 也使用：
 
 ```text
 summary: Option<Vec<SummaryPart>>
@@ -107,20 +107,20 @@ provider name + provider type + base URL
   -> 上游请求
 ```
 
-任何方向都不依赖进程内映射或临时数据库，因此 CodexHub 重启后仍能判断状态归属。
+任何方向都不依赖进程内映射或临时数据库，因此 MochiPort 重启后仍能判断状态归属。
 
 ## 5. OpenAI/Grok Responses 转换
 
 ### 5.1 上游响应到 Codex
 
-CodexHub 递归检查 Responses JSON 或 SSE `data:` 中的 Provider 私有 item：
+MochiPort 递归检查 Responses JSON 或 SSE `data:` 中的 Provider 私有 item：
 
 - `reasoning`
 - `compaction`
 - `compaction_summary`
 - `context_compaction`
 
-发现非空 `encrypted_content` 时保持原值。JSON、SSE 和 Compact 响应均不得给 OpenAI/Grok 密文添加 CodexHub 前缀。
+发现非空 `encrypted_content` 时保持原值。JSON、SSE 和 Compact 响应均不得给 OpenAI/Grok 密文添加旧 `codexhub:enc:v1:` 前缀。
 
 ### 5.2 Codex 请求到上游
 
@@ -171,7 +171,7 @@ Anthropic 允许 thinking 文本为空但 signature 存在：
 }
 ```
 
-CodexHub 必须保留它，并用空 `summary` 数组表达“这是 thinking，但没有可见文本”：
+MochiPort 必须保留它，并用空 `summary` 数组表达“这是 thinking，但没有可见文本”：
 
 ```json
 {
@@ -226,7 +226,7 @@ Redacted item 不使用 `summary` 字段。这样 JSON/SSE 中间表示也能保
 }
 ```
 
-如果 marker 是 thinking，但 `summary` 字段已经丢失，CodexHub 不构造一个可能无法通过签名校验的 block，而是忽略该私有 reasoning item。
+如果 marker 是 thinking，但 `summary` 字段已经丢失，MochiPort 不构造一个可能无法通过签名校验的 block，而是忽略该私有 reasoning item。
 
 ### 7.2 Redacted thinking 回放
 
@@ -409,7 +409,7 @@ custom_tool_call_output
 
 当前处理位于 Provider 分发和 `GatewayRequest` 反序列化之前，因此 `additional_tools` 不会先退化成 `ItemType::Unknown`。顶层 `tools` 保持优先，后续 carrier 按出现顺序追加，重复工具去重；重复 namespace 会继续合并未出现的子工具。
 
-Grok Responses 不接受 Codex 私有 `additional_tools` carrier，也不原生接受 `custom`/`namespace` 定义。CodexHub 会：
+Grok Responses 不接受 Codex 私有 `additional_tools` carrier，也不原生接受 `custom`/`namespace` 定义。MochiPort 会：
 
 1. 将 custom tool 包装成参数为 `{input: string}` 的 function。
 2. 将 namespace 子 function 编码成 Provider-safe 名称。
@@ -469,8 +469,8 @@ Anthropic 路径不猜测、不降级私有状态：
 必须保持以下不变量：
 
 1. OpenAI/Grok 新响应不得写入 `codexhub:enc:v1:` marker。
-2. Anthropic typed marker 只存在于 Codex 和 CodexHub 之间。
-3. 上游请求中不得出现 CodexHub marker。
+2. Anthropic typed marker 只存在于 Codex 和 MochiPort 之间。
+3. 上游请求中不得出现任何 `codexhub:enc:v1:` marker。
 4. OpenAI/Grok 原生密文以及解包后的 Anthropic 签名字节必须保持不变。
 5. API Key 不得进入 marker 或 footprint。
 6. 不得解析或修改 opaque state 的内部内容。
@@ -498,7 +498,7 @@ Anthropic 路径不猜测、不降级私有状态：
 
 排查密文或签名问题时对比三个位置：
 
-1. **上游响应**：应该是 Provider 原始字段，不含 CodexHub marker。
+1. **上游响应**：应该是 Provider 原始字段，不含 `codexhub:enc:v1:` marker。
 2. **返回 Codex 的响应**：OpenAI/Grok 应保持原值；Anthropic 应包含 typed marker。
 3. **下一轮上游请求**：同协议连续请求应恢复原始字段；跨协议切换应先出现 `comp_hash` 触发的压缩请求。
 

@@ -1,6 +1,6 @@
 import Foundation
 
-/// ThreadRelay GitHub Releases 기반 새 버전 확인.
+/// MochiPort GitHub Releases 기반 새 버전 확인.
 ///
 /// 하루 1회 `releases/latest`를 조회해 현재 버전보다 높으면 알림/배지로 안내한다.
 /// 자동 설치는 하지 않는다 — 클릭 시 릴리스 페이지를 열 뿐 (Sparkle 없이 최소 구현).
@@ -18,14 +18,17 @@ public enum AIGlassUpdateChecker {
     }
 
     public static let latestReleaseURL =
-        URL(string: "https://api.github.com/repos/mps233/threadrelay/releases/latest")!
+        URL(string: "https://api.github.com/repos/mps233/mochiport/releases/latest")!
 
     /// `releases/latest` 응답 JSON에서 버전·페이지 URL을 뽑는다. 형식이 다르면 nil.
     public static func parseLatestRelease(jsonData: Data) -> Release? {
         guard let obj = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any],
               let tag = obj["tag_name"] as? String,
               let urlString = obj["html_url"] as? String,
-              let url = URL(string: urlString) else { return nil }
+              let url = URL(string: urlString),
+              url.scheme?.lowercased() == "https",
+              url.host?.lowercased() == "github.com",
+              url.path.lowercased().hasPrefix("/mps233/mochiport/releases/") else { return nil }
         let version = tag.hasPrefix("v") ? String(tag.dropFirst()) : tag
         guard !version.isEmpty else { return nil }
         return Release(version: version, url: url)

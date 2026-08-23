@@ -74,15 +74,24 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(
             ManagementCredentialStore.candidatePaths(
                 environment: [
-                    "THREADRELAY_HOME": "/fixture/threadrelay",
+                "MOCHIPORT_HOME": "/fixture/mochiport",
+                "THREADRELAY_HOME": "/fixture/threadrelay",
                     "CODEXHUB_HOME": "/fixture/codexhub",
                 ],
                 applicationSupport: applicationSupport
             ).map(\.path),
             [
+                "/fixture/mochiport/mochiport-control.json",
+                "/fixture/mochiport/threadrelay-control.json",
+                "/fixture/threadrelay/mochiport-control.json",
                 "/fixture/threadrelay/threadrelay-control.json",
+                "/fixture/codexhub/mochiport-control.json",
                 "/fixture/codexhub/threadrelay-control.json",
+                "/fixture/Application Support/MochiPort/mochiport-control.json",
+                "/fixture/Application Support/MochiPort/threadrelay-control.json",
+                "/fixture/Application Support/ThreadRelay/mochiport-control.json",
                 "/fixture/Application Support/ThreadRelay/threadrelay-control.json",
+                "/fixture/Application Support/CodexHub/mochiport-control.json",
                 "/fixture/Application Support/CodexHub/threadrelay-control.json",
             ]
         )
@@ -376,6 +385,39 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(environment["HOME"], configuration.homeURL.path)
         XCTAssertEqual(environment["THREADRELAY_HOME"], configuration.dataDirectoryURL.path)
         XCTAssertEqual(environment["THREADRELAY_BUNDLE_BUILD"], "389")
+    }
+
+    func testGUIRecoveryLauncherAcceptsLegacySupervisorBesideRenamedBundle() throws {
+        let fixture = try makeGUIRecoveryLauncherFixture(
+            bundleName: "MochiPort",
+            executableName: "MochiPort",
+            supervisorName: "mochiport-gui-supervisor"
+        )
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let configuration = fixture.configuration
+        let legacySupervisor = fixture.root.appendingPathComponent(
+            "ThreadRelay.app/Contents/Helpers/threadrelay-gui-supervisor"
+        )
+        let printOutput = guiRecoveryLaunchctlOutput(
+            configuration: configuration,
+            supervisorURL: legacySupervisor,
+            arguments: [legacySupervisor.path]
+        )
+        let commands = CommandInvocationRecorder { arguments in
+            guard arguments.first == "print" else {
+                return CommandResult(exitCode: 1, output: "unexpected command")
+            }
+            return CommandResult(exitCode: 0, output: printOutput)
+        }
+        let launcher = GUIRecoveryLauncher(
+            configurationLoader: { configuration },
+            commandRunner: commands.run
+        )
+
+        try launcher.startIfNeeded()
+
+        let serviceTarget = "gui/\(getuid())/\(GUIRecoveryConfiguration.label)"
+        XCTAssertEqual(commands.arguments, [["print", serviceTarget]])
     }
 
     func testGUIRecoveryLauncherKickstartsStoppedSupervisorWithoutReloadingIt() throws {
@@ -1038,7 +1080,7 @@ final class APIContractTests: XCTestCase {
         await assertProbeError(.unsupportedAPIMajor(2), from: client)
         XCTAssertEqual(
             APIClientError.unsupportedAPIMajor(2).localizedDescription,
-            "当前 ThreadRelay 使用了不受支持的管理 API 版本 2。"
+            "当前 MochiPort 使用了不受支持的管理 API 版本 2。"
         )
         XCTAssertNotEqual(
             APIClientError.unsupportedAPIMajor(2).localizedDescription,
@@ -4272,14 +4314,14 @@ final class APIContractTests: XCTestCase {
         let release = try JSONDecoder().decode(
             GitHubRelease.self,
             from: Data(
-                #"{"tag_name":"v0.5.1","html_url":"https://github.com/mps233/threadrelay/releases/tag/v0.5.1","body":"发布说明"}"#.utf8
+                #"{"tag_name":"v0.5.1","html_url":"https://github.com/mps233/mochiport/releases/tag/v0.5.1","body":"发布说明"}"#.utf8
             )
         )
         XCTAssertEqual(release.tagName, "v0.5.1")
         XCTAssertEqual(release.body, "发布说明")
         XCTAssertEqual(
             release.validatedURL,
-            URL(string: "https://github.com/mps233/threadrelay/releases/tag/v0.5.1")
+            URL(string: "https://github.com/mps233/mochiport/releases/tag/v0.5.1")
         )
 
         func validatedURL(_ htmlURL: String) throws -> URL? {
@@ -4289,8 +4331,8 @@ final class APIContractTests: XCTestCase {
             ).validatedURL
         }
 
-        XCTAssertNil(try validatedURL("http://github.com/mps233/threadrelay/releases/tag/v1"))
-        XCTAssertNil(try validatedURL("https://evil.example/mps233/threadrelay/releases/tag/v1"))
+        XCTAssertNil(try validatedURL("http://github.com/mps233/mochiport/releases/tag/v1"))
+        XCTAssertNil(try validatedURL("https://evil.example/mps233/mochiport/releases/tag/v1"))
         XCTAssertNil(try validatedURL("https://github.com/other/repo/releases/tag/v1"))
     }
 
@@ -4303,7 +4345,7 @@ final class APIContractTests: XCTestCase {
             )
             return MockResponse(
                 statusCode: 200,
-                json: #"{"tag_name":"v0.6.0","html_url":"https://github.com/mps233/threadrelay/releases/tag/v0.6.0","body":null}"#
+                json: #"{"tag_name":"v0.6.0","html_url":"https://github.com/mps233/mochiport/releases/tag/v0.6.0","body":null}"#
             )
         }
         let configuration = URLSessionConfiguration.ephemeral
@@ -4315,7 +4357,7 @@ final class APIContractTests: XCTestCase {
             update,
             AvailableUpdate(
                 version: "v0.6.0",
-                url: URL(string: "https://github.com/mps233/threadrelay/releases/tag/v0.6.0")!
+                url: URL(string: "https://github.com/mps233/mochiport/releases/tag/v0.6.0")!
             )
         )
 
@@ -4549,17 +4591,21 @@ final class APIContractTests: XCTestCase {
     }
 
 
-    private func makeGUIRecoveryLauncherFixture() throws -> (
+    private func makeGUIRecoveryLauncherFixture(
+        bundleName: String = "ThreadRelay",
+        executableName: String = "ThreadRelay",
+        supervisorName: String = "threadrelay-gui-supervisor"
+    ) throws -> (
         root: URL,
         configuration: GUIRecoveryConfiguration
     ) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         let executable = root.appendingPathComponent(
-            "ThreadRelay.app/Contents/MacOS/ThreadRelay"
+            "\(bundleName).app/Contents/MacOS/\(executableName)"
         )
         let supervisor = root.appendingPathComponent(
-            "ThreadRelay.app/Contents/Helpers/threadrelay-gui-supervisor"
+            "\(bundleName).app/Contents/Helpers/\(supervisorName)"
         )
         try FileManager.default.createDirectory(
             at: executable.deletingLastPathComponent(),
@@ -4767,10 +4813,13 @@ final class APIContractTests: XCTestCase {
         var environment = [
             "HOME": configuration.homeURL.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "MOCHIPORT_HOME": configuration.configURL.deletingLastPathComponent().path,
             "THREADRELAY_HOME": configuration.configURL.deletingLastPathComponent().path,
+            "MOCHIPORT_BUNDLE_BUILD": build,
             "THREADRELAY_BUNDLE_BUILD": build,
         ]
         if configuration.launchdLabel != DaemonLaunchConfiguration.label {
+            environment["MOCHIPORT_SKIP_DESKTOP_INTEGRATION"] = "1"
             environment["THREADRELAY_SKIP_DESKTOP_INTEGRATION"] = "1"
         }
         environment.merge(environmentOverrides) { _, override in override }

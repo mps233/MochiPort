@@ -11,11 +11,15 @@ use uuid::Uuid;
 
 use crate::types::now_ms;
 
-pub const DAEMON_INSTANCE_ENV: &str = "THREADRELAY_DAEMON_INSTANCE_ID";
+pub const DAEMON_INSTANCE_ENV: &str = "MOCHIPORT_DAEMON_INSTANCE_ID";
+const THREADRELAY_DAEMON_INSTANCE_ENV: &str = "THREADRELAY_DAEMON_INSTANCE_ID";
 const LEGACY_DAEMON_INSTANCE_ENV: &str = "CODEXHUB_DAEMON_INSTANCE_ID";
 // Keep the GUI PID variable stable because relaunch helpers may outlive the
 // executable that spawned them during an in-place upgrade.
 pub const CODEXHUB_GUI_PID_ENV: &str = "CODEXHUB_GUI_PID";
+// Keep the management protocol service value stable across the product rename.
+// The executable and user-facing product are MochiPort; existing clients still
+// identify the local daemon through the `threadrelay` service contract.
 pub const DAEMON_SERVICE_NAME: &str = "threadrelay";
 const LEGACY_DAEMON_SERVICE_NAME: &str = "codexhub";
 
@@ -31,6 +35,7 @@ pub struct DaemonIdentity {
 impl DaemonIdentity {
     pub fn new() -> Self {
         let instance_id = std::env::var(DAEMON_INSTANCE_ENV)
+            .or_else(|_| std::env::var(THREADRELAY_DAEMON_INSTANCE_ENV))
             .or_else(|_| std::env::var(LEGACY_DAEMON_INSTANCE_ENV))
             .ok()
             .map(|value| value.trim().to_string())
@@ -44,12 +49,17 @@ impl DaemonIdentity {
         }
     }
 
-    pub fn is_codexhub(&self) -> bool {
+    pub fn is_mochiport_compatible(&self) -> bool {
         matches!(
             self.service.as_str(),
             DAEMON_SERVICE_NAME | LEGACY_DAEMON_SERVICE_NAME
         ) && self.pid > 0
             && !self.instance_id.trim().is_empty()
+    }
+
+    #[allow(dead_code)]
+    pub fn is_codexhub(&self) -> bool {
+        self.is_mochiport_compatible()
     }
 }
 
@@ -79,9 +89,13 @@ impl DaemonInstanceLock {
             })?;
         }
         // Hold the legacy lock as well as the new lock. This prevents an older
-        // CodexHub build and ThreadRelay from starting daemons side by side.
-        let mut files = Vec::with_capacity(2);
-        for lock_path in [legacy_daemon_lock_path(config_path), path.clone()] {
+        // Hold both legacy locks so an older build cannot start beside MochiPort.
+        let mut files = Vec::with_capacity(3);
+        for lock_path in [
+            legacy_daemon_lock_path(config_path),
+            threadrelay_daemon_lock_path(config_path),
+            path.clone(),
+        ] {
             let file = OpenOptions::new()
                 .create(true)
                 .truncate(false)
@@ -99,7 +113,7 @@ impl DaemonInstanceLock {
                     })
                     .unwrap_or_else(|| "owner=unknown".to_string());
                 return Err(anyhow!(
-                    "another ThreadRelay or CodexHub daemon holds `{}` ({owner}): {err}",
+                    "another MochiPort, ThreadRelay, or CodexHub daemon holds `{}` ({owner}): {err}",
                     lock_path.display()
                 ));
             }
@@ -150,7 +164,7 @@ pub fn daemon_lock_path(config_path: &Path) -> PathBuf {
         .filter(|path| !path.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("threadrelay-daemon.lock")
+        .join("mochiport-daemon.lock")
 }
 
 pub fn daemon_metadata_path(config_path: &Path) -> PathBuf {
@@ -159,7 +173,7 @@ pub fn daemon_metadata_path(config_path: &Path) -> PathBuf {
         .filter(|path| !path.as_os_str().is_empty())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join("threadrelay-daemon.json")
+        .join("mochiport-daemon.json")
 }
 
 pub fn read_daemon_metadata(config_path: &Path) -> Option<DaemonMetadata> {
@@ -198,6 +212,14 @@ fn legacy_daemon_lock_path(config_path: &Path) -> PathBuf {
     config_directory(config_path).join("codexhub-daemon.lock")
 }
 
+fn threadrelay_daemon_lock_path(config_path: &Path) -> PathBuf {
+    config_directory(config_path).join("threadrelay-daemon.lock")
+}
+
+fn threadrelay_daemon_metadata_path(config_path: &Path) -> PathBuf {
+    config_directory(config_path).join("threadrelay-daemon.json")
+}
+
 fn legacy_daemon_metadata_path(config_path: &Path) -> PathBuf {
     config_directory(config_path).join("codexhub-daemon.json")
 }
@@ -210,11 +232,15 @@ fn config_directory(config_path: &Path) -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn daemon_file_pairs(config_path: &Path) -> [(PathBuf, PathBuf); 2] {
+fn daemon_file_pairs(config_path: &Path) -> [(PathBuf, PathBuf); 3] {
     [
         (
             daemon_lock_path(config_path),
             daemon_metadata_path(config_path),
+        ),
+        (
+            threadrelay_daemon_lock_path(config_path),
+            threadrelay_daemon_metadata_path(config_path),
         ),
         (
             legacy_daemon_lock_path(config_path),
@@ -232,11 +258,11 @@ mod tests {
         let config = PathBuf::from("root").join("config.toml");
         assert_eq!(
             daemon_lock_path(&config),
-            PathBuf::from("root").join("threadrelay-daemon.lock")
+            PathBuf::from("root").join("mochiport-daemon.lock")
         );
         assert_eq!(
             daemon_metadata_path(&config),
-            PathBuf::from("root").join("threadrelay-daemon.json")
+            PathBuf::from("root").join("mochiport-daemon.json")
         );
         assert_eq!(
             legacy_daemon_lock_path(&config),
@@ -245,13 +271,16 @@ mod tests {
     }
 
     #[test]
-    fn daemon_identity_requires_codexhub_service_and_instance() {
+    fn daemon_identity_accepts_current_and_legacy_services() {
         let mut identity = DaemonIdentity::new();
+        assert!(identity.is_mochiport_compatible());
+        identity.service = DAEMON_SERVICE_NAME.to_string();
+        assert!(identity.is_mochiport_compatible());
         assert!(identity.is_codexhub());
         identity.service = LEGACY_DAEMON_SERVICE_NAME.to_string();
-        assert!(identity.is_codexhub());
+        assert!(identity.is_mochiport_compatible());
         identity.service = "other".to_string();
-        assert!(!identity.is_codexhub());
+        assert!(!identity.is_mochiport_compatible());
     }
 
     #[test]

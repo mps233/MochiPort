@@ -1,4 +1,4 @@
-# ThreadRelay 改动交接规则
+# MochiPort 改动交接规则
 
 本文档适用于 `/Users/miaopasi/codexhub`，是构建和交接 macOS SwiftUI App、Rust daemon 时的项目级约定。
 
@@ -32,15 +32,15 @@
 
    ```sh
    scripts/assemble-swiftui-macos-app.sh <build-number> \
-     macos/ThreadRelay/.build/xcode/Build/Products/Release/ThreadRelay.app \
-     "$HOME/Library/Application Support/CodexHub/runtimes/<build-number>/threadrelay-daemon" \
-     outputs/ThreadRelay.app
+     macos/ThreadRelay/.build/xcode/Build/Products/Release/MochiPort.app \
+     "$HOME/Library/Application Support/MochiPort/runtimes/<build-number>/mochiport-daemon" \
+     outputs/MochiPort.app
    ```
 
-3. 只退出并重新打开 `outputs/ThreadRelay.app`。
+3. 只退出并重新打开 `outputs/MochiPort.app`。
 4. 重新确认：
 
-   - GUI 运行路径是 `outputs/ThreadRelay.app`
+   - GUI 运行路径是 `outputs/MochiPort.app`
    - App 版本和 build number 正确
    - daemon PID、可执行文件路径和 SHA-256 与重启前一致
 
@@ -53,17 +53,17 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
 
    ```sh
    BUILD_NUMBER=439
-   THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
-     --target aarch64-apple-darwin --bin threadrelay
-   THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
-     --target x86_64-apple-darwin --bin threadrelay
+   MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+     --target aarch64-apple-darwin --bin mochiport
+   MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" cargo build --release \
+     --target x86_64-apple-darwin --bin mochiport
    mkdir -p target/release
    lipo -create \
-     target/aarch64-apple-darwin/release/threadrelay \
-     target/x86_64-apple-darwin/release/threadrelay \
-     -output target/release/threadrelay
-   chmod 755 target/release/threadrelay
-   THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh \
+     target/aarch64-apple-darwin/release/mochiport \
+     target/x86_64-apple-darwin/release/mochiport \
+     -output target/release/mochiport
+   chmod 755 target/release/mochiport
+   MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" scripts/generate-swift-version.sh \
      macos/ThreadRelay/Config/Version.xcconfig
    xcodebuild \
      -project macos/ThreadRelay/ThreadRelay.xcodeproj \
@@ -73,9 +73,9 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
      build
    scripts/assemble-swiftui-macos-app.sh \
      "$BUILD_NUMBER" \
-     macos/ThreadRelay/.build/xcode/Build/Products/Release/ThreadRelay.app \
-     target/release/threadrelay \
-     outputs/ThreadRelay.app
+     macos/ThreadRelay/.build/xcode/Build/Products/Release/MochiPort.app \
+     target/release/mochiport \
+     outputs/MochiPort.app
    ```
 
    实际使用时将 `BUILD_NUMBER` 改为本次发布使用的下一个正整数；不要复用已经发布的构建号。

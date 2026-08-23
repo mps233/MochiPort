@@ -37,7 +37,7 @@ use crate::{app_state::SharedState, daemon_process::DaemonIdentity, types::now_m
 pub const API_MAJOR: u16 = 1;
 const CONTROL_FILE_NAME: &str = "threadrelay-control.json";
 const CONTROL_LOCK_FILE_NAME: &str = "threadrelay-control.lock";
-const ACTIVE_DAEMON_FILE_NAME: &str = "threadrelay-active-daemon.json";
+const ACTIVE_DAEMON_FILE_NAME: &str = "mochiport-active-daemon.json";
 const MANAGEMENT_LEASE_DURATION_MS: u64 = 30_000;
 const CREDENTIAL_ROTATION_REASON_TAKEOVER: &str = "trustedTakeover";
 const CREDENTIAL_ROTATION_REASON_LEAK: &str = "leakRecovery";
@@ -463,7 +463,7 @@ pub fn active_daemon_locator_path() -> Result<PathBuf, AuthError> {
                 .map(|home| home.join(".local/state"))
         });
 
-    base.map(|base| base.join("ThreadRelay").join(ACTIVE_DAEMON_FILE_NAME))
+    base.map(|base| base.join("MochiPort").join(ACTIVE_DAEMON_FILE_NAME))
         .ok_or_else(|| {
             AuthError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,

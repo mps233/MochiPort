@@ -2,11 +2,11 @@
 
 - 状态：已接受
 - 日期：2026-08-13
-- 范围：ThreadRelay macOS SwiftUI 预览版与现有 Rust daemon
+- 范围：MochiPort macOS SwiftUI 预览版与现有 Rust daemon
 
 ## 背景
 
-ThreadRelay 正在从 macOS wxDragon 前端渐进迁移到 SwiftUI。迁移期间，stable、SwiftUI preview 和最后一个桥接版可能同时连接同一用户数据域与同一个 daemon。任何前端生命周期动作都不能误停正在承载 Codex 或消息通道工作的 daemon。
+MochiPort 正在从 macOS wxDragon 前端渐进迁移到 SwiftUI。迁移期间，stable、SwiftUI preview 和最后一个桥接版可能同时连接同一用户数据域与同一个 daemon。任何前端生命周期动作都不能误停正在承载 Codex 或消息通道工作的 daemon。
 
 ## 决策
 
@@ -31,7 +31,7 @@ Rust daemon 是配置和凭据的唯一事实来源。SwiftUI 不复制业务配
 - stable Bundle ID：`io.github.mps233.threadrelay`
 - SwiftUI preview Bundle ID：`io.github.mps233.threadrelay.preview`
 - 产品语义版本：根目录 `Cargo.toml` 的 package version
-- 构建号：显式 `THREADRELAY_BUILD_NUMBER`
+- 构建号：显式 `MOCHIPORT_BUILD_NUMBER`
 - 最低系统：macOS 13
 - stable 与 preview 使用同一签名 Team ID；Team ID 在首次正式签名前由发布环境提供并冻结
 

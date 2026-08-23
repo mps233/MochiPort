@@ -95,7 +95,7 @@ pub(super) async fn send_initialize_for_client_on_connection(
         "params": {
             "clientInfo": {
                 "name": "threadrelay",
-                "title": "ThreadRelay",
+                "title": "MochiPort",
                 "version": env!("CARGO_PKG_VERSION")
             },
             "capabilities": {

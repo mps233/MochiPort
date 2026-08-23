@@ -2,7 +2,7 @@
 
 日期：2026-07-16
 
-状态：调研工具，不进入 ThreadRelay 正式运行链路。
+状态：调研工具，不进入 MochiPort 正式运行链路。
 
 ## 目标
 
@@ -35,7 +35,7 @@ powershell -ExecutionPolicy Bypass -File scripts/start-codex-app-cdp-diagnostics
 
 如果 Codex App 已经运行，辅助脚本会直接报错，不会关闭或重启现有进程。
 
-诊断脚本本身不会关闭或重启 Codex App，也不会接管 ThreadRelay 的启动流程。
+诊断脚本本身不会关闭或重启 Codex App，也不会接管 MochiPort 的启动流程。
 
 CDP 是本机无认证的高权限调试接口。仅绑定 `127.0.0.1`，诊断结束后应正常退出这次 Codex App，让端口随进程关闭。
 
@@ -128,10 +128,10 @@ gpt-5.2
 
 两个列表完全一致。当前模型 `grok-4.6` 仍保留在按钮状态中，但没有进入 `labelCandidates`。因此可以确认：
 
-1. ThreadRelay/Core 的模型数据已经进入 renderer，当前会话也能识别 `grok-4.6`；
+1. MochiPort/Core 的模型数据已经进入 renderer，当前会话也能识别 `grok-4.6`；
 2. 真正丢失发生在 renderer 生成模型候选列表时；
 3. 直接过滤输入就是官方 Statsig `107580212.available_models`，并由 `use_hidden_models=true` 启用白名单行为；
-4. 这不是 ThreadRelay `/models` 合成或 app-server `model/list` 丢弃造成的。
+4. 这不是 MochiPort `/models` 合成或 app-server `model/list` 丢弃造成的。
 
 ### 是否能转成不依赖 CDP 的稳定修复
 
@@ -143,7 +143,7 @@ gpt-5.2
 2. ASAR renderer 补丁：不依赖 CDP，但需维护 Windows/macOS、多架构、签名和每次 App 更新后的 bundle 差异；
 3. 等待 Codex App 提供正式的自定义模型或 Statsig 覆盖入口：最稳定，但当前版本没有。
 
-因此 CDP 不作为 ThreadRelay 默认启动行为，但可以由用户从 ThreadRelay 主动选择“增强模式启动 Codex App”。普通官方入口保持不变。
+因此 CDP 不作为 MochiPort 默认启动行为，但可以由用户从 MochiPort 主动选择“增强模式启动 Codex App”。普通官方入口保持不变。
 
 ## 临时因果实验
 
@@ -201,7 +201,7 @@ Sonnet-4.6
 
 重新派生后，真实二级模型菜单显示完整 12 个模型。按钮也从“自定义”恢复为当前模型名 `Grok-4.6`。这证明：
 
-1. ThreadRelay `/models`、app-server `model/list` 和 React Query 原始缓存都正确；
+1. MochiPort `/models`、app-server `model/list` 和 React Query 原始缓存都正确；
 2. 自定义模型的 `hidden` 标志正确；
 3. 唯一导致模型消失的是 renderer 的 Statsig allowlist 过滤；
 4. renderer 内同时存在 Statsig store、Statsig memo cache、React hook 和 TanStack Query observer 四层状态，运行中修改必须让四层一起重新派生。
@@ -218,7 +218,7 @@ CODEX_API_BASE_URL
   > https://chatgpt.com/backend-api
 ```
 
-旧 8000 快速模式实际使用的是轻量 `/api` 协议路径，而不是端口本身带来加速。当前 ThreadRelay 默认把 `CODEX_API_BASE_URL` 设为 `http://127.0.0.1:3847/api`：继续由 3847 主服务承载，但保留旧 dev API 的启动语义，并清理遗留 `CODEX_API_ENDPOINT`。远程控制 server 与插件接口同时提供 `/api` 别名，因此不需要 8000 listener，也不牺牲现有功能。
+旧 8000 快速模式实际使用的是轻量 `/api` 协议路径，而不是端口本身带来加速。当前 MochiPort 默认把 `CODEX_API_BASE_URL` 设为 `http://127.0.0.1:3847/api`：继续由 3847 主服务承载，但保留旧 dev API 的启动语义，并清理遗留 `CODEX_API_ENDPOINT`。远程控制 server 与插件接口同时提供 `/api` 别名，因此不需要 8000 listener，也不牺牲现有功能。
 
 但该环境变量不会修改 renderer Statsig 地址。Statsig client 的实际运行时配置仍为：
 
@@ -237,7 +237,7 @@ window.__STATSIG__.firstInstance._network._netConfig.networkOverrideFunc
 
 包装器成功捕获到带 SDK 参数的真实 `/v1/initialize` URL，也能把该调用改投 `127.0.0.1:3847`。所以 CDP 模式下可以修改这条链路，阻点不在网络拦截能力。
 
-现有 `/backend-api/wham/statsig/bootstrap` 不能原样作为 `/v1/initialize` 响应：前者外面还有 `statsigPayload` envelope。ThreadRelay 现在另提供 `POST /codex-app/statsig/v1/initialize`，直接返回 Statsig `init-v2` JSON。`dynamic_configs[*].v` 和 `layer_configs[*].v` 必须是指向顶层 `values` 的字符串键；把配置对象直接塞进 `v` 会导致 SDK 初始化成功，但对应 dynamic config 仍然是未识别状态。
+现有 `/backend-api/wham/statsig/bootstrap` 不能原样作为 `/v1/initialize` 响应：前者外面还有 `statsigPayload` envelope。MochiPort 现在另提供 `POST /codex-app/statsig/v1/initialize`，直接返回 Statsig `init-v2` JSON。`dynamic_configs[*].v` 和 `layer_configs[*].v` 必须是指向顶层 `values` 的字符串键；把配置对象直接塞进 `v` 会导致 SDK 初始化成功，但对应 dynamic config 仍然是未识别状态。
 
 增强模式在 Statsig client 调用 `initializeAsync()` 前，将 `_network._initializeUrlConfig.customUrl` 改到上述本地端点。官方完整 evaluation 缓存存在时仍优先用缓存同步初始化，随后恢复官方刷新地址，避免定时刷新用本地精简响应覆盖 primary runtime、插件和其他动态配置；没有完整缓存时才持续使用本地端点返回模型目录、i18n layer 和已确认的关键 gate。当前本地端点总是返回完整的 `has_updates=true` 响应，不实现增量 delta。SDK 3.32.6 隔离探针已验证本地 POST、12 个模型、中文层和关键 gate 均可解析。
 
@@ -253,7 +253,7 @@ POST /wham/statsig/bootstrap
 
 这条调用被放在 `CodexStatsigProvider.sync` 的 Suspense 边界前。单次请求超时为 5 秒；401 会最多重试 5 次，重试间隔 500ms。因此本地请求被拒绝时，最坏路径约为 `6 * 5s + 5 * 0.5s = 32.5s`，与实测的 33.2 秒一致。只有所有重试结束并进入 pre-login Statsig fallback 后，应用路由才会挂载。
 
-ThreadRelay 的本地 `/api/wham/statsig/bootstrap` 实测约几十毫秒即可返回。延迟发生在请求到达 ThreadRelay 之前：Codex App 主进程的安全请求层拒绝给非 OpenAI URL 附加 ChatGPT 认证。旧的 CDP 实现只在 Statsig client 创建后修补 store，已经晚于这段 Suspense 等待。
+MochiPort 的本地 `/api/wham/statsig/bootstrap` 实测约几十毫秒即可返回。延迟发生在请求到达 MochiPort 之前：Codex App 主进程的安全请求层拒绝给非 OpenAI URL 附加 ChatGPT 认证。旧的 CDP 实现只在 Statsig client 创建后修补 store，已经晚于这段 Suspense 等待。
 
 Codex App `26.715.4045` 又确认了另一条同类路径。`requires_openai_auth=false` 时 renderer 进入
 pre-login 分支，直接调用 Statsig React SDK 的 `useClientAsyncInit()`。SDK 的实际顺序是：
@@ -265,15 +265,15 @@ pre-login 分支，直接调用 Statsig React SDK 的 `useClientAsyncInit()`。S
 因此“缓存已有正确模型”和“首屏不等待网络”是两回事。SDK `NetworkCore` 的默认单次超时为
 10 秒，失败重试后会形成约 30 多秒的等待。本机实测中，窗口在 314ms ready-to-show，增强配置
 在 4.126 秒完成，但 `app routes mounted` 直到 35.984 秒才出现；普通启动历史日志也曾等待
-33.2 秒。阻塞位于 renderer 的 Statsig Provider，不在 ThreadRelay 启动器、app-server、插件同步或
+33.2 秒。阻塞位于 renderer 的 Statsig Provider，不在 MochiPort 启动器、app-server、插件同步或
 会话历史读取。
 
 增强模式仍从 renderer 第一行代码前监听 `codex-message-from-view`。当 Codex App 进入 post-login Statsig 路径时：
 
 1. 只匹配 `POST /wham/statsig/bootstrap`，其他请求继续走 Codex App 原路径；
-2. 优先读取最新的 pre-login 官方 Statsig evaluation 缓存，其次读取 ThreadRelay 本地用户缓存；
-3. 保留完整官方 payload，只覆盖 ThreadRelay 模型目录和已确认的关键 gate；
-4. 没有完整官方缓存时不伪造官方大配置；pre-login SDK 改走 ThreadRelay 本地 initialize 端点；
+2. 优先读取最新的 pre-login 官方 Statsig evaluation 缓存，其次读取 MochiPort 本地用户缓存；
+3. 保留完整官方 payload，只覆盖 MochiPort 模型目录和已确认的关键 gate；
+4. 没有完整官方缓存时不伪造官方大配置；pre-login SDK 改走 MochiPort 本地 initialize 端点；
 5. 同步发送对应的 `fetch-response`，原主进程请求随后返回的错误因 request ID 已完成而被忽略。
 
 运行时探针通过 Codex App 自己的 `safePost` 验证了 bootstrap 消息链路，响应在 1ms 内完成；独立 Statsig client 探针验证了本地 initialize 线协议。两条路径都由 3847 主服务承载，没有恢复 8000 端口。
@@ -288,7 +288,7 @@ Codex App 也可能直接进入 pre-login Statsig 路径，此时不会发出 `/
 2. 把 evaluation 的 user 替换为该 client 当前的真实 Statsig user；
 3. 有缓存时调用 SDK 自己的 `dataAdapter.setData()`；
 4. 有缓存时调用 `initializeSync({ disableBackgroundCacheRefresh: true })`，直接结束首屏 loading；
-5. 没有完整缓存时，原生 `initializeAsync()` 请求被定向到 ThreadRelay 本地端点；完成后再做局部 overlay；
+5. 没有完整缓存时，原生 `initializeAsync()` 请求被定向到 MochiPort 本地端点；完成后再做局部 overlay；
 6. 本地 URL 配置不可写或本地响应异常时记录明确诊断，不把“已安装 URL 改写”误报成“配置已生效”。
 
 模型 dynamic config 和 i18n layer 也不再把数字 ID 当作唯一入口。脚本先按
@@ -310,10 +310,10 @@ Codex App 也可能直接进入 pre-login Statsig 路径，此时不会发出 `/
 Codex 接入页提供“增强模式启动 Codex”按钮。按钮只在 Codex 配置已经初始化时可用；未初始化时
 保持置灰，避免在缺少本地 Provider 和认证配置时进入不完整的启动链路：
 
-1. 用户主动选择增强模式启动后，ThreadRelay 设置 `CODEX_API_BASE_URL=<本地 backend-api>`；
+1. 用户主动选择增强模式启动后，MochiPort 设置 `CODEX_API_BASE_URL=<本地 backend-api>`；
 2. Windows 通过隐藏进程激活 Store/MSIX App，macOS 通过 `open --args` 启动；
 3. CDP 只监听 `127.0.0.1:9335`；
-4. 页面目标出现后，ThreadRelay 先在当前 renderer 立即执行脚本，再注册 `Page.addScriptToEvaluateOnNewDocument`；目标探测间隔为 50ms，且当前文档注入不等待 `Page.enable`，尽量保证 hook 早于 React root render；不主动刷新页面，后续若发生应用自身的自然导航，新文档仍会自动注入；
+4. 页面目标出现后，MochiPort 先在当前 renderer 立即执行脚本，再注册 `Page.addScriptToEvaluateOnNewDocument`；目标探测间隔为 50ms，且当前文档注入不等待 `Page.enable`，尽量保证 hook 早于 React root render；不主动刷新页面，后续若发生应用自身的自然导航，新文档仍会自动注入；
 5. 注入脚本在 post-login 路径只对完整官方 Statsig 缓存响应启动期 `/wham/statsig/bootstrap`，并修补
    Statsig 缓存；pre-login 路径同样只使用完整官方缓存；没有完整缓存时保留官方初始化路径；
 6. SDK 就绪后优先通过 Store 合并；Store 不可用时使用公开 API overlay，官方其他配置保持原样；
@@ -356,9 +356,9 @@ Desktop bootstrap failed to start the main app
 
 当前 renderer bundle 将 Statsig gate `3446105535` 映射为
 `suppressResumeHistoryDrain`。Codex App `26.721.4979.0` 虽然已有分页历史框架，但官方初始化响应未默认
-开启该 gate；ThreadRelay 强开后，新任务会进入 paginated history，而当前 renderer 又会禁止此类任务
+开启该 gate；MochiPort 强开后，新任务会进入 paginated history，而当前 renderer 又会禁止此类任务
 执行 fork、消息编辑和 rollback。但关闭它会让已有 paginated 任务在 renderer 阶段停止恢复，点击时
-不会发送任何历史读取请求。因此 ThreadRelay 暂时继续开启该 gate，优先保证已有会话可以访问。
+不会发送任何历史读取请求。因此 MochiPort 暂时继续开启该 gate，优先保证已有会话可以访问。
 
 同时，增强脚本会撤销 CodexHub 时期旧版本对 9 个非核心历史 gate 和上述 2 个退役 gate 的本地强制值，
 只保留官方值；本地

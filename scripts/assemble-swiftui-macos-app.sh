@@ -24,7 +24,7 @@ case "$BUILD" in
     ;;
 esac
 
-if [ ! -d "$XCODE_APP" ] || [ ! -x "$XCODE_APP/Contents/MacOS/ThreadRelay" ]; then
+if [ ! -d "$XCODE_APP" ] || [ ! -x "$XCODE_APP/Contents/MacOS/MochiPort" ]; then
   echo "Xcode app bundle is unavailable" >&2
   exit 1
 fi
@@ -90,9 +90,9 @@ esac
 
 DAEMON_VERSION=$("$DAEMON_BINARY" --version 2>/dev/null || true)
 case "$DAEMON_VERSION" in
-  threadrelay\ *) ;;
+  mochiport\ *|threadrelay\ *) ;;
   *)
-    echo "daemon binary does not identify as ThreadRelay" >&2
+    echo "daemon binary does not identify as MochiPort" >&2
     exit 1
     ;;
 esac
@@ -102,7 +102,7 @@ if [ -z "$DAEMON_BUILD" ] || [ "$DAEMON_BUILD" != "$BUILD" ]; then
   exit 1
 fi
 
-GUI_ARCHS=$(lipo -archs "$XCODE_APP/Contents/MacOS/ThreadRelay")
+GUI_ARCHS=$(lipo -archs "$XCODE_APP/Contents/MacOS/MochiPort")
 DAEMON_ARCHS=$(lipo -archs "$DAEMON_BINARY")
 for ARCH in $GUI_ARCHS; do
   case " $DAEMON_ARCHS " in
@@ -123,7 +123,7 @@ for ARCH in $DAEMON_ARCHS; do
   esac
 done
 
-STAGING_ROOT=$(mktemp -d "$OUTPUT_PARENT/.threadrelay-assemble.XXXXXX")
+STAGING_ROOT=$(mktemp -d "$OUTPUT_PARENT/.mochiport-assemble.XXXXXX")
 STAGED_APP="$STAGING_ROOT/$OUTPUT_NAME"
 BACKUP_APP="$STAGING_ROOT/previous.app"
 cleanup() {
@@ -144,10 +144,10 @@ trap 'exit 1' HUP INT TERM
 /usr/bin/ditto "$XCODE_APP" "$STAGED_APP"
 mkdir -p "$STAGED_APP/Contents/Helpers"
 mkdir -p "$STAGED_APP/Contents/Resources/brand/providers"
-cp "$DAEMON_BINARY" "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
-chmod 755 "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
-cp "$GUI_SUPERVISOR" "$STAGED_APP/Contents/Helpers/threadrelay-gui-supervisor"
-chmod 755 "$STAGED_APP/Contents/Helpers/threadrelay-gui-supervisor"
+cp "$DAEMON_BINARY" "$STAGED_APP/Contents/Helpers/mochiport-daemon"
+chmod 755 "$STAGED_APP/Contents/Helpers/mochiport-daemon"
+cp "$GUI_SUPERVISOR" "$STAGED_APP/Contents/Helpers/mochiport-gui-supervisor"
+chmod 755 "$STAGED_APP/Contents/Helpers/mochiport-gui-supervisor"
 cp "$APP_ICON" "$STAGED_APP/Contents/Resources/AppIcon.icns"
 python3 "$THIRD_PARTY_LICENSE_GENERATOR" \
   "$STAGED_APP/Contents/Resources/THIRD_PARTY_LICENSES.txt"
@@ -165,7 +165,7 @@ fi
 
 codesign --force --deep --sign - "$STAGED_APP"
 codesign --verify --deep --strict "$STAGED_APP"
-codesign --verify --strict "$STAGED_APP/Contents/Helpers/threadrelay-daemon"
+codesign --verify --strict "$STAGED_APP/Contents/Helpers/mochiport-daemon"
 
 if [ -e "$OUTPUT_APP" ]; then
   mv "$OUTPUT_APP" "$BACKUP_APP"

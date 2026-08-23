@@ -61,13 +61,13 @@ use crate::{
 };
 
 // Isolated fault tests set this explicitly; normal launch configurations never do.
-const SKIP_DESKTOP_INTEGRATION_ENV: &str = "THREADRELAY_SKIP_DESKTOP_INTEGRATION";
+const SKIP_DESKTOP_INTEGRATION_ENV: &str = "MOCHIPORT_SKIP_DESKTOP_INTEGRATION";
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
     if matches!(cli.command, Command::Version) {
         println!(
-            "threadrelay {} (build {})",
+            "mochiport {} (build {})",
             version::PRODUCT_VERSION,
             version::BUILD_NUMBER
         );
@@ -128,7 +128,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
     tracing::info!(
         target: "threadrelay::logging",
         path = %log_path.display(),
-        "ThreadRelay chain log initialized"
+        "MochiPort chain log initialized"
     );
     if should_save_config {
         config.save(&config_path)?;
@@ -218,7 +218,7 @@ fn run_gui_command() -> anyhow::Result<()> {
 
     #[cfg(not(feature = "gui"))]
     {
-        anyhow::bail!("this ThreadRelay build does not include GUI support")
+        anyhow::bail!("this MochiPort build does not include GUI support")
     }
 }
 
@@ -275,7 +275,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         &state.daemon_identity,
         &format!("http://{advertised_addr}"),
     )?;
-    println!("threadrelay web: http://{addr}");
+    println!("mochiport web: http://{addr}");
     tracing::info!(target: "threadrelay::startup", addr = %addr, "local service listener ready");
 
     // Environment-variable updates can synchronously broadcast WM_SETTINGCHANGE
@@ -374,7 +374,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     if let Some(companion_addr) = companion {
         match TcpListener::bind(companion_addr).await {
             Ok(companion_listener) => {
-                println!("threadrelay web: http://{companion_addr}");
+                println!("mochiport web: http://{companion_addr}");
                 companion_tasks.push(tokio::spawn(serve_http(
                     companion_listener,
                     app.clone(),
@@ -524,10 +524,14 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
         return absolutize(path);
     }
 
-    let threadrelay_home_is_set = env::var_os("THREADRELAY_HOME").is_some();
-    let threadrelay_repo_config_is_set = env::var_os("THREADRELAY_USE_REPO_CONFIG").is_some();
-    if threadrelay_home_is_set
-        || (!threadrelay_repo_config_is_set && env::var_os("CODEXHUB_HOME").is_some())
+    let mochiport_home_is_set = env::var_os("MOCHIPORT_HOME").is_some();
+    let legacy_home_is_set =
+        env::var_os("THREADRELAY_HOME").is_some() || env::var_os("CODEXHUB_HOME").is_some();
+    let mochiport_repo_config_is_set = env::var_os("MOCHIPORT_USE_REPO_CONFIG").is_some();
+    let legacy_repo_config_is_set = env::var_os("THREADRELAY_USE_REPO_CONFIG").is_some()
+        || env::var_os("CODEXHUB_USE_REPO_CONFIG").is_some();
+    if mochiport_home_is_set
+        || (!mochiport_repo_config_is_set && !legacy_repo_config_is_set && legacy_home_is_set)
     {
         return app_support_config_path();
     }
@@ -536,7 +540,7 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
         return path;
     }
 
-    if !threadrelay_repo_config_is_set && env::var_os("CODEXHUB_USE_REPO_CONFIG").is_none() {
+    if !mochiport_repo_config_is_set && !legacy_repo_config_is_set {
         return app_support_config_path();
     }
 
@@ -551,6 +555,9 @@ fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
 }
 
 fn app_support_config_path() -> PathBuf {
+    if let Some(base) = env::var_os("MOCHIPORT_HOME").map(PathBuf::from) {
+        return base.join("config.toml");
+    }
     if let Some(base) = env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
         return base.join("config.toml");
     }
@@ -567,11 +574,14 @@ fn platform_app_support_config_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    let new_path = base.join("ThreadRelay").join("config.toml");
+    let new_path = base.join("MochiPort").join("config.toml");
     let legacy_macos_path = env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
-    let mut legacy_paths = vec![base.join("CodexHub").join("config.toml")];
+    let mut legacy_paths = vec![
+        base.join("ThreadRelay").join("config.toml"),
+        base.join("CodexHub").join("config.toml"),
+    ];
     legacy_paths.extend(legacy_macos_path);
     prefer_existing_legacy_config(new_path, &legacy_paths)
 }
@@ -584,8 +594,11 @@ fn platform_app_support_config_path() -> PathBuf {
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     prefer_existing_legacy_config(
-        base.join("ThreadRelay").join("config.toml"),
-        &[base.join("CodexHub").join("config.toml")],
+        base.join("MochiPort").join("config.toml"),
+        &[
+            base.join("ThreadRelay").join("config.toml"),
+            base.join("CodexHub").join("config.toml"),
+        ],
     )
 }
 
@@ -640,7 +653,7 @@ fn config_directory_is_writable(dir: &Path) -> bool {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or(0);
-    let probe = dir.join(format!(".threadrelay-write-probe-{nanos}"));
+    let probe = dir.join(format!(".mochiport-write-probe-{nanos}"));
     match std::fs::File::create(&probe) {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
@@ -674,6 +687,7 @@ fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()
+                .add_directive("mochiport=info".parse()?)
                 .add_directive("threadrelay=info".parse()?)
                 .add_directive("codexhub=info".parse()?),
         )
@@ -687,7 +701,7 @@ fn effective_chain_log_diagnostic(config: &AppConfig) -> bool {
 }
 
 fn chain_log_path(config: &AppConfig) -> PathBuf {
-    log_dir_from_config(config).join("threadrelay-chain.log")
+    log_dir_from_config(config).join("mochiport-chain.log")
 }
 
 fn log_dir_from_config(config: &AppConfig) -> PathBuf {
@@ -705,7 +719,7 @@ async fn set_bridge_enabled(config_path: &Path, enabled: bool) -> anyhow::Result
     config.save(&config_path.to_path_buf())?;
     let _ = notify_daemon_bridge(&config, enabled).await;
     println!(
-        "ThreadRelay Feishu bridge {}",
+        "MochiPort Feishu bridge {}",
         if enabled { "enabled" } else { "disabled" }
     );
     Ok(())
@@ -804,12 +818,12 @@ mod tests {
     #[test]
     fn app_support_path_uses_legacy_config_until_new_config_exists() {
         let root = std::env::temp_dir().join(format!(
-            "threadrelay-config-path-test-{}-{}",
+            "mochiport-config-path-test-{}-{}",
             std::process::id(),
             crate::types::now_ms()
         ));
-        let new_path = root.join("ThreadRelay/config.toml");
-        let legacy_path = root.join("CodexHub/config.toml");
+        let new_path = root.join("MochiPort/config.toml");
+        let legacy_path = root.join("ThreadRelay/config.toml");
 
         assert_eq!(
             prefer_existing_legacy_config(new_path.clone(), std::slice::from_ref(&legacy_path)),
@@ -827,7 +841,10 @@ mod tests {
         std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
         std::fs::write(&new_path, "").unwrap();
         assert_eq!(
-            prefer_existing_legacy_config(new_path.clone(), &[root.join("CodexHub/config.toml")]),
+            prefer_existing_legacy_config(
+                new_path.clone(),
+                &[root.join("ThreadRelay/config.toml")]
+            ),
             new_path
         );
 

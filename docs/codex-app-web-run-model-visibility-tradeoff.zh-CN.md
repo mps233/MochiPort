@@ -4,14 +4,14 @@
 
 状态：方案 1 的 Codex App 模型显示已通过可选增强启动解决；普通启动模型显示和账号态相关市场仍有边界。
 
-本文记录 CodexHub 接入 Codex App 时，自定义模型显示、原生 `web.run` 和本地压缩之间的条件冲突。该结论基于 `references/codex-main` 最新源码和 Codex App `26.707.9981` 的实际 renderer bundle 分析。
+本文记录 MochiPort 接入 Codex App 时，自定义模型显示、原生 `web.run` 和本地压缩之间的条件冲突。该结论基于 `references/codex-main` 最新源码和 Codex App `26.707.9981` 的实际 renderer bundle 分析。
 
 ## 1. 当前决策
 
 目前没有一个只靠公开配置的组合，可以同时满足以下全部目标：
 
 1. Provider 名称保持 `ai-gateway`。
-2. Codex App 显示 CodexHub 的完整自定义模型列表。
+2. Codex App 显示 MochiPort 的完整自定义模型列表。
 3. GPT-5.6 Responses Lite 注册原生 `web.run`。
 4. 保持本地压缩，不进入 OpenAI Remote Compact V2。
 5. 不修改 Codex App 本体，不代理或替换 Codex App 自己的 app-server。
@@ -23,7 +23,7 @@
 | 方案 1 | `ai-gateway + requires_openai_auth=false + Actor Authorization` | `web.run`、本地压缩、增强模式下的 Codex App 模型显示 | 普通启动下的模型显示；账号态相关的 curated 市场 |
 | 方案 2 | `ai-gateway + requires_openai_auth=true` | 模型显示、账号态、本地压缩 | `web.run` 注册 |
 
-CodexHub 不修改 ASAR，也不接管默认官方入口。需要完整模型列表时，用户从 CodexHub 主动使用增强模式启动。
+MochiPort 不修改 ASAR，也不接管默认官方入口。需要完整模型列表时，用户从 MochiPort 主动使用增强模式启动。
 
 ## 2. 方案 1：Actor Authorization
 
@@ -82,12 +82,12 @@ Codex App renderer 随后得到 `authMethod=null`，进入 pre-login Statsig 路
 https://ab.chatgpt.com/v1
 ```
 
-它不会调用 CodexHub 的 `/wham/statsig/bootstrap`。官方 Statsig dynamic config `107580212` 中的 `available_models` 和 `use_hidden_models` 会再次过滤 app-server 的 `model/list`，最终只显示官方白名单模型。
+它不会调用 MochiPort 的 `/wham/statsig/bootstrap`。官方 Statsig dynamic config `107580212` 中的 `available_models` 和 `use_hidden_models` 会再次过滤 app-server 的 `model/list`，最终只显示官方白名单模型。
 
 所以即使以下链路都正常，Codex App 下拉框仍可能看不到 DeepSeek、Grok、GLM、Opus 和 Sonnet：
 
 ```text
-CodexHub /models
+MochiPort /models
   -> Codex Core ModelsManager
   -> app-server model/list
   -> Remote Control 可见
@@ -96,9 +96,9 @@ CodexHub /models
 
 ### 2.3 可选增强启动
 
-CodexHub 可以用 loopback-only CDP 启动 Codex App，在 renderer 第一帧增量合并 Statsig `107580212` 和关键 gate。该模式已实机验证完整显示 DeepSeek、Grok、GLM、Opus 和 Sonnet，同时保留官方 primary runtime 和插件配置。
+MochiPort 可以用 loopback-only CDP 启动 Codex App，在 renderer 第一帧增量合并 Statsig `107580212` 和关键 gate。该模式已实机验证完整显示 DeepSeek、Grok、GLM、Opus 和 Sonnet，同时保留官方 primary runtime 和插件配置。
 
-增强模式不修改 ASAR、LevelDB 或快捷方式，只影响本次由 CodexHub 启动的 Codex App。VS Code 插件和用户从官方入口普通启动的 Codex App 不受影响。
+增强模式不修改 ASAR、LevelDB 或快捷方式，只影响本次由 MochiPort 启动的 Codex App。VS Code 插件和用户从官方入口普通启动的 Codex App 不受影响。
 
 ### 2.4 插件市场与账号态副作用
 
@@ -126,21 +126,21 @@ openai-curated-remote
 1. `plugins=true`、`remote_plugin=true`，Statsig gate `4218407052=true`；
 2. 左侧“插件”入口仍存在；
 3. `openai-bundled` 和 `openai-primary-runtime` 共 10 个本地插件正常显示，包括 Computer Use、Chrome、Documents、PDF、Spreadsheets、Presentations、LaTeX 和 Visualize；
-4. 本地 `openai-curated` manifest 仍有 25 个经过 CodexHub 过滤、理论上可本地使用的插件，但查询键被标记为 `openai-curated-marketplaces-hidden`，renderer 不渲染它们；
-5. `/backend-api/ps/plugins/list` 仍被请求，因此问题不是 CodexHub 路由中断，也不是增强模式漏补 Statsig gate。
+4. 本地 `openai-curated` manifest 仍有 25 个经过 MochiPort 过滤、理论上可本地使用的插件，但查询键被标记为 `openai-curated-marketplaces-hidden`，renderer 不渲染它们；
+5. `/backend-api/ps/plugins/list` 仍被请求，因此问题不是 MochiPort 路由中断，也不是增强模式漏补 Statsig gate。
 
 增强模式不修改 React Auth Context，也不会把 `authMethod=null` 伪造成 ChatGPT 登录态。2026-07-21 起，它除模型、语言和已确认的功能 gate 外，还会对本地 curated 插件目录做窄范围展示适配，详见 2.6 节。
 
 ### 2.5 Apps/Connectors 是另一条链路
 
-CodexHub 当前还会写入：
+MochiPort 当前还会写入：
 
 ```toml
 [features]
 apps = false
 ```
 
-该开关关闭的是 `codex_apps` MCP 以及依赖 ChatGPT 官方后端的 Apps/Connectors，例如 Gmail、Google Drive 等；它不关闭本地 plugin、skill、Computer Use 或 Chrome。CodexHub 尚未实现官方 `.../backend-api/wham/apps` streamable HTTP 后端，因此不能为了恢复入口而直接改成 `apps=true`，否则只会展示无法工作的功能并产生 MCP 启动错误。
+该开关关闭的是 `codex_apps` MCP 以及依赖 ChatGPT 官方后端的 Apps/Connectors，例如 Gmail、Google Drive 等；它不关闭本地 plugin、skill、Computer Use 或 Chrome。MochiPort 尚未实现官方 `.../backend-api/wham/apps` streamable HTTP 后端，因此不能为了恢复入口而直接改成 `apps=true`，否则只会展示无法工作的功能并产生 MCP 启动错误。
 
 ### 2.6 本地 curated 插件展示适配
 
@@ -208,7 +208,7 @@ requires_openai_auth = true
 
 但 `is_openai()` 不只控制 Web Search。它还会影响 OpenAI 私有行为，包括 Remote Compact V2、请求编码、认证和其他 Provider 能力判断。
 
-CodexHub 的上游可能是 Grok、DeepSeek、GLM 或 Anthropic。为了开启搜索而把整个 Gateway 伪装成 OpenAI，会扩大协议影响范围，并重新引入跨 Provider 密文、压缩结果和会话迁移问题。因此不采用。
+MochiPort 的上游可能是 Grok、DeepSeek、GLM 或 Anthropic。为了开启搜索而把整个 Gateway 伪装成 OpenAI，会扩大协议影响范围，并重新引入跨 Provider 密文、压缩结果和会话迁移问题。因此不采用。
 
 ## 5. 已评估但暂不采用的方案
 

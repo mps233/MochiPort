@@ -136,7 +136,7 @@ impl Default for AppConfig {
             outbound_proxy: OutboundProxyConfig::default(),
             language: None,
             theme: None,
-            state_path: PathBuf::from("threadrelay-state.json"),
+            state_path: PathBuf::from("mochiport-state.json"),
             logging: LoggingConfig::default(),
             feishu: FeishuConfig::default(),
             telegram: TelegramConfig::default(),
@@ -300,7 +300,7 @@ impl AppConfig {
             .with_context(|| format!("failed to create config directory {}", parent.display()))?;
 
         let mut temporary = tempfile::Builder::new()
-            .prefix(".threadrelay-config.")
+            .prefix(".mochiport-config.")
             .tempfile_in(parent)
             .with_context(|| format!("failed to prepare config file {}", path.display()))?;
         temporary
@@ -759,7 +759,7 @@ mod tests {
                 entry
                     .file_name()
                     .to_string_lossy()
-                    .starts_with(".threadrelay-config.")
+                    .starts_with(".mochiport-config.")
             })
             .count();
         assert_eq!(temporary_files, 0);

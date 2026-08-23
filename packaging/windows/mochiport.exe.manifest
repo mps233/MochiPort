@@ -3,9 +3,9 @@
   <assemblyIdentity
     version="0.5.0.0"
     processorArchitecture="*"
-    name="threadrelay"
+    name="MochiPort"
     type="win32" />
-  <description>ThreadRelay</description>
+  <description>MochiPort</description>
   <dependency>
     <dependentAssembly>
       <assemblyIdentity

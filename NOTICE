@@ -1,11 +1,11 @@
-ThreadRelay
-Copyright 2026 ThreadRelay contributors.
+MochiPort
+Copyright 2026 MochiPort contributors.
 
-ThreadRelay is an independent derivative project based on the Apache-2.0
-licensed codexhub project by happy-loki and its contributors. The ThreadRelay
-changes in this repository are maintained by miaopasi and other ThreadRelay
+MochiPort is an independent derivative project based on the Apache-2.0
+licensed codexhub project by happy-loki and its contributors. The MochiPort
+changes in this repository are maintained by miaopasi and other MochiPort
 contributors. The upstream project and its authors do not endorse or support
-ThreadRelay unless explicitly stated otherwise.
+MochiPort unless explicitly stated otherwise.
 
 The original Apache-2.0 license and required attribution notices remain in
 LICENSE. Third-party visual assets and their licenses are documented under

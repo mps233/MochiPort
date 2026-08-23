@@ -79,7 +79,7 @@ impl WecomAdapter {
             .collect::<Vec<_>>();
         let card = serde_json::json!({
             "card_type": "button_interaction",
-            "source": { "desc": "ThreadRelay", "desc_color": 0 },
+            "source": { "desc": "MochiPort", "desc_color": 0 },
             "main_title": {
                 "title": "Codex 审批请求",
                 "desc": approval.request_kind
@@ -276,7 +276,7 @@ impl TextChatAdapter for WecomAdapter {
 fn thread_routing_choice_card(request_id: &str, text: ImText) -> serde_json::Value {
     serde_json::json!({
         "card_type": "button_interaction",
-        "source": { "desc": "ThreadRelay", "desc_color": 0 },
+        "source": { "desc": "MochiPort", "desc_color": 0 },
         "main_title": {
             "title": text.create_choice_title_feishu(),
             "desc": text.thread_list_title_feishu()
@@ -338,7 +338,7 @@ fn thread_routing_list_card(page: &ThreadRoutingPage, text: ImText) -> serde_jso
     };
     serde_json::json!({
         "card_type": "button_interaction",
-        "source": { "desc": "ThreadRelay", "desc_color": 0 },
+        "source": { "desc": "MochiPort", "desc_color": 0 },
         "main_title": {
             "title": text.thread_list_title_feishu(),
             "desc": text.page_label(page.page)
@@ -389,7 +389,7 @@ fn thread_create_settings_card(
         .unwrap_or(text.waiting_custom_cwd());
     Ok(serde_json::json!({
         "card_type": "multiple_interaction",
-        "source": { "desc": "ThreadRelay", "desc_color": 0 },
+        "source": { "desc": "MochiPort", "desc_color": 0 },
         "main_title": {
             "title": text.create_settings_card_title(),
             "desc": defaults.remote_name.as_deref().unwrap_or(text.not_connected())
@@ -450,7 +450,7 @@ fn create_selection(
 fn resolved_routing_card(task_id: &str, title: &str, body: &str) -> serde_json::Value {
     serde_json::json!({
         "card_type": "text_notice",
-        "source": { "desc": "ThreadRelay", "desc_color": 0 },
+        "source": { "desc": "MochiPort", "desc_color": 0 },
         "main_title": { "title": title },
         "sub_title_text": body,
         "card_action": {

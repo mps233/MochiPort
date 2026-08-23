@@ -66,9 +66,9 @@ impl ApiClient {
     pub(super) fn daemon_identity(&self) -> Result<DaemonIdentity, String> {
         let identity = self.get_quick::<DaemonIdentity>("/api/status")?;
         identity
-            .is_codexhub()
+            .is_mochiport_compatible()
             .then_some(identity)
-            .ok_or_else(|| "local service identity does not match ThreadRelay".to_string())
+            .ok_or_else(|| "local service identity does not match MochiPort".to_string())
     }
 
     pub(super) fn get_quick_json(&self, path: &str) -> Result<Value, String> {
@@ -245,7 +245,7 @@ impl ApiClient {
         response.status().is_success()
             && response
                 .json::<DaemonIdentity>()
-                .is_ok_and(|identity| identity.is_codexhub())
+                .is_ok_and(|identity| identity.is_mochiport_compatible())
     }
 
     pub(super) fn configure_codex_app(

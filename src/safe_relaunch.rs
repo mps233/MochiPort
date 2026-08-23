@@ -20,7 +20,7 @@ use crate::{
 };
 
 const EXPECTED_BUNDLE_IDENTIFIER: &str = "io.github.mps233.threadrelay";
-const EXPECTED_BUNDLE_EXECUTABLE: &str = "ThreadRelay";
+const EXPECTED_BUNDLE_EXECUTABLE: &str = "MochiPort";
 const MAX_PENDING_AGE: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_HELPER_START_DELAY_MS: u64 = 350;
 const DEFAULT_HELPER_SHUTDOWN_MODE: SafeRelaunchShutdownMode = SafeRelaunchShutdownMode::Guarded;
@@ -181,7 +181,7 @@ async fn register_request(
     }
     if expected_bundle_identifier != EXPECTED_BUNDLE_IDENTIFIER {
         return Err(RegisterError::bad_request(
-            "unexpected ThreadRelay bundle identifier",
+            "unexpected MochiPort bundle identifier",
         ));
     }
 
@@ -465,7 +465,7 @@ fn gui_pid_for_helper(executable: &Path, daemon_pid: u32) -> Result<Option<u32>,
             .map_err(|_| "managed GUI pid is invalid".to_string())?;
         if gui_pid <= 1 || gui_pid == daemon_pid || !process_matches_executable(gui_pid, executable)
         {
-            return Err("managed GUI pid does not match the running ThreadRelay app".to_string());
+            return Err("managed GUI pid does not match the running MochiPort app".to_string());
         }
         return Ok(Some(gui_pid));
     }
@@ -552,7 +552,7 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
                     &format!("gui_recovery_agent_restore_failed err={restore_error}"),
                 );
             }
-            anyhow::bail!("old ThreadRelay GUI did not stop in time");
+            anyhow::bail!("old MochiPort GUI did not stop in time");
         }
     }
 
@@ -568,7 +568,7 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         return fail_with_rollback(
             &old_bundle,
             &log_path,
-            "old ThreadRelay process or local bind address did not stop in time",
+            "old MochiPort process or local bind address did not stop in time",
         );
     }
 
@@ -583,7 +583,7 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         &log_path,
         &format!("bundle_launched={}", candidate.display()),
     );
-    let expected_new_executable = candidate.join("Contents/MacOS/ThreadRelay");
+    let expected_new_executable = candidate.join("Contents/MacOS/MochiPort");
     if !wait_for_new_daemon(
         &args.config_path,
         &args.daemon_instance_id,
@@ -595,7 +595,7 @@ pub(crate) fn run_helper(args: SafeRelaunchHelperArgs) -> anyhow::Result<()> {
         return fail_with_rollback(
             &old_bundle,
             &log_path,
-            "new ThreadRelay daemon did not become ready in time",
+            "new MochiPort daemon did not become ready in time",
         );
     }
     log_line(&log_path, "new_daemon_verified");
@@ -763,7 +763,7 @@ fn active_daemon_matches(args: &SafeRelaunchHelperArgs) -> bool {
     };
     if metadata.identity.pid != args.daemon_pid
         || metadata.identity.instance_id != args.daemon_instance_id
-        || !metadata.identity.is_codexhub()
+        || !metadata.identity.is_mochiport_compatible()
     {
         return false;
     }
@@ -1199,10 +1199,10 @@ fn validate_candidate_bundle_against(
         return Err("bundle path is not a directory".to_string());
     }
     let info_path = canonical.join("Contents/Info.plist");
-    let executable_path = canonical.join("Contents/MacOS/ThreadRelay");
+    let executable_path = canonical.join("Contents/MacOS/MochiPort");
     if !info_path.is_file() || !executable_path.is_file() {
         return Err(
-            "bundle is missing Contents/Info.plist or Contents/MacOS/ThreadRelay".to_string(),
+            "bundle is missing Contents/Info.plist or Contents/MacOS/MochiPort".to_string(),
         );
     }
     if path_contains_symlink(&info_path) || path_contains_symlink(&executable_path) {
@@ -1237,7 +1237,7 @@ fn validate_candidate_bundle_against(
         ));
     }
     if actual.executable != EXPECTED_BUNDLE_EXECUTABLE {
-        return Err("bundle executable is not ThreadRelay".to_string());
+        return Err("bundle executable is not MochiPort".to_string());
     }
     if actual.package_type != "APPL" {
         return Err("bundle package type is not APPL".to_string());

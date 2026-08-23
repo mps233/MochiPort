@@ -399,7 +399,7 @@ struct MessagingAccountsView: View {
         case .needsUpdate:
             updateNotice(
                 title: "后台服务需要更新",
-                message: "当前后台服务不支持账号管理，请更新 ThreadRelay 后再试。",
+                message: "当前后台服务不支持账号管理，请更新 MochiPort 后再试。",
                 symbol: "arrow.triangle.2.circlepath"
             )
         case .unauthorized:

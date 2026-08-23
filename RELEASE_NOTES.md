@@ -1,4 +1,37 @@
-ThreadRelay v0.5.0
+# MochiPort v0.5.2
+
+本版本正式将产品更名为 MochiPort，并把公开发行与更新渠道迁移到
+[`mps233/mochiport`](https://github.com/mps233/mochiport)。
+
+## 品牌与发布
+
+- 产品、桌面应用、安装包和公开命令统一使用 MochiPort / `mochiport`。
+- macOS、Windows 和 Linux 的新安装包、更新元数据及 Issue 页面均来自 MochiPort 仓库。
+- 新配置优先使用 `MochiPort` 目录、`MOCHIPORT_*` 环境变量和 `mochiport-*` 状态文件。
+- 旧 ThreadRelay `0.5.0`/`0.5.1` 客户端写死了旧更新地址，不能通过兼容仓库自动迁移；请从 MochiPort Releases 手动安装一次新版本。
+
+## 迁移兼容
+
+- MochiPort 继续读取旧 `ThreadRelay`、`CodexHub` 配置目录以及 `THREADRELAY_*`、`CODEXHUB_*` 环境变量，保留已有凭据、会话绑定和 provider 配置。
+- `codexhub` 身份字符串、旧 daemon 锁和 `service = "threadrelay"` 等协议值仅用于运行时兼容，不代表当前产品品牌。
+- 旧目录和兼容环境变量不需要手动重命名；新安装和新配置统一使用 MochiPort。
+
+## Telegram 任务控制
+
+- 运行中直接发送普通文字会调整当前任务方向，也可以使用 `/steer` 明确表达。
+- 使用 `/queue` 将后续消息按 FIFO 排队；`/stop`、`/exit` 分别停止当前任务或退出会话。
+- `/s`、`/q` 保留为旧命令兼容别名，不再作为菜单中的规范命令。
+
+## 验证
+
+- `cargo fmt --all --check` 通过。
+- `cargo check --locked --features gui --bin mochiport` 通过。
+- `cargo test --locked --features gui --bin mochiport` 通过。
+- GitHub Actions 构建 Windows、macOS 和 Linux 安装包。
+
+---
+
+## ThreadRelay v0.5.0（历史发行记录）
 
 本次版本标志项目从 CodexHub fork 独立为 ThreadRelay。既有 CodexHub 发行记录保留在下方，作为项目演进历史。
 

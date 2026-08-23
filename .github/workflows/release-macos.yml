@@ -1,4 +1,4 @@
-name: ThreadRelay macOS release
+name: MochiPort macOS release
 
 on:
   workflow_dispatch:
@@ -71,20 +71,20 @@ jobs:
         run: |
           set -euo pipefail
           BUILD_NUMBER="${GITHUB_RUN_NUMBER:-1}"
-          XCODE_DERIVED_DATA="$RUNNER_TEMP/ThreadRelayDerivedData"
+          XCODE_DERIVED_DATA="$RUNNER_TEMP/MochiPortDerivedData"
 
-          THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" \
-            cargo build --locked --release --bin threadrelay --target aarch64-apple-darwin
-          THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" \
-            cargo build --locked --release --bin threadrelay --target x86_64-apple-darwin
+          MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" \
+            cargo build --locked --release --bin mochiport --target aarch64-apple-darwin
+          MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" \
+            cargo build --locked --release --bin mochiport --target x86_64-apple-darwin
 
           mkdir -p target/release
           lipo -create \
-            target/aarch64-apple-darwin/release/threadrelay \
-            target/x86_64-apple-darwin/release/threadrelay \
-            -output target/release/threadrelay
+            target/aarch64-apple-darwin/release/mochiport \
+            target/x86_64-apple-darwin/release/mochiport \
+            -output target/release/mochiport
 
-          THREADRELAY_BUILD_NUMBER="$BUILD_NUMBER" \
+          MOCHIPORT_BUILD_NUMBER="$BUILD_NUMBER" \
             scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
 
           rm -rf "$XCODE_DERIVED_DATA"
@@ -102,9 +102,9 @@ jobs:
           mkdir -p target/dist
           scripts/assemble-swiftui-macos-app.sh \
             "$BUILD_NUMBER" \
-            "$XCODE_DERIVED_DATA/Build/Products/Release/ThreadRelay.app" \
-            target/release/threadrelay \
-            target/dist/ThreadRelay.app
+            "$XCODE_DERIVED_DATA/Build/Products/Release/MochiPort.app" \
+            target/release/mochiport \
+            target/dist/MochiPort.app
 
           CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           if [ -z "$CARGO_VERSION" ]; then
@@ -118,8 +118,8 @@ jobs:
           fi
           {
             echo "APP_VERSION=$APP_VERSION"
-            echo "MACOS_DMG_NAME=ThreadRelay-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
-            echo "MACOS_APP_ZIP_NAME=ThreadRelay-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
+            echo "MACOS_DMG_NAME=MochiPort-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
+            echo "MACOS_APP_ZIP_NAME=MochiPort-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
           } >> "$GITHUB_ENV"
 
       - name: Sign And Notarize
@@ -136,11 +136,11 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
-          APP="target/dist/ThreadRelay.app"
-          DMG="target/dist/ThreadRelay.dmg"
+          APP="target/dist/MochiPort.app"
+          DMG="target/dist/MochiPort.dmg"
           DMG_STAGING="target/dist/dmg"
           ZIP="target/dist/${MACOS_APP_ZIP_NAME}"
-          NOTARY_ZIP="target/dist/ThreadRelay-notary.zip"
+          NOTARY_ZIP="target/dist/MochiPort-notary.zip"
           ENTITLEMENTS="packaging/macos/entitlements.plist"
 
           if [ -n "${APPLE_API_KEY_P8:-}" ]; then
@@ -221,10 +221,10 @@ jobs:
 
           codesign --force --timestamp --options runtime \
             --sign "$APPLE_CODESIGN_IDENTITY" \
-            "$APP/Contents/Helpers/threadrelay-gui-supervisor"
+            "$APP/Contents/Helpers/mochiport-gui-supervisor"
           codesign --force --timestamp --options runtime \
             --sign "$APPLE_CODESIGN_IDENTITY" \
-            "$APP/Contents/Helpers/threadrelay-daemon"
+            "$APP/Contents/Helpers/mochiport-daemon"
           codesign --force --timestamp --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$APPLE_CODESIGN_IDENTITY" \
@@ -239,10 +239,10 @@ jobs:
 
           rm -rf "$DMG_STAGING"
           mkdir -p "$DMG_STAGING"
-          ditto "$APP" "$DMG_STAGING/ThreadRelay.app"
+          ditto "$APP" "$DMG_STAGING/MochiPort.app"
           ln -s /Applications "$DMG_STAGING/Applications"
 
-          hdiutil create -volname "ThreadRelay" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+          hdiutil create -volname "MochiPort" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
           codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$DMG"
           notary_submit "$DMG"
           xcrun stapler staple "$DMG"
@@ -258,17 +258,17 @@ jobs:
         if: env.HAS_MACOS_CODESIGN != 'true'
         run: |
           set -euo pipefail
-          APP="target/dist/ThreadRelay.app"
-          DMG="target/dist/ThreadRelay.dmg"
+          APP="target/dist/MochiPort.app"
+          DMG="target/dist/MochiPort.dmg"
           DMG_STAGING="target/dist/dmg"
           ZIP="target/dist/${MACOS_APP_ZIP_NAME}"
 
           ditto -c -k --keepParent "$APP" "$ZIP"
           rm -rf "$DMG_STAGING"
           mkdir -p "$DMG_STAGING"
-          ditto "$APP" "$DMG_STAGING/ThreadRelay.app"
+          ditto "$APP" "$DMG_STAGING/MochiPort.app"
           ln -s /Applications "$DMG_STAGING/Applications"
-          hdiutil create -volname "ThreadRelay" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+          hdiutil create -volname "MochiPort" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
           mv "$DMG" "target/dist/${MACOS_DMG_NAME}"
           echo "macOS artifact is unsigned because complete signing and notarization secrets were not configured." >&2
 
@@ -353,10 +353,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ThreadRelay-macOS-${{ matrix.file_slug }}
+          name: MochiPort-macOS-${{ matrix.file_slug }}
           path: |
-            target/dist/ThreadRelay-*-macos-${{ matrix.file_slug }}.dmg
-            target/dist/ThreadRelay-*-macos-${{ matrix.file_slug }}.app.zip
+            target/dist/MochiPort-*-macos-${{ matrix.file_slug }}.dmg
+            target/dist/MochiPort-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
             target/dist/${{ matrix.intel_manifest_name }}
 
@@ -369,7 +369,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/ThreadRelay-*-macos-${{ matrix.file_slug }}.dmg
-            target/dist/ThreadRelay-*-macos-${{ matrix.file_slug }}.app.zip
+            target/dist/MochiPort-*-macos-${{ matrix.file_slug }}.dmg
+            target/dist/MochiPort-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
             target/dist/${{ matrix.intel_manifest_name }}

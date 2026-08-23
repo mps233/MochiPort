@@ -28,7 +28,7 @@
 
 ## 1. 背景
 
-CodexHub 对 Codex 暴露一个 OpenAI Responses Provider，但内部可以把不同模型路由到：
+MochiPort 对 Codex 暴露一个 OpenAI Responses Provider，但内部可以把不同模型路由到：
 
 - OpenAI Responses
 - Grok Responses
@@ -105,7 +105,7 @@ Gateway 只能看到旧模型 `gpt-5.6` 和 `reason=comp_hash_changed`，无法�
 
 ### 2.3 若启用 `web.run`，需要 OpenAI Provider 身份
 
-原生 `web.run` 是本文备选方案成立的前提。若未来启用它，CodexHub 的 Provider 配置键和 Provider 能力名称是两个概念：
+原生 `web.run` 是本文备选方案成立的前提。若未来启用它，MochiPort 的 Provider 配置键和 Provider 能力名称是两个概念：
 
 ```toml
 model_provider = "ai-gateway"
@@ -132,7 +132,7 @@ requires_openai_auth = true
 remote_compaction_v2 = true
 ```
 
-该功能当前默认开启，可以不显式写入配置。CodexHub 不使用旧 `/responses/compact` 作为主要实现，也不依赖 Compact V1。
+该功能当前默认开启，可以不显式写入配置。MochiPort 不使用旧 `/responses/compact` 作为主要实现，也不依赖 Compact V1。
 
 ## 3. 备选方案设计
 
@@ -154,7 +154,7 @@ Gateway 不再尝试区分“同 Provider 压缩”和“跨 Provider 压缩”�
 - OpenAI -> OpenAI、OpenAI -> Grok、Grok -> OpenAI 等路径行为完全一致。
 - Gateway 不需要知道目标模型。
 - V2 只承担 Codex 与 Gateway 之间的压缩请求和生命周期协议。
-- 真正的压缩语义由 CodexHub 文本摘要实现。
+- 真正的压缩语义由 MochiPort 文本摘要实现。
 
 ### 3.2 不修改 Codex 本体
 
@@ -164,9 +164,9 @@ Gateway 不再尝试区分“同 Provider 压缩”和“跨 Provider 压缩”�
 
 ### 3.3 不解析 OpenAI 原生 blob
 
-CodexHub 不解密、不反序列化、不猜测 OpenAI compaction blob 的内部结构。
+MochiPort 不解密、不反序列化、不猜测 OpenAI compaction blob 的内部结构。
 
-处理会话时，原生 OpenAI blob 不带 CodexHub marker，Gateway 原样交还给旧模型。只有历史版本已经写入 marker 的会话才执行兼容解包。
+处理会话时，原生 OpenAI blob 不带 `codexhub` marker，Gateway 原样交还给旧模型。只有历史版本已经写入 marker 的会话才执行兼容解包。
 
 ## 4. 总体流程
 
@@ -177,7 +177,7 @@ Codex
   x-codex-turn-metadata.request_kind = compaction
         |
         v
-CodexHub 检测 Compact V2
+MochiPort 检测 Compact V2
         |
         +-> 移除 compaction_trigger
         +-> 展开已有 portable summary
@@ -189,7 +189,7 @@ CodexHub 检测 Compact V2
 旧模型 / 旧 Provider 生成普通文本摘要
         |
         v
-CodexHub 合成 Compact V2 SSE
+MochiPort 合成 Compact V2 SSE
   output item = compaction
   encrypted_content = codexhub:compact:v1:<payload>
         |
@@ -200,7 +200,7 @@ Codex 安装 replacement history
 下一次普通模型请求
         |
         v
-CodexHub 将 portable compaction 替换成 role=user 摘要
+MochiPort 将 portable compaction 替换成 role=user 摘要
         |
         v
 目标 OpenAI / Grok / DeepSeek / Anthropic Provider
@@ -287,7 +287,7 @@ Gateway 内部发起的摘要请求必须带内部标记，禁止再次进入 Co
 - 对不确定事实标注不确定性，不编造完成状态。
 - 输出纯文本，不调用工具，不返回 JSON tool call。
 
-可复用 Codex 当前 `SUMMARY_PREFIX` 和 `SUMMARIZATION_PROMPT` 的语义，但 CodexHub 应保存自己的版本化 prompt，避免上游源码更新后行为无记录地变化。
+可复用 Codex 当前 `SUMMARY_PREFIX` 和 `SUMMARIZATION_PROMPT` 的语义，但 MochiPort 应保存自己的版本化 prompt，避免上游源码更新后行为无记录地变化。
 
 ### 6.4 工具和输出限制
 
@@ -317,7 +317,7 @@ codexhub:compact:v1:<base64url-json>
 ```text
 原生 encrypted_content: OpenAI/Grok Provider 私有 opaque 状态
 codexhub:enc:v1:      Anthropic typed 状态或旧 Responses 迁移格式
-codexhub:compact:v1:  CodexHub 可读取、可跨 Provider 的文本摘要
+codexhub:compact:v1:  MochiPort 可读取、可跨 Provider 的文本摘要
 ```
 
 portable marker 必须在 Provider 私有密文过滤之前识别，不能被 `EncryptedContentScope` 当作 foreign blob 删除。
@@ -374,7 +374,7 @@ Codex V2 collector 要求得到一个 `ResponseItem::Compaction`，不能直接�
 }
 ```
 
-虽然字段名仍是 `encrypted_content`，这里承载的是 CodexHub portable envelope，不应声称它是 OpenAI 原生密文。
+虽然字段名仍是 `encrypted_content`，这里承载的是 MochiPort portable envelope，不应声称它是 OpenAI 原生密文。
 
 SSE 至少保持以下生命周期一致：
 
@@ -392,7 +392,7 @@ response.completed
 4. `response.completed.usage` 应记录内部摘要请求的真实 token 用量，无法取得时才省略。
 5. HTTP 状态、SSE content type 和结束标记必须符合现有 Responses stream 规范。
 
-### 8.1 第一层：Codex -> CodexHub
+### 8.1 第一层：Codex -> MochiPort
 
 Codex 发给 Gateway 的外层请求保持 Compact V2，不改变客户端协议：
 
@@ -420,7 +420,7 @@ X-Codex-Turn-Metadata: {"request_kind":"compaction","compaction":{"reason":"comp
 
 这里的 `model` 是旧模型。Gateway 不把该请求原样发给 OpenAI，而是在 HTTP 响应尚未开始前完成内部摘要调用。
 
-### 8.2 第二层：CodexHub -> 旧 OpenAI Provider
+### 8.2 第二层：MochiPort -> 旧 OpenAI Provider
 
 Gateway 构造普通 Responses 摘要请求：
 
@@ -485,7 +485,7 @@ Gateway 构造普通 Responses 摘要请求：
 
 Gateway 只提取 assistant `output_text`。出现 tool call、空文本或不完整响应时，本次压缩失败。
 
-### 8.3 第三层：CodexHub -> Codex
+### 8.3 第三层：MochiPort -> Codex
 
 普通 assistant 摘要不能原样返回 Codex。Gateway 必须重新包装成 Compact V2 SSE。
 
@@ -670,7 +670,7 @@ portable marker 绝不能原样发给任何上游。
 原则：
 
 1. OpenAI 模型保留模型目录提供的原始 hash。
-2. 非 OpenAI 模型使用 CodexHub 自己的稳定、版本化 hash。
+2. 非 OpenAI 模型使用 MochiPort 自己的稳定、版本化 hash。
 3. 不同协议族的 hash 必须不同。
 4. 同协议族只有在压缩和私有状态语义确实兼容时才能共享 hash。
 5. 改变摘要格式、工具历史降级规则或 Provider 私有状态表示时，应升级对应 hash。
@@ -715,7 +715,7 @@ portable marker 绝不能原样发给任何上游。
 2. base64url 不是加密，日志和诊断包必须按敏感内容处理。
 3. 内部摘要 prompt 必须防止历史 prompt injection。
 4. 不记录 API Key、认证 header、cookie 或原始 token。
-5. `codexhub:compact:v1:` 只能存在于 Codex 与 CodexHub 之间。
+5. `codexhub:compact:v1:` 只能存在于 Codex 与 MochiPort 之间。
 6. portable marker、Anthropic typed marker 和旧 Responses marker 必须使用不同解析器和测试矩阵。
 7. 内部摘要请求不允许调用任何工具。
 

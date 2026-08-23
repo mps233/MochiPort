@@ -12,7 +12,7 @@ Codex remote-control 官方实现支持多个独立逻辑 client。隔离键是�
 
 `client_id` 可以相同，只要 `stream_id` 不同，Codex app-server 侧就会创建不同的 remote-control connection。官方源码里 `ClientTracker` 使用 `HashMap<(ClientId, StreamId), ClientState>`，并有测试覆盖“同一个 client_id 使用新 stream_id 会打开新 connection”。
 
-当前 `codexhub` 已有 `RemoteControlInner.clients: HashMap<String, RemoteControlClientState>`，非 default `client_key` 会派生独立 `stream_id`。问题是 IM 层很多入口仍然走 `default_remote_client_key()`，导致飞书、微信、Telegram 会共享同一条 remote-control stream。一条链路的 pending reset、reinitialize、recovery 可能影响另一条 IM 链路。
+当前 `mochiport` 已有 `RemoteControlInner.clients: HashMap<String, RemoteControlClientState>`，非 default `client_key` 会派生独立 `stream_id`。问题是 IM 层很多入口仍然走 `default_remote_client_key()`，导致飞书、微信、Telegram 会共享同一条 remote-control stream。一条链路的 pending reset、reinitialize、recovery 可能影响另一条 IM 链路。
 
 ## 目标
 

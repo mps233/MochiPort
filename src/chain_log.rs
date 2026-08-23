@@ -43,7 +43,7 @@ pub fn init(
         .with_context(|| format!("failed to open chain log {}", path.display()))?;
     let _ = writeln!(
         file,
-        "\n===== threadrelay start ts_ms={} =====",
+        "\n===== mochiport start ts_ms={} =====",
         timestamp_ms()
     );
     let written_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
@@ -213,7 +213,9 @@ fn is_threadrelay_log_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|value| value.to_str())
         .is_some_and(|name| {
-            (name.starts_with("threadrelay") || name.starts_with("codexhub"))
+            (name.starts_with("mochiport")
+                || name.starts_with("threadrelay")
+                || name.starts_with("codexhub"))
                 && name.contains(".log")
         })
 }
@@ -223,7 +225,7 @@ fn rotated_path(path: &Path) -> PathBuf {
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or("threadrelay-chain.log");
+        .unwrap_or("mochiport-chain.log");
     rotated.set_file_name(format!("{file_name}.1"));
     rotated
 }

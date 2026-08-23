@@ -1,7 +1,7 @@
-ThreadRelay Third-Party Notices
-================================
+MochiPort Third-Party Notices
+=============================
 
-ThreadRelay includes third-party open-source software and visual assets.
+MochiPort includes third-party open-source software and visual assets.
 The dependency inventory and exact versions are recorded in Cargo.lock.
 
 Rust dependencies
@@ -21,7 +21,7 @@ Lucide Icons and Feather-derived icons
 --------------------------------------
 
 The complete ISC and MIT license texts for the Lucide assets distributed with
-ThreadRelay are included in:
+MochiPort are included in:
 
   brand/LICENSE.lucide-icons
 
@@ -29,7 +29,7 @@ LobeHub Icons
 -------------
 
 The complete MIT license text for the LobeHub icon assets distributed with
-ThreadRelay is included in:
+MochiPort is included in:
 
   brand/providers/LICENSE.lobehub-icons
 

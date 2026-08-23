@@ -1,10 +1,10 @@
-# ThreadRelay
+# MochiPort
 
 [中文说明](README.md)
 
-ThreadRelay is a local-first agent session relay. It connects local Codex App, the Codex VS Code extension, and Codex CLI sessions to Telegram, Feishu, WeChat, and WeCom while providing session management and an AI Gateway.
+MochiPort is a local-first agent session relay. It connects local Codex App, the Codex VS Code extension, and Codex CLI sessions to Telegram, Feishu, WeChat, and WeCom while providing session management and an AI Gateway.
 
-This project is derived from [`happy-loki/codexhub`](https://github.com/happy-loki/codexhub) and is now independently maintained by the ThreadRelay maintainers. ThreadRelay is not affiliated with or endorsed by the upstream authors or OpenAI.
+This project is derived from [`happy-loki/codexhub`](https://github.com/happy-loki/codexhub) and is now independently maintained by the MochiPort maintainers. MochiPort is not affiliated with or endorsed by the upstream authors or OpenAI.
 
 ## Product Preview
 
@@ -17,17 +17,17 @@ This project is derived from [`happy-loki/codexhub`](https://github.com/happy-lo
 | Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
 
 <p align="center">
-  <img src="docs/assets/product/threadrelay-overview.png" alt="Current ThreadRelay connection topology and messaging channel overview" width="900">
+  <img src="docs/assets/product/threadrelay-overview.png" alt="Current MochiPort connection topology and messaging channel overview" width="900">
 </p>
 <p align="center">
-  <img src="docs/assets/product/threadrelay-ai-gateway.png" alt="Current ThreadRelay AI Gateway providers and visible models" width="900">
+  <img src="docs/assets/product/threadrelay-ai-gateway.png" alt="Current MochiPort AI Gateway providers and visible models" width="900">
 </p>
 
-AI Gateway is a local model entry built into `threadrelay`. Codex App keeps sending normal Responses-style requests, while `threadrelay` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
+AI Gateway is a local model entry built into `mochiport`. Codex App keeps sending normal Responses-style requests, while `mochiport` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
 
 ## Quick Start
 
-The main ThreadRelay flow is: download the app -> configure a model provider -> connect Telegram, Feishu, WeChat, or WeCom -> connect Codex -> start using Codex from the messaging app. If you only want to use the AI Gateway from the local Codex App or VS Code extension, you can skip messaging channels. Codex CLI still requires starting its own app-server in step 7.
+The main MochiPort flow is: download the app -> configure a model provider -> connect Telegram, Feishu, WeChat, or WeCom -> connect Codex -> start using Codex from the messaging app. If you only want to use the AI Gateway from the local Codex App or VS Code extension, you can skip messaging channels. Codex CLI still requires starting its own app-server in step 7.
 
 ### 0. Prerequisites
 
@@ -39,15 +39,15 @@ The main ThreadRelay flow is: download the app -> configure a model provider -> 
 
 ### 1. Install
 
-Download `ThreadRelay.dmg` from [ThreadRelay Releases](https://github.com/mps233/threadrelay/releases), drag it to Applications, then open it. On Windows, run `ThreadRelay.exe` from the release package. On Linux, download `ThreadRelay Linux x86_64.AppImage`, make it executable, then double-click it.
+Download the appropriate package from [MochiPort Releases](https://github.com/mps233/mochiport/releases). On macOS, open `MochiPort-<version>-macos-<architecture>.dmg` and drag MochiPort to Applications. On Windows, install `MochiPort-<version>-windows-x64.msi` or run `MochiPort.exe` from the ZIP package. On Linux, download `MochiPort-<version>-linux-x86_64.AppImage`, make it executable, then open it.
 
-If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs per-user LaunchAgents that keep the local backend running and recover the GUI after an abnormal exit; a normal GUI quit does not reopen the window. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x "ThreadRelay Linux x86_64.AppImage"` once.
+If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs per-user LaunchAgents that keep the local backend running and recover the GUI after an abnormal exit; a normal GUI quit does not reopen the window. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x MochiPort-*-linux-x86_64.AppImage` once.
 
 Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The MVP only opens the download page; it does not silently replace the local app.
 
 ### 2. Open The App
 
-Open `ThreadRelay`. The GUI ensures that the local backend is running. On macOS, the LaunchAgent-managed backend continues running after the GUI exits.
+Open `MochiPort`. The GUI ensures that the local backend is running. On macOS, the LaunchAgent-managed backend continues running after the GUI exits.
 
 Continue when the status overview shows the local service is running.
 
@@ -76,29 +76,29 @@ If the upstream model name differs from the name you want to expose in Codex, us
 
 If a provider rejects Codex's image generation tool, enable `Filter image generation tool`. It takes effect immediately and removes `image_generation` from outgoing AI Gateway requests.
 
-### 5. Let ThreadRelay Take Over Codex
+### 5. Let MochiPort Take Over Codex
 
-Turn on `连接 ThreadRelay` on the `Codex 接入` page. This single switch starts the local ThreadRelay connection for Codex App and the Codex VS Code extension.
+Turn on `连接 MochiPort` on the `Codex 接入` page. This single switch starts the local MochiPort connection for Codex App and the Codex VS Code extension.
 
-Turning the switch off first restores the Codex connection from before setup, then stops ThreadRelay for Codex. The restore action is shown only after Codex config has been written.
+Turning the switch off first restores the Codex connection from before setup, then stops MochiPort for Codex. The restore action is shown only after Codex config has been written.
 
 ### 6. Open Codex
 
 Open Codex App or the Codex VS Code extension normally, then enable remote-control / control this computer.
 
-When connected, `ThreadRelay` shows the Codex control channel as connected.
+When connected, `MochiPort` shows the Codex control channel as connected.
 
-ThreadRelay reads the current Codex App's local sessions through its remote-control connection. No import, file copy, or session migration is required. The list can be empty when Codex App is not running, remote-control is disconnected, or a session has not been written to the Codex state database yet.
+MochiPort reads the current Codex App's local sessions through its remote-control connection. No import, file copy, or session migration is required. The list can be empty when Codex App is not running, remote-control is disconnected, or a session has not been written to the Codex state database yet.
 
-You do not need to see a remote device list in Codex App's connection settings. This project uses a local backend plus IM bridge. If the `ThreadRelay` status overview is normal, you can use it directly from the connected IM channel.
+You do not need to see a remote device list in Codex App's connection settings. This project uses a local backend plus IM bridge. If the `MochiPort` status overview is normal, you can use it directly from the connected IM channel.
 
-If Codex App, the Codex VS Code extension, and Codex CLI are connected to `ThreadRelay` at the same time, new or resumed IM sessions choose the execution endpoint by fixed priority: Codex App > Codex VS Code extension > Codex CLI. After a session is bound, later messages keep using the selected endpoint until the IM session exits or binds again.
+If Codex App, the Codex VS Code extension, and Codex CLI are connected to `MochiPort` at the same time, new or resumed IM sessions choose the execution endpoint by fixed priority: Codex App > Codex VS Code extension > Codex CLI. After a session is bound, later messages keep using the selected endpoint until the IM session exits or binds again.
 
 ### 7. Use Codex CLI
 
 If you want Codex CLI to work with Feishu / Telegram / WeChat, you do not need to replace the `codex` command or install a wrapper. Use the same three-step flow on macOS, Windows, and Linux.
 
-1. Open the `ThreadRelay` desktop app, finish IM channel setup and Codex access, and keep it running.
+1. Open the `MochiPort` desktop app, finish IM channel setup and Codex access, and keep it running.
 
 2. Open a terminal in the project directory and start Codex app-server:
 
@@ -124,15 +124,15 @@ The WeChat path depends on a context token issued by the WeChat client. During l
 
 ## Network and Proxy
 
-The Network menu provides three outbound modes: use the system proxy, connect directly, or use a custom HTTP/SOCKS5 proxy. This setting only affects requests ThreadRelay sends to model providers, WeChat, Telegram, Feishu HTTP APIs, and update endpoints. It does not modify macOS `launchctl`, Windows user environment variables, or networking for other applications.
+The Network menu provides three outbound modes: use the system proxy, connect directly, or use a custom HTTP/SOCKS5 proxy. This setting only affects requests MochiPort sends to model providers, WeChat, Telegram, Feishu HTTP APIs, and update endpoints. It does not modify macOS `launchctl`, Windows user environment variables, or networking for other applications.
 
-For a local Clash or V2Ray proxy, select the custom proxy option and enter `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`. The setting applies immediately while the daemon is running. Loopback communication between the GUI, Codex App, VS Code, and ThreadRelay does not use this outbound proxy.
+For a local Clash or V2Ray proxy, select the custom proxy option and enter `http://127.0.0.1:7890` or `socks5://127.0.0.1:1080`. The setting applies immediately while the daemon is running. Loopback communication between the GUI, Codex App, VS Code, and MochiPort does not use this outbound proxy.
 
 TUN and Network Extension VPNs operate below the HTTP proxy layer. If such a VPN intercepts loopback traffic, exclude `localhost`, `127.0.0.1`, and `::1` in the VPN application.
 
 ## AI Gateway
 
-AI Gateway solves one practical problem: Codex expects its native model entry, but users often want to use more model providers. After providers are configured in the GUI, Codex App still sees a normal model list; `threadrelay` handles provider routing and protocol conversion locally.
+AI Gateway solves one practical problem: Codex expects its native model entry, but users often want to use more model providers. After providers are configured in the GUI, Codex App still sees a normal model list; `mochiport` handles provider routing and protocol conversion locally.
 
 Current highlights:
 
@@ -150,7 +150,7 @@ All of this is configured from the GUI. Users do not need to hand-edit config fi
 
 ## Community And Support
 
-For questions or feedback, open an issue in [ThreadRelay Issues](https://github.com/mps233/threadrelay/issues).
+For questions or feedback, open an issue in [MochiPort Issues](https://github.com/mps233/mochiport/issues).
 
 ## IM Commands
 
@@ -178,13 +178,13 @@ Approval prompts are updated after selection where the platform supports it.
 
 ## Restore Codex Config
 
-Click `Restore Previous Settings` in the GUI to restore the Codex connection from before setup. After restore, Codex App no longer sends model requests through ThreadRelay.
+Click `Restore Previous Settings` in the GUI to restore the Codex connection from before setup. After restore, Codex App no longer sends model requests through MochiPort.
 
 This does not uninstall Codex and does not delete Codex session history.
 
 ## Project Boundary
 
-`threadrelay` only supports the clean official Codex remote-control path.
+`mochiport` only supports the clean official Codex remote-control path.
 
 It does not:
 
@@ -193,7 +193,7 @@ It does not:
 - launch Codex App through a shim
 - change Codex model, sandbox, approval policy, cwd, or environment
 
-The macOS client installs only per-user LaunchAgents for ThreadRelay itself, not a system-wide service. They keep the local backend running and recover the GUI only after an abnormal exit; a normal GUI quit stays quit.
+The macOS client installs only per-user LaunchAgents for MochiPort itself, not a system-wide service. They keep the local backend running and recover the GUI only after an abnormal exit; a normal GUI quit stays quit.
 
 ## Technical Notes
 
@@ -209,7 +209,7 @@ official Codex app-server
   |
   | outbound remote-control websocket
   v
-threadrelay local backend
+MochiPort local backend
   |
   | Feishu websocket events
   | Feishu message/card APIs
@@ -244,7 +244,7 @@ Thread binding model:
 ```powershell
 cargo fmt
 cargo test
-cargo build --release --features gui --bin threadrelay
+cargo build --release --features gui --bin mochiport
 ```
 
 Useful status endpoints while the daemon is running:
@@ -274,9 +274,10 @@ GET http://127.0.0.1:3847/api/events
 
 ## Independent Maintenance And Compatibility
 
-- New installations use the ThreadRelay name, independent application identifiers, and the `threadrelay` command.
-- Existing CodexHub users continue to load the legacy config directory and `CODEXHUB_HOME`, preserving IM credentials, session bindings, and provider configuration.
-- Independent releases update only from [`mps233/threadrelay`](https://github.com/mps233/threadrelay); maintainers can still selectively merge upstream changes.
+- New installations use the MochiPort name, the `MochiPort` config directory, and the `mochiport` command.
+- Existing ThreadRelay and CodexHub users continue to load the legacy config directories, `THREADRELAY_*` and `CODEXHUB_*` environment variables, preserving IM credentials, session bindings, and provider configuration.
+- Releases and update metadata are published only from [`mps233/mochiport`](https://github.com/mps233/mochiport); maintainers can still selectively merge upstream changes.
+- ThreadRelay `0.5.0` and `0.5.1` still point at the retired update URL. There is no compatibility repository, so those users must install one MochiPort release manually before future update checks follow the new repository.
 
 ## License
 
