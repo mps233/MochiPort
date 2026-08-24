@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "MochiPort",
+  "version": "0.5.3",
+  "identifier": "io.github.mps233.mochiport.windows",
+  "build": {
+    "runner": {
+      "cmd": "cargo",
+      "args": ["--locked"]
+    },
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "MochiPort",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 920,
+        "minHeight": 620,
+        "center": true,
+        "decorations": false,
+        "transparent": false,
+        "shadow": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["msi"],
+    "publisher": "mps233",
+    "license": "Apache-2.0",
+    "licenseFile": "../../../LICENSE",
+    "resources": [
+      "../../../LICENSE",
+      "../../../NOTICE",
+      "../../../packaging/THIRD_PARTY_LICENSES.txt",
+      "../../../packaging/brand/LICENSE.lucide-icons",
+      "../../../packaging/brand/providers/LICENSE.lobehub-icons",
+      "../../../packaging/brand/providers/SOURCES.md"
+    ],
+    "shortDescription": "Local-first bridge for controlling coding agents from chat",
+    "windows": {
+      "allowDowngrades": false,
+      "wix": {
+        "upgradeCode": "9076a4b1-d8c3-43bd-b358-513d31bf97bf",
+        "language": "en-US"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      }
+    },
+    "icon": ["../../../packaging/icons/AppIcon.ico"]
+  }
+}

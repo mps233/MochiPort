@@ -4,6 +4,13 @@
 /macos/ThreadRelay/.build
 /macos/ThreadRelay/.derived-data
 /macos/ThreadRelay/.swiftpm
+/windows/MochiPort/node_modules
+/windows/MochiPort/dist
+/windows/MochiPort/test-results
+/windows/MochiPort/playwright-report
+/windows/MochiPort/src-tauri/target
+/windows/MochiPort/src-tauri/gen
+/windows/MochiPort/src-tauri/binaries/*.exe
 .DS_Store
 config.toml
 codexhub-state.json

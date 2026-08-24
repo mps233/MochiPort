@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": ["binaries/mochiport-daemon"],
+    "resources": [
+      "../../../LICENSE",
+      "../../../NOTICE",
+      "../../../packaging/THIRD_PARTY_LICENSES.txt",
+      "../../../packaging/brand/LICENSE.lucide-icons",
+      "../../../packaging/brand/providers/LICENSE.lobehub-icons",
+      "../../../packaging/brand/providers/SOURCES.md"
+    ]
+  }
+}
