@@ -69,6 +69,7 @@ def main() -> int:
                 ],
                 cwd=repository_root,
                 text=True,
+                encoding="utf-8",
             )
         )
         root_package_id = metadata.get("resolve", {}).get("root")
