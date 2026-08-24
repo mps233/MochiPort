@@ -59,7 +59,7 @@ src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\
 3. 生成并签署唯一公开安装器 MSI；不再构建或发布 NSIS，以避免两套安装技术产生重复卸载登记。
 4. 生成含 GUI 与 sidecar 的 portable ZIP、Windows 更新 JSON 和 appcast，并沿用 GitHub Release 发布约定。
 
-正式 `v<version>` tag 必须同时配置以下两个签名 secret，否则 workflow 会在构建前失败。手动分支运行不会使用正式签名凭据，只上传名称明确标注为 `unsigned` 的内部 artifact。
+正式 `v<version>` tag 只有在同时配置以下两个签名 secret 时才会签名；如果 secret 缺失，workflow 会继续生成名称明确标注为 `unsigned` 的 MSI 和 ZIP，不会在构建前失败。手动分支运行同样不会使用正式签名凭据，只上传 `unsigned` 的内部 artifact。
 
 签名 secret 名称保持为：
 

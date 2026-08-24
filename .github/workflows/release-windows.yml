@@ -22,13 +22,18 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Require Code Signing for Release Tags
-        if: env.IS_WINDOWS_RELEASE == 'true'
+      - name: Report Windows Code Signing Mode
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          if ($env:HAS_WINDOWS_CODESIGN -ne "true") {
-            throw "Formal Windows releases require both WINDOWS_CODESIGN_PFX_BASE64 and WINDOWS_CODESIGN_PFX_PASSWORD"
+          $willSign = $env:IS_WINDOWS_RELEASE -eq "true" -and $env:HAS_WINDOWS_CODESIGN -eq "true"
+          if ($env:IS_WINDOWS_RELEASE -eq "true" -and -not $willSign) {
+            Write-Warning "Windows signing secrets are unavailable; continuing with unsigned MSI and ZIP artifacts"
+          }
+          if ($willSign) {
+            "WINDOWS_SIGNING_STATUS=signed" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            "WINDOWS_SIGNING_STATUS=unsigned" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           }
 
       - name: Prepare Release Metadata
@@ -101,7 +106,7 @@ jobs:
           }
           $productVersion = $numericSegments -join "."
 
-          $artifactLabel = if ($env:IS_WINDOWS_RELEASE -eq "true") { "signed" } else { "unsigned" }
+          $artifactLabel = $env:WINDOWS_SIGNING_STATUS
 
           $releaseConfigPath = Join-Path $env:RUNNER_TEMP "tauri.release.conf.json"
           [ordered]@{ version = $cargoVersion } |
@@ -379,7 +384,7 @@ jobs:
                 url = $msiUrl
                 sha256 = $msiHash
                 size = $msiSize
-                signed = $env:HAS_WINDOWS_CODESIGN -eq "true"
+                signed = $env:WINDOWS_SIGNING_STATUS -eq "signed"
               }
               "windows-portable-x86_64" = [ordered]@{
                 type = "zip"
