@@ -4,8 +4,8 @@
 from __future__ import annotations
 
 import json
+import argparse
 import subprocess
-import sys
 from collections import OrderedDict
 from pathlib import Path
 
@@ -33,29 +33,50 @@ def package_notice_files(package: dict[str, object]) -> list[Path]:
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print(f"usage: {Path(sys.argv[0]).name} OUTPUT", file=sys.stderr)
-        return 2
+    parser = argparse.ArgumentParser(
+        description="Collect Cargo dependency notices into a deterministic release document."
+    )
+    parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--manifest-path",
+        action="append",
+        default=[],
+        help="Cargo manifest to include; may be repeated (defaults to the repository root).",
+    )
+    args = parser.parse_args()
 
     repository_root = Path(__file__).resolve().parent.parent
-    output_path = Path(sys.argv[1])
+    output_path = args.output
     if not output_path.is_absolute():
         output_path = repository_root / output_path
 
-    metadata = json.loads(
-        subprocess.check_output(
-            ["cargo", "metadata", "--locked", "--format-version", "1"],
-            cwd=repository_root,
-            text=True,
+    manifest_paths = [
+        (repository_root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+        for path in (args.manifest_path or ["Cargo.toml"])
+    ]
+    packages_by_id: dict[str, dict[str, object]] = {}
+    for manifest_path in manifest_paths:
+        metadata = json.loads(
+            subprocess.check_output(
+                [
+                    "cargo",
+                    "metadata",
+                    "--manifest-path",
+                    str(manifest_path),
+                    "--locked",
+                    "--format-version",
+                    "1",
+                ],
+                cwd=repository_root,
+                text=True,
+            )
         )
-    )
-    root_package_id = metadata.get("resolve", {}).get("root")
+        root_package_id = metadata.get("resolve", {}).get("root")
+        for package in metadata["packages"]:
+            if package["id"] != root_package_id:
+                packages_by_id.setdefault(package["id"], package)
     packages = sorted(
-        (
-            package
-            for package in metadata["packages"]
-            if package["id"] != root_package_id
-        ),
+        packages_by_id.values(),
         key=lambda package: (package["name"].casefold(), package["version"], package["id"]),
     )
 

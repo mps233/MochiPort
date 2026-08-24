@@ -13,72 +13,211 @@ jobs:
   build-package:
     runs-on: windows-2022
     env:
-      HAS_WINDOWS_CODESIGN: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 != '' }}
+      HAS_WINDOWS_CODESIGN: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 != '' && secrets.WINDOWS_CODESIGN_PFX_PASSWORD != '' }}
+      IS_WINDOWS_RELEASE: ${{ startsWith(github.ref, 'refs/tags/v') }}
+      TAURI_TARGET: x86_64-pc-windows-msvc
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install .NET SDK
-        uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: 8.0.x
+          persist-credentials: false
 
-      - name: Restore Cargo Cache
-        uses: Swatinem/rust-cache@v2
+      - name: Require Code Signing for Release Tags
+        if: env.IS_WINDOWS_RELEASE == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:HAS_WINDOWS_CODESIGN -ne "true") {
+            throw "Formal Windows releases require both WINDOWS_CODESIGN_PFX_BASE64 and WINDOWS_CODESIGN_PFX_PASSWORD"
+          }
 
       - name: Prepare Release Metadata
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $cargoToml = Get-Content "Cargo.toml" -Raw
-          if ($cargoToml -match '(?m)^version\s*=\s*"([^"]+)"') {
-            $cargoVersion = $Matches[1]
-          } else {
-            throw "Could not read package version from Cargo.toml"
+
+          function Read-CargoPackageVersion {
+            param([Parameter(Mandatory = $true)][string]$Path)
+
+            $inPackageSection = $false
+            foreach ($line in Get-Content -LiteralPath $Path) {
+              if ($line -match '^\s*\[package\]\s*$') {
+                $inPackageSection = $true
+                continue
+              }
+              if ($inPackageSection -and $line -match '^\s*\[') {
+                break
+              }
+              if ($inPackageSection -and $line -match '^\s*version\s*=\s*"([^"]+)"') {
+                return $Matches[1]
+              }
+            }
+            throw "Could not read [package].version from $Path"
           }
+
+          $versions = [ordered]@{
+            "Cargo.toml" = (Read-CargoPackageVersion "Cargo.toml")
+            "windows/MochiPort/src-tauri/Cargo.toml" = (Read-CargoPackageVersion "windows/MochiPort/src-tauri/Cargo.toml")
+            "windows/MochiPort/package.json" = (Get-Content "windows/MochiPort/package.json" -Raw | ConvertFrom-Json).version
+            "windows/MochiPort/src-tauri/tauri.conf.json" = (Get-Content "windows/MochiPort/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json).version
+          }
+          $versionValues = @($versions.Values | ForEach-Object { [string]$_ })
+          if ($versionValues | Where-Object { [string]::IsNullOrWhiteSpace($_) }) {
+            throw "Every release manifest must declare a non-empty version"
+          }
+          if (@($versionValues | Where-Object { $_ -cne $versionValues[0] }).Count -ne 0) {
+            $versionDetails = ($versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ", "
+            throw "Release versions do not match: $versionDetails"
+          }
+          $cargoVersion = $versionValues[0]
 
           $refType = "${{ github.ref_type }}"
           $refName = "${{ github.ref_name }}"
           if ($refType -eq "tag") {
-            $appVersion = $refName
+            $expectedTag = "v$cargoVersion"
+            if ($refName -cne $expectedTag) {
+              throw "Release tag must exactly match $expectedTag, got $refName"
+            }
+            $appVersion = $expectedTag
           } else {
             $appVersion = "v$cargoVersion"
           }
 
-          $productVersion = ($cargoVersion -split '[-+]')[0]
+          $productVersion = ($cargoVersion -split '[-+]', 2)[0]
           $segments = @($productVersion.Split(".") | ForEach-Object { $_.Trim() })
-          if ($segments.Count -lt 3) {
-            throw "MSI ProductVersion must have at least three numeric segments: $productVersion"
+          if ($segments.Count -ne 3) {
+            throw "MSI ProductVersion must have exactly three numeric segments: $productVersion"
           }
-          $productVersion = "$($segments[0]).$($segments[1]).$($segments[2])"
-          if ($productVersion -notmatch '^\d+\.\d+\.\d+$') {
-            throw "MSI ProductVersion must be numeric: $productVersion"
+          $limits = @([uint64]255, [uint64]255, [uint64]65535)
+          $numericSegments = for ($index = 0; $index -lt 3; $index++) {
+            [uint64]$parsed = 0
+            if (-not [uint64]::TryParse($segments[$index], [ref]$parsed)) {
+              throw "MSI ProductVersion must be numeric: $productVersion"
+            }
+            if ($parsed -gt $limits[$index]) {
+              throw "MSI ProductVersion segment $index exceeds $($limits[$index]): $productVersion"
+            }
+            $parsed
           }
+          $productVersion = $numericSegments -join "."
+
+          $artifactLabel = if ($env:IS_WINDOWS_RELEASE -eq "true") { "signed" } else { "unsigned" }
+
+          $releaseConfigPath = Join-Path $env:RUNNER_TEMP "tauri.release.conf.json"
+          [ordered]@{ version = $cargoVersion } |
+            ConvertTo-Json |
+            Set-Content -LiteralPath $releaseConfigPath -Encoding utf8
 
           "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "PRODUCT_VERSION=$productVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAURI_RELEASE_CONFIG=$releaseConfigPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_ARTIFACT_NAME=MochiPort-Windows-$artifactLabel" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "WINDOWS_ZIP_NAME=MochiPort-$appVersion-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "WINDOWS_MSI_NAME=MochiPort-$appVersion-windows-x64.msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Reset wxWidgets CMake Cache
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: windows/MochiPort/package-lock.json
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            windows/MochiPort/src-tauri -> target
+
+      - name: Install Frontend Dependencies
+        working-directory: windows/MochiPort
+        run: npm ci
+
+      - name: Build Daemon Sidecar
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          Remove-Item -Recurse -Force "target\release\wxwidgets_cmake_build" -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force "target\release\wxdragon_sys_cmake_build" -ErrorAction SilentlyContinue
+          & "windows\MochiPort\scripts\build-sidecar.ps1" `
+            -TargetTriple $env:TAURI_TARGET `
+            -Profile Release `
+            -BuildNumber "${{ github.run_number }}"
 
-      - name: Build Release
+      - name: Prepare Windows License Resources
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $env:MOCHIPORT_BUILD_NUMBER = "${{ github.run_number }}"
-          cargo build --locked --release --features gui --bin mochiport
+          $licenseRoot = Join-Path $env:RUNNER_TEMP "mochiport-license-resources"
+          Remove-Item -Recurse -Force $licenseRoot -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force (Join-Path $licenseRoot "legal\brand\providers") | Out-Null
 
-      - name: Sign Binaries
-        if: env.HAS_WINDOWS_CODESIGN == 'true'
+          $generatedThirdParty = Join-Path $licenseRoot "legal\THIRD_PARTY_LICENSES.txt"
+          python "packaging\generate-third-party-licenses.py" $generatedThirdParty `
+            --manifest-path Cargo.toml `
+            --manifest-path windows\MochiPort\src-tauri\Cargo.toml
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not generate the Windows third-party license inventory"
+          }
+
+          $sourceFiles = [ordered]@{
+            (Resolve-Path "LICENSE").Path = "legal/LICENSE"
+            (Resolve-Path "NOTICE").Path = "legal/NOTICE"
+            (Resolve-Path $generatedThirdParty).Path = "legal/THIRD_PARTY_LICENSES.txt"
+            (Resolve-Path "packaging\brand\LICENSE.lucide-icons").Path = "legal/brand/LICENSE.lucide-icons"
+            (Resolve-Path "packaging\brand\providers\LICENSE.lobehub-icons").Path = "legal/brand/providers/LICENSE.lobehub-icons"
+            (Resolve-Path "packaging\brand\providers\SOURCES.md").Path = "legal/brand/providers/SOURCES.md"
+          }
+          foreach ($sourcePath in $sourceFiles.Keys) {
+            if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) {
+              throw "Required Windows license resource is missing: $sourcePath"
+            }
+          }
+          $expectedDestinations = @(
+            "legal/LICENSE",
+            "legal/NOTICE",
+            "legal/THIRD_PARTY_LICENSES.txt",
+            "legal/brand/LICENSE.lucide-icons",
+            "legal/brand/providers/LICENSE.lobehub-icons",
+            "legal/brand/providers/SOURCES.md"
+          )
+          $actualDestinations = @($sourceFiles.Values)
+          if ($actualDestinations.Count -ne $expectedDestinations.Count -or
+              (@($actualDestinations | Where-Object { $expectedDestinations -notcontains $_ }).Count -ne 0) -or
+              (@($expectedDestinations | Where-Object { $actualDestinations -notcontains $_ }).Count -ne 0)) {
+            throw "Windows license resource map does not contain the expected six MSI destinations"
+          }
+
+          $releaseVersion = (Get-Content -LiteralPath $env:TAURI_RELEASE_CONFIG -Raw | ConvertFrom-Json).version
+          [ordered]@{
+            version = $releaseVersion
+            bundle = [ordered]@{
+              resources = $sourceFiles
+            }
+          } |
+            ConvertTo-Json -Depth 8 |
+            Set-Content -LiteralPath $env:TAURI_RELEASE_CONFIG -Encoding utf8
+
+          "WINDOWS_LICENSE_ROOT=$licenseRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_LICENSE_RESOURCE_COUNT=$($sourceFiles.Count)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Build Tauri Application
+        shell: pwsh
+        working-directory: windows/MochiPort
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm run tauri -- build `
+            --target $env:TAURI_TARGET `
+            --config $env:TAURI_RELEASE_CONFIG `
+            --no-bundle `
+            --no-sign `
+            --ci
+
+      - name: Prepare Windows Code Signing
+        if: env.IS_WINDOWS_RELEASE == 'true' && env.HAS_WINDOWS_CODESIGN == 'true'
         shell: pwsh
         env:
           WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
@@ -96,18 +235,80 @@ jobs:
             throw "signtool.exe not found in Windows SDK"
           }
 
+          "WINDOWS_CODESIGN_CERT=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_SIGNTOOL=$($signtool.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Sign Tauri and Sidecar Executables
+        if: env.IS_WINDOWS_RELEASE == 'true' && env.HAS_WINDOWS_CODESIGN == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
           $files = @(
-            "target\release\mochiport.exe"
+            "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\mochiport-windows.exe",
+            "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\mochiport-daemon.exe",
+            "windows\MochiPort\src-tauri\binaries\mochiport-daemon-$env:TAURI_TARGET.exe"
           )
           foreach ($file in $files) {
-            & $signtool.FullName sign `
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Expected executable was not produced: $file"
+            }
+            & $env:WINDOWS_SIGNTOOL sign `
               /fd SHA256 `
               /td SHA256 `
               /tr "http://timestamp.digicert.com" `
-              /f $certPath `
+              /f $env:WINDOWS_CODESIGN_CERT `
               /p $env:WINDOWS_CODESIGN_PFX_PASSWORD `
               $file
-            & $signtool.FullName verify /pa /v $file
+            if ($LASTEXITCODE -ne 0) {
+              throw "signtool failed for $file"
+            }
+            & $env:WINDOWS_SIGNTOOL verify /pa /v $file
+            if ($LASTEXITCODE -ne 0) {
+              throw "signature verification failed for $file"
+            }
+          }
+
+      - name: Build Tauri MSI Bundle
+        shell: pwsh
+        working-directory: windows/MochiPort
+        run: |
+          $ErrorActionPreference = "Stop"
+          npm run tauri -- bundle `
+            --target $env:TAURI_TARGET `
+            --bundles msi `
+            --config $env:TAURI_RELEASE_CONFIG `
+            --no-sign `
+            --ci
+
+      - name: Sign Tauri MSI
+        if: env.IS_WINDOWS_RELEASE == 'true' && env.HAS_WINDOWS_CODESIGN == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $bundleRoot = "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\bundle"
+          $msiFiles = @(Get-ChildItem -LiteralPath (Join-Path $bundleRoot "msi") -Filter "*.msi" -File)
+          if ($msiFiles.Count -ne 1) {
+            throw "Expected exactly one Tauri MSI, found $($msiFiles.Count)"
+          }
+
+          $file = $msiFiles[0].FullName
+          & $env:WINDOWS_SIGNTOOL sign `
+            /fd SHA256 `
+            /td SHA256 `
+            /tr "http://timestamp.digicert.com" `
+            /f $env:WINDOWS_CODESIGN_CERT `
+            /p $env:WINDOWS_CODESIGN_PFX_PASSWORD `
+            $file
+          if ($LASTEXITCODE -ne 0) {
+            throw "signtool failed for $file"
+          }
+          & $env:WINDOWS_SIGNTOOL verify /pa /v $file
+          if ($LASTEXITCODE -ne 0) {
+            throw "signature verification failed for $file"
           }
 
       - name: Stage Distribution Files
@@ -116,113 +317,38 @@ jobs:
           $ErrorActionPreference = "Stop"
           $distRoot = "target\dist"
           $zipDist = Join-Path $distRoot "MochiPort Windows x64"
-          $msiSource = "target\msi-source"
+          $bundleRoot = "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\bundle"
+          $guiExecutable = "windows\MochiPort\src-tauri\target\$env:TAURI_TARGET\release\mochiport-windows.exe"
+          $sidecarExecutable = "windows\MochiPort\src-tauri\binaries\mochiport-daemon-$env:TAURI_TARGET.exe"
+          $msiFiles = @(Get-ChildItem -LiteralPath (Join-Path $bundleRoot "msi") -Filter "*.msi" -File)
+          if ($msiFiles.Count -ne 1) {
+            throw "Expected exactly one Tauri MSI, found $($msiFiles.Count)"
+          }
+
           Remove-Item -Recurse -Force $distRoot -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force $msiSource -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force $zipDist | Out-Null
-          New-Item -ItemType Directory -Force $msiSource | Out-Null
           New-Item -ItemType Directory -Force (Join-Path $zipDist "brand\providers") | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $msiSource "brand\providers") | Out-Null
 
-          python "packaging\generate-third-party-licenses.py" (Join-Path $distRoot "THIRD_PARTY_LICENSES.txt")
+          $thirdPartyLicenses = Join-Path $env:WINDOWS_LICENSE_ROOT "legal\THIRD_PARTY_LICENSES.txt"
+          if (-not (Test-Path -LiteralPath $thirdPartyLicenses -PathType Leaf)) {
+            throw "The license resource used by the MSI was not generated: $thirdPartyLicenses"
+          }
 
-          Copy-Item "target\release\mochiport.exe" (Join-Path $zipDist "MochiPort.exe")
+          Copy-Item -LiteralPath $guiExecutable -Destination (Join-Path $zipDist "MochiPort.exe")
+          Copy-Item -LiteralPath $sidecarExecutable -Destination (Join-Path $zipDist "mochiport-daemon.exe")
+          Copy-Item "windows\MochiPort\README.md" (Join-Path $zipDist "README-Windows.md")
           Copy-Item "README.md" $zipDist
           Copy-Item "README.en.md" $zipDist
+          Copy-Item "config.example.toml" $zipDist
           Copy-Item "LICENSE" $zipDist
           Copy-Item "NOTICE" $zipDist
-          Copy-Item (Join-Path $distRoot "THIRD_PARTY_LICENSES.txt") $zipDist
+          Copy-Item -LiteralPath $thirdPartyLicenses -Destination (Join-Path $zipDist "THIRD_PARTY_LICENSES.txt")
           Copy-Item "packaging\brand\LICENSE.lucide-icons" (Join-Path $zipDist "brand")
           Copy-Item "packaging\brand\providers\LICENSE.lobehub-icons" (Join-Path $zipDist "brand\providers")
           Copy-Item "packaging\brand\providers\SOURCES.md" (Join-Path $zipDist "brand\providers")
-          if (Test-Path "config.example.toml") {
-            Copy-Item "config.example.toml" $zipDist
-          }
 
-          Copy-Item "target\release\mochiport.exe" (Join-Path $msiSource "MochiPort.exe")
-          Copy-Item "README.md" $msiSource
-          Copy-Item "README.en.md" $msiSource
-          Copy-Item "config.example.toml" $msiSource
-          Copy-Item "LICENSE" $msiSource
-          Copy-Item "NOTICE" $msiSource
-          Copy-Item (Join-Path $distRoot "THIRD_PARTY_LICENSES.txt") $msiSource
-          Copy-Item "packaging\brand\LICENSE.lucide-icons" (Join-Path $msiSource "brand")
-          Copy-Item "packaging\brand\providers\LICENSE.lobehub-icons" (Join-Path $msiSource "brand\providers")
-          Copy-Item "packaging\brand\providers\SOURCES.md" (Join-Path $msiSource "brand\providers")
-          Copy-Item "packaging\icons\AppIcon.ico" $msiSource
-
-          $zip = Join-Path $distRoot $env:WINDOWS_ZIP_NAME
-          Compress-Archive -Path "$zipDist\*" -DestinationPath $zip -Force
-
-      - name: Install WiX Toolset
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          dotnet tool install --global wix --version 7.0.0
-          $wix = Join-Path $env:USERPROFILE ".dotnet\tools\wix.exe"
-          if (-not (Test-Path $wix)) {
-            throw "WiX 7 executable was not installed at $wix"
-          }
-          & $wix eula accept wix7
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not accept the WiX 7 OSMF EULA"
-          }
-          & $wix extension add -g WixToolset.UI.wixext/7.0.0
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not install the WiX UI extension"
-          }
-          & $wix extension list -g
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not list the WiX extension cache"
-          }
-          & $wix --version
-
-      - name: Build MSI
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $wix = Join-Path $env:USERPROFILE ".dotnet\tools\wix.exe"
-          if (-not (Test-Path $wix)) {
-            $wix = "wix"
-          }
-          $sourceDir = (Resolve-Path "target\msi-source").Path
-          $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
-          & $wix build "packaging\windows\MochiPort.wxs" `
-            -ext WixToolset.UI.wixext/7.0.0 `
-            -acceptEula wix7 `
-            -arch x64 `
-            -d "ProductVersion=$env:PRODUCT_VERSION" `
-            -d "SourceDir=$sourceDir" `
-            -out $msiPath
-
-      - name: Sign MSI
-        if: env.HAS_WINDOWS_CODESIGN == 'true'
-        shell: pwsh
-        env:
-          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
-          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $certPath = Join-Path $env:RUNNER_TEMP "windows-codesign.pfx"
-          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
-
-          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe |
-            Where-Object { $_.FullName -match "\\x64\\signtool.exe$" } |
-            Sort-Object FullName -Descending |
-            Select-Object -First 1
-          if (-not $signtool) {
-            throw "signtool.exe not found in Windows SDK"
-          }
-
-          $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
-          & $signtool.FullName sign `
-            /fd SHA256 `
-            /td SHA256 `
-            /tr "http://timestamp.digicert.com" `
-            /f $certPath `
-            /p $env:WINDOWS_CODESIGN_PFX_PASSWORD `
-            $msiPath
-          & $signtool.FullName verify /pa /v $msiPath
+          Copy-Item -LiteralPath $msiFiles[0].FullName -Destination (Join-Path $distRoot $env:WINDOWS_MSI_NAME)
+          Compress-Archive -Path "$zipDist\*" -DestinationPath (Join-Path $distRoot $env:WINDOWS_ZIP_NAME) -Force
 
       - name: Write Windows Update Metadata
         if: startsWith(github.ref, 'refs/tags/')
@@ -297,7 +423,7 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MochiPort-Windows
+          name: ${{ env.WINDOWS_ARTIFACT_NAME }}
           path: |
             target/dist/MochiPort-*-windows-x64.zip
             target/dist/MochiPort-*-windows-x64.msi
@@ -308,7 +434,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          overwrite_files: true
           body_path: RELEASE_NOTES.md
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
