@@ -603,6 +603,7 @@ private struct OverviewSectionHeading: View {
     let trailing: String?
     let isRefreshing: Bool
     let onRefresh: (() -> Void)?
+    @State private var isRefreshHovered = false
 
     init(
         title: String,
@@ -633,8 +634,11 @@ private struct OverviewSectionHeading: View {
             Spacer(minLength: 12)
             if let trailing {
                 Text(trailing)
-                    .font(.caption.monospacedDigit())
+                    .font(.caption.monospacedDigit().weight(.medium))
                     .foregroundStyle(.secondary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.045), in: Capsule())
             }
             if let onRefresh {
                 Button(action: onRefresh) {
@@ -645,10 +649,20 @@ private struct OverviewSectionHeading: View {
                             .controlSize(.small)
                             .opacity(isRefreshing ? 1 : 0)
                     }
-                    .frame(width: 18, height: 18)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        Color.primary.opacity(isRefreshHovered ? 0.085 : 0.04),
+                        in: Circle()
+                    )
+                    .overlay {
+                        Circle()
+                            .strokeBorder(Color.primary.opacity(isRefreshHovered ? 0.14 : 0.07), lineWidth: 0.5)
+                    }
                 }
                 .buttonStyle(.plain)
                 .disabled(isRefreshing)
+                .onHover { isRefreshHovered = $0 }
+                .animation(.easeOut(duration: 0.14), value: isRefreshHovered)
                 .help("刷新账号余额与倍率")
                 .accessibilityLabel("刷新 Sub2API 账号池")
             }
@@ -1363,6 +1377,15 @@ private struct OverviewSub2ApiAccountGroup: Identifiable {
     var id: String { key }
 }
 
+private enum OverviewSub2ApiTableLayout {
+    static let columnSpacing: CGFloat = 12
+    static let statusWidth: CGFloat = 104
+    static let balanceWidth: CGFloat = 96
+    static let horizontalPadding: CGFloat = 16
+    static let nestedContentInset: CGFloat = 36
+    static let routeGuideInset: CGFloat = 30
+}
+
 private struct OverviewSub2ApiAccountTable: View {
     let accounts: [ManageSub2ApiAccountPoolResponse.Account]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1408,19 +1431,23 @@ private struct OverviewSub2ApiAccountTable: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
+            HStack(spacing: OverviewSub2ApiTableLayout.columnSpacing) {
                 Text("站点 / 账号")
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text("状态")
-                    .frame(width: 88, alignment: .leading)
+                    .frame(width: OverviewSub2ApiTableLayout.statusWidth, alignment: .leading)
                 Text("余额")
-                    .frame(width: 96, alignment: .trailing)
+                    .frame(width: OverviewSub2ApiTableLayout.balanceWidth, alignment: .trailing)
             }
-            .font(.caption2.weight(.semibold))
-            .foregroundStyle(.tertiary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color.primary.opacity(0.025))
+            .font(.caption.weight(.medium))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, OverviewSub2ApiTableLayout.horizontalPadding)
+            .padding(.vertical, 9)
+            .background(Color.primary.opacity(0.035))
+            .overlay(alignment: .bottom) {
+                Divider()
+                    .opacity(0.65)
+            }
 
             ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
                 if group.accounts.count == 1, let account = group.accounts.first {
@@ -1440,11 +1467,22 @@ private struct OverviewSub2ApiAccountTable: View {
                                 )
                                 if childIndex < group.accounts.count - 1 {
                                     Divider()
-                                        .padding(.leading, 22)
+                                        .opacity(0.55)
+                                        .padding(.leading, 52)
+                                        .padding(.trailing, OverviewSub2ApiTableLayout.horizontalPadding)
                                 }
                             }
                         }
-                        .background(Color.primary.opacity(0.018))
+                        .background {
+                            ZStack(alignment: .leading) {
+                                Color.primary.opacity(0.012)
+                                Rectangle()
+                                    .fill(Color.accentColor.opacity(0.24))
+                                    .frame(width: 1)
+                                    .padding(.leading, OverviewSub2ApiTableLayout.routeGuideInset)
+                                    .padding(.vertical, 12)
+                            }
+                        }
                         .transition(
                             reduceMotion
                                 ? .opacity
@@ -1455,15 +1493,33 @@ private struct OverviewSub2ApiAccountTable: View {
 
                 if index < groups.count - 1 {
                     Divider()
-                        .padding(.horizontal, 16)
+                        .opacity(0.65)
+                        .padding(.horizontal, OverviewSub2ApiTableLayout.horizontalPadding)
                 }
             }
         }
         .background {
-            Color(nsColor: .underPageBackgroundColor)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            Color.primary.opacity(0.022)
+                .clipShape(
+                    RoundedRectangle(
+                        cornerRadius: ThreadRelayRadius.content,
+                        style: .continuous
+                    )
+                )
         }
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(
+                cornerRadius: ThreadRelayRadius.content,
+                style: .continuous
+            )
+            .strokeBorder(Color.primary.opacity(0.065), lineWidth: 0.5)
+        }
+        .clipShape(
+            RoundedRectangle(
+                cornerRadius: ThreadRelayRadius.content,
+                style: .continuous
+            )
+        )
         .onChange(of: expandableGroupKeys) { _, keys in
             expandedGroupKeys.formIntersection(keys)
         }
@@ -1474,6 +1530,7 @@ private struct OverviewSub2ApiAccountGroupRow: View {
     let group: OverviewSub2ApiAccountGroup
     let isExpanded: Bool
     let onToggle: () -> Void
+    @State private var isHovering = false
 
     private var availableCount: Int {
         group.accounts.count(where: { account in
@@ -1500,14 +1557,30 @@ private struct OverviewSub2ApiAccountGroupRow: View {
         return .primary
     }
 
+    private var statusTint: Color {
+        if availableCount == group.accounts.count { return Theme.safeGreen }
+        if availableCount == 0 { return .red }
+        return .orange
+    }
+
+    private var statusText: String {
+        availableCount == group.accounts.count
+            ? "全部可用"
+            : "\(availableCount)/\(group.accounts.count) 可用"
+    }
+
     var body: some View {
         Button(action: onToggle) {
-            HStack(spacing: 12) {
-                HStack(spacing: 8) {
+            HStack(spacing: OverviewSub2ApiTableLayout.columnSpacing) {
+                HStack(spacing: 9) {
                     Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .frame(width: 18, height: 18)
+                        .foregroundStyle(isHovering ? Color.accentColor : .secondary)
+                        .frame(width: 24, height: 24)
+                        .background(
+                            Color.accentColor.opacity(isHovering ? 0.12 : 0.065),
+                            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        )
                         .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 3) {
@@ -1523,31 +1596,25 @@ private struct OverviewSub2ApiAccountGroupRow: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .help(group.siteUrl ?? "")
 
-                HStack(spacing: 5) {
-                    Circle()
-                        .fill(availableCount == group.accounts.count ? Color.green : availableCount == 0 ? Color.red : Color.orange)
-                        .frame(width: 6, height: 6)
-                    Text(availableCount == group.accounts.count ? "可用" : "\(availableCount)/\(group.accounts.count)")
-                        .lineLimit(1)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(width: 88, alignment: .leading)
+                OverviewSub2ApiStatus(text: statusText, tint: statusTint)
+                    .frame(width: OverviewSub2ApiTableLayout.statusWidth, alignment: .leading)
 
                 Text(balanceSummaryText)
                     .font(.callout.monospacedDigit().weight(.medium))
                     .foregroundStyle(balanceTint)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
-                    .frame(width: 96, alignment: .trailing)
+                    .frame(width: OverviewSub2ApiTableLayout.balanceWidth, alignment: .trailing)
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 11)
+            .padding(.horizontal, OverviewSub2ApiTableLayout.horizontalPadding)
+            .padding(.vertical, 10)
             .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
-            .background(Color.primary.opacity(0.035))
+            .background(Color.accentColor.opacity(isHovering ? 0.055 : 0.022))
         }
         .buttonStyle(.plain)
         .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
+        .animation(.easeOut(duration: 0.14), value: isHovering)
         .help(isExpanded ? "收起子账号" : "展开子账号")
         .accessibilityLabel(
             "\(sub2ApiSiteLabel(group.siteUrl))，\(group.accounts.count) 个账号，\(availableCount) 个可用，余额 \(balanceSummaryText)"
@@ -1572,7 +1639,7 @@ private struct OverviewSub2ApiAccountRow: View {
     private var accountTint: Color {
         guard account.schedulable else { return .red }
         switch account.status.lowercased() {
-        case "active": return .green
+        case "active": return Theme.safeGreen
         case "cooldown": return .orange
         default: return .red
         }
@@ -1586,47 +1653,59 @@ private struct OverviewSub2ApiAccountRow: View {
     }
 
     var body: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: OverviewSub2ApiTableLayout.columnSpacing) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(account.name)
-                    .font(.callout)
+                    .font(.callout.weight(.medium))
                     .lineLimit(1)
                 HStack(spacing: 5) {
                     Text(sub2ApiAccountKindText(account))
                     Text("·")
                     Text("倍率 \(sub2ApiMultiplierText(account.localRateMultiplier)) / 上游 \(sub2ApiUpstreamRateText(account.upstreamBilling))")
                         .help(sub2ApiCapabilityStateText(account.upstreamBilling.state))
+                    if account.upstreamBilling.stale {
+                        Image(systemName: "clock.badge.exclamationmark")
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .help("上游倍率数据已过期")
+                            .accessibilityLabel("上游倍率数据已过期")
+                    }
                 }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(
-                    account.upstreamBilling.stale
-                        ? Color.orange
-                        : Color(nsColor: .tertiaryLabelColor)
-                )
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.78)
             }
-            .padding(.leading, nested ? 22 : 0)
+            .padding(.leading, nested ? OverviewSub2ApiTableLayout.nestedContentInset : 0)
             .frame(maxWidth: .infinity, alignment: .leading)
 
             OverviewSub2ApiStatus(
                 text: sub2ApiAccountStatusText(account),
                 tint: accountTint
             )
-            .frame(width: 88, alignment: .leading)
+            .frame(width: OverviewSub2ApiTableLayout.statusWidth, alignment: .leading)
 
             Text(sub2ApiBalanceText(account.upstreamBalance))
-                .font(.caption.monospacedDigit().weight(.medium))
+                .font(.callout.monospacedDigit().weight(.medium))
                 .foregroundStyle(balanceTint)
                 .lineLimit(1)
                 .minimumScaleFactor(0.78)
                 .help(sub2ApiBalanceHelp(account.upstreamBalance))
-                .frame(width: 96, alignment: .trailing)
+                .frame(width: OverviewSub2ApiTableLayout.balanceWidth, alignment: .trailing)
 
         }
-        .padding(.horizontal, nested ? 8 : 16)
+        .padding(.horizontal, OverviewSub2ApiTableLayout.horizontalPadding)
         .padding(.vertical, nested ? 9 : 10)
-        .frame(minHeight: nested ? 56 : 56)
+        .frame(minHeight: 58)
+        .overlay(alignment: .leading) {
+            if nested {
+                Circle()
+                    .fill(accountTint)
+                    .frame(width: 5, height: 5)
+                    .padding(.leading, OverviewSub2ApiTableLayout.routeGuideInset - 2)
+                    .accessibilityHidden(true)
+            }
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(
             "\(account.name)，\(sub2ApiAccountStatusText(account))，本地倍率 \(sub2ApiMultiplierText(account.localRateMultiplier))，上游倍率 \(sub2ApiUpstreamRateText(account.upstreamBilling))，余额 \(sub2ApiBalanceText(account.upstreamBalance))"
@@ -1642,12 +1721,19 @@ private struct OverviewSub2ApiStatus: View {
         HStack(spacing: 5) {
             Circle()
                 .fill(tint)
-                .frame(width: 6, height: 6)
+                .frame(width: 5, height: 5)
             Text(text)
                 .lineLimit(1)
         }
-        .font(.caption)
-        .foregroundStyle(.secondary)
+        .font(.caption.weight(.medium))
+        .foregroundStyle(tint)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(tint.opacity(0.10), in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(tint.opacity(0.18), lineWidth: 0.5)
+        }
     }
 }
 

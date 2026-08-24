@@ -19,8 +19,13 @@ struct HeatmapView: View {
     let cellSpacing: CGFloat
     let legendPlacement: LegendPlacement
 
-    private static let weeks = 15
+    private static let minimumWeeks = 15
+    private static let maximumWeeks = 53
     private static let trailingLegendSpacing: CGFloat = 14
+    private static let weekdayAxisWidth: CGFloat = 26
+    private static let axisGap: CGFloat = 8
+    private static let monthAxisHeight: CGFloat = 16
+    private static let contentSpacing: CGFloat = 7
 
     init(
         statsStore: DailyStatsStore,
@@ -48,9 +53,14 @@ struct HeatmapView: View {
 
     // 그리드 컬럼(주) — 각 주는 월~일 7칸. 미래 날짜는 nil로 비운다.
     private struct Week: Identifiable {
-        let index: Int          // 0 = 가장 과거 주, weeks-1 = 최신 주 (stagger 순서)
+        let index: Int          // 0 = 가장 과거 주, 마지막 = 최신 주 (stagger 순서)
         let days: [GridDay?]    // 7칸 (월~일)
         var id: Int { index }
+    }
+
+    private struct Layout {
+        let weekCount: Int
+        let cellSize: CGFloat
     }
 
     private var calendar: Calendar {
@@ -61,9 +71,9 @@ struct HeatmapView: View {
         return cal
     }
 
-    // 일별 토큰 딕셔너리(UTC 자정 Date 키)와 기간 최대값.
-    private var dailyTokens: [Date: Int] {
-        let rows = statsStore.dailyTotals(days: Self.weeks * 7, now: Date(),
+    // 일별 토큰 딕셔너리(UTC 자정 Date 키).
+    private func dailyTokens(weeks: Int) -> [Date: Int] {
+        let rows = statsStore.dailyTotals(days: weeks * 7, now: Date(),
                                           calendar: calendar, services: enabledServices)
         var dict: [Date: Int] = [:]
         for r in rows { dict[calendar.startOfDay(for: r.day)] = r.tokens }
@@ -72,20 +82,20 @@ struct HeatmapView: View {
 
     private var todayStart: Date { calendar.startOfDay(for: Date()) }
 
-    // 15주 격자 구성: 오른쪽(최신) 열이 이번 주가 되도록, 이번 주가 속한 주의 월요일에서
-    // (weeks-1)주 전 월요일까지를 시작점으로 잡는다.
-    private var grid: [Week] {
-        let tokens = dailyTokens
+    // 오른쪽(최신) 열이 이번 주가 되도록, 이번 주가 속한 월요일에서
+    // (weekCount-1)주 전 월요일까지를 시작점으로 잡는다.
+    private func grid(weeks weekCount: Int) -> [Week] {
+        let tokens = dailyTokens(weeks: weekCount)
         let today = todayStart
         // 이번 주 월요일.
         let weekday = calendar.component(.weekday, from: today)  // 1=일 … 2=월
         let daysSinceMonday = (weekday + 5) % 7                  // 월=0, 일=6
         guard let thisMonday = calendar.date(byAdding: .day, value: -daysSinceMonday, to: today),
-              let firstMonday = calendar.date(byAdding: .day, value: -(Self.weeks - 1) * 7, to: thisMonday)
+              let firstMonday = calendar.date(byAdding: .day, value: -(weekCount - 1) * 7, to: thisMonday)
         else { return [] }
 
         var weeks: [Week] = []
-        for w in 0..<Self.weeks {
+        for w in 0..<weekCount {
             guard let weekStart = calendar.date(byAdding: .day, value: w * 7, to: firstMonday) else { continue }
             var days: [GridDay?] = []
             for d in 0..<7 {
@@ -103,12 +113,12 @@ struct HeatmapView: View {
         return weeks
     }
 
-    private var maxTokens: Int {
-        max(1, dailyTokens.values.max() ?? 0)
+    private func maxTokens(in weeks: [Week]) -> Int {
+        max(1, weeks.flatMap { $0.days.compactMap { $0?.tokens } }.max() ?? 0)
     }
 
     // 5단계 양자화: 0 = 빈 셀, 1~4 = 민트 농도.
-    private func level(for tokens: Int) -> Int {
+    private func level(for tokens: Int, maxTokens: Int) -> Int {
         guard tokens > 0 else { return 0 }
         let ratio = Double(tokens) / Double(maxTokens)
         if ratio <= 0.25 { return 1 }
@@ -130,81 +140,132 @@ struct HeatmapView: View {
     }
 
     var body: some View {
-        Group {
+        GeometryReader { proxy in
+            let hasBottomCaption = legendPlacement == .bottom
+            let reservedTrailingWidth = legendPlacement == .trailing
+                ? cellSize + Self.trailingLegendSpacing
+                : 0
+            let layout = layout(
+                for: proxy.size.width - reservedTrailingWidth,
+                height: proxy.size.height,
+                includesBottomCaption: hasBottomCaption
+            )
+            let weeks = grid(weeks: layout.weekCount)
+            let maxTokens = maxTokens(in: weeks)
+
             if legendPlacement == .trailing {
-                GeometryReader { proxy in
-                    let fittedCellSize = fittedCellSize(
-                        for: proxy.size.width,
-                        height: proxy.size.height
-                    )
-                    HStack(alignment: .center, spacing: Self.trailingLegendSpacing) {
-                        gridContent(cellSize: fittedCellSize)
-                        caption(cellSize: fittedCellSize)
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+                HStack(alignment: .center, spacing: Self.trailingLegendSpacing) {
+                    heatmapContent(weeks: weeks, maxTokens: maxTokens, cellSize: layout.cellSize)
+                    trailingCaption(cellSize: layout.cellSize)
                 }
-                .frame(minHeight: 176)
-            } else if legendPlacement == .none {
-                GeometryReader { proxy in
-                    let fittedCellSize = fittedCellSizeWithoutLegend(
-                        for: proxy.size.width,
-                        height: proxy.size.height
-                    )
-                    gridContent(cellSize: fittedCellSize)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-                }
-                .frame(minHeight: 176)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
             } else {
-                VStack(spacing: 8) {
-                    gridContent(cellSize: cellSize)
-                    caption(cellSize: cellSize)
+                VStack(alignment: .leading, spacing: Self.contentSpacing) {
+                    heatmapContent(weeks: weeks, maxTokens: maxTokens, cellSize: layout.cellSize)
+
+                    if hasBottomCaption {
+                        bottomCaption(weekCount: layout.weekCount, cellSize: layout.cellSize)
+                    }
                 }
-                .padding(.vertical, 4)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             }
         }
+        .frame(minHeight: minimumHeight)
         .onAppear {
             guard !appeared else { return }
             withAnimation(.easeOut(duration: 0.5)) { appeared = true }
         }
     }
 
-    private func gridContent(cellSize: CGFloat) -> some View {
+    private var minimumHeight: CGFloat {
+        let gridHeight = cellSize * 7 + cellSpacing * 6
+        let captionHeight: CGFloat = legendPlacement == .bottom ? 18 + Self.contentSpacing : 0
+        return gridHeight + Self.monthAxisHeight + Self.contentSpacing + captionHeight
+    }
+
+    private func heatmapContent(
+        weeks: [Week],
+        maxTokens: Int,
+        cellSize: CGFloat
+    ) -> some View {
+        HStack(alignment: .top, spacing: Self.axisGap) {
+            weekdayAxis(cellSize: cellSize)
+
+            VStack(alignment: .leading, spacing: Self.contentSpacing) {
+                weekGrid(weeks: weeks, maxTokens: maxTokens, cellSize: cellSize)
+                monthAxis(weeks: weeks, cellSize: cellSize)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func weekGrid(weeks: [Week], maxTokens: Int, cellSize: CGFloat) -> some View {
         HStack(alignment: .top, spacing: cellSpacing) {
-            ForEach(grid) { week in
+            ForEach(weeks) { week in
                 VStack(spacing: cellSpacing) {
                     ForEach(0..<7, id: \.self) { row in
-                        cell(week.days[row], staggerIndex: week.index, size: cellSize)
+                        cell(
+                            week.days[row],
+                            maxTokens: maxTokens,
+                            staggerIndex: week.index,
+                            size: cellSize
+                        )
                     }
                 }
             }
         }
     }
 
-    private func fittedCellSize(for width: CGFloat, height: CGFloat) -> CGFloat {
-        // Reserve room for the trailing legend, then use the available width
-        // to make the 15-week grid read as a full-width overview element.
-        // The vertical legend is narrow, so use the released horizontal room
-        // to make the 15-week grid read as a full-width overview element.
-        // The vertical legend uses the same cell width as the grid, so the
-        // combined layout contains 16 cell columns in total.
-        let fixedWidth = 14 * cellSpacing + Self.trailingLegendSpacing
-        let fittedWidth = (width - fixedWidth) / 16
-        let fittedHeight = (height - 6 * cellSpacing) / 7
-        let fitted = min(fittedWidth, fittedHeight)
-        return min(28, max(cellSize, fitted))
+    private func weekdayAxis(cellSize: CGFloat) -> some View {
+        VStack(spacing: cellSpacing) {
+            ForEach(0..<7, id: \.self) { index in
+                Text(weekdayLabel(for: index))
+                    .font(.system(size: 9, weight: .regular))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: Self.weekdayAxisWidth, height: cellSize, alignment: .leading)
+            }
+        }
     }
 
-    private func fittedCellSizeWithoutLegend(for width: CGFloat, height: CGFloat) -> CGFloat {
-        let fittedWidth = (width - 14 * cellSpacing) / 15
-        let fittedHeight = (height - 6 * cellSpacing) / 7
-        let fitted = min(fittedWidth, fittedHeight)
-        return min(28, max(cellSize, fitted))
+    private func monthAxis(weeks: [Week], cellSize: CGFloat) -> some View {
+        HStack(alignment: .top, spacing: cellSpacing) {
+            ForEach(weeks) { week in
+                Text(monthLabel(for: week))
+                    .font(.system(size: 9, weight: .regular))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: cellSize, alignment: .leading)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .accessibilityHidden(monthLabel(for: week).isEmpty)
+            }
+        }
+        .frame(height: Self.monthAxisHeight, alignment: .top)
+    }
+
+    private func layout(
+        for width: CGFloat,
+        height: CGFloat,
+        includesBottomCaption: Bool
+    ) -> Layout {
+        let gridWidth = width - Self.weekdayAxisWidth - Self.axisGap
+        let captionHeight: CGFloat = includesBottomCaption ? 18 + Self.contentSpacing : 0
+        let gridHeight = height - Self.monthAxisHeight - Self.contentSpacing - captionHeight
+        let fittedHeight = (gridHeight - 6 * cellSpacing) / 7
+        let targetCellSize = min(18, max(4, fittedHeight))
+        let fitWeekCount = Int((gridWidth + cellSpacing) / (targetCellSize + cellSpacing))
+        let weekCount = min(Self.maximumWeeks, max(Self.minimumWeeks, fitWeekCount))
+        let fittedWidth = (gridWidth - CGFloat(weekCount - 1) * cellSpacing) / CGFloat(weekCount)
+        return Layout(weekCount: weekCount, cellSize: min(targetCellSize, max(4, fittedWidth)))
     }
 
     @ViewBuilder
-    private func cell(_ gridDay: GridDay?, staggerIndex: Int, size: CGFloat) -> some View {
+    private func cell(
+        _ gridDay: GridDay?,
+        maxTokens: Int,
+        staggerIndex: Int,
+        size: CGFloat
+    ) -> some View {
         if let gridDay {
-            let lvl = level(for: gridDay.tokens)
+            let lvl = level(for: gridDay.tokens, maxTokens: maxTokens)
             let isToday = calendar.isDate(gridDay.day, inSameDayAs: todayStart)
             heatmapSquare(level: lvl, size: size)
                 .overlay(
@@ -225,36 +286,61 @@ struct HeatmapView: View {
         }
     }
 
-    // 그리드 하단 또는 오른쪽의 고정 범례/hover 캡션.
-    @ViewBuilder
-    private func caption(cellSize: CGFloat) -> some View {
-        if let hovered {
-            HStack(spacing: 6) {
-                Text(Self.captionDateFormatter.string(from: hovered.day))
-                Text("·")
-                Text("\(formatTokens(hovered.tokens)) Token")
+    private func bottomCaption(weekCount: Int, cellSize: CGFloat) -> some View {
+        HStack(spacing: 6) {
+            if let hovered {
+                Text("\(Self.captionDateFormatter.string(from: hovered.day)) · \(formatTokens(hovered.tokens)) Token")
+            } else {
+                Text("最近 \(weekCount) 周")
             }
-            .font(.system(size: 10))
-            .foregroundStyle(.secondary)
-        } else if legendPlacement == .trailing {
-            VStack(spacing: 4) {
-                Text("多").font(.system(size: 9)).foregroundStyle(.secondary)
-                ForEach((0..<5).reversed(), id: \.self) { lvl in
-                    heatmapSquare(level: lvl, size: cellSize)
-                }
-                Text("少").font(.system(size: 9)).foregroundStyle(.secondary)
-            }
-            .fixedSize()
-        } else {
-            HStack(spacing: 4) {
-                Text("少").font(.system(size: 9)).foregroundStyle(.secondary)
-                ForEach(0..<5, id: \.self) { lvl in
-                    heatmapSquare(level: lvl, size: cellSize)
-                }
-                Text("多").font(.system(size: 9)).foregroundStyle(.secondary)
-            }
-            .fixedSize()
+
+            Spacer(minLength: 8)
+            intensityLegend(cellSize: cellSize)
         }
+        .font(.system(size: 10))
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity)
+    }
+
+    private func trailingCaption(cellSize: CGFloat) -> some View {
+        VStack(spacing: 4) {
+            Text("多").font(.system(size: 9)).foregroundStyle(.secondary)
+            ForEach((0..<5).reversed(), id: \.self) { level in
+                heatmapSquare(level: level, size: cellSize)
+            }
+            Text("少").font(.system(size: 9)).foregroundStyle(.secondary)
+        }
+        .fixedSize()
+        .accessibilityLabel(hovered.map { "\(Self.captionDateFormatter.string(from: $0.day)) \(formatTokens($0.tokens)) Token" } ?? "使用强度")
+    }
+
+    private func intensityLegend(cellSize: CGFloat) -> some View {
+        HStack(spacing: 4) {
+            Text("少")
+            ForEach(0..<5, id: \.self) { level in
+                heatmapSquare(level: level, size: min(cellSize, 10))
+            }
+            Text("多")
+        }
+        .font(.system(size: 9))
+        .fixedSize()
+    }
+
+    private func weekdayLabel(for index: Int) -> String {
+        switch index {
+        case 0: return "周一"
+        case 2: return "周三"
+        case 4: return "周五"
+        default: return ""
+        }
+    }
+
+    private func monthLabel(for week: Week) -> String {
+        let days = week.days.compactMap { $0?.day }
+        guard let monthStart = days.first(where: { calendar.component(.day, from: $0) == 1 }) else {
+            return ""
+        }
+        return Self.monthFormatter.string(from: monthStart)
     }
 
     private func heatmapSquare(level: Int, size: CGFloat) -> some View {
@@ -282,6 +368,15 @@ struct HeatmapView: View {
         f.timeZone = TimeZone(identifier: "UTC")!
         f.locale = Locale.current
         f.setLocalizedDateFormatFromTemplate("MMMd")
+        return f
+    }()
+
+    private static let monthFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = TimeZone(identifier: "UTC")!
+        f.locale = Locale.current
+        f.setLocalizedDateFormatFromTemplate("MMM")
         return f
     }()
 }
