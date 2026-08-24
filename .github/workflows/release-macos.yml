@@ -329,29 +329,29 @@ jobs:
             "https://github.com/${RELEASE_REPOSITORY}/releases/latest/download/${MACOS_MANIFEST_NAME}" \
             --output "$PREVIOUS_MANIFEST" || rm -f "$PREVIOUS_MANIFEST"
 
-          SIGNING_ARGUMENT=()
-          if [ "$MACOS_SIGNED" = true ]; then
-            SIGNING_ARGUMENT=(--signed)
-          fi
-          scripts/write-macos-update-manifest.py \
-            --output "target/dist/${MACOS_MANIFEST_NAME}" \
-            --previous "$PREVIOUS_MANIFEST" \
-            --component "$RELEASE_COMPONENT" \
-            --repository "$RELEASE_REPOSITORY" \
-            --release-tag "$RELEASE_TAG" \
-            "${SIGNING_ARGUMENT[@]}" \
-            --ui-version "$MOCHIPORT_UI_VERSION" \
-            --ui-build "$MOCHIPORT_UI_BUILD_NUMBER" \
-            --ui-dmg "target/dist/${MACOS_DMG_NAME}" \
-            --ui-dmg-name "$MACOS_DMG_NAME" \
-            --ui-app-zip "target/dist/${MACOS_APP_ZIP_NAME}" \
-            --ui-app-zip-name "$MACOS_APP_ZIP_NAME" \
-            --daemon-version "$MOCHIPORT_DAEMON_VERSION" \
-            --daemon-build "$MOCHIPORT_DAEMON_BUILD_NUMBER" \
-            --daemon-binary "target/dist/${MACOS_DAEMON_NAME}" \
-            --daemon-binary-name "$MACOS_DAEMON_NAME" \
-            --minimum-ui-version "$MOCHIPORT_UI_VERSION" \
+          MANIFEST_ARGS=(
+            --output "target/dist/${MACOS_MANIFEST_NAME}"
+            --previous "$PREVIOUS_MANIFEST"
+            --component "$RELEASE_COMPONENT"
+            --repository "$RELEASE_REPOSITORY"
+            --release-tag "$RELEASE_TAG"
+            --ui-version "$MOCHIPORT_UI_VERSION"
+            --ui-build "$MOCHIPORT_UI_BUILD_NUMBER"
+            --ui-dmg "target/dist/${MACOS_DMG_NAME}"
+            --ui-dmg-name "$MACOS_DMG_NAME"
+            --ui-app-zip "target/dist/${MACOS_APP_ZIP_NAME}"
+            --ui-app-zip-name "$MACOS_APP_ZIP_NAME"
+            --daemon-version "$MOCHIPORT_DAEMON_VERSION"
+            --daemon-build "$MOCHIPORT_DAEMON_BUILD_NUMBER"
+            --daemon-binary "target/dist/${MACOS_DAEMON_NAME}"
+            --daemon-binary-name "$MACOS_DAEMON_NAME"
+            --minimum-ui-version "$MOCHIPORT_UI_VERSION"
             --minimum-ui-build "$MOCHIPORT_UI_BUILD_NUMBER"
+          )
+          if [ "$MACOS_SIGNED" = true ]; then
+            MANIFEST_ARGS+=(--signed)
+          fi
+          scripts/write-macos-update-manifest.py "${MANIFEST_ARGS[@]}"
 
           cp "target/dist/${MACOS_MANIFEST_NAME}" \
             "target/dist/${MACOS_INTEL_MANIFEST_NAME}"
