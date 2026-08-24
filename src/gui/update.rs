@@ -943,7 +943,9 @@ mod update_tests {
         assert!(workflow.contains("asset_key: macos-universal"));
         assert!(workflow.contains("sparkle_key: macos-sparkle-universal"));
         assert!(workflow.contains("intel_manifest_name: latest-macos-intel.json"));
-        assert!(workflow.contains("\"macos-intel\": manifest[\"assets\"][asset_key]"));
+        assert!(workflow.contains(
+            "cp \"target/dist/${MACOS_MANIFEST_NAME}\" \\\n            \"target/dist/${MACOS_INTEL_MANIFEST_NAME}\""
+        ));
         assert!(workflow.contains("target/dist/${{ matrix.intel_manifest_name }}"));
     }
 
