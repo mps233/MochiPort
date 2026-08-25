@@ -17,11 +17,18 @@ final class AIGlassCoordinator: ObservableObject {
     let briefingEngine = BriefingEngine()
     let statsStore: DailyStatsStore?
 
-    private lazy var codexCollector = CodexCollector(root: Self.homePath(".codex/sessions"))
+    private lazy var codexCollector = CodexCollector(roots: [
+        Self.homePath(".codex/sessions"),
+        Self.homePath(".codex/archived_sessions"),
+    ])
     private var directoryWatcher: DirectoryWatcher?
     private var refreshTimer: Timer?
     private var updateTask: Task<Void, Never>?
+    private var recentHydrationTask: Task<Void, Never>?
+    private var historicalRebuildTask: Task<Void, Never>?
     private var lastStatsWrite = Date.distantPast
+    private var lastRecentHydrationAttempt = Date.distantPast
+    private var lastHistoricalRebuildAttempt = Date.distantPast
     private var lastBriefingEvaluation = Date.distantPast
     private var didStart = false
     private var lastRecordDay: String?
@@ -40,6 +47,7 @@ final class AIGlassCoordinator: ObservableObject {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         directoryWatcher = DirectoryWatcher(paths: [
             home + "/.codex/sessions",
+            home + "/.codex/archived_sessions",
         ]) { [weak self] in
             self?.refresh()
         }
@@ -56,7 +64,26 @@ final class AIGlassCoordinator: ObservableObject {
     }
 
     func refresh() {
-        codexCollector.collect(into: store)
+        if !codexCollector.hasHydratedRecentHistory {
+            if recentHydrationTask == nil,
+               Date().timeIntervalSince(lastRecentHydrationAttempt) >= 60 {
+                scheduleRecentHydration()
+            }
+        } else {
+            if let statsStore,
+               statsStore.needsCodexRebuild,
+               historicalRebuildTask == nil,
+               Date().timeIntervalSince(lastHistoricalRebuildAttempt) >= 60,
+               statsStore.beginCodexRebuildIfAllowed() {
+                scheduleHistoricalRebuild(statsStore)
+            }
+            // The hydration pass has already advanced every reader cursor.
+            // Do not synchronously enumerate the log tree again in the same
+            // refresh; the watcher/timer will collect appended bytes later.
+            if recentHydrationTask == nil {
+                codexCollector.collect(into: store)
+            }
+        }
         evaluateComeback()
         evaluateUsageEvents()
         persistStatsIfNeeded()
@@ -64,6 +91,57 @@ final class AIGlassCoordinator: ObservableObject {
         // The menu-bar label reads UsageStore through this coordinator. Keep
         // the small label in sync without adding a high-frequency timer.
         objectWillChange.send()
+    }
+
+    /// Hydrate recent Codex events off the main actor in bounded batches.
+    /// SwiftUI can render between batches instead of waiting for a full file
+    /// (some local session files are hundreds of megabytes) to be parsed.
+    private func scheduleRecentHydration() {
+        lastRecentHydrationAttempt = Date()
+        recentHydrationTask = Task { [weak self] in
+            guard let self else { return }
+            defer { recentHydrationTask = nil }
+            guard await codexCollector.hydrateRecentHistory(into: store), !Task.isCancelled else { return }
+            // Re-enter while this task is still registered: refresh can start
+            // the delayed historical rebuild but skips a duplicate synchronous
+            // traversal of the same recent files.
+            refresh()
+        }
+    }
+
+    private func scheduleHistoricalRebuild(_ statsStore: DailyStatsStore) {
+        lastHistoricalRebuildAttempt = Date()
+        let roots = [
+            Self.homePath(".codex/sessions"),
+            Self.homePath(".codex/archived_sessions"),
+        ]
+        historicalRebuildTask = Task { [weak self] in
+            defer {
+                self?.historicalRebuildTask = nil
+            }
+            // Let the initial window settle before competing for disk and
+            // CPU with the UI's first render and event batches.
+            try? await Task.sleep(for: .seconds(10))
+            guard !Task.isCancelled else { return }
+            let rows = await Task.detached(priority: .background) {
+                CodexCollector.historicalRows(roots: roots)
+            }.value
+            guard let self else { return }
+            guard !Task.isCancelled, let rows else {
+                statsStore.markCodexRebuildFailed()
+                return
+            }
+            let rebuilt = statsStore.rebuildCodexStats(
+                rows: rows,
+                databaseBackupURL: statsStore.defaultRebuildBackupURL())
+            if !rebuilt { statsStore.markCodexRebuildFailed() }
+            if rebuilt {
+                // Avoid an immediate second full `events` pass after the
+                // rebuild; the normal timer will persist new tail events.
+                self.lastStatsWrite = Date()
+            }
+            self.objectWillChange.send()
+        }
     }
 
     private func evaluateUsageEvents() {
@@ -134,7 +212,7 @@ final class AIGlassCoordinator: ObservableObject {
     private func persistStatsIfNeeded() {
         guard let statsStore, Date().timeIntervalSince(lastStatsWrite) >= 60 else { return }
         lastStatsWrite = Date()
-        statsStore.upsert(events: store.events, calendar: .utc)
+        statsStore.upsert(events: store.events, calendar: .current)
         for (service, windows) in store.limits {
             for window in windows {
                 statsStore.recordPercentSnapshot(service: service, kind: window.kind,
@@ -150,7 +228,7 @@ final class AIGlassCoordinator: ObservableObject {
         if settings.funRecord {
             let day = Self.dayString(Date())
             if lastRecordDay != day,
-               let previous = statsStore.maxDailyTokens(excludingDay: Date(), calendar: .utc),
+               let previous = statsStore.maxDailyTokens(excludingDay: Date(), calendar: .current),
                previous > 0, today > previous {
                 lastRecordDay = day
                 record(HUDEvent(kind: .record, title: "今日创下新纪录", subtitle: "超过此前 \(formatTokens(previous)) tokens", percent: nil))
@@ -171,26 +249,26 @@ final class AIGlassCoordinator: ObservableObject {
         let yesterdayEnd = calendar.startOfDay(for: now)
         let yesterdayStart = yesterdayEnd.addingTimeInterval(-24 * 3600)
         let yesterdayEvents = store.events.filter { $0.timestamp >= yesterdayStart && $0.timestamp < yesterdayEnd }
-        let yesterdayTokens = yesterdayEvents.reduce(0) { $0 + $1.totalTokens }
+        let yesterdayTokens = yesterdayEvents.reduce(0) { $0 + $1.requestTokens }
         let todayStart = calendar.startOfDay(for: now)
         let todayEvents = store.events.filter { $0.timestamp >= todayStart }
 
         // Weekly fields are intentionally best-effort: UsageStore retains the
         // recent event tail, while SQLite fills in older days after the first
         // persistence pass.
-        let utc = Calendar.utc
-        let utcToday = utc.startOfDay(for: now)
-        let lastWeekStart = utc.date(byAdding: .day, value: -7, to: utcToday) ?? utcToday
-        let previousWeekStart = utc.date(byAdding: .day, value: -14, to: utcToday) ?? lastWeekStart
-        let daily = statsStore?.dailyTotals(days: 15, now: now, calendar: utc) ?? []
+        let local = Calendar.current
+        let localToday = local.startOfDay(for: now)
+        let lastWeekStart = local.date(byAdding: .day, value: -7, to: localToday) ?? localToday
+        let previousWeekStart = local.date(byAdding: .day, value: -14, to: localToday) ?? lastWeekStart
+        let daily = statsStore?.dailyTotals(days: 15, now: now, calendar: local) ?? []
         let lastWeekTokens = daily
-            .filter { $0.day >= lastWeekStart && $0.day < utcToday }
+            .filter { $0.day >= lastWeekStart && $0.day < localToday }
             .reduce(0) { $0 + $1.tokens }
         let prevWeekTokens = daily
             .filter { $0.day >= previousWeekStart && $0.day < lastWeekStart }
             .reduce(0) { $0 + $1.tokens }
         let lastWeekEvents = store.events.filter {
-            $0.timestamp >= lastWeekStart && $0.timestamp < utcToday
+            $0.timestamp >= lastWeekStart && $0.timestamp < localToday
         }
         let yesterdayCost = CostEstimator.cost(of: yesterdayEvents)
         let todayCost = CostEstimator.cost(of: todayEvents)
@@ -203,12 +281,12 @@ final class AIGlassCoordinator: ObservableObject {
             todayTopService: topServiceToday(now: now),
             lastWeekTokens: settings.funWeeklyReport && lastWeekTokens > 0 ? lastWeekTokens : nil,
             lastWeekCost: settings.funWeeklyReport
-                ? statsStore?.totalCost(from: lastWeekStart, to: utcToday, calendar: utc)
+                ? statsStore?.totalCost(from: lastWeekStart, to: localToday, calendar: local)
                 : nil,
             prevWeekTokens: settings.funWeeklyReport && prevWeekTokens > 0 ? prevWeekTokens : nil,
             lastWeekTopProject: settings.funWeeklyReport ? topProject(in: lastWeekEvents) : nil,
             streakDays: settings.funStreak
-                ? (statsStore?.streakDays(endingOn: now, calendar: utc) ?? 0)
+                ? (statsStore?.streakDays(endingOn: now, calendar: local) ?? 0)
                 : 0
         )) else { return }
         record(event)
@@ -219,7 +297,7 @@ final class AIGlassCoordinator: ObservableObject {
     private func topProject(in events: [TokenEvent]) -> String? {
         let totals = events.reduce(into: [String: Int]()) { result, event in
             guard let project = event.project, !project.isEmpty else { return }
-            result[project, default: 0] += event.totalTokens
+            result[project, default: 0] += event.requestTokens
         }
         return totals.max(by: { $0.value < $1.value })?.key
     }
@@ -228,7 +306,7 @@ final class AIGlassCoordinator: ObservableObject {
         let start = Calendar.current.startOfDay(for: now)
         var totals: [ServiceID: Int] = [:]
         for event in store.events where event.timestamp >= start {
-            totals[event.service, default: 0] += event.totalTokens
+            totals[event.service, default: 0] += event.requestTokens
         }
         let total = totals.values.reduce(0, +)
         guard total > 0, let top = totals.max(by: { $0.value < $1.value }) else { return nil }
@@ -255,7 +333,7 @@ final class AIGlassCoordinator: ObservableObject {
     private static func dayString(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.timeZone = .current
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.string(from: date)
     }

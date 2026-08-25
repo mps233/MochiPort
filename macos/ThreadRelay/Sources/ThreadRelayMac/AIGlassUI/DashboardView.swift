@@ -158,11 +158,11 @@ private struct OverviewTab: View {
             }
             HStack(spacing: 8) {
                 StatCard(value: metrics.todayTokens,
-                         format: { formatTokens(Int($0)) }, label: "今日 Token")
+                         format: { formatTokens(Int($0)) }, label: "今日请求 Token")
                 StatCard(value: metrics.todayCost,
                          format: metrics.formatCost, label: "今日成本")
                 StatCard(value: metrics.tokensPerMinute,
-                         format: { formatTokens(Int($0)) }, label: "当前 Token/分钟")
+                         format: { formatTokens(Int($0)) }, label: "当前请求 Token/分钟")
             }
         }
     }
@@ -203,8 +203,9 @@ private struct OverviewTab: View {
 
 private func formatTokens(_ n: Int) -> String {
     switch n {
+    case 1_000_000_000...: return String(format: "%.1fB", Double(n) / 1_000_000_000)
     case 1_000_000...: return String(format: "%.1fM", Double(n) / 1_000_000)
-    case 1_000...: return String(format: "%.0fK", Double(n) / 1_000)
+    case 1_000...: return String(format: "%.1fK", Double(n) / 1_000)
     default: return "\(n)"
     }
 }
@@ -214,7 +215,6 @@ private struct UsageMetricSnapshot {
     let todayTokens: Double
     let todayCost: Double
     let tokensPerMinute: Double
-    private let hasLiveTodayCost: Bool
 
     init(
         store: UsageStore,
@@ -226,36 +226,24 @@ private struct UsageMetricSnapshot {
         let events = store.events.filter {
             services.contains($0.service) && $0.timestamp >= start
         }
-        todayTokens = Double(events.reduce(0) { $0 + $1.totalTokens })
+        todayTokens = Double(events.reduce(0) { $0 + $1.requestTokens })
         tokensPerMinute = services.reduce(0) {
             $0 + store.tokensPerMinute(service: $1, windowMinutes: 3, now: now)
         }
 
-        let usage = providerUsage?.usage
-        let liveCost: Double?
-        if let actual = usage?.todayActualCost, actual.isFinite, actual >= 0 {
-            liveCost = actual
-        } else if let base = usage?.todayCost,
-                  base.isFinite,
-                  base >= 0,
-                  let multiplier = usage?.effectiveRateMultiplier ?? usage?.resolvedRateMultiplier,
-                  multiplier.isFinite,
-                  multiplier >= 0 {
-            liveCost = base * multiplier
-        } else {
-            liveCost = nil
-        }
-
-        hasLiveTodayCost = liveCost != nil
-        let multiplier = usage?.effectiveRateMultiplier
-            ?? usage?.resolvedRateMultiplier
-            ?? 1.0
-        todayCost = liveCost ?? CostEstimator.cost(of: events, multiplier: multiplier)
+        // Match ai-token-monitor: today's cost is always the API-equivalent
+        // Codex estimate derived from local per-turn usage. Provider actual
+        // spend and Sub2API rate multipliers are separate billing concepts.
+        _ = providerUsage
+        todayCost = CostEstimator.cost(of: events)
     }
 
     func formatCost(_ usd: Double) -> String {
-        guard usd >= 0.01 else { return "$0" }
-        return String(format: "%@%.2f", hasLiveTodayCost ? "$" : "~$", usd)
+        switch usd {
+        case 100...: return String(format: "$%.0f", usd)
+        case 1...: return String(format: "$%.2f", usd)
+        default: return String(format: "$%.4f", max(0, usd))
+        }
     }
 }
 
@@ -874,7 +862,7 @@ struct OverviewUsageInsightsView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text("用量与趋势")
                 .font(.headline)
-            Text("今日消耗与最近的 Token 走势")
+            Text("今日请求 Token 与最近走势")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
@@ -898,7 +886,7 @@ struct OverviewUsageInsightsView: View {
             OverviewUsageMetricCard(
                 value: metrics.todayTokens,
                 format: { formatTokens(Int($0)) },
-                label: "今日 Token",
+                label: "今日请求 Token",
                 emphasis: .hero
             )
             metricRow(metrics)
@@ -916,7 +904,7 @@ struct OverviewUsageInsightsView: View {
             OverviewUsageMetricCard(
                 value: metrics.tokensPerMinute,
                 format: { "\(formatTokens(Int($0)))/m" },
-                label: "当前 Token/分钟",
+                label: "当前请求 Token/分钟",
                 emphasis: .standard
             )
         }
@@ -1025,9 +1013,11 @@ private struct UsageTrendContent: View {
             return store.dailyTotalsByService(days: days, now: now, calendar: .current)
         }
 
-        // The 30-day archive is still keyed by UTC for restart-stable history.
-        return statsStore?.dailyTotalsByService(days: days, now: now, calendar: .utc)
-            ?? store.dailyTotalsByService(days: days, now: now, calendar: .utc)
+        // The durable archive follows the same local natural-day buckets as
+        // AI Token Monitor, so a request after local midnight is attributed
+        // to the day the user sees in the dashboard.
+        return statsStore?.dailyTotalsByService(days: days, now: now, calendar: .current)
+            ?? store.dailyTotalsByService(days: days, now: now, calendar: .current)
     }
 
     /// The chart uses the same calendar as its data source.
@@ -1083,7 +1073,7 @@ private struct UsageTrendContent: View {
         let factor = growFactor
         return Chart(data) { item in
             BarMark(x: .value("日期", item.day, unit: .day),
-                    y: .value("Token", Double(item.tokens) * factor))
+                    y: .value("请求 Token", Double(item.tokens) * factor))
                 .foregroundStyle(by: .value("服务", item.service.displayName))
                 .cornerRadius(3)
         }
@@ -1128,7 +1118,7 @@ private struct UsageTrendContent: View {
 
     private static let utcMonthDayFormat = Date.FormatStyle(
         locale: .current,
-        calendar: .utc,
+        calendar: .current,
         timeZone: TimeZone(identifier: "UTC")!
     ).month(.defaultDigits).day()
 

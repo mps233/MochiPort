@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SQLite3
 import XCTest
 
 #if canImport(ThreadRelayMac)
@@ -82,8 +83,301 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(rows.first?.tokens, 120)
     }
 
+    func testTokenEventPreservesReportedTotalAndContextComponents() {
+        let event = TokenEvent(
+            service: .codex,
+            timestamp: Date(),
+            model: "gpt-codex",
+            inputTokens: 10,
+            outputTokens: 2,
+            cacheReadTokens: 100,
+            cacheCreationTokens: 3,
+            source: "sub2api",
+            reportedInputTokens: 110,
+            reportedTotalTokens: 777
+        )
+
+        XCTAssertEqual(event.requestTokens, 777)
+        XCTAssertEqual(event.contextTokens, 115)
+        XCTAssertEqual(event.totalTokens, 777)
+        XCTAssertEqual(event.reportedInputTokens, 110)
+        XCTAssertEqual(event.provider, "sub2api")
+    }
+
+    func testSessionMetaCarriesProviderWithoutBreakingProjectParsing() throws {
+        let oldHome = CodexLogParser.homeDirectoryOverride
+        defer { CodexLogParser.homeDirectoryOverride = oldHome }
+        CodexLogParser.homeDirectoryOverride = "/fixture/home"
+        let line = #"{"type":"session_meta","payload":{"id":"session-7","cwd":"/fixture/project","model_provider":"ai-gateway"}}"#
+
+        let details = try XCTUnwrap(CodexLogParser.parseSessionMetaDetails(line: line))
+        XCTAssertEqual(details.project, "project")
+        XCTAssertEqual(details.source, "ai-gateway")
+        XCTAssertEqual(details.sessionID, "session-7")
+        XCTAssertEqual(CodexLogParser.parseSessionMeta(line: line), "project")
+    }
+
+    func testCodexParserUsesTurnModelReportedTotalAndCumulativeSnapshot() throws {
+        XCTAssertEqual(
+            CodexLogParser.parseTurnContextModel(
+                line: #"{"type":"turn_context","payload":{"model":"OpenAI/GPT_5.6.SOL"}}"#),
+            "gpt-5-6-sol")
+
+        let line = #"{"timestamp":"2026-08-24T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":100,"output_tokens":5,"total_tokens":444},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":50,"reasoning_output_tokens":7,"total_tokens":1057}}}}"#
+        let parsed = try XCTUnwrap(CodexLogParser.parse(line: line, model: "gpt-5.6-sol"))
+        let event = try XCTUnwrap(parsed.event)
+
+        XCTAssertEqual(event.model, "gpt-5-6-sol")
+        XCTAssertEqual(event.inputTokens, 20)
+        XCTAssertEqual(event.reportedInputTokens, 120)
+        XCTAssertEqual(event.cacheReadTokens, 100)
+        XCTAssertEqual(event.outputTokens, 5)
+        XCTAssertEqual(event.reportedTotalTokens, 444)
+        XCTAssertEqual(event.cumulativeUsage, CodexCumulativeUsage(
+            inputTokens: 1000,
+            cachedInputTokens: 800,
+            outputTokens: 50,
+            reasoningOutputTokens: 7,
+            totalTokens: 1057))
+    }
+
+    func testCodexParserFallsBackToCumulativeUsageAndReportedInputPlusOutputTotal() throws {
+        let cumulativeOnly = #"{"timestamp":"2026-08-24T10:00:00Z","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":120,"cached_input_tokens":100,"output_tokens":5}}}}"#
+        let event = try XCTUnwrap(CodexLogParser.parse(line: cumulativeOnly)?.event)
+        XCTAssertEqual(event.reportedTotalTokens, 125)
+        XCTAssertEqual(event.inputTokens, 20)
+        XCTAssertNotNil(event.cumulativeUsage)
+
+        let malformedTimestamp = #"{"timestamp":"2026-08-24 invalid","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":1,"output_tokens":2,"total_tokens":9}}}}"#
+        let fallbackDate = try XCTUnwrap(CodexLogParser.parse(line: malformedTimestamp)?.timestamp)
+        XCTAssertTrue(Calendar.current.isDate(fallbackDate, inSameDayAs:
+            try XCTUnwrap(ISO8601.date("2026-08-24T12:00:00Z"))))
+    }
+
     @MainActor
-    func testCodexCollectorRehydratesRecentHistoryAfterRestart() throws {
+    func testDailyStatsSeparatesProvidersAndPersistsReportedTotalsForTrends() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-stats-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let stats = try XCTUnwrap(DailyStatsStore(path: path))
+        let now = Date()
+        let gateway = TokenEvent(
+            service: .codex, timestamp: now, model: "gpt-codex",
+            inputTokens: 10, outputTokens: 2, cacheReadTokens: 100,
+            cacheCreationTokens: 0, source: "ai-gateway", reportedTotalTokens: 400)
+        let sub2api = TokenEvent(
+            service: .codex, timestamp: now, model: "gpt-codex",
+            inputTokens: 20, outputTokens: 3, cacheReadTokens: 200,
+            cacheCreationTokens: 0, source: "sub2api", reportedTotalTokens: 900)
+        stats.upsert(events: [gateway, sub2api], calendar: .utc)
+
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc)
+            .first?.tokens, 1_300)
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc,
+                                                   source: "ai-gateway").first?.tokens, 400)
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc,
+                                                   source: "sub2api").first?.tokens, 900)
+    }
+
+    @MainActor
+    func testDailyStatsMigratesLegacyRowsToTheDefaultSource() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-legacy-stats-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        let create = """
+        CREATE TABLE daily_stats(
+            day TEXT, service TEXT, model TEXT, project TEXT,
+            input INTEGER, output INTEGER, cache_read INTEGER, cache_create INTEGER,
+            PRIMARY KEY(day, service, model, project)
+        );
+        INSERT INTO daily_stats(day, service, model, project, input, output, cache_read, cache_create)
+        VALUES ('2026-08-24', 'codex', 'gpt-codex', 'fixture', 10, 2, 100, 0);
+        """
+        XCTAssertEqual(sqlite3_exec(db, create, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+
+        let stats = try XCTUnwrap(DailyStatsStore(path: path))
+        let now = try XCTUnwrap(ISO8601.date("2026-08-24T12:00:00Z"))
+        XCTAssertTrue(stats.needsCodexRebuild)
+        // v2 rows cannot be reconstructed from input/output: usage_total is
+        // intentionally NULL until a verified raw-log rebuild succeeds.
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc)
+            .first?.tokens, 0)
+    }
+
+    @MainActor
+    func testCodexRebuildClaimIsPersistedAndThrottledAcrossRestart() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-rebuild-claim-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        let create = """
+        CREATE TABLE daily_stats(
+            day TEXT, service TEXT, source TEXT NOT NULL DEFAULT 'legacy',
+            model TEXT, project TEXT,
+            input INTEGER, output INTEGER, cache_read INTEGER, cache_create INTEGER,
+            PRIMARY KEY(day, service, source, model, project)
+        );
+        INSERT INTO daily_stats(day, service, source, model, project, input, output, cache_read, cache_create)
+        VALUES ('2026-08-24', 'codex', 'legacy', 'gpt-codex', 'fixture', 10, 2, 100, 0);
+        """
+        XCTAssertEqual(sqlite3_exec(db, create, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+
+        let now = Date(timeIntervalSince1970: 1_000_000)
+        var first: DailyStatsStore? = try XCTUnwrap(DailyStatsStore(path: path))
+        XCTAssertTrue(first?.needsCodexRebuild == true)
+        XCTAssertTrue(first?.beginCodexRebuildIfAllowed(now: now) == true)
+        first = nil
+
+        let restarted = try XCTUnwrap(DailyStatsStore(path: path))
+        XCTAssertTrue(restarted.needsCodexRebuild)
+        XCTAssertFalse(restarted.beginCodexRebuildIfAllowed(
+            now: now.addingTimeInterval(60 * 60)))
+        XCTAssertTrue(restarted.beginCodexRebuildIfAllowed(
+            now: now.addingTimeInterval(DailyStatsStore.codexRebuildRetryInterval + 1)))
+    }
+
+    @MainActor
+    func testFailedCodexRebuildIsThrottledWithoutDeletingLegacyRows() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-rebuild-failure-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(path, &db), SQLITE_OK)
+        let create = """
+        CREATE TABLE daily_stats(
+            day TEXT, service TEXT, source TEXT NOT NULL DEFAULT 'legacy',
+            model TEXT, project TEXT,
+            input INTEGER, output INTEGER, cache_read INTEGER, cache_create INTEGER,
+            PRIMARY KEY(day, service, source, model, project)
+        );
+        INSERT INTO daily_stats(day, service, source, model, project, input, output, cache_read, cache_create)
+        VALUES ('2026-08-24', 'codex', 'legacy', 'gpt-codex', 'fixture', 10, 2, 100, 0);
+        """
+        XCTAssertEqual(sqlite3_exec(db, create, nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+
+        let now = try XCTUnwrap(ISO8601.date("2026-08-24T12:00:00Z"))
+        var stats: DailyStatsStore? = try XCTUnwrap(DailyStatsStore(path: path))
+        XCTAssertTrue(stats?.beginCodexRebuildIfAllowed(now: now) == true)
+        stats?.markCodexRebuildFailed(now: now)
+        stats = nil
+
+        let restarted = try XCTUnwrap(DailyStatsStore(path: path))
+        XCTAssertFalse(restarted.beginCodexRebuildIfAllowed(
+            now: now.addingTimeInterval(DailyStatsStore.codexRebuildRetryInterval - 1)))
+        XCTAssertTrue(restarted.beginCodexRebuildIfAllowed(
+            now: now.addingTimeInterval(DailyStatsStore.codexRebuildRetryInterval + 1)))
+        XCTAssertEqual(restarted.dailyTotalsByService(days: 1, now: now, calendar: .utc)
+            .first?.tokens, 0)
+    }
+
+    @MainActor
+    func testHistoricalRebuildUsesAllFilesAndReplacesLegacyRows() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-history-rebuild-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let file = root.appendingPathComponent("session.jsonl")
+        let lines = [
+            #"{"type":"session_meta","payload":{"id":"session-a","cwd":"/tmp/project","model_provider":"custom"}}"#,
+            #"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            #"{"timestamp":"2026-08-24T10:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":120,"cached_input_tokens":100,"cache_write_input_tokens":7,"output_tokens":5,"total_tokens":777},"total_token_usage":{"input_tokens":120,"cached_input_tokens":100,"output_tokens":5,"total_tokens":777}}}}"#,
+        ]
+        try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+
+        let rows = try XCTUnwrap(CodexCollector.historicalRows(root: root))
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].source, "custom")
+        XCTAssertEqual(rows[0].input, 20)
+        XCTAssertEqual(rows[0].output, 5)
+        XCTAssertEqual(rows[0].cacheRead, 100)
+        XCTAssertEqual(rows[0].cacheCreate, 7)
+        XCTAssertEqual(rows[0].usageTotal, 777)
+
+        let dbPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-rebuild-\(UUID().uuidString).db").path
+        defer {
+            try? FileManager.default.removeItem(atPath: dbPath)
+            try? FileManager.default.removeItem(atPath: dbPath + ".pre-reported-total-v3.bak")
+        }
+        let stats = try XCTUnwrap(DailyStatsStore(path: dbPath))
+        let old = TokenEvent(service: .codex, timestamp: Date(), model: "gpt-codex",
+                             inputTokens: 900, outputTokens: 1, cacheReadTokens: 0,
+                             cacheCreationTokens: 0, source: "legacy")
+        stats.upsert(events: [old], calendar: .utc)
+        XCTAssertTrue(stats.rebuildCodexStats(rows: rows))
+
+        let now = try XCTUnwrap(ISO8601.date("2026-08-24T12:00:00Z"))
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc)
+            .first?.tokens, 777)
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc,
+                                                   source: "legacy").count, 0)
+        XCTAssertFalse(stats.needsCodexRebuild)
+    }
+
+    @MainActor
+    func testDailyStatsKeepsDistinctSourcesUntilVerifiedRebuild() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-source-cleanup-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let stats = try XCTUnwrap(DailyStatsStore(path: path))
+        let now = Date()
+        let legacy = TokenEvent(
+            service: .codex, timestamp: now, model: "gpt-codex",
+            inputTokens: 10, outputTokens: 2, cacheReadTokens: 100,
+            cacheCreationTokens: 0, source: "legacy")
+        let source = TokenEvent(
+            service: .codex, timestamp: now, model: "gpt-codex",
+            inputTokens: 10, outputTokens: 2, cacheReadTokens: 100,
+            cacheCreationTokens: 0, source: "ai-gateway")
+
+        stats.upsert(events: [legacy], calendar: .utc)
+        stats.upsert(events: [source], calendar: .utc)
+
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc)
+            .first?.tokens, 24)
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc,
+                                                   source: "legacy").first?.tokens, 12)
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc,
+                                                   source: "ai-gateway").first?.tokens, 12)
+    }
+
+    @MainActor
+    func testDailyStatsKeepsLegacyWhenSourceArrivesWithoutRebuild() throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-source-partial-\(UUID().uuidString).db").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let stats = try XCTUnwrap(DailyStatsStore(path: path))
+        let now = Date()
+        let legacy = TokenEvent(
+            service: .codex, timestamp: now, model: "gpt-codex",
+            inputTokens: 100, outputTokens: 20, cacheReadTokens: 400,
+            cacheCreationTokens: 0, source: "legacy")
+        let partial = TokenEvent(
+            service: .codex, timestamp: now, model: "gpt-codex",
+            inputTokens: 50, outputTokens: 10, cacheReadTokens: 100,
+            cacheCreationTokens: 0, source: "ai-gateway")
+
+        stats.upsert(events: [legacy], calendar: .utc)
+        stats.upsert(events: [partial], calendar: .utc)
+
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc)
+            .first?.tokens, 180)
+        XCTAssertEqual(stats.dailyTotalsByService(days: 1, now: now, calendar: .utc,
+                                                   source: "ai-gateway").first?.tokens, 60)
+    }
+
+    @MainActor
+    func testCodexCollectorRehydratesRecentHistoryAfterRestart() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -117,6 +411,215 @@ final class APIContractTests: XCTestCase {
 
         XCTAssertEqual(restartedStore.events.count, 2)
         XCTAssertEqual(restartedStore.events.map(\.totalTokens).sorted(), [110, 210])
+
+        // The production startup path is asynchronous and must likewise
+        // ignore the persisted cursor while rebuilding its memory-only store.
+        let asynchronouslyRestartedStore = UsageStore()
+        let asynchronouslyRestartedCollector = CodexCollector(root: root)
+        let hydrated = await asynchronouslyRestartedCollector.hydrateRecentHistory(
+            into: asynchronouslyRestartedStore)
+        XCTAssertTrue(hydrated)
+        XCTAssertEqual(asynchronouslyRestartedStore.events.count, 2)
+        XCTAssertEqual(
+            asynchronouslyRestartedStore.events.map(\.totalTokens).sorted(),
+            [110, 210])
+    }
+
+    @MainActor
+    func testCodexCollectorHydratesInBoundedBatchesAndDoesNotDuplicateOnRefresh() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let file = root.appendingPathComponent("session.jsonl")
+        let formatter = ISO8601DateFormatter()
+        let now = Date()
+        var lines = [#"{"type":"session_meta","payload":{"cwd":"/tmp/project","model_provider":"ai-gateway"}}"#]
+        for index in 0..<2_000 {
+            let timestamp = formatter.string(from: now.addingTimeInterval(Double(index) * 0.001))
+            lines.append(#"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":\#(index + 10),"output_tokens":2,"cached_input_tokens":0}}}}"#)
+        }
+        try (lines.joined(separator: "\n") + "\n").write(to: file, atomically: true, encoding: .utf8)
+
+        let store = UsageStore()
+        let collector = CodexCollector(root: root, hydrationBatchBytes: 64 * 1024)
+        let hydrated = await collector.hydrateRecentHistory(into: store)
+        XCTAssertTrue(hydrated)
+        XCTAssertEqual(store.events.count, 2_000)
+
+        // The reader must have committed its cursor after hydration; a
+        // normal refresh should only inspect appended bytes, not duplicate the
+        // initial snapshot.
+        collector.collect(into: store)
+        XCTAssertEqual(store.events.count, 2_000)
+    }
+
+    @MainActor
+    func testCodexCollectorTracksModelSwitchesKeepsCompactionAndDropsConsecutiveSnapshot() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-model-switch-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let ordinary = #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":2,"total_tokens":12},"total_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":2,"total_tokens":12}}}}"#
+        let compacted = #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":0,"total_tokens":900},"total_token_usage":{"input_tokens":10,"cached_input_tokens":3,"output_tokens":2,"total_tokens":12}}}}"#
+        let lines = [
+            #"{"type":"session_meta","payload":{"id":"session-switch","cwd":"/tmp/project"}}"#,
+            #"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            ordinary,
+            ordinary,
+            #"{"type":"turn_context","payload":{"model":"openai/GPT_5.6_SOL"}}"#,
+            compacted,
+        ]
+        try (lines.joined(separator: "\n") + "\n").write(
+            to: root.appendingPathComponent("session.jsonl"), atomically: true, encoding: .utf8)
+
+        let store = UsageStore()
+        let hydrated = await CodexCollector(root: root).hydrateRecentHistory(into: store)
+        XCTAssertTrue(hydrated)
+        XCTAssertEqual(store.events.count, 2)
+        XCTAssertEqual(store.events.map(\.reportedTotalTokens).sorted(), [12, 900])
+        XCTAssertEqual(Set(store.events.map(\.model)), Set(["gpt-5-4", "gpt-5-6-sol"]))
+    }
+
+    @MainActor
+    func testCodexCollectorDeduplicatesCumulativeReplaysToEarliestLocalDate() async throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-replay-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let calendar = Calendar.current
+        let later = Date()
+        let earlier = try XCTUnwrap(calendar.date(byAdding: .day, value: -1, to: later))
+        let formatter = ISO8601DateFormatter()
+        func rollout(timestamp: Date, model: String) -> String {
+            [
+                #"{"type":"session_meta","payload":{"id":"shared-session","cwd":"/tmp/project"}}"#,
+                #"{"type":"turn_context","payload":{"model":"\#(model)"}}"#,
+                #"{"timestamp":"\#(formatter.string(from: timestamp))","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":4,"total_tokens":321},"total_token_usage":{"input_tokens":1000,"cached_input_tokens":800,"output_tokens":40,"reasoning_output_tokens":3,"total_tokens":1043}}}}"#,
+            ].joined(separator: "\n") + "\n"
+        }
+        // Lexical order intentionally presents the later replay first.
+        try rollout(timestamp: later, model: "openai/GPT_5.6_SOL").write(
+            to: root.appendingPathComponent("a-later.jsonl"), atomically: true, encoding: .utf8)
+        try rollout(timestamp: earlier, model: "gpt-5.6-sol").write(
+            to: root.appendingPathComponent("z-earlier.jsonl"), atomically: true, encoding: .utf8)
+
+        let store = UsageStore()
+        let hydrated = await CodexCollector(root: root).hydrateRecentHistory(into: store)
+        XCTAssertTrue(hydrated)
+        XCTAssertEqual(store.events.count, 1)
+        XCTAssertEqual(store.events[0].reportedTotalTokens, 321)
+        XCTAssertEqual(
+            calendar.startOfDay(for: store.events[0].timestamp),
+            calendar.startOfDay(for: earlier))
+
+        let rows = try XCTUnwrap(CodexCollector.historicalRows(root: root))
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].usageTotal, 321)
+        let localDay = DateFormatter()
+        localDay.calendar = Calendar(identifier: .gregorian)
+        localDay.timeZone = .current
+        localDay.locale = Locale(identifier: "en_US_POSIX")
+        localDay.dateFormat = "yyyy-MM-dd"
+        XCTAssertEqual(rows[0].day, localDay.string(from: earlier))
+    }
+
+    @MainActor
+    func testCodexCollectorDoesNotDeduplicateCrossFileUsageWithoutCumulativeSnapshot() async throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-archive-\(UUID().uuidString)", isDirectory: true)
+        let sessions = parent.appendingPathComponent("sessions", isDirectory: true)
+        let archived = parent.appendingPathComponent("archived_sessions", isDirectory: true)
+        try FileManager.default.createDirectory(at: sessions, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: archived, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: parent) }
+
+        let timestamp = ISO8601DateFormatter().string(from: Date())
+        let contents = [
+            #"{"type":"session_meta","payload":{"id":"shared-session"}}"#,
+            #"{"type":"turn_context","payload":{"model":"gpt-5.4"}}"#,
+            #"{"timestamp":"\#(timestamp)","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":100,"cached_input_tokens":80,"output_tokens":4,"total_tokens":321}}}}"#,
+        ].joined(separator: "\n") + "\n"
+        try contents.write(to: sessions.appendingPathComponent("active.jsonl"),
+                           atomically: true, encoding: .utf8)
+        try contents.write(to: archived.appendingPathComponent("archived.jsonl"),
+                           atomically: true, encoding: .utf8)
+
+        let store = UsageStore()
+        let hydrated = await CodexCollector(roots: [sessions, archived])
+            .hydrateRecentHistory(into: store)
+        XCTAssertTrue(hydrated)
+        XCTAssertEqual(store.events.count, 2)
+        XCTAssertEqual(store.todayTokens(now: Date()), 642)
+    }
+
+    func testIncrementalReaderRetriesPartialTailAndPersistsExactEOF() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-reader-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: file) }
+
+        try Data("one\ntwo\npartial".utf8).write(to: file)
+        let reader = IncrementalLineReader()
+        guard let first = reader.nextBatchSynchronously(
+            of: file, persistOffset: true, maxBytes: 8) else {
+            return XCTFail("expected the complete records before the partial tail")
+        }
+        XCTAssertEqual(first.lines.map { String(decoding: $0, as: UTF8.self) }, ["one", "two"])
+        reader.commit(
+            of: file,
+            offset: first.nextOffset,
+            persistOffset: true,
+            reachedEOF: first.reachedEOF)
+
+        // Complete the record after the first pass. The uncommitted tail must
+        // be read exactly once on the next batch.
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("\n".utf8))
+        try handle.close()
+        let completed = reader.nextBatchSynchronously(of: file, persistOffset: true, maxBytes: 64)
+        XCTAssertEqual(completed?.lines.map { String(decoding: $0, as: UTF8.self) }, ["partial"])
+        if let completed {
+            reader.commit(
+                of: file,
+                offset: completed.nextOffset,
+                persistOffset: true,
+                reachedEOF: completed.reachedEOF)
+        }
+        XCTAssertNil(reader.nextBatchSynchronously(of: file, persistOffset: true, maxBytes: 64))
+
+        // A fresh reader must observe the persisted EOF even when the first
+        // batch stopped exactly at the byte budget.
+        let exactFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiglass-reader-exact-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: exactFile) }
+        try Data("a\nb\nc\n".utf8).write(to: exactFile)
+        let exactReader = IncrementalLineReader()
+        let exact = exactReader.nextBatchSynchronously(
+            of: exactFile, persistOffset: true, maxBytes: 4)
+        XCTAssertEqual(exact?.lines.map { String(decoding: $0, as: UTF8.self) }, ["a", "b"])
+        if let exact {
+            exactReader.commit(
+                of: exactFile,
+                offset: exact.nextOffset,
+                persistOffset: true,
+                reachedEOF: exact.reachedEOF)
+        }
+        let final = exactReader.nextBatchSynchronously(of: exactFile, persistOffset: true, maxBytes: 64)
+        XCTAssertEqual(final?.lines.map { String(decoding: $0, as: UTF8.self) }, ["c"])
+        if let final {
+            exactReader.commit(
+                of: exactFile,
+                offset: final.nextOffset,
+                persistOffset: true,
+                reachedEOF: final.reachedEOF)
+        }
+        let freshReader = IncrementalLineReader()
+        XCTAssertNil(freshReader.nextBatchSynchronously(of: exactFile, persistOffset: true, maxBytes: 64))
     }
 
     func testSingleInstanceGuardRejectsSecondOwner() throws {
@@ -3999,7 +4502,7 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(timeouts.values, ["30.0"])
     }
 
-    func testCostEstimatorMatchesSub2ApiCodexFallbackAndMultiplier() {
+    func testCostEstimatorMatchesTokenMonitorPricingAndIgnoresProviderMultiplier() {
         let event = TokenEvent(
             service: .codex,
             timestamp: Date(),
@@ -4010,10 +4513,18 @@ final class APIContractTests: XCTestCase {
             cacheCreationTokens: 50_000
         )
 
-        // Sub2API fallback: $1.50 input, $12 output, $0.15 cache-read,
-        // $1.50 cache-write per million tokens, then ×0.6.
+        // v0.20.5: $1.75 uncached input, $14 output and $0.175 cached
+        // input. Cache creation and provider multipliers are not charged.
         let estimated = CostEstimator.cost(of: event, multiplier: 0.6)
-        XCTAssertEqual(estimated, 4.554, accuracy: 0.000_001)
+        XCTAssertEqual(estimated, 8.7675, accuracy: 0.000_001)
+        XCTAssertEqual(estimated, CostEstimator.cost(of: event), accuracy: 0.000_001)
+
+        XCTAssertEqual(CostEstimator.rate(for: "openai/GPT_5.4_PRO"),
+                       .init(input: 30, output: 180, cachedInput: 0))
+        XCTAssertEqual(CostEstimator.rate(for: "gpt-5.4-mini-2026"),
+                       .init(input: 0.75, output: 4.5, cachedInput: 0.075))
+        XCTAssertEqual(CostEstimator.rate(for: "some-future-model"),
+                       .init(input: 2.5, output: 15, cachedInput: 0.25))
     }
 
     func testProviderUsageFormattingCoversPartialStatusesAndUnlimitedBalance() throws {

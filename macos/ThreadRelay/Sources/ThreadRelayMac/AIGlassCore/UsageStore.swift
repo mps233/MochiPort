@@ -7,7 +7,7 @@ public final class UsageStore {
     public private(set) var limits: [ServiceID: [LimitWindow]] = [:]
     public private(set) var events: [TokenEvent] = []
     public private(set) var lastActivityAt: Date?
-    private var dedupKeys: Set<String> = []
+    private var dedupEventIndexes: [String: Int] = [:]
     /// 분 단위 토큰 합계 캐시 (key = epoch초 / 60). burn rate 계산용. 서비스별로 분리.
     private var minuteBuckets: [ServiceID: [Int: Int]] = [:]
     /// 分钟级请求数缓存，用于最近活动占比计算。
@@ -73,12 +73,22 @@ public final class UsageStore {
         for (event, key) in batch {
             guard event.timestamp >= cutoff else { continue }
             if let key {
-                if dedupKeys.contains(key) { continue }
-                dedupKeys.insert(key)
+                if let existingIndex = dedupEventIndexes[key] {
+                    let existing = events[existingIndex]
+                    let calendar = Calendar.current
+                    if calendar.startOfDay(for: event.timestamp)
+                        < calendar.startOfDay(for: existing.timestamp) {
+                        replaceReplay(at: existingIndex, with: event)
+                    }
+                    continue
+                }
+                dedupEventIndexes[key] = events.count
             }
             events.append(event)
             let minute = Int(event.timestamp.timeIntervalSince1970) / 60
-            minuteBuckets[event.service, default: [:]][minute, default: 0] += event.totalTokens
+            // Burn rate/activity tracks request tokens. Cache reads are kept
+            // on the event, but are not repeatedly counted as new usage.
+            minuteBuckets[event.service, default: [:]][minute, default: 0] += event.requestTokens
             requestBuckets[event.service, default: [:]][minute, default: 0] += 1
             // 서비스별 최신 timestamp 캐시 갱신 (approxFullReset용)
             if let prev = lastEventTimestamp[event.service] {
@@ -124,6 +134,45 @@ public final class UsageStore {
         }
     }
 
+    /// Replayed turns belong to the earliest local date on which Codex logged
+    /// them. This path is rare and intentionally recomputes timestamp caches
+    /// after moving one already-counted event.
+    private func replaceReplay(at index: Int, with replacement: TokenEvent) {
+        let existing = events[index]
+        let oldMinute = Int(existing.timestamp.timeIntervalSince1970) / 60
+        let newMinute = Int(replacement.timestamp.timeIntervalSince1970) / 60
+
+        if let value = minuteBuckets[existing.service]?[oldMinute] {
+            let next = value - existing.requestTokens
+            if next > 0 {
+                minuteBuckets[existing.service]?[oldMinute] = next
+            } else {
+                minuteBuckets[existing.service]?.removeValue(forKey: oldMinute)
+            }
+        }
+        if let value = requestBuckets[existing.service]?[oldMinute] {
+            if value > 1 {
+                requestBuckets[existing.service]?[oldMinute] = value - 1
+            } else {
+                requestBuckets[existing.service]?.removeValue(forKey: oldMinute)
+            }
+        }
+
+        events[index] = replacement
+        minuteBuckets[replacement.service, default: [:]][newMinute, default: 0]
+            += replacement.requestTokens
+        requestBuckets[replacement.service, default: [:]][newMinute, default: 0] += 1
+
+        for service in Set([existing.service, replacement.service]) {
+            lastEventTimestamp[service] = events
+                .lazy
+                .filter { $0.service == service }
+                .map(\.timestamp)
+                .max()
+        }
+        lastKnownMaxTimestamp = events.map(\.timestamp).max()
+    }
+
     /// 감지된 컴백 공백을 반환하고 클리어한다. 없으면 nil.
     public func consumeComebackGap() -> TimeInterval? {
         defer { pendingComebackGap = nil }
@@ -160,7 +209,7 @@ public final class UsageStore {
         let dayOf = Self.dayBucketer(calendar: calendar)
         var buckets: [Date: Int] = [:]
         for e in events {
-            buckets[dayOf(e.timestamp), default: 0] += e.totalTokens
+            buckets[dayOf(e.timestamp), default: 0] += e.requestTokens
         }
         return (0..<days).reversed().map { offset in
             let day = calendar.date(byAdding: .day, value: -offset, to: today)!
@@ -172,14 +221,14 @@ public final class UsageStore {
         let cutoff = calendar.date(byAdding: .day, value: -days, to: now)!
         var byModel: [String: Int] = [:]
         for e in events where e.timestamp >= cutoff {
-            byModel[e.model, default: 0] += e.totalTokens
+            byModel[e.model, default: 0] += e.requestTokens
         }
         return byModel.map { (model: $0.key, tokens: $0.value) }.sorted { $0.tokens > $1.tokens }
     }
 
     public func todayTokens(now: Date, calendar: Calendar = .current) -> Int {
         let start = calendar.startOfDay(for: now)
-        return events.filter { $0.timestamp >= start }.reduce(0) { $0 + $1.totalTokens }
+        return events.filter { $0.timestamp >= start }.reduce(0) { $0 + $1.requestTokens }
     }
 
     public func todayRequests(now: Date, calendar: Calendar = .current) -> Int {
@@ -264,7 +313,7 @@ public final class UsageStore {
         var byProject: [String: Int] = [:]
         for e in events where e.timestamp >= cutoff {
             guard let proj = e.project else { continue }
-            byProject[proj, default: 0] += e.totalTokens
+            byProject[proj, default: 0] += e.requestTokens
         }
         return byProject.map { (project: $0.key, tokens: $0.value) }.sorted { $0.tokens > $1.tokens }
     }
@@ -276,7 +325,7 @@ public final class UsageStore {
         var byProject: [String: [ServiceID: Int]] = [:]
         for e in events where e.timestamp >= cutoff {
             guard let proj = e.project else { continue }
-            byProject[proj, default: [:]][e.service, default: 0] += e.totalTokens
+            byProject[proj, default: [:]][e.service, default: 0] += e.requestTokens
         }
         return byProject.map { (project, byService) in
             (project: project, byService: byService, total: byService.values.reduce(0, +))
@@ -291,7 +340,7 @@ public final class UsageStore {
         let dayOf = Self.dayBucketer(calendar: calendar)
         var buckets: [Date: [ServiceID: Int]] = [:]
         for e in events {
-            buckets[dayOf(e.timestamp), default: [:]][e.service, default: 0] += e.totalTokens
+            buckets[dayOf(e.timestamp), default: [:]][e.service, default: 0] += e.requestTokens
         }
         var result: [(day: Date, service: ServiceID, tokens: Int)] = []
         for offset in (0..<days).reversed() {
@@ -318,12 +367,12 @@ public final class UsageStore {
         }
         guard !scoped.isEmpty else { return nil }
 
-        let tokens = scoped.reduce(0) { $0 + $1.totalTokens }
+        let tokens = scoped.reduce(0) { $0 + $1.requestTokens }
         var parts = ["上一会话：\(Self.formatTokens(tokens)) tokens"]
 
         // 최다 프로젝트
         var byProject: [String: Int] = [:]
-        for e in scoped { if let p = e.project { byProject[p, default: 0] += e.totalTokens } }
+        for e in scoped { if let p = e.project { byProject[p, default: 0] += e.requestTokens } }
         if let top = byProject.max(by: { $0.value < $1.value })?.key {
             parts.append("主要项目 \(top)")
         }

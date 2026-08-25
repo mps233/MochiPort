@@ -16,8 +16,8 @@ enum MenubarMode: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .todayTokens: return "今日 Token 总量"
-        case .burnRate: return "消耗速度（Token/分钟）"
+        case .todayTokens: return "今日请求 Token 总量"
+        case .burnRate: return "请求 Token 速度（Token/分钟）"
         case .maxPercent: return "最高使用率"
         case .iconOnly: return "仅显示图标"
         }
@@ -37,8 +37,8 @@ enum MenubarItem: String, CaseIterable, Identifiable {
         switch self {
         case .usagePercent: return "使用率"
         case .resetCountdown: return "距离重置"
-        case .todayTokens: return "今日 Token 总量"
-        case .burnRate: return "消耗速度（Token/分钟）"
+        case .todayTokens: return "今日请求 Token 总量"
+        case .burnRate: return "请求 Token 速度（Token/分钟）"
         }
     }
 

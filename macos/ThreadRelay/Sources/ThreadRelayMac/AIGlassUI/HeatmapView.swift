@@ -289,7 +289,7 @@ struct HeatmapView: View {
     private func bottomCaption(weekCount: Int, cellSize: CGFloat) -> some View {
         HStack(spacing: 6) {
             if let hovered {
-                Text("\(Self.captionDateFormatter.string(from: hovered.day)) · \(formatTokens(hovered.tokens)) Token")
+                Text("\(Self.captionDateFormatter.string(from: hovered.day)) · \(formatTokens(hovered.tokens)) 请求 Token")
             } else {
                 Text("最近 \(weekCount) 周")
             }
@@ -311,7 +311,7 @@ struct HeatmapView: View {
             Text("少").font(.system(size: 9)).foregroundStyle(.secondary)
         }
         .fixedSize()
-        .accessibilityLabel(hovered.map { "\(Self.captionDateFormatter.string(from: $0.day)) \(formatTokens($0.tokens)) Token" } ?? "使用强度")
+        .accessibilityLabel(hovered.map { "\(Self.captionDateFormatter.string(from: $0.day)) \(formatTokens($0.tokens)) 请求 Token" } ?? "使用强度")
     }
 
     private func intensityLegend(cellSize: CGFloat) -> some View {
