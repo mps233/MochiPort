@@ -17,6 +17,21 @@ export function compactNumber(value?: number | null): string {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
+/** AI Token Monitor v0.20.5 usage-card formatting. */
+export function formatUsageTokens(tokens: number): string {
+  if (tokens >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(1)}B`;
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}K`;
+  return new Intl.NumberFormat("zh-CN").format(tokens);
+}
+
+/** AI Token Monitor v0.20.5 cost precision tiers. */
+export function formatUsageCost(cost: number): string {
+  if (cost >= 100) return `$${cost.toFixed(0)}`;
+  if (cost >= 1) return `$${cost.toFixed(2)}`;
+  return `$${cost.toFixed(4)}`;
+}
+
 export function formatBytes(value?: number | null): string {
   if (value === undefined || value === null) return "—";
   if (value >= 1_048_576) return `${(value / 1_048_576).toFixed(2)} MB`;

@@ -36,6 +36,10 @@ export interface CodexUsageSnapshot {
   sourceDirectory: string;
   scannedFiles: number;
   todayTokens: number;
+  /** Input plus output from Codex; cached input is already included in input. */
+  todayContextTokens?: number;
+  todayCacheReadTokens?: number;
+  todayCacheCreationTokens?: number;
   todayRequests: number;
   yesterdayTokens?: number;
   yesterdayCostUsd?: number;
@@ -95,6 +99,9 @@ function isSnapshot(value: unknown): value is CodexUsageSnapshot {
     && typeof snapshot.sourceDirectory === "string"
     && typeof snapshot.scannedFiles === "number"
     && typeof snapshot.todayTokens === "number"
+    && (snapshot.todayContextTokens === undefined || typeof snapshot.todayContextTokens === "number")
+    && (snapshot.todayCacheReadTokens === undefined || typeof snapshot.todayCacheReadTokens === "number")
+    && (snapshot.todayCacheCreationTokens === undefined || typeof snapshot.todayCacheCreationTokens === "number")
     && typeof snapshot.todayRequests === "number"
     && (snapshot.yesterdayTokens === undefined || typeof snapshot.yesterdayTokens === "number")
     && (snapshot.yesterdayCostUsd === undefined || typeof snapshot.yesterdayCostUsd === "number")
@@ -144,6 +151,9 @@ function fixtureSnapshot(): CodexUsageSnapshot {
     sourceDirectory: "C:\\Users\\Mia\\.codex\\sessions",
     scannedFiles: 23,
     todayTokens: sevenDay.at(-1)?.tokens ?? 0,
+    todayContextTokens: sevenDay.at(-1)?.tokens ?? 0,
+    todayCacheReadTokens: 0,
+    todayCacheCreationTokens: 0,
     todayRequests: 17,
     yesterdayTokens: dailyUsage.at(-2)?.tokens ?? 0,
     yesterdayCostUsd: 1.32,
@@ -151,7 +161,7 @@ function fixtureSnapshot(): CodexUsageSnapshot {
     tokensPerMinute: 982.3,
     burnRateTokensPerMinute: 734.8,
     activeBaselineTokensPerMinute: 410.2,
-    estimatedCostUsd: 1.84,
+    estimatedCostUsd: 129.442171,
     quotaWindows: [
       {
         kind: "session5h",
@@ -194,6 +204,9 @@ function browserSnapshot(): CodexUsageSnapshot {
     sourceDirectory: "%USERPROFILE%\\.codex\\sessions",
     scannedFiles: 0,
     todayTokens: 0,
+    todayContextTokens: 0,
+    todayCacheReadTokens: 0,
+    todayCacheCreationTokens: 0,
     todayRequests: 0,
     yesterdayTokens: 0,
     yesterdayCostUsd: 0,

@@ -7,8 +7,12 @@ use std::{
 use chrono::{Days, NaiveDate};
 use serde::{Deserialize, Serialize};
 
-const HISTORY_SCHEMA_VERSION: u32 = 1;
-const HISTORY_FILE_NAME: &str = "codex-usage-history-v1.json";
+// Version 4 stores Codex's reported per-turn `total_tokens` and local-calendar
+// day buckets, matching AI Token Monitor v0.20.5. Earlier files used derived
+// token units and/or UTC day boundaries and must be rebuilt from source logs
+// instead of being silently reinterpreted.
+const HISTORY_SCHEMA_VERSION: u32 = 4;
+const HISTORY_FILE_NAME: &str = "codex-usage-history-v4.json";
 
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,9 +22,9 @@ struct PersistedUsageHistory {
     daily_tokens: BTreeMap<String, u64>,
     #[serde(default)]
     observed_daily_tokens: BTreeMap<String, u64>,
-    /// Per-source high-water observations keep a temporarily missing log
-    /// from looking like a reset. The source path is stable across refreshes
-    /// and a genuinely new path is still allowed to contribute its totals.
+    /// Per-session high-water observations keep a temporarily missing log
+    /// from looking like a reset. Session identity also survives a rollout
+    /// moving from `sessions` to `archived_sessions`.
     #[serde(default)]
     source_daily_tokens: BTreeMap<String, BTreeMap<String, u64>>,
     #[serde(default)]
@@ -100,9 +104,10 @@ impl UsageHistoryStore {
         self.needs_full_backfill
     }
 
-    /// Replace complete UTC-day aggregates. The first pass covers every
-    /// discoverable JSONL file; later passes replace only the recent range,
-    /// preserving older rows after their source files age out or rotate away.
+    /// Replace complete local-calendar-day aggregates. The first pass covers
+    /// every discoverable JSONL file; later passes replace only the recent
+    /// range, preserving older rows after their source files age out or rotate
+    /// away.
     pub(super) fn replace_daily_tokens(
         &mut self,
         observed: &BTreeMap<NaiveDate, u64>,
@@ -483,6 +488,34 @@ fn consecutive_active_days(active_days: &HashSet<NaiveDate>, ending_on: NaiveDat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn older_history_is_not_interpreted_as_reported_total_tokens() {
+        let root = std::env::temp_dir().join(format!(
+            "mochiport-usage-history-v2-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos(),
+        ));
+        let path = root.join(HISTORY_FILE_NAME);
+        fs::create_dir_all(&root).expect("create history fixture directory");
+        let old_payload = serde_json::json!({
+            "schemaVersion": 2,
+            "dailyTokens": { "2026-08-24": 44_705_188_094_u64 }
+        });
+        fs::write(
+            &path,
+            serde_json::to_vec(&old_payload).expect("encode v2 fixture"),
+        )
+        .expect("write v2 history fixture");
+
+        let store = UsageHistoryStore::at(path);
+        assert!(store.needs_full_backfill());
+
+        fs::remove_dir_all(root).expect("remove history fixture directory");
+    }
 
     #[test]
     fn history_round_trips_full_streak_record_and_weekly_percentages() {

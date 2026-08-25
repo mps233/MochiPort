@@ -1,4 +1,13 @@
 import { expect, test } from "@playwright/test";
+import { formatUsageCost, formatUsageTokens } from "../src/utils/format";
+
+test("usage card formatting matches AI Token Monitor precision tiers", () => {
+  expect(formatUsageTokens(163_505_410)).toBe("163.5M");
+  expect(formatUsageTokens(1_250_000_000)).toBe("1.3B");
+  expect(formatUsageCost(129.442171)).toBe("$129");
+  expect(formatUsageCost(12.3456)).toBe("$12.35");
+  expect(formatUsageCost(0.123456)).toBe("$0.1235");
+});
 
 test("usage insights switch between seven-day, thirty-day, and heatmap views", async ({ page }) => {
   await page.goto("/?fixture=1");
@@ -6,6 +15,11 @@ test("usage insights switch between seven-day, thirty-day, and heatmap views", a
 
   const range = page.getByRole("group", { name: "用量范围" });
   await expect(range.getByRole("button", { name: "7 天" })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByText("今日 Token", { exact: true })).toBeVisible();
+  await expect(page.getByText("今日成本", { exact: true })).toBeVisible();
+  await expect(page.getByText("$129", { exact: true })).toBeVisible();
+  await expect(page.getByText("今日请求 Token", { exact: true })).toHaveCount(0);
+  await expect(page.locator(".usage-metrics > div").filter({ hasText: "今日 Token" }).locator("strong")).toHaveText(/^\d+\.\dK$/);
   const weekChart = page.getByRole("img", { name: "最近七天 Codex Token 趋势" });
   await expect(weekChart.locator(".usage-bar")).toHaveCount(7);
   await expect(weekChart.locator(".usage-chart__y-axis span")).toHaveCount(3);

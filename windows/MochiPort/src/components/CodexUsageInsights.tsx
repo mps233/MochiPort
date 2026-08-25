@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { type KeyboardEvent, useId, useMemo, useState } from "react";
 import { useCodexUsage, type UsageDay, type UsageHistoryEvent } from "../state/CodexUsage";
-import { compactNumber, relativeTime } from "../utils/format";
+import { compactNumber, formatUsageCost, formatUsageTokens, relativeTime } from "../utils/format";
 import { Button, Card, SectionHeading, StatusPill } from "./ui";
 
 const numberFormatter = new Intl.NumberFormat("zh-CN");
@@ -206,8 +206,8 @@ export function CodexUsageInsights() {
       ) : (
         <Card className="usage-dashboard">
           <div className="usage-metrics">
-            <div><span className="usage-metric__icon"><Gauge size={16} /></span><p>今日 Token</p><strong>{compactNumber(snapshot?.todayTokens ?? 0)}</strong><small>{snapshot?.todayRequests ?? 0} 次用量记录</small></div>
-            <div><span className="usage-metric__icon"><Coins size={16} /></span><p>API 等值成本</p><strong>${(snapshot?.estimatedCostUsd ?? 0).toFixed(2)}</strong><small>仅供估算，不是订阅账单</small></div>
+            <div><span className="usage-metric__icon"><Gauge size={16} /></span><p>今日 Token</p><strong>{formatUsageTokens(snapshot?.todayTokens ?? 0)}</strong><small>{snapshot?.todayRequests ?? 0} 次用量记录</small></div>
+            <div><span className="usage-metric__icon"><Coins size={16} /></span><p>今日成本</p><strong>{formatUsageCost(snapshot?.estimatedCostUsd ?? 0)}</strong><small>API 等值估算，不是订阅账单</small></div>
             <div><span className="usage-metric__icon"><Activity size={16} /></span><p>近 3 分钟速度</p><strong>{compactNumber(snapshot?.tokensPerMinute ?? 0)}</strong><small>Token / 分钟</small></div>
           </div>
           <div className="quota-windows" aria-label="Codex 额度窗口">
