@@ -2125,7 +2125,7 @@ mod tests {
     #[test]
     fn command_parser_normalizes_standard_commands_and_legacy_aliases() {
         assert_eq!(
-            super::command("/STOP@ThreadRelay extra"),
+            super::command("/STOP@MochiPort extra"),
             Some("/stop".to_string())
         );
         assert_eq!(super::command("/s"), Some("/s".to_string()));
@@ -2134,11 +2134,11 @@ mod tests {
         assert_eq!(super::command("status"), None);
         assert_eq!(super::command("/queue hello"), Some("/queue".to_string()));
         assert_eq!(
-            super::command("/steer@ThreadRelay new direction"),
+            super::command("/steer@MochiPort new direction"),
             Some("/steer".to_string())
         );
         assert_eq!(super::command_payload("/queue hello world"), "hello world");
-        assert_eq!(super::command_payload("/queue@ThreadRelay hello"), "hello");
+        assert_eq!(super::command_payload("/queue@MochiPort hello"), "hello");
     }
 
     #[tokio::test]

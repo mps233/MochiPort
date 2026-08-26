@@ -12,16 +12,16 @@ use uuid::Uuid;
 use crate::types::now_ms;
 
 pub const DAEMON_INSTANCE_ENV: &str = "MOCHIPORT_DAEMON_INSTANCE_ID";
-const THREADRELAY_DAEMON_INSTANCE_ENV: &str = "THREADRELAY_DAEMON_INSTANCE_ID";
-const LEGACY_DAEMON_INSTANCE_ENV: &str = "CODEXHUB_DAEMON_INSTANCE_ID";
+const LEGACY_THREADRELAY_DAEMON_INSTANCE_ENV: &str = "THREADRELAY_DAEMON_INSTANCE_ID";
+const LEGACY_CODEXHUB_DAEMON_INSTANCE_ENV: &str = "CODEXHUB_DAEMON_INSTANCE_ID";
 // Keep the GUI PID variable stable because relaunch helpers may outlive the
 // executable that spawned them during an in-place upgrade.
-pub const CODEXHUB_GUI_PID_ENV: &str = "CODEXHUB_GUI_PID";
+pub const LEGACY_CODEXHUB_GUI_PID_ENV: &str = "CODEXHUB_GUI_PID";
 // Keep the management protocol service value stable across the product rename.
 // The executable and user-facing product are MochiPort; existing clients still
 // identify the local daemon through the `threadrelay` service contract.
 pub const DAEMON_SERVICE_NAME: &str = "threadrelay";
-const LEGACY_DAEMON_SERVICE_NAME: &str = "codexhub";
+const LEGACY_CODEXHUB_DAEMON_SERVICE_NAME: &str = "codexhub";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,8 +35,8 @@ pub struct DaemonIdentity {
 impl DaemonIdentity {
     pub fn new() -> Self {
         let instance_id = std::env::var(DAEMON_INSTANCE_ENV)
-            .or_else(|_| std::env::var(THREADRELAY_DAEMON_INSTANCE_ENV))
-            .or_else(|_| std::env::var(LEGACY_DAEMON_INSTANCE_ENV))
+            .or_else(|_| std::env::var(LEGACY_THREADRELAY_DAEMON_INSTANCE_ENV))
+            .or_else(|_| std::env::var(LEGACY_CODEXHUB_DAEMON_INSTANCE_ENV))
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -52,14 +52,9 @@ impl DaemonIdentity {
     pub fn is_mochiport_compatible(&self) -> bool {
         matches!(
             self.service.as_str(),
-            DAEMON_SERVICE_NAME | LEGACY_DAEMON_SERVICE_NAME
+            DAEMON_SERVICE_NAME | LEGACY_CODEXHUB_DAEMON_SERVICE_NAME
         ) && self.pid > 0
             && !self.instance_id.trim().is_empty()
-    }
-
-    #[cfg(test)]
-    pub fn is_codexhub(&self) -> bool {
-        self.is_mochiport_compatible()
     }
 }
 
@@ -88,12 +83,11 @@ impl DaemonInstanceLock {
                 )
             })?;
         }
-        // Hold the legacy lock as well as the new lock. This prevents an older
         // Hold both legacy locks so an older build cannot start beside MochiPort.
         let mut files = Vec::with_capacity(3);
         for lock_path in [
-            legacy_daemon_lock_path(config_path),
-            threadrelay_daemon_lock_path(config_path),
+            legacy_codexhub_daemon_lock_path(config_path),
+            legacy_threadrelay_daemon_lock_path(config_path),
             path.clone(),
         ] {
             let file = OpenOptions::new()
@@ -208,19 +202,19 @@ pub fn read_active_daemon_metadata(config_path: &Path) -> Option<DaemonMetadata>
     None
 }
 
-fn legacy_daemon_lock_path(config_path: &Path) -> PathBuf {
+fn legacy_codexhub_daemon_lock_path(config_path: &Path) -> PathBuf {
     config_directory(config_path).join("codexhub-daemon.lock")
 }
 
-fn threadrelay_daemon_lock_path(config_path: &Path) -> PathBuf {
+fn legacy_threadrelay_daemon_lock_path(config_path: &Path) -> PathBuf {
     config_directory(config_path).join("threadrelay-daemon.lock")
 }
 
-fn threadrelay_daemon_metadata_path(config_path: &Path) -> PathBuf {
+fn legacy_threadrelay_daemon_metadata_path(config_path: &Path) -> PathBuf {
     config_directory(config_path).join("threadrelay-daemon.json")
 }
 
-fn legacy_daemon_metadata_path(config_path: &Path) -> PathBuf {
+fn legacy_codexhub_daemon_metadata_path(config_path: &Path) -> PathBuf {
     config_directory(config_path).join("codexhub-daemon.json")
 }
 
@@ -239,12 +233,12 @@ fn daemon_file_pairs(config_path: &Path) -> [(PathBuf, PathBuf); 3] {
             daemon_metadata_path(config_path),
         ),
         (
-            threadrelay_daemon_lock_path(config_path),
-            threadrelay_daemon_metadata_path(config_path),
+            legacy_threadrelay_daemon_lock_path(config_path),
+            legacy_threadrelay_daemon_metadata_path(config_path),
         ),
         (
-            legacy_daemon_lock_path(config_path),
-            legacy_daemon_metadata_path(config_path),
+            legacy_codexhub_daemon_lock_path(config_path),
+            legacy_codexhub_daemon_metadata_path(config_path),
         ),
     ]
 }
@@ -265,7 +259,7 @@ mod tests {
             PathBuf::from("root").join("mochiport-daemon.json")
         );
         assert_eq!(
-            legacy_daemon_lock_path(&config),
+            legacy_codexhub_daemon_lock_path(&config),
             PathBuf::from("root").join("codexhub-daemon.lock")
         );
     }
@@ -276,8 +270,7 @@ mod tests {
         assert!(identity.is_mochiport_compatible());
         identity.service = DAEMON_SERVICE_NAME.to_string();
         assert!(identity.is_mochiport_compatible());
-        assert!(identity.is_codexhub());
-        identity.service = LEGACY_DAEMON_SERVICE_NAME.to_string();
+        identity.service = LEGACY_CODEXHUB_DAEMON_SERVICE_NAME.to_string();
         assert!(identity.is_mochiport_compatible());
         identity.service = "other".to_string();
         assert!(!identity.is_mochiport_compatible());
@@ -285,7 +278,7 @@ mod tests {
 
     #[test]
     fn daemon_metadata_is_readable_while_lock_is_held() {
-        let root = std::env::temp_dir().join(format!("codexhub-lock-test-{}", Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("mochiport-lock-test-{}", Uuid::new_v4()));
         let config_path = root.join("config.toml");
         std::fs::create_dir_all(&root).expect("create temp directory");
         let identity = DaemonIdentity::new();
@@ -327,7 +320,7 @@ mod tests {
         let config_path = root.join("config.toml");
         std::fs::create_dir_all(&root).expect("create temp directory");
         let identity = DaemonIdentity {
-            service: LEGACY_DAEMON_SERVICE_NAME.to_string(),
+            service: LEGACY_CODEXHUB_DAEMON_SERVICE_NAME.to_string(),
             pid: std::process::id(),
             instance_id: Uuid::new_v4().to_string(),
             started_at_ms: 1,
@@ -337,7 +330,7 @@ mod tests {
             executable: "codexhub".to_string(),
             config_path: config_path.display().to_string(),
         };
-        let legacy_lock_path = legacy_daemon_lock_path(&config_path);
+        let legacy_lock_path = legacy_codexhub_daemon_lock_path(&config_path);
         let legacy_lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -347,7 +340,7 @@ mod tests {
             .expect("open legacy lock");
         FileExt::try_lock_exclusive(&legacy_lock).expect("lock legacy daemon file");
         std::fs::write(
-            legacy_daemon_metadata_path(&config_path),
+            legacy_codexhub_daemon_metadata_path(&config_path),
             serde_json::to_vec(&metadata).unwrap(),
         )
         .expect("write legacy metadata");

@@ -292,7 +292,7 @@ fn read_migration_records(path: &Path) -> Result<BTreeMap<String, SessionProvide
 }
 
 fn migration_log_path(codex_home: &Path) -> PathBuf {
-    codexhub_app_support_dir()
+    mochiport_app_support_dir()
         .join("codex-app")
         .join(codex_home_id(codex_home))
         .join(MIGRATION_LOG_FILE)
@@ -332,7 +332,7 @@ fn open_state_db_write(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-fn codexhub_app_support_dir() -> PathBuf {
+fn mochiport_app_support_dir() -> PathBuf {
     if let Some(base) = std::env::var_os("MOCHIPORT_HOME").map(PathBuf::from) {
         return base;
     }

@@ -8,21 +8,21 @@ let package = Package(
         .macOS("26.0"),
     ],
     products: [
-        .executable(name: "MochiPort", targets: ["ThreadRelayMac"]),
+        .executable(name: "MochiPort", targets: ["MochiPortMac"]),
     ],
     targets: [
         .executableTarget(
-            name: "ThreadRelayMac",
-            path: "Sources/ThreadRelayMac",
+            name: "MochiPortMac",
+            path: "Sources/MochiPortMac",
             resources: [
                 .copy("Resources/ProviderLogos"),
                 .copy("Resources/ClientLogos"),
             ]
         ),
         .testTarget(
-            name: "ThreadRelayMacTests",
-            dependencies: ["ThreadRelayMac"],
-            path: "Tests/ThreadRelayMacTests"
+            name: "MochiPortMacTests",
+            dependencies: ["MochiPortMac"],
+            path: "Tests/MochiPortMacTests"
         ),
     ]
 )

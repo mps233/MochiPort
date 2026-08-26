@@ -215,7 +215,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         host.as_deref().unwrap_or_default()
     ));
     info!(
-        target: "threadrelay::remote_control",
+        target: "mochiport::remote_control",
         event = "remote_control_ws_open",
         connection_epoch,
         client_id,

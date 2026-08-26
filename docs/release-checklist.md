@@ -3,7 +3,7 @@
 Use this before publishing the repository or creating a release.
 
 For post-change GUI/daemon handoff rules, see
-[`docs/threadrelay-change-handoff.zh-CN.md`](threadrelay-change-handoff.zh-CN.md).
+[`docs/mochiport-change-handoff.zh-CN.md`](mochiport-change-handoff.zh-CN.md).
 
 ## Release Notes
 
@@ -52,7 +52,7 @@ lipo -create \
   -output target/release/mochiport
 chmod 755 target/release/mochiport
 MOCHIPORT_UI_VERSION="$UI_VERSION" MOCHIPORT_UI_BUILD_NUMBER="$UI_BUILD_NUMBER" \
-  scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
+  scripts/generate-swift-version.sh macos/MochiPort/Config/Version.xcconfig
 scripts/assemble-swiftui-macos-app.sh "$DAEMON_BUILD_NUMBER" "$XCODE_APP" target/release/mochiport outputs/MochiPort.app
 ```
 

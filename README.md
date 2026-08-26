@@ -158,7 +158,7 @@ GUI 中的“恢复原来的设置”只恢复 MochiPort 写入前的 Codex 连�
 - [Telegram 集成与维护边界](docs/telegram-integration.zh-CN.md)
 - [微信集成与已知边界](docs/wechat-integration.zh-CN.md)
 - [认证说明](docs/auth-notes.zh-CN.md)
-- [构建和交接规则](docs/threadrelay-change-handoff.zh-CN.md)
+- [构建和交接规则](docs/mochiport-change-handoff.zh-CN.md)
 - [发布检查清单](docs/release-checklist.md)
 
 旧版本的 `ThreadRelay`、`CodexHub` 配置目录和环境变量仍会被兼容读取，用于迁移已有数据；新安装请使用 `MochiPort`、`MOCHIPORT_HOME` 和 `mochiport-*`。

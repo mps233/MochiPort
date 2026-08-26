@@ -293,7 +293,7 @@ private struct OverviewView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: ThreadRelayPageLayout.sectionSpacing) {
+            VStack(alignment: .leading, spacing: MochiPortPageLayout.sectionSpacing) {
                 if model.hasAvailableUnifiedUpdate,
                    !model.unifiedUpdateNoticeDismissed
                 {
@@ -339,16 +339,16 @@ private struct OverviewView: View {
                     onConnect: { model.selection = .gateway }
                 )
             }
-            .frame(maxWidth: ThreadRelayPageLayout.maxContentWidth, alignment: .leading)
-            .padding(.top, ThreadRelayPageLayout.topPadding)
-            .padding(.bottom, ThreadRelayPageLayout.bottomPadding)
+            .frame(maxWidth: MochiPortPageLayout.maxContentWidth, alignment: .leading)
+            .padding(.top, MochiPortPageLayout.topPadding)
+            .padding(.bottom, MochiPortPageLayout.bottomPadding)
         }
         // Keep the scroll view edge-to-edge so the system sidebar glass can
         // sample live detail content underneath it; the resting inset still
         // keeps cards and headings clear of the sidebar via scroll margins.
         .contentMargins(
             .horizontal,
-            ThreadRelayPageLayout.horizontalPadding,
+            MochiPortPageLayout.horizontalPadding,
             for: .scrollContent
         )
         .scrollIndicators(.never)
@@ -592,7 +592,7 @@ private extension View {
     @ViewBuilder
     func startHereGlassSurface() -> some View {
         let shape = RoundedRectangle(
-            cornerRadius: ThreadRelayRadius.overlay,
+            cornerRadius: MochiPortRadius.overlay,
             style: .continuous
         )
 
@@ -1389,21 +1389,21 @@ private struct OverviewSub2ApiAccountTable: View {
             Color.primary.opacity(0.022)
                 .clipShape(
                     RoundedRectangle(
-                        cornerRadius: ThreadRelayRadius.content,
+                        cornerRadius: MochiPortRadius.content,
                         style: .continuous
                     )
                 )
         }
         .overlay {
             RoundedRectangle(
-                cornerRadius: ThreadRelayRadius.content,
+                cornerRadius: MochiPortRadius.content,
                 style: .continuous
             )
             .strokeBorder(Color.primary.opacity(0.065), lineWidth: 0.5)
         }
         .clipShape(
             RoundedRectangle(
-                cornerRadius: ThreadRelayRadius.content,
+                cornerRadius: MochiPortRadius.content,
                 style: .continuous
             )
         )

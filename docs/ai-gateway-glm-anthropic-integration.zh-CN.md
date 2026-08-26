@@ -232,7 +232,7 @@ ProviderConfig {
 智谱 logo 文件：
 
 ```text
-macos/ThreadRelay/Sources/ThreadRelayMac/Resources/ProviderLogos/zhipu.svg
+macos/MochiPort/Sources/MochiPortMac/Resources/ProviderLogos/zhipu.svg
 ```
 
 来源记录：
@@ -243,7 +243,7 @@ packaging/brand/providers/SOURCES.md
 
 SwiftUI 客户端通过 `ProviderLogoKind.zhipu` 从 App Bundle 加载该 SVG。后续新增厂商 logo 时，按同样方式：
 
-1. 把 SVG 放入 `macos/ThreadRelay/Sources/ThreadRelayMac/Resources/ProviderLogos/`。
+1. 把 SVG 放入 `macos/MochiPort/Sources/MochiPortMac/Resources/ProviderLogos/`。
 2. 在 `SOURCES.md` 记录来源。
 3. 在 `ProviderLogoKind` 增加枚举值。
 4. 在 provider row 的 logo 选择逻辑中按 profile 映射。

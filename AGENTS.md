@@ -18,7 +18,7 @@
 ## 构建和运行交接
 
 GUI 与 daemon 的分类、构建、重启和身份核对规则见
-[`docs/threadrelay-change-handoff.zh-CN.md`](docs/threadrelay-change-handoff.zh-CN.md)。
+[`docs/mochiport-change-handoff.zh-CN.md`](docs/mochiport-change-handoff.zh-CN.md)。
 
 - 仅 SwiftUI/GUI 改动可以更新并重启正式 GUI，但不得替换或重启 daemon。
 - daemon 相关改动不得自动替换、切换、停止或重启正在运行的 daemon；构建完成后通知用户手动处理。

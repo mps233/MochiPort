@@ -261,7 +261,7 @@ struct DaemonLaunchConfiguration: Equatable {
                 .appendingPathComponent("\(label).plist"),
             logURL: dataDirectory
                 .appendingPathComponent("logs", isDirectory: true)
-                .appendingPathComponent("threadrelay-daemon-launchd.log"),
+                .appendingPathComponent("mochiport-daemon-launchd.log"),
             homeURL: homeURL,
             buildIdentifier: Self.embeddedDaemonBuildIdentifier(bundleURL: bundleURL)
         )
@@ -384,7 +384,7 @@ struct GUIRecoveryConfiguration: Equatable {
                 .appendingPathComponent("\(label).plist"),
             logURL: daemon.logURL
                 .deletingLastPathComponent()
-                .appendingPathComponent("threadrelay-gui-launchd.log"),
+                .appendingPathComponent("mochiport-gui-launchd.log"),
             homeURL: daemon.homeURL,
             dataDirectoryURL: daemon.configURL.deletingLastPathComponent(),
             buildIdentifier: daemon.buildIdentifier

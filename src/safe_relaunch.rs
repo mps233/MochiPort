@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use crate::{
     app_state::SharedState,
     cli::SafeRelaunchShutdownMode,
-    daemon_process::{CODEXHUB_GUI_PID_ENV, read_active_daemon_metadata},
+    daemon_process::{LEGACY_CODEXHUB_GUI_PID_ENV, read_active_daemon_metadata},
     types::{ImPlatformKind, now_ms},
 };
 
@@ -412,7 +412,7 @@ async fn spawn_relaunch_helper(
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("logs")
-        .join("threadrelay-safe-relaunch.log");
+        .join("mochiport-safe-relaunch.log");
 
     let mut command = Command::new(&executable);
     command
@@ -458,7 +458,7 @@ async fn spawn_relaunch_helper(
 }
 
 fn gui_pid_for_helper(executable: &Path, daemon_pid: u32) -> Result<Option<u32>, String> {
-    if let Some(raw_pid) = std::env::var_os(CODEXHUB_GUI_PID_ENV) {
+    if let Some(raw_pid) = std::env::var_os(LEGACY_CODEXHUB_GUI_PID_ENV) {
         let gui_pid = raw_pid
             .to_string_lossy()
             .parse::<u32>()
@@ -1362,9 +1362,9 @@ mod tests {
 
     fn pending(thread_id: &str, requested_at_ms: u128) -> PendingSafeRelaunch {
         PendingSafeRelaunch {
-            bundle_path: PathBuf::from("/tmp/ThreadRelay-build330.app"),
+            bundle_path: PathBuf::from("/tmp/MochiPort-build330.app"),
             metadata: BundleMetadata {
-                bundle_path: "/tmp/ThreadRelay-build330.app".to_string(),
+                bundle_path: "/tmp/MochiPort-build330.app".to_string(),
                 bundle_identifier: EXPECTED_BUNDLE_IDENTIFIER.to_string(),
                 executable: EXPECTED_BUNDLE_EXECUTABLE.to_string(),
                 package_type: "APPL".to_string(),
@@ -1379,10 +1379,10 @@ mod tests {
 
     #[test]
     fn bundle_root_is_found_from_macos_executable_layout() {
-        let path = Path::new("/tmp/ThreadRelay-build330.app/Contents/MacOS/ThreadRelay");
+        let path = Path::new("/tmp/MochiPort-build330.app/Contents/MacOS/MochiPort");
         assert_eq!(
             bundle_root_from_executable(path),
-            Some(PathBuf::from("/tmp/ThreadRelay-build330.app"))
+            Some(PathBuf::from("/tmp/MochiPort-build330.app"))
         );
     }
 
@@ -1400,7 +1400,7 @@ mod tests {
 
     #[test]
     fn helper_request_is_sent_without_shell_interpolation() {
-        let path = Path::new("/tmp/ThreadRelay build 330.app");
+        let path = Path::new("/tmp/MochiPort build 330.app");
         assert_eq!(
             path.extension().and_then(|value| value.to_str()),
             Some("app")
@@ -1623,7 +1623,7 @@ mod tests {
             .and_then(|path| path.canonicalize())
             .expect("current executable");
         let mut args = SafeRelaunchHelperArgs {
-            bundle_path: PathBuf::from("/tmp/ThreadRelay-build330.app"),
+            bundle_path: PathBuf::from("/tmp/MochiPort-build330.app"),
             expected_bundle_identifier: EXPECTED_BUNDLE_IDENTIFIER.to_string(),
             expected_version: "0.4.20".to_string(),
             expected_build: "330".to_string(),
@@ -1692,8 +1692,8 @@ mod tests {
     fn candidate_bundle_must_be_newer_and_next_to_running_bundle() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().canonicalize().expect("canonical tempdir");
-        let current = root.join("ThreadRelay-build329.app");
-        let candidate = root.join("ThreadRelay build 330.app");
+        let current = root.join("MochiPort-build329.app");
+        let candidate = root.join("MochiPort build 330.app");
         write_test_bundle(&current, EXPECTED_BUNDLE_IDENTIFIER, "329");
         write_test_bundle(&candidate, EXPECTED_BUNDLE_IDENTIFIER, "330");
 
@@ -1724,9 +1724,9 @@ mod tests {
     fn candidate_bundle_rejects_wrong_identity_and_untrusted_parent() {
         let temp = tempfile::tempdir().expect("tempdir");
         let root = temp.path().canonicalize().expect("canonical tempdir");
-        let current = root.join("trusted/ThreadRelay-build329.app");
-        let wrong_id = root.join("trusted/ThreadRelay-build330.app");
-        let outside = root.join("other/ThreadRelay-build331.app");
+        let current = root.join("trusted/MochiPort-build329.app");
+        let wrong_id = root.join("trusted/MochiPort-build330.app");
+        let outside = root.join("other/MochiPort-build331.app");
         write_test_bundle(&current, EXPECTED_BUNDLE_IDENTIFIER, "329");
         write_test_bundle(&wrong_id, "com.example.other", "330");
         write_test_bundle(&outside, EXPECTED_BUNDLE_IDENTIFIER, "331");

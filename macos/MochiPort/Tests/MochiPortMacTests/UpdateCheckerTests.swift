@@ -1,10 +1,10 @@
 import Foundation
 import XCTest
 
-#if canImport(ThreadRelayMac)
-@testable import ThreadRelayMac
-#elseif canImport(ThreadRelay)
-@testable import ThreadRelay
+#if canImport(MochiPortMac)
+@testable import MochiPortMac
+#elseif canImport(MochiPort)
+@testable import MochiPort
 #endif
 
 final class UpdateCheckerManifestTests: XCTestCase {

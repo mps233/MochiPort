@@ -32,7 +32,7 @@
 
    ```sh
    scripts/assemble-swiftui-macos-app.sh <build-number> \
-     macos/ThreadRelay/.build/xcode/Build/Products/Release/MochiPort.app \
+     macos/MochiPort/.build/xcode/Build/Products/Release/MochiPort.app \
      "$HOME/Library/Application Support/MochiPort/runtimes/<build-number>/mochiport-daemon" \
      outputs/MochiPort.app
    ```
@@ -67,16 +67,16 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
    chmod 755 target/release/mochiport
    MOCHIPORT_UI_VERSION="$UI_VERSION" MOCHIPORT_UI_BUILD_NUMBER="$UI_BUILD_NUMBER" \
      scripts/generate-swift-version.sh \
-     macos/ThreadRelay/Config/Version.xcconfig
+     macos/MochiPort/Config/Version.xcconfig
    xcodebuild \
-     -project macos/ThreadRelay/ThreadRelay.xcodeproj \
-     -scheme ThreadRelay \
+     -project macos/MochiPort/MochiPort.xcodeproj \
+     -scheme MochiPort \
      -configuration Release \
-     -derivedDataPath macos/ThreadRelay/.build/xcode \
+     -derivedDataPath macos/MochiPort/.build/xcode \
      build
    scripts/assemble-swiftui-macos-app.sh \
      "$DAEMON_BUILD_NUMBER" \
-     macos/ThreadRelay/.build/xcode/Build/Products/Release/MochiPort.app \
+     macos/MochiPort/.build/xcode/Build/Products/Release/MochiPort.app \
      target/release/mochiport \
      outputs/MochiPort.app
    ```

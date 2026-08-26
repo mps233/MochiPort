@@ -1,5 +1,5 @@
 bind = "127.0.0.1:3847"
-statePath = "threadrelay-state.json"
+statePath = "mochiport-state.json"
 
 [feishu]
 enabled = true

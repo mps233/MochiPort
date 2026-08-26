@@ -27,7 +27,7 @@ pub fn install_with_sensitive(
     replace_client(&GLOBAL_CLIENT, client);
     replace_client(&SENSITIVE_CLIENT, sensitive_client);
     tracing::info!(
-        target: "threadrelay::network",
+        target: "mochiport::network",
         mode = ?config.mode,
         proxy = %masked_proxy_url(config),
         "outbound HTTP clients initialized"
@@ -134,7 +134,7 @@ pub fn apply_async_proxy(
         OutboundProxyMode::System => {
             if local_port.is_some_and(system_proxy_points_to_local_server) {
                 tracing::warn!(
-                    target: "threadrelay::network",
+                    target: "mochiport::network",
                     local_port,
                     "system proxy points to MochiPort; disabling it to avoid proxy recursion"
                 );
@@ -276,7 +276,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_custom_proxy_pointing_to_codexhub() {
+    fn rejects_custom_proxy_pointing_to_mochiport() {
         assert!(
             validate_for_local_port(
                 &OutboundProxyConfig {
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn loopback_detection_requires_the_codexhub_port() {
+    fn loopback_detection_requires_the_mochiport_port() {
         assert!(proxy_points_to_loopback_port("http://127.0.0.1:3847", 3847));
         assert!(proxy_points_to_loopback_port(
             "socks5://localhost:3847",

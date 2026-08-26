@@ -840,7 +840,7 @@ fn log_feishu_api_response(
 
     if status.is_success() && code == 0 {
         info!(
-            target: "threadrelay::feishu",
+            target: "mochiport::feishu",
             event = "feishu_api_ok",
             operation,
             http_status = status.as_u16(),
@@ -852,7 +852,7 @@ fn log_feishu_api_response(
         );
     } else {
         warn!(
-            target: "threadrelay::feishu",
+            target: "mochiport::feishu",
             event = "feishu_api_failed",
             operation,
             http_status = status.as_u16(),

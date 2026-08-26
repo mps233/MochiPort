@@ -9,7 +9,7 @@ private struct ManagementPageInsets: ViewModifier {
             content
                 .contentMargins(
                     .horizontal,
-                    ThreadRelayPageLayout.horizontalPadding,
+                    MochiPortPageLayout.horizontalPadding,
                     for: .scrollContent
                 )
                 .contentMargins(
@@ -19,7 +19,7 @@ private struct ManagementPageInsets: ViewModifier {
                 )
         } else {
             content
-                .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+                .padding(.horizontal, MochiPortPageLayout.horizontalPadding)
                 .padding(.top, topPadding)
         }
     }
@@ -27,7 +27,7 @@ private struct ManagementPageInsets: ViewModifier {
 
 private extension View {
     func managementPageInsets(
-        topPadding: CGFloat = ThreadRelayPageLayout.topPadding
+        topPadding: CGFloat = MochiPortPageLayout.topPadding
     ) -> some View {
         modifier(ManagementPageInsets(topPadding: topPadding))
     }
@@ -404,10 +404,10 @@ private struct CodexRequestPathRow: View {
     @State private var togglePending = false
 
     private var isDirectApi: Bool { mode == "direct-api" }
-    private var isThreadRelay: Bool { mode == "threadrelay" }
-    private var isKnownMode: Bool { isDirectApi || isThreadRelay }
+    private var isMochiPort: Bool { mode == "threadrelay" }
+    private var isKnownMode: Bool { isDirectApi || isMochiPort }
     private var gatewayReady: Bool {
-        isThreadRelay && gatewayEnabled != false
+        isMochiPort && gatewayEnabled != false
     }
     private var toggleValue: Bool {
         pendingEnabled ?? gatewayReady
@@ -419,10 +419,10 @@ private struct CodexRequestPathRow: View {
         if isDirectApi {
             return "已关闭，Codex 使用原来的设置。"
         }
-        if isThreadRelay, gatewayEnabled == false {
+        if isMochiPort, gatewayEnabled == false {
             return "MochiPort 已关闭，打开开关即可使用。"
         }
-        if isThreadRelay {
+        if isMochiPort {
             return "Codex 已连接，可以使用。"
         }
         return "打开开关连接 Codex。"
@@ -745,7 +745,7 @@ private struct SessionProjectGroup: Identifiable {
     }
 }
 
-private enum SessionRouteFilter: String, CaseIterable, Identifiable, ThreadRelaySegmentItem {
+private enum SessionRouteFilter: String, CaseIterable, Identifiable, MochiPortSegmentItem {
     case all
     case gateway
     case direct
@@ -845,7 +845,7 @@ struct SessionsView: View {
     @State private var selectedIDs = Set<String>()
     @State private var moveInFlight = false
 
-    private let unknownProjectKey = "__threadrelay_unknown_project__"
+    private let unknownProjectKey = "__mochiport_unknown_project__"
 
     private var filteredSessions: [ManageCodexSession] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -906,8 +906,8 @@ struct SessionsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             sessionToolbar
-                .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
-                .padding(.top, ThreadRelayPageLayout.topPadding)
+                .padding(.horizontal, MochiPortPageLayout.horizontalPadding)
+                .padding(.top, MochiPortPageLayout.topPadding)
                 .padding(.bottom, 12)
 
             List(selection: $selectedIDs) {
@@ -1207,7 +1207,7 @@ struct SessionsView: View {
     }
 }
 
-private enum GatewaySection: String, CaseIterable, Identifiable, ThreadRelaySegmentItem {
+private enum GatewaySection: String, CaseIterable, Identifiable, MochiPortSegmentItem {
     case general
     case providers
     case accountPool
@@ -1380,8 +1380,8 @@ struct GatewayView: View {
                 help: { "显示\($0.title)" }
             )
                 .frame(width: 440)
-                .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
-                .padding(.top, ThreadRelayPageLayout.topPadding)
+                .padding(.horizontal, MochiPortPageLayout.horizontalPadding)
+                .padding(.top, MochiPortPageLayout.topPadding)
                 .padding(.bottom, 12)
 
             if let error = model.sectionErrors[.gateway] {
@@ -1390,7 +1390,7 @@ struct GatewayView: View {
                     retry: { Task { await model.loadSection(.gateway, force: true) } },
                     dismiss: { model.dismissSectionError(.gateway) }
                 )
-                .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
+                .padding(.horizontal, MochiPortPageLayout.horizontalPadding)
                 .padding(.bottom, 12)
             }
 
@@ -3085,8 +3085,8 @@ struct RequestLogsView: View {
                 filterBar
                     .pickerStyle(.menu)
                     .controlSize(.regular)
-                    .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
-                    .padding(.top, ThreadRelayPageLayout.topPadding)
+                    .padding(.horizontal, MochiPortPageLayout.horizontalPadding)
+                    .padding(.top, MochiPortPageLayout.topPadding)
                     .padding(.bottom, 12)
 
                 List(selection: $selectedID) {
@@ -3262,7 +3262,7 @@ struct RequestLogsView: View {
                 .help("返回请求日志")
                 Spacer()
             }
-            .padding(.horizontal, ThreadRelaySpacing.page)
+            .padding(.horizontal, MochiPortSpacing.page)
             .padding(.vertical, 14)
 
             Divider()
@@ -3274,7 +3274,7 @@ struct RequestLogsView: View {
                     message: error,
                     retry: { loadDetail(id: logID) }
                 )
-                .padding(ThreadRelaySpacing.page)
+                .padding(MochiPortSpacing.page)
                 Spacer()
             } else {
                 ProgressView("正在读取详情…")

@@ -323,7 +323,7 @@ mod tests {
     fn safe_relaunch_helper_args(shutdown_mode: Option<&str>) -> Vec<String> {
         let mut args = vec![
             "--bundle-path",
-            "/tmp/ThreadRelay build 330.app",
+            "/tmp/MochiPort build 330.app",
             "--expected-bundle-identifier",
             "io.github.mps233.threadrelay",
             "--expected-version",
@@ -335,15 +335,15 @@ mod tests {
             "--daemon-instance-id",
             "instance-a",
             "--old-executable-path",
-            "/tmp/ThreadRelay old.app/Contents/MacOS/ThreadRelay",
+            "/tmp/MochiPort old.app/Contents/MacOS/MochiPort",
             "--gui-pid",
             "100",
             "--bind-address",
             "127.0.0.1:3847",
             "--log-path",
-            "/tmp/ThreadRelay logs/relaunch.log",
+            "/tmp/MochiPort logs/relaunch.log",
             "--config-path",
-            "/tmp/ThreadRelay config/config.toml",
+            "/tmp/MochiPort config/config.toml",
             "--start-delay-ms",
             "350",
         ]
@@ -376,20 +376,17 @@ mod tests {
         else {
             panic!("expected safe relaunch helper")
         };
-        assert_eq!(bundle_path, PathBuf::from("/tmp/ThreadRelay build 330.app"));
+        assert_eq!(bundle_path, PathBuf::from("/tmp/MochiPort build 330.app"));
         assert_eq!(
             old_executable_path,
-            PathBuf::from("/tmp/ThreadRelay old.app/Contents/MacOS/ThreadRelay")
+            PathBuf::from("/tmp/MochiPort old.app/Contents/MacOS/MochiPort")
         );
         assert_eq!(gui_pid, Some(100));
         assert_eq!(bind_addr, "127.0.0.1:3847".parse().expect("bind address"));
-        assert_eq!(
-            log_path,
-            PathBuf::from("/tmp/ThreadRelay logs/relaunch.log")
-        );
+        assert_eq!(log_path, PathBuf::from("/tmp/MochiPort logs/relaunch.log"));
         assert_eq!(
             config_path,
-            PathBuf::from("/tmp/ThreadRelay config/config.toml")
+            PathBuf::from("/tmp/MochiPort config/config.toml")
         );
         assert_eq!(start_delay_ms, 350);
         assert_eq!(shutdown_mode, SafeRelaunchShutdownMode::Guarded);

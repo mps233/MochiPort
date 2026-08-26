@@ -134,10 +134,10 @@ fn collect_upstream_headers(headers: &HeaderMap) -> HeaderMap {
 
 fn forwarded_user_agent(value: &axum::http::HeaderValue) -> Option<axum::http::HeaderValue> {
     let value = value.to_str().ok()?;
-    axum::http::HeaderValue::from_str(&strip_codexhub_user_agent_suffix(value)).ok()
+    axum::http::HeaderValue::from_str(&strip_legacy_codexhub_user_agent_suffix(value)).ok()
 }
 
-fn strip_codexhub_user_agent_suffix(value: &str) -> String {
+fn strip_legacy_codexhub_user_agent_suffix(value: &str) -> String {
     let value = value.trim();
     let Some(prefix_end) = value.rfind(" (") else {
         return value.to_string();
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn test_codexhub_user_agent_suffix_removed_for_upstream() {
+    fn test_legacy_codexhub_user_agent_suffix_removed_for_upstream() {
         let mut headers = HeaderMap::new();
         headers.insert(
             "user-agent",
@@ -369,10 +369,13 @@ mod tests {
     }
 
     #[test]
-    fn test_user_agent_without_codexhub_suffix_is_kept() {
-        assert_eq!(strip_codexhub_user_agent_suffix("Codex/1.0"), "Codex/1.0");
+    fn test_user_agent_without_legacy_codexhub_suffix_is_kept() {
         assert_eq!(
-            strip_codexhub_user_agent_suffix("Codex/1.0 (other; 1.2.3)"),
+            strip_legacy_codexhub_user_agent_suffix("Codex/1.0"),
+            "Codex/1.0"
+        );
+        assert_eq!(
+            strip_legacy_codexhub_user_agent_suffix("Codex/1.0 (other; 1.2.3)"),
             "Codex/1.0 (other; 1.2.3)"
         );
     }

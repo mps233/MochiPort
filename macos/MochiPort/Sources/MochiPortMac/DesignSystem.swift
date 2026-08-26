@@ -1,13 +1,13 @@
 import SwiftUI
 
-enum ThreadRelaySpacing {
+enum MochiPortSpacing {
     static let compact: CGFloat = 8
     static let standard: CGFloat = 12
     static let section: CGFloat = 24
     static let page: CGFloat = 28
 }
 
-enum ThreadRelayRadius {
+enum MochiPortRadius {
     static let content: CGFloat = 12
     static let overlay: CGFloat = 16
 }
@@ -15,7 +15,7 @@ enum ThreadRelayRadius {
 /// Shared geometry for pages hosted in the main detail column. The native
 /// navigation title identifies the page; these values keep the content area
 /// predictable as users move between sections.
-enum ThreadRelayPageLayout {
+enum MochiPortPageLayout {
     static let maxContentWidth: CGFloat = 960
     static let horizontalPadding: CGFloat = 28
     static let topPadding: CGFloat = 20
@@ -23,7 +23,7 @@ enum ThreadRelayPageLayout {
     static let sectionSpacing: CGFloat = 24
 }
 
-protocol ThreadRelaySegmentItem: CaseIterable, Equatable, Identifiable {
+protocol MochiPortSegmentItem: CaseIterable, Equatable, Identifiable {
     var title: String { get }
     var symbol: String { get }
 }
@@ -39,7 +39,7 @@ extension StatusTint {
     }
 }
 
-struct GlassSegmentedControl<Item: ThreadRelaySegmentItem>: View {
+struct GlassSegmentedControl<Item: MochiPortSegmentItem>: View {
     @Binding private var selection: Item
     let accessibilityLabel: String
     let help: (Item) -> String

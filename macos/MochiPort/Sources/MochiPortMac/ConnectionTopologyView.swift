@@ -373,7 +373,7 @@ private struct TopologyNodeView: View {
         .padding(.horizontal, 11)
         .frame(maxWidth: .infinity, minHeight: 52, maxHeight: 52)
         .topologyEndpointSurface(tint: node.tint, isHovering: isHovering)
-        .contentShape(RoundedRectangle(cornerRadius: ThreadRelayRadius.content, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: MochiPortRadius.content, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(.easeOut(duration: 0.16), value: isHovering)
         .accessibilityElement(children: .combine)
@@ -652,7 +652,7 @@ private extension View {
     @ViewBuilder
     func topologyEndpointSurface(tint _: StatusTint, isHovering: Bool) -> some View {
         let shape = RoundedRectangle(
-            cornerRadius: ThreadRelayRadius.content,
+            cornerRadius: MochiPortRadius.content,
             style: .continuous
         )
         let fillOpacity = isHovering ? 0.05 : 0.025
@@ -678,7 +678,7 @@ private extension View {
     @ViewBuilder
     func topologyServiceSurface(tint _: StatusTint) -> some View {
         let shape = RoundedRectangle(
-            cornerRadius: ThreadRelayRadius.overlay,
+            cornerRadius: MochiPortRadius.overlay,
             style: .continuous
         )
 

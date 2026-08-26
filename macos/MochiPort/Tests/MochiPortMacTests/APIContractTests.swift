@@ -3,10 +3,10 @@ import AppKit
 import SQLite3
 import XCTest
 
-#if canImport(ThreadRelayMac)
-@testable import ThreadRelayMac
-#elseif canImport(ThreadRelay)
-@testable import ThreadRelay
+#if canImport(MochiPortMac)
+@testable import MochiPortMac
+#elseif canImport(MochiPort)
+@testable import MochiPort
 #endif
 
 final class APIContractTests: XCTestCase {
@@ -625,7 +625,7 @@ final class APIContractTests: XCTestCase {
     func testSingleInstanceGuardRejectsSecondOwner() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let lockURL = root.appendingPathComponent("threadrelay.gui.lock")
+        let lockURL = root.appendingPathComponent("mochiport.gui.lock")
         defer { try? FileManager.default.removeItem(at: root) }
 
         do {
@@ -640,7 +640,7 @@ final class APIContractTests: XCTestCase {
     func testSingleInstanceGuardReleasesLockOnDeallocation() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let lockURL = root.appendingPathComponent("threadrelay.gui.lock")
+        let lockURL = root.appendingPathComponent("mochiport.gui.lock")
         defer { try? FileManager.default.removeItem(at: root) }
 
         var first: SingleInstanceGuard? = try SingleInstanceGuard.acquire(lockURL: lockURL)
@@ -1719,7 +1719,7 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(recorder.paths, ["/healthz", "/api/status"])
     }
 
-    func testProbeRejectsAnotherServiceOnThreadRelayPort() async {
+    func testProbeRejectsAnotherServiceOnMochiPortPort() async {
         let client = makeClient { _ in
             MockResponse(
                 statusCode: 200,
@@ -1730,7 +1730,7 @@ final class APIContractTests: XCTestCase {
         await assertProbeError(.incompatibleService, from: client)
     }
 
-    func testProbeRejectsUnsupportedThreadRelayAPIMajorSeparately() async {
+    func testProbeRejectsUnsupportedMochiPortAPIMajorSeparately() async {
         let client = makeClient { _ in
             MockResponse(
                 statusCode: 200,
@@ -2195,7 +2195,7 @@ final class APIContractTests: XCTestCase {
         )
     }
 
-    func testFetchDashboardRejectsUnsupportedThreadRelayAPIMajorSeparately() async {
+    func testFetchDashboardRejectsUnsupportedMochiPortAPIMajorSeparately() async {
         let client = makeClient { _ in
             MockResponse(
                 statusCode: 200,
@@ -2332,7 +2332,7 @@ final class APIContractTests: XCTestCase {
             )
             return MockResponse(
                 statusCode: 200,
-                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","executableSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":1,"codexTurns":2,"imStreams":3,"pendingApprovals":1,"remoteControlRequests":4,"total":11},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null,"managementTokenGeneration":9}}"#
+                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/MochiPort","executableSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":1,"codexTurns":2,"imStreams":3,"pendingApprovals":1,"remoteControlRequests":4,"total":11},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null,"managementTokenGeneration":9}}"#
             )
         }
 
@@ -2355,7 +2355,7 @@ final class APIContractTests: XCTestCase {
         let client = makeClient { _ in
             MockResponse(
                 statusCode: 200,
-                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.4.21","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/MochiPort","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.4.21","apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
             )
         }
 
@@ -2379,7 +2379,7 @@ final class APIContractTests: XCTestCase {
         let identity = ManageDaemonIdentity(
             pid: 123,
             startedAtMs: 456,
-            executable: "/fixture/ThreadRelay",
+            executable: "/fixture/MochiPort",
             executableSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             bind: "127.0.0.1:3847"
         )
@@ -2396,7 +2396,7 @@ final class APIContractTests: XCTestCase {
                 let daemonIdentity = body?["daemonIdentity"] as? [String: Any]
                 XCTAssertEqual(daemonIdentity?["pid"] as? Int, 123)
                 XCTAssertEqual(daemonIdentity?["startedAtMs"] as? Int, 456)
-                XCTAssertEqual(daemonIdentity?["executable"] as? String, "/fixture/ThreadRelay")
+                XCTAssertEqual(daemonIdentity?["executable"] as? String, "/fixture/MochiPort")
                 XCTAssertEqual(
                     daemonIdentity?["executableSha256"] as? String,
                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -2538,7 +2538,7 @@ final class APIContractTests: XCTestCase {
         let identity = ManageDaemonIdentity(
             pid: 123,
             startedAtMs: 456,
-            executable: "/fixture/ThreadRelay",
+            executable: "/fixture/MochiPort",
             executableSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             bind: "127.0.0.1:3847"
         )
@@ -2575,7 +2575,7 @@ final class APIContractTests: XCTestCase {
         let client = makeClient { _ in
             MockResponse(
                 statusCode: 200,
-                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":2},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+                json: #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/MochiPort","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","apiMajor":2},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
             )
         }
 
@@ -3012,7 +3012,7 @@ final class APIContractTests: XCTestCase {
             }
         }
         let failingLauncher = IdentityVerifyingDaemonLauncher(
-            error: .loadedAgentUntrusted("/fixture/ThreadRelay")
+            error: .loadedAgentUntrusted("/fixture/MochiPort")
         )
         let takeoverModel = AppModel(
             apiClient: conflictClient,
@@ -5034,7 +5034,7 @@ final class APIContractTests: XCTestCase {
 
     func testLoadedDaemonAgentRejectsAStaleBundleBuild() throws {
         let configuration = DaemonLaunchConfiguration(
-            helperURL: URL(fileURLWithPath: "/fixture/ThreadRelay.app/Contents/Helpers/threadrelay-daemon"),
+            helperURL: URL(fileURLWithPath: "/fixture/MochiPort.app/Contents/Helpers/mochiport-daemon"),
             configURL: URL(fileURLWithPath: "/fixture/data/config.toml"),
             launchAgentURL: URL(fileURLWithPath: "/fixture/daemon.plist"),
             logURL: URL(fileURLWithPath: "/fixture/data/logs/daemon.log"),
@@ -5204,7 +5204,7 @@ final class APIContractTests: XCTestCase {
     private static let dashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"bridgeRunning":true,"remoteControlConnected":true,"remoteControlHealthy":true,"executionClients":{"codexApp":{"configured":true,"connected":true},"vscode":{"configured":true,"connected":true},"cli":{"configured":false,"connected":false}},"messageChannels":{"telegram":{"accountCount":2,"connectedAccountCount":1},"feishu":{"accountCount":1,"connectedAccountCount":1},"wechat":{"accountCount":1,"connectedAccountCount":1},"wecom":{"accountCount":0,"connectedAccountCount":0}},"aiGatewayEnabled":true,"aiGatewayProviderCount":2,"requestLoggingEnabled":true}"#
     private static let imAccountsJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"accounts":[{"platform":"telegram","accountId":"telegram-main","displayName":"主 Telegram","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":true,"connected":true,"lastError":null,"lastEventAtMs":1754000120000,"lastInboundAtMs":1754000100000},{"platform":"wecom","accountId":"wecom-offline","displayName":"企业微信","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":false,"connected":false,"lastError":"连接失败","lastEventAtMs":null,"lastInboundAtMs":null}]}"#
     private static let codexStatusJSON = #"{"codexHome":"/fixture/.codex","configured":true,"configOk":true,"authOk":true,"providerOk":true,"configError":null,"authError":null,"guiConfigured":true,"guiError":null,"remoteControlSupported":true,"remoteControlConfigured":true,"remoteControlError":null,"providers":[{"name":"ai-gateway","baseUrl":"http://127.0.0.1:3847/backend-api","secretSet":true,"supportsWebsockets":true}],"imageGenerationEnabled":true,"connectionMode":"standard"}"#
-    private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
+    private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/MochiPort","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
     private static let originalV1DashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"legacy-instance","pid":456,"startedAtMs":789},"bridgeRunning":true,"remoteControlConnected":false,"remoteControlHealthy":false,"codexAppConfigured":true,"imAccountCount":5,"connectedImAccountCount":3,"aiGatewayEnabled":false,"aiGatewayProviderCount":1,"requestLoggingEnabled":true}"#
     // Mirrors the daemon payload where the Anthropic TTL-split keys are
     // omitted entirely when unreported (serde skip_serializing_if).
@@ -5272,7 +5272,7 @@ final class APIContractTests: XCTestCase {
         } else {
             management = #"{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null,"managementTokenGeneration":\#(managementTokenGeneration)}"#
         }
-        return #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/ThreadRelay","executableSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":\#(management)}"#
+        return #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/MochiPort","executableSha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":\#(management)}"#
     }
 
     private static func requestLogsPageJSON(
@@ -5320,7 +5320,7 @@ final class APIContractTests: XCTestCase {
     }
 
     private func makeClient(
-        baseURL: URL = URL(string: "https://threadrelay.test")!,
+        baseURL: URL = URL(string: "https://mochiport.test")!,
         credentialLoader: @escaping @Sendable () -> String? = { "fixture-token" },
         handler: @escaping MockURLProtocol.Handler
     ) -> APIClient {
@@ -5342,9 +5342,9 @@ final class APIContractTests: XCTestCase {
 
 
     private func makeGUIRecoveryLauncherFixture(
-        bundleName: String = "ThreadRelay",
-        executableName: String = "ThreadRelay",
-        supervisorName: String = "threadrelay-gui-supervisor"
+        bundleName: String = "MochiPort",
+        executableName: String = "MochiPort",
+        supervisorName: String = "mochiport-gui-supervisor"
     ) throws -> (
         root: URL,
         configuration: GUIRecoveryConfiguration
@@ -5437,7 +5437,7 @@ final class APIContractTests: XCTestCase {
     ) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let helper = root.appendingPathComponent("ThreadRelay.app/Contents/Helpers/threadrelay-daemon")
+        let helper = root.appendingPathComponent("MochiPort.app/Contents/Helpers/mochiport-daemon")
         try FileManager.default.createDirectory(
             at: helper.deletingLastPathComponent(),
             withIntermediateDirectories: true
@@ -5646,7 +5646,7 @@ final class APIContractTests: XCTestCase {
         configuration.protocolClasses = [MockURLProtocol.self]
         let session = URLSession(configuration: configuration)
         return APIClient(
-            baseURL: URL(string: "https://threadrelay.test")!,
+            baseURL: URL(string: "https://mochiport.test")!,
             session: session,
             credentialLoader: credentialCandidatesLoader
         )

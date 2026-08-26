@@ -1,9 +1,9 @@
 /target
 /target-verify
 /outputs
-/macos/ThreadRelay/.build
-/macos/ThreadRelay/.derived-data
-/macos/ThreadRelay/.swiftpm
+/macos/MochiPort/.build
+/macos/MochiPort/.derived-data
+/macos/MochiPort/.swiftpm
 /windows/MochiPort/node_modules
 /windows/MochiPort/dist
 /windows/MochiPort/test-results
@@ -14,6 +14,7 @@
 .DS_Store
 config.toml
 codexhub-state.json
+mochiport-state.json
 threadrelay-state.json
 *.log
 ai-gateway-request-logs.sqlite

@@ -124,8 +124,8 @@ jobs:
 
           rm -rf "$XCODE_DERIVED_DATA"
           xcodebuild \
-            -project macos/ThreadRelay/ThreadRelay.xcodeproj \
-            -scheme ThreadRelay \
+            -project macos/MochiPort/MochiPort.xcodeproj \
+            -scheme MochiPort \
             -configuration Release \
             -destination 'generic/platform=macOS' \
             -derivedDataPath "$XCODE_DERIVED_DATA" \

@@ -424,7 +424,7 @@ fn parse_legacy_identity(response: &NativeResponse) -> Option<LegacyStatusRespon
         .filter(|status| compatible_service(&status.service))
 }
 
-fn is_ready_threadrelay_health(response: &NativeResponse) -> bool {
+fn is_ready_mochiport_health(response: &NativeResponse) -> bool {
     response.status == 200
         && serde_json::from_str::<HealthResponse>(&response.body).is_ok_and(|health| {
             health.service == "threadrelay" && health.api_major == 1 && health.ready
@@ -448,7 +448,7 @@ fn classify_endpoint_probe(
     health: Option<&NativeResponse>,
     legacy: Option<&NativeResponse>,
 ) -> EndpointProbe {
-    if health.is_some_and(is_ready_threadrelay_health) {
+    if health.is_some_and(is_ready_mochiport_health) {
         EndpointProbe::CompatibleV1
     } else if health.is_none() && legacy.is_none() {
         EndpointProbe::Offline
@@ -576,7 +576,7 @@ async fn management_request_inner(
         }
         if probe == EndpointProbe::OccupiedOrIncompatible {
             return Err(
-                "检测到已有本地服务，但它不是已就绪的 ThreadRelay 管理 API；未发送管理凭据"
+                "检测到已有本地服务，但它不是已就绪的 MochiPort 管理 API；未发送管理凭据"
                     .to_string(),
             );
         }
@@ -664,7 +664,7 @@ fn daemon_candidates(app: &tauri::AppHandle) -> Vec<PathBuf> {
 
 async fn probe_endpoint(client: &Client, base_url: &Url) -> EndpointProbe {
     let health = send_probe_request(client, base_url, "healthz", None).await;
-    if health.as_ref().is_ok_and(is_ready_threadrelay_health) {
+    if health.as_ref().is_ok_and(is_ready_mochiport_health) {
         return EndpointProbe::CompatibleV1;
     }
     if let Ok(response) = &health {
@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn management_status_requires_ready_v1_threadrelay_and_optional_instance_match() {
+    fn management_status_requires_ready_v1_mochiport_and_optional_instance_match() {
         let current = response(
             200,
             r#"{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"current"}"#,

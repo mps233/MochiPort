@@ -568,19 +568,19 @@ impl AppState {
         ));
         match level {
             "error" => tracing::error!(
-                target: "threadrelay::event",
+                target: "mochiport::event",
                 event_kind = kind,
                 message = %message,
                 "app event"
             ),
             "warn" => tracing::warn!(
-                target: "threadrelay::event",
+                target: "mochiport::event",
                 event_kind = kind,
                 message = %message,
                 "app event"
             ),
             _ => tracing::info!(
-                target: "threadrelay::event",
+                target: "mochiport::event",
                 event_kind = kind,
                 message = %message,
                 "app event"

@@ -329,7 +329,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 交付物：
 
-- [x] 创建 `macos/ThreadRelay` SwiftUI 工程，正式 Xcode 与 SwiftPM deployment target 均为 macOS 26。
+- [x] 创建 `macos/MochiPort` SwiftUI 工程，正式 Xcode 与 SwiftPM deployment target 均为 macOS 26。
 - [x] 固化 stable/preview Bundle ID、Cargo 版本来源、构建号和 Debug/Release scheme。
 - [ ] 补齐图标、签名能力和正式包签名验证。
 - [x] 使用 Swift 并发、`@MainActor` 和 `ObservableObject` 建立 `APIClient`、错误模型、依赖注入和只读 fixture 加载能力。
@@ -343,7 +343,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 - [x] 删除旧 Rust/wxDragon GUI、wxDragon vendor、Linux AppImage workflow 和旧 Linux 桌面入口。
 - [x] 建立语义化设计 token，但颜色和材质优先引用系统值。
 - [x] 建立 Liquid Glass 使用边界；macOS 26 使用原生 API，不实现仿制玻璃渲染器。
-- [x] 为总览、请求日志、Settings 和 sheet/popover 制作可运行的视觉基准，并提供不接触真实 daemon 的 `ThreadRelayPreview` fixture scheme（工程内部名称保留）。
+- [x] 为总览、请求日志、Settings 和 sheet/popover 制作可运行的视觉基准，并提供不接触真实 daemon 的 `MochiPortPreview` fixture scheme。
 - [ ] 完成 macOS 26 浅色/深色的截图和可读性评审。
 - [x] 创建主导航、Settings、About、菜单命令和占位页面。
 - [x] 增加 Swift 单元测试 target。

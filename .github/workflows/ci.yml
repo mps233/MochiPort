@@ -52,17 +52,17 @@ jobs:
       - name: Generate Swift version
         run: |
           set -euo pipefail
-          UI_VERSION="$(sed -n 's/^MARKETING_VERSION *= *\([^ ]*\).*/\1/p' macos/ThreadRelay/Config/Version.xcconfig | head -n 1)"
+          UI_VERSION="$(sed -n 's/^MARKETING_VERSION *= *\([^ ]*\).*/\1/p' macos/MochiPort/Config/Version.xcconfig | head -n 1)"
           MOCHIPORT_UI_VERSION="$UI_VERSION" \
             MOCHIPORT_UI_BUILD_NUMBER="${{ github.run_number }}" \
-            scripts/generate-swift-version.sh macos/ThreadRelay/Config/Version.xcconfig
+            scripts/generate-swift-version.sh macos/MochiPort/Config/Version.xcconfig
 
       - name: Build SwiftUI shell
         run: |
           set -euo pipefail
           xcodebuild build \
-            -project macos/ThreadRelay/ThreadRelay.xcodeproj \
-            -scheme ThreadRelay \
+            -project macos/MochiPort/MochiPort.xcodeproj \
+            -scheme MochiPort \
             -configuration Debug \
             -destination 'platform=macOS' \
             -derivedDataPath "$RUNNER_TEMP/MochiPortDerivedData" \
@@ -72,8 +72,8 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild test \
-            -project macos/ThreadRelay/ThreadRelay.xcodeproj \
-            -scheme ThreadRelay \
+            -project macos/MochiPort/MochiPort.xcodeproj \
+            -scheme MochiPort \
             -configuration Debug \
             -destination 'platform=macOS' \
             -derivedDataPath "$RUNNER_TEMP/MochiPortDerivedData" \

@@ -207,7 +207,7 @@ struct MessagingAccountAvatar: View {
     }
 }
 
-private enum MessagingAccountFilter: String, CaseIterable, Identifiable, ThreadRelaySegmentItem {
+private enum MessagingAccountFilter: String, CaseIterable, Identifiable, MochiPortSegmentItem {
     case all
     case feishu
     case telegram
@@ -290,16 +290,16 @@ struct MessagingAccountsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: ThreadRelayPageLayout.sectionSpacing) {
+            VStack(alignment: .leading, spacing: MochiPortPageLayout.sectionSpacing) {
                 availabilityNotice
                 filterBar
                 accountSummaryBar
                 accountPanel
             }
-            .frame(maxWidth: ThreadRelayPageLayout.maxContentWidth, alignment: .leading)
-            .padding(.horizontal, ThreadRelayPageLayout.horizontalPadding)
-            .padding(.top, ThreadRelayPageLayout.topPadding)
-            .padding(.bottom, ThreadRelayPageLayout.bottomPadding)
+            .frame(maxWidth: MochiPortPageLayout.maxContentWidth, alignment: .leading)
+            .padding(.horizontal, MochiPortPageLayout.horizontalPadding)
+            .padding(.top, MochiPortPageLayout.topPadding)
+            .padding(.bottom, MochiPortPageLayout.bottomPadding)
         }
         .scrollIndicators(.never)
         .searchable(text: $searchText, prompt: "搜索账号")
@@ -380,7 +380,7 @@ struct MessagingAccountsView: View {
     }
 
     private func updateNotice(title: String, message: String, symbol: String) -> some View {
-        HStack(alignment: .top, spacing: ThreadRelaySpacing.standard) {
+        HStack(alignment: .top, spacing: MochiPortSpacing.standard) {
             Image(systemName: symbol)
                 .foregroundStyle(.orange)
                 .frame(width: 20)
@@ -395,15 +395,15 @@ struct MessagingAccountsView: View {
             Spacer(minLength: 0)
         }
         .padding(12)
-        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: ThreadRelayRadius.content))
+        .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: MochiPortRadius.content))
         .overlay {
-            RoundedRectangle(cornerRadius: ThreadRelayRadius.content)
+            RoundedRectangle(cornerRadius: MochiPortRadius.content)
                 .strokeBorder(Color.orange.opacity(0.18), lineWidth: 0.5)
         }
     }
 
     private var accountSummaryBar: some View {
-        HStack(alignment: .center, spacing: ThreadRelaySpacing.standard) {
+        HStack(alignment: .center, spacing: MochiPortSpacing.standard) {
             Text(summaryText)
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -450,7 +450,7 @@ struct MessagingAccountsView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: ThreadRelaySpacing.compact) {
+        VStack(spacing: MochiPortSpacing.compact) {
             Image(systemName: emptyStateSymbol)
                 .font(.system(size: 26, weight: .regular))
                 .foregroundStyle(.secondary)
@@ -500,7 +500,7 @@ struct MessagingAccountsView: View {
         let mutationsEnabled = availability == .available
         let togglePending = pendingToggleIDs.contains(account.id)
         return VStack(spacing: 0) {
-            HStack(spacing: ThreadRelaySpacing.standard) {
+            HStack(spacing: MochiPortSpacing.standard) {
                 Button {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         if isExpanded {
@@ -510,7 +510,7 @@ struct MessagingAccountsView: View {
                         }
                     }
                 } label: {
-                    HStack(spacing: ThreadRelaySpacing.standard) {
+                    HStack(spacing: MochiPortSpacing.standard) {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.tertiary)
@@ -618,7 +618,7 @@ struct MessagingAccountsView: View {
     }
 
     private func accountDetails(_ account: MessagingAccountSummary) -> some View {
-        VStack(alignment: .leading, spacing: ThreadRelaySpacing.compact) {
+        VStack(alignment: .leading, spacing: MochiPortSpacing.compact) {
             HStack(spacing: 18) {
                 detailItem("配置", value: account.configured ? "完整" : "不完整")
                 detailItem("凭据", value: account.secretSet ? "已设置" : "未设置")

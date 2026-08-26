@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn codexhub_third_party_models_use_372k_context_window() {
+    fn mochiport_third_party_models_use_372k_context_window() {
         for slug in ["grok-4.6", "GLM-5.2", "Opus-4.8", "Sonnet-4.6"] {
             let model = catalog_models()
                 .iter()
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_4_models_remain_visible_for_codexhub() {
+    fn gpt_5_4_models_remain_visible_for_mochiport() {
         let gpt_5_5 = catalog_models()
             .iter()
             .find(|model| model_slug(model) == Some("gpt-5.5"))

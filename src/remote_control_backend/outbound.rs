@@ -94,7 +94,7 @@ pub(super) async fn send_initialize_for_client_on_connection(
         "method": "initialize",
         "params": {
             "clientInfo": {
-                "name": "threadrelay",
+                "name": "mochiport",
                 "title": "MochiPort",
                 "version": env!("CARGO_PKG_VERSION")
             },
@@ -244,7 +244,7 @@ pub(super) async fn send_envelope_on_connection(
         client_id, stream_id, seq_id_text, summary
     ));
     info!(
-        target: "threadrelay::remote_control",
+        target: "mochiport::remote_control",
         event = "remote_control_client_envelope",
         summary = %summary,
         "remote-control client envelope"
@@ -308,7 +308,7 @@ pub(super) async fn send_envelopes_on_connection(
             envelope_count, client_id, stream_id, seq_id_text, summary
         ));
         info!(
-            target: "threadrelay::remote_control",
+            target: "mochiport::remote_control",
             event = "remote_control_client_envelope",
             envelope_count,
             summary = %summary,
@@ -335,7 +335,7 @@ pub(super) async fn send_envelopes_on_connection(
 pub(super) async fn send_ws_control_ping(state: &SharedState, connection_epoch: u64) -> Result<()> {
     chain_log::write_line("[remote_control] event=client_ping payload_len=0");
     info!(
-        target: "threadrelay::remote_control",
+        target: "mochiport::remote_control",
         event = "remote_control_client_ping",
         payload_len = 0usize,
         "remote-control client ping"
@@ -361,7 +361,7 @@ pub(super) async fn send_ws_control_pong(
         data.len()
     ));
     info!(
-        target: "threadrelay::remote_control",
+        target: "mochiport::remote_control",
         event = "remote_control_client_pong",
         payload_len = data.len(),
         "remote-control client pong"

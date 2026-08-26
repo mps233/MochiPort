@@ -108,7 +108,7 @@ pub struct AccountBalanceSnapshot {
 }
 
 /// Most recent Sub2API usage record whose API key exactly matches a saved
-/// ThreadRelay Provider. The matching key remains inside the daemon.
+/// MochiPort Provider. The matching key remains inside the daemon.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RecentProviderAccountSnapshot {
@@ -615,7 +615,7 @@ fn normalize_account(
 
 /// Keep only a safe, stable URL for presentation/grouping. Sub2API redacts
 /// credential values, but a custom base URL can still contain userinfo or
-/// tracking components that should never be echoed by ThreadRelay.
+/// tracking components that should never be echoed by MochiPort.
 fn sanitized_site_url(credentials: &Value) -> Option<String> {
     let raw = credentials
         .get("base_url")

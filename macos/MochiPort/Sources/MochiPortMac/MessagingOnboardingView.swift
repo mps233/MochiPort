@@ -87,13 +87,13 @@ struct MessagingOnboardingView: View {
     @State private var completedAccountName = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: ThreadRelaySpacing.section) {
+        VStack(alignment: .leading, spacing: MochiPortSpacing.section) {
             header
             content
             Spacer(minLength: 0)
             footer
         }
-        .padding(ThreadRelaySpacing.page)
+        .padding(MochiPortSpacing.page)
         .frame(width: 520, height: 500)
         .onDisappear {
             scanTask?.cancel()
@@ -106,7 +106,7 @@ struct MessagingOnboardingView: View {
     // MARK: - Header
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: ThreadRelaySpacing.compact) {
+        VStack(alignment: .leading, spacing: MochiPortSpacing.compact) {
             Image(systemName: headerSymbol)
                 .font(.system(size: 28))
                 .foregroundStyle(step == .done ? AnyShapeStyle(.green) : AnyShapeStyle(.tint))
@@ -168,7 +168,7 @@ struct MessagingOnboardingView: View {
         case .wechatScan, .wecomScan:
             scanArea
         case .verifying:
-            HStack(spacing: ThreadRelaySpacing.standard) {
+            HStack(spacing: MochiPortSpacing.standard) {
                 ProgressView()
                     .controlSize(.small)
                 Text("验证通常在几秒内完成。")
@@ -203,7 +203,7 @@ struct MessagingOnboardingView: View {
         Button {
             selectedPlatform = platform
         } label: {
-            HStack(spacing: ThreadRelaySpacing.standard) {
+            HStack(spacing: MochiPortSpacing.standard) {
                 Image(systemName: platform.symbol)
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.tint)
@@ -216,7 +216,7 @@ struct MessagingOnboardingView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                Spacer(minLength: ThreadRelaySpacing.compact)
+                Spacer(minLength: MochiPortSpacing.compact)
                 Image(systemName: selectedPlatform == platform ? "checkmark.circle.fill" : "circle")
                     .foregroundStyle(.tint)
             }
@@ -229,7 +229,7 @@ struct MessagingOnboardingView: View {
     }
 
     private var telegramCredentialsForm: some View {
-        VStack(alignment: .leading, spacing: ThreadRelaySpacing.standard) {
+        VStack(alignment: .leading, spacing: MochiPortSpacing.standard) {
             SecureField("Bot Token", text: $botToken)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityIdentifier("onboarding.telegram.token")
@@ -244,7 +244,7 @@ struct MessagingOnboardingView: View {
     }
 
     private var feishuSetup: some View {
-        VStack(alignment: .leading, spacing: ThreadRelaySpacing.standard) {
+        VStack(alignment: .leading, spacing: MochiPortSpacing.standard) {
             Picker("接入方式", selection: $feishuMethod) {
                 ForEach(FeishuMethod.allCases) { method in
                     Text(method.title).tag(method)
@@ -295,7 +295,7 @@ struct MessagingOnboardingView: View {
     private var scanArea: some View {
         switch scanPhase {
         case .idle, .loading:
-            HStack(spacing: ThreadRelaySpacing.standard) {
+            HStack(spacing: MochiPortSpacing.standard) {
                 ProgressView()
                     .controlSize(.small)
                 Text("正在获取二维码…")
@@ -303,7 +303,7 @@ struct MessagingOnboardingView: View {
             }
             .frame(maxWidth: .infinity, minHeight: 190)
         case let .waiting(qrContent, hint):
-            VStack(spacing: ThreadRelaySpacing.standard) {
+            VStack(spacing: MochiPortSpacing.standard) {
                 QRCodeView(content: qrContent)
                     .frame(width: 164, height: 164)
                 HStack(spacing: 6) {
@@ -316,14 +316,14 @@ struct MessagingOnboardingView: View {
             }
             .frame(maxWidth: .infinity)
         case let .awaitingVerifyCode(qrContent):
-            VStack(spacing: ThreadRelaySpacing.standard) {
+            VStack(spacing: MochiPortSpacing.standard) {
                 QRCodeView(content: qrContent)
                     .frame(width: 108, height: 108)
                     .opacity(0.3)
                 Text("微信要求输入验证码以完成连接。")
                     .font(.callout)
                 errorLabel
-                HStack(spacing: ThreadRelaySpacing.compact) {
+                HStack(spacing: MochiPortSpacing.compact) {
                     TextField("验证码", text: $wechatVerifyCode)
                         .textFieldStyle(.roundedBorder)
                         .frame(width: 150)
@@ -339,7 +339,7 @@ struct MessagingOnboardingView: View {
             }
             .frame(maxWidth: .infinity)
         case let .expired(message), let .failed(message):
-            VStack(spacing: ThreadRelaySpacing.standard) {
+            VStack(spacing: MochiPortSpacing.standard) {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.system(size: 24))
                     .foregroundStyle(.orange)

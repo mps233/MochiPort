@@ -1,6 +1,6 @@
 ﻿# Brand Assets
 
-Brand SVGs are copied from `@lobehub/icons` version `5.8.0` when the package contains a matching icon. The package is distributed under the MIT license. Runtime copies live under `macos/ThreadRelay/Sources/ThreadRelayMac/Resources/`.
+Brand SVGs are copied from `@lobehub/icons` version `5.8.0` when the package contains a matching icon. The package is distributed under the MIT license. Runtime copies live under `macos/MochiPort/Sources/MochiPortMac/Resources/`.
 
 - Codex: `references/lobehub-icons/es/Codex/components/Color.js` -> `Resources/ClientLogos/codex.svg`
 - OpenAI: `references/lobehub-icons/es/OpenAI/components/Mono.js` -> `Resources/ProviderLogos/openai.svg`
@@ -10,7 +10,7 @@ Brand SVGs are copied from `@lobehub/icons` version `5.8.0` when the package con
 - Zhipu: `references/lobehub-icons/es/Zhipu/components/Color.js` -> `Resources/ProviderLogos/zhipu.svg`
 
 The SwiftUI client bundles monochrome copies of these provider marks under
-`macos/ThreadRelay/Sources/ThreadRelayMac/Resources/ProviderLogos/`.
+`macos/MochiPort/Sources/MochiPortMac/Resources/ProviderLogos/`.
 
 Lucide UI icons are copied from Lucide Icons and covered by `packaging/brand/LICENSE.lucide-icons`.
 

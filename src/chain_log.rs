@@ -228,7 +228,7 @@ fn cleanup_old_logs(log_dir: &Path, active_path: &Path, retention_days: u64) -> 
         .unwrap_or(UNIX_EPOCH);
     for entry in entries.flatten() {
         let path = entry.path();
-        if path == active_path || !is_threadrelay_log_path(&path) {
+        if path == active_path || !is_mochiport_log_path(&path) {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {
@@ -248,7 +248,7 @@ fn cleanup_old_logs(log_dir: &Path, active_path: &Path, retention_days: u64) -> 
     Ok(())
 }
 
-fn is_threadrelay_log_path(path: &Path) -> bool {
+fn is_mochiport_log_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|value| value.to_str())
         .is_some_and(|name| {
@@ -286,9 +286,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("threadrelay-chain-log-test-{unique}"));
+        let dir = std::env::temp_dir().join(format!("mochiport-chain-log-test-{unique}"));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("threadrelay-chain.log");
+        let path = dir.join("mochiport-chain.log");
         std::fs::write(&path, "old\n").unwrap();
         let file = OpenOptions::new()
             .create(true)

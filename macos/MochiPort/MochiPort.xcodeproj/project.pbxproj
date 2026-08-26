@@ -6,7 +6,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		A10000000000000000000001 /* ThreadRelayApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* ThreadRelayApp.swift */; };
+		A10000000000000000000001 /* MochiPortApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* MochiPortApp.swift */; };
 		A10000000000000000000002 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* AppModel.swift */; };
 		A10000000000000000000003 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* APIClient.swift */; };
 		A10000000000000000000004 /* RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000004 /* RootView.swift */; };
@@ -59,7 +59,7 @@
 
 /* Begin PBXFileReference section */
 		A20000000000000000000000 /* MochiPort.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MochiPort.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		A20000000000000000000001 /* ThreadRelayApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadRelayApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000001 /* MochiPortApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MochiPortApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* RootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RootView.swift; sourceTree = "<group>"; };
@@ -68,10 +68,10 @@
 		A20000000000000000000007 /* DesignSystem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DesignSystem.swift; sourceTree = "<group>"; };
 		A20000000000000000000008 /* VisualBaselines.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualBaselines.swift; sourceTree = "<group>"; };
 		A20000000000000000000009 /* APIContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIContractTests.swift; sourceTree = "<group>"; };
-		A20000000000000000000010 /* ThreadRelayMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.xctest; includeInIndex = 0; path = ThreadRelayMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000010 /* MochiPortMacTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.xctest; includeInIndex = 0; path = MochiPortMacTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A2000000000000000000000A /* DaemonLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonLauncher.swift; sourceTree = "<group>"; };
 		A2000000000000000000000B /* ConnectionTopologyView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionTopologyView.swift; sourceTree = "<group>"; };
-		A2000000000000000000000C /* ThreadRelay-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "ThreadRelay-Info.plist"; sourceTree = "<group>"; };
+		A2000000000000000000000C /* MochiPort-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "MochiPort-Info.plist"; sourceTree = "<group>"; };
 		A2000000000000000000000D /* MessagingAccountsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagingAccountsView.swift; sourceTree = "<group>"; };
 		A2000000000000000000000E /* MessagingOnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessagingOnboardingView.swift; sourceTree = "<group>"; };
 		A2000000000000000000000F /* ManagementViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ManagementViews.swift; sourceTree = "<group>"; };
@@ -82,34 +82,34 @@
 		A20000000000000000000015 /* ClientLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ClientLogos; sourceTree = "<group>"; };
 		A20000000000000000000016 /* DaemonUpdateInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonUpdateInstaller.swift; sourceTree = "<group>"; };
 		A20000000000000000000017 /* UpdateCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCheckerTests.swift; sourceTree = "<group>"; };
-		B200000000000000000000 /* AIGlassUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/AIGlassUpdateChecker.swift; sourceTree = "<group>"; };
-		B200000000000000000003 /* BriefingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/BriefingEngine.swift; sourceTree = "<group>"; };
-		B200000000000000000006 /* CodexLogParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/CodexLogParser.swift; sourceTree = "<group>"; };
-		B200000000000000000007 /* Collectors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/Collectors.swift; sourceTree = "<group>"; };
-		B200000000000000000008 /* CostEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/CostEstimator.swift; sourceTree = "<group>"; };
-		B200000000000000000009 /* DailyStatsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/DailyStatsStore.swift; sourceTree = "<group>"; };
-		B20000000000000000000A /* DepletionEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/DepletionEstimator.swift; sourceTree = "<group>"; };
-		B20000000000000000000B /* DirectoryWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/DirectoryWatcher.swift; sourceTree = "<group>"; };
-		B20000000000000000000C /* EventEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/EventEngine.swift; sourceTree = "<group>"; };
-		B20000000000000000000D /* EventLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/EventLog.swift; sourceTree = "<group>"; };
-		B20000000000000000000F /* ISO8601.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/ISO8601.swift; sourceTree = "<group>"; };
-		B200000000000000000010 /* IncrementalLineReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/IncrementalLineReader.swift; sourceTree = "<group>"; };
-		B200000000000000000011 /* LogLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/LogLocator.swift; sourceTree = "<group>"; };
-		B200000000000000000012 /* MilestoneTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/MilestoneTracker.swift; sourceTree = "<group>"; };
-		B200000000000000000013 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/Models.swift; sourceTree = "<group>"; };
-		B200000000000000000015 /* RealModeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/RealModeMessages.swift; sourceTree = "<group>"; };
-		B200000000000000000016 /* UsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/UsageStore.swift; sourceTree = "<group>"; };
-		B200000000000000000017 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/AppSettings.swift; sourceTree = "<group>"; };
-		B200000000000000000018 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/DashboardView.swift; sourceTree = "<group>"; };
-		B200000000000000000019 /* HeatmapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/HeatmapView.swift; sourceTree = "<group>"; };
-		B20000000000000000001A /* LaunchAtLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/LaunchAtLogin.swift; sourceTree = "<group>"; };
-		B20000000000000000001B /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/Notifier.swift; sourceTree = "<group>"; };
-		B20000000000000000001C /* SoundPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/SoundPlayer.swift; sourceTree = "<group>"; };
-		B20000000000000000001D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/Theme.swift; sourceTree = "<group>"; };
-		B20000000000000000001E /* UpdateState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassUI/UpdateState.swift; sourceTree = "<group>"; };
-		B20000000000000000001F /* HUDEventPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCore/HUDEventPresentation.swift; sourceTree = "<group>"; };
-		B200000000000000000020 /* AIGlassCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassCoordinator.swift; sourceTree = "<group>"; };
-		B200000000000000000021 /* AIGlassSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/ThreadRelayMac/AIGlassSettingsView.swift; sourceTree = "<group>"; };
+		B200000000000000000000 /* AIGlassUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/AIGlassUpdateChecker.swift; sourceTree = "<group>"; };
+		B200000000000000000003 /* BriefingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/BriefingEngine.swift; sourceTree = "<group>"; };
+		B200000000000000000006 /* CodexLogParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/CodexLogParser.swift; sourceTree = "<group>"; };
+		B200000000000000000007 /* Collectors.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/Collectors.swift; sourceTree = "<group>"; };
+		B200000000000000000008 /* CostEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/CostEstimator.swift; sourceTree = "<group>"; };
+		B200000000000000000009 /* DailyStatsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/DailyStatsStore.swift; sourceTree = "<group>"; };
+		B20000000000000000000A /* DepletionEstimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/DepletionEstimator.swift; sourceTree = "<group>"; };
+		B20000000000000000000B /* DirectoryWatcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/DirectoryWatcher.swift; sourceTree = "<group>"; };
+		B20000000000000000000C /* EventEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/EventEngine.swift; sourceTree = "<group>"; };
+		B20000000000000000000D /* EventLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/EventLog.swift; sourceTree = "<group>"; };
+		B20000000000000000000F /* ISO8601.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/ISO8601.swift; sourceTree = "<group>"; };
+		B200000000000000000010 /* IncrementalLineReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/IncrementalLineReader.swift; sourceTree = "<group>"; };
+		B200000000000000000011 /* LogLocator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/LogLocator.swift; sourceTree = "<group>"; };
+		B200000000000000000012 /* MilestoneTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/MilestoneTracker.swift; sourceTree = "<group>"; };
+		B200000000000000000013 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/Models.swift; sourceTree = "<group>"; };
+		B200000000000000000015 /* RealModeMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/RealModeMessages.swift; sourceTree = "<group>"; };
+		B200000000000000000016 /* UsageStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/UsageStore.swift; sourceTree = "<group>"; };
+		B200000000000000000017 /* AppSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassUI/AppSettings.swift; sourceTree = "<group>"; };
+		B200000000000000000018 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassUI/DashboardView.swift; sourceTree = "<group>"; };
+		B200000000000000000019 /* HeatmapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassUI/HeatmapView.swift; sourceTree = "<group>"; };
+		B20000000000000000001A /* LaunchAtLogin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassUI/LaunchAtLogin.swift; sourceTree = "<group>"; };
+		B20000000000000000001B /* Notifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassUI/Notifier.swift; sourceTree = "<group>"; };
+		B20000000000000000001C /* SoundPlayer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassUI/SoundPlayer.swift; sourceTree = "<group>"; };
+		B20000000000000000001D /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassUI/Theme.swift; sourceTree = "<group>"; };
+		B20000000000000000001E /* UpdateState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassUI/UpdateState.swift; sourceTree = "<group>"; };
+		B20000000000000000001F /* HUDEventPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/HUDEventPresentation.swift; sourceTree = "<group>"; };
+		B200000000000000000020 /* AIGlassCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCoordinator.swift; sourceTree = "<group>"; };
+		B200000000000000000021 /* AIGlassSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassSettingsView.swift; sourceTree = "<group>"; };
 		B200000000000000000022 /* TokenCompanionAnimator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIGlassUI/TokenCompanionAnimator.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -132,17 +132,17 @@
 		A40000000000000000000000 = {
 			isa = PBXGroup;
 			children = (
-				A40000000000000000000001 /* ThreadRelayMac */,
+				A40000000000000000000001 /* MochiPortMac */,
 				A40000000000000000000002 /* Config */,
 				A40000000000000000000003 /* Products */,
 				A40000000000000000000004 /* Tests */,
 			);
 			sourceTree = "<group>";
 		};
-		A40000000000000000000001 /* ThreadRelayMac */ = {
+		A40000000000000000000001 /* MochiPortMac */ = {
 			isa = PBXGroup;
 			children = (
-				A20000000000000000000001 /* ThreadRelayApp.swift */,
+				A20000000000000000000001 /* MochiPortApp.swift */,
 				A20000000000000000000002 /* AppModel.swift */,
 				A20000000000000000000003 /* APIClient.swift */,
 				A20000000000000000000004 /* RootView.swift */,
@@ -162,14 +162,14 @@
 				A20000000000000000000015 /* ClientLogos */,
 				B200000000000000000022 /* TokenCompanionAnimator.swift */,
 			);
-			path = Sources/ThreadRelayMac;
+			path = Sources/MochiPortMac;
 			sourceTree = SOURCE_ROOT;
 		};
 		A40000000000000000000002 /* Config */ = {
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000006 /* Version.xcconfig */,
-				A2000000000000000000000C /* ThreadRelay-Info.plist */,
+				A2000000000000000000000C /* MochiPort-Info.plist */,
 			);
 			path = Config;
 			sourceTree = SOURCE_ROOT;
@@ -178,7 +178,7 @@
 			isa = PBXGroup;
 			children = (
 				A20000000000000000000000 /* MochiPort.app */,
-				A20000000000000000000010 /* ThreadRelayMacTests.xctest */,
+				A20000000000000000000010 /* MochiPortMacTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -189,13 +189,13 @@
 				A20000000000000000000009 /* APIContractTests.swift */,
 				A20000000000000000000017 /* UpdateCheckerTests.swift */,
 			);
-			path = Tests/ThreadRelayMacTests;
+			path = Tests/MochiPortMacTests;
 			sourceTree = SOURCE_ROOT;
 		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		A50000000000000000000001 /* ThreadRelay */ = {
+		A50000000000000000000001 /* MochiPort */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = A90000000000000000000002 /* Build configuration list for PBXNativeTarget */;
 			buildPhases = (
@@ -205,24 +205,24 @@
 			);
 			buildRules = ();
 			dependencies = ();
-			name = ThreadRelay;
+			name = MochiPort;
 			productName = MochiPort;
 			productReference = A20000000000000000000000 /* MochiPort.app */;
 			productType = "com.apple.product-type.application";
 		};
-		A50000000000000000000002 /* ThreadRelayMacTests */ = {
+		A50000000000000000000002 /* MochiPortMacTests */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = A90000000000000000000003 /* Build configuration list for ThreadRelayMacTests */;
+			buildConfigurationList = A90000000000000000000003 /* Build configuration list for MochiPortMacTests */;
 			buildPhases = (
 				A70000000000000000000003 /* Test Sources */,
 				A30000000000000000000002 /* Test Frameworks */,
 				A70000000000000000000004 /* Test Resources */,
 			);
 			buildRules = ();
-			dependencies = (A60000000000000000000002 /* ThreadRelay dependency */);
-			name = ThreadRelayMacTests;
-			productName = ThreadRelayMacTests;
-			productReference = A20000000000000000000010 /* ThreadRelayMacTests.xctest */;
+			dependencies = (A60000000000000000000002 /* MochiPort dependency */);
+			name = MochiPortMacTests;
+			productName = MochiPortMacTests;
+			productReference = A20000000000000000000010 /* MochiPortMacTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
@@ -249,27 +249,27 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				A50000000000000000000001 /* ThreadRelay */,
-				A50000000000000000000002 /* ThreadRelayMacTests */,
+				A50000000000000000000001 /* MochiPort */,
+				A50000000000000000000002 /* MochiPortMacTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXContainerItemProxy section */
-		A60000000000000000000003 /* ThreadRelay test target proxy */ = {
+		A60000000000000000000003 /* MochiPort test target proxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = A60000000000000000000001 /* Project object */;
 			proxyType = 1;
 			remoteGlobalIDString = A50000000000000000000001;
-			remoteInfo = ThreadRelay;
+			remoteInfo = MochiPort;
 		};
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXTargetDependency section */
-		A60000000000000000000002 /* ThreadRelay dependency */ = {
+		A60000000000000000000002 /* MochiPort dependency */ = {
 			isa = PBXTargetDependency;
-			target = A50000000000000000000001 /* ThreadRelay */;
-			targetProxy = A60000000000000000000003 /* ThreadRelay test target proxy */;
+			target = A50000000000000000000001 /* MochiPort */;
+			targetProxy = A60000000000000000000003 /* MochiPort test target proxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -283,7 +283,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				A10000000000000000000001 /* ThreadRelayApp.swift in Sources */,
+				A10000000000000000000001 /* MochiPortApp.swift in Sources */,
 				A10000000000000000000002 /* AppModel.swift in Sources */,
 				A10000000000000000000003 /* APIClient.swift in Sources */,
 				A10000000000000000000004 /* RootView.swift in Sources */,
@@ -354,12 +354,12 @@
 					DEFINES_MODULE = YES;
 					ENABLE_TESTABILITY = YES;
 					GENERATE_INFOPLIST_FILE = NO;
-					INFOPLIST_FILE = Config/ThreadRelay-Info.plist;
+					INFOPLIST_FILE = Config/MochiPort-Info.plist;
 					MOCHIPORT_DISPLAY_NAME = "MochiPort Preview";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay.preview;
-				PRODUCT_MODULE_NAME = ThreadRelay;
+				PRODUCT_MODULE_NAME = MochiPort;
 				PRODUCT_NAME = MochiPort;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_STRICT_CONCURRENCY = complete;
@@ -374,12 +374,12 @@
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = NO;
-				INFOPLIST_FILE = Config/ThreadRelay-Info.plist;
+				INFOPLIST_FILE = Config/MochiPort-Info.plist;
 				MOCHIPORT_DISPLAY_NAME = MochiPort;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay;
-				PRODUCT_MODULE_NAME = ThreadRelay;
+				PRODUCT_MODULE_NAME = MochiPort;
 				PRODUCT_NAME = MochiPort;
 				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_STRICT_CONCURRENCY = complete;
@@ -398,7 +398,7 @@
 					LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @loader_path/../../MacOS";
 					MACOSX_DEPLOYMENT_TARGET = 26.0;
 					PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay.preview.tests;
-					PRODUCT_NAME = ThreadRelayMacTests;
+					PRODUCT_NAME = MochiPortMacTests;
 					SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 					SWIFT_STRICT_CONCURRENCY = complete;
 					SWIFT_VERSION = 6.0;
@@ -417,7 +417,7 @@
 					LD_RUNPATH_SEARCH_PATHS = "$(inherited) @loader_path/../Frameworks @loader_path/../../MacOS";
 					MACOSX_DEPLOYMENT_TARGET = 26.0;
 					PRODUCT_BUNDLE_IDENTIFIER = io.github.mps233.threadrelay.tests;
-					PRODUCT_NAME = ThreadRelayMacTests;
+					PRODUCT_NAME = MochiPortMacTests;
 					SWIFT_STRICT_CONCURRENCY = complete;
 					SWIFT_VERSION = 6.0;
 					TEST_HOST = "$(BUILT_PRODUCTS_DIR)/MochiPort.app/Contents/MacOS/MochiPort";
@@ -429,7 +429,7 @@
 /* Begin XCConfigurationList section */
 			A90000000000000000000001 /* Build configuration list for PBXProject */ = {isa = XCConfigurationList; buildConfigurations = (A80000000000000000000001, A80000000000000000000002); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 			A90000000000000000000002 /* Build configuration list for PBXNativeTarget */ = {isa = XCConfigurationList; buildConfigurations = (A80000000000000000000003, A80000000000000000000004); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-			A90000000000000000000003 /* Build configuration list for ThreadRelayMacTests */ = {isa = XCConfigurationList; buildConfigurations = (A80000000000000000000005, A80000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+			A90000000000000000000003 /* Build configuration list for MochiPortMacTests */ = {isa = XCConfigurationList; buildConfigurations = (A80000000000000000000005, A80000000000000000000006); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 	};
 	rootObject = A60000000000000000000001 /* Project object */;

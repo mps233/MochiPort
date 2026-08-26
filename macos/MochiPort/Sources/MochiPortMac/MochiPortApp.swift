@@ -266,7 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 @main
-struct ThreadRelayApp: App {
+struct MochiPortApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var model: AppModel
     @StateObject private var glass: AIGlassCoordinator

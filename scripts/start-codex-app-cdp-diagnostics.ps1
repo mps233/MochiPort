@@ -42,7 +42,7 @@ class ApplicationActivationManager
 {
 }
 
-public static class ThreadRelayMsixLauncher
+public static class MochiPortMsixLauncher
 {
     public static uint Launch(string appId, string arguments)
     {
@@ -55,13 +55,13 @@ public static class ThreadRelayMsixLauncher
 }
 '@
 
-if (-not ('ThreadRelayMsixLauncher' -as [type])) {
+if (-not ('MochiPortMsixLauncher' -as [type])) {
     Add-Type -TypeDefinition $source
 }
 
 $appUserModelId = "$($package.PackageFamilyName)!App"
 $arguments = "--remote-debugging-address=127.0.0.1 --remote-debugging-port=$Port"
-$processId = [ThreadRelayMsixLauncher]::Launch($appUserModelId, $arguments)
+$processId = [MochiPortMsixLauncher]::Launch($appUserModelId, $arguments)
 
 $deadline = (Get-Date).AddSeconds(30)
 do {

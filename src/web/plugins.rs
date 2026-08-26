@@ -29,8 +29,8 @@ const MAX_FEATURED_PLUGINS: usize = 8;
 const OPENAI_BUNDLED_MARKETPLACE: &str = "openai-bundled";
 const OPENAI_CURATED_MARKETPLACE: &str = "openai-curated";
 const OPENAI_CURATED_REMOTE_MARKETPLACE: &str = "openai-curated-remote";
-const CODEXHUB_CURATED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-local-";
-const CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
+const LEGACY_CODEXHUB_CURATED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-local-";
+const LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
 const LOCAL_BUNDLED_REMOTE_ID_PREFIX: &str = "local~openai-bundled~";
 
 pub fn router() -> Router<SharedState> {
@@ -61,7 +61,7 @@ pub fn router() -> Router<SharedState> {
 }
 
 async fn list_plugins() -> Response {
-    // codexhub intentionally serves an EMPTY remote plugin catalog here.
+    // MochiPort intentionally serves an EMPTY remote plugin catalog here.
     //
     // The Codex desktop app merges two independent plugin sources:
     //   1. the on-disk local marketplace `openai-curated` (display name
@@ -74,7 +74,7 @@ async fn list_plugins() -> Response {
     // branch (materialized into `~/.codex/plugins/cache/openai-curated/...`).
     // When we also advertised the same plugins here, the app surfaced a second
     // "OpenAI Curated Remote" tab whose installs route through the remote
-    // branch and fail with `MissingBundleDownloadUrl` because codexhub cannot
+    // branch and fail with `MissingBundleDownloadUrl` because MochiPort cannot
     // provide an HTTPS `bundle_download_url`. Returning an empty catalog drops
     // that broken duplicate tab and leaves the working local tab untouched.
     Json(empty_plugin_page()).into_response()
@@ -228,7 +228,7 @@ fn load_local_curated_remote_plugins() -> Result<Vec<Value>, String> {
             local_marketplace_plugin_to_remote(
                 plugin,
                 OPENAI_CURATED_REMOTE_MARKETPLACE,
-                CODEXHUB_CURATED_REMOTE_ID_PREFIX,
+                LEGACY_CODEXHUB_CURATED_REMOTE_ID_PREFIX,
             )
         })
         .collect())
@@ -344,7 +344,7 @@ fn find_local_bundled_compat_plugin(plugin_id: &str) -> Result<Option<Value>, St
                 plugin,
                 OPENAI_BUNDLED_MARKETPLACE,
                 Some(remote_id.as_str()),
-                CODEXHUB_BUNDLED_REMOTE_ID_PREFIX,
+                LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX,
             )?;
             Some(with_local_bundled_skills(plugin, &plugin_name))
         }))
@@ -352,7 +352,7 @@ fn find_local_bundled_compat_plugin(plugin_id: &str) -> Result<Option<Value>, St
 
 fn bundled_plugin_name_from_compat_id(plugin_id: &str) -> Option<String> {
     plugin_id
-        .strip_prefix(CODEXHUB_BUNDLED_REMOTE_ID_PREFIX)
+        .strip_prefix(LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX)
         .map(str::to_string)
         .or_else(|| {
             plugin_id
@@ -368,12 +368,12 @@ fn bundled_plugin_name_from_compat_id(plugin_id: &str) -> Option<String> {
 }
 
 fn bundled_compat_remote_id(plugin_id: &str, plugin_name: &str) -> String {
-    if plugin_id.starts_with(CODEXHUB_BUNDLED_REMOTE_ID_PREFIX)
+    if plugin_id.starts_with(LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX)
         || plugin_id.starts_with(LOCAL_BUNDLED_REMOTE_ID_PREFIX)
     {
         return plugin_id.to_string();
     }
-    format!("{CODEXHUB_BUNDLED_REMOTE_ID_PREFIX}{plugin_name}")
+    format!("{LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX}{plugin_name}")
 }
 
 fn read_local_bundled_skill(plugin_name: &str, skill_name: &str) -> Result<Option<String>, String> {
@@ -712,7 +712,7 @@ fn local_marketplace_plugin_to_remote_with_id(
             },
             "skills": []
         },
-        "codexhub_marketplace_name": marketplace_name
+        "mochiport_marketplace_name": marketplace_name
     }))
 }
 
@@ -777,7 +777,7 @@ fn curated_marketplace_root() -> PathBuf {
 }
 
 /// Decides whether a curated-marketplace plugin depends on a remote backend
-/// codexhub does not provide when running against a local gateway.
+/// MochiPort does not provide when running against a local gateway.
 ///
 /// Two dependency kinds are treated as "remote-backed" and hidden from the
 /// local plugin directory:
@@ -894,7 +894,7 @@ mod tests {
             .as_nanos();
         let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "codexhub-plugins-test-{}-{}-{}",
+            "mochiport-plugins-test-{}-{}-{}",
             std::process::id(),
             nanos,
             sequence

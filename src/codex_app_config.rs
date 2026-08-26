@@ -29,7 +29,7 @@ const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
 const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
-const CODEXHUB_ACTOR_AUTHORIZATION_VALUE: &str = "codexhub-local";
+const CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE: &str = "codexhub-local";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
 const CODEX_API_ENDPOINT_ENV: &str = "CODEX_API_ENDPOINT";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
@@ -53,12 +53,12 @@ const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const CODEX_CONNECTOR_DIRECTORY_CACHE_DIR: &str = "cache/codex_app_directory";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
-const CODEXHUB_HOME_ENV: &str = "CODEXHUB_HOME";
-const THREADRELAY_HOME_ENV: &str = "THREADRELAY_HOME";
+const LEGACY_CODEXHUB_HOME_ENV: &str = "CODEXHUB_HOME";
+const LEGACY_THREADRELAY_HOME_ENV: &str = "THREADRELAY_HOME";
 const MOCHIPORT_HOME_ENV: &str = "MOCHIPORT_HOME";
 const OPENAI_BUNDLED_MARKETPLACE_NAME: &str = "openai-bundled";
 const OPENAI_CURATED_MARKETPLACE_NAME: &str = "openai-curated";
-const CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
+const LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
 const REMOTE_PLUGIN_INSTALL_METADATA_FILE: &str = ".codex-remote-plugin-install.json";
 const PLUGIN_BLOCKING_FEATURE_FLAGS: &[&str] =
     &["plugins", "computer_use", "browser_use", "in_app_browser"];
@@ -174,11 +174,12 @@ pub struct CodexAppConfigStatus {
 /// Which process currently owns Codex's provider routing.
 ///
 /// `direct-api` means Codex calls the selected third-party API provider
-/// directly, without going through ThreadRelay's local gateway.
+/// directly, without going through MochiPort's local gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexProviderMode {
-    Threadrelay,
+    #[serde(rename = "threadrelay")]
+    MochiPort,
     DirectApi,
     Unknown,
 }
@@ -336,7 +337,7 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     #[cfg(not(test))]
     chain_log::write_line("[codex_app_config] event=gui_environment_configure_done");
 
-    write_provider_mode(&codex_home, CodexProviderMode::Threadrelay)?;
+    write_provider_mode(&codex_home, CodexProviderMode::MochiPort)?;
 
     Ok(ConfigureCodexAppReport {
         codex_home,
@@ -484,7 +485,7 @@ pub fn switch_codex_app_to_direct_api_mode(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let managed_names = threadrelay_local_provider_names(&doc, backend_url);
+    let managed_names = mochiport_local_provider_names(&doc, backend_url);
     let target_provider = active_provider
         .as_deref()
         .filter(|name| !managed_names.contains(*name))
@@ -1501,7 +1502,7 @@ fn gui_unsetenv_many(names: &[&str]) -> Result<(), String> {
 #[cfg(target_os = "windows")]
 fn broadcast_windows_environment_change() {
     let started = Instant::now();
-    tracing::info!(target: "threadrelay::startup", "broadcasting Windows environment change");
+    tracing::info!(target: "mochiport::startup", "broadcasting Windows environment change");
     let message: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
     let mut result = 0usize;
     unsafe {
@@ -1516,7 +1517,7 @@ fn broadcast_windows_environment_change() {
         );
     }
     tracing::info!(
-        target: "threadrelay::startup",
+        target: "mochiport::startup",
         elapsed_ms = started.elapsed().as_millis() as u64,
         result,
         "Windows environment change broadcast finished"
@@ -1646,12 +1647,12 @@ fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
         Ok(auth) => auth,
         Err(err) => return (false, Some(err.to_string())),
     };
-    if is_codexhub_auth_json(&auth) {
+    if is_mochiport_managed_auth_json(&auth) {
         (true, None)
     } else {
         (
             false,
-            Some("auth.json is not codexhub local auth".to_string()),
+            Some("auth.json is not MochiPort-managed local auth".to_string()),
         )
     }
 }
@@ -1659,7 +1660,7 @@ fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
 fn read_local_auth_account_id(path: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     let auth = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
-    if !is_codexhub_auth_json(&auth) {
+    if !is_mochiport_managed_auth_json(&auth) {
         return None;
     }
     auth.pointer("/tokens/account_id")
@@ -1805,7 +1806,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
             set_provider_http_header(
                 provider,
                 OPENAI_ACTOR_AUTHORIZATION_HEADER,
-                CODEXHUB_ACTOR_AUTHORIZATION_VALUE,
+                CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE,
             );
         } else if let Some(provider_base_url) = explicit_provider_base_url {
             provider["base_url"] = toml_edit::value(provider_base_url);
@@ -1860,9 +1861,9 @@ fn remove_disabled_plugin_feature_flags(doc: &mut toml_edit::DocumentMut) {
 // The `codex_apps` MCP is a host-owned server Codex auto-registers whenever the
 // `apps` feature is enabled and the session uses a Codex backend. Its transport
 // is a ChatGPT-hosted streamable HTTP endpoint (e.g. `.../backend-api/wham/apps`),
-// which codexhub does not implement, so startup logs an `MCP client for
+// which MochiPort does not implement, so startup logs an `MCP client for
 // `codex_apps` failed to start` error and the Apps/Connectors that depend on
-// OpenAI's remote services are surfaced but unusable. codexhub runs fully against
+// OpenAI's remote services are surfaced but unusable. MochiPort runs fully against
 // a local backend, so we turn the feature off to skip the registration entirely.
 fn disable_host_owned_codex_apps(doc: &mut toml_edit::DocumentMut) {
     let features = ensure_config_table(doc, "features");
@@ -1884,7 +1885,7 @@ fn remove_legacy_openai_bundled_marketplace(doc: &mut toml_edit::DocumentMut) {
     }
 }
 
-fn is_codexhub_local_marketplace(
+fn is_mochiport_local_marketplace(
     marketplace: Option<&toml_edit::Table>,
     source_marker: &str,
 ) -> bool {
@@ -1935,7 +1936,7 @@ fn upsert_enabled_plugins(doc: &mut toml_edit::DocumentMut, plugin_ids: &[&str])
 //
 // The metrics push is what actually hangs: in Codex's `otel_init`, the metrics
 // exporter defaults to `Statsig` and is gated by `analytics.enabled`, while the
-// log/trace exporters already default to `None`. codexhub runs the app fully
+// log/trace exporters already default to `None`. MochiPort runs the app fully
 // against a local backend, so none of this telemetry is useful here. We turn
 // the analytics gate off and pin every exporter to `none`, but only fill in
 // fields the user has not set so any deliberate override is preserved.
@@ -2021,13 +2022,13 @@ fn openai_curated_marketplace_exists(path: &Path) -> bool {
 // the app actually enumerates. The curated catalog ships ~180 entries, and the
 // large majority depend on OpenAI's remote Apps/Connector backend (`.app.json`)
 // or a hosted HTTP MCP server (`.mcp.json` with a bare `url`/`http`/`sse`
-// transport). None of those work against codexhub's local gateway, so we prune
+// transport). None of those work against MochiPort's local gateway, so we prune
 // them from the on-disk manifests, leaving only skill-only plugins and plugins
 // whose `.mcp.json` launches a local stdio `command`.
 //
 // This rewrites provisioned state Codex regenerates; the curated checkout has
 // no git remote, and uninstall only drops the config.toml marketplace entry, so
-// pruning here matches how codexhub already treats `.tmp/plugins`.
+// pruning here matches how MochiPort already treats `.tmp/plugins`.
 fn filter_curated_marketplace_manifests(marketplace_root: &Path) {
     const MANIFEST_RELATIVE_PATHS: &[&str] = &["marketplace.json", "api_marketplace.json"];
     for relative in MANIFEST_RELATIVE_PATHS {
@@ -2174,7 +2175,7 @@ fn normalize_config_toml_order(raw: &str) -> String {
 }
 
 fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)> {
-    cleanup_codexhub_config(path, backend_url, true, None)
+    cleanup_mochiport_config(path, backend_url, true, None)
 }
 
 fn managed_provider_names_in_config(
@@ -2201,7 +2202,7 @@ fn managed_provider_names_in_config(
             .map(str::trim)
             .map(|value| backend_urls_equivalent(value, &ai_gateway_base_url))
             .unwrap_or(false);
-        let managed_shape = provider_table_has_codexhub_shape(provider, provider_name)
+        let managed_shape = provider_table_has_mochiport_shape(provider, provider_name)
             || include_legacy_shape
                 && provider_table_has_legacy_codexhub_shape(provider, provider_name);
         if local_gateway_provider && managed_shape {
@@ -2212,7 +2213,7 @@ fn managed_provider_names_in_config(
     names
 }
 
-fn threadrelay_local_provider_names(
+fn mochiport_local_provider_names(
     doc: &toml_edit::DocumentMut,
     backend_url: &str,
 ) -> HashSet<String> {
@@ -2331,7 +2332,7 @@ fn inspect_provider_mode(
     let Ok(doc) = parse_existing_config_toml(config_path) else {
         return read_provider_mode_marker(codex_home).unwrap_or(CodexProviderMode::Unknown);
     };
-    let managed_names = threadrelay_local_provider_names(&doc, backend_url);
+    let managed_names = mochiport_local_provider_names(&doc, backend_url);
     if let Some(active_provider) = active_provider {
         if !managed_names.contains(active_provider)
             && provider_is_external(&doc, active_provider, backend_url)
@@ -2339,7 +2340,7 @@ fn inspect_provider_mode(
             return CodexProviderMode::DirectApi;
         }
         if managed_names.contains(active_provider) {
-            return CodexProviderMode::Threadrelay;
+            return CodexProviderMode::MochiPort;
         }
     }
     let local_route = doc
@@ -2348,7 +2349,7 @@ fn inspect_provider_mode(
         .map(str::trim)
         .is_some_and(|value| backend_urls_equivalent(value, backend_url));
     if local_route {
-        CodexProviderMode::Threadrelay
+        CodexProviderMode::MochiPort
     } else {
         read_provider_mode_marker(codex_home).unwrap_or(CodexProviderMode::Unknown)
     }
@@ -2376,7 +2377,7 @@ fn provider_is_external(
         return false;
     };
     !backend_urls_equivalent(base_url, &ai_gateway_base_url_from_backend_url(backend_url))
-        && !threadrelay_local_provider_names(doc, backend_url).contains(provider_name)
+        && !mochiport_local_provider_names(doc, backend_url).contains(provider_name)
 }
 
 fn preferred_external_provider(
@@ -2397,7 +2398,7 @@ fn preferred_external_provider(
 
 fn provider_mode_message(mode: CodexProviderMode, active_provider: Option<&str>) -> String {
     match mode {
-        CodexProviderMode::Threadrelay => "请求经过 MochiPort 本地 AI 网关".to_string(),
+        CodexProviderMode::MochiPort => "请求经过 MochiPort 本地 AI 网关".to_string(),
         CodexProviderMode::DirectApi => format!(
             "请求直接发送到第三方 API{}",
             active_provider
@@ -2408,15 +2409,15 @@ fn provider_mode_message(mode: CodexProviderMode, active_provider: Option<&str>)
     }
 }
 
-fn provider_table_has_codexhub_shape(provider: &toml_edit::Table, provider_name: &str) -> bool {
+fn provider_table_has_mochiport_shape(provider: &toml_edit::Table, provider_name: &str) -> bool {
     provider_name == AI_GATEWAY_PROVIDER_NAME
-        && provider_table_has_codexhub_identity(provider, AI_GATEWAY_PROVIDER_NAME)
+        && provider_table_has_mochiport_identity(provider, AI_GATEWAY_PROVIDER_NAME)
         && provider
             .get("requires_openai_auth")
             .and_then(|item| item.as_bool())
             == Some(false)
         && provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER)
-            == Some(CODEXHUB_ACTOR_AUTHORIZATION_VALUE)
+            == Some(CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE)
 }
 
 fn provider_table_has_legacy_codexhub_shape(
@@ -2424,7 +2425,7 @@ fn provider_table_has_legacy_codexhub_shape(
     provider_name: &str,
 ) -> bool {
     if provider_name == AI_GATEWAY_PROVIDER_NAME
-        && provider_table_has_codexhub_identity(provider, OPENAI_PROVIDER_NAME)
+        && provider_table_has_mochiport_identity(provider, OPENAI_PROVIDER_NAME)
     {
         return provider
             .get("requires_openai_auth")
@@ -2443,7 +2444,7 @@ fn provider_table_has_legacy_codexhub_shape(
         Some(true) => true,
         Some(false) => {
             provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER)
-                == Some(CODEXHUB_ACTOR_AUTHORIZATION_VALUE)
+                == Some(CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE)
         }
         None => false,
     }
@@ -2461,7 +2462,7 @@ fn provider_table_has_legacy_codexhub_identity(
     name_matches && provider_uses_responses_wire_api(provider)
 }
 
-fn provider_table_has_codexhub_identity(provider: &toml_edit::Table, identity: &str) -> bool {
+fn provider_table_has_mochiport_identity(provider: &toml_edit::Table, identity: &str) -> bool {
     let name_matches = provider
         .get("name")
         .and_then(|item| item.as_str())
@@ -2614,7 +2615,7 @@ fn uninstall_auth_json(path: &Path) -> Result<bool> {
         .with_context(|| format!("failed to read {}", path.display()))?;
     let auth = serde_json::from_str::<serde_json::Value>(&raw)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    if !is_codexhub_auth_json(&auth) {
+    if !is_mochiport_managed_auth_json(&auth) {
         return Ok(false);
     }
 
@@ -2854,7 +2855,7 @@ fn derive_local_auth_identity(
     LocalAuthIdentity::from_options(options)
 }
 
-fn is_codexhub_auth_json(auth: &serde_json::Value) -> bool {
+fn is_mochiport_managed_auth_json(auth: &serde_json::Value) -> bool {
     let auth_mode = auth.get("auth_mode").and_then(|value| value.as_str());
     let api_key = auth.get("OPENAI_API_KEY").and_then(|value| value.as_str());
     if auth_mode.is_none() && api_key == Some(LEGACY_BAD_LOCAL_AUTH_API_KEY) {
@@ -2874,10 +2875,10 @@ fn is_codexhub_auth_json(auth: &serde_json::Value) -> bool {
             auth.pointer("/tokens/id_token")
                 .and_then(|value| value.as_str())
         })
-        .is_some_and(is_codexhub_local_jwt)
+        .is_some_and(is_mochiport_local_jwt)
 }
 
-fn is_codexhub_local_jwt(token: &str) -> bool {
+fn is_mochiport_local_jwt(token: &str) -> bool {
     let Some(payload) = decode_jwt_payload_value(token) else {
         return false;
     };
@@ -2975,7 +2976,7 @@ fn uninstall_with_managed_state(
             .then(|| infer_legacy_original_model_provider(config_path, backend_url))
             .flatten()
     });
-    let (removed_chatgpt_base_url, removed_model_provider) = cleanup_codexhub_config(
+    let (removed_chatgpt_base_url, removed_model_provider) = cleanup_mochiport_config(
         config_path,
         backend_url,
         manifest.config_existed,
@@ -2985,7 +2986,7 @@ fn uninstall_with_managed_state(
         auth_path,
         &backup.auth_path,
         manifest.auth_existed,
-        Some(is_codexhub_auth_file),
+        Some(is_mochiport_managed_auth_file),
     )?;
     chain_log::write_line(format!(
         "[codex_app_config] event=managed_backup_restored path={}",
@@ -3005,7 +3006,7 @@ fn uninstall_with_managed_state(
     ))
 }
 
-fn cleanup_codexhub_config(
+fn cleanup_mochiport_config(
     path: &Path,
     backend_url: &str,
     config_existed_before_first_write: bool,
@@ -3170,7 +3171,7 @@ fn remove_created_local_marketplaces(doc: &mut toml_edit::DocumentMut) {
                 .get(name)
                 .and_then(|item| item.as_table())
                 .is_some_and(|marketplace| {
-                    is_codexhub_local_marketplace(Some(marketplace), source_marker)
+                    is_mochiport_local_marketplace(Some(marketplace), source_marker)
                 });
             if remove_marketplace {
                 marketplaces.remove(name);
@@ -3238,7 +3239,7 @@ fn read_managed_backup_manifest(path: &Path) -> Result<ManagedCodexAppBackupMani
 }
 
 fn managed_backup_paths(codex_home: &Path) -> ManagedBackupPaths {
-    let dir = codexhub_app_support_dir()
+    let dir = mochiport_app_support_dir()
         .join("backups")
         .join("codex-app")
         .join(codex_home_backup_id(codex_home));
@@ -3250,13 +3251,13 @@ fn managed_backup_paths(codex_home: &Path) -> ManagedBackupPaths {
 }
 
 fn managed_proxy_environment_backup_path() -> PathBuf {
-    codexhub_app_support_dir()
+    mochiport_app_support_dir()
         .join("backups")
         .join(PROXY_ENVIRONMENT_BACKUP_FILE)
 }
 
 fn managed_app_server_proxy_environment_backup_path() -> PathBuf {
-    codexhub_app_support_dir()
+    mochiport_app_support_dir()
         .join("backups")
         .join(APP_SERVER_PROXY_ENVIRONMENT_BACKUP_FILE)
 }
@@ -3270,26 +3271,26 @@ fn codex_home_backup_id(codex_home: &Path) -> String {
     hex::encode(&digest[..16])
 }
 
-fn codexhub_app_support_dir() -> PathBuf {
+fn mochiport_app_support_dir() -> PathBuf {
     if let Some(base) = std::env::var_os(MOCHIPORT_HOME_ENV).map(PathBuf::from) {
         return base;
     }
-    if let Some(base) = std::env::var_os(THREADRELAY_HOME_ENV).map(PathBuf::from) {
+    if let Some(base) = std::env::var_os(LEGACY_THREADRELAY_HOME_ENV).map(PathBuf::from) {
         return base;
     }
-    if let Some(base) = std::env::var_os(CODEXHUB_HOME_ENV).map(PathBuf::from) {
+    if let Some(base) = std::env::var_os(LEGACY_CODEXHUB_HOME_ENV).map(PathBuf::from) {
         return base;
     }
-    platform_codexhub_app_support_dir()
+    platform_mochiport_app_support_dir()
 }
 
 #[cfg(test)]
-fn platform_codexhub_app_support_dir() -> PathBuf {
+fn platform_mochiport_app_support_dir() -> PathBuf {
     std::env::temp_dir().join("mochiport-managed-backups-tests")
 }
 
 #[cfg(all(target_os = "windows", not(test)))]
-fn platform_codexhub_app_support_dir() -> PathBuf {
+fn platform_mochiport_app_support_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA")
         .or_else(|| std::env::var_os("APPDATA"))
         .map(PathBuf::from)
@@ -3302,7 +3303,7 @@ fn platform_codexhub_app_support_dir() -> PathBuf {
 }
 
 #[cfg(all(not(target_os = "windows"), not(test)))]
-fn platform_codexhub_app_support_dir() -> PathBuf {
+fn platform_mochiport_app_support_dir() -> PathBuf {
     let base = std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join("Library/Application Support"))
@@ -3326,12 +3327,12 @@ fn prefer_existing_legacy_app_dir(new_dir: PathBuf, legacy_dirs: &[PathBuf]) -> 
         .unwrap_or(new_dir)
 }
 
-fn is_codexhub_auth_file(path: &Path) -> Result<bool> {
+fn is_mochiport_managed_auth_file(path: &Path) -> Result<bool> {
     let raw = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read {}", path.display()))?;
     let auth = serde_json::from_str::<serde_json::Value>(&raw)
         .with_context(|| format!("failed to parse {}", path.display()))?;
-    Ok(is_codexhub_auth_json(&auth))
+    Ok(is_mochiport_managed_auth_json(&auth))
 }
 
 fn backup_existing(path: &Path) -> Result<()> {
@@ -3528,7 +3529,7 @@ fn civil_from_days(days_since_unix_epoch: i64) -> (i32, u32, u32) {
 
 pub(crate) fn default_codex_home() -> PathBuf {
     // This helper configures the separately launched Codex App, not the
-    // CODEX_HOME of the process that happens to run codexhub.
+    // CODEX_HOME of the process that happens to run MochiPort.
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".codex"))
         .or_else(|| std::env::var_os("USERPROFILE").map(|home| PathBuf::from(home).join(".codex")))
@@ -3550,9 +3551,9 @@ pub(crate) fn clear_codex_models_cache(codex_home: Option<PathBuf>) -> Result<bo
 // ...) on disk under `cache/codex_app_directory/<hash>.json`. That cache has no
 // TTL: `codex_connectors::cached_directory_connectors` returns a disk `Hit`
 // verbatim, so a stale catalog captured under an official ChatGPT backend keeps
-// surfacing thousands of unusable Apps even after codexhub starts serving an
+// surfacing thousands of unusable Apps even after MochiPort starts serving an
 // empty `/api/connectors/directory/list`. We wipe the cache during the initial
-// "初始化 Codex 配置" flow so a codex-app restart repopulates it from codexhub's
+// "初始化 Codex 配置" flow so a codex-app restart repopulates it from MochiPort's
 // (empty) directory instead. This is pure cache, so the uninstall/restore path
 // intentionally leaves it alone.
 fn clear_connector_directory_cache(codex_home: &Path) -> Result<usize> {
@@ -3628,7 +3629,7 @@ fn clear_legacy_codexhub_bundled_remote_identity_files(codex_home: &Path) -> Res
         let Ok(contents) = std::fs::read_to_string(&metadata_path) else {
             continue;
         };
-        if !contents.contains(CODEXHUB_BUNDLED_REMOTE_ID_PREFIX) {
+        if !contents.contains(LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX) {
             continue;
         }
         std::fs::remove_file(&metadata_path)
@@ -3653,7 +3654,7 @@ fn clear_legacy_codexhub_bundled_remote_catalog_files(codex_home: &Path) -> Resu
         let Ok(contents) = std::fs::read_to_string(&path) else {
             continue;
         };
-        if !contents.contains(CODEXHUB_BUNDLED_REMOTE_ID_PREFIX) {
+        if !contents.contains(LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX) {
             continue;
         }
         std::fs::remove_file(&path)
@@ -3692,7 +3693,7 @@ mod tests {
         );
         assert_eq!(
             provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER),
-            Some(CODEXHUB_ACTOR_AUTHORIZATION_VALUE)
+            Some(CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE)
         );
     }
 
@@ -4315,7 +4316,7 @@ name = "old-provider"
 
         let config = std::fs::read_to_string(report.config_path).expect("read config");
         assert!(config.contains("[features]"));
-        // codexhub always disables the host-owned `codex_apps` MCP, even when the
+        // MochiPort always disables the host-owned `codex_apps` MCP, even when the
         // user previously enabled the `apps` feature explicitly.
         assert!(config.contains("apps = false"));
         assert!(!config.contains("apps = true"));
@@ -4346,7 +4347,7 @@ keep_me = false
         configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
 
         let config = std::fs::read_to_string(config_path).expect("read config");
-        // `apps` is no longer a plugin-blocking flag: codexhub keeps it set to
+        // `apps` is no longer a plugin-blocking flag: MochiPort keeps it set to
         // false so Codex skips the host-owned `codex_apps` MCP registration.
         assert!(config.contains("apps = false"));
         assert!(!config.contains("plugins = false"));
@@ -5485,7 +5486,7 @@ base_url = "https://api.example.invalid"
             .as_nanos();
         let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "codexhub-test-{}-{}-{}",
+            "mochiport-test-{}-{}-{}",
             std::process::id(),
             nanos,
             sequence

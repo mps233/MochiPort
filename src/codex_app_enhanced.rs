@@ -1950,7 +1950,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
   const isObject = (value) => value !== null
     && typeof value === "object"
     && !Array.isArray(value);
-  const isCodexHubLocalEntry = (entry) => isObject(entry)
+  const isLegacyCodexHubLocalEntry = (entry) => isObject(entry)
     && (entry.rule_id === "codexhub-local" || entry.r === "codexhub-local");
   const statsigEntryValue = (values, entry) => {{
     if (!isObject(entry)) return null;
@@ -1971,7 +1971,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     if (!isObject(values)) return;
     const modelEntries = Object.entries(values.dynamic_configs ?? {{}})
       .filter(([, entry]) => isModelConfigValue(statsigEntryValue(values, entry)));
-    const modelMatch = modelEntries.find(([, entry]) => !isCodexHubLocalEntry(entry))
+    const modelMatch = modelEntries.find(([, entry]) => !isLegacyCodexHubLocalEntry(entry))
       ?? modelEntries[0];
     if (modelMatch) {{
       state.modelConfigId = modelMatch[0];
@@ -1984,7 +1984,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     }}
     const i18nEntries = Object.entries(values.layer_configs ?? {{}})
       .filter(([, entry]) => isI18nLayerValue(statsigEntryValue(values, entry)));
-    const i18nMatch = i18nEntries.find(([, entry]) => !isCodexHubLocalEntry(entry))
+    const i18nMatch = i18nEntries.find(([, entry]) => !isLegacyCodexHubLocalEntry(entry))
       ?? i18nEntries[0];
     if (i18nMatch) {{
       state.i18nLayerId = i18nMatch[0];
@@ -2156,7 +2156,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
       ...Object.values(values.layer_configs),
     ];
     const hasOfficialEntry = entries.some((entry) => isObject(entry)
-      && !isCodexHubLocalEntry(entry));
+      && !isLegacyCodexHubLocalEntry(entry));
     if (!hasOfficialEntry) return false;
     const valueCount = isObject(values.values) ? Object.keys(values.values).length : 0;
     const sectionCount = Object.keys(values.feature_gates).length
@@ -2170,25 +2170,25 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     return hasRuntimeConfig || hasEvaluationMetadata || valueCount > 0 || sectionCount >= 4;
   }};
 
-  const isCompleteCodexHubValues = (values) => {{
+  const isCompleteLegacyCodexHubValues = (values) => {{
     if (!isObject(values)
       || !isObject(values.feature_gates)
       || !isObject(values.dynamic_configs)
       || !isObject(values.layer_configs)) return false;
     const modelEntry = values.dynamic_configs[DEFAULT_MODEL_CONFIG_ID];
     const i18nEntry = values.layer_configs[DEFAULT_I18N_LAYER_ID];
-    return isCodexHubLocalEntry(modelEntry)
+    return isLegacyCodexHubLocalEntry(modelEntry)
       && isModelConfigValue(statsigEntryValue(values, modelEntry))
-      && isCodexHubLocalEntry(i18nEntry)
+      && isLegacyCodexHubLocalEntry(i18nEntry)
       && isI18nLayerValue(statsigEntryValue(values, i18nEntry));
   }};
 
   const isUsableBaseValues = (values) => isCompleteOfficialValues(values)
-    || isCompleteCodexHubValues(values);
+    || isCompleteLegacyCodexHubValues(values);
 
   const markBaseAvailability = (values) => {{
     if (isCompleteOfficialValues(values)) state.officialBaseAvailable = true;
-    if (isCompleteCodexHubValues(values)) state.localBaseAvailable = true;
+    if (isCompleteLegacyCodexHubValues(values)) state.localBaseAvailable = true;
   }};
 
   const STORE_PATCH_MARKER = "__CODEXHUB_ENHANCED_SET_VALUES_PATCH__";
@@ -2758,7 +2758,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
   state.refreshPluginCatalogCache = refreshPluginCatalogCache;
   queueMicrotask(refreshPluginCatalogCache);
 
-  const PLUGIN_DIRECTORY_LINK_ID = "codexhub-plugin-directory-link";
+  const PLUGIN_DIRECTORY_LINK_ID = "mochiport-plugin-directory-link";
   let pluginDirectoryLinkScheduled = false;
   const findReactRouterNavigator = () => {{
     const elements = document.querySelectorAll("button,main,[role='main']");
@@ -3681,7 +3681,7 @@ mod tests {
         assert!(script.contains("originalInitializeUrls = new WeakMap()"));
         assert!(script.contains("restoreOfficialInitializeUrl"));
         assert!(script.contains("official-statsig-refresh"));
-        assert!(script.contains("isCompleteCodexHubValues"));
+        assert!(script.contains("isCompleteLegacyCodexHubValues"));
         assert!(script.contains("isUsableBaseValues"));
         assert!(script.contains("DEFAULT_MODEL_CONFIG_ID = \"107580212\""));
         assert!(script.contains("DEFAULT_I18N_LAYER_ID = \"72216192\""));

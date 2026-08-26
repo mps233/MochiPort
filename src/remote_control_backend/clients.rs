@@ -21,7 +21,7 @@ use super::{
     RemoteControlStatusResponse, format_rfc3339_utc, status_snapshot, unix_now_u64,
 };
 
-const THREADRELAY_REMOTE_DISPLAY_NAME: &str = "MochiPort";
+const MOCHIPORT_REMOTE_DISPLAY_NAME: &str = "MochiPort";
 
 #[derive(Debug, Deserialize)]
 pub(super) struct RenameEnvironmentRequest {
@@ -143,7 +143,7 @@ fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Va
         .server_name
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| THREADRELAY_REMOTE_DISPLAY_NAME.to_string());
+        .unwrap_or_else(|| MOCHIPORT_REMOTE_DISPLAY_NAME.to_string());
 
     json!({
         "id": FEISHU_BRIDGE_ENV_ID,
@@ -196,7 +196,7 @@ fn feishu_bridge_client_item(connected: bool) -> Value {
     remote_control_client_json(RemoteControlClientJson {
         client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
         account_user_id: "user_codexhub_local__acct_codexhub_local".to_string(),
-        display_name: THREADRELAY_REMOTE_DISPLAY_NAME.to_string(),
+        display_name: MOCHIPORT_REMOTE_DISPLAY_NAME.to_string(),
         device_model: local_device_model(),
         device_type: local_device_type(),
         platform: local_client_platform(),
@@ -317,7 +317,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn feishu_bridge_client_uses_threadrelay_display_name() {
+    fn feishu_bridge_client_uses_mochiport_display_name() {
         let client = feishu_bridge_client_item(true);
 
         for key in [
@@ -328,12 +328,12 @@ mod tests {
             "device_name",
             "deviceName",
         ] {
-            assert_eq!(client[key], THREADRELAY_REMOTE_DISPLAY_NAME);
+            assert_eq!(client[key], MOCHIPORT_REMOTE_DISPLAY_NAME);
         }
     }
 
     #[test]
-    fn remote_control_environment_fallback_uses_threadrelay_display_name() {
+    fn remote_control_environment_fallback_uses_mochiport_display_name() {
         let environment = remote_control_environment_item(&RemoteControlStatusResponse {
             connected: true,
             initialized: true,
@@ -371,7 +371,7 @@ mod tests {
             "name",
             "title",
         ] {
-            assert_eq!(environment[key], THREADRELAY_REMOTE_DISPLAY_NAME);
+            assert_eq!(environment[key], MOCHIPORT_REMOTE_DISPLAY_NAME);
         }
     }
 }

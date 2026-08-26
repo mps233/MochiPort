@@ -114,7 +114,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
     config::normalize_config_paths(&mut config, &config_path);
     let log_path = init_logging(&config)?;
     tracing::info!(
-        target: "threadrelay::logging",
+        target: "mochiport::logging",
         path = %log_path.display(),
         "MochiPort chain log initialized"
     );
@@ -237,7 +237,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid bind address `{bind}`"))?;
-    tracing::info!(target: "threadrelay::startup", addr = %addr, "binding local service");
+    tracing::info!(target: "mochiport::startup", addr = %addr, "binding local service");
     let listener = TcpListener::bind(addr).await?;
     let advertised_addr = if addr.ip().is_unspecified() {
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port())
@@ -250,7 +250,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         &format!("http://{advertised_addr}"),
     )?;
     println!("mochiport web: http://{addr}");
-    tracing::info!(target: "threadrelay::startup", addr = %addr, "local service listener ready");
+    tracing::info!(target: "mochiport::startup", addr = %addr, "local service listener ready");
 
     // Environment-variable updates can synchronously broadcast WM_SETTINGCHANGE
     // to every desktop window on Windows. Keep that work out of the service's
@@ -260,10 +260,10 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         let backend_url = state.config.lock().await.remote_control_base_url();
         let environment_state = state.clone();
         tokio::spawn(async move {
-            tracing::info!(target: "threadrelay::startup", "starting Codex App environment synchronization");
+            tracing::info!(target: "mochiport::startup", "starting Codex App environment synchronization");
             let mutation = environment_state.codex_app_mutations.lock().await;
             let result = tokio::task::spawn_blocking(move || {
-                tracing::info!(target: "threadrelay::startup", "Codex App environment synchronization entered blocking worker");
+                tracing::info!(target: "mochiport::startup", "Codex App environment synchronization entered blocking worker");
                 let preserve_direct_api_mode =
                     codex_app_config::should_preserve_direct_api_mode(None, &backend_url);
                 let gui_api_base = if preserve_direct_api_mode {
@@ -284,7 +284,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             match result {
                 Ok((gui_api_base, proxy_cleanup, preserve_direct_api_mode)) => {
                     tracing::info!(
-                        target: "threadrelay::startup",
+                        target: "mochiport::startup",
                         configured = gui_api_base.configured,
                         proxy_cleanup_ok = proxy_cleanup.is_ok(),
                         preserve_direct_api_mode,
@@ -318,7 +318,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
                         .await;
                 }
                 Err(error) => {
-                    tracing::warn!(target: "threadrelay::startup", error = %error, "Codex App environment synchronization worker failed");
+                    tracing::warn!(target: "mochiport::startup", error = %error, "Codex App environment synchronization worker failed");
                     environment_state
                         .push_event(
                             "warn",
@@ -357,7 +357,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             }
             Err(err) => {
                 tracing::warn!(
-                    target: "threadrelay::server",
+                    target: "mochiport::server",
                     addr = %companion_addr,
                     error = %err,
                     "compatible loopback listener unavailable"
@@ -378,14 +378,14 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             Ok(Ok(())) => {}
             Ok(Err(err)) => {
                 tracing::warn!(
-                    target: "threadrelay::server",
+                    target: "mochiport::server",
                     error = %err,
                     "compatible loopback server stopped with error"
                 );
             }
             Err(err) => {
                 tracing::warn!(
-                    target: "threadrelay::server",
+                    target: "mochiport::server",
                     error = %err,
                     "compatible loopback server task failed"
                 );
@@ -397,7 +397,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         match vscode_extension_patch::restore_remote_control() {
             Ok(report) => {
                 tracing::info!(
-                    target: "threadrelay::vscode_extension_patch",
+                    target: "mochiport::vscode_extension_patch",
                     action = %report.action,
                     extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
                     message = %report.message,
@@ -406,7 +406,7 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             }
             Err(err) => {
                 tracing::warn!(
-                    target: "threadrelay::vscode_extension_patch",
+                    target: "mochiport::vscode_extension_patch",
                     error = %err,
                     "VS Code Codex extension restore failed"
                 );
@@ -647,12 +647,7 @@ fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
     )?;
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::from_default_env()
-                .add_directive("mochiport=info".parse()?)
-                .add_directive("threadrelay=info".parse()?)
-                .add_directive("codexhub=info".parse()?),
-        )
+        .with_env_filter(EnvFilter::from_default_env().add_directive("mochiport=info".parse()?))
         .with_ansi(false)
         .init();
     Ok(path)

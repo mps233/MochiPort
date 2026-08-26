@@ -137,7 +137,7 @@ pub fn inspect_request(
         );
     }
     sanitized.insert(
-        "_codexhub".to_string(),
+        "_mochiport".to_string(),
         json!({
             "endpoint": endpoint.path(),
             "requestBodyBytes": byte_len(raw_body.len()),
@@ -308,7 +308,7 @@ fn sanitize_response(raw_body: &Bytes, endpoint: ImageEndpoint) -> Value {
         Err(error) => {
             return json!({
                 "status": "completed",
-                "_codexhub": {
+                "_mochiport": {
                     "endpoint": endpoint.path(),
                     "responseBodyBytes": byte_len(raw_body.len()),
                     "imagePayloadsRedacted": true,
@@ -375,7 +375,7 @@ fn sanitize_response(raw_body: &Bytes, endpoint: ImageEndpoint) -> Value {
         sanitized.insert("usage".to_string(), usage);
     }
     sanitized.insert(
-        "_codexhub".to_string(),
+        "_mochiport".to_string(),
         json!({
             "endpoint": endpoint.path(),
             "responseBodyBytes": byte_len(raw_body.len()),
@@ -632,7 +632,7 @@ mod tests {
         let client = reqwest::Client::new();
         let context = GatewayContext::extract(&HeaderMap::new(), None);
         let db_path = std::env::temp_dir().join(format!(
-            "codexhub-image-request-log-test-{}.sqlite",
+            "mochiport-image-request-log-test-{}.sqlite",
             uuid::Uuid::new_v4()
         ));
         let store = RequestLogStore::new(db_path.clone());
