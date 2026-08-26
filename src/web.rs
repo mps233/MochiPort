@@ -18,7 +18,7 @@ use crate::{
         FeishuWsState, ImAccountRuntimeState, RemoteControlSourceKind, SharedState, TelegramState,
         WechatState, im_account_key,
     },
-    chain_log, codex_app_config,
+    chain_log,
     config::AppConfig,
     manage_api, remote_control_backend,
     types::ImPlatformKind,
@@ -313,7 +313,6 @@ pub fn router(state: SharedState) -> Router {
         .route("/oauth/authorize", get(oauth::oauth_authorize))
         .route("/oauth/token", post(oauth::oauth_token))
         .route("/api/status", get(status))
-        .route("/api/gui/dashboard", get(gui_dashboard))
         .route(
             "/api/update/safe-relaunch",
             get(crate::safe_relaunch::status).post(crate::safe_relaunch::register),
@@ -476,33 +475,6 @@ async fn status_snapshot(state: &SharedState) -> StatusResponse {
         wechat,
         im_accounts,
     }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GuiDashboardResponse {
-    status: StatusResponse,
-    remote: remote_control_backend::RemoteControlStatusResponse,
-    codex_app: codex_app_config::CodexAppConfigStatus,
-    im_accounts: im_api::ImAccountsResponse,
-    ai_gateway: crate::ai_gateway::config::AiGatewayConfig,
-}
-
-async fn gui_dashboard(State(state): State<SharedState>) -> Json<GuiDashboardResponse> {
-    let (status, remote, codex_app, im_accounts) = tokio::join!(
-        status_snapshot(&state),
-        remote_control_backend::status_snapshot(&state),
-        codex_app::codex_app_status_snapshot(&state),
-        im_api::im_accounts_snapshot(&state),
-    );
-    let ai_gateway = state.config.lock().await.ai_gateway.clone();
-    Json(GuiDashboardResponse {
-        status,
-        remote,
-        codex_app,
-        im_accounts,
-        ai_gateway,
-    })
 }
 
 #[derive(Serialize)]

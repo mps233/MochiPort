@@ -10,7 +10,7 @@
 
 - [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md)：Anthropic Messages adapter 设计。
 - [`ai-gateway-web-search-protocol.zh-CN.md`](ai-gateway-web-search-protocol.zh-CN.md)：Codex Responses `web_search` 与 Anthropic/GLM web search 的详细对接规则。
-- [`provider-logo-assets.zh-CN.md`](provider-logo-assets.zh-CN.md)：provider logo 资源维护方式。
+- [`SOURCES.md`](../packaging/brand/providers/SOURCES.md)：provider logo 资源来源与维护方式。
 
 官方参考：
 
@@ -232,7 +232,7 @@ ProviderConfig {
 智谱 logo 文件：
 
 ```text
-packaging/brand/providers/zhipu.svg
+macos/ThreadRelay/Sources/ThreadRelayMac/Resources/ProviderLogos/zhipu.svg
 ```
 
 来源记录：
@@ -241,13 +241,12 @@ packaging/brand/providers/zhipu.svg
 packaging/brand/providers/SOURCES.md
 ```
 
-GUI 通过 `ProviderLogoKind::Zhipu` 编译期嵌入该 SVG。后续新增厂商 logo 时，按同样方式：
+SwiftUI 客户端通过 `ProviderLogoKind.zhipu` 从 App Bundle 加载该 SVG。后续新增厂商 logo 时，按同样方式：
 
-1. 把 SVG 放入 `packaging/brand/providers/`。
+1. 把 SVG 放入 `macos/ThreadRelay/Sources/ThreadRelayMac/Resources/ProviderLogos/`。
 2. 在 `SOURCES.md` 记录来源。
 3. 在 `ProviderLogoKind` 增加枚举值。
-4. 在 `provider_logo_bitmap()` 增加 `include_bytes!()`。
-5. 在 provider row 的 logo 选择逻辑中按 profile 映射。
+4. 在 provider row 的 logo 选择逻辑中按 profile 映射。
 
 ## 6. 验证清单
 

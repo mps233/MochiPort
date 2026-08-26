@@ -62,7 +62,7 @@ MochiPort 的 macOS 客户端改用 SwiftUI 重写，现有 Rust daemon、Telegr
 - 请求日志：列表、清理、请求详情、响应、SSE、错误和内容搜索。
 - 桌面能力：菜单栏状态项、主题、语言、网络设置、诊断导出、更新和安全重启。
 
-Rust daemon 已提供 `/api/gui/dashboard`、`/api/config`、Codex App、IM 账号、Onboarding、请求日志、Bridge 启停和安全关闭等接口，因此 SwiftUI 可以通过 HTTP API 接入，不需要直接链接 Rust 库。
+Rust daemon 已提供 `/api/v1/manage/dashboard`、版本化设置、Codex App、IM 账号、Onboarding、请求日志、Bridge 启停和安全关闭等接口，因此 SwiftUI 可以通过 HTTP API 接入，不需要直接链接 Rust 库。
 
 ## 5. 目标架构
 
@@ -358,7 +358,7 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 交付物：
 
-- [x] 对接 `/healthz` 与 `/api/v1/manage/dashboard`；旧 `/api/status`、`/api/gui/dashboard` 仅用于桥接兼容测试。
+- [x] 对接 `/healthz` 与 `/api/v1/manage/dashboard`；旧 `/api/status` 仅保留给 CLI 状态探测和兼容检查，旧 GUI 聚合端点已删除。
 - [x] 展示 daemon、Codex App、VS Code、CLI、remote-control、Telegram、飞书、微信、企业微信和 AI Gateway 状态，完整对应第 7.3 节总览的四个 section。
 - [x] 支持加载、空、离线、部分失败和陈旧数据状态。
 - [x] 支持手动刷新和统一自动刷新，窗口不可见时降低刷新频率。
