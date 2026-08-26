@@ -20,7 +20,7 @@ For post-change GUI/daemon handoff rules, see
 ```sh
 cargo fmt
 cargo test
-cargo build --release --features gui --bin mochiport
+cargo build --release --bin mochiport
 ```
 
 For every daemon-affecting change, build the Rust daemon and Xcode app with
@@ -29,9 +29,9 @@ is automatic in the handoff workflow, but it never changes the running GUI or
 daemon:
 
 ```sh
-UI_VERSION=0.5.3
-UI_BUILD_NUMBER=446
-DAEMON_BUILD_NUMBER=439
+UI_VERSION=0.5.4
+UI_BUILD_NUMBER=457
+DAEMON_BUILD_NUMBER=457
 MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
   --target aarch64-apple-darwin --bin mochiport
 MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
@@ -49,7 +49,7 @@ scripts/assemble-swiftui-macos-app.sh "$DAEMON_BUILD_NUMBER" "$XCODE_APP" target
 
 - [ ] Confirm the assembled app and embedded daemon report the expected build.
 - [ ] Restart the GUI or daemon manually only when the release procedure calls for it.
-- [ ] Confirm the release contains `latest-macos.json`, `latest-windows.json`, and `latest-linux.json` with MochiPort asset URLs.
+- [ ] Confirm the release contains `latest-macos.json` and `latest-windows.json` with MochiPort asset URLs.
 - [ ] Publish daemon metadata only from a signed macOS build; unsigned releases intentionally publish UI metadata only.
 
 ## Clean Local Artifacts
