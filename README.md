@@ -12,6 +12,10 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/product/mochiport-hero.png" alt="MochiPort macOS 主界面，展示用量趋势、连接拓扑和消息渠道状态" width="1000">
+</p>
+
+<p align="center">
   <a href="README.en.md">English</a>
   ·
   <a href="https://github.com/mps233/MochiPort/releases">下载</a>

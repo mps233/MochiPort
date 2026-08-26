@@ -12,6 +12,10 @@
 </p>
 
 <p align="center">
+  <img src="docs/assets/product/mochiport-hero.png" alt="MochiPort macOS dashboard showing usage trends, connection topology, and messaging channel status" width="1000">
+</p>
+
+<p align="center">
   <a href="README.md">中文说明</a>
   ·
   <a href="https://github.com/mps233/MochiPort/releases">Downloads</a>
