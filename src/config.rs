@@ -84,6 +84,15 @@ pub struct TelegramConfig {
     pub mention_only: bool,
     #[serde(alias = "allowed_chat_ids")]
     pub allowed_chat_ids: Vec<String>,
+    pub project_groups: Vec<TelegramProjectGroupConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TelegramProjectGroupConfig {
+    pub chat_id: String,
+    pub project_name: String,
+    pub cwd: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,6 +185,17 @@ impl Default for TelegramConfig {
             display_name: String::new(),
             mention_only: false,
             allowed_chat_ids: Vec::new(),
+            project_groups: Vec::new(),
+        }
+    }
+}
+
+impl Default for TelegramProjectGroupConfig {
+    fn default() -> Self {
+        Self {
+            chat_id: String::new(),
+            project_name: String::new(),
+            cwd: String::new(),
         }
     }
 }
@@ -639,6 +659,14 @@ impl TelegramConfig {
         !self.bot_token.trim().is_empty()
     }
 
+    pub fn project_group_for_chat(&self, chat_id: &str) -> Option<TelegramProjectGroupConfig> {
+        let chat_id = chat_id.trim();
+        self.project_groups
+            .iter()
+            .find(|group| group.chat_id.trim() == chat_id && !group.cwd.trim().is_empty())
+            .cloned()
+    }
+
     pub fn is_active(&self) -> bool {
         self.enabled && self.is_configured()
     }
@@ -805,6 +833,26 @@ mod tests {
             config.ensure_telegram_allowed_chat_id("tg_1", "456"),
             TelegramChatAllowResult::Denied
         );
+    }
+
+    #[test]
+    fn telegram_project_groups_round_trip_through_toml() {
+        let config: AppConfig = toml::from_str(
+            r#"
+                [telegram]
+                botToken = "token"
+                projectGroups = [
+                  { chatId = "-100", projectName = "MochiPort", cwd = "/tmp/mochiport" }
+                ]
+            "#,
+        )
+        .expect("project group config");
+        let group = config
+            .telegram
+            .project_group_for_chat(" -100 ")
+            .expect("configured project group");
+        assert_eq!(group.project_name, "MochiPort");
+        assert_eq!(group.cwd, "/tmp/mochiport");
     }
 
     #[test]

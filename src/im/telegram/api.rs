@@ -6,6 +6,7 @@ use reqwest::{StatusCode, multipart};
 use serde::{Deserialize, Serialize};
 
 use crate::chain_log;
+use crate::types::split_telegram_message_target;
 
 use super::types::TelegramSettings;
 
@@ -52,6 +53,8 @@ pub struct TelegramCallbackQuery {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct TelegramMessage {
     pub message_id: i64,
+    #[serde(default)]
+    pub message_thread_id: Option<i64>,
     pub from: Option<TelegramUser>,
     pub chat: TelegramChat,
     pub text: Option<String>,
@@ -64,6 +67,46 @@ pub struct TelegramMessage {
     pub voice: Option<TelegramMediaFile>,
     pub video_note: Option<TelegramMediaFile>,
     pub sticker: Option<TelegramStickerFile>,
+    #[serde(default)]
+    pub forum_topic_created: Option<TelegramForumTopicCreated>,
+    #[serde(default)]
+    pub forum_topic_edited: Option<TelegramForumTopicEdited>,
+    #[serde(default)]
+    pub forum_topic_closed: Option<TelegramForumTopicClosed>,
+    #[serde(default)]
+    pub forum_topic_reopened: Option<TelegramForumTopicReopened>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramForumTopicCreated {
+    pub name: String,
+    pub icon_color: i64,
+    #[serde(default)]
+    pub icon_custom_emoji_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramForumTopicEdited {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub icon_custom_emoji_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TelegramForumTopicClosed {}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TelegramForumTopicReopened {}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TelegramForumTopic {
+    pub message_thread_id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub icon_color: Option<i64>,
+    #[serde(default)]
+    pub icon_custom_emoji_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -249,6 +292,32 @@ impl TelegramApiError {
                 .contains("message is not modified")
     }
 
+    /// `editForumTopic` returns this error when the topic exists but the
+    /// requested edit would not change anything. It is a successful probe.
+    pub fn is_topic_not_modified(&self) -> bool {
+        if !self.method.eq_ignore_ascii_case("editForumTopic") || self.error_code != Some(400) {
+            return false;
+        }
+        let description = self.description.to_ascii_lowercase();
+        description.contains("topic_not_modified") || description.contains("topic is not modified")
+    }
+
+    /// Match only Telegram errors that identify a missing forum topic. Other
+    /// 400/403/network errors must remain inconclusive so callers do not
+    /// create duplicate topics or discard a valid binding.
+    pub fn is_forum_topic_missing(&self) -> bool {
+        if !self.method.eq_ignore_ascii_case("editForumTopic") {
+            return false;
+        }
+        let description = self.description.to_ascii_lowercase();
+        self.error_code == Some(400)
+            && (description.contains("topic_id_invalid")
+                || description.contains("topic id is invalid")
+                || description.contains("message thread not found")
+                || description.contains("message thread id is invalid")
+                || description.contains("topic not found"))
+    }
+
     pub fn is_edit_target_unavailable(&self) -> bool {
         if self.error_code != Some(400) {
             return false;
@@ -380,12 +449,48 @@ impl TelegramApi {
         Ok(())
     }
 
+    /// Create a forum topic in a configured Telegram supergroup.
+    pub async fn create_forum_topic(
+        &self,
+        chat_id: &str,
+        name: &str,
+    ) -> Result<TelegramForumTopic> {
+        let body = create_forum_topic_body(chat_id, name);
+        self.post("createForumTopic", &body).await
+    }
+
+    /// Remove a forum topic that was created for a session whose binding
+    /// could not be completed. This keeps retries from leaving orphan topics.
+    pub async fn delete_forum_topic(&self, chat_id: &str, message_thread_id: i64) -> Result<bool> {
+        let body = delete_forum_topic_body(chat_id, message_thread_id);
+        self.post("deleteForumTopic", &body).await
+    }
+
+    /// Probe whether a forum topic still exists by applying its expected name.
+    /// Telegram reports `TOPIC_NOT_MODIFIED` when the topic already has that
+    /// name, and a topic-id error when it no longer exists.
+    pub async fn edit_forum_topic(
+        &self,
+        chat_id: &str,
+        message_thread_id: i64,
+        name: &str,
+    ) -> Result<bool> {
+        let body = edit_forum_topic_body(chat_id, message_thread_id, name);
+        match self.post("editForumTopic", &body).await {
+            Ok(result) => Ok(result),
+            Err(err) if err.downcast_ref::<TelegramApiError>().is_some_and(|error| {
+                error.is_topic_not_modified()
+            }) => Ok(true),
+            Err(err) => Err(err),
+        }
+    }
+
     pub async fn send_text(&self, chat_id: &str, text: &str) -> Result<i64> {
-        let body = serde_json::json!({
-            "chat_id": chat_id,
+        let mut body = serde_json::json!({
             "text": text,
             "disable_web_page_preview": true,
         });
+        add_message_target(&mut body, chat_id);
         let message: TelegramMessage = self.post("sendMessage", &body).await?;
         Ok(message.message_id)
     }
@@ -396,12 +501,12 @@ impl TelegramApi {
         text: &str,
         parse_mode: TelegramParseMode,
     ) -> Result<i64> {
-        let body = serde_json::json!({
-            "chat_id": chat_id,
+        let mut body = serde_json::json!({
             "text": text,
             "parse_mode": parse_mode,
             "disable_web_page_preview": true,
         });
+        add_message_target(&mut body, chat_id);
         let message: TelegramMessage = self.post("sendMessage", &body).await?;
         Ok(message.message_id)
     }
@@ -412,12 +517,12 @@ impl TelegramApi {
         text: &str,
         reply_markup: serde_json::Value,
     ) -> Result<i64> {
-        let body = serde_json::json!({
-            "chat_id": chat_id,
+        let mut body = serde_json::json!({
             "text": text,
             "disable_web_page_preview": true,
             "reply_markup": reply_markup,
         });
+        add_message_target(&mut body, chat_id);
         let message: TelegramMessage = self.post("sendMessage", &body).await?;
         Ok(message.message_id)
     }
@@ -429,13 +534,13 @@ impl TelegramApi {
         reply_markup: serde_json::Value,
         parse_mode: TelegramParseMode,
     ) -> Result<i64> {
-        let body = serde_json::json!({
-            "chat_id": chat_id,
+        let mut body = serde_json::json!({
             "text": text,
             "parse_mode": parse_mode,
             "disable_web_page_preview": true,
             "reply_markup": reply_markup,
         });
+        add_message_target(&mut body, chat_id);
         let message: TelegramMessage = self.post("sendMessage", &body).await?;
         Ok(message.message_id)
     }
@@ -618,6 +723,25 @@ impl TelegramApi {
         Ok(())
     }
 
+    pub async fn send_message_draft_to_target(
+        &self,
+        target: &str,
+        draft_id: i64,
+        text: &str,
+    ) -> Result<()> {
+        if draft_id == 0 {
+            return Err(anyhow!("telegram message draft id must be non-zero"));
+        }
+        let (chat_id, _) = split_telegram_message_target(target);
+        let chat_id = chat_id
+            .trim()
+            .parse::<i64>()
+            .context("telegram message draft target must contain a numeric chat id")?;
+        let body = send_message_draft_body_for_target(target, chat_id, draft_id, text);
+        let _: bool = self.post("sendMessageDraft", &body).await?;
+        Ok(())
+    }
+
     pub async fn send_rich_message_draft(
         &self,
         chat_id: i64,
@@ -628,6 +752,25 @@ impl TelegramApi {
             return Err(anyhow!("telegram rich message draft id must be non-zero"));
         }
         let body = send_rich_message_draft_body(chat_id, draft_id, rich_message);
+        let _: bool = self.post("sendRichMessageDraft", &body).await?;
+        Ok(())
+    }
+
+    pub async fn send_rich_message_draft_to_target(
+        &self,
+        target: &str,
+        draft_id: i64,
+        rich_message: &TelegramInputRichMessage,
+    ) -> Result<()> {
+        if draft_id == 0 {
+            return Err(anyhow!("telegram rich message draft id must be non-zero"));
+        }
+        let (chat_id, _) = split_telegram_message_target(target);
+        let chat_id = chat_id
+            .trim()
+            .parse::<i64>()
+            .context("telegram rich message draft target must contain a numeric chat id")?;
+        let body = send_rich_message_draft_body_for_target(target, chat_id, draft_id, rich_message);
         let _: bool = self.post("sendRichMessageDraft", &body).await?;
         Ok(())
     }
@@ -734,9 +877,13 @@ impl TelegramApi {
             .file_name(file_name)
             .mime_str(&mime)
             .with_context(|| format!("invalid mime type for {}", local_path.display()))?;
+        let (raw_chat_id, topic_id) = split_telegram_message_target(chat_id);
         let mut form = multipart::Form::new()
-            .text("chat_id", chat_id.to_string())
+            .text("chat_id", raw_chat_id.to_string())
             .part(field_name.to_string(), part);
+        if let Some(topic_id) = topic_id {
+            form = form.text("message_thread_id", topic_id.to_string());
+        }
         if let Some(caption) = caption.map(str::trim).filter(|value| !value.is_empty()) {
             form = form.text("caption", caption.to_string());
         }
@@ -815,11 +962,11 @@ fn edit_message_text_body(
     reply_markup: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
-        "chat_id": chat_id,
         "message_id": message_id,
         "text": text,
         "disable_web_page_preview": true,
     });
+    add_message_target(&mut body, chat_id);
     if let Some(parse_mode) = parse_mode {
         body["parse_mode"] = serde_json::to_value(parse_mode)
             .unwrap_or_else(|_| serde_json::Value::String("HTML".to_string()));
@@ -836,9 +983,9 @@ fn send_rich_message_body(
     reply_markup: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
-        "chat_id": chat_id,
         "rich_message": rich_message,
     });
+    add_message_target(&mut body, chat_id);
     if let Some(reply_markup) = reply_markup {
         body["reply_markup"] = reply_markup;
     }
@@ -852,10 +999,10 @@ fn edit_rich_message_body(
     reply_markup: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({
-        "chat_id": chat_id,
         "message_id": message_id,
         "rich_message": rich_message,
     });
+    add_message_target(&mut body, chat_id);
     if let Some(reply_markup) = reply_markup {
         body["reply_markup"] = reply_markup;
     }
@@ -867,17 +1014,42 @@ fn edit_message_reply_markup_body(
     message_id: i64,
     reply_markup: serde_json::Value,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "chat_id": chat_id,
+    let mut body = serde_json::json!({
         "message_id": message_id,
         "reply_markup": reply_markup,
-    })
+    });
+    add_message_target(&mut body, chat_id);
+    body
 }
 
 fn send_chat_action_body(chat_id: &str, action: &str) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "action": action,
+    });
+    add_message_target(&mut body, chat_id);
+    body
+}
+
+fn create_forum_topic_body(chat_id: &str, name: &str) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "name": name.trim(),
+    });
+    add_message_target(&mut body, chat_id);
+    body
+}
+
+fn delete_forum_topic_body(chat_id: &str, message_thread_id: i64) -> serde_json::Value {
     serde_json::json!({
         "chat_id": chat_id,
-        "action": action,
+        "message_thread_id": message_thread_id,
+    })
+}
+
+fn edit_forum_topic_body(chat_id: &str, message_thread_id: i64, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "chat_id": chat_id,
+        "message_thread_id": message_thread_id,
+        "name": name.trim(),
     })
 }
 
@@ -887,6 +1059,17 @@ fn send_message_draft_body(chat_id: i64, draft_id: i64, text: &str) -> serde_jso
         "draft_id": draft_id,
         "text": text,
     })
+}
+
+fn send_message_draft_body_for_target(
+    target: &str,
+    chat_id: i64,
+    draft_id: i64,
+    text: &str,
+) -> serde_json::Value {
+    let mut body = send_message_draft_body(chat_id, draft_id, text);
+    add_message_thread_id(&mut body, target);
+    body
 }
 
 fn send_rich_message_draft_body(
@@ -901,6 +1084,29 @@ fn send_rich_message_draft_body(
     })
 }
 
+fn send_rich_message_draft_body_for_target(
+    target: &str,
+    chat_id: i64,
+    draft_id: i64,
+    rich_message: &TelegramInputRichMessage,
+) -> serde_json::Value {
+    let mut body = send_rich_message_draft_body(chat_id, draft_id, rich_message);
+    add_message_thread_id(&mut body, target);
+    body
+}
+
+fn add_message_target(body: &mut serde_json::Value, target: &str) {
+    let (chat_id, _) = split_telegram_message_target(target);
+    body["chat_id"] = serde_json::json!(chat_id);
+    add_message_thread_id(body, target);
+}
+
+fn add_message_thread_id(body: &mut serde_json::Value, target: &str) {
+    if let (_, Some(topic_id)) = split_telegram_message_target(target) {
+        body["message_thread_id"] = serde_json::json!(topic_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use reqwest::StatusCode;
@@ -908,9 +1114,10 @@ mod tests {
     use super::{
         TelegramApi, TelegramApiError, TelegramBotCommand, TelegramInputRichMessage,
         TelegramInputRichMessageMedia, TelegramParseMode, TelegramResponse, TelegramUpdate,
-        edit_message_reply_markup_body, edit_message_text_body, edit_rich_message_body,
-        send_chat_action_body, send_message_draft_body, send_rich_message_body,
-        send_rich_message_draft_body,
+        create_forum_topic_body, delete_forum_topic_body, edit_forum_topic_body,
+        edit_message_reply_markup_body,
+        edit_message_text_body, edit_rich_message_body, send_chat_action_body,
+        send_message_draft_body, send_rich_message_body, send_rich_message_draft_body,
     };
     use crate::im::telegram::types::TelegramSettings;
 
@@ -990,6 +1197,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_forum_topic_state_service_messages() {
+        let raw = serde_json::json!({
+            "update_id": 102,
+            "message": {
+                "message_id": 9,
+                "message_thread_id": 17,
+                "chat": {"id": -1001, "type": "supergroup"},
+                "forum_topic_closed": {}
+            }
+        });
+        let update: TelegramUpdate = serde_json::from_value(raw).expect("topic update");
+        let message = update.message.expect("message");
+        assert_eq!(message.message_thread_id, Some(17));
+        assert!(message.forum_topic_closed.is_some());
+        assert!(message.forum_topic_reopened.is_none());
+    }
+
+    #[test]
+    fn parses_forum_topic_rename_service_messages() {
+        let raw = serde_json::json!({
+            "update_id": 103,
+            "message": {
+                "message_id": 10,
+                "message_thread_id": 17,
+                "chat": {"id": -1001, "type": "supergroup"},
+                "forum_topic_edited": {"name": "新标题"}
+            }
+        });
+        let update: TelegramUpdate = serde_json::from_value(raw).expect("topic rename update");
+        assert_eq!(
+            update
+                .message
+                .and_then(|message| message.forum_topic_edited)
+                .and_then(|topic| topic.name),
+            Some("新标题".to_string())
+        );
+    }
+
+    #[test]
     fn builds_edit_message_text_payload_with_markup() {
         let body = edit_message_text_body(
             "42",
@@ -1008,6 +1254,88 @@ mod tests {
             serde_json::json!([])
         );
         assert_eq!(body["disable_web_page_preview"], true);
+    }
+
+    #[test]
+    fn adds_forum_topic_to_message_payloads() {
+        let body = edit_message_text_body("-100|topic=17", 7, "done", None, None);
+        assert_eq!(body["chat_id"], "-100");
+        assert_eq!(body["message_thread_id"], 17);
+
+        let body = send_chat_action_body("-100|topic=17", "typing");
+        assert_eq!(body["chat_id"], "-100");
+        assert_eq!(body["message_thread_id"], 17);
+    }
+
+    #[test]
+    fn builds_forum_topic_creation_payload() {
+        let body = create_forum_topic_body("-100", "  Fix routing  ");
+        assert_eq!(body["chat_id"], "-100");
+        assert_eq!(body["name"], "Fix routing");
+        assert!(body.get("message_thread_id").is_none());
+    }
+
+    #[test]
+    fn builds_forum_topic_deletion_payload() {
+        let body = delete_forum_topic_body("-100", 17);
+        assert_eq!(body["chat_id"], "-100");
+        assert_eq!(body["message_thread_id"], 17);
+    }
+
+    #[test]
+    fn builds_forum_topic_probe_payload() {
+        let body = edit_forum_topic_body("-100", 17, "  Fix routing  ");
+        assert_eq!(body, serde_json::json!({
+            "chat_id": "-100",
+            "message_thread_id": 17,
+            "name": "Fix routing",
+        }));
+    }
+
+    #[test]
+    fn classifies_forum_topic_probe_errors_conservatively() {
+        assert!(api_error(
+            "editForumTopic",
+            StatusCode::BAD_REQUEST,
+            400,
+            "Bad Request: TOPIC_ID_INVALID",
+        )
+        .is_forum_topic_missing());
+        assert!(api_error(
+            "editForumTopic",
+            StatusCode::BAD_REQUEST,
+            400,
+            "Bad Request: message thread not found",
+        )
+        .is_forum_topic_missing());
+        assert!(api_error(
+            "editForumTopic",
+            StatusCode::BAD_REQUEST,
+            400,
+            "Bad Request: TOPIC_NOT_MODIFIED",
+        )
+        .is_topic_not_modified());
+        assert!(!api_error(
+            "editForumTopic",
+            StatusCode::FORBIDDEN,
+            403,
+            "Forbidden: not enough rights",
+        )
+        .is_forum_topic_missing());
+        assert!(!api_error(
+            "editForumTopic",
+            StatusCode::BAD_REQUEST,
+            400,
+            "Bad Request: chat not found",
+        )
+        .is_forum_topic_missing());
+        assert!(!api_error(
+            "sendMessage",
+            StatusCode::BAD_REQUEST,
+            400,
+            "Bad Request: TOPIC_ID_INVALID",
+        )
+        .is_forum_topic_missing());
     }
 
     #[test]

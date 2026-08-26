@@ -310,12 +310,15 @@ private struct MessagingAccountFilterControl: View {
 /// preview, or pass live snapshots and implement the optional callbacks.
 struct MessagingAccountsView: View {
     let accounts: [MessagingAccountSummary]
+    var telegramProjectGroupAccounts: [ManageTelegramProjectGroupAccount] = []
     var availability: MessagingAccountsAvailability = .available
     var onAdd: (() -> Void)?
     /// Returns whether the backend acknowledged the change. On `false` the
     /// optimistic switch state is rolled back.
     var onToggle: ((MessagingAccountSummary, Bool) async -> Bool)?
     var onDelete: ((MessagingAccountSummary) -> Void)?
+    var onSaveTelegramProjectGroups: ((String, [ManageTelegramProjectGroup]) async -> Bool)?
+    var onSyncTelegramTopics: ((String, String) async -> Bool)?
 
     @State private var searchText = ""
     @State private var filter: MessagingAccountFilter = .all
@@ -324,19 +327,27 @@ struct MessagingAccountsView: View {
     @State private var expandedIDs: Set<String> = []
     @State private var pendingDeletion: MessagingAccountSummary?
     @State private var hoveredAccountID: String?
+    @State private var projectGroupAccount: ManageTelegramProjectGroupAccount?
+    @State private var editingProjectGroups: [ManageTelegramProjectGroup] = []
 
     init(
         accounts: [MessagingAccountSummary],
+        telegramProjectGroupAccounts: [ManageTelegramProjectGroupAccount] = [],
         availability: MessagingAccountsAvailability = .available,
         onAdd: (() -> Void)? = nil,
         onToggle: ((MessagingAccountSummary, Bool) async -> Bool)? = nil,
-        onDelete: ((MessagingAccountSummary) -> Void)? = nil
+        onDelete: ((MessagingAccountSummary) -> Void)? = nil,
+        onSaveTelegramProjectGroups: ((String, [ManageTelegramProjectGroup]) async -> Bool)? = nil,
+        onSyncTelegramTopics: ((String, String) async -> Bool)? = nil
     ) {
         self.accounts = accounts
+        self.telegramProjectGroupAccounts = telegramProjectGroupAccounts
         self.availability = availability
         self.onAdd = onAdd
         self.onToggle = onToggle
         self.onDelete = onDelete
+        self.onSaveTelegramProjectGroups = onSaveTelegramProjectGroups
+        self.onSyncTelegramTopics = onSyncTelegramTopics
     }
 
     var body: some View {
@@ -382,6 +393,20 @@ struct MessagingAccountsView: View {
             }
         } message: { account in
             Text("将删除“\(account.displayName?.trimmedNonEmpty ?? account.platform.title)”及其连接配置，此操作不可撤销。")
+        }
+        .sheet(item: $projectGroupAccount) { account in
+            TelegramProjectGroupsView(
+                accountID: account.accountId,
+                projectGroups: $editingProjectGroups,
+                onSave: { groups in
+                    guard let onSaveTelegramProjectGroups else { return false }
+                    return await onSaveTelegramProjectGroups(account.accountId, groups)
+                },
+                onSyncTopics: { chatId in
+                    guard let onSyncTelegramTopics else { return false }
+                    return await onSyncTelegramTopics(account.accountId, chatId)
+                }
+            )
         }
         .accessibilityIdentifier("messaging-accounts.view")
     }
@@ -673,6 +698,19 @@ struct MessagingAccountsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            if account.platform == .telegram, onSaveTelegramProjectGroups != nil {
+                Button {
+                    let saved = telegramProjectGroupAccounts.first(where: { $0.accountId == account.accountID })
+                    editingProjectGroups = saved?.projectGroups ?? []
+                    projectGroupAccount = saved ?? ManageTelegramProjectGroupAccount(accountId: account.accountID, projectGroups: [])
+                } label: {
+                    Label("配置项目群", systemImage: "folder.badge.gearshape")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(availability != .available)
+                .help("为 Telegram 机器人配置项目群")
+            }
             if onDelete != nil, availability == .available {
                 Button("删除账号", role: .destructive) {
                     pendingDeletion = account
@@ -723,6 +761,141 @@ struct MessagingAccountsView: View {
         if account.connecting || account.polling { return .connecting }
         if !account.configured || !account.secretSet { return .incomplete }
         return .offline
+    }
+}
+
+private struct TelegramProjectGroupsView: View {
+    @Environment(\.dismiss) private var dismiss
+    let accountID: String
+    @Binding var projectGroups: [ManageTelegramProjectGroup]
+    let onSave: ([ManageTelegramProjectGroup]) async -> Bool
+    let onSyncTopics: (String) async -> Bool
+    @State private var saving = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("一个群对应一个项目。机器人收到群里的第一条消息后，会自动创建一个 Topic，并把这个 Topic 绑定到对应项目目录。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if projectGroups.isEmpty {
+                ContentUnavailableView("还没有项目群", systemImage: "folder", description: Text("添加一个 Telegram 群组后即可开始。"))
+                    .frame(maxWidth: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 10) {
+                        ForEach($projectGroups) { $group in
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    TextField("项目名称", text: $group.projectName)
+                                    Button {
+                                        projectGroups.removeAll { $0.id == group.id }
+                                    } label: {
+                                        Image(systemName: "trash")
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .foregroundStyle(.red)
+                                    .help("删除项目群")
+                                }
+                                TextField("Telegram 群组 ID，例如 -1001234567890", text: $group.chatId)
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.caption.monospaced())
+                                TextField("项目目录", text: $group.cwd)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                            .padding(12)
+                            .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 8))
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+
+            Button {
+                projectGroups.append(ManageTelegramProjectGroup(chatId: "", projectName: "", cwd: ""))
+            } label: {
+                Label("添加项目群", systemImage: "plus")
+            }
+            .buttonStyle(.bordered)
+
+            if !projectGroups.isEmpty {
+                Menu {
+                    ForEach(projectGroups) { group in
+                        Button(group.projectName.isEmpty ? group.chatId : group.projectName) {
+                            Task { await syncTopics(for: group) }
+                        }
+                        .disabled(group.chatId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                } label: {
+                    Label("同步 / 转移 Codex 会话到 Telegram Topic", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(saving)
+            }
+
+            Label("需要使用 Forum 群组，并确保 Bot 有管理 Topic 的权限。群成员都可以向该项目发送消息。", systemImage: "info.circle")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+        .padding(22)
+        .frame(width: 560)
+        .navigationTitle("Telegram 项目群")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存") { Task { await save() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(saving)
+            }
+        }
+    }
+
+    private func save() async {
+        let normalized = projectGroups.map {
+            ManageTelegramProjectGroup(
+                chatId: $0.chatId.trimmingCharacters(in: .whitespacesAndNewlines),
+                projectName: $0.projectName.trimmingCharacters(in: .whitespacesAndNewlines),
+                cwd: $0.cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+            )
+        }
+        guard normalized.allSatisfy({ !$0.chatId.isEmpty && !$0.projectName.isEmpty && !$0.cwd.isEmpty }) else {
+            errorMessage = "每个项目群都需要填写项目名称、群组 ID 和项目目录。"
+            return
+        }
+        guard Set(normalized.map(\.chatId)).count == normalized.count else {
+            errorMessage = "群组 ID 不能重复。"
+            return
+        }
+        saving = true
+        errorMessage = nil
+        if await onSave(normalized) {
+            dismiss()
+        } else {
+            errorMessage = "保存失败，请查看账号页面底部的错误提示。"
+        }
+        saving = false
+    }
+
+    private func syncTopics(for group: ManageTelegramProjectGroup) async {
+        guard !saving else { return }
+        saving = true
+        errorMessage = nil
+        let ok = await onSyncTopics(group.chatId.trimmingCharacters(in: .whitespacesAndNewlines))
+        if !ok {
+            errorMessage = "同步失败，请查看账号页面底部的错误提示。"
+        }
+        saving = false
     }
 }
 

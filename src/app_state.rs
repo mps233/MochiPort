@@ -24,7 +24,7 @@ use crate::{
     daemon_process::DaemonIdentity,
     im_runtime::{RouteTarget, RuntimeState, route_from_conversation_key},
     store::PersistedState,
-    types::{EventRecord, ImPlatformKind, now_ms},
+    types::{EventRecord, ImPlatformKind, now_ms, split_telegram_message_target},
 };
 
 pub type SharedState = Arc<AppState>;
@@ -176,6 +176,18 @@ pub struct AppState {
     pub runtime: Mutex<RuntimeState>,
     pub im_route_binding_ops: Mutex<()>,
     pub telegram_queue_start_ops: Mutex<()>,
+    /// Serializes the long-running Telegram session-to-topic synchronization
+    /// so a client timeout/retry cannot create a second topic for the same
+    /// Codex session while the first request is still finishing.
+    pub telegram_topic_sync_ops: Mutex<()>,
+    /// Names MochiPort is currently applying to Telegram Topics. Telegram
+    /// echoes bot edits as service messages; these markers prevent that echo
+    /// from being mistaken for a user rename.
+    pub telegram_topic_name_sync_ops: Mutex<HashMap<String, String>>,
+    /// Names MochiPort is currently applying to Codex threads. Codex emits a
+    /// notification after `thread/name/set`; these markers prevent a second
+    /// Telegram edit for the same change.
+    pub codex_thread_name_sync_ops: Mutex<HashMap<String, String>>,
     pub remote_control: RemoteControlState,
     pub events: Mutex<Vec<EventRecord>>,
     pub bridge_task: Mutex<Option<JoinHandle<()>>>,
@@ -522,6 +534,9 @@ impl AppState {
             runtime: Mutex::new(runtime),
             im_route_binding_ops: Mutex::new(()),
             telegram_queue_start_ops: Mutex::new(()),
+            telegram_topic_sync_ops: Mutex::new(()),
+            telegram_topic_name_sync_ops: Mutex::new(HashMap::new()),
+            codex_thread_name_sync_ops: Mutex::new(HashMap::new()),
             remote_control: RemoteControlState::new(),
             events: Mutex::new(Vec::new()),
             bridge_task: Mutex::new(None),
@@ -599,11 +614,13 @@ fn restore_persisted_im_bindings(
     persisted: &mut PersistedState,
 ) -> (RuntimeState, bool) {
     let original_bindings = persisted.im_thread_bindings.clone();
+    let original_topic_states = persisted.telegram_topic_binding_states.clone();
     let mut bindings = original_bindings.iter().collect::<Vec<_>>();
     bindings.sort_unstable_by_key(|(left, _)| *left);
 
     let mut runtime = RuntimeState::default();
     let mut restored_bindings = HashMap::new();
+    let mut restored_topic_states = HashMap::new();
     let mut claimed_threads = HashSet::new();
 
     for (conversation_key, thread_id) in bindings {
@@ -620,10 +637,18 @@ fn restore_persisted_im_bindings(
 
         runtime.bind_route(thread_id, route);
         restored_bindings.insert(conversation_key.clone(), thread_id.to_string());
+        let mut binding_state = persisted
+            .telegram_topic_binding_states
+            .get(conversation_key)
+            .cloned()
+            .unwrap_or_default();
+        binding_state.thread_id = thread_id.to_string();
+        restored_topic_states.insert(conversation_key.clone(), binding_state);
     }
 
-    let changed = restored_bindings != original_bindings;
+    let changed = restored_bindings != original_bindings || restored_topic_states != original_topic_states;
     persisted.im_thread_bindings = restored_bindings;
+    persisted.telegram_topic_binding_states = restored_topic_states;
     (runtime, changed)
 }
 
@@ -640,12 +665,18 @@ fn valid_persisted_telegram_route(
     }
 
     let account = config.telegram_account(&route.account_id)?;
-    if !account.is_active()
-        || !account
-            .allowed_chat_ids
-            .iter()
-            .any(|chat_id| chat_id.trim() == route.chat_id)
-    {
+    let (raw_chat_id, topic_id) = split_telegram_message_target(&route.chat_id);
+    let allowed_private_chat = account
+        .allowed_chat_ids
+        .iter()
+        .any(|chat_id| chat_id.trim() == raw_chat_id);
+    let configured_project_group = account.project_group_for_chat(raw_chat_id).is_some();
+    let target_is_valid = if topic_id.is_some() {
+        configured_project_group
+    } else {
+        allowed_private_chat || configured_project_group
+    };
+    if !account.is_active() || !target_is_valid {
         return None;
     }
 
@@ -730,6 +761,10 @@ mod tests {
                 "thread-disallowed".to_string(),
             ),
             (
+                "telegram:active:42|topic=17".to_string(),
+                "thread-private-topic".to_string(),
+            ),
+            (
                 "telegram:disabled:43".to_string(),
                 "thread-disabled".to_string(),
             ),
@@ -778,6 +813,41 @@ mod tests {
         assert_eq!(
             saved.im_thread_bindings,
             HashMap::from([("telegram:active:42".to_string(), "thread-42".to_string())])
+        );
+    }
+
+    #[test]
+    fn configured_project_group_topic_binding_is_restored() {
+        let mut config = AppConfig::default();
+        let mut account = telegram_account("active", true, &[]);
+        account.project_groups = vec![crate::config::TelegramProjectGroupConfig {
+            chat_id: "-100".to_string(),
+            project_name: "MochiPort".to_string(),
+            cwd: "/tmp/mochiport".to_string(),
+        }];
+        config.telegram_accounts = vec![account];
+        let mut persisted = PersistedState::default();
+        persisted.im_thread_bindings = HashMap::from([(
+            "telegram:active:-100|topic=17".to_string(),
+            "topic-thread".to_string(),
+        )]);
+
+        let (runtime, changed) = restore_persisted_im_bindings(&config, &mut persisted);
+
+        assert!(changed);
+        assert_eq!(
+            persisted
+                .telegram_topic_binding_states
+                .get("telegram:active:-100|topic=17")
+                .map(|state| state.thread_id.as_str()),
+            Some("topic-thread")
+        );
+        assert_eq!(
+            runtime
+                .route_by_thread
+                .get("topic-thread")
+                .map(|route| route.conversation_key.as_str()),
+            Some("telegram:active:-100|topic=17")
         );
     }
 

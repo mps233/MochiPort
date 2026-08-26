@@ -7,6 +7,7 @@ use crate::{
     chain_log,
     im::core::{i18n::ImText, thread::ThreadCreateOption},
     im_runtime::{PendingApproval, approval_request_fingerprint},
+    types::split_telegram_message_target,
 };
 
 use super::api::{TelegramApi, TelegramApiError, TelegramInputRichMessage, TelegramParseMode};
@@ -185,7 +186,8 @@ impl TelegramAdapter {
     }
 
     pub async fn send_rich_thinking_draft(&self, target: &str, draft_id: i64) -> Result<bool> {
-        let Ok(chat_id) = target.trim().parse::<i64>() else {
+        let (raw_chat_id, _) = split_telegram_message_target(target);
+        let Ok(chat_id) = raw_chat_id.trim().parse::<i64>() else {
             log_adapter(
                 "send_thinking_rich_draft_fallback",
                 format!("chat={target} reason=non_numeric_private_chat"),
@@ -207,7 +209,7 @@ impl TelegramAdapter {
         );
         match self
             .api
-            .send_rich_message_draft(chat_id, draft_id, &rich_message)
+            .send_rich_message_draft_to_target(target, draft_id, &rich_message)
             .await
         {
             Ok(()) => Ok(true),
@@ -227,7 +229,8 @@ impl TelegramAdapter {
     }
 
     pub async fn send_thinking_draft(&self, target: &str, draft_id: i64) -> Result<bool> {
-        let Ok(chat_id) = target.trim().parse::<i64>() else {
+        let (raw_chat_id, _) = split_telegram_message_target(target);
+        let Ok(chat_id) = raw_chat_id.trim().parse::<i64>() else {
             log_adapter(
                 "send_thinking_draft_fallback",
                 format!("chat={target} reason=non_numeric_private_chat"),
@@ -246,7 +249,11 @@ impl TelegramAdapter {
             "send_thinking_draft",
             format!("chat={target} draft={draft_id}"),
         );
-        match self.api.send_message_draft(chat_id, draft_id, "").await {
+        match self
+            .api
+            .send_message_draft_to_target(target, draft_id, "")
+            .await
+        {
             Ok(()) => Ok(true),
             Err(err)
                 if err

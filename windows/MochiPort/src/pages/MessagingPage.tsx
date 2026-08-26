@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleAlert,
+  FolderOpen,
   MessageCircleMore,
   Plus,
   QrCode,
@@ -10,13 +11,14 @@ import {
   Search,
   Send,
   ShieldCheck,
+  Save,
   Trash2,
   UserRound,
   Wifi,
 } from "lucide-react";
 import { type CSSProperties, type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
-import type { IMAccount } from "../api/types";
+import type { IMAccount, TelegramProjectGroup } from "../api/types";
 import { useAppModel } from "../state/AppModel";
 import { platformLabel, relativeTime } from "../utils/format";
 import {
@@ -77,6 +79,81 @@ function accountState(account: IMAccount): { label: string; tone: "positive" | "
   if (account.connecting || account.polling) return { label: "连接中", tone: "warning" };
   if (!account.configured || !account.secretSet) return { label: "待配置", tone: "neutral" };
   return { label: "未连接", tone: "neutral" };
+}
+
+function TelegramProjectGroupsModal({
+  account,
+  initialGroups,
+  onSave,
+  onClose,
+}: {
+  account: IMAccount;
+  initialGroups: TelegramProjectGroup[];
+  onSave: (groups: TelegramProjectGroup[]) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const [groups, setGroups] = useState<TelegramProjectGroup[]>(initialGroups);
+  const [localError, setLocalError] = useState<string>();
+  const [saving, setSaving] = useState(false);
+
+  const update = (index: number, field: keyof TelegramProjectGroup, value: string) => {
+    setGroups((current) => current.map((group, position) => position === index ? { ...group, [field]: value } : group));
+  };
+
+  const save = async () => {
+    const normalized = groups.map((group) => ({
+      chatId: group.chatId.trim(),
+      projectName: group.projectName.trim(),
+      cwd: group.cwd.trim(),
+    }));
+    if (normalized.some((group) => !group.chatId || !group.projectName || !group.cwd)) {
+      setLocalError("每个项目群都需要填写项目名称、群组 ID 和项目目录。");
+      return;
+    }
+    if (new Set(normalized.map((group) => group.chatId)).size !== normalized.length) {
+      setLocalError("群组 ID 不能重复。");
+      return;
+    }
+    setSaving(true);
+    setLocalError(undefined);
+    if (await onSave(normalized)) onClose();
+    else setLocalError("保存失败，请查看页面上的错误提示。");
+    setSaving(false);
+  };
+
+  return (
+    <Modal
+      open
+      title="Telegram 项目群"
+      description={`${account.displayName ?? account.accountId} · 一个群对应一个项目`}
+      onClose={onClose}
+      size="large"
+      footer={<><Button onClick={onClose}>取消</Button><Button variant="primary" icon={Save} loading={saving} onClick={() => void save()}>保存配置</Button></>}
+    >
+      <div className="telegram-project-groups-editor">
+        <div className="telegram-project-groups-editor__intro">
+          <FolderOpen size={16} />
+          <p>机器人收到群里的第一条消息后，会自动创建 Topic，并把这个 Topic 绑定到对应项目目录。保存后需要手动重启后台服务才会生效。</p>
+        </div>
+        {groups.length === 0 && <EmptyState icon={FolderOpen} title="还没有项目群" description="添加一个 Telegram Forum 群组后即可开始。" />}
+        <div className="telegram-project-groups-editor__list">
+          {groups.map((group, index) => (
+            <div className="telegram-project-group-row" key={`${index}-${group.chatId}`}>
+              <div className="telegram-project-group-row__header"><strong>项目群 {index + 1}</strong><Button variant="link" size="small" icon={Trash2} onClick={() => setGroups((current) => current.filter((_, position) => position !== index))}>删除</Button></div>
+              <div className="provider-editor-grid__pair">
+                <Field label="项目名称"><input value={group.projectName} placeholder="例如：MochiPort" onChange={(event) => update(index, "projectName", event.target.value)} /></Field>
+                <Field label="Telegram 群组 ID"><input value={group.chatId} placeholder="例如：-1001234567890" onChange={(event) => update(index, "chatId", event.target.value)} /></Field>
+              </div>
+              <Field label="项目目录"><input value={group.cwd} placeholder="例如：C:\\Projects\\MochiPort" onChange={(event) => update(index, "cwd", event.target.value)} /></Field>
+            </div>
+          ))}
+        </div>
+        <Button icon={Plus} onClick={() => setGroups((current) => [...current, { chatId: "", projectName: "", cwd: "" }])}>添加项目群</Button>
+        <p className="field__hint">需要使用 Forum 群组，并确保 Bot 有管理 Topic 的权限。群成员都可以向该项目发送消息。</p>
+        {localError && <InlineError message={localError} onDismiss={() => setLocalError(undefined)} />}
+      </div>
+    </Modal>
+  );
 }
 
 interface ScanState {
@@ -406,6 +483,7 @@ export function MessagingPage() {
   const [filter, setFilter] = useState<AccountFilter>("all");
   const [onboarding, setOnboarding] = useState(false);
   const [deleting, setDeleting] = useState<IMAccount>();
+  const [editingProjectGroups, setEditingProjectGroups] = useState<IMAccount>();
   const [expandedIds, setExpandedIds] = useState<Set<string>>(() => new Set());
   const pageError = model.errors.messaging ?? model.accountsRefreshError;
   const filtered = useMemo(() => model.accounts.filter((account) => {
@@ -476,6 +554,11 @@ export function MessagingPage() {
                   ) : account.lastEventAtMs ? (
                     <div className="account-card__activity"><UserRound size={13} />最近活动：{relativeTime(account.lastEventAtMs)}</div>
                   ) : null}
+                  {account.platform === "telegram" && (
+                    <Button variant="secondary" size="small" icon={FolderOpen} onClick={() => setEditingProjectGroups(account)}>
+                      配置项目群
+                    </Button>
+                  )}
                   <Button variant="link" size="small" icon={Trash2} onClick={() => { model.dismissError("messaging"); setDeleting(account); }}>删除账号</Button>
                 </div>
               )}
@@ -486,6 +569,14 @@ export function MessagingPage() {
       </div>
 
       <OnboardingModal open={onboarding} onClose={() => setOnboarding(false)} />
+      {editingProjectGroups && (
+        <TelegramProjectGroupsModal
+          account={editingProjectGroups}
+          initialGroups={model.telegramProjectGroupAccounts.find((item) => item.accountId === editingProjectGroups.accountId)?.projectGroups ?? []}
+          onSave={(groups) => model.saveTelegramProjectGroups(editingProjectGroups.accountId, groups)}
+          onClose={() => setEditingProjectGroups(undefined)}
+        />
+      )}
       <Modal open={Boolean(deleting)} title="删除消息账号？" description="删除后需要重新验证凭据或扫码才能再次连接。" onClose={() => setDeleting(undefined)} size="small" footer={<><Button onClick={() => setDeleting(undefined)}>取消</Button><Button variant="danger" icon={Trash2} loading={deleting ? model.busy[`account-delete:${deleting.platform}:${deleting.accountId}`] : false} onClick={async () => { if (deleting && await model.deleteAccount(deleting)) setDeleting(undefined); }}>删除账号</Button></>}>
         {model.errors.messaging && <InlineError message={model.errors.messaging} onDismiss={() => model.dismissError("messaging")} />}
         <div className="confirmation-copy"><PlatformBadge platform={deleting?.platform ?? "telegram"} /><p>{deleting?.displayName ?? deleting?.accountId} 将从 MochiPort 本地配置中移除。</p></div>

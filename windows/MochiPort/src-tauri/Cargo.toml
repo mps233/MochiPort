@@ -1,6 +1,6 @@
 [package]
 name = "mochiport-windows"
-version = "0.5.3"
+version = "0.5.4"
 description = "MochiPort desktop client for Windows"
 authors = ["mps233"]
 edition = "2024"

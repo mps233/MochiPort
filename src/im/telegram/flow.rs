@@ -38,7 +38,7 @@ use crate::{
         TelegramQueueEnqueueOutcome, ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin,
     },
     remote_control_backend,
-    types::{InboundAction, InboundMessage, ThreadRouteDirection},
+    types::{InboundAction, InboundMessage, ThreadRouteDirection, split_telegram_message_target},
 };
 
 const TELEGRAM_CREATE_OPTION_PAGE_SIZE: usize = 8;
@@ -776,7 +776,7 @@ pub(crate) async fn handle_inbound(
     let mut attachments = message.attachments.clone();
     attachments.extend(pending_attachments.clone());
 
-    let outcome = start_turn_for_route(
+    let mut outcome = start_turn_for_route(
         &state,
         &route,
         trimmed,
@@ -785,6 +785,52 @@ pub(crate) async fn handle_inbound(
         TurnOrigin::Telegram,
     )
     .await;
+    if matches!(&outcome, TurnStartOutcome::NoThread)
+        && message.chat_type == crate::types::ChatType::Group
+    {
+        let project_cwd = {
+            let (raw_chat_id, _) = split_telegram_message_target(&message.chat_id);
+            state
+                .config
+                .lock()
+                .await
+                .telegram_account(&message.account_id)
+                .and_then(|config| config.project_group_for_chat(raw_chat_id))
+                .map(|group| group.cwd)
+        };
+        if let Some(cwd) = project_cwd {
+            let options = thread_start_options_with_current_provider(
+                remote_control_backend::ThreadStartOptions {
+                    cwd: Some(cwd),
+                    ..Default::default()
+                },
+            );
+            match create_and_bind_thread(&state, &route, options, None).await {
+                Ok(thread_id) => {
+                    state
+                        .push_event(
+                            "info",
+                            "telegram_topic_thread_created",
+                            format!(
+                                "conversation={} thread={} project_group=true",
+                                route.conversation_key, thread_id
+                            ),
+                        )
+                        .await;
+                    outcome = start_turn_for_route(
+                        &state,
+                        &route,
+                        trimmed,
+                        &attachments,
+                        message.received_at_ms,
+                        TurnOrigin::Telegram,
+                    )
+                    .await;
+                }
+                Err(error) => outcome = TurnStartOutcome::Failed { error },
+            }
+        }
+    }
     let attachments_to_restore = if matches!(&outcome, TurnStartOutcome::Started { .. }) {
         Vec::new()
     } else if matches!(&outcome, TurnStartOutcome::Expired { .. }) {

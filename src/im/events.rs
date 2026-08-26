@@ -1645,6 +1645,9 @@ pub(crate) async fn handle_codex_notification(
             }
         }
         "thread/started" => {}
+        "thread/name/updated" => {
+            sync_codex_thread_name_to_telegram(&state, &api_registry, params).await;
+        }
         "thread/status/changed" => {
             let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
                 return;
@@ -2510,6 +2513,188 @@ pub(crate) async fn handle_codex_notification(
             }
         }
         _ => {}
+    }
+}
+
+async fn sync_codex_thread_name_to_telegram(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    params: &serde_json::Value,
+) {
+    let Some(thread_id) = params.get("threadId").and_then(|value| value.as_str()) else {
+        return;
+    };
+    let Some(thread_name) = params
+        .get("threadName")
+        .or_else(|| params.get("name"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let Some(route) = route_for_codex_output(state, "thread/name/updated", thread_id, params).await
+    else {
+        return;
+    };
+    if route.platform != ImPlatformKind::Telegram {
+        return;
+    }
+    let Some(api) = api_registry.telegram_for_route(&route) else {
+        log_missing_api(state, &route, "thread_name_sync").await;
+        return;
+    };
+    let (_, Some(topic_id)) = crate::types::split_telegram_message_target(&route.chat_id) else {
+        return;
+    };
+    let conversation_key = route.conversation_key.clone();
+    let topic_name = crate::im::telegram::polling::truncate_topic_name(thread_name);
+    let originated_from_telegram = {
+        let mut ops = state.codex_thread_name_sync_ops.lock().await;
+        match ops.get(thread_id) {
+            Some(expected) if expected == &topic_name => {
+                ops.remove(thread_id);
+                true
+            }
+            Some(_) => {
+                ops.remove(thread_id);
+                false
+            }
+            None => false,
+        }
+    };
+
+    if originated_from_telegram {
+        persist_synced_telegram_topic_name(
+            state,
+            &conversation_key,
+            thread_id,
+            thread_name,
+            &topic_name,
+        )
+        .await;
+        return;
+    }
+
+    {
+        let mut ops = state.telegram_topic_name_sync_ops.lock().await;
+        ops.insert(conversation_key.clone(), topic_name.clone());
+    }
+    let marker_state = state.clone();
+    let marker_key = conversation_key.clone();
+    let marker_topic_name = topic_name.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let mut ops = marker_state.telegram_topic_name_sync_ops.lock().await;
+        if ops
+            .get(&marker_key)
+            .is_some_and(|expected| expected == &marker_topic_name)
+        {
+            ops.remove(&marker_key);
+        }
+    });
+    match api
+        .edit_forum_topic(
+            crate::types::split_telegram_message_target(&route.chat_id).0,
+            topic_id,
+            &topic_name,
+        )
+        .await
+    {
+        Ok(true) => {
+            persist_synced_telegram_topic_name(
+                state,
+                &conversation_key,
+                thread_id,
+                thread_name,
+                &topic_name,
+            )
+            .await;
+            state
+                .push_event(
+                    "info",
+                    "codex_thread_name_synced_to_telegram",
+                    format!("thread={} name={}", thread_id, topic_name),
+                )
+                .await;
+        }
+        Ok(false) | Err(_) => {
+            state
+                .telegram_topic_name_sync_ops
+                .lock()
+                .await
+                .remove(&conversation_key);
+            state
+                .push_event(
+                    "warn",
+                    "codex_thread_name_sync_to_telegram_failed",
+                    format!("thread={} name={}", thread_id, topic_name),
+                )
+                .await;
+            persist_codex_title_only(state, &conversation_key, thread_id, thread_name).await;
+        }
+    }
+}
+
+async fn persist_synced_telegram_topic_name(
+    state: &SharedState,
+    conversation_key: &str,
+    thread_id: &str,
+    codex_title: &str,
+    topic_name: &str,
+) {
+    let mut persisted = state.persisted.lock().await;
+    let Some(binding) = persisted
+        .telegram_topic_binding_states
+        .get_mut(conversation_key)
+    else {
+        return;
+    };
+    if binding.thread_id != thread_id {
+        return;
+    }
+    binding.codex_title = codex_title.to_string();
+    binding.topic_name = topic_name.to_string();
+    binding.last_synced_codex_title = codex_title.to_string();
+    binding.last_synced_topic_name = topic_name.to_string();
+    binding.last_checked_at_ms = crate::types::now_ms();
+    let path = state.config.lock().await.state_path.clone();
+    if let Err(err) = persisted.save(&path) {
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[telegram_topic] event=real_time_sync_save_failed key={} err={err}",
+                conversation_key
+            )
+        });
+    }
+}
+
+async fn persist_codex_title_only(
+    state: &SharedState,
+    conversation_key: &str,
+    thread_id: &str,
+    title: &str,
+) {
+    let mut persisted = state.persisted.lock().await;
+    let Some(binding) = persisted
+        .telegram_topic_binding_states
+        .get_mut(conversation_key)
+    else {
+        return;
+    };
+    if binding.thread_id != thread_id {
+        return;
+    }
+    binding.codex_title = title.to_string();
+    binding.last_checked_at_ms = crate::types::now_ms();
+    let path = state.config.lock().await.state_path.clone();
+    if let Err(err) = persisted.save(&path) {
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[telegram_topic] event=codex_title_save_failed key={} err={err}",
+                conversation_key
+            )
+        });
     }
 }
 

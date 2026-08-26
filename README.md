@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-> 当前版本：`0.5.3`
+> 当前版本：`0.5.4`
 
 MochiPort 是一个本地优先的 Codex 会话中继。它把 Codex App、Codex VS Code 插件和 Codex CLI 接到 Telegram、飞书、微信或企业微信，让你可以在消息软件里创建会话、跟进任务和处理审批。
 
@@ -76,12 +76,30 @@ codex --remote ws://127.0.0.1:3849
 
 打开 **消息渠道**，选择一个或多个渠道：
 
-- **Telegram**：填写 BotFather token；当前只处理私聊。
+- **Telegram**：填写 BotFather token；私聊使用白名单，配置的 Forum 项目群按 Topic 分开处理。
 - **飞书**：扫码创建机器人，使用 WebSocket 接收事件。
 - **微信**：扫码登录微信 iLink Bot。
 - **企业微信**：扫码接入 AI Bot，支持私聊和群聊文本。
 
 每个平台可以配置多个账号，并单独启停。实际部署时建议配置 Telegram `allowedChatIds`、飞书 `allowedOpenIds`/`allowedChatIds` 等白名单。
+
+### Telegram 项目群和话题
+
+Telegram 不需要为每个项目、每个会话单独创建机器人。通常只需要：
+
+- 一个 Telegram Bot；
+- 每个项目一个群，并把这个群设置为 Forum（论坛）群；
+- 群里的每个 Topic（话题）对应一个 Codex 会话。
+
+这样，同一个项目的多个会话可以放在同一个群里，分别使用不同的话题。话题名称会使用 Codex 会话标题，消息也只会回到对应的话题里。以后你在 Codex 客户端改了会话名称，MochiPort 会实时同步 Telegram 话题；你在 Telegram 里改话题名称，也会实时同步回 Codex 会话。
+
+MochiPort 会记住“哪个话题对应哪个会话”。Codex 会话被归档后，MochiPort 会每隔一段时间检查；确认归档持续约 5 分钟后，会自动删除对应的话题。Codex 会话真正消失后，也会删除对应话题。这个过程不会删除 Codex 会话本身。
+
+名称变更会通过事件实时同步；如果某次事件因断线或重启丢失，仍会每约 5 分钟自动对账补偿。两边同时改名时，后续对账以 Codex 名称为最终结果，避免互相循环覆盖。
+
+在项目群设置里点击“同步 / 转移 Codex 会话到 Telegram Topic”时，如果某个会话原来绑定在私聊，MochiPort 会自动解除私聊绑定、创建项目群 Topic，再绑定回同一个 Codex 会话，不会删除会话本身。同步结果会逐条显示会话标题和跳过或失败原因。
+
+在 Telegram 里手动关闭话题，只表示暂时不让它接收消息，不会删除 Codex 会话；重新打开后可以继续使用。如果手动删除了话题，Telegram 不会单独通知机器人。MochiPort 会在定期对账时探测绑定的 Topic，确认 Topic 确实不存在后清理绑定；你下一次点击“同步 Telegram 话题”时，会为仍存在的 Codex 会话重新创建并绑定 Topic。网络错误或权限不足时不会贸然清理，也不会创建重复 Topic。
 
 ## 常用操作
 

@@ -38,6 +38,8 @@ import type {
   Settings,
   Sub2ApiAdmin,
   Sub2ApiPool,
+  TelegramProjectGroup,
+  TelegramProjectGroupAccount,
 } from "../api/types";
 import { useCodexEnhancedLaunch } from "./useCodexEnhancedLaunch";
 
@@ -157,6 +159,8 @@ interface AppModelValue {
   gateway?: Gateway;
   accounts: IMAccount[];
   accountsRefreshError?: string;
+  telegramProjectGroupAccounts: TelegramProjectGroupAccount[];
+  saveTelegramProjectGroups: (accountId: string, groups: TelegramProjectGroup[]) => Promise<boolean>;
   requestLogs: RequestLog[];
   requestLogsHasMore: boolean;
   settings?: Settings;
@@ -268,6 +272,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
   const [sessionProviders, setSessionProviders] = useState<string[]>(fixtureMode ? ["ai-gateway", "openai"] : []);
   const [gateway, setGateway] = useState<Gateway | undefined>(fixtureMode ? fixtureGateway : undefined);
   const [accounts, setAccounts] = useState<IMAccount[]>(fixtureMode ? fixtureAccounts : []);
+  const [telegramProjectGroupAccounts, setTelegramProjectGroupAccounts] = useState<TelegramProjectGroupAccount[]>([]);
   const [accountsRefreshError, setAccountsRefreshError] = useState<string>();
   const [requestLogs, setRequestLogs] = useState<RequestLog[]>(fixtureMode ? fixtureLogs : []);
   const [requestLogsHasMore, setRequestLogsHasMore] = useState(false);
@@ -545,10 +550,15 @@ export function AppModelProvider({ children }: PropsWithChildren) {
           break;
         }
         case "messaging": {
-          const nextAccounts = await api.imAccounts();
+          const [accountsResult, groupsResult] = await Promise.allSettled([
+            api.imAccounts(),
+            api.telegramProjectGroups(),
+          ]);
           if (!isCurrent()) return;
-          setAccounts(nextAccounts);
+          if (accountsResult.status === "rejected") throw accountsResult.reason;
+          setAccounts(accountsResult.value);
           setAccountsRefreshError(undefined);
+          setTelegramProjectGroupAccounts(groupsResult.status === "fulfilled" ? groupsResult.value.accounts : []);
           break;
         }
         case "requestLogs": {
@@ -948,7 +958,29 @@ export function AppModelProvider({ children }: PropsWithChildren) {
       try {
         if (!fixtureMode) await api.deleteIMAccount(account.platform, account.accountId);
         setAccounts((current) => current.filter((item) => item.platform !== account.platform || item.accountId !== account.accountId));
+        if (account.platform === "telegram") {
+          setTelegramProjectGroupAccounts((current) => current.filter((item) => item.accountId !== account.accountId));
+        }
         setFeedback("消息账号已删除");
+        return true;
+      } catch (error) {
+        recordError("messaging", error);
+        return false;
+      }
+    });
+  }, [fixtureMode, recordError, withBusy]);
+
+  const saveTelegramProjectGroups = useCallback(async (accountId: string, groups: TelegramProjectGroup[]) => {
+    return withBusy("telegram-project-groups", async () => {
+      try {
+        const response = fixtureMode
+          ? { accountId, projectGroups: groups }
+          : await api.updateTelegramProjectGroups(accountId, groups);
+        setTelegramProjectGroupAccounts((current) => [
+          ...current.filter((item) => item.accountId !== accountId),
+          { accountId: response.accountId, projectGroups: response.projectGroups },
+        ]);
+        setFeedback("项目群配置已保存；重启后台服务后生效");
         return true;
       } catch (error) {
         recordError("messaging", error);
@@ -1390,6 +1422,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     gateway,
     accounts,
     accountsRefreshError,
+    telegramProjectGroupAccounts,
     requestLogs,
     requestLogsHasMore,
     settings,
@@ -1416,6 +1449,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     refreshSub2ApiPool,
     toggleAccount,
     deleteAccount,
+    saveTelegramProjectGroups,
     addTelegram,
     addFeishu,
     runCodexAction,
@@ -1441,6 +1475,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     saveSettings, takeOverDaemonManagement, saveSub2Api, selectionState, sessionProviders,
     sessions, setSelection, settings, status, statusMessage, sub2ApiAdmin, sub2ApiPool, sub2ApiPoolError,
     sub2ApiPoolLoading, toggleAccount,
+    saveTelegramProjectGroups, telegramProjectGroupAccounts,
     completeFixtureOnboarding,
   ]);
 

@@ -5,7 +5,7 @@
 ## 目标
 
 - 支持 Telegram Bot 作为新的 IM 通道。
-- Telegram 默认面向 BotFather 创建的私人 bot，由用户直接私聊这个 bot。
+- Telegram 使用一个长期运行的 Bot；私聊和显式配置的 Forum 项目群都可以接入。
 - 复用 Codex remote-control、thread 绑定、approval 队列、turn 状态、消息去重等平台无关逻辑。
 - 保留飞书现有体验，不因为 Telegram 引入大规模重写。
 - Telegram 支持文本、附件、thread 创建/恢复、审批确认、中断/退出命令和原生草稿流式输出。
@@ -80,7 +80,7 @@ Telegram 使用 BotFather 创建的 Bot API，不使用 MTProto/userbot。
 - `getUpdates` 启动前先 `timeout=0` probe，避免旧 long-poll 连接残留后持续 409。
 - 主 polling 遇到 409 backoff 到大于 long-poll timeout 的时间。
 - `allowed_updates` 限定为 `message` / `callback_query`。
-- `getMe` 获取 bot 展示名用于 GUI；当前阶段不接入群聊。
+- `getMe` 获取 bot 展示名用于 GUI；项目群通过 Topic 路由到独立 Codex 会话。
 - 文本按 Telegram 4096 字符限制切块，优先按换行/空格断开，并给多段消息加 continuation 标记。
 - 多段消息之间加短延迟，降低触发限流的概率。
 - 收到用户消息后发 `sendChatAction=typing`，降低“没响应”的体感。
@@ -103,7 +103,7 @@ Telegram 使用 BotFather 创建的 Bot API，不使用 MTProto/userbot。
 - `PendingApproval` 已使用平台中性的 `message_id`。
 - `config.rs` 已新增 `[telegram]`。
 - `bridge.rs` 仍保留较多业务编排逻辑，后续再考虑小型 `ImChannel` 抽象。
-- GUI 已在“聊天工具接入”页管理 Telegram Bot Token，并明确 Telegram 仅支持私聊。
+- GUI 已在“聊天工具接入”页管理 Telegram Bot Token；项目群映射使用 MochiPort 配置里的 `projectGroups`。
 
 这些点需要分阶段处理，避免一次性重构影响飞书稳定性。
 
@@ -153,17 +153,21 @@ Telegram 使用 BotFather 创建的 Bot API，不使用 MTProto/userbot。
 [telegram]
 botToken = ""
 allowedChatIds = []
+projectGroups = []
 ```
 
 MVP 功能：
 
 - 通过 long polling 接收 Telegram Bot 消息。
-- 私聊文本消息转为 `InboundMessage`；群聊消息和群聊按钮回调直接忽略。
+- 私聊文本消息转为 `InboundMessage`；只有 `projectGroups` 中登记的 Forum 群会接收群聊消息。
+- 项目群的第一条普通消息会自动创建 Topic；Topic id 会编码进路由，因此同一项目可以并行运行多个会话。
 - Telegram 菜单提供规范命令：`/new` 创建会话、`/sessions` 恢复历史会话、`/status` 查看状态、`/steer` 调整当前任务方向、`/queue` 排队下一条任务、`/stop` 中断任务、`/exit` 退出会话、`/help` 查看帮助；`/s` 和 `/q` 继续作为兼容别名。
 - 任务运行时直接发送普通文字会调用 `turn/steer` 追加方向；也可使用 `/steer <内容>` 明确表达。使用 `/queue <内容>` 可将消息放入当前 Telegram 会话的有限 FIFO 队列，当前 turn 完成后自动启动下一条。
-- 没有绑定 thread 时，先让用户选择新建会话或恢复历史会话，不自动创建。
+- 私聊没有绑定 thread 时，先让用户选择新建会话或恢复历史会话；已配置的项目群 Topic 则使用项目目录自动创建 Codex thread。
 - approval 使用 inline keyboard，并保留 `/1`、`/y`、`/n` 等文本回复作为备用入口。
 - Codex 最终回复用普通文本发送。
+- Codex 会话名和 Telegram Topic 名称实时双向同步；约每 5 分钟再对账一次，作为断线、丢事件或重启后的兜底。
+- 从私聊迁移到项目群时，点击同步即可自动解除私聊绑定并创建项目群 Topic，原 Codex 会话会保留；同步结果会显示具体会话标题和处理原因。
 
 MVP 之后已补齐：
 
@@ -190,7 +194,7 @@ MVP 之后已补齐：
 - `TelegramApi` 暴露结构化错误，保留 `error_code`、`description`、`retry_after`。已完成。
 - `polling` 启动时执行 `timeout=0` probe，成功后再进入 long polling。已完成。
 - `polling` 遇到 409 conflict 时 backoff，避免旧连接未释放时高频重试。已完成。
-- `polling` 只接受 private chat，群聊消息和群聊 callback_query 不进入 Codex。已完成。
+- `polling` 接受私聊和已登记的 Forum 项目群；未登记的群聊消息仍然忽略。已完成。
 - 收到可处理消息后发送 `sendChatAction=typing`。已完成。
 - `TelegramAdapter` 按 4096 字符限制智能切块，优先在换行/空格处分段。已完成。
 - 多段消息加 continuation 标记，并在段之间短暂 sleep。已完成。

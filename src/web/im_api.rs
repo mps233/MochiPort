@@ -3,15 +3,23 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
+use std::path::Path;
 use std::time::Duration;
 
 use crate::{
     app_state::{ImAccountProfile, ImAccountRuntimeState, SharedState, im_account_key},
     bridge, chain_log,
-    config::{AppConfig, FeishuConfig, TelegramConfig},
+    config::{AppConfig, FeishuConfig, TelegramConfig, TelegramProjectGroupConfig},
+    im::core::{
+        i18n::im_text_for_state,
+        session::bind_thread_to_route,
+        thread::summarize_thread_title,
+    },
     im::feishu::{FeishuApi, FeishuSettings},
     im::telegram::{api::TelegramApi, types::TelegramSettings},
-    types::ImPlatformKind,
+    im_runtime::{RouteTarget, route_from_conversation_key},
+    remote_control_backend,
+    types::{ImPlatformKind, split_telegram_message_target, telegram_message_target},
 };
 
 const IM_ACCOUNT_PROFILE_REFRESH_MS: u128 = 60 * 60 * 1_000;
@@ -191,6 +199,56 @@ pub(super) struct ManageImAccountsResponse {
     accounts: Vec<ImAccountItem>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TelegramProjectGroupAccount {
+    account_id: String,
+    project_groups: Vec<TelegramProjectGroupConfig>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct TelegramProjectGroupsResponse {
+    accounts: Vec<TelegramProjectGroupAccount>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct UpdateTelegramProjectGroupsRequest {
+    account_id: String,
+    project_groups: Vec<TelegramProjectGroupConfig>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SyncTelegramTopicsRequest {
+    account_id: String,
+    chat_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TelegramTopicSyncItem {
+    thread_id: String,
+    title: String,
+    status: String,
+    topic_id: Option<i64>,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TelegramTopicSyncResponse {
+    ok: bool,
+    account_id: String,
+    chat_id: String,
+    total: usize,
+    created: usize,
+    skipped: usize,
+    failed: usize,
+    items: Vec<TelegramTopicSyncItem>,
+}
+
 pub(super) async fn im_accounts(State(state): State<SharedState>) -> Json<ImAccountsResponse> {
     Json(im_accounts_snapshot(&state).await)
 }
@@ -213,6 +271,664 @@ pub(super) async fn im_accounts_snapshot(state: &SharedState) -> ImAccountsRespo
         accounts: im_account_items(state, &config, &runtime),
     }
 }
+pub(super) async fn manage_telegram_project_groups(
+    State(state): State<SharedState>,
+) -> Json<TelegramProjectGroupsResponse> {
+    let config = state.config.lock().await.clone();
+    Json(TelegramProjectGroupsResponse {
+        accounts: config
+            .effective_telegram_accounts()
+            .into_iter()
+            .map(|account| TelegramProjectGroupAccount {
+                account_id: account.account_id,
+                project_groups: account.project_groups,
+            })
+            .collect(),
+    })
+}
+
+pub(super) async fn update_telegram_project_groups(
+    State(state): State<SharedState>,
+    Json(request): Json<UpdateTelegramProjectGroupsRequest>,
+) -> impl IntoResponse {
+    let account_id = request.account_id.trim().to_string();
+    if account_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing accountId" })),
+        );
+    }
+
+    let mut project_groups = Vec::with_capacity(request.project_groups.len());
+    let mut seen_chat_ids = std::collections::HashSet::new();
+    for group in request.project_groups {
+        let chat_id = group.chat_id.trim().to_string();
+        let project_name = group.project_name.trim().to_string();
+        let cwd = group.cwd.trim().to_string();
+        if chat_id.is_empty() || project_name.is_empty() || cwd.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "ok": false,
+                    "error": "each project group needs chatId, projectName, and cwd"
+                })),
+            );
+        }
+        if !seen_chat_ids.insert(chat_id.clone()) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "ok": false, "error": "project group chatId must be unique" })),
+            );
+        }
+        project_groups.push(TelegramProjectGroupConfig {
+            chat_id,
+            project_name,
+            cwd,
+        });
+    }
+
+    let mut config = state.config.lock().await;
+    config.migrate_legacy_im_accounts();
+    let Some(account) = config
+        .telegram_accounts
+        .iter_mut()
+        .find(|account| account.account_id.trim() == account_id)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
+        );
+    };
+    account.project_groups = project_groups.clone();
+    if config.telegram.account_id.trim() == account_id {
+        config.telegram.project_groups = project_groups.clone();
+    }
+    if let Err(err) = config.save(&state.config_path) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "accountId": account_id,
+            "projectGroups": project_groups,
+            "restartRequired": true,
+        })),
+    )
+}
+
+pub(super) async fn sync_telegram_topics(
+    State(state): State<SharedState>,
+    Json(request): Json<SyncTelegramTopicsRequest>,
+) -> impl IntoResponse {
+    const PAGE_LIMIT: u32 = 100;
+    const MAX_PAGES: usize = 20;
+
+    let account_id = request.account_id.trim().to_string();
+    let chat_id = request.chat_id.trim().to_string();
+    if account_id.is_empty() || chat_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "accountId and chatId are required" })),
+        );
+    }
+
+    let account = {
+        let config = state.config.lock().await;
+        config.telegram_account(&account_id)
+    };
+    let Some(account) = account else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
+        );
+    };
+    if !account.is_active() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "Telegram 账号未启用或未配置" })),
+        );
+    }
+    if account.project_group_for_chat(&chat_id).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "请先为这个群组配置项目目录" })),
+        );
+    }
+    let project_cwd = account
+        .project_group_for_chat(&chat_id)
+        .map(|group| group.cwd.trim().to_string())
+        .unwrap_or_default();
+
+    // A sync can take longer than the management client's request timeout.
+    // Keep retries serialized so a timed-out client cannot start a second
+    // pass that creates duplicate Telegram topics.
+    let _sync_guard = state.telegram_topic_sync_ops.lock().await;
+
+    let raw_threads = match remote_control_backend::session_history_threads(
+        &state,
+        remote_control_backend::default_remote_client_key(),
+        PAGE_LIMIT,
+        MAX_PAGES,
+        false,
+    )
+    .await
+    {
+        Ok(threads) => threads,
+        Err(err) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            );
+        }
+    };
+    let history_total = raw_threads.len();
+    let mut raw_threads = raw_threads
+        .into_iter()
+        .filter(|thread| thread_belongs_to_project(thread, &project_cwd))
+        .collect::<Vec<_>>();
+    let filtered = history_total.saturating_sub(raw_threads.len());
+
+    // Do not rely on the server's current list order. The API normally
+    // returns newest-first, but the ordering is not part of the binding
+    // contract; sort by the session's actual update timestamp instead.
+    raw_threads.sort_by(|left, right| {
+        thread_updated_at(left)
+            .cmp(&thread_updated_at(right))
+            .then_with(|| thread_id_for_sort(left).cmp(&thread_id_for_sort(right)))
+    });
+
+    let text = im_text_for_state(&state);
+    let api = TelegramApi::new(TelegramSettings::from_app_config(&account));
+    let mut items = Vec::with_capacity(raw_threads.len());
+    let mut created = 0;
+    let mut skipped = 0;
+    let mut failed = 0;
+
+    for raw_thread in raw_threads {
+        let Some(thread_id) = raw_thread
+            .get("id")
+            .or_else(|| raw_thread.get("threadId"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let title = raw_thread
+            .get("name")
+            .or_else(|| raw_thread.get("title"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| summarize_thread_title(&raw_thread, text));
+        let topic_name = truncate_telegram_topic_name(&title);
+
+        let existing_bindings = {
+            let persisted = state.persisted.lock().await;
+            persisted
+                .im_thread_bindings
+                .iter()
+                .filter_map(|(conversation_key, bound_thread_id)| {
+                    (bound_thread_id == &thread_id)
+                        .then(|| route_from_conversation_key(conversation_key))
+                        .flatten()
+                        .map(|route| (conversation_key.clone(), route))
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let current_topic_bindings = existing_bindings
+            .iter()
+            .filter(|(_, route)| {
+                if route.platform != ImPlatformKind::Telegram
+                    || route.account_id != account_id
+                {
+                    return false;
+                }
+                let (bound_chat_id, topic_id) = split_telegram_message_target(&route.chat_id);
+                bound_chat_id == chat_id && topic_id.is_some()
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let current_topic_keys = current_topic_bindings
+            .iter()
+            .map(|(key, _)| key.as_str())
+            .collect::<Vec<_>>();
+        let private_bindings = existing_bindings
+            .iter()
+            .filter(|(_, route)| {
+                if route.platform != ImPlatformKind::Telegram || route.account_id != account_id {
+                    return false;
+                }
+                let (bound_chat_id, topic_id) = split_telegram_message_target(&route.chat_id);
+                topic_id.is_none()
+                    && account
+                        .allowed_chat_ids
+                        .iter()
+                        .any(|allowed| allowed.trim() == bound_chat_id)
+            })
+            .map(|(key, route)| (key.clone(), route.clone()))
+            .collect::<Vec<_>>();
+        let mut current_topic_alive = false;
+        let mut alive_binding_key = None;
+        let mut probe_error = None;
+        let mut missing_binding_keys = Vec::new();
+        for (conversation_key, route) in &current_topic_bindings {
+            let (bound_chat_id, topic_id) = split_telegram_message_target(&route.chat_id);
+            let Some(topic_id) = topic_id else {
+                continue;
+            };
+            match api
+                .edit_forum_topic(bound_chat_id, topic_id, &topic_name)
+                .await
+            {
+                Ok(true) => {
+                    current_topic_alive = true;
+                    alive_binding_key = Some(conversation_key.clone());
+                }
+                Ok(false) => {
+                    if !current_topic_alive && probe_error.is_none() {
+                        probe_error = Some("Telegram 未确认原 Topic 是否存在".to_string());
+                    }
+                }
+                Err(err) if err.downcast_ref::<crate::im::telegram::api::TelegramApiError>()
+                    .is_some_and(|error| error.is_forum_topic_missing()) =>
+                {
+                    missing_binding_keys.push(conversation_key.clone());
+                }
+                Err(err) => {
+                    state
+                        .push_event(
+                            "warn",
+                            "telegram_topic_probe_failed",
+                            format!("conversation={} err={err}", conversation_key),
+                        )
+                        .await;
+                    if !current_topic_alive && probe_error.is_none() {
+                        probe_error = Some(
+                            "无法确认原 Telegram Topic 是否仍存在，已保留原绑定".to_string(),
+                        );
+                    }
+                }
+            }
+        }
+        if current_topic_alive {
+            probe_error = None;
+            if let Some(conversation_key) = alive_binding_key.as_deref()
+                && let Err(err) = persist_telegram_topic_name(
+                    &state,
+                    conversation_key,
+                    &topic_name,
+                )
+                .await
+            {
+                probe_error = Some(format!("保存 Topic 名称失败：{err}"));
+            }
+        }
+        for conversation_key in &missing_binding_keys {
+            if let Err(err) = crate::im::core::routing::clear_thread_binding_with_reason(
+                &state,
+                conversation_key,
+                "telegram_topic_missing_during_sync",
+            )
+            .await
+            {
+                probe_error = Some(format!("清理已删除 Topic 的绑定失败：{err}"));
+                break;
+            }
+        }
+        let has_other_binding = existing_bindings.iter().any(|(conversation_key, _)| {
+            !current_topic_keys.contains(&conversation_key.as_str())
+                && !missing_binding_keys.iter().any(|key| key == conversation_key)
+                && !private_bindings
+                    .iter()
+                    .any(|(key, _)| key == conversation_key)
+        });
+        if let Some(error) = probe_error {
+            failed += 1;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "failed".to_string(),
+                topic_id: None,
+                error: Some(error),
+            });
+            continue;
+        }
+        if current_topic_alive || has_other_binding {
+            skipped += 1;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "skipped".to_string(),
+                topic_id: None,
+                error: Some(if current_topic_alive {
+                    "已有 Topic".to_string()
+                } else {
+                    "已有其他 Telegram 对话绑定".to_string()
+                }),
+            });
+            continue;
+        }
+
+        let topic = match api.create_forum_topic(&chat_id, &topic_name).await {
+            Ok(topic) if topic.message_thread_id > 0 => topic,
+            Ok(topic) => {
+                failed += 1;
+                items.push(TelegramTopicSyncItem {
+                    thread_id: thread_id.clone(),
+                    title: title.clone(),
+                    status: "failed".to_string(),
+                    topic_id: None,
+                    error: Some(format!(
+                        "Telegram 返回了无效 Topic ID：{}",
+                        topic.message_thread_id
+                    )),
+                });
+                continue;
+            }
+            Err(err) => {
+                failed += 1;
+                items.push(TelegramTopicSyncItem {
+                    thread_id: thread_id.clone(),
+                    title: title.clone(),
+                    status: "failed".to_string(),
+                    topic_id: None,
+                    error: Some(err.to_string()),
+                });
+                continue;
+            }
+        };
+
+        let mut transferred_private_bindings = Vec::new();
+        let mut private_transfer_error = None;
+        for (conversation_key, private_route) in &private_bindings {
+            if let Err(err) = crate::im::core::routing::clear_thread_binding_with_reason(
+                &state,
+                conversation_key,
+                "telegram_topic_transfer_from_private",
+            )
+            .await
+            {
+                let error = cleanup_created_topic(
+                    &api,
+                    &chat_id,
+                    topic.message_thread_id,
+                    anyhow::anyhow!("已绑定到私聊，自动转移失败：{err}"),
+                )
+                .await;
+                failed += 1;
+                items.push(TelegramTopicSyncItem {
+                    thread_id: thread_id.clone(),
+                    title: title.clone(),
+                    status: "failed".to_string(),
+                    topic_id: Some(topic.message_thread_id),
+                    error: Some(error),
+                });
+                private_transfer_error = Some(());
+                break;
+            }
+            transferred_private_bindings.push((conversation_key.clone(), private_route.clone()));
+        }
+        if private_transfer_error.is_some() {
+            restore_private_bindings(
+                &state,
+                &thread_id,
+                &transferred_private_bindings,
+            )
+            .await;
+            continue;
+        }
+
+        let target = telegram_message_target(&chat_id, Some(topic.message_thread_id));
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: format!("telegram:{account_id}:{target}"),
+            account_id: account_id.clone(),
+            chat_id: target,
+            remote_client_key: String::new(),
+        }
+        .with_deterministic_remote_client_key();
+
+        if let Err(err) = remote_control_backend::resume_thread_for_client(
+            &state,
+            &route.remote_client_key,
+            &thread_id,
+            true,
+        )
+        .await
+        {
+            failed += 1;
+            let error = cleanup_created_topic(&api, &chat_id, topic.message_thread_id, err).await;
+            restore_private_bindings(
+                &state,
+                &thread_id,
+                &transferred_private_bindings,
+            )
+            .await;
+            items.push(TelegramTopicSyncItem {
+                thread_id: thread_id.clone(),
+                title: title.clone(),
+                status: "failed".to_string(),
+                topic_id: Some(topic.message_thread_id),
+                error: Some(error),
+            });
+            continue;
+        }
+
+        if let Err(err) = bind_thread_to_route(
+            &state,
+            &route,
+            &thread_id,
+            None,
+            route.remote_client_key.clone(),
+        )
+        .await
+        {
+            failed += 1;
+            let error = cleanup_created_topic(&api, &chat_id, topic.message_thread_id, err).await;
+            restore_private_bindings(
+                &state,
+                &thread_id,
+                &transferred_private_bindings,
+            )
+            .await;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "failed".to_string(),
+                topic_id: Some(topic.message_thread_id),
+                error: Some(error),
+            });
+            continue;
+        }
+
+        if let Err(err) = persist_telegram_topic_name(&state, &route.conversation_key, &topic_name).await {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_topic_binding_state_save_failed",
+                    format!("thread={} err={err}", thread_id),
+                )
+                .await;
+        }
+
+        let migration_note = if transferred_private_bindings.is_empty() {
+            "已创建 Topic".to_string()
+        } else {
+            "已从私聊转移到项目群，Codex 会话已保留".to_string()
+        };
+        created += 1;
+        items.push(TelegramTopicSyncItem {
+            thread_id,
+            title,
+            status: "created".to_string(),
+            topic_id: Some(topic.message_thread_id),
+            error: Some(migration_note),
+        });
+    }
+
+    state
+        .push_event(
+            "info",
+            "telegram_topics_sync_completed",
+            format!(
+                "account={} chat={} total={} filtered={} created={} skipped={} failed={}",
+                account_id,
+                chat_id,
+                items.len(),
+                filtered,
+                created,
+                skipped,
+                failed
+            ),
+        )
+        .await;
+
+    (
+        StatusCode::OK,
+        Json(json!(TelegramTopicSyncResponse {
+            ok: failed == 0,
+            account_id,
+            chat_id,
+            total: items.len(),
+            created,
+            skipped,
+            failed,
+            items,
+        })),
+    )
+}
+
+async fn persist_telegram_topic_name(
+    state: &SharedState,
+    conversation_key: &str,
+    topic_name: &str,
+) -> anyhow::Result<()> {
+    let mut persisted = state.persisted.lock().await;
+    let Some(binding) = persisted
+        .telegram_topic_binding_states
+        .get_mut(conversation_key)
+    else {
+        return Ok(());
+    };
+    binding.topic_name = topic_name.to_string();
+    if binding.codex_title.trim().is_empty() {
+        binding.codex_title = topic_name.to_string();
+    }
+    if binding.last_synced_codex_title.trim().is_empty() {
+        binding.last_synced_codex_title = binding.codex_title.clone();
+    }
+    if binding.last_synced_topic_name.trim().is_empty() {
+        binding.last_synced_topic_name = topic_name.to_string();
+    }
+    binding.last_checked_at_ms = crate::types::now_ms();
+    let path = state.config.lock().await.state_path.clone();
+    persisted.save(&path)
+}
+
+async fn cleanup_created_topic(
+    api: &TelegramApi,
+    chat_id: &str,
+    topic_id: i64,
+    binding_error: anyhow::Error,
+) -> String {
+    let binding_error = binding_error.to_string();
+    match api.delete_forum_topic(chat_id, topic_id).await {
+        Ok(true) => format!("{binding_error}（已清理未绑定的 Topic）"),
+        Ok(false) => format!("{binding_error}（清理未绑定的 Topic 未确认成功）"),
+        Err(cleanup_error) => format!(
+            "{binding_error}（清理未绑定的 Topic 失败：{cleanup_error}）"
+        ),
+    }
+}
+
+async fn restore_private_bindings(
+    state: &SharedState,
+    thread_id: &str,
+    bindings: &[(String, RouteTarget)],
+) {
+    for (conversation_key, route) in bindings {
+        if remote_control_backend::resume_thread_for_client(
+            state,
+            &route.remote_client_key,
+            thread_id,
+            true,
+        )
+        .await
+        .is_ok()
+        {
+            let _ = bind_thread_to_route(
+                state,
+                route,
+                thread_id,
+                None,
+                route.remote_client_key.clone(),
+            )
+            .await;
+        } else {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_topic_private_binding_restore_failed",
+                    format!("thread={} conversation={}", thread_id, conversation_key),
+                )
+                .await;
+        }
+    }
+}
+
+fn thread_belongs_to_project(thread: &serde_json::Value, project_cwd: &str) -> bool {
+    let project_cwd = project_cwd.trim();
+    let Some(thread_cwd) = thread
+        .get("cwd")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let project_root = Path::new(project_cwd);
+    let thread_root = Path::new(thread_cwd);
+    !project_cwd.is_empty()
+        && (thread_root == project_root || thread_root.starts_with(project_root))
+}
+
+fn thread_updated_at(thread: &serde_json::Value) -> i128 {
+    ["updatedAt", "updated_at", "lastUpdatedAt", "last_updated_at"]
+        .iter()
+        .find_map(|key| {
+            let value = thread.get(*key)?;
+            value
+                .as_i64()
+                .map(i128::from)
+                .or_else(|| value.as_u64().map(i128::from))
+                .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+        })
+        .unwrap_or_default()
+}
+
+fn thread_id_for_sort(thread: &serde_json::Value) -> &str {
+    thread
+        .get("id")
+        .or_else(|| thread.get("threadId"))
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+}
+
+fn truncate_telegram_topic_name(title: &str) -> String {
+    let title = title.trim();
+    let title = if title.is_empty() { "未命名会话" } else { title };
+    title.chars().take(64).collect()
+}
+
 
 /// API contract with the SwiftUI client: `APIClient.performIMMutation`
 /// matches this exact string to tell "the account does not exist" apart from
@@ -1124,6 +1840,7 @@ async fn apply_telegram_token(
         display_name: String::new(),
         mention_only,
         allowed_chat_ids: Vec::new(),
+        project_groups: Vec::new(),
     };
     let api = TelegramApi::new(TelegramSettings::from_app_config(&telegram_config));
     let user = match tokio::time::timeout(std::time::Duration::from_secs(5), api.get_me()).await {
@@ -1172,6 +1889,7 @@ async fn persist_telegram_account(
             .find(|account| account.account_id.trim() == telegram_config.account_id.trim())
         {
             telegram_config.allowed_chat_ids = existing.allowed_chat_ids.clone();
+            telegram_config.project_groups = existing.project_groups.clone();
         }
         let token = telegram_config.bot_token.trim().to_string();
         config.telegram_accounts.retain(|account| {
@@ -1383,6 +2101,82 @@ mod tests {
 
     fn state_with_config_path(config_path: std::path::PathBuf, config: AppConfig) -> SharedState {
         AppState::new(config_path, config, None, None)
+    }
+
+    #[test]
+    fn telegram_topic_name_matches_title_and_respects_telegram_limit() {
+        assert_eq!(truncate_telegram_topic_name("  修复启动流程  "), "修复启动流程");
+        assert_eq!(truncate_telegram_topic_name(""), "未命名会话");
+        assert_eq!(truncate_telegram_topic_name(&"x".repeat(80)).chars().count(), 64);
+    }
+
+    #[test]
+    fn telegram_topic_sync_filters_to_project_root_and_children() {
+        let thread = |cwd: &str| json!({ "cwd": cwd });
+        assert!(thread_belongs_to_project(
+            &thread("/Users/miaopasi/codexhub"),
+            "/Users/miaopasi/codexhub"
+        ));
+        assert!(thread_belongs_to_project(
+            &thread("/Users/miaopasi/codexhub/macos"),
+            "/Users/miaopasi/codexhub"
+        ));
+        assert!(!thread_belongs_to_project(
+            &thread("/Users/miaopasi/codexhub-old"),
+            "/Users/miaopasi/codexhub"
+        ));
+        assert!(!thread_belongs_to_project(
+            &thread("/Users/miaopasi/da-2/CellularBridge"),
+            "/Users/miaopasi/codexhub"
+        ));
+        assert!(!thread_belongs_to_project(&json!({}), "/Users/miaopasi/codexhub"));
+    }
+
+    #[test]
+    fn telegram_topic_sync_sorts_by_actual_update_time() {
+        let mut threads = vec![
+            json!({"id": "new", "updatedAt": 300}),
+            json!({"id": "old", "updated_at": 100}),
+            json!({"id": "middle", "updatedAt": 200}),
+        ];
+        threads.sort_by(|left, right| {
+            thread_updated_at(left)
+                .cmp(&thread_updated_at(right))
+                .then_with(|| thread_id_for_sort(left).cmp(&thread_id_for_sort(right)))
+        });
+        assert_eq!(
+            threads
+                .iter()
+                .map(thread_id_for_sort)
+                .collect::<Vec<_>>(),
+            vec!["old", "middle", "new"]
+        );
+    }
+
+    #[test]
+    fn telegram_topic_sync_update_time_accepts_numeric_strings_and_missing_values() {
+        assert_eq!(thread_updated_at(&json!({"updatedAt": "42"})), 42);
+        assert_eq!(thread_updated_at(&json!({"id": "legacy"})), 0);
+    }
+
+    #[test]
+    fn legacy_im_account_match_is_shared_by_toggle_and_clear() {
+        let mut config = AppConfig::default();
+        config.feishu.app_id = "app_42".to_string();
+        config.feishu.enabled = true;
+
+        assert!(legacy_im_account_matches(&config, "feishu", "app_42"));
+        set_legacy_im_account_enabled(&mut config, "feishu", "app_42", false);
+        assert!(!config.feishu.enabled);
+
+        config.feishu.enabled = true;
+        clear_legacy_im_account(&mut config, "feishu", "app_42");
+        assert!(!config.feishu.is_configured());
+
+        config.feishu.app_id = "app_42".to_string();
+        config.feishu.enabled = true;
+        set_legacy_im_account_enabled(&mut config, "feishu", "other", false);
+        assert!(config.feishu.enabled);
     }
 
     #[tokio::test]

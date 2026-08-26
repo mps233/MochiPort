@@ -7,6 +7,42 @@ use serde::{Deserialize, Serialize};
 pub struct PersistedState {
     pub wechat: WechatPersistedState,
     pub im_thread_bindings: HashMap<String, String>,
+    pub telegram_topic_binding_states: HashMap<String, TelegramTopicBindingState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TelegramTopicBindingState {
+    pub thread_id: String,
+    /// The latest Codex title observed for this bound session.
+    pub codex_title: String,
+    pub topic_name: String,
+    /// Names at the last successful two-way synchronization. Keeping both
+    /// sides lets reconciliation tell which side changed since that point.
+    pub last_synced_codex_title: String,
+    pub last_synced_topic_name: String,
+    pub codex_state: String,
+    pub telegram_state: String,
+    pub archived_at_ms: Option<u128>,
+    pub missing_at_ms: Option<u128>,
+    pub last_checked_at_ms: u128,
+}
+
+impl Default for TelegramTopicBindingState {
+    fn default() -> Self {
+        Self {
+            thread_id: String::new(),
+            codex_title: String::new(),
+            topic_name: String::new(),
+            last_synced_codex_title: String::new(),
+            last_synced_topic_name: String::new(),
+            codex_state: "active".to_string(),
+            telegram_state: "open".to_string(),
+            archived_at_ms: None,
+            missing_at_ms: None,
+            last_checked_at_ms: 0,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -69,5 +105,28 @@ mod tests {
             restored.im_thread_bindings.get("telegram:bot:42"),
             Some(&"thread-42".to_string())
         );
+    }
+
+    #[test]
+    fn topic_binding_states_are_optional_for_legacy_state() {
+        let state: PersistedState =
+            serde_json::from_str(r#"{"imThreadBindings":{"telegram:bot:42":"thread-42"}}"#)
+                .expect("legacy state");
+        assert!(state.telegram_topic_binding_states.is_empty());
+    }
+
+    #[test]
+    fn topic_binding_names_are_optional_for_older_bindings() {
+        let state: PersistedState = serde_json::from_str(
+            r#"{"telegramTopicBindingStates":{"telegram:bot:-100|topic=7":{"threadId":"t-7","topicName":"旧标题"}}}"#,
+        )
+        .expect("older topic binding");
+        let binding = state
+            .telegram_topic_binding_states
+            .get("telegram:bot:-100|topic=7")
+            .expect("binding");
+        assert_eq!(binding.thread_id, "t-7");
+        assert_eq!(binding.topic_name, "旧标题");
+        assert!(binding.last_synced_codex_title.is_empty());
     }
 }

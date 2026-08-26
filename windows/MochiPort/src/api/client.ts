@@ -4,6 +4,7 @@ import type {
   GatewayProvider,
   Lifecycle,
   ServiceProbe,
+  TelegramProjectGroup,
 } from "./types";
 import {
   isActionResponse,
@@ -34,6 +35,8 @@ import {
   isSub2ApiAdmin,
   isSub2ApiAdminMutationResponse,
   isSub2ApiPoolResponse,
+  isTelegramProjectGroupsMutationResponse,
+  isTelegramProjectGroupsResponse,
   isWechatOnboardingPollResponse,
   isWechatOnboardingStartResponse,
   isWecomOnboardingPollResponse,
@@ -342,6 +345,14 @@ export const api = {
     const response = await request("api/v1/manage/im/accounts", isIMAccountsResponse);
     return response.accounts;
   },
+  telegramProjectGroups: () => request("api/v1/manage/im/account/telegram/project-groups", isTelegramProjectGroupsResponse),
+  updateTelegramProjectGroups: (accountId: string, projectGroups: TelegramProjectGroup[]) =>
+    request(
+      "api/v1/manage/im/account/telegram/project-groups",
+      isTelegramProjectGroupsMutationResponse,
+      "POST",
+      { accountId, projectGroups },
+    ),
   sub2ApiAdmin: () => request("api/v1/manage/gateway/sub2api", isSub2ApiAdmin),
   updateSub2ApiAdmin: (baseUrl: string, adminApiKey?: string | null, clearAdminApiKey = false) =>
     request("api/v1/manage/gateway/sub2api/config", isSub2ApiAdminMutationResponse, "POST", { baseUrl, adminApiKey, clearAdminApiKey }),

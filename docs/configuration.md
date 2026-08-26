@@ -44,6 +44,7 @@ allowedChatIds = []
 [telegram]
 botToken = ""
 allowedChatIds = []
+projectGroups = []
 
 [wechat]
 accountId = "wechat"
@@ -146,17 +147,18 @@ Empty means no chat-level allowlist.
 [telegram]
 botToken = ""
 allowedChatIds = []
+projectGroups = []
 ```
 
 ### `botToken`
 
 Telegram Bot token from BotFather. `bot_token` is also accepted for hand-written config.
 
-This is the private-chat bot flow: create your own bot with BotFather, then send messages to that bot from your Telegram account. It does not require Telegram `api_id`, `api_hash`, phone login, or an MTProto user session.
+This is the Telegram Bot API flow: create one bot with BotFather and add it to the project groups that MochiPort should control. It does not require Telegram `api_id`, `api_hash`, phone login, or an MTProto user session.
 
-Group chats are intentionally ignored for now. This prevents other group members from controlling the host machine through the bot.
+Private chats continue to use `allowedChatIds`. Forum groups are enabled explicitly through `projectGroups`; other groups are ignored.
 
-Existing configs may still contain `mentionOnly`; it is kept for compatibility but is not used while Telegram group chats are disabled.
+`mentionOnly` is kept for compatibility with the existing Telegram onboarding. Explicit `projectGroups` are treated as trusted project groups, so their messages are accepted without requiring an `@机器人` mention. Private chats still follow `allowedChatIds`.
 
 ### `allowedChatIds`
 
@@ -169,6 +171,21 @@ For stricter setup, prefill this list before starting the bridge:
 ```toml
 allowedChatIds = ["123456789"]
 ```
+
+### `projectGroups`
+
+Each configured forum group represents one project. Enable forum mode, add the bot as an administrator, then add a mapping like this:
+
+```toml
+projectGroups = [
+  { chatId = "-1001234567890", projectName = "MochiPort", cwd = "/Users/you/src/mochiport" },
+  { chatId = "-1009876543210", projectName = "CellularBridge", cwd = "/Users/you/src/CellularBridge" },
+]
+```
+
+The first message in the group automatically creates a Topic named from that message and binds a Codex thread using the configured project directory. Messages in an existing Topic continue in that Topic's thread. The Topic id is part of the conversation route, so multiple Topics in the same project can run and receive replies independently. The bot needs permission to manage topics; otherwise MochiPort sends a setup hint and ignores the message.
+
+Treat a configured project group as trusted: every member who can send messages there can ask Codex to operate on the mapped project directory.
 
 ## WeChat
 

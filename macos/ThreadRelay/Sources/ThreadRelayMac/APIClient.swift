@@ -34,6 +34,53 @@ struct ManageIMAccountsResponse: Decodable, Equatable {
     let accounts: [ManageIMAccount]
 }
 
+struct ManageTelegramProjectGroup: Codable, Equatable, Identifiable {
+    var chatId: String
+    var projectName: String
+    var cwd: String
+
+    var id: String { chatId }
+}
+
+struct ManageTelegramProjectGroupAccount: Codable, Equatable, Identifiable {
+    let accountId: String
+    let projectGroups: [ManageTelegramProjectGroup]
+
+    var id: String { accountId }
+}
+
+struct ManageTelegramProjectGroupsResponse: Codable, Equatable {
+    let accounts: [ManageTelegramProjectGroupAccount]
+}
+
+struct ManageTelegramProjectGroupsMutationResponse: Codable, Equatable, ManageMutationResponse {
+    let ok: Bool
+    let accountId: String
+    let projectGroups: [ManageTelegramProjectGroup]
+    let restartRequired: Bool
+}
+
+struct ManageTelegramTopicSyncItem: Codable, Equatable, Identifiable {
+    let threadId: String
+    let title: String
+    let status: String
+    let topicId: Int64?
+    let error: String?
+
+    var id: String { threadId }
+}
+
+struct ManageTelegramTopicSyncResponse: Codable, Equatable, ManageMutationResponse {
+    let ok: Bool
+    let accountId: String
+    let chatId: String
+    let total: Int
+    let created: Int
+    let skipped: Int
+    let failed: Int
+    let items: [ManageTelegramTopicSyncItem]
+}
+
 /// Common shape of authenticated account mutation responses so one request
 /// path can decode and acknowledge every mutation variant.
 protocol ManageMutationResponse: Decodable {
@@ -1373,6 +1420,39 @@ struct APIClient: Sendable {
         )
     }
 
+    func telegramProjectGroups() async throws -> ManageTelegramProjectGroupsResponse {
+        try await performManageGET(path: "api/v1/manage/im/account/telegram/project-groups")
+    }
+
+    func updateTelegramProjectGroups(
+        accountId: String,
+        projectGroups: [ManageTelegramProjectGroup]
+    ) async throws -> ManageTelegramProjectGroupsMutationResponse {
+        let response: ManageTelegramProjectGroupsMutationResponse = try await performManagePOST(
+            path: "api/v1/manage/im/account/telegram/project-groups",
+            body: TelegramProjectGroupsRequest(accountId: accountId, projectGroups: projectGroups)
+        )
+        guard response.ok else {
+            throw APIClientError.operationFailed("后台服务未完成 Telegram 项目群保存。")
+        }
+        return response
+    }
+
+    func syncTelegramTopics(
+        accountId: String,
+        chatId: String
+    ) async throws -> ManageTelegramTopicSyncResponse {
+        let response: ManageTelegramTopicSyncResponse = try await performManagePOST(
+            path: "api/v1/manage/im/account/telegram/sync-topics",
+            body: TelegramTopicSyncRequest(accountId: accountId, chatId: chatId),
+            timeout: 120
+        )
+        guard response.ok || response.total > 0 else {
+            throw APIClientError.operationFailed("后台服务未完成 Telegram Topic 同步。")
+        }
+        return response
+    }
+
     /// Submit manually entered Feishu app credentials. The daemon validates
     /// them against the Feishu open platform before persisting; the response
     /// never echoes the secret.
@@ -1791,6 +1871,16 @@ struct APIClient: Sendable {
     private struct TelegramConfigureRequest: Encodable {
         let botToken: String
         let mentionOnly: Bool
+    }
+
+    private struct TelegramProjectGroupsRequest: Encodable {
+        let accountId: String
+        let projectGroups: [ManageTelegramProjectGroup]
+    }
+
+    private struct TelegramTopicSyncRequest: Encodable {
+        let accountId: String
+        let chatId: String
     }
 
     private struct FeishuConfigureRequest: Encodable {

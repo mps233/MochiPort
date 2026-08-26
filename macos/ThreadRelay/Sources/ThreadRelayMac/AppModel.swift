@@ -76,6 +76,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var lifecycle: ManageLifecycle?
     @Published private(set) var imAccounts: [ManageIMAccount] = []
     @Published private(set) var imAccountsAvailability: MessagingAccountsAvailability = .loading
+    @Published private(set) var telegramProjectGroupAccounts: [ManageTelegramProjectGroupAccount] = []
     @Published private(set) var codexStatus: ManageCodexStatus?
     @Published private(set) var codexPreflight: ManageCodexPreflightResponse?
     @Published private(set) var codexEnhancedOperation: ManageEnhancedLaunchOperation?
@@ -521,6 +522,7 @@ final class AppModel: ObservableObject {
             dashboard = fixtureDashboard(for: fixtureStatus)
             lifecycle = fixtureLifecycle(for: fixtureStatus)
             imAccounts = fixtureIMAccounts(for: fixtureStatus)
+            telegramProjectGroupAccounts = []
             imAccountsAvailability = fixtureStatus == .available ? .available : .unavailable(fixtureStatus.detail)
             dashboardState = fixtureDashboardState(for: fixtureStatus)
             lastCheckedAt = Date()
@@ -616,6 +618,7 @@ final class AppModel: ObservableObject {
                 // is still running, but expose the missing capability instead
                 // of presenting it as an empty account list.
                 await loadIMAccounts()
+                await loadTelegramProjectGroups()
                 dashboardState = .loaded
             } catch let error as APIClientError {
                 guard lifecycleObservationIsCurrent(observationGeneration) else { return }
@@ -835,6 +838,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func loadTelegramProjectGroups() async {
+        guard fixtureStatus == nil else { return }
+        do {
+            telegramProjectGroupAccounts = try await apiClient.telegramProjectGroups().accounts
+        } catch let error as APIClientError where error == .featureUnavailable {
+            telegramProjectGroupAccounts = []
+        } catch {
+            // Project-group support is optional on older daemons. Keep the
+            // account page usable even when this secondary request fails.
+        }
+    }
+
     func logDirectory() async -> URL? {
         guard fixtureStatus == nil else { return nil }
         return try? await apiClient.logDirectory()
@@ -887,6 +902,7 @@ final class AppModel: ObservableObject {
                 .sorted()
             case .messaging:
                 await loadIMAccounts()
+                await loadTelegramProjectGroups()
             case .gateway:
                 async let gatewayResponse = apiClient.gateway()
                 async let sub2ApiResponse = try? apiClient.sub2ApiAdmin()
@@ -2559,6 +2575,9 @@ final class AppModel: ObservableObject {
             imAccounts.removeAll {
                 $0.platform == account.platform && $0.accountId == account.accountId
             }
+            if account.platform == "telegram" {
+                telegramProjectGroupAccounts.removeAll { $0.accountId == account.accountId }
+            }
             return true
         }
         do {
@@ -2571,6 +2590,80 @@ final class AppModel: ObservableObject {
             return true
         } catch {
             updateIMAccountsAvailability(for: error)
+            accountOperationError = userFacingMessage(for: error)
+            return false
+        }
+    }
+
+    func telegramProjectGroups(for accountId: String) -> [ManageTelegramProjectGroup] {
+        telegramProjectGroupAccounts.first(where: { $0.accountId == accountId })?.projectGroups ?? []
+    }
+
+    @discardableResult
+    func saveTelegramProjectGroups(
+        accountId: String,
+        projectGroups: [ManageTelegramProjectGroup]
+    ) async -> Bool {
+        if fixtureStatus != nil {
+            let next = ManageTelegramProjectGroupAccount(accountId: accountId, projectGroups: projectGroups)
+            telegramProjectGroupAccounts.removeAll { $0.accountId == accountId }
+            telegramProjectGroupAccounts.append(next)
+            actionFeedback = ActionFeedback(message: "项目群配置已保存；重启后台服务后生效")
+            return true
+        }
+        do {
+            let response = try await apiClient.updateTelegramProjectGroups(
+                accountId: accountId,
+                projectGroups: projectGroups
+            )
+            telegramProjectGroupAccounts.removeAll { $0.accountId == accountId }
+            telegramProjectGroupAccounts.append(
+                ManageTelegramProjectGroupAccount(
+                    accountId: response.accountId,
+                    projectGroups: response.projectGroups
+                )
+            )
+            accountOperationError = nil
+            actionFeedback = ActionFeedback(message: "项目群配置已保存；重启后台服务后生效")
+            return true
+        } catch {
+            accountOperationError = userFacingMessage(for: error)
+            return false
+        }
+    }
+
+    @discardableResult
+    func syncTelegramTopics(accountId: String, chatId: String) async -> Bool {
+        if fixtureStatus != nil {
+            actionFeedback = ActionFeedback(message: "预览模式：已模拟同步 Telegram 会话 Topic")
+            return true
+        }
+        do {
+            let response = try await apiClient.syncTelegramTopics(
+                accountId: accountId,
+                chatId: chatId
+            )
+            accountOperationError = nil
+            let details = response.items.compactMap { item -> String? in
+                guard let reason = item.error?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !reason.isEmpty else { return nil }
+                return "「\(item.title)」：\(reason)"
+            }
+            let detailText: String
+            if details.isEmpty {
+                detailText = ""
+            } else {
+                let visible = details.prefix(20).joined(separator: "\n")
+                let remaining = details.count - min(details.count, 20)
+                detailText = remaining > 0
+                    ? "\n\(visible)\n还有 \(remaining) 个会话未展开"
+                    : "\n\(visible)"
+            }
+            actionFeedback = ActionFeedback(
+                message: "Topic 同步完成：共 \(response.total) 个，创建 \(response.created) 个，跳过 \(response.skipped) 个，失败 \(response.failed) 个\(detailText)"
+            )
+            return true
+        } catch {
             accountOperationError = userFacingMessage(for: error)
             return false
         }

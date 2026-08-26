@@ -62,15 +62,34 @@ pub(crate) async fn bind_thread_to_route(
 
     let mut persisted = state.persisted.lock().await;
     let previous_bindings = persisted.im_thread_bindings.clone();
+    let previous_topic_states = persisted.telegram_topic_binding_states.clone();
     persisted
         .im_thread_bindings
         .retain(|_, bound_thread_id| bound_thread_id != thread_id);
+    persisted
+        .telegram_topic_binding_states
+        .retain(|_, binding| binding.thread_id != thread_id);
     if route.platform == ImPlatformKind::Telegram {
         persisted
             .im_thread_bindings
             .insert(route.conversation_key.clone(), thread_id.to_string());
+        let mut binding_state = crate::store::TelegramTopicBindingState {
+            thread_id: thread_id.to_string(),
+            ..Default::default()
+        };
+        if crate::types::split_telegram_message_target(&route.chat_id)
+            .1
+            .is_none()
+        {
+            binding_state.telegram_state = "open".to_string();
+        }
+        persisted
+            .telegram_topic_binding_states
+            .insert(route.conversation_key.clone(), binding_state);
     }
-    if persisted.im_thread_bindings != previous_bindings {
+    if persisted.im_thread_bindings != previous_bindings
+        || persisted.telegram_topic_binding_states != previous_topic_states
+    {
         let state_path = state.config.lock().await.state_path.clone();
         persisted.save(&state_path)?;
     }

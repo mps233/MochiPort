@@ -153,6 +153,26 @@ impl InboundMessage {
     }
 }
 
+/// Telegram uses an encoded target internally so the existing IM outbound
+/// APIs can keep accepting a single string while still addressing a forum
+/// topic. Plain private-chat targets remain unchanged.
+pub fn telegram_message_target(chat_id: &str, topic_id: Option<i64>) -> String {
+    let (chat_id, existing_topic_id) = split_telegram_message_target(chat_id);
+    let topic_id = topic_id.or(existing_topic_id);
+    match topic_id {
+        Some(topic_id) => format!("{chat_id}|topic={topic_id}"),
+        None => chat_id.to_string(),
+    }
+}
+
+pub fn split_telegram_message_target(target: &str) -> (&str, Option<i64>) {
+    let Some((chat_id, suffix)) = target.split_once("|topic=") else {
+        return (target, None);
+    };
+    let topic_id = suffix.parse::<i64>().ok().filter(|value| *value > 0);
+    (chat_id, topic_id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventRecord {
@@ -167,4 +187,23 @@ pub fn now_ms() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|v| v.as_millis())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{split_telegram_message_target, telegram_message_target};
+
+    #[test]
+    fn telegram_topic_target_round_trips() {
+        let target = telegram_message_target("-100", Some(17));
+        assert_eq!(target, "-100|topic=17");
+        assert_eq!(split_telegram_message_target(&target), ("-100", Some(17)));
+        assert_eq!(telegram_message_target(&target, None), target);
+    }
+
+    #[test]
+    fn telegram_private_target_stays_unchanged() {
+        assert_eq!(telegram_message_target("42", None), "42");
+        assert_eq!(split_telegram_message_target("42"), ("42", None));
+    }
 }

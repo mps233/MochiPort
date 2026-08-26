@@ -180,6 +180,15 @@ pub fn router(state: SharedState) -> Router {
             post(im_api::manage_configure_telegram_account),
         )
         .route(
+            "/im/account/telegram/project-groups",
+            get(im_api::manage_telegram_project_groups)
+                .post(im_api::update_telegram_project_groups),
+        )
+        .route(
+            "/im/account/telegram/sync-topics",
+            post(im_api::sync_telegram_topics),
+        )
+        .route(
             "/im/account/feishu",
             post(onboarding::manage_configure_feishu_account),
         )

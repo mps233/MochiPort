@@ -21,6 +21,10 @@ import type {
   Settings,
   Sub2ApiAdmin,
   Sub2ApiPool,
+  TelegramProjectGroup,
+  TelegramProjectGroupAccount,
+  TelegramProjectGroupsMutationResponse,
+  TelegramProjectGroupsResponse,
 } from "./types";
 
 export type Validator<T> = (value: unknown) => value is T;
@@ -335,6 +339,33 @@ export interface IMAccountsResponse {
 
 export const isIMAccountsResponse: Validator<IMAccountsResponse> = (value): value is IMAccountsResponse =>
   isObject(value) && Array.isArray(value.accounts) && value.accounts.every(isIMAccount);
+
+function isTelegramProjectGroup(value: unknown): value is TelegramProjectGroup {
+  return isObject(value)
+    && isString(value.chatId)
+    && isString(value.projectName)
+    && isString(value.cwd);
+}
+
+function isTelegramProjectGroupAccount(value: unknown): value is TelegramProjectGroupAccount {
+  return isObject(value)
+    && isString(value.accountId)
+    && Array.isArray(value.projectGroups)
+    && value.projectGroups.every(isTelegramProjectGroup);
+}
+
+export const isTelegramProjectGroupsResponse: Validator<TelegramProjectGroupsResponse> =
+  (value): value is TelegramProjectGroupsResponse => isObject(value)
+    && Array.isArray(value.accounts)
+    && value.accounts.every(isTelegramProjectGroupAccount);
+
+export const isTelegramProjectGroupsMutationResponse: Validator<TelegramProjectGroupsMutationResponse> =
+  (value): value is TelegramProjectGroupsMutationResponse => isObject(value)
+    && value.ok === true
+    && isString(value.accountId)
+    && Array.isArray(value.projectGroups)
+    && value.projectGroups.every(isTelegramProjectGroup)
+    && isBoolean(value.restartRequired);
 
 function isRequestLog(value: unknown): value is RequestLog {
   return isObject(value)

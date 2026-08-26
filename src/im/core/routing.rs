@@ -134,11 +134,15 @@ async fn forget_persisted_thread_binding(
     }
 
     let mut persisted = state.persisted.lock().await;
-    if persisted
+    let removed_binding = persisted
         .im_thread_bindings
         .remove(conversation_key)
-        .is_none()
-    {
+        .is_some();
+    let removed_state = persisted
+        .telegram_topic_binding_states
+        .remove(conversation_key)
+        .is_some();
+    if !removed_binding && !removed_state {
         return Ok(());
     }
     let state_path = state.config.lock().await.state_path.clone();

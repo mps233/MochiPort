@@ -469,6 +469,37 @@ pub async fn start_thread_for_client(
     Ok(thread_id)
 }
 
+/// Update the user-visible name of an existing Codex thread through the
+/// app-server protocol. This is the supported counterpart to Telegram Topic
+/// renames; callers should persist their local sync state only after this
+/// request succeeds.
+pub async fn set_thread_name_for_client(
+    state: &SharedState,
+    client_key: &str,
+    thread_id: &str,
+    name: &str,
+) -> Result<()> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(anyhow!("thread name must not be empty"));
+    }
+    request_for_client(
+        state,
+        client_key,
+        "thread/name/set",
+        thread_set_name_params(thread_id, name),
+    )
+    .await?;
+    Ok(())
+}
+
+fn thread_set_name_params(thread_id: &str, name: &str) -> Value {
+    json!({
+        "threadId": thread_id,
+        "name": name,
+    })
+}
+
 pub async fn config_read_for_client(
     state: &SharedState,
     client_key: &str,
@@ -1059,7 +1090,7 @@ fn turn_input_items(text: &str, attachments: &[InboundAttachment]) -> Vec<Value>
 
 #[cfg(test)]
 mod tests {
-    use super::turn_input_items;
+    use super::{thread_set_name_params, turn_input_items};
     use crate::types::InboundAttachment;
 
     #[test]
@@ -1079,5 +1110,13 @@ mod tests {
         assert_eq!(items[0]["text"], "adjust the plan");
         assert_eq!(items[1]["type"], "localImage");
         assert_eq!(items[1]["path"], "/tmp/screen.png");
+    }
+
+    #[test]
+    fn thread_name_set_params_match_app_server_protocol() {
+        assert_eq!(
+            thread_set_name_params("thread-7", "Renamed"),
+            serde_json::json!({"threadId": "thread-7", "name": "Renamed"})
+        );
     }
 }

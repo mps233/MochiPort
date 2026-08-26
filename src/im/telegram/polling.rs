@@ -1,7 +1,8 @@
 use anyhow::Result;
 use sha2::Digest;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
@@ -10,8 +11,10 @@ use crate::{
     app_state::{ImAccountRuntimeState, SharedState, im_account_key},
     chain_log,
     im::core::i18n::im_text_for_state,
+    im::core::thread::summarize_thread_title,
     types::{
         ChatType, ImPlatformKind, InboundAction, InboundMessage, ThreadRouteDirection, now_ms,
+        telegram_message_target,
     },
 };
 
@@ -26,6 +29,8 @@ const TELEGRAM_LONG_POLL_TIMEOUT_SECONDS: u32 = 25;
 const TELEGRAM_STARTUP_PROBE_RETRY_SECONDS: u64 = 5;
 const TELEGRAM_CONFLICT_BACKOFF_SECONDS: u64 = 35;
 const TELEGRAM_GENERIC_RETRY_SECONDS: u64 = 5;
+const TELEGRAM_TOPIC_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(300);
+const TELEGRAM_TOPIC_STATE_GRACE: Duration = Duration::from_secs(300);
 
 pub async fn listen_polling(
     state: SharedState,
@@ -38,6 +43,7 @@ pub async fn listen_polling(
     let mut offset = None;
     set_polling_state(&state, &account_id, true, false, None).await;
     claim_polling_slot(&state, &api, &mut offset).await;
+    let mut last_reconciliation_at = Instant::now() - TELEGRAM_TOPIC_RECONCILIATION_INTERVAL;
     loop {
         let updates = match api
             .get_updates(offset, TELEGRAM_LONG_POLL_TIMEOUT_SECONDS)
@@ -86,13 +92,32 @@ pub async fn listen_polling(
                 continue;
             }
             if let Some(message) = update.message {
+                if handle_forum_topic_service_message(&state, &api, &message).await {
+                    continue;
+                }
+                if message.from.as_ref().is_some_and(|user| user.is_bot) {
+                    continue;
+                }
                 match ensure_message_chat_allowed(&state, &api, &mut chat_access, &message).await {
                     TelegramChatAccessDecision::Allowed => {
-                        if let Some(mut inbound) = inbound_from_message(
+                        let inbound = inbound_from_message(
                             api.settings(),
                             &chat_access.allowed_chat_ids,
                             &message,
-                        ) {
+                        );
+                        let inbound = match inbound {
+                            Some(inbound) => Some(inbound),
+                            None => {
+                                inbound_from_message_after_topic_creation(
+                                    &api,
+                                    api.settings(),
+                                    &chat_access.allowed_chat_ids,
+                                    &message,
+                                )
+                                .await
+                            }
+                        };
+                        if let Some(mut inbound) = inbound {
                             let collection =
                                 collect_telegram_attachments(&api, &attachment_root, &message)
                                     .await;
@@ -149,7 +174,603 @@ pub async fn listen_polling(
                 )
                 .await;
         }
+        if last_reconciliation_at.elapsed() >= TELEGRAM_TOPIC_RECONCILIATION_INTERVAL {
+            reconcile_telegram_topic_bindings(&state, &api).await;
+            last_reconciliation_at = Instant::now();
+        }
     }
+}
+
+async fn handle_forum_topic_service_message(
+    state: &SharedState,
+    api: &TelegramApi,
+    message: &TelegramMessage,
+) -> bool {
+    let Some(topic_id) = message.message_thread_id else {
+        return false;
+    };
+    let topic_state = if message.forum_topic_closed.is_some() {
+        Some("closed")
+    } else if message.forum_topic_reopened.is_some() {
+        Some("open")
+    } else if message.forum_topic_created.is_some() || message.forum_topic_edited.is_some() {
+        Some("open")
+    } else {
+        None
+    };
+    let Some(topic_state) = topic_state else {
+        return false;
+    };
+    let topic_name = message
+        .forum_topic_created
+        .as_ref()
+        .map(|topic| topic.name.trim())
+        .filter(|name| !name.is_empty())
+        .or_else(|| {
+            message
+                .forum_topic_edited
+                .as_ref()
+                .and_then(|topic| topic.name.as_deref())
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+        })
+        .map(str::to_string);
+    let key = format!(
+        "telegram:{}:{}",
+        api.settings().account_id(),
+        crate::types::telegram_message_target(&message.chat.id.to_string(), Some(topic_id))
+    );
+    // Telegram echoes edits made through editForumTopic as a service message.
+    // Consume our own expected value before touching persistence so a bot
+    // initiated rename does not trigger a reverse Codex request.
+    let topic_name_was_expected = if let Some(name) = topic_name.as_deref() {
+        let mut ops = state.telegram_topic_name_sync_ops.lock().await;
+        match ops.get(&key) {
+            Some(expected) if expected == name => {
+                ops.remove(&key);
+                true
+            }
+            Some(_) => {
+                // A different name means the user renamed the Topic again;
+                // discard the stale bot marker and process this as a real
+                // external change.
+                ops.remove(&key);
+                false
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+    let topic_name = topic_name.map(|name| truncate_topic_name(&name));
+    let topic_name_for_sync = topic_name.clone();
+    let mut pending_codex_sync = None;
+    {
+        let mut persisted = state.persisted.lock().await;
+        if let Some(binding) = persisted.telegram_topic_binding_states.get_mut(&key) {
+            let bound_thread_id = binding.thread_id.clone();
+            binding.telegram_state = topic_state.to_string();
+            if let Some(topic_name) = topic_name {
+                binding.topic_name = topic_name.clone();
+                if topic_name_was_expected {
+                    binding.codex_title = topic_name.clone();
+                    binding.last_synced_codex_title = topic_name.clone();
+                    binding.last_synced_topic_name = topic_name;
+                } else if !bound_thread_id.trim().is_empty() {
+                    pending_codex_sync = Some((
+                        bound_thread_id,
+                        topic_name_for_sync.clone().unwrap_or_default(),
+                    ));
+                }
+            }
+            binding.last_checked_at_ms = crate::types::now_ms();
+            let path = state.config.lock().await.state_path.clone();
+            if let Err(err) = persisted.save(&path) {
+                chain_log::write_diagnostic_lazy(|| {
+                    format!(
+                        "[telegram_topic] event=state_save_failed key={} err={err}",
+                        key
+                    )
+                });
+            }
+        }
+    }
+
+    if let Some((thread_id, topic_name)) = pending_codex_sync
+        && !topic_name.trim().is_empty()
+    {
+        let remote_client_key = state
+            .runtime
+            .lock()
+            .await
+            .route_for_thread(&thread_id)
+            .map(|route| route.remote_client_key)
+            .or_else(|| {
+                crate::im_runtime::route_from_conversation_key(&key)
+                    .map(|route| route.remote_client_key)
+            })
+            .unwrap_or_default();
+        {
+            let mut ops = state.codex_thread_name_sync_ops.lock().await;
+            ops.insert(thread_id.clone(), topic_name.clone());
+        }
+        let marker_state = state.clone();
+        let marker_thread_id = thread_id.clone();
+        let marker_topic_name = topic_name.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            let mut ops = marker_state.codex_thread_name_sync_ops.lock().await;
+            if ops
+                .get(&marker_thread_id)
+                .is_some_and(|expected| expected == &marker_topic_name)
+            {
+                ops.remove(&marker_thread_id);
+            }
+        });
+        match crate::remote_control_backend::set_thread_name_for_client(
+            state,
+            &remote_client_key,
+            &thread_id,
+            &topic_name,
+        )
+        .await
+        {
+            Ok(()) => {
+                    let mut persisted = state.persisted.lock().await;
+                    if let Some(binding) = persisted.telegram_topic_binding_states.get_mut(&key)
+                        && binding.thread_id == thread_id
+                    {
+                        binding.codex_title = topic_name.clone();
+                        binding.topic_name = topic_name.clone();
+                        binding.last_synced_codex_title = topic_name.clone();
+                        binding.last_synced_topic_name = topic_name.clone();
+                        binding.last_checked_at_ms = crate::types::now_ms();
+                        let path = state.config.lock().await.state_path.clone();
+                        if let Err(err) = persisted.save(&path) {
+                            chain_log::write_diagnostic_lazy(|| {
+                                format!(
+                                    "[telegram_topic] event=sync_save_failed key={} err={err}",
+                                    key
+                                )
+                            });
+                        }
+                    }
+                    state
+                        .push_event(
+                            "info",
+                            "telegram_topic_name_synced_to_codex",
+                            format!("thread={} name={}", thread_id, topic_name),
+                        )
+                        .await;
+            }
+            Err(err) => {
+                    state
+                        .codex_thread_name_sync_ops
+                        .lock()
+                        .await
+                        .remove(&thread_id);
+                    state
+                        .push_event(
+                            "warn",
+                            "telegram_topic_name_sync_to_codex_failed",
+                            format!("thread={} err={err}", thread_id),
+                        )
+                        .await;
+            }
+        }
+    }
+    true
+}
+
+async fn reconcile_telegram_topic_bindings(state: &SharedState, api: &TelegramApi) {
+    let account_id = api.settings().account_id();
+    let (active, archived) = tokio::join!(
+        crate::remote_control_backend::session_history_threads(
+            state,
+            crate::remote_control_backend::default_remote_client_key(),
+            100,
+            20,
+            false,
+        ),
+        crate::remote_control_backend::session_history_threads(
+            state,
+            crate::remote_control_backend::default_remote_client_key(),
+            100,
+            20,
+            true,
+        )
+    );
+    let Ok(active) = active else {
+        state
+            .push_event(
+                "warn",
+                "telegram_topic_reconcile_skipped",
+                "active session query failed",
+            )
+            .await;
+        return;
+    };
+    let Ok(archived) = archived else {
+        state
+            .push_event(
+                "warn",
+                "telegram_topic_reconcile_skipped",
+                "archived session query failed",
+            )
+            .await;
+        return;
+    };
+    let active_ids = session_ids(&active);
+    let archived_ids = session_ids(&archived);
+    let text = im_text_for_state(state);
+    let mut codex_titles = thread_titles(&archived, text);
+    codex_titles.extend(thread_titles(&active, text));
+    let bindings = {
+        let persisted = state.persisted.lock().await;
+        persisted
+            .im_thread_bindings
+            .iter()
+            .filter(|(key, _)| key.starts_with(&format!("telegram:{account_id}:")))
+            .map(|(key, thread_id)| {
+                (
+                    key.clone(),
+                    thread_id.clone(),
+                    persisted.telegram_topic_binding_states.get(key).cloned(),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    for (conversation_key, thread_id, state_snapshot) in bindings {
+        let Some(route) = crate::im_runtime::route_from_conversation_key(&conversation_key) else {
+            continue;
+        };
+        let (_, topic_id) = crate::types::split_telegram_message_target(&route.chat_id);
+        let Some(topic_id) = topic_id else {
+            continue;
+        };
+        let (raw_chat_id, _) = crate::types::split_telegram_message_target(&route.chat_id);
+        let mut next_state = state_snapshot.unwrap_or_default();
+        next_state.thread_id = thread_id.clone();
+        let current_topic_name = next_state
+            .topic_name
+            .trim()
+            .to_string();
+        let codex_title = codex_titles.get(&thread_id).cloned();
+        let target_topic_name = codex_title
+            .as_deref()
+            .map(truncate_topic_name)
+            .unwrap_or_else(|| {
+                if current_topic_name.is_empty() {
+                    "未命名会话".to_string()
+                } else {
+                    current_topic_name.clone()
+                }
+            });
+        let baseline_codex_title = next_state.last_synced_codex_title.trim();
+        let baseline_topic_name = if next_state.last_synced_topic_name.trim().is_empty() {
+            current_topic_name.as_str()
+        } else {
+            next_state.last_synced_topic_name.trim()
+        };
+        let initial_sync = baseline_codex_title.is_empty();
+        let codex_changed = !initial_sync
+            && codex_title
+                .as_deref()
+                .is_some_and(|title| title != baseline_codex_title);
+        let telegram_changed = !initial_sync
+            && !current_topic_name.is_empty()
+            && !baseline_topic_name.is_empty()
+            && current_topic_name != baseline_topic_name;
+        // If both sides changed since the last successful pass, Codex remains
+        // authoritative and the Topic is brought back to the Codex title.
+        let telegram_to_codex = !codex_changed && telegram_changed;
+        let probe_name = if telegram_to_codex {
+            current_topic_name.as_str()
+        } else {
+            target_topic_name.as_str()
+        };
+        match api.edit_forum_topic(raw_chat_id, topic_id, probe_name).await {
+            Ok(true) => {
+                if current_topic_name.is_empty() {
+                    next_state.topic_name = probe_name.to_string();
+                    if next_state.last_synced_topic_name.trim().is_empty() {
+                        next_state.last_synced_topic_name = probe_name.to_string();
+                    }
+                }
+            }
+            Ok(false) => {
+                state
+                    .push_event(
+                        "warn",
+                        "telegram_topic_probe_failed",
+                        format!("chat={} topic={} api returned false", route.chat_id, topic_id),
+                    )
+                    .await;
+                continue;
+            }
+            Err(err)
+                if err
+                    .downcast_ref::<TelegramApiError>()
+                    .is_some_and(|error| error.is_forum_topic_missing()) =>
+            {
+                let clear_result = crate::im::core::routing::clear_thread_binding_with_reason(
+                    state,
+                    &conversation_key,
+                    "telegram_topic_missing_during_reconcile",
+                )
+                .await;
+                match clear_result {
+                    Ok(()) => {
+                        state
+                            .push_event(
+                                "info",
+                                "telegram_topic_binding_removed",
+                                format!("chat={} topic={} no longer exists", route.chat_id, topic_id),
+                            )
+                            .await;
+                    }
+                    Err(err) => {
+                        state
+                            .push_event(
+                                "warn",
+                                "telegram_topic_binding_remove_failed",
+                                format!(
+                                    "chat={} topic={} clear binding failed: {err}",
+                                    route.chat_id, topic_id
+                                ),
+                            )
+                            .await;
+                    }
+                }
+                continue;
+            }
+            Err(err) => {
+                state
+                    .push_event(
+                        "warn",
+                        "telegram_topic_probe_failed",
+                        format!("chat={} topic={} err={err}", route.chat_id, topic_id),
+                    )
+                    .await;
+                continue;
+            }
+        }
+        let now = crate::types::now_ms();
+        if let Some(codex_title) = codex_title.as_deref() {
+            if telegram_to_codex {
+                match crate::remote_control_backend::set_thread_name_for_client(
+                    state,
+                    &route.remote_client_key,
+                    &thread_id,
+                    &current_topic_name,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        next_state.codex_title = current_topic_name.clone();
+                        next_state.topic_name = current_topic_name.clone();
+                        next_state.last_synced_codex_title = current_topic_name.clone();
+                        next_state.last_synced_topic_name = current_topic_name.clone();
+                        state
+                            .push_event(
+                                "info",
+                                "telegram_topic_name_synced_to_codex",
+                                format!("thread={} name={}", thread_id, current_topic_name),
+                            )
+                            .await;
+                    }
+                    Err(err) => {
+                        next_state.codex_title = codex_title.to_string();
+                        state
+                            .push_event(
+                                "warn",
+                                "telegram_topic_name_sync_to_codex_failed",
+                                format!("thread={} err={err}", thread_id),
+                            )
+                            .await;
+                    }
+                }
+            } else {
+                next_state.codex_title = codex_title.to_string();
+                next_state.topic_name = target_topic_name.clone();
+                next_state.last_synced_codex_title = codex_title.to_string();
+                next_state.last_synced_topic_name = target_topic_name.clone();
+            }
+        } else if !current_topic_name.is_empty() {
+            next_state.topic_name = current_topic_name;
+        }
+        // Older bindings may have neither a saved Topic name nor a Codex
+        // title. Once the probe above succeeds, persist a complete baseline
+        // so later reconciliations can detect a real rename or deletion.
+        if next_state.codex_title.trim().is_empty() {
+            next_state.codex_title = target_topic_name.clone();
+        }
+        if next_state.last_synced_codex_title.trim().is_empty() {
+            next_state.last_synced_codex_title = next_state.codex_title.clone();
+        }
+        if next_state.last_synced_topic_name.trim().is_empty()
+            && !next_state.topic_name.trim().is_empty()
+        {
+            next_state.last_synced_topic_name = next_state.topic_name.clone();
+        }
+        next_state.last_checked_at_ms = now;
+        let should_delete = if active_ids.contains(&thread_id) {
+            next_state.codex_state = "active".to_string();
+            next_state.archived_at_ms = None;
+            next_state.missing_at_ms = None;
+            false
+        } else if archived_ids.contains(&thread_id) {
+            next_state.codex_state = "archived".to_string();
+            next_state.missing_at_ms = None;
+            let archived_at = next_state.archived_at_ms.get_or_insert(now);
+            now.saturating_sub(*archived_at) >= TELEGRAM_TOPIC_STATE_GRACE.as_millis()
+        } else {
+            next_state.codex_state = "missing".to_string();
+            let missing_at = next_state.missing_at_ms.get_or_insert(now);
+            now.saturating_sub(*missing_at) >= TELEGRAM_TOPIC_STATE_GRACE.as_millis()
+        };
+
+        if should_delete {
+            match api.delete_forum_topic(raw_chat_id, topic_id).await {
+                Ok(true) => {
+                    let _ = crate::im::core::routing::clear_thread_binding_with_reason(
+                        state,
+                        &conversation_key,
+                        "codex_session_archived_or_deleted",
+                    )
+                    .await;
+                    continue;
+                }
+                Ok(false) => {
+                    state
+                        .push_event(
+                            "warn",
+                            "telegram_topic_delete_failed",
+                            format!(
+                                "chat={} topic={} api returned false",
+                                route.chat_id, topic_id
+                            ),
+                        )
+                        .await;
+                }
+                Err(err) => {
+                    state
+                        .push_event(
+                            "warn",
+                            "telegram_topic_delete_failed",
+                            format!("chat={} topic={} err={err}", route.chat_id, topic_id),
+                        )
+                        .await;
+                }
+            }
+        }
+        let mut persisted = state.persisted.lock().await;
+        persisted
+            .telegram_topic_binding_states
+            .insert(conversation_key, next_state);
+        let path = state.config.lock().await.state_path.clone();
+        if let Err(err) = persisted.save(&path) {
+            chain_log::write_diagnostic_lazy(|| {
+                format!("[telegram_topic] event=reconcile_save_failed err={err}")
+            });
+        }
+    }
+}
+
+fn thread_titles(threads: &[serde_json::Value], text: crate::im::core::i18n::ImText) -> HashMap<String, String> {
+    threads
+        .iter()
+        .filter_map(|thread| {
+            let thread_id = thread
+                .get("id")
+                .or_else(|| thread.get("threadId"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())?
+                .to_string();
+            let title = summarize_thread_title(thread, text);
+            Some((thread_id, title))
+        })
+        .collect()
+}
+
+pub(crate) fn truncate_topic_name(title: &str) -> String {
+    let title = title.trim();
+    let title = if title.is_empty() { "未命名会话" } else { title };
+    title.chars().take(64).collect()
+}
+
+fn session_ids(threads: &[serde_json::Value]) -> HashSet<String> {
+    threads
+        .iter()
+        .filter_map(|thread| {
+            thread
+                .get("id")
+                .or_else(|| thread.get("threadId"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+async fn inbound_from_message_after_topic_creation(
+    api: &TelegramApi,
+    settings: &TelegramSettings,
+    allowed_chat_ids: &[String],
+    message: &TelegramMessage,
+) -> Option<InboundMessage> {
+    if message.chat.kind == "private" || message.message_thread_id.is_some() {
+        return None;
+    }
+    let raw_chat_id = message.chat.id.to_string();
+    let project = settings.project_group_for_chat(&raw_chat_id)?;
+    let text = message
+        .text
+        .as_deref()
+        .or(message.caption.as_deref())
+        .unwrap_or_default()
+        .trim();
+    if text.is_empty() && !message_has_media(message) {
+        return None;
+    }
+
+    let topic_name = forum_topic_name(project.project_name.as_str(), text);
+    let topic = match api.create_forum_topic(&raw_chat_id, &topic_name).await {
+        Ok(topic) if topic.message_thread_id > 0 => topic,
+        Ok(topic) => {
+            chain_log::write_diagnostic_lazy(|| {
+                format!(
+                    "[telegram_topic] event=invalid_topic_id chat={} topic_id={}",
+                    raw_chat_id, topic.message_thread_id
+                )
+            });
+            return None;
+        }
+        Err(error) => {
+            chain_log::write_diagnostic_lazy(|| {
+                format!(
+                    "[telegram_topic] event=create_failed chat={} project={} err={}",
+                    raw_chat_id, project.project_name, error
+                )
+            });
+            let _ = api
+                .send_text(
+                    &raw_chat_id,
+                    "这个项目群需要开启 Telegram 论坛模式，机器人也需要管理主题的权限。",
+                )
+                .await;
+            return None;
+        }
+    };
+
+    let mut routed_message = message.clone();
+    routed_message.message_thread_id = Some(topic.message_thread_id);
+    let inbound = inbound_from_message(settings, allowed_chat_ids, &routed_message)?;
+    chain_log::write_diagnostic_lazy(|| {
+        format!(
+            "[telegram_topic] event=created chat={} topic_id={} project={}",
+            raw_chat_id, topic.message_thread_id, project.project_name
+        )
+    });
+    Some(inbound)
+}
+
+fn forum_topic_name(project_name: &str, text: &str) -> String {
+    let first_line = text.lines().next().unwrap_or_default().trim();
+    let candidate = if first_line.is_empty() {
+        project_name.trim()
+    } else {
+        first_line
+    };
+    let candidate = candidate.trim_start_matches('/').trim();
+    let candidate = if candidate.is_empty() {
+        "新任务"
+    } else {
+        candidate
+    };
+    candidate.chars().take(64).collect()
 }
 
 async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut Option<i64>) {
@@ -237,9 +858,7 @@ fn inbound_from_message(
     allowed_chat_ids: &[String],
     message: &TelegramMessage,
 ) -> Option<InboundMessage> {
-    if message.chat.kind != "private" {
-        return None;
-    }
+    let is_private = message.chat.kind == "private";
     let text = message
         .text
         .as_deref()
@@ -250,10 +869,17 @@ fn inbound_from_message(
     if text.is_empty() && !message_has_media(message) {
         return None;
     }
-    let chat_id = message.chat.id.to_string();
-    if !chat_allowed(allowed_chat_ids, &chat_id) {
+    let raw_chat_id = message.chat.id.to_string();
+    if is_private && !chat_allowed(allowed_chat_ids, &raw_chat_id) {
         return None;
     }
+    if !is_private
+        && (settings.project_group_for_chat(&raw_chat_id).is_none()
+            || message.message_thread_id.is_none())
+    {
+        return None;
+    }
+    let chat_id = telegram_message_target(&raw_chat_id, message.message_thread_id);
     let sender_id = message
         .from
         .as_ref()
@@ -265,11 +891,15 @@ fn inbound_from_message(
         account_id: settings.account_id(),
         sender_id,
         chat_id,
-        chat_type: ChatType::Direct,
+        chat_type: if is_private {
+            ChatType::Direct
+        } else {
+            ChatType::Group
+        },
         message_id: message.message_id.to_string(),
         received_at_ms: now_ms(),
         text,
-        mentioned: true,
+        mentioned: is_private,
         approval_request_key: None,
         action: None,
         card_message_id: None,
@@ -704,24 +1334,33 @@ fn inbound_from_callback(
     let data = callback.data?;
     let action = action_from_callback_data(&data)?;
     let message = callback.message?;
-    if message.chat.kind != "private" {
+    let is_private = message.chat.kind == "private";
+    let raw_chat_id = message.chat.id.to_string();
+    if is_private && !chat_allowed(allowed_chat_ids, &raw_chat_id) {
         return None;
     }
-    let chat_id = message.chat.id.to_string();
-    if !chat_allowed(allowed_chat_ids, &chat_id) {
+    if !is_private
+        && (settings.project_group_for_chat(&raw_chat_id).is_none()
+            || message.message_thread_id.is_none())
+    {
         return None;
     }
+    let chat_id = telegram_message_target(&raw_chat_id, message.message_thread_id);
 
     Some(InboundMessage {
         platform: ImPlatformKind::Telegram,
         account_id: settings.account_id(),
         sender_id: callback.from.id.to_string(),
         chat_id,
-        chat_type: ChatType::Direct,
+        chat_type: if is_private {
+            ChatType::Direct
+        } else {
+            ChatType::Group
+        },
         message_id: message.message_id.to_string(),
         received_at_ms: now_ms(),
         text: data,
-        mentioned: true,
+        mentioned: is_private,
         approval_request_key: None,
         action: Some(action),
         card_message_id: Some(message.message_id.to_string()),
@@ -825,11 +1464,15 @@ async fn ensure_chat_allowed(
     access: &mut TelegramChatAccess,
     chat: &super::api::TelegramChat,
 ) -> TelegramChatAccessDecision {
-    if chat.kind != "private" {
-        return TelegramChatAccessDecision::Ignored;
-    }
     let account_id = api.settings().account_id();
     let chat_id = chat.id.to_string();
+    if chat.kind != "private" {
+        return if api.settings().project_group_for_chat(&chat_id).is_some() {
+            TelegramChatAccessDecision::Allowed
+        } else {
+            TelegramChatAccessDecision::Ignored
+        };
+    }
     if access.is_allowed(&chat_id) {
         return TelegramChatAccessDecision::Allowed;
     }
@@ -1421,6 +2064,56 @@ mod tests {
         );
 
         assert!(inbound.is_none());
+    }
+
+    #[test]
+    fn routes_configured_forum_topic_as_its_own_conversation() {
+        let settings = TelegramSettings {
+            project_groups: vec![crate::config::TelegramProjectGroupConfig {
+                chat_id: "-100".to_string(),
+                project_name: "MochiPort".to_string(),
+                cwd: "/tmp/mochiport".to_string(),
+            }],
+            ..TelegramSettings::default()
+        };
+        let message = TelegramMessage {
+            message_id: 12,
+            from: Some(TelegramUser {
+                id: 42,
+                is_bot: false,
+                username: Some("ada".to_string()),
+                first_name: Some("Ada".to_string()),
+                last_name: None,
+            }),
+            chat: TelegramChat {
+                id: -100,
+                kind: "supergroup".to_string(),
+                title: Some("MochiPort".to_string()),
+                ..TelegramChat::default()
+            },
+            message_thread_id: Some(17),
+            text: Some("修一下路由".to_string()),
+            ..TelegramMessage::default()
+        };
+
+        let inbound = inbound_from_message(&settings, &[], &message).expect("topic inbound");
+        assert_eq!(inbound.chat_type, ChatType::Group);
+        assert_eq!(inbound.chat_id, "-100|topic=17");
+        assert_eq!(
+            inbound.conversation_key(),
+            "telegram:telegram:-100|topic=17"
+        );
+    }
+
+    #[test]
+    fn forum_topic_name_uses_first_line_and_is_bounded() {
+        assert_eq!(
+            forum_topic_name("MochiPort", "修一下启动流程\n补充日志"),
+            "修一下启动流程"
+        );
+        assert_eq!(forum_topic_name("MochiPort", "   "), "MochiPort");
+        let long = "a".repeat(100);
+        assert_eq!(forum_topic_name("MochiPort", &long).chars().count(), 64);
     }
 
     #[test]

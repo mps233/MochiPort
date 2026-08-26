@@ -115,6 +115,28 @@ export interface IMAccount {
   lastInboundAtMs?: number | null;
 }
 
+export interface TelegramProjectGroup {
+  chatId: string;
+  projectName: string;
+  cwd: string;
+}
+
+export interface TelegramProjectGroupAccount {
+  accountId: string;
+  projectGroups: TelegramProjectGroup[];
+}
+
+export interface TelegramProjectGroupsResponse {
+  accounts: TelegramProjectGroupAccount[];
+}
+
+export interface TelegramProjectGroupsMutationResponse {
+  ok: boolean;
+  accountId: string;
+  projectGroups: TelegramProjectGroup[];
+  restartRequired: boolean;
+}
+
 export interface CodexProvider {
   name: string;
   baseUrl?: string | null;

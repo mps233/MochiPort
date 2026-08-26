@@ -154,7 +154,8 @@ struct ActionFeedbackCapsule: View {
         }
         .accessibilityIdentifier("feedback.capsule")
         .task(id: feedback.id) {
-            try? await Task.sleep(for: .seconds(3))
+            let duration: Duration = feedback.message.contains("\n") ? .seconds(8) : .seconds(3)
+            try? await Task.sleep(for: duration)
             guard !Task.isCancelled else { return }
             dismiss()
         }

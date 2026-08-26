@@ -949,6 +949,7 @@ async fn send_telegram_approval(
                 .await;
         }
         Err(err) => {
+            cleanup_deleted_telegram_topic(state, message, &err).await;
             state
                 .push_event(
                     "error",
@@ -1056,6 +1057,7 @@ async fn send_telegram_text(
             true
         }
         Err(err) => {
+            cleanup_deleted_telegram_topic(state, message, &err).await;
             log_outbound_result("send_telegram_text_failed", message, &err.to_string());
             let event_failed = match message.kind {
                 ImOutboundKind::TurnReply => "telegram_turn_completed_failed",
@@ -1171,6 +1173,7 @@ async fn send_telegram_commentary(
                 .await;
         }
         Err(err) => {
+            cleanup_deleted_telegram_topic(state, message, &err).await;
             log_outbound_result("send_telegram_commentary_failed", message, &err.to_string());
             state
                 .push_event(
@@ -1346,6 +1349,7 @@ async fn send_telegram_image(
                 .await;
         }
         Err(err) => {
+            cleanup_deleted_telegram_topic(state, message, &err).await;
             state
                 .push_event(
                     "warn",
@@ -1365,6 +1369,60 @@ async fn send_telegram_image(
             }
         }
     }
+}
+
+async fn cleanup_deleted_telegram_topic(
+    state: &SharedState,
+    message: &ImOutboundMessage,
+    err: &anyhow::Error,
+) {
+    if message.route.platform != ImPlatformKind::Telegram
+        || crate::types::split_telegram_message_target(&message.route.chat_id)
+            .1
+            .is_none()
+        || !is_deleted_telegram_topic_error(&err.to_string())
+    {
+        return;
+    }
+    if let Err(cleanup_err) = crate::im::core::routing::clear_thread_binding_with_reason(
+        state,
+        &message.route.conversation_key,
+        "telegram_topic_deleted",
+    )
+    .await
+    {
+        state
+            .push_event(
+                "warn",
+                "telegram_topic_binding_cleanup_failed",
+                format!(
+                    "conversation={} err={cleanup_err}",
+                    message.route.conversation_key
+                ),
+            )
+            .await;
+    } else {
+        state
+            .push_event(
+                "info",
+                "telegram_topic_binding_removed",
+                format!(
+                    "conversation={} reason=topic_deleted",
+                    message.route.conversation_key
+                ),
+            )
+            .await;
+    }
+}
+
+fn is_deleted_telegram_topic_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("topic_id_invalid")
+        || error.contains("topic id is invalid")
+        || error.contains("message thread not found")
+        || error.contains("message thread is not found")
+        || error.contains("thread not found")
+        || error.contains("topic not found")
 }
 
 #[cfg(test)]

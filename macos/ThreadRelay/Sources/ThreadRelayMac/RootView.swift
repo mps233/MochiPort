@@ -7,6 +7,8 @@ struct RootView: View {
     @State private var opensGatewayProviders = false
 
     var body: some View {
+        let liveAccounts = model.imAccounts
+        let projectGroupAccounts = model.telegramProjectGroupAccounts
         NavigationSplitView {
             List(selection: $model.selection) {
                 ForEach(AppSectionGroup.allCases) { group in
@@ -53,22 +55,25 @@ struct RootView: View {
                     RequestLogsView()
                 case .messaging:
                     MessagingAccountsView(
-                        accounts: model.imAccounts.compactMap(MessagingAccountSummary.init),
+                        accounts: liveAccounts.compactMap(MessagingAccountSummary.init),
+                        telegramProjectGroupAccounts: projectGroupAccounts,
                         availability: model.imAccountsAvailability,
                         onAdd: { showsAccountOnboarding = true },
                         onToggle: { account, enabled in
-                            let live = model.imAccounts.first {
-                                $0.platform == account.platform.rawValue && $0.accountId == account.accountID
-                            }
+                            let live = matchingLiveAccount(account, in: liveAccounts)
                             guard let live else { return false }
                             return await model.setIMAccountEnabled(live, enabled: enabled)
                         },
                         onDelete: { account in
-                            let live = model.imAccounts.first {
-                                $0.platform == account.platform.rawValue && $0.accountId == account.accountID
-                            }
+                            let live = matchingLiveAccount(account, in: liveAccounts)
                             guard let live else { return }
                             Task { await model.deleteIMAccount(live) }
+                        },
+                        onSaveTelegramProjectGroups: { accountId, groups in
+                            await model.saveTelegramProjectGroups(accountId: accountId, projectGroups: groups)
+                        },
+                        onSyncTelegramTopics: { accountId, chatId in
+                            await model.syncTelegramTopics(accountId: accountId, chatId: chatId)
                         }
                     )
                     .overlay(alignment: .bottom) {
@@ -208,6 +213,15 @@ struct RootView: View {
                 .tag(section)
                 .accessibilityIdentifier("sidebar.\(section.id)")
         }
+    }
+
+    private func matchingLiveAccount(
+        _ account: MessagingAccountSummary,
+        in accounts: [ManageIMAccount]
+    ) -> ManageIMAccount? {
+        accounts.first(where: { live in
+            live.platform == account.platform.rawValue && live.accountId == account.accountID
+        })
     }
 }
 

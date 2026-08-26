@@ -74,7 +74,7 @@ Check:
 1. Daemon status: Feishu websocket connected.
 2. Remote-control status: `connected=true` and `initialized=true`.
 3. Feishu allowlists: `allowedOpenIds` and `allowedChatIds`.
-4. Group chat mention behavior: if `mentionOnly=true`, mention the bot in group chats.
+4. Telegram project groups are trusted by explicit `projectGroups` configuration and do not require a mention. Private Telegram chats still use `allowedChatIds`; Feishu and other group channels keep their own mention settings.
 5. Event log: `GET /api/events`.
 
 ## Feishu Messages Do Not Reach Codex
