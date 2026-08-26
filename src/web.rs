@@ -31,6 +31,27 @@ mod oauth;
 mod onboarding;
 pub(crate) mod plugins;
 
+/// Return a display-safe URL without credentials, query parameters, or fragments.
+/// Management responses use this helper wherever a configured endpoint is exposed.
+pub(super) fn masked_url(value: &str) -> String {
+    let normalize = |value: &str| value.trim().trim_end_matches('/').to_string();
+    let Ok(mut parsed) = url::Url::parse(value.trim()) else {
+        return "<invalid>".to_string();
+    };
+    if parsed.username().is_empty()
+        && parsed.password().is_none()
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
+    {
+        return normalize(value);
+    }
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    normalize(parsed.as_str())
+}
+
 pub async fn start_bridge_if_ready(state: &SharedState, event_message: &'static str) -> bool {
     im_api::start_bridge_task(state, im_api::BridgeStartMode::KeepExisting, event_message).await
 }
@@ -225,10 +246,10 @@ pub fn router(state: SharedState) -> Router {
             manage_api::require_bearer,
         ));
 
-    // Legacy GUI paths remain available during migration, but write-capable
+    // Legacy management paths remain available for compatibility, but write-capable
     // IM operations share the same management credential as the versioned
     // API. This prevents the compatibility surface from bypassing bearer
-    // authentication while the Rust GUI transitions to `/api/v1/manage/*`.
+    // authentication while compatibility clients transition to `/api/v1/manage/*`.
     let legacy_im_manage_routes = Router::new()
         .route("/api/bridge/start", post(im_api::start_bridge))
         .route("/api/bridge/stop", post(im_api::stop_bridge))
@@ -468,10 +489,12 @@ struct GuiDashboardResponse {
 }
 
 async fn gui_dashboard(State(state): State<SharedState>) -> Json<GuiDashboardResponse> {
-    let status = status_snapshot(&state).await;
-    let remote = remote_control_backend::status_snapshot(&state).await;
-    let codex_app = codex_app::codex_app_status_snapshot(&state).await;
-    let im_accounts = im_api::im_accounts_snapshot(&state).await;
+    let (status, remote, codex_app, im_accounts) = tokio::join!(
+        status_snapshot(&state),
+        remote_control_backend::status_snapshot(&state),
+        codex_app::codex_app_status_snapshot(&state),
+        im_api::im_accounts_snapshot(&state),
+    );
     let ai_gateway = state.config.lock().await.ai_gateway.clone();
     Json(GuiDashboardResponse {
         status,
@@ -594,8 +617,10 @@ async fn manage_dashboard(State(state): State<SharedState>) -> Json<ManageDashbo
         .await
         .as_ref()
         .is_some_and(|handle| !handle.is_finished());
-    let remote = remote_control_backend::status_snapshot(&state).await;
-    let codex_app = codex_app::codex_app_status_snapshot(&state).await;
+    let (remote, codex_app) = tokio::join!(
+        remote_control_backend::status_snapshot(&state),
+        codex_app::codex_app_status_snapshot(&state),
+    );
     let (_, codex_app_connected) = remote_source_status(&remote, RemoteControlSourceKind::CodexApp);
     let (vscode_configured, vscode_connected) =
         remote_source_status(&remote, RemoteControlSourceKind::Vscode);

@@ -13,6 +13,8 @@ use crate::{
     remote_control_backend,
 };
 
+use super::masked_url;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct EnhancedLaunchOperationRequest {
@@ -1062,7 +1064,7 @@ pub(super) async fn manage_codex_app_status(
             .into_iter()
             .map(|provider| ManageCodexAppProviderStatus {
                 name: provider.name,
-                base_url: provider.base_url.map(masked_provider_url),
+                base_url: provider.base_url.as_deref().map(masked_url),
                 secret_set: provider
                     .key
                     .as_deref()
@@ -1076,24 +1078,6 @@ pub(super) async fn manage_codex_app_status(
         provider_mode_message: status.provider_mode_message,
         active_provider: status.active_provider,
     })
-}
-
-fn masked_provider_url(value: String) -> String {
-    let Ok(mut parsed) = url::Url::parse(value.trim()) else {
-        return "<invalid>".to_string();
-    };
-    if parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.query().is_none()
-        && parsed.fragment().is_none()
-    {
-        return value.trim().trim_end_matches('/').to_string();
-    }
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-    parsed.as_str().trim_end_matches('/').to_string()
 }
 
 pub(super) async fn codex_app_status_snapshot(
@@ -1145,14 +1129,9 @@ mod tests {
 
     #[test]
     fn provider_url_masking_never_returns_unparseable_input() {
+        assert_eq!(masked_url("https://broken url?api_key=canary"), "<invalid>");
         assert_eq!(
-            masked_provider_url("https://broken url?api_key=canary".to_string()),
-            "<invalid>"
-        );
-        assert_eq!(
-            masked_provider_url(
-                "https://user:password@provider.example/v1?api_key=canary".to_string()
-            ),
+            masked_url("https://user:password@provider.example/v1?api_key=canary"),
             "https://provider.example/v1"
         );
     }

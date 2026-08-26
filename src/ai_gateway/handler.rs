@@ -1050,7 +1050,8 @@ pub async fn handle_request_logs(
 ) -> impl IntoResponse {
     match state
         .ai_gateway_request_logs
-        .list_recent(query.limit.unwrap_or(200))
+        .list_recent_blocking(query.limit.unwrap_or(200))
+        .await
     {
         Ok(logs) => Json(json!({ "logs": logs })).into_response(),
         Err(err) => (
@@ -1106,7 +1107,7 @@ pub async fn handle_request_log_detail(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    match state.ai_gateway_request_logs.get_detail(id) {
+    match state.ai_gateway_request_logs.get_detail_blocking(id).await {
         Ok(Some(log)) => {
             let mut value = serde_json::to_value(log).unwrap_or(serde_json::Value::Null);
             request_log::redact_value(&mut value);

@@ -1,8 +1,11 @@
-﻿use std::{
+use std::{
     fs::{File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{
+        Arc, Mutex,
+        mpsc::{SyncSender, sync_channel},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,9 +15,15 @@ use once_cell::sync::OnceCell;
 static CHAIN_LOG: OnceCell<ChainLog> = OnceCell::new();
 
 struct ChainLog {
-    inner: Mutex<ChainLogInner>,
+    inner: Arc<Mutex<ChainLogInner>>,
+    write_tx: SyncSender<ChainLogWrite>,
     diagnostic: bool,
     max_bytes: u64,
+}
+
+struct ChainLogWrite {
+    line: String,
+    flush: bool,
 }
 
 struct ChainLogInner {
@@ -29,6 +38,9 @@ pub fn init(
     max_bytes: u64,
     retention_days: u64,
 ) -> anyhow::Result<()> {
+    if CHAIN_LOG.get().is_some() {
+        return Ok(());
+    }
     let log_dir = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("invalid log path {}", path.display()))?;
@@ -47,15 +59,32 @@ pub fn init(
         timestamp_ms()
     );
     let written_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
-    let _ = CHAIN_LOG.set(ChainLog {
-        inner: Mutex::new(ChainLogInner {
-            file: Some(file),
-            path: path.to_path_buf(),
-            written_bytes,
-        }),
+    let inner = Arc::new(Mutex::new(ChainLogInner {
+        file: Some(file),
+        path: path.to_path_buf(),
+        written_bytes,
+    }));
+    let (write_tx, write_rx) = sync_channel::<ChainLogWrite>(4096);
+    let writer_inner = inner.clone();
+    std::thread::Builder::new()
+        .name("mochiport-chain-log-writer".to_string())
+        .spawn(move || {
+            while let Ok(command) = write_rx.recv() {
+                write_line_sync(&writer_inner, max_bytes, &command.line, command.flush);
+            }
+        })
+        .context("failed to start chain log writer thread")?;
+
+    if let Err(chain_log) = CHAIN_LOG.set(ChainLog {
+        inner,
+        write_tx,
         diagnostic,
         max_bytes,
-    });
+    }) {
+        // Another initializer won the race. Dropping the sender lets the
+        // newly started writer exit cleanly after its receiver is drained.
+        drop(chain_log.write_tx);
+    }
     Ok(())
 }
 
@@ -83,10 +112,20 @@ fn write_line_inner(line: &str, flush: bool) {
     let Some(log) = CHAIN_LOG.get() else {
         return;
     };
-    let Ok(mut inner) = log.inner.lock() else {
+    let command = ChainLogWrite {
+        line: line.to_string(),
+        flush,
+    };
+    if let Err(error) = log.write_tx.send(command) {
+        write_line_sync(&log.inner, log.max_bytes, &error.0.line, error.0.flush);
+    }
+}
+
+fn write_line_sync(inner: &Mutex<ChainLogInner>, max_bytes: u64, line: &str, flush: bool) {
+    let Ok(mut inner) = inner.lock() else {
         return;
     };
-    if log.max_bytes > 0 && inner.written_bytes >= log.max_bytes {
+    if max_bytes > 0 && inner.written_bytes >= max_bytes {
         rotate_open_log(&mut inner);
     }
     let wrote = if let Some(file) = inner.file.as_mut() {

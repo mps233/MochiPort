@@ -293,6 +293,14 @@ impl RequestLogStore {
         .map(|page| page.logs)
     }
 
+    pub async fn list_recent_blocking(&self, limit: usize) -> Result<Vec<RequestLogEntry>, String> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.list_recent(limit))
+            .await
+            .map_err(|error| format!("request log read task failed: {error}"))?
+            .map_err(|error| error.to_string())
+    }
+
     pub fn list_page(&self, query: &RequestLogQuery) -> rusqlite::Result<RequestLogPage> {
         if self.inner.maintenance_active.load(Ordering::Acquire) {
             return Err(rusqlite::Error::InvalidQuery);
@@ -300,6 +308,17 @@ impl RequestLogStore {
         let _maintenance = try_lock_maintenance(&self.inner.maintenance)?;
         self.flush_pending_writes()?;
         self.with_conn(|conn| list_page_with_conn(conn, query))
+    }
+
+    pub async fn list_page_blocking(
+        &self,
+        query: RequestLogQuery,
+    ) -> Result<RequestLogPage, String> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.list_page(&query))
+            .await
+            .map_err(|error| format!("request log read task failed: {error}"))?
+            .map_err(|error| error.to_string())
     }
 
     pub fn delete_older_than(&self, cutoff_ms: i64) -> rusqlite::Result<usize> {
@@ -317,6 +336,14 @@ impl RequestLogStore {
         let _maintenance = try_lock_maintenance(&self.inner.maintenance)?;
         self.flush_pending_writes()?;
         self.with_conn(|conn| get_detail_with_conn(conn, id))
+    }
+
+    pub async fn get_detail_blocking(&self, id: i64) -> Result<Option<RequestLogDetail>, String> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.get_detail(id))
+            .await
+            .map_err(|error| format!("request log read task failed: {error}"))?
+            .map_err(|error| error.to_string())
     }
 
     fn with_conn<T>(

@@ -21,6 +21,8 @@ use crate::{
     config::{LocalConnectionMode, OutboundProxyConfig, OutboundProxyMode},
 };
 
+use super::masked_url;
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageGatewayResponse {
@@ -56,8 +58,8 @@ impl From<&ProviderConfig> for ManageProviderResponse {
             enabled: provider.enabled,
             provider_type: provider.provider_type.clone(),
             compatibility: provider.compatibility.clone(),
-            base_url: masked_remote_url(&provider.base_url),
-            models_url: provider.models_url.as_deref().map(masked_remote_url),
+            base_url: masked_url(&provider.base_url),
+            models_url: provider.models_url.as_deref().map(masked_url),
             models: provider.models.clone(),
             model_aliases: provider.model_aliases.clone(),
             prompt_cache_retention: provider.prompt_cache_retention.clone(),
@@ -509,7 +511,11 @@ pub(super) async fn request_logs(
         sort,
     };
 
-    match state.ai_gateway_request_logs.list_page(&request) {
+    match state
+        .ai_gateway_request_logs
+        .list_page_blocking(request)
+        .await
+    {
         Ok(page) => {
             let next_cursor = match page.next_cursor.map(encode_request_log_cursor).transpose() {
                 Ok(cursor) => cursor,
@@ -575,7 +581,7 @@ pub(super) async fn request_log_detail(
     State(state): State<SharedState>,
     Path(id): Path<i64>,
 ) -> impl IntoResponse {
-    match state.ai_gateway_request_logs.get_detail(id) {
+    match state.ai_gateway_request_logs.get_detail_blocking(id).await {
         Ok(Some(log)) => {
             let mut value = serde_json::to_value(log).unwrap_or(Value::Null);
             request_log::redact_value(&mut value);
@@ -601,8 +607,9 @@ pub(super) async fn clear_request_logs(State(state): State<SharedState>) -> impl
     }
 }
 
-/// 清理早于 `days` 天的请求日志。旧 GUI `DELETE /ai-gateway/request-logs/old?days=3`
-/// 在版本化管理 API 中的对等物；`days` 缺省 3，clamp 到 1..=365。
+/// 清理早于 `days` 天的请求日志。兼容端点
+/// `DELETE /ai-gateway/request-logs/old?days=3` 在版本化管理 API 中的对等物；
+/// `days` 缺省 3，clamp 到 1..=365。
 pub(super) async fn clear_old_request_logs(
     State(state): State<SharedState>,
     request: Option<Json<ClearOldRequestLogsRequest>>,
@@ -626,9 +633,7 @@ pub(super) async fn clear_old_request_logs(
     }
 }
 
-/// 代理端从上游拉取模型列表，语义对齐旧 GUI 的「获取模型」按钮
-/// （`src/gui.rs` 的 `fetch_remote_models` 调用链，纯逻辑在
-/// `crate::ai_gateway::model_fetch` 中共享）。
+/// 代理端从上游拉取模型列表，复用 `crate::ai_gateway::model_fetch` 的纯逻辑。
 ///
 /// API key 选用顺序：请求里的 `apiKey` → `providerName` 命中现有 provider 时
 /// 的已存 key → 无鉴权头。响应对每个候选 URL 记录尝试详情，不回显鉴权信息。
@@ -934,7 +939,7 @@ fn gateway_snapshot(config: &crate::ai_gateway::config::AiGatewayConfig) -> Mana
 fn sub2api_admin_snapshot(config: &Sub2ApiAdminConfig) -> ManageSub2ApiAdminResponse {
     ManageSub2ApiAdminResponse {
         configured: config.is_configured(),
-        base_url: masked_remote_url(&config.base_url),
+        base_url: masked_url(&config.base_url),
         secret_set: !config.admin_api_key.trim().is_empty(),
     }
 }
@@ -1022,25 +1027,7 @@ fn normalized_remote_url_text(value: &str) -> String {
 }
 
 fn displayed_remote_url_matches(stored: &str, submitted: &str) -> bool {
-    normalized_remote_url_text(&masked_remote_url(stored)) == normalized_remote_url_text(submitted)
-}
-
-fn masked_remote_url(value: &str) -> String {
-    let Ok(mut parsed) = url::Url::parse(value.trim()) else {
-        return "<invalid>".to_string();
-    };
-    if parsed.username().is_empty()
-        && parsed.password().is_none()
-        && parsed.query().is_none()
-        && parsed.fragment().is_none()
-    {
-        return normalized_remote_url_text(value);
-    }
-    let _ = parsed.set_username("");
-    let _ = parsed.set_password(None);
-    parsed.set_query(None);
-    parsed.set_fragment(None);
-    normalized_remote_url_text(parsed.as_str())
+    normalized_remote_url_text(&masked_url(stored)) == normalized_remote_url_text(submitted)
 }
 
 fn proxy_has_credentials(config: &OutboundProxyConfig) -> bool {
@@ -1078,9 +1065,7 @@ mod tests {
     #[test]
     fn provider_urls_never_return_embedded_credentials_or_query_tokens() {
         assert_eq!(
-            masked_remote_url(
-                "https://provider-user:provider-secret@provider.example/v1?api_key=canary"
-            ),
+            masked_url("https://provider-user:provider-secret@provider.example/v1?api_key=canary"),
             "https://provider.example/v1"
         );
         assert!(
@@ -1093,10 +1078,7 @@ mod tests {
         assert!(
             validate_remote_url("https://provider.example/v1?api_key=canary", "baseUrl").is_err()
         );
-        assert_eq!(
-            masked_remote_url("https://broken url?api_key=canary"),
-            "<invalid>"
-        );
+        assert_eq!(masked_url("https://broken url?api_key=canary"), "<invalid>");
         assert!(displayed_remote_url_matches(
             "https://provider-user:provider-secret@provider.example/v1?api_key=canary",
             "https://provider.example/v1"
