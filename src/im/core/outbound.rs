@@ -72,6 +72,18 @@ pub(crate) enum ImOutboundPayload {
         caption: Option<String>,
         fallback_text: Option<String>,
     },
+    /// A set of related images. Telegram sends these as one media-group
+    /// album; other platforms may deliver the entries individually.
+    ImageGroup {
+        images: Vec<ImOutboundImage>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ImOutboundImage {
+    pub path: PathBuf,
+    pub caption: Option<String>,
+    pub fallback_text: Option<String>,
 }
 
 pub(crate) fn channel() -> (ImOutboundSender, ImOutboundReceiver) {
@@ -283,6 +295,39 @@ async fn send_wecom_outbound(
                     .map_err(|text_err| anyhow!("media={media_err}; fallback={text_err}"))
             }
         },
+        ImOutboundPayload::ImageGroup { images } => {
+            async {
+                let mut last_message_id = String::new();
+                for image in images {
+                    let result = adapter
+                        .send_media(&message.route.chat_id, &image.path)
+                        .await;
+                    match result {
+                        Ok(message_id) => last_message_id = message_id,
+                        Err(media_err) => {
+                            let fallback = image
+                                .fallback_text
+                                .as_deref()
+                                .or(image.caption.as_deref())
+                                .unwrap_or("附件发送失败");
+                            last_message_id = adapter
+                                .send_text(
+                                    state,
+                                    &message.route.account_id,
+                                    &message.route.chat_id,
+                                    fallback,
+                                )
+                                .await
+                                .map_err(|text_err| {
+                                    anyhow!("media={media_err}; fallback={text_err}")
+                                })?;
+                        }
+                    }
+                }
+                Ok::<String, anyhow::Error>(last_message_id)
+            }
+            .await
+        }
         ImOutboundPayload::TelegramCommentary { fallback_text, .. } => {
             adapter
                 .send_text(
@@ -387,6 +432,10 @@ async fn send_telegram_outbound(
             .await;
             false
         }
+        ImOutboundPayload::ImageGroup { images } => {
+            send_telegram_image_group(state, &adapter, &message, images).await;
+            false
+        }
         ImOutboundPayload::TelegramCommentary {
             segment,
             rich_markdown,
@@ -439,7 +488,8 @@ async fn send_feishu_outbound(
         }
         ImOutboundPayload::Text(_)
         | ImOutboundPayload::TelegramCommentary { .. }
-        | ImOutboundPayload::Image { .. } => {
+        | ImOutboundPayload::Image { .. }
+        | ImOutboundPayload::ImageGroup { .. } => {
             state
                 .push_event(
                     "warn",
@@ -538,6 +588,19 @@ async fn send_wechat_outbound(
                 fallback_text.as_deref(),
             )
             .await;
+        }
+        ImOutboundPayload::ImageGroup { images } => {
+            for image in images {
+                send_wechat_image(
+                    state,
+                    &adapter,
+                    &message,
+                    image.path.clone(),
+                    image.caption.as_deref(),
+                    image.fallback_text.as_deref(),
+                )
+                .await;
+            }
         }
         ImOutboundPayload::TelegramCommentary { fallback_text, .. } => {
             send_wechat_text(state, &adapter, &message, fallback_text).await;
@@ -1257,6 +1320,25 @@ fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&
                 log_text_preview(&image_text, 500),
             )
         }
+        (ImOutboundPayload::ImageGroup { images }, None) => {
+            let image_text = images
+                .iter()
+                .map(|image| {
+                    format!(
+                        "path={} caption={} fallback={}",
+                        image.path.display(),
+                        image.caption.as_deref().unwrap_or(""),
+                        image.fallback_text.as_deref().unwrap_or("")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ");
+            (
+                "image_group",
+                image_text.chars().count(),
+                log_text_preview(&image_text, 500),
+            )
+        }
     };
     chain_log::write_diagnostic_lazy(|| {
         format!(
@@ -1355,6 +1437,82 @@ async fn send_telegram_image(
             if let Some(fallback_text) = fallback_text {
                 let _ = send_telegram_text(state, adapter, message, fallback_text).await;
             }
+        }
+    }
+}
+
+async fn send_telegram_image_group(
+    state: &SharedState,
+    adapter: &TelegramAdapter,
+    message: &ImOutboundMessage,
+    images: &[ImOutboundImage],
+) {
+    if images.is_empty() {
+        return;
+    }
+    state
+        .push_event(
+            "info",
+            "telegram_image_group_send_begin",
+            format!(
+                "thread={} item={} type={} chat={} image_count={}",
+                message.thread_id,
+                message.item_id.as_deref().unwrap_or(""),
+                message.item_type.as_deref().unwrap_or(""),
+                message.route.chat_id,
+                images.len()
+            ),
+        )
+        .await;
+
+    let items = images
+        .iter()
+        .map(|image| {
+            (
+                image.path.clone(),
+                image.caption.clone(),
+                image.fallback_text.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    match adapter
+        .send_image_paths(&message.route.chat_id, &items)
+        .await
+    {
+        Ok(message_ids) => {
+            state
+                .push_event(
+                    "info",
+                    "telegram_image_group_sent",
+                    format!(
+                        "thread={} item={} type={} chat={} image_count={} messages={}",
+                        message.thread_id,
+                        message.item_id.as_deref().unwrap_or(""),
+                        message.item_type.as_deref().unwrap_or(""),
+                        message.route.chat_id,
+                        images.len(),
+                        message_ids.join(",")
+                    ),
+                )
+                .await;
+        }
+        Err(err) => {
+            cleanup_deleted_telegram_topic(state, message, &err).await;
+            state
+                .push_event(
+                    "warn",
+                    "telegram_image_group_send_failed",
+                    format!(
+                        "thread={} item={} type={} chat={} image_count={} err={}",
+                        message.thread_id,
+                        message.item_id.as_deref().unwrap_or(""),
+                        message.item_type.as_deref().unwrap_or(""),
+                        message.route.chat_id,
+                        images.len(),
+                        err
+                    ),
+                )
+                .await;
         }
     }
 }

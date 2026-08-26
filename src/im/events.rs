@@ -11,7 +11,10 @@ use crate::{
         core::{
             accounts::ImApiRegistry,
             i18n::im_text_for_state,
-            outbound::{ImOutboundKind, ImOutboundMessage, ImOutboundPayload, ImOutboundSender},
+            outbound::{
+                ImOutboundImage, ImOutboundKind, ImOutboundMessage, ImOutboundPayload,
+                ImOutboundSender,
+            },
             text_renderer,
             text_utils::log_text_preview,
         },
@@ -1076,24 +1079,68 @@ fn queue_agent_message_images(
     item_id: Option<&str>,
     text: &str,
 ) -> Result<usize> {
-    let images = text_renderer::local_markdown_image_refs(text);
+    let images = text_renderer::local_markdown_image_refs(text)
+        .into_iter()
+        .map(|image| ImOutboundImage {
+            path: image.path,
+            caption: (!image.alt.trim().is_empty()).then_some(image.alt.clone()),
+            fallback_text: Some(agent_message_image_fallback_text(&image.alt, &image.target)),
+        })
+        .collect();
+    enqueue_image_payloads(
+        outbound_tx,
+        thread_id,
+        route,
+        item_id,
+        "agentMessageImage",
+        "agent-message-image",
+        images,
+    )
+}
+
+fn enqueue_image_payloads(
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    route: &RouteTarget,
+    item_id: Option<&str>,
+    item_type: &str,
+    fallback_item_id_prefix: &str,
+    images: Vec<ImOutboundImage>,
+) -> Result<usize> {
     let count = images.len();
-    for (index, image) in images.into_iter().enumerate() {
-        let caption = (!image.alt.trim().is_empty()).then_some(image.alt.clone());
-        let fallback_text = Some(agent_message_image_fallback_text(&image.alt, &image.target));
+    if count == 0 {
+        return Ok(0);
+    }
+
+    if route.platform == ImPlatformKind::Telegram && count > 1 {
         outbound_tx.enqueue(ImOutboundMessage {
             thread_id: thread_id.to_string(),
             turn_id: None,
             route: route.clone(),
             item_id: item_id
                 .map(str::to_string)
-                .or_else(|| Some(format!("agent-message-image-{index}"))),
-            item_type: Some("agentMessageImage".to_string()),
+                .or_else(|| Some(format!("{fallback_item_id_prefix}-group"))),
+            item_type: Some(item_type.to_string()),
+            kind: ImOutboundKind::ImageItem,
+            payload: ImOutboundPayload::ImageGroup { images },
+        })?;
+        return Ok(count);
+    }
+
+    for (index, image) in images.into_iter().enumerate() {
+        outbound_tx.enqueue(ImOutboundMessage {
+            thread_id: thread_id.to_string(),
+            turn_id: None,
+            route: route.clone(),
+            item_id: item_id
+                .map(str::to_string)
+                .or_else(|| Some(format!("{fallback_item_id_prefix}-{index}"))),
+            item_type: Some(item_type.to_string()),
             kind: ImOutboundKind::ImageItem,
             payload: ImOutboundPayload::Image {
                 path: image.path,
-                caption,
-                fallback_text,
+                caption: image.caption,
+                fallback_text: image.fallback_text,
             },
         })?;
     }
@@ -3289,23 +3336,23 @@ fn queue_mcp_tool_images(
     item_id: &str,
     paths: Vec<PathBuf>,
 ) -> Result<usize> {
-    let image_count = paths.len();
-    for path in paths {
-        outbound_tx.enqueue(ImOutboundMessage {
-            thread_id: thread_id.to_string(),
-            turn_id: None,
-            route: route.clone(),
-            item_id: Some(item_id.to_string()),
-            item_type: Some("mcpToolCall".to_string()),
-            kind: ImOutboundKind::ImageItem,
-            payload: ImOutboundPayload::Image {
-                path,
-                caption: None,
-                fallback_text: None,
-            },
-        })?;
-    }
-    Ok(image_count)
+    let images = paths
+        .into_iter()
+        .map(|path| ImOutboundImage {
+            path,
+            caption: None,
+            fallback_text: None,
+        })
+        .collect();
+    enqueue_image_payloads(
+        outbound_tx,
+        thread_id,
+        route,
+        Some(item_id),
+        "mcpToolCall",
+        "mcp-tool-image",
+        images,
+    )
 }
 
 fn log_codex_to_im_handler(notification: &crate::codex::CodexNotification) {
@@ -3725,8 +3772,134 @@ mod tests {
             }
             ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
-            | ImOutboundPayload::Image { .. } => {
+            | ImOutboundPayload::Image { .. }
+            | ImOutboundPayload::ImageGroup { .. } => {
                 panic!("Telegram final reply must be queued as text")
+            }
+        }
+        assert!(try_recv_for_test(&mut outbound_rx).is_none());
+    }
+
+    #[test]
+    fn telegram_agent_images_are_queued_as_one_album_payload() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let first = temp_dir.path().join("first.png");
+        let second = temp_dir.path().join("second.jpg");
+        let third = temp_dir.path().join("third.webp");
+        for path in [&first, &second, &third] {
+            std::fs::write(path, b"image").expect("write test image");
+        }
+        let text = format!(
+            "![first]({})\n![second]({})\n![third]({})",
+            first.display(),
+            second.display(),
+            third.display()
+        );
+        let route = test_telegram_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+
+        let count = queue_agent_message_images(&outbound_tx, "thread", &route, None, &text)
+            .expect("queue image album");
+
+        assert_eq!(count, 3);
+        let message = try_recv_for_test(&mut outbound_rx).expect("queued image album");
+        assert_eq!(message.kind, ImOutboundKind::ImageItem);
+        assert_eq!(
+            message.item_id.as_deref(),
+            Some("agent-message-image-group")
+        );
+        match message.payload {
+            ImOutboundPayload::ImageGroup { images } => {
+                assert_eq!(images.len(), 3);
+                assert_eq!(images[0].path, first);
+                assert_eq!(images[0].caption.as_deref(), Some("first"));
+                assert_eq!(images[1].path, second);
+                assert_eq!(images[1].caption.as_deref(), Some("second"));
+                assert_eq!(images[2].path, third);
+                assert_eq!(images[2].caption.as_deref(), Some("third"));
+            }
+            ImOutboundPayload::Text(_)
+            | ImOutboundPayload::TelegramCommentary { .. }
+            | ImOutboundPayload::Approval(_)
+            | ImOutboundPayload::Image { .. } => {
+                panic!("multiple Telegram images should use one album payload")
+            }
+        }
+        assert!(try_recv_for_test(&mut outbound_rx).is_none());
+    }
+
+    #[test]
+    fn telegram_single_image_keeps_the_single_image_payload() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let path = temp_dir.path().join("single.png");
+        std::fs::write(&path, b"image").expect("write test image");
+        let text = format!("![single]({})", path.display());
+        let route = test_telegram_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+
+        assert_eq!(
+            queue_agent_message_images(&outbound_tx, "thread", &route, None, &text)
+                .expect("queue single image"),
+            1
+        );
+        let message = try_recv_for_test(&mut outbound_rx).expect("queued single image");
+        match message.payload {
+            ImOutboundPayload::Image {
+                path: queued_path,
+                caption,
+                ..
+            } => {
+                assert_eq!(queued_path, path);
+                assert_eq!(caption.as_deref(), Some("single"));
+            }
+            ImOutboundPayload::Text(_)
+            | ImOutboundPayload::TelegramCommentary { .. }
+            | ImOutboundPayload::Approval(_)
+            | ImOutboundPayload::ImageGroup { .. } => {
+                panic!("a single Telegram image should use the single-image payload")
+            }
+        }
+        assert!(try_recv_for_test(&mut outbound_rx).is_none());
+    }
+
+    #[test]
+    fn non_telegram_images_remain_individual_payloads() {
+        let route = test_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        let images = (0..3)
+            .map(|index| ImOutboundImage {
+                path: PathBuf::from(format!("image-{index}.png")),
+                caption: Some(format!("image {index}")),
+                fallback_text: None,
+            })
+            .collect();
+
+        assert_eq!(
+            enqueue_image_payloads(
+                &outbound_tx,
+                "thread",
+                &route,
+                Some("item"),
+                "mcpToolCall",
+                "mcp-tool-image",
+                images,
+            )
+            .expect("queue non-Telegram images"),
+            3
+        );
+        for index in 0..3 {
+            let message = try_recv_for_test(&mut outbound_rx).expect("queued image");
+            match message.payload {
+                ImOutboundPayload::Image { path, caption, .. } => {
+                    assert_eq!(path, PathBuf::from(format!("image-{index}.png")));
+                    assert_eq!(caption.as_deref(), Some(format!("image {index}").as_str()));
+                }
+                ImOutboundPayload::Text(_)
+                | ImOutboundPayload::TelegramCommentary { .. }
+                | ImOutboundPayload::Approval(_)
+                | ImOutboundPayload::ImageGroup { .. } => {
+                    panic!("non-Telegram images should remain individual payloads")
+                }
             }
         }
         assert!(try_recv_for_test(&mut outbound_rx).is_none());
@@ -4356,6 +4529,10 @@ mod tests {
         assert_eq!(message.item_type.as_deref(), Some("mcpToolCall"));
         match message.payload {
             ImOutboundPayload::Image { path, .. } => assert!(path.is_file()),
+            ImOutboundPayload::ImageGroup { images } => {
+                assert_eq!(images.len(), 1);
+                assert!(images[0].path.is_file());
+            }
             ImOutboundPayload::Text(_)
             | ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_) => {
@@ -4407,7 +4584,8 @@ mod tests {
             }
             ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
-            | ImOutboundPayload::Image { .. } => {
+            | ImOutboundPayload::Image { .. }
+            | ImOutboundPayload::ImageGroup { .. } => {
                 panic!("terminal failure must be queued as text")
             }
         }
@@ -4440,7 +4618,8 @@ mod tests {
             ImOutboundPayload::Text(text) => assert!(text.contains("已完成")),
             ImOutboundPayload::TelegramCommentary { .. }
             | ImOutboundPayload::Approval(_)
-            | ImOutboundPayload::Image { .. } => {
+            | ImOutboundPayload::Image { .. }
+            | ImOutboundPayload::ImageGroup { .. } => {
                 panic!("terminal success must be queued as text")
             }
         }

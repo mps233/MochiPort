@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
@@ -12,6 +12,7 @@ use super::types::TelegramSettings;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
 const TELEGRAM_MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
+pub(crate) const TELEGRAM_MAX_MEDIA_GROUP_ITEMS: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct TelegramApi {
@@ -679,6 +680,120 @@ impl TelegramApi {
         .await
     }
 
+    /// Send a Telegram album containing local photos.
+    ///
+    /// Telegram accepts between two and ten items in one `sendMediaGroup`
+    /// request. Each item is uploaded as a multipart part and referenced from
+    /// the `media` JSON through an `attach://fileN` URL. Captions and HTML
+    /// parse mode belong to each `InputMediaPhoto` entry, matching `sendPhoto`.
+    pub async fn send_photo_group_files(
+        &self,
+        chat_id: &str,
+        items: &[(PathBuf, Option<String>)],
+    ) -> Result<Vec<i64>> {
+        if !(2..=TELEGRAM_MAX_MEDIA_GROUP_ITEMS).contains(&items.len()) {
+            return Err(anyhow!(
+                "telegram media groups require 2-{} photos, got {}",
+                TELEGRAM_MAX_MEDIA_GROUP_ITEMS,
+                items.len()
+            ));
+        }
+        if !self.is_configured() {
+            return Err(anyhow!("telegram bot_token is empty"));
+        }
+
+        let request_body = send_photo_group_body(chat_id, items);
+        let mut form = multipart::Form::new().text(
+            "chat_id",
+            request_body["chat_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        );
+        if let Some(topic_id) = request_body["message_thread_id"].as_i64() {
+            form = form.text("message_thread_id", topic_id.to_string());
+        }
+
+        for (index, (local_path, _caption)) in items.iter().enumerate() {
+            let bytes = std::fs::read(local_path)
+                .with_context(|| format!("failed to read {}", local_path.display()))?;
+            let file_name = local_path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("image.png")
+                .to_string();
+            let mime = mime_guess::from_path(local_path)
+                .first_or_octet_stream()
+                .to_string();
+            let part = multipart::Part::bytes(bytes)
+                .file_name(file_name)
+                .mime_str(&mime)
+                .with_context(|| format!("invalid mime type for {}", local_path.display()))?;
+            let field_name = format!("file{index}");
+            form = form.part(field_name.clone(), part);
+        }
+        form = form.text(
+            "media",
+            serde_json::to_string(&request_body["media"])
+                .context("failed to encode telegram media group")?,
+        );
+
+        let url = format!(
+            "{TELEGRAM_API_BASE}/bot{}/sendMediaGroup",
+            self.settings.bot_token.trim()
+        );
+        let response = crate::outbound_http::get()
+            .post(url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|err| {
+                let message = self.sanitize_error(&err.to_string());
+                chain_log::write_line(format!(
+                    "[telegram_api] event=request_failed method=sendMediaGroup err={}",
+                    message
+                ));
+                anyhow!("telegram api sendMediaGroup request failed: {}", message)
+            })?;
+        let status = response.status();
+        let payload: TelegramResponse<Vec<TelegramMessage>> = response
+            .json()
+            .await
+            .context("failed to decode telegram api sendMediaGroup response")?;
+        if !status.is_success() || !payload.ok {
+            let description = payload.description.unwrap_or_default();
+            let retry_after = payload
+                .parameters
+                .and_then(|parameters| parameters.retry_after);
+            chain_log::write_line(format!(
+                "[telegram_api] event=response_error method=sendMediaGroup status={} error_code={:?} retry_after={:?} description={}",
+                status, payload.error_code, retry_after, description
+            ));
+            return Err(TelegramApiError {
+                method: "sendMediaGroup".to_string(),
+                status,
+                error_code: payload.error_code,
+                description,
+                retry_after,
+            }
+            .into());
+        }
+        let messages = payload
+            .result
+            .ok_or_else(|| anyhow!("telegram api sendMediaGroup returned empty result"))?;
+        if messages.len() != items.len() {
+            return Err(anyhow!(
+                "telegram api sendMediaGroup returned {} messages for {} photos",
+                messages.len(),
+                items.len()
+            ));
+        }
+        Ok(messages
+            .into_iter()
+            .map(|message| message.message_id)
+            .collect())
+    }
+
     pub async fn send_document_file(
         &self,
         chat_id: &str,
@@ -1111,17 +1226,61 @@ fn add_message_thread_id(body: &mut serde_json::Value, target: &str) {
     }
 }
 
+fn send_photo_group_media_body(
+    items: &[(PathBuf, Option<String>)],
+    parse_mode: Option<TelegramParseMode>,
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        items
+            .iter()
+            .enumerate()
+            .map(|(index, (_, caption))| {
+                photo_group_media_item(index, caption.as_deref(), parse_mode)
+            })
+            .collect(),
+    )
+}
+
+fn send_photo_group_body(chat_id: &str, items: &[(PathBuf, Option<String>)]) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "media": send_photo_group_media_body(items, Some(TelegramParseMode::Html)),
+    });
+    add_message_target(&mut body, chat_id);
+    body
+}
+
+fn photo_group_media_item(
+    index: usize,
+    caption: Option<&str>,
+    parse_mode: Option<TelegramParseMode>,
+) -> serde_json::Value {
+    let field_name = format!("file{index}");
+    let mut item = serde_json::json!({
+        "type": "photo",
+        "media": format!("attach://{field_name}"),
+    });
+    if let Some(caption) = caption.map(str::trim).filter(|value| !value.is_empty()) {
+        item["caption"] = serde_json::json!(caption);
+    }
+    if let Some(parse_mode) = parse_mode {
+        item["parse_mode"] = serde_json::to_value(parse_mode)
+            .unwrap_or_else(|_| serde_json::Value::String("HTML".to_string()));
+    }
+    item
+}
+
 #[cfg(test)]
 mod tests {
     use reqwest::StatusCode;
+    use std::path::PathBuf;
 
     use super::{
         TelegramApi, TelegramApiError, TelegramBotCommand, TelegramInputRichMessage,
         TelegramInputRichMessageMedia, TelegramParseMode, TelegramResponse, TelegramUpdate,
         create_forum_topic_body, delete_forum_topic_body, edit_forum_topic_body,
         edit_message_reply_markup_body, edit_message_text_body, edit_rich_message_body,
-        send_chat_action_body, send_message_draft_body, send_rich_message_body,
-        send_rich_message_draft_body,
+        send_chat_action_body, send_message_draft_body, send_photo_group_body,
+        send_photo_group_media_body, send_rich_message_body, send_rich_message_draft_body,
     };
     use crate::im::telegram::types::TelegramSettings;
 
@@ -1578,6 +1737,72 @@ mod tests {
                 "skip_entity_detection": true,
             })
         );
+    }
+
+    #[test]
+    fn serializes_photo_group_media_with_attach_urls_and_per_item_captions() {
+        let items = vec![
+            (PathBuf::from("first.jpg"), Some("<b>First</b>".to_string())),
+            (PathBuf::from("second.png"), None),
+            (PathBuf::from("third.webp"), Some("Third".to_string())),
+        ];
+
+        assert_eq!(
+            send_photo_group_media_body(&items, Some(TelegramParseMode::Html)),
+            serde_json::json!([
+                {
+                    "type": "photo",
+                    "media": "attach://file0",
+                    "caption": "<b>First</b>",
+                    "parse_mode": "HTML",
+                },
+                {
+                    "type": "photo",
+                    "media": "attach://file1",
+                    "parse_mode": "HTML",
+                },
+                {
+                    "type": "photo",
+                    "media": "attach://file2",
+                    "caption": "Third",
+                    "parse_mode": "HTML",
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn builds_photo_group_target_fields_for_forum_topics() {
+        let items = vec![
+            (PathBuf::from("first.jpg"), None),
+            (PathBuf::from("second.jpg"), None),
+        ];
+        let body = send_photo_group_body("-1001|topic=17", &items);
+
+        assert_eq!(body["chat_id"], "-1001");
+        assert_eq!(body["message_thread_id"], 17);
+        assert_eq!(body["media"][0]["media"], "attach://file0");
+    }
+
+    #[tokio::test]
+    async fn rejects_photo_groups_outside_telegram_item_limit_before_network_or_file_io() {
+        let api = TelegramApi::new(TelegramSettings::default());
+        let one = vec![(PathBuf::from("does-not-exist.jpg"), None)];
+        let eleven = (0..11)
+            .map(|index| (PathBuf::from(format!("does-not-exist-{index}.jpg")), None))
+            .collect::<Vec<_>>();
+
+        let one_error = api
+            .send_photo_group_files("42", &one)
+            .await
+            .expect_err("single photo must use sendPhoto");
+        assert!(one_error.to_string().contains("require 2-10 photos"));
+
+        let eleven_error = api
+            .send_photo_group_files("42", &eleven)
+            .await
+            .expect_err("Telegram caps media groups at ten photos");
+        assert!(eleven_error.to_string().contains("require 2-10 photos"));
     }
 
     #[test]

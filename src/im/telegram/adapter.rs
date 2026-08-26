@@ -1,6 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::time::{Duration, sleep};
 
 use crate::{
@@ -10,7 +10,10 @@ use crate::{
     types::split_telegram_message_target,
 };
 
-use super::api::{TelegramApi, TelegramApiError, TelegramInputRichMessage, TelegramParseMode};
+use super::api::{
+    TELEGRAM_MAX_MEDIA_GROUP_ITEMS, TelegramApi, TelegramApiError, TelegramInputRichMessage,
+    TelegramParseMode,
+};
 
 const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4096;
 const TELEGRAM_CONTINUATION_OVERHEAD: usize = 30;
@@ -336,6 +339,198 @@ impl TelegramAdapter {
                     Err(photo_err)
                 }
             },
+        }
+    }
+
+    /// Send multiple local images as Telegram albums, splitting at Telegram's
+    /// ten-item limit. A failed album request falls back to the existing
+    /// single-image path for every item so the document fallback remains
+    /// available and one bad album does not prevent later images from being
+    /// delivered.
+    pub async fn send_image_paths(
+        &self,
+        target: &str,
+        items: &[(PathBuf, Option<String>, Option<String>)],
+    ) -> Result<Vec<String>> {
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        if items.len() == 1 {
+            let (path, caption, fallback_text) = &items[0];
+            return self
+                .send_image_path_with_fallback(
+                    target,
+                    path,
+                    caption.as_deref(),
+                    fallback_text.as_deref(),
+                )
+                .await
+                .map(|message_id| vec![message_id]);
+        }
+
+        log_adapter(
+            "send_image_group_begin",
+            format!(
+                "chat={} images={} groups={} captions_chars={}",
+                target,
+                items.len(),
+                Self::telegram_media_group_sizes(items.len()).len(),
+                items
+                    .iter()
+                    .map(|(_, caption, _)| caption.as_deref().unwrap_or("").chars().count())
+                    .sum::<usize>()
+            ),
+        );
+        let mut message_ids = Vec::with_capacity(items.len());
+        let mut failures = Vec::new();
+        let group_sizes = Self::telegram_media_group_sizes(items.len());
+        let mut group_start = 0;
+        for (group_index, group_size) in group_sizes.iter().copied().enumerate() {
+            let group_end = group_start + group_size;
+            let group = &items[group_start..group_end];
+            group_start = group_end;
+            // A remainder of one after splitting (for example, item 11) must
+            // use sendPhoto directly because Telegram albums require >=2.
+            if group.len() == 1 {
+                let (path, caption, fallback_text) = &group[0];
+                match self
+                    .send_image_path_with_fallback(
+                        target,
+                        path,
+                        caption.as_deref(),
+                        fallback_text.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(message_id) => message_ids.push(message_id),
+                    Err(err) => failures.push(format!(
+                        "image {} ({}) failed: {err}",
+                        group_index * TELEGRAM_MAX_MEDIA_GROUP_ITEMS + 1,
+                        path.display()
+                    )),
+                }
+                continue;
+            }
+
+            let group_items = group
+                .iter()
+                .map(|(path, caption, _)| {
+                    let caption_html = caption
+                        .as_deref()
+                        .map(telegram_cleanup_text)
+                        .map(|caption| telegram_markdown_to_html(&caption));
+                    (path.clone(), caption_html)
+                })
+                .collect::<Vec<_>>();
+            match self.api.send_photo_group_files(target, &group_items).await {
+                Ok(group_message_ids) => {
+                    log_adapter(
+                        "send_image_group_sent",
+                        format!(
+                            "chat={} group={}/{} images={} method=sendMediaGroup",
+                            target,
+                            group_index + 1,
+                            group_sizes.len(),
+                            group.len()
+                        ),
+                    );
+                    message_ids.extend(
+                        group_message_ids
+                            .into_iter()
+                            .map(|message_id| message_id.to_string()),
+                    );
+                }
+                Err(group_err) => {
+                    log_adapter(
+                        "send_image_group_failed",
+                        format!(
+                            "chat={} group={}/{} images={} fallback=single err={group_err}",
+                            target,
+                            group_index + 1,
+                            group_sizes.len(),
+                            group.len()
+                        ),
+                    );
+                    for (offset, (path, caption, fallback_text)) in group.iter().enumerate() {
+                        match self
+                            .send_image_path_with_fallback(
+                                target,
+                                path,
+                                caption.as_deref(),
+                                fallback_text.as_deref(),
+                            )
+                            .await
+                        {
+                            Ok(message_id) => message_ids.push(message_id),
+                            Err(err) => failures.push(format!(
+                                "group {} image {} ({}) failed after album error ({group_err}): {err}",
+                                group_index + 1,
+                                group_index * TELEGRAM_MAX_MEDIA_GROUP_ITEMS + offset + 1,
+                                path.display()
+                            )),
+                        }
+                    }
+                }
+            }
+        }
+
+        if failures.is_empty() {
+            log_adapter(
+                "send_image_group_done",
+                format!(
+                    "chat={} images={} delivered={}",
+                    target,
+                    items.len(),
+                    message_ids.len()
+                ),
+            );
+            Ok(message_ids)
+        } else {
+            Err(anyhow!(
+                "telegram image delivery failed for {} of {} images: {}",
+                failures.len(),
+                items.len(),
+                failures.join("; ")
+            ))
+        }
+    }
+
+    fn telegram_media_group_sizes(item_count: usize) -> Vec<usize> {
+        if item_count == 0 {
+            return Vec::new();
+        }
+        if item_count <= TELEGRAM_MAX_MEDIA_GROUP_ITEMS {
+            return vec![item_count];
+        }
+
+        let group_count = item_count.div_ceil(TELEGRAM_MAX_MEDIA_GROUP_ITEMS);
+        let base_size = item_count / group_count;
+        let remainder = item_count % group_count;
+        (0..group_count)
+            .map(|index| base_size + usize::from(index < remainder))
+            .collect()
+    }
+
+    async fn send_image_path_with_fallback(
+        &self,
+        target: &str,
+        local_path: &Path,
+        caption: Option<&str>,
+        fallback_text: Option<&str>,
+    ) -> Result<String> {
+        match self.send_image_path(target, local_path, caption).await {
+            Ok(message_id) => Ok(message_id),
+            Err(image_err) => {
+                let Some(fallback_text) = fallback_text
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                else {
+                    return Err(image_err);
+                };
+                self.send_text(target, fallback_text)
+                    .await
+                    .map_err(|fallback_err| anyhow!("image={image_err}; fallback={fallback_err}"))
+            }
         }
     }
 
@@ -1751,7 +1946,10 @@ mod tests {
 
     use crate::{
         im::core::i18n::ImText,
-        im::telegram::{api::TelegramApi, types::TelegramSettings},
+        im::telegram::{
+            api::{TELEGRAM_MAX_MEDIA_GROUP_ITEMS, TelegramApi},
+            types::TelegramSettings,
+        },
         im_runtime::{ApprovalDecisionOption, PendingApproval},
     };
 
@@ -1770,6 +1968,26 @@ mod tests {
         assert!(!adapter.send_thinking_draft("-1001", 7).await.unwrap());
         assert!(!adapter.send_thinking_draft("@channel", 7).await.unwrap());
         assert!(!adapter.send_thinking_draft("42", 0).await.unwrap());
+    }
+
+    #[test]
+    fn balances_large_image_sets_without_singleton_albums() {
+        assert_eq!(
+            TelegramAdapter::telegram_media_group_sizes(0),
+            Vec::<usize>::new()
+        );
+        assert_eq!(TelegramAdapter::telegram_media_group_sizes(1), vec![1]);
+        assert_eq!(TelegramAdapter::telegram_media_group_sizes(10), vec![10]);
+        assert_eq!(TelegramAdapter::telegram_media_group_sizes(11), vec![6, 5]);
+        assert_eq!(
+            TelegramAdapter::telegram_media_group_sizes(21),
+            vec![7, 7, 7]
+        );
+        assert!(
+            TelegramAdapter::telegram_media_group_sizes(101)
+                .iter()
+                .all(|size| (2..=TELEGRAM_MAX_MEDIA_GROUP_ITEMS).contains(size))
+        );
     }
 
     #[test]
