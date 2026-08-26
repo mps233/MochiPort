@@ -478,9 +478,13 @@ impl TelegramApi {
         let body = edit_forum_topic_body(chat_id, message_thread_id, name);
         match self.post("editForumTopic", &body).await {
             Ok(result) => Ok(result),
-            Err(err) if err.downcast_ref::<TelegramApiError>().is_some_and(|error| {
-                error.is_topic_not_modified()
-            }) => Ok(true),
+            Err(err)
+                if err
+                    .downcast_ref::<TelegramApiError>()
+                    .is_some_and(|error| error.is_topic_not_modified()) =>
+            {
+                Ok(true)
+            }
             Err(err) => Err(err),
         }
     }
@@ -1115,9 +1119,9 @@ mod tests {
         TelegramApi, TelegramApiError, TelegramBotCommand, TelegramInputRichMessage,
         TelegramInputRichMessageMedia, TelegramParseMode, TelegramResponse, TelegramUpdate,
         create_forum_topic_body, delete_forum_topic_body, edit_forum_topic_body,
-        edit_message_reply_markup_body,
-        edit_message_text_body, edit_rich_message_body, send_chat_action_body,
-        send_message_draft_body, send_rich_message_body, send_rich_message_draft_body,
+        edit_message_reply_markup_body, edit_message_text_body, edit_rich_message_body,
+        send_chat_action_body, send_message_draft_body, send_rich_message_body,
+        send_rich_message_draft_body,
     };
     use crate::im::telegram::types::TelegramSettings;
 
@@ -1285,57 +1289,72 @@ mod tests {
     #[test]
     fn builds_forum_topic_probe_payload() {
         let body = edit_forum_topic_body("-100", 17, "  Fix routing  ");
-        assert_eq!(body, serde_json::json!({
-            "chat_id": "-100",
-            "message_thread_id": 17,
-            "name": "Fix routing",
-        }));
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "chat_id": "-100",
+                "message_thread_id": 17,
+                "name": "Fix routing",
+            })
+        );
     }
 
     #[test]
     fn classifies_forum_topic_probe_errors_conservatively() {
-        assert!(api_error(
-            "editForumTopic",
-            StatusCode::BAD_REQUEST,
-            400,
-            "Bad Request: TOPIC_ID_INVALID",
-        )
-        .is_forum_topic_missing());
-        assert!(api_error(
-            "editForumTopic",
-            StatusCode::BAD_REQUEST,
-            400,
-            "Bad Request: message thread not found",
-        )
-        .is_forum_topic_missing());
-        assert!(api_error(
-            "editForumTopic",
-            StatusCode::BAD_REQUEST,
-            400,
-            "Bad Request: TOPIC_NOT_MODIFIED",
-        )
-        .is_topic_not_modified());
-        assert!(!api_error(
-            "editForumTopic",
-            StatusCode::FORBIDDEN,
-            403,
-            "Forbidden: not enough rights",
-        )
-        .is_forum_topic_missing());
-        assert!(!api_error(
-            "editForumTopic",
-            StatusCode::BAD_REQUEST,
-            400,
-            "Bad Request: chat not found",
-        )
-        .is_forum_topic_missing());
-        assert!(!api_error(
-            "sendMessage",
-            StatusCode::BAD_REQUEST,
-            400,
-            "Bad Request: TOPIC_ID_INVALID",
-        )
-        .is_forum_topic_missing());
+        assert!(
+            api_error(
+                "editForumTopic",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: TOPIC_ID_INVALID",
+            )
+            .is_forum_topic_missing()
+        );
+        assert!(
+            api_error(
+                "editForumTopic",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: message thread not found",
+            )
+            .is_forum_topic_missing()
+        );
+        assert!(
+            api_error(
+                "editForumTopic",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: TOPIC_NOT_MODIFIED",
+            )
+            .is_topic_not_modified()
+        );
+        assert!(
+            !api_error(
+                "editForumTopic",
+                StatusCode::FORBIDDEN,
+                403,
+                "Forbidden: not enough rights",
+            )
+            .is_forum_topic_missing()
+        );
+        assert!(
+            !api_error(
+                "editForumTopic",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: chat not found",
+            )
+            .is_forum_topic_missing()
+        );
+        assert!(
+            !api_error(
+                "sendMessage",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: TOPIC_ID_INVALID",
+            )
+            .is_forum_topic_missing()
+        );
     }
 
     #[test]

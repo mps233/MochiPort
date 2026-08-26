@@ -316,46 +316,46 @@ async fn handle_forum_topic_service_message(
         .await
         {
             Ok(()) => {
-                    let mut persisted = state.persisted.lock().await;
-                    if let Some(binding) = persisted.telegram_topic_binding_states.get_mut(&key)
-                        && binding.thread_id == thread_id
-                    {
-                        binding.codex_title = topic_name.clone();
-                        binding.topic_name = topic_name.clone();
-                        binding.last_synced_codex_title = topic_name.clone();
-                        binding.last_synced_topic_name = topic_name.clone();
-                        binding.last_checked_at_ms = crate::types::now_ms();
-                        let path = state.config.lock().await.state_path.clone();
-                        if let Err(err) = persisted.save(&path) {
-                            chain_log::write_diagnostic_lazy(|| {
-                                format!(
-                                    "[telegram_topic] event=sync_save_failed key={} err={err}",
-                                    key
-                                )
-                            });
-                        }
+                let mut persisted = state.persisted.lock().await;
+                if let Some(binding) = persisted.telegram_topic_binding_states.get_mut(&key)
+                    && binding.thread_id == thread_id
+                {
+                    binding.codex_title = topic_name.clone();
+                    binding.topic_name = topic_name.clone();
+                    binding.last_synced_codex_title = topic_name.clone();
+                    binding.last_synced_topic_name = topic_name.clone();
+                    binding.last_checked_at_ms = crate::types::now_ms();
+                    let path = state.config.lock().await.state_path.clone();
+                    if let Err(err) = persisted.save(&path) {
+                        chain_log::write_diagnostic_lazy(|| {
+                            format!(
+                                "[telegram_topic] event=sync_save_failed key={} err={err}",
+                                key
+                            )
+                        });
                     }
-                    state
-                        .push_event(
-                            "info",
-                            "telegram_topic_name_synced_to_codex",
-                            format!("thread={} name={}", thread_id, topic_name),
-                        )
-                        .await;
+                }
+                state
+                    .push_event(
+                        "info",
+                        "telegram_topic_name_synced_to_codex",
+                        format!("thread={} name={}", thread_id, topic_name),
+                    )
+                    .await;
             }
             Err(err) => {
-                    state
-                        .codex_thread_name_sync_ops
-                        .lock()
-                        .await
-                        .remove(&thread_id);
-                    state
-                        .push_event(
-                            "warn",
-                            "telegram_topic_name_sync_to_codex_failed",
-                            format!("thread={} err={err}", thread_id),
-                        )
-                        .await;
+                state
+                    .codex_thread_name_sync_ops
+                    .lock()
+                    .await
+                    .remove(&thread_id);
+                state
+                    .push_event(
+                        "warn",
+                        "telegram_topic_name_sync_to_codex_failed",
+                        format!("thread={} err={err}", thread_id),
+                    )
+                    .await;
             }
         }
     }
@@ -431,10 +431,7 @@ async fn reconcile_telegram_topic_bindings(state: &SharedState, api: &TelegramAp
         let (raw_chat_id, _) = crate::types::split_telegram_message_target(&route.chat_id);
         let mut next_state = state_snapshot.unwrap_or_default();
         next_state.thread_id = thread_id.clone();
-        let current_topic_name = next_state
-            .topic_name
-            .trim()
-            .to_string();
+        let current_topic_name = next_state.topic_name.trim().to_string();
         let codex_title = codex_titles.get(&thread_id).cloned();
         let target_topic_name = codex_title
             .as_deref()
@@ -469,7 +466,10 @@ async fn reconcile_telegram_topic_bindings(state: &SharedState, api: &TelegramAp
         } else {
             target_topic_name.as_str()
         };
-        match api.edit_forum_topic(raw_chat_id, topic_id, probe_name).await {
+        match api
+            .edit_forum_topic(raw_chat_id, topic_id, probe_name)
+            .await
+        {
             Ok(true) => {
                 if current_topic_name.is_empty() {
                     next_state.topic_name = probe_name.to_string();
@@ -483,7 +483,10 @@ async fn reconcile_telegram_topic_bindings(state: &SharedState, api: &TelegramAp
                     .push_event(
                         "warn",
                         "telegram_topic_probe_failed",
-                        format!("chat={} topic={} api returned false", route.chat_id, topic_id),
+                        format!(
+                            "chat={} topic={} api returned false",
+                            route.chat_id, topic_id
+                        ),
                     )
                     .await;
                 continue;
@@ -505,7 +508,10 @@ async fn reconcile_telegram_topic_bindings(state: &SharedState, api: &TelegramAp
                             .push_event(
                                 "info",
                                 "telegram_topic_binding_removed",
-                                format!("chat={} topic={} no longer exists", route.chat_id, topic_id),
+                                format!(
+                                    "chat={} topic={} no longer exists",
+                                    route.chat_id, topic_id
+                                ),
                             )
                             .await;
                     }
@@ -657,7 +663,10 @@ async fn reconcile_telegram_topic_bindings(state: &SharedState, api: &TelegramAp
     }
 }
 
-fn thread_titles(threads: &[serde_json::Value], text: crate::im::core::i18n::ImText) -> HashMap<String, String> {
+fn thread_titles(
+    threads: &[serde_json::Value],
+    text: crate::im::core::i18n::ImText,
+) -> HashMap<String, String> {
     threads
         .iter()
         .filter_map(|thread| {
@@ -676,7 +685,11 @@ fn thread_titles(threads: &[serde_json::Value], text: crate::im::core::i18n::ImT
 
 pub(crate) fn truncate_topic_name(title: &str) -> String {
     let title = title.trim();
-    let title = if title.is_empty() { "未命名会话" } else { title };
+    let title = if title.is_empty() {
+        "未命名会话"
+    } else {
+        title
+    };
     title.chars().take(64).collect()
 }
 
