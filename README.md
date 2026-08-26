@@ -10,10 +10,10 @@ MochiPort 还内置 AI Gateway：Codex 只连接一个本地入口，模型请�
 
 ## 能做什么
 
-- 通过官方 remote-control 接入 Codex App、VS Code 插件和 Codex CLI，不替换 Codex 文件，也不安装包装命令。
+- 通过官方 remote-control 接入 Codex App、VS Code 插件和 Codex CLI；daemon 启动时会检查 VS Code 插件，必要时备份并改写其 `extension.js` 以加入 `--remote-control`，停止时尝试恢复；不安装包装命令。
 - 在消息软件中创建、恢复和操作 Codex thread，接收进度并处理审批。
 - 在 macOS SwiftUI 或 Windows 客户端中管理模型服务、模型别名、路由、请求日志和消息渠道。
-- 只读查看 Sub2API 账号池的在线状态、倍率和最近命中账号，不修改账号池。
+- 查看 Sub2API 账号池的在线状态、倍率和最近命中账号；查询会调用上游用量探测，强制刷新还会调用 billing 探测，可能同步倍率并持久化快照；不会通过 MochiPort 执行账号的创建、删除或手动编辑。
 
 ## Telegram 项目群和话题
 
@@ -71,7 +71,7 @@ MochiPort 会记住“哪个话题对应哪个会话”。Codex 会话被归档�
 
 | 平台 | 文件 | 启动方式 |
 | --- | --- | --- |
-| macOS | `MochiPort-<版本>-macos-<架构>.dmg` | 拖入 Applications 后打开 |
+| macOS | `MochiPort-<版本>-build<构建号>-macos-<架构>.dmg` | 拖入 Applications 后打开 |
 | Windows | `MochiPort-<版本>-windows-x64.msi` 或 `.zip` | 安装或直接运行 |
 
 打开客户端后，MochiPort 会启动本地 backend。macOS 使用当前用户范围的 LaunchAgent 保持 backend 运行；正常退出 GUI 不会自动重新打开窗口。Linux 桌面包暂不发布，未来将单独设计新的客户端。
@@ -104,7 +104,7 @@ codex --remote ws://127.0.0.1:3849
 
 打开 **消息渠道**，选择一个或多个渠道：
 
-- **Telegram**：填写 BotFather token；私聊使用白名单，配置的 Forum 项目群按 Topic 分开处理。
+- **Telegram**：填写 BotFather token；私聊使用 `allowedChatIds` 白名单，留空时会绑定首个私聊，配置的 Forum 项目群按 Topic 分开处理。
 - **飞书**：扫码创建机器人，使用 WebSocket 接收事件。
 - **微信**：扫码登录微信 iLink Bot。
 - **企业微信**：扫码接入 AI Bot，支持私聊和群聊文本。
@@ -115,7 +115,7 @@ codex --remote ws://127.0.0.1:3849
 
 - **会话**：从当前 Codex App 读取会话，创建或恢复 thread。
 - **请求日志**：按状态、渠道和模型筛选请求，查看耗时、用量和错误。
-- **Sub2API**：在 **AI 网关 -> 账号** 填写管理地址和 Admin API Key；MochiPort 只读账号池，不会创建、删除或编辑账号。
+- **Sub2API**：在 **AI 网关 -> 账号** 填写管理地址和 Admin API Key；查询会调用上游用量探测，强制刷新还会调用 billing 探测，可能同步倍率/快照；不会通过 MochiPort 执行账号的创建、删除或手动编辑。
 - **网络**：可选系统代理、直连或自定义 HTTP/SOCKS5 代理，只影响 MochiPort 的出站请求。
 
 ### Telegram 命令
@@ -148,7 +148,7 @@ http://127.0.0.1:3847
 - Sub2API Admin API Key
 - Codex 本地认证数据
 
-GUI 中的“恢复原来的设置”只恢复 MochiPort 写入前的 Codex 连接方式，不会卸载 Codex，也不会删除会话历史。
+GUI 中的“恢复原来的设置”会移除 MochiPort 写入的 Codex 连接配置，同时保留后续 Codex 配置变化和会话历史；不会卸载 Codex。该操作本身不会直接撤销 VS Code 插件的 `--remote-control` 补丁，插件还原会在 daemon 停止时尝试执行。
 
 ## 更多文档
 

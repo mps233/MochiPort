@@ -11,7 +11,7 @@ This project is derived from [`happy-loki/codexhub`](https://github.com/happy-lo
 | Feature | Description |
 | --- | --- |
 | Remote and local side by side | Use Feishu, WeChat, and Telegram to control local Codex App, the Codex VS Code extension, and Codex CLI. The same Codex session can stay synchronized between IM and local clients. |
-| Local Codex access | Does not modify Codex frontend code. Connect Codex App, the VS Code extension, and Codex CLI through the local backend. |
+| Local Codex access | Connect Codex App, the VS Code extension, and Codex CLI through the local backend. When needed, the daemon backs up and patches the VS Code extension's `extension.js` to add `--remote-control`, then attempts to restore it when the daemon stops. |
 | Codex session management | Read sessions directly from the current Codex App over its remote-control connection and manage them in the GUI. No session files need to be copied or migrated; change a session's provider only when needed. |
 | Manage Codex sessions from IM | Use the native Codex remote-control protocol to create and resume Codex sessions from IM. |
 | Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
@@ -39,7 +39,7 @@ The main MochiPort flow is: download the app -> configure a model provider -> co
 
 ### 1. Install
 
-Download the appropriate package from [MochiPort Releases](https://github.com/mps233/mochiport/releases). On macOS, open `MochiPort-<version>-macos-<architecture>.dmg` and drag MochiPort to Applications. On Windows, install `MochiPort-<version>-windows-x64.msi` or run `MochiPort.exe` from the ZIP package. A Linux desktop package is not currently published; a separate client may be designed later.
+Download the appropriate package from [MochiPort Releases](https://github.com/mps233/mochiport/releases). On macOS, open `MochiPort-<version>-build<build-number>-macos-<architecture>.dmg` and drag MochiPort to Applications. On Windows, install `MochiPort-<version>-windows-x64.msi` or run `MochiPort.exe` from the ZIP package. A Linux desktop package is not currently published; a separate client may be designed later.
 
 If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs per-user LaunchAgents that keep the local backend running and recover the GUI after an abnormal exit; a normal GUI quit does not reopen the window.
 
@@ -80,7 +80,7 @@ If a provider rejects Codex's image generation tool, enable `Filter image genera
 
 Turn on `连接 MochiPort` on the `Codex 接入` page. This single switch starts the local MochiPort connection for Codex App and the Codex VS Code extension.
 
-Turning the switch off first restores the Codex connection from before setup, then stops MochiPort for Codex. The restore action is shown only after Codex config has been written.
+Turning the switch off first restores the Codex connection from before setup, then stops MochiPort for Codex. The restore action is shown only after Codex config has been written. It does not directly undo the VS Code extension patch; that patch is attempted when the daemon stops.
 
 ### 6. Open Codex
 
@@ -178,7 +178,7 @@ Approval prompts are updated after selection where the platform supports it.
 
 ## Restore Codex Config
 
-Click `Restore Previous Settings` in the GUI to restore the Codex connection from before setup. After restore, Codex App no longer sends model requests through MochiPort.
+Click `Restore Previous Settings` in the GUI to remove MochiPort's connection configuration while preserving later Codex config changes and session history. After restore, Codex App no longer sends model requests through MochiPort. The action does not directly undo the VS Code extension's `--remote-control` patch; the daemon attempts that restore when it stops.
 
 This does not uninstall Codex and does not delete Codex session history.
 
