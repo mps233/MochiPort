@@ -6,6 +6,7 @@ pub mod routing;
 pub mod session;
 pub mod text_adapter;
 pub mod text_renderer;
+pub(crate) mod text_utils;
 pub mod thread;
 pub mod thread_list;
 pub mod turn;

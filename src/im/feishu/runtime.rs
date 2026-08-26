@@ -10,7 +10,7 @@ use crate::{
     app_state::SharedState,
     chain_log,
     im::{
-        core::text_renderer,
+        core::{text_renderer, text_utils::log_text_preview},
         feishu::{
             FeishuApi,
             renderer::{
@@ -42,15 +42,7 @@ fn feishu_receive_target(target: &str) -> (&'static str, &str) {
 }
 
 fn log_preview(text: &str) -> String {
-    let normalized = text.replace("\r\n", "\n").replace('\n', "\\n");
-    let mut out = String::new();
-    for ch in normalized.chars().take(FEISHU_LOG_PREVIEW_CHARS) {
-        out.push(ch);
-    }
-    if normalized.chars().count() > FEISHU_LOG_PREVIEW_CHARS {
-        out.push_str("...");
-    }
-    out
+    log_text_preview(text, FEISHU_LOG_PREVIEW_CHARS)
 }
 
 fn log_tail(text: &str) -> String {

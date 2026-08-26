@@ -7,8 +7,8 @@ use crate::{
     app_state::SharedState,
     chain_log,
     im::{
-        core::accounts::ImApiRegistry,
         core::i18n::im_text_for_state,
+        core::{accounts::ImApiRegistry, text_utils::log_text_preview},
         feishu::{FeishuAdapter, FeishuApi},
         telegram::{adapter::TelegramAdapter, api::TelegramApi, typing as telegram_typing},
         wechat::{
@@ -1213,9 +1213,9 @@ fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&
         return;
     }
     let (payload_kind, text_len, preview) = match (&message.payload, text) {
-        (_, Some(text)) => ("text", text.chars().count(), trace_preview(text, 500)),
+        (_, Some(text)) => ("text", text.chars().count(), log_text_preview(text, 500)),
         (ImOutboundPayload::Text(text), None) => {
-            ("text", text.chars().count(), trace_preview(text, 500))
+            ("text", text.chars().count(), log_text_preview(text, 500))
         }
         (
             ImOutboundPayload::TelegramCommentary {
@@ -1229,13 +1229,13 @@ fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&
             (
                 "telegram_commentary",
                 rich_text.chars().count(),
-                trace_preview(&rich_text, 500),
+                log_text_preview(&rich_text, 500),
             )
         }
         (ImOutboundPayload::Approval(approval), None) => (
             "approval",
             approval.summary.chars().count(),
-            trace_preview(&approval.summary, 500),
+            log_text_preview(&approval.summary, 500),
         ),
         (
             ImOutboundPayload::Image {
@@ -1254,7 +1254,7 @@ fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&
             (
                 "image",
                 image_text.chars().count(),
-                trace_preview(&image_text, 500),
+                log_text_preview(&image_text, 500),
             )
         }
     };
@@ -1288,21 +1288,9 @@ fn log_outbound_result(event: &str, message: &ImOutboundMessage, result: &str) {
             message.item_id.as_deref().unwrap_or(""),
             message.item_type.as_deref().unwrap_or(""),
             message.kind,
-            trace_preview(result, 300)
+            log_text_preview(result, 300)
         )
     });
-}
-
-fn trace_preview(text: &str, limit: usize) -> String {
-    let compact = text.replace("\r\n", "\n").replace('\n', "\\n");
-    let mut out = String::new();
-    for ch in compact.chars().take(limit) {
-        out.push(ch);
-    }
-    if compact.chars().count() > limit {
-        out.push_str("...");
-    }
-    out
 }
 
 async fn send_telegram_image(

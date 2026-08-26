@@ -85,17 +85,7 @@ pub(in crate::remote_control_backend) fn json_preview(text: &str) -> String {
     out
 }
 
-pub(in crate::remote_control_backend) fn log_text_preview(text: &str, limit: usize) -> String {
-    let compact = text.replace("\r\n", "\n").replace('\n', "\\n");
-    let mut out = String::new();
-    for ch in compact.chars().take(limit) {
-        out.push(ch);
-    }
-    if compact.chars().count() > limit {
-        out.push_str("...");
-    }
-    out
-}
+pub(in crate::remote_control_backend) use crate::im::core::text_utils::log_text_preview;
 
 pub(in crate::remote_control_backend) fn log_codex_to_remote_message(
     connection_epoch: u64,

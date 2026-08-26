@@ -13,6 +13,7 @@ use crate::{
             i18n::im_text_for_state,
             outbound::{ImOutboundKind, ImOutboundMessage, ImOutboundPayload, ImOutboundSender},
             text_renderer,
+            text_utils::log_text_preview,
         },
         feishu::{
             FeishuAdapter, flow as feishu_flow, renderer,
@@ -3348,7 +3349,7 @@ fn log_codex_to_im_handler(notification: &crate::codex::CodexNotification) {
             item_id,
             item_type,
             text.chars().count(),
-            trace_preview(&text, 500)
+            log_text_preview(&text, 500)
         )
     });
 }
@@ -3372,7 +3373,7 @@ fn log_remote_to_im_enqueue(
             item_id,
             item_type,
             text.chars().count(),
-            trace_preview(text, 500)
+            log_text_preview(text, 500)
         )
     });
 }
@@ -3409,18 +3410,6 @@ fn trace_text_for_notification(
         return item.to_string();
     }
     params.to_string()
-}
-
-fn trace_preview(text: &str, limit: usize) -> String {
-    let compact = text.replace("\r\n", "\n").replace('\n', "\\n");
-    let mut out = String::new();
-    for ch in compact.chars().take(limit) {
-        out.push(ch);
-    }
-    if compact.chars().count() > limit {
-        out.push_str("...");
-    }
-    out
 }
 
 async fn text_im_image_path_for_item(

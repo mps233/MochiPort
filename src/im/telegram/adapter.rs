@@ -5,7 +5,7 @@ use tokio::time::{Duration, sleep};
 
 use crate::{
     chain_log,
-    im::core::{i18n::ImText, thread::ThreadCreateOption},
+    im::core::{i18n::ImText, text_utils::log_text_preview, thread::ThreadCreateOption},
     im_runtime::{PendingApproval, approval_request_fingerprint},
     types::split_telegram_message_target,
 };
@@ -1208,18 +1208,6 @@ fn log_adapter(event: &str, message: impl AsRef<str>) {
     chain_log::write_diagnostic_lazy(|| {
         format!("[telegram_adapter] event={} {}", event, message.as_ref())
     });
-}
-
-fn log_text_preview(text: &str, limit: usize) -> String {
-    let compact = text.replace("\r\n", "\n").replace('\n', "\\n");
-    let mut out = String::new();
-    for ch in compact.chars().take(limit) {
-        out.push(ch);
-    }
-    if compact.chars().count() > limit {
-        out.push_str("...");
-    }
-    out
 }
 
 fn button(text: &str, callback_data: &str) -> serde_json::Value {
