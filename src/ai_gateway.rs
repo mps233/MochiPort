@@ -2,6 +2,7 @@ pub mod apply_patch_tool;
 pub mod catalog;
 pub mod config;
 pub mod context;
+pub(crate) mod custom_tool_input;
 pub mod encrypted_content;
 pub mod error;
 pub mod handler;
