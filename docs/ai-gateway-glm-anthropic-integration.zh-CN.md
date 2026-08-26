@@ -257,7 +257,7 @@ GUI 通过 `ProviderLogoKind::Zhipu` 编译期嵌入该 SVG。后续新增厂商
 cargo fmt
 cargo test ai_gateway
 cargo check
-cargo check --features gui
+cargo check
 git diff --check
 ```
 

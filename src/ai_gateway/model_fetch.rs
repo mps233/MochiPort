@@ -1,12 +1,8 @@
 //! 从上游 provider 拉取模型列表的共享实现：候选 URL 推导、响应解析、
 //! DeepSeek 型号过滤与响应预览截断。
 //!
-//! 逻辑对齐 `src/gui.rs` 的 `fetch_remote_models`（及其辅助函数
-//! `model_list_candidates`、`extract_model_ids`、`filter_fetched_models_for_provider`、
-//! `push_model_items`、`response_preview`、`known_models_url_for_provider`、
-//! `is_default_models_url_for_base` 的推导语义），修改时需同步两处。
-//! 旧 wxDragon GUI 处于维护模式，仍保留其阻塞式副本；本模块是版本化管理 API
-//! （`POST /api/v1/manage/gateway/provider/models/fetch`）使用的异步版本。
+//! 本模块是版本化管理 API
+//! （`POST /api/v1/manage/gateway/provider/models/fetch`）使用的异步实现。
 
 use std::time::Duration;
 
@@ -16,10 +12,10 @@ use serde_json::Value;
 use super::config::{ProviderType, provider_api_root};
 use super::templates;
 
-/// 每个候选 URL 的拉取超时。管理 API 语义固定为 15 秒/次（旧 GUI 为 30 秒）。
+/// 每个候选 URL 的拉取超时。管理 API 语义固定为 15 秒/次。
 pub const MODEL_LIST_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 响应体预览的最大字符数，与旧 GUI 的 `response_preview` 一致。
+/// 响应体预览的最大字符数。
 const PREVIEW_MAX_CHARS: usize = 240;
 
 /// 单个候选 URL 的一次拉取尝试结果。不携带任何鉴权信息。
@@ -43,8 +39,8 @@ pub struct FetchOutcome {
     pub attempts: Vec<FetchAttempt>,
 }
 
-/// 构造候选 models URL 列表，顺序与去重对齐旧 GUI 的 `model_list_candidates`：
-/// 显式 `models_url`（及其展开变体）→ `{base}/models` → `{root}/v1/models` →
+/// 构造候选 models URL 列表：显式 `models_url`（及其展开变体）→
+/// `{base}/models` → `{root}/v1/models` →
 /// 未显式配置 `models_url` 时追加已知服务的兜底地址。
 pub fn model_list_candidates(
     base_url: &str,
@@ -101,11 +97,10 @@ fn push_candidate(candidates: &mut Vec<String>, url: String) {
 
 /// 按 provider 元数据推导「已知服务」的官方 models 地址。
 ///
-/// 对齐 `src/gui.rs` 的 `known_models_url_for_provider`：GLM/智谱（名称或
-/// Anthropic 兼容 profile 命中，且 Base URL 指向 open.bigmodel.cn）返回 GLM
+/// GLM/智谱（名称或 Anthropic 兼容 profile 命中，且 Base URL 指向 open.bigmodel.cn）返回 GLM
 /// 模板中的官方 models 地址。管理 API 的请求体不携带 compatibility，因此
-/// 额外接受 `provider_type == AnthropicMessages` 作为等价信号——旧 GUI 中
-/// Base URL 指向 open.bigmodel.cn 的模板即 GLM，其类型同为 Anthropic Messages。
+/// 额外接受 `provider_type == AnthropicMessages` 作为等价信号——Base URL
+/// 指向 open.bigmodel.cn 的模板即 GLM，其类型同为 Anthropic Messages。
 pub fn known_models_url(
     provider_name: Option<&str>,
     provider_type: &ProviderType,
@@ -295,7 +290,7 @@ mod tests {
             ]
         );
 
-        // 不带 /models 结尾的显式配置会展开成两个变体（对齐旧 GUI）。
+        // 不带 /models 结尾的显式配置会展开成两个变体。
         assert_eq!(
             model_list_candidates(
                 "https://api.example.com/v1",
@@ -349,7 +344,7 @@ mod tests {
         let root = json!(["x", { "id": "y" }, "x"]);
         assert_eq!(extract_model_ids(&root), vec!["x", "y"]);
 
-        // data 优先于 models（对齐旧 GUI 的 else-if 顺序）。
+        // data 优先于 models。
         let both = json!({ "data": [{ "id": "d" }], "models": [{ "id": "m" }] });
         assert_eq!(extract_model_ids(&both), vec!["d"]);
 

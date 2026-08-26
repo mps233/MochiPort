@@ -1,6 +1,6 @@
 # MochiPort for Windows
 
-Windows 客户端使用 React、TypeScript、Tauri 2 和系统 WebView2。界面进程只通过 Tauri 原生桥访问本机 MochiPort 管理 API；随安装包分发的 `mochiport-daemon.exe` 来自仓库根目录的 Rust backend，并且不启用旧 wxDragon GUI feature。
+Windows 客户端使用 React、TypeScript、Tauri 2 和系统 WebView2。界面进程只通过 Tauri 原生桥访问本机 MochiPort 管理 API；随安装包分发的 `mochiport-daemon.exe` 来自仓库根目录的 Rust backend。
 
 ## 环境要求
 
@@ -54,7 +54,7 @@ src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\
 
 正式发布由 `.github\workflows\release-windows.yml` 完成。该 workflow 会：
 
-1. 以无 GUI feature 的方式构建 daemon sidecar。
+1. 构建 Rust daemon sidecar。
 2. 构建 Tauri GUI；正式 tag 会先签 GUI 与 sidecar。
 3. 生成并签署唯一公开安装器 MSI；不再构建或发布 NSIS，以避免两套安装技术产生重复卸载登记。
 4. 生成含 GUI 与 sidecar 的 portable ZIP、Windows 更新 JSON 和 appcast，并沿用 GitHub Release 发布约定。

@@ -1,4 +1,3 @@
-#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
 // These lints describe stable API and callback shapes in the current
 // cross-platform implementation. Keep them visible in review without
 // requiring behavior-changing signature refactors just to satisfy Clippy.
@@ -25,9 +24,6 @@ mod codex_app_enhanced;
 mod codex_session_history;
 mod config;
 mod daemon_process;
-mod diagnostics_export;
-#[cfg(feature = "gui")]
-mod gui;
 mod im;
 mod im_runtime;
 mod manage_api;
@@ -105,14 +101,6 @@ fn main() -> anyhow::Result<()> {
             shutdown_mode: *shutdown_mode,
         });
     }
-    // GUI 需要在自己的线程里创建 tokio 运行时，若这里先建立外层运行时，
-    // gui::run() 内层运行时退出时会在 async 上下文中被 drop，触发
-    // "Cannot drop a runtime in a context where blocking is not allowed" panic。
-    // 因此 GUI 分支在创建任何 tokio 运行时之前直接走同步路径返回。
-    if matches!(cli.command, Command::Gui) {
-        return run_gui_command();
-    }
-
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
@@ -205,20 +193,6 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             unreachable!("safe relaunch helper is handled before runtime creation")
         }
         Command::Version => unreachable!("version command is handled before runtime creation"),
-        Command::Gui => unreachable!("GUI command is handled before config loading"),
-    }
-}
-
-fn run_gui_command() -> anyhow::Result<()> {
-    #[cfg(feature = "gui")]
-    {
-        gui::run();
-        Ok(())
-    }
-
-    #[cfg(not(feature = "gui"))]
-    {
-        anyhow::bail!("this MochiPort build does not include GUI support")
     }
 }
 

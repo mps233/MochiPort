@@ -26,7 +26,6 @@ impl SafeRelaunchShutdownMode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Version,
-    Gui,
     Daemon,
     On,
     Off,
@@ -90,7 +89,6 @@ impl Cli {
         let command = match remaining.first().map(String::as_str) {
             None => default_command(),
             Some("-V") | Some("--version") | Some("version") => Command::Version,
-            Some("gui") => Command::Gui,
             Some("daemon") | Some("run") => Command::Daemon,
             Some("on") => Command::On,
             Some("off") => Command::Off,
@@ -116,11 +114,7 @@ impl Cli {
 }
 
 fn default_command() -> Command {
-    if cfg!(feature = "gui") {
-        Command::Gui
-    } else {
-        Command::Daemon
-    }
+    Command::Daemon
 }
 
 fn parse_configure_codex_app(args: &[String]) -> anyhow::Result<Command> {
@@ -310,7 +304,6 @@ pub fn print_help() {
 
 Usage:
   mochiport --version
-  mochiport [--config PATH] gui
   mochiport [--config PATH] daemon
   mochiport [--config PATH] on
   mochiport [--config PATH] off
@@ -318,7 +311,7 @@ Usage:
   mochiport [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
   mochiport [--config PATH] uninstall-codex-app [--codex-home PATH]
 
-Default command is gui when built with the gui feature, otherwise daemon.
+Default command is daemon.
 "#
     );
 }

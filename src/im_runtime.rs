@@ -1996,7 +1996,7 @@ impl RuntimeState {
         false
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn resolve_approval_request(&mut self, request_id: &Value) -> Option<PendingApproval> {
         self.resolve_approval_request_with_context(request_id)
             .map(|resolved| resolved.approval)

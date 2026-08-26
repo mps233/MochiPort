@@ -5,6 +5,7 @@ use crate::{
     chain_log,
 };
 
+#[cfg(test)]
 use super::server_envelopes::server_ack_cursor_key;
 use super::{DEFAULT_REMOTE_CLIENT_KEY, OutboundWsMessage, stable_id, uuid_like};
 
@@ -482,7 +483,7 @@ pub(in crate::remote_control_backend) fn remove_pending_initialize_for_connectio
     removed
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 pub(in crate::remote_control_backend) fn reset_remote_clients_for_connection_locked(
     remote: &mut RemoteControlInner,
     connection_epoch: u64,

@@ -830,8 +830,8 @@ Responses tools include tool_search
 
 本轮验证：
 
-- `cargo test ai_gateway --features gui`：138 passed。
-- `cargo check --features gui`：通过。
+- `cargo test ai_gateway`：通过。
+- `cargo check`：通过。
 
 ### Step 1：新增 IR，不改路由行为
 

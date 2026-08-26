@@ -164,6 +164,7 @@ pub fn provider_api_root(base_url: &str) -> String {
 /// 将 provider Base URL 规范成 UI/配置展示用地址。
 ///
 /// 目前支持的上游协议都使用 `/v1`，所以保存时统一展示为带 `/v1`。
+#[cfg(test)]
 pub fn provider_display_base_url(base_url: &str) -> String {
     let root = provider_api_root(base_url);
     if root.is_empty() {

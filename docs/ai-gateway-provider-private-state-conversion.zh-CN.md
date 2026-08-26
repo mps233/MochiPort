@@ -536,7 +536,7 @@ Codex、OpenAI、Grok、Anthropic 或兼容厂商升级后，至少执行以下�
 9. 同渠道 OpenAI、Grok、Anthropic 回放测试是否通过。
 10. OpenAI <-> Grok <-> Anthropic 的全部切换组合是否过滤私有状态。
 11. JSON、普通 SSE 和内部 WebSearch SSE 是否使用同一 marker 规则。
-12. GUI feature 编译和全量测试是否通过。
+12. daemon/CLI 编译和全量测试是否通过。
 13. GPT/OpenAI 会话切换 Grok 后，custom tool 历史和结构化 output 是否已规范化。
 14. GPT-5.6 `additional_tools` 是否仍是当前版本的工具注册表载体。
 15. GPT-5.6 切换到 Grok、DeepSeek、Anthropic 后，当前工具定义是否完成目标协议降级。

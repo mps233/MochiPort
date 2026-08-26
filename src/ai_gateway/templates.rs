@@ -1,8 +1,7 @@
 //! 内置 AI Gateway 服务商模板。
 //!
-//! 这里是「按服务商一键填充 provider 编辑器」数据的唯一来源：
-//! 旧 wxDragon GUI（`gui` feature）与管理 API
-//! `GET /api/v1/manage/gateway/provider-templates` 共用同一份数据。
+//! 这里是「按服务商一键填充 provider 编辑器」数据的唯一来源，供管理 API
+//! `GET /api/v1/manage/gateway/provider-templates` 使用。
 //! 模板是纯静态数据，不包含任何用户配置或密钥；「自定义」不在此列，
 //! 由客户端本地兜底。
 
@@ -30,7 +29,7 @@ pub struct ProviderTemplate {
 impl ProviderTemplate {
     /// 生成可直接进入编辑器/保存流程的 [`ProviderConfig`] 草稿：
     /// 无 API key，weight/timeout 等沿用默认值。
-    #[cfg_attr(not(feature = "gui"), allow(dead_code))]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn to_provider_config(&self) -> ProviderConfig {
         ProviderConfig {
             name: self.id.to_string(),
@@ -111,7 +110,7 @@ pub fn provider_templates() -> &'static [ProviderTemplate] {
 
 /// 按协议类型取官方默认模板；`AnthropicMessages` 返回 Anthropic 官方模板，
 /// GLM 等兼容厂商使用 [`glm_template`] 之类的专属模板。
-#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn default_template_for(provider_type: &ProviderType) -> &'static ProviderTemplate {
     let id = match provider_type {
         ProviderType::OpenAiResponses => "openai",
@@ -124,7 +123,7 @@ pub fn default_template_for(provider_type: &ProviderType) -> &'static ProviderTe
 }
 
 /// 智谱 GLM 模板（Anthropic Messages 协议 + `glm_anthropic` 兼容 profile）。
-#[cfg_attr(not(feature = "gui"), allow(dead_code))]
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn glm_template() -> &'static ProviderTemplate {
     template_by_id("glm")
 }

@@ -31,7 +31,7 @@ The main MochiPort flow is: download the app -> configure a model provider -> co
 
 ### 0. Prerequisites
 
-- macOS, Windows, or Linux device
+- macOS or Windows device
 - Codex App, the Codex VS Code extension, or Codex CLI
 - No ChatGPT account and no acceleration network required
 - At least one model API key: OpenAI Responses, DeepSeek, Anthropic/Claude, Zhipu GLM, or another compatible provider
@@ -39,9 +39,9 @@ The main MochiPort flow is: download the app -> configure a model provider -> co
 
 ### 1. Install
 
-Download the appropriate package from [MochiPort Releases](https://github.com/mps233/mochiport/releases). On macOS, open `MochiPort-<version>-macos-<architecture>.dmg` and drag MochiPort to Applications. On Windows, install `MochiPort-<version>-windows-x64.msi` or run `MochiPort.exe` from the ZIP package. On Linux, download `MochiPort-<version>-linux-x86_64.AppImage`, make it executable, then open it.
+Download the appropriate package from [MochiPort Releases](https://github.com/mps233/mochiport/releases). On macOS, open `MochiPort-<version>-macos-<architecture>.dmg` and drag MochiPort to Applications. On Windows, install `MochiPort-<version>-windows-x64.msi` or run `MochiPort.exe` from the ZIP package. A Linux desktop package is not currently published; a separate client may be designed later.
 
-If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs per-user LaunchAgents that keep the local backend running and recover the GUI after an abnormal exit; a normal GUI quit does not reopen the window. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x MochiPort-*-linux-x86_64.AppImage` once.
+If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs per-user LaunchAgents that keep the local backend running and recover the GUI after an abnormal exit; a normal GUI quit does not reopen the window.
 
 Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The Rust desktop client can download, verify, and launch the platform installer after confirmation; the SwiftUI macOS client opens the verified release page/update flow. Neither client silently replaces the local app.
 
@@ -96,9 +96,9 @@ If Codex App, the Codex VS Code extension, and Codex CLI are connected to `Mochi
 
 ### 7. Use Codex CLI
 
-If you want Codex CLI to work with Feishu / Telegram / WeChat, you do not need to replace the `codex` command or install a wrapper. Use the same three-step flow on macOS, Windows, and Linux.
+If you want Codex CLI to work with Feishu / Telegram / WeChat, you do not need to replace the `codex` command or install a wrapper. Use the desktop client on macOS/Windows, or run the daemon directly on Linux; the Codex connection flow is the same.
 
-1. Open the `MochiPort` desktop app, finish IM channel setup and Codex access, and keep it running.
+1. Open the `MochiPort` desktop app on macOS/Windows, or start `mochiport daemon` on Linux. Finish IM channel setup and Codex access, and keep the client or daemon running.
 
 2. Open a terminal in the project directory and start Codex app-server:
 
@@ -244,7 +244,7 @@ Thread binding model:
 ```powershell
 cargo fmt
 cargo test
-cargo build --release --features gui --bin mochiport
+cargo build --release --bin mochiport
 ```
 
 Useful status endpoints while the daemon is running:

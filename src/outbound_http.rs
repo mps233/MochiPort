@@ -152,29 +152,6 @@ pub fn apply_async_proxy(
     }
 }
 
-#[cfg(feature = "gui")]
-pub fn apply_blocking_proxy(
-    builder: reqwest::blocking::ClientBuilder,
-    config: &OutboundProxyConfig,
-    local_port: Option<u16>,
-) -> Result<reqwest::blocking::ClientBuilder> {
-    match config.mode {
-        OutboundProxyMode::System => {
-            if local_port.is_some_and(system_proxy_points_to_local_server) {
-                Ok(builder.no_proxy())
-            } else {
-                Ok(builder)
-            }
-        }
-        OutboundProxyMode::Direct => Ok(builder.no_proxy()),
-        OutboundProxyMode::Custom => {
-            reject_local_proxy_recursion(config, local_port)?;
-            let proxy = custom_proxy(config)?;
-            Ok(builder.proxy(proxy))
-        }
-    }
-}
-
 fn custom_proxy(config: &OutboundProxyConfig) -> Result<reqwest::Proxy> {
     let value = config.url.trim();
     if value.is_empty() {

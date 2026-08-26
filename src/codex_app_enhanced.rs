@@ -3352,22 +3352,6 @@ fn launch_codex_app_blocking(port: u16) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-#[allow(dead_code)]
-fn launch_codex_app_blocking(port: u16) -> Result<()> {
-    let arguments = format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}");
-    for app_name in ["Codex", "ChatGPT"] {
-        let status = Command::new("open")
-            .args(["-na", app_name, "--args"])
-            .args(arguments.split_whitespace())
-            .status()?;
-        if status.success() {
-            return Ok(());
-        }
-    }
-    bail!("macOS 无法定位 Codex App")
-}
-
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn launch_codex_app_blocking(_port: u16) -> Result<()> {
     bail!("增强模式启动当前仅支持 Windows 和 macOS")

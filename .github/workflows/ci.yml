@@ -50,10 +50,10 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Check
-        run: cargo check --locked --features gui --bin mochiport
+        run: cargo check --locked --bin mochiport
 
       - name: Test
-        run: cargo test --locked --features gui --bin mochiport
+        run: cargo test --locked --bin mochiport
 
   swiftui:
     name: SwiftUI macOS shell

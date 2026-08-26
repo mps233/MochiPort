@@ -12,7 +12,7 @@ MochiPort 还内置 AI Gateway：Codex 只连接一个本地入口，模型请�
 
 - 通过官方 remote-control 接入 Codex App、VS Code 插件和 Codex CLI，不替换 Codex 文件，也不安装包装命令。
 - 在消息软件中创建、恢复和操作 Codex thread，接收进度并处理审批。
-- 在 GUI 中管理模型服务、模型别名、路由、请求日志和消息渠道。
+- 在 macOS SwiftUI 或 Windows 客户端中管理模型服务、模型别名、路由、请求日志和消息渠道。
 - 只读查看 Sub2API 账号池的在线状态、倍率和最近命中账号，不修改账号池。
 
 ## 界面预览
@@ -44,9 +44,8 @@ MochiPort 还内置 AI Gateway：Codex 只连接一个本地入口，模型请�
 | --- | --- | --- |
 | macOS | `MochiPort-<版本>-macos-<架构>.dmg` | 拖入 Applications 后打开 |
 | Windows | `MochiPort-<版本>-windows-x64.msi` 或 `.zip` | 安装或直接运行 |
-| Linux | `MochiPort-<版本>-linux-x86_64.AppImage` | `chmod +x` 后运行 |
 
-打开 GUI 后，MochiPort 会启动本地 backend。macOS 使用当前用户范围的 LaunchAgent 保持 backend 运行；正常退出 GUI 不会自动重新打开窗口。
+打开客户端后，MochiPort 会启动本地 backend。macOS 使用当前用户范围的 LaunchAgent 保持 backend 运行；正常退出 GUI 不会自动重新打开窗口。Linux 桌面包暂不发布，未来将单独设计新的客户端。
 
 ### 2. 配置模型
 
@@ -63,7 +62,7 @@ Codex 侧只看到 MochiPort 暴露的模型目录。未配置 AI Gateway 时，
 
 打开 **Codex 接入**，开启“连接 MochiPort”，再正常启动 Codex App 或 Codex VS Code 插件并开启 remote-control/“控制这台电脑”。remote-control 需要 ChatGPT 兼容的认证模式，仅 API key 认证无法启动；MochiPort 会写入本地连接配置。MochiPort 会通过本地连接读取会话，不需要复制或迁移会话文件。
 
-如果使用 Codex CLI，保持 MochiPort GUI 运行，然后执行：
+如果使用 Codex CLI，保持 MochiPort 客户端或 daemon 运行，然后执行：
 
 ```bash
 codex app-server --listen ws://127.0.0.1:3849 --remote-control
@@ -158,7 +157,7 @@ GUI 中的“恢复原来的设置”只恢复 MochiPort 写入前的 Codex 连�
 ```bash
 cargo fmt
 cargo test
-cargo build --release --features gui --bin mochiport
+cargo build --release --bin mochiport
 ```
 
 许可证：Apache-2.0。上游归属和修改声明见 [NOTICE](NOTICE)。

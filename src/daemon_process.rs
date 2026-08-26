@@ -57,7 +57,7 @@ impl DaemonIdentity {
             && !self.instance_id.trim().is_empty()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn is_codexhub(&self) -> bool {
         self.is_mochiport_compatible()
     }

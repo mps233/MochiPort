@@ -418,8 +418,8 @@ Gateway 在 `GlmAnthropic` profile 中：
 当前应保持通过：
 
 ```powershell
-cargo test --features gui --bin mochiport anthropic
-cargo build --release --features gui --bin mochiport
+cargo test --bin mochiport anthropic
+cargo build --release --bin mochiport
 ```
 
 重点测试点：

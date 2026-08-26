@@ -19,7 +19,6 @@ ecb = "0.1"
 futures-util = "0.3"
 fs2 = "0.4"
 hex = "0.4"
-image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
 mime_guess = "2"
 md5 = "0.7"
 once_cell = "1"
@@ -42,8 +41,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-wxdragon = { version = "0.9.17", optional = true }
-zip = { version = "2", default-features = false }
 zstd = "0.13"
 
 [target.'cfg(windows)'.dependencies]
@@ -55,14 +52,6 @@ embed-resource = "3.0.6"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
-
-[features]
-gui = ["dep:image", "dep:wxdragon", "wxdragon/stc", "reqwest/blocking"]
-
-[patch.crates-io]
-wxdragon = { path = "vendor/wxdragon/rust/wxdragon" }
-wxdragon-sys = { path = "vendor/wxdragon/rust/wxdragon-sys" }
-wxdragon-macros = { path = "vendor/wxdragon/rust/wxdragon-macros" }
 
 [[bin]]
 name = "mochiport"

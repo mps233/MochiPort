@@ -11,12 +11,6 @@ The Rust dependencies are distributed under their respective licenses. Release
 workflows append the dependency inventory and license texts discovered from the
 Cargo.lock-resolved source packages to this file.
 
-wxDragon
---------
-
-The vendored wxDragon Rust bindings are licensed under either the MIT License
-or the Apache License, Version 2.0, at your option.
-
 Lucide Icons and Feather-derived icons
 --------------------------------------
 

@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=MochiPort
-Comment=Control coding agents from Feishu, WeChat, WeCom, and Telegram
-Exec=mochiport
-Icon=mochiport
-Terminal=false
-Categories=Development;Utility;
