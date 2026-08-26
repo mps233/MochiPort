@@ -12,7 +12,7 @@
 ## macOS 客户端
 
 - 调整 macOS 浅色主题和 mascot，使主界面在浅色外观下更清晰统一。
-- 更新正式 App 与内置 daemon 版本为 `0.5.5 (build 461)`。
+- 更新正式 App 与内置 daemon 到 `0.5.5`，本地 macOS 验证包使用 UI build `461`。
 
 ## 验证
 
