@@ -1,8 +1,29 @@
-# MochiPort
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="packaging/macos/AppIcon-dark.svg">
+    <img src="packaging/macos/AppIcon.svg" alt="MochiPort logo" width="132">
+  </picture>
+</p>
 
-[English](README.en.md)
+<h1 align="center">MochiPort</h1>
 
-> 当前版本：`0.5.4`
+<p align="center">
+  本地优先的 Codex 会话中继与 AI Gateway
+</p>
+
+<p align="center">
+  <a href="README.en.md">English</a>
+  ·
+  <a href="https://github.com/mps233/MochiPort/releases">下载</a>
+  ·
+  <a href="https://github.com/mps233/MochiPort/issues">反馈问题</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/mps233/MochiPort/releases/latest"><img src="https://img.shields.io/github/v/release/mps233/MochiPort?display_name=tag&style=flat-square" alt="Latest release"></a>
+  <a href="https://github.com/mps233/MochiPort/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mps233/MochiPort/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
+  <span> <code>v0.5.4</code></span>
+</p>
 
 MochiPort 是一个本地优先的 Codex 会话中继。它把 Codex App、Codex VS Code 插件和 Codex CLI 接到 Telegram、飞书、微信或企业微信，让你可以在消息软件里创建会话、跟进任务和处理审批。
 
