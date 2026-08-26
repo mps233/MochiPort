@@ -92,6 +92,17 @@ Telegram 不需要为每个项目、每个会话单独创建机器人。通常�
 
 这样，同一个项目的多个会话可以放在同一个群里，分别使用不同的话题。话题名称会使用 Codex 会话标题，消息也只会回到对应的话题里。以后你在 Codex 客户端改了会话名称，MochiPort 会实时同步 Telegram 话题；你在 Telegram 里改话题名称，也会实时同步回 Codex 会话。
 
+<table>
+  <tr>
+    <td align="center"><strong>项目群话题列表</strong><br><img src="docs/assets/product/telegram-mobile-topics.jpg" alt="Telegram 手机端项目群话题列表" width="280"></td>
+    <td align="center"><strong>话题内任务进度</strong><br><img src="docs/assets/product/telegram-mobile-topic-progress.jpg" alt="Telegram 手机端话题内 Codex 任务进度" width="280"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>私聊持续跟进</strong><br><img src="docs/assets/product/telegram-mobile-chat.jpg" alt="Telegram 手机端 Codex 私聊" width="280"></td>
+    <td align="center"><strong>任务执行结果</strong><br><img src="docs/assets/product/telegram-mobile-task-result.jpg" alt="Telegram 手机端 Codex 任务执行结果" width="280"></td>
+  </tr>
+</table>
+
 MochiPort 会记住“哪个话题对应哪个会话”。Codex 会话被归档后，MochiPort 会每隔一段时间检查；确认归档持续约 5 分钟后，会自动删除对应的话题。Codex 会话真正消失后，也会删除对应话题。这个过程不会删除 Codex 会话本身。
 
 名称变更会通过事件实时同步；如果某次事件因断线或重启丢失，仍会每约 5 分钟自动对账补偿。两边同时改名时，后续对账以 Codex 名称为最终结果，避免互相循环覆盖。
