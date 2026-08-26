@@ -5,6 +5,15 @@ Use this before publishing the repository or creating a release.
 For post-change GUI/daemon handoff rules, see
 [`docs/threadrelay-change-handoff.zh-CN.md`](threadrelay-change-handoff.zh-CN.md).
 
+## Release Notes
+
+- `RELEASE_NOTES.md` must contain only the version being published.
+- Replace the file contents for every new release. Do not append, copy, or embed
+  historical release notes.
+- Keep older release notes on their existing GitHub Release pages and Git tags.
+- Before pushing a release tag, confirm the file has exactly one version heading
+  and does not contain sections labeled as historical releases.
+
 ## Repository Hygiene
 
 - [ ] Confirm `LICENSE`, `NOTICE`, and third-party attribution files are current.
