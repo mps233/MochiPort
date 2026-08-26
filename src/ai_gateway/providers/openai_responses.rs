@@ -28,6 +28,17 @@ use super::{
 };
 
 const UPSTREAM_REQUEST_BODY_READ_MAX_RETRIES: usize = 2;
+const DEEPSEEK_FLASH_VISION_MODEL: &str = "deepseek-v4-flash-vision-exp";
+
+fn resolve_deepseek_upstream_model(provider: &ProviderConfig, upstream_model: &str) -> String {
+    if provider.provider_type == ProviderType::DeepSeekResponses
+        && upstream_model.eq_ignore_ascii_case("deepseek-v4-flash")
+    {
+        DEEPSEEK_FLASH_VISION_MODEL.to_string()
+    } else {
+        upstream_model.to_string()
+    }
+}
 
 #[derive(Clone, Copy)]
 enum ResponsesEndpoint {
@@ -160,7 +171,7 @@ async fn passthrough_to_endpoint(
             raw_body["prompt_cache_retention"] = json!(retention);
         }
     }
-    raw_body["model"] = json!(upstream_model);
+    raw_body["model"] = json!(resolve_deepseek_upstream_model(provider, upstream_model));
     let encrypted_content_scope = EncryptedContentScope::for_provider(provider);
     let encrypted_content_stats =
         prepare_responses_request(&mut raw_body, &encrypted_content_scope);
@@ -1647,7 +1658,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let upstream = requests.recv().await.expect("captured upstream request");
-        assert_eq!(upstream["model"], "deepseek-v4-flash");
+        assert_eq!(upstream["model"], super::DEEPSEEK_FLASH_VISION_MODEL);
         assert!(upstream.get("prompt_cache_key").is_none());
         assert!(upstream.get("prompt_cache_retention").is_none());
         assert_eq!(upstream["tools"][0]["type"], "web_search");
