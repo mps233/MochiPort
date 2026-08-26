@@ -17,10 +17,10 @@ This project is derived from [`happy-loki/codexhub`](https://github.com/happy-lo
 | Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
 
 <p align="center">
-  <img src="docs/assets/product/threadrelay-overview.png" alt="Current MochiPort connection topology and messaging channel overview" width="900">
+  <img src="docs/assets/product/mochiport-overview.png" alt="Current MochiPort connection topology and messaging channel overview" width="900">
 </p>
 <p align="center">
-  <img src="docs/assets/product/threadrelay-ai-gateway.png" alt="Current MochiPort AI Gateway providers and visible models" width="900">
+  <img src="docs/assets/product/mochiport-ai-gateway.png" alt="Current MochiPort AI Gateway providers and visible models" width="900">
 </p>
 
 AI Gateway is a local model entry built into `mochiport`. Codex App keeps sending normal Responses-style requests, while `mochiport` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
