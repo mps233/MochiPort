@@ -1,10 +1,10 @@
-﻿# Contributing to MochiPort
+# MochiPort 贡献指南
 
-Thanks for considering contributing to MochiPort.
+感谢你考虑为 MochiPort 做贡献。
 
-MochiPort sits between Codex remote-control clients, IM channels, and the local AI Gateway, so small protocol changes can affect message routing, approvals, and model requests. Please keep changes conservative and easy to review.
+MochiPort 连接 Codex remote-control 客户端、消息渠道和本地 AI Gateway。即使是较小的协议改动，也可能影响消息路由、审批和模型请求，因此请保持改动克制，方便审查和回溯。
 
-## Development Setup
+## 开发环境
 
 ```powershell
 cargo fmt
@@ -12,27 +12,126 @@ cargo test
 cargo build
 ```
 
-For approval-related changes:
+涉及审批功能的改动：
 
 ```powershell
 cargo test approval
 ```
 
-## Design Rules
+## 设计原则
 
-- Keep Codex as the source of truth.
-- Do not change Codex cwd, model, sandbox, approval policy, or environment from the bridge.
-- Prefer forwarding official app-server protocol payloads instead of inventing bridge-specific semantics.
-- Keep Codex App launch clean: configuration should point it at the local backend, but `mochiport` should not wrap or launch Codex.
-- IM interfaces should be compact and stateful; avoid repeated explanatory messages when an existing message or card can show the result.
+- 以 Codex 作为事实来源。
+- 不要通过桥接层修改 Codex 的工作目录、模型、沙盒、审批策略或环境变量。
+- 优先转发官方 app-server 协议载荷，不要自行设计桥接层专用语义。
+- 保持 Codex App 的启动方式干净：配置应指向本地 backend，但 `mochiport` 不应包装或代为启动 Codex。
+- 消息渠道界面应保持紧凑并体现状态；如果已有消息或卡片可以展示结果，不要重复发送解释性消息。
 
-## Pull Request Checklist
+## Pull Request 检查清单
 
-- Explain the user-facing behavior change.
-- Include verification steps.
-- Add or update docs for command/config/protocol changes.
-- Avoid committing local config, credentials, state files, logs, or build outputs.
+- 说明面向用户的行为变化。
+- 写明验证步骤和结果。
+- 命令、配置或协议发生变化时，补充或更新相关文档。
+- 不要提交本地配置、凭据、状态文件、日志或构建产物。
 
-## Security
+## 安全要求
 
-Do not include real IM credentials, API keys, user ids, private chat ids, screenshots with sensitive content, or local project paths in issues or pull requests.
+Issue 或 Pull Request 中不得包含真实的消息渠道凭据、API Key、用户 ID、私聊 ID、包含敏感信息的截图或本地项目路径。
+
+## 提交规范
+
+所有提交消息使用中文，并按功能或改动类型归类。
+
+### 基本格式
+
+```text
+类型（范围）：简短描述
+```
+
+- `类型` 必填，用来说明这次提交做了什么。
+- `范围` 可选，用来说明影响的模块、平台或页面。
+- `描述` 必须使用中文，简洁说明结果，不写实现过程。
+- 描述末尾不加句号，不使用模糊的“更新一下”“修改若干问题”等表述。
+
+### 提交类型
+
+| 类型 | 用途 |
+| --- | --- |
+| `功能` | 新增用户可见能力或新接口 |
+| `修复` | 修复错误、异常或兼容性问题 |
+| `文档` | 修改 README、指南或技术文档 |
+| `测试` | 新增、调整或补充测试 |
+| `构建` | 修改构建、打包或版本配置 |
+| `持续集成` | 修改 CI、发布流水线或自动化检查 |
+| `重构` | 不改变外部行为的代码整理 |
+| `性能` | 性能、资源或并发优化 |
+| `发布` | 准备版本、发布产物或发布元数据 |
+| `维护` | 依赖、清理或其他常规维护 |
+| `回退` | 回退之前的提交 |
+
+### 范围写法
+
+范围只写一个最主要的影响区域，常用范围包括：
+
+- `macOS`
+- `Windows`
+- `Linux`
+- `AI 网关`
+- `Codex`
+- `Telegram`
+- `飞书`
+- `微信`
+- `企业微信`
+- `README`
+- `发布`
+
+如果改动横跨多个紧密相关的模块，可以使用 `跨平台`、`消息渠道` 或 `后台服务`；不要把多个范围堆在一起。
+
+### 示例
+
+```text
+功能（Windows）：新增 MochiPort 桌面
+功能（AI 网关）：新增 Provider 余额查询
+修复（macOS）：优化概览并账号
+修复（Telegram）：保持会话恢复状态
+文档（README）：简化指南并 macOS
+测试（更新）：记录 macOS 清单文案
+构建（Windows）：更新 MSI 打包流程
+持续集成（Windows）：打包 MSI
+发布：准备 v0.5.4
+重构（消息渠道）：统一账号状态处理
+```
+
+### 提交原则
+
+1. 一个提交只包含一个完整功能、一个修复或一类紧密相关的维护工作。
+2. 代码、测试和该功能必须的文档可以放在同一个提交中。
+3. 不要把无关的格式化、重命名或个人配置混入功能提交。
+4. 提交前至少执行与改动相关的检查，并在提交正文中记录重要验证结果。
+5. 不要提交凭据、密钥、用户数据、日志、数据库或构建产物。
+
+### 提交正文
+
+改动较小时只写标题即可。需要解释背景或验证结果时，标题后空一行，再使用短段落或列表：
+
+```text
+修复（Telegram）：恢复任务完成后的状态更新
+
+- 保留任务完成消息中的最终状态
+- 避免重复发送同一条进度
+- 验证：cargo test telegram
+```
+
+### 提交命令
+
+```bash
+git add <相关文件>
+git commit -m "功能（范围）：简短描述"
+```
+
+提交前检查：
+
+```bash
+git status
+git diff --check
+git log -1 --format='%s%n%n%b'
+```

@@ -152,6 +152,10 @@ GUI 中的“恢复原来的设置”只恢复 MochiPort 写入前的 Codex 连�
 
 旧版本的 `ThreadRelay`、`CodexHub` 配置目录和环境变量仍会被兼容读取，用于迁移已有数据；新安装请使用 `MochiPort`、`MOCHIPORT_HOME` 和 `mochiport-*`。
 
+## 致谢
+
+MochiPort 源自 [`happy-loki/codexhub`](https://github.com/happy-loki/codexhub)，感谢上游项目及其贡献者提供的基础实现和早期探索。MochiPort 目前由独立维护者继续开发和发布，与上游项目及 OpenAI 没有隶属、背书或官方支持关系。完整的许可证和归属说明见 [NOTICE](NOTICE)。
+
 ## 开发
 
 ```bash
