@@ -84,6 +84,7 @@ Open the `消息接入` page and choose one channel:
 
 - Feishu: click `扫码使用新机器人` and complete QR onboarding.
 - Telegram: paste the BotFather token and click `保存并接入`. Private chats support text, image/file input, in-place menu and approval updates, aggregated command and subagent progress per turn, and streamed agent reply drafts. Explicitly configured Forum project groups route each Topic to its own Codex conversation.
+- When the official Codex App creates a new session, MochiPort automatically creates and binds a same-name Topic when the session directory matches one configured project group. Existing bindings, missing matches, or ambiguous project configuration are skipped without creating duplicates; manual synchronization remains available as a fallback.
 - WeChat: click `扫码连接微信` and confirm in WeChat.
 - WeCom: click `添加企业微信机器人` and confirm by scanning with WeCom. Direct/group text, streaming and final replies, image/file transfer, initial/history thread selection cards, and interactive approval template cards are supported.
 

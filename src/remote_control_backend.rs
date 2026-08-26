@@ -65,7 +65,8 @@ use session_api::wait_for_remote_control_initialized;
 pub use session_api::{
     ThreadStartOptions, clear_thread_for_client, clear_turn_for_client, config_read_for_client,
     current_thread_for_client, interrupt_turn_for_client, model_list_for_client,
-    resume_thread_for_client, session_history_threads, set_thread_name_for_client,
+    resume_thread_for_client, resume_thread_for_client_on_connection, session_history_threads,
+    session_history_threads_for_client_on_connection, set_thread_name_for_client,
     start_thread_for_client, start_turn_for_client, steer_turn_for_client, thread_list_for_client,
     thread_loaded_list_for_client,
 };

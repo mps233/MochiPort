@@ -4,14 +4,19 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::{Duration, sleep};
 
 use crate::{
     app_state::{ImAccountRuntimeState, SharedState, im_account_key},
     chain_log,
-    im::core::i18n::im_text_for_state,
-    im::core::thread::summarize_thread_title,
+    im::core::{
+        accounts::ImApiRegistry, i18n::im_text_for_state, session::bind_thread_to_route,
+        thread::summarize_thread_title,
+    },
+    im_runtime::{RouteTarget, route_from_conversation_key},
+    remote_control_backend,
     types::{
         ChatType, ImPlatformKind, InboundAction, InboundMessage, ThreadRouteDirection, now_ms,
         telegram_message_target,
@@ -31,6 +36,651 @@ const TELEGRAM_CONFLICT_BACKOFF_SECONDS: u64 = 35;
 const TELEGRAM_GENERIC_RETRY_SECONDS: u64 = 5;
 const TELEGRAM_TOPIC_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(300);
 const TELEGRAM_TOPIC_STATE_GRACE: Duration = Duration::from_secs(300);
+const AUTO_TOPIC_SESSION_PAGE_LIMIT: u32 = 100;
+const AUTO_TOPIC_SESSION_MAX_PAGES: usize = 20;
+
+/// Handle a `thread/started` notification from the official Codex client.
+///
+/// The notification is intentionally handled in a detached task: Telegram
+/// network calls and the optional session-history lookup must not stall the
+/// shared Codex notification router. `telegram_topic_sync_ops` serializes this
+/// path with the manual import endpoint, making duplicate notifications
+/// idempotent.
+pub(crate) async fn auto_create_topic_for_codex_thread(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    remote_client_key: &str,
+    params: Value,
+) {
+    let generation = state.runtime.lock().await.bridge_generation;
+    auto_create_topic_for_codex_thread_for_generation(
+        state,
+        api_registry,
+        remote_client_key,
+        params,
+        generation,
+        None,
+    )
+    .await;
+}
+
+/// Create and bind a Topic only while the bridge generation that received the
+/// notification is still active. The event router intentionally lets this
+/// workflow run outside its notification loop, so every await that can cross a
+/// bridge restart needs a generation check before applying side effects.
+pub(crate) async fn auto_create_topic_for_codex_thread_for_generation(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    remote_client_key: &str,
+    params: Value,
+    generation: u64,
+    connection_epoch: Option<u64>,
+) {
+    if !is_current_bridge_generation(state, generation).await {
+        return;
+    }
+    let Some(thread_id) = started_thread_id(&params) else {
+        state
+            .push_event(
+                "warn",
+                "telegram_auto_topic_skipped",
+                "thread/started notification did not include a thread id",
+            )
+            .await;
+        return;
+    };
+    let remote_client_key = if remote_client_key.trim().is_empty() {
+        remote_control_backend::default_remote_client_key().to_string()
+    } else {
+        remote_client_key.trim().to_string()
+    };
+    let Some((thread_cwd, thread_title)) = started_thread_metadata(
+        state,
+        &remote_client_key,
+        connection_epoch,
+        &params,
+        &thread_id,
+    )
+    .await
+    else {
+        state
+            .push_event(
+                "warn",
+                "telegram_auto_topic_skipped",
+                format!("thread={thread_id} could not read session metadata"),
+            )
+            .await;
+        return;
+    };
+    if !is_current_bridge_generation(state, generation).await {
+        return;
+    }
+    if thread_cwd.trim().is_empty() {
+        state
+            .push_event(
+                "info",
+                "telegram_auto_topic_skipped",
+                format!("thread={thread_id} reason=session has no project directory"),
+            )
+            .await;
+        return;
+    }
+
+    let Some(target) = find_auto_topic_target(state, api_registry, &thread_cwd).await else {
+        return;
+    };
+    let _sync_guard = state.telegram_topic_sync_ops.lock().await;
+    if !is_current_bridge_generation(state, generation).await {
+        return;
+    }
+
+    if let Some((conversation_key, route)) = existing_binding_for_thread(state, &thread_id).await {
+        state
+            .push_event(
+                "info",
+                "telegram_auto_topic_skipped",
+                format!(
+                    "thread={} reason=already bound conversation={} platform={} chat={}",
+                    thread_id,
+                    conversation_key,
+                    route.platform.key(),
+                    route.chat_id
+                ),
+            )
+            .await;
+        return;
+    }
+
+    let topic_name = truncate_topic_name(&thread_title);
+    let topic = match target
+        .api
+        .create_forum_topic(&target.chat_id, &topic_name)
+        .await
+    {
+        Ok(topic) if topic.message_thread_id > 0 => topic,
+        Ok(topic) => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_auto_topic_failed",
+                    format!(
+                        "thread={} chat={} reason=invalid Topic ID {}",
+                        thread_id, target.chat_id, topic.message_thread_id
+                    ),
+                )
+                .await;
+            return;
+        }
+        Err(err) => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_auto_topic_failed",
+                    format!(
+                        "thread={} chat={} reason=创建 Topic 失败：{}",
+                        thread_id, target.chat_id, err
+                    ),
+                )
+                .await;
+            return;
+        }
+    };
+
+    // The bridge can be stopped while Telegram is creating the Topic. Remove
+    // the orphan before leaving the detached task behind.
+    if !is_current_bridge_generation(state, generation).await {
+        delete_auto_created_topic(
+            state,
+            &target.api,
+            &target.chat_id,
+            topic.message_thread_id,
+            &thread_id,
+        )
+        .await;
+        return;
+    }
+
+    // An inbound Telegram action can bind the same session while the create
+    // request is in flight. Do not leave the newly-created topic orphaned.
+    if existing_binding_for_thread(state, &thread_id)
+        .await
+        .is_some()
+    {
+        delete_auto_created_topic(
+            state,
+            &target.api,
+            &target.chat_id,
+            topic.message_thread_id,
+            &thread_id,
+        )
+        .await;
+        state
+            .push_event(
+                "info",
+                "telegram_auto_topic_skipped",
+                format!("thread={thread_id} reason=绑定在创建期间已存在"),
+            )
+            .await;
+        return;
+    }
+
+    let target_chat = telegram_message_target(&target.chat_id, Some(topic.message_thread_id));
+    let route = RouteTarget {
+        platform: ImPlatformKind::Telegram,
+        conversation_key: format!("telegram:{}:{}", target.account_id, target_chat),
+        account_id: target.account_id.clone(),
+        chat_id: target_chat,
+        remote_client_key: String::new(),
+    }
+    .with_deterministic_remote_client_key();
+
+    if !is_current_bridge_generation(state, generation).await {
+        delete_auto_created_topic(
+            state,
+            &target.api,
+            &target.chat_id,
+            topic.message_thread_id,
+            &thread_id,
+        )
+        .await;
+        return;
+    }
+
+    let resume_result = match connection_epoch {
+        Some(connection_epoch) => {
+            remote_control_backend::resume_thread_for_client_on_connection(
+                state,
+                connection_epoch,
+                &route.remote_client_key,
+                &thread_id,
+                true,
+            )
+            .await
+        }
+        None => {
+            remote_control_backend::resume_thread_for_client(
+                state,
+                &route.remote_client_key,
+                &thread_id,
+                true,
+            )
+            .await
+        }
+    };
+    if let Err(err) = resume_result {
+        delete_auto_created_topic(
+            state,
+            &target.api,
+            &target.chat_id,
+            topic.message_thread_id,
+            &thread_id,
+        )
+        .await;
+        state
+            .push_event(
+                "warn",
+                "telegram_auto_topic_failed",
+                format!("thread={thread_id} reason=订阅会话失败：{err}"),
+            )
+            .await;
+        return;
+    }
+
+    if !is_current_bridge_generation(state, generation).await {
+        delete_auto_created_topic(
+            state,
+            &target.api,
+            &target.chat_id,
+            topic.message_thread_id,
+            &thread_id,
+        )
+        .await;
+        return;
+    }
+
+    if let Err(err) = bind_thread_to_route(
+        state,
+        &route,
+        &thread_id,
+        None,
+        route.remote_client_key.clone(),
+    )
+    .await
+    {
+        delete_auto_created_topic(
+            state,
+            &target.api,
+            &target.chat_id,
+            topic.message_thread_id,
+            &thread_id,
+        )
+        .await;
+        let _ = crate::im::core::routing::clear_thread_binding_with_reason(
+            state,
+            &route.conversation_key,
+            "telegram_auto_topic_binding_failed",
+        )
+        .await;
+        state
+            .push_event(
+                "warn",
+                "telegram_auto_topic_failed",
+                format!("thread={thread_id} reason=保存绑定失败：{err}"),
+            )
+            .await;
+        return;
+    }
+
+    if !is_current_bridge_generation(state, generation).await {
+        let _ = crate::im::core::routing::clear_thread_binding_for_thread_with_reason(
+            state,
+            &thread_id,
+            &route.remote_client_key,
+            "telegram_auto_topic_stale_generation",
+        )
+        .await;
+        delete_auto_created_topic(
+            state,
+            &target.api,
+            &target.chat_id,
+            topic.message_thread_id,
+            &thread_id,
+        )
+        .await;
+        return;
+    }
+
+    if let Err(err) = persist_auto_topic_name(
+        state,
+        &route.conversation_key,
+        &thread_id,
+        &thread_title,
+        &topic_name,
+    )
+    .await
+    {
+        state
+            .push_event(
+                "warn",
+                "telegram_auto_topic_binding_state_save_failed",
+                format!("thread={thread_id} err={err}"),
+            )
+            .await;
+    }
+    if !is_current_bridge_generation(state, generation).await {
+        let _ = crate::im::core::routing::clear_thread_binding_for_thread_with_reason(
+            state,
+            &thread_id,
+            &route.remote_client_key,
+            "telegram_auto_topic_stale_generation",
+        )
+        .await;
+        delete_auto_created_topic(
+            state,
+            &target.api,
+            &target.chat_id,
+            topic.message_thread_id,
+            &thread_id,
+        )
+        .await;
+        return;
+    }
+    state
+        .push_event(
+            "info",
+            "telegram_auto_topic_created",
+            format!(
+                "thread={} account={} chat={} topic={} name={}",
+                thread_id, target.account_id, target.chat_id, topic.message_thread_id, topic_name
+            ),
+        )
+        .await;
+}
+
+async fn is_current_bridge_generation(state: &SharedState, generation: u64) -> bool {
+    state.runtime.lock().await.is_bridge_generation(generation)
+}
+
+#[derive(Clone)]
+struct AutoTopicTarget {
+    account_id: String,
+    chat_id: String,
+    api: TelegramApi,
+}
+
+async fn find_auto_topic_target(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_cwd: &str,
+) -> Option<AutoTopicTarget> {
+    let accounts = state.config.lock().await.effective_telegram_accounts();
+    let mut matches = Vec::new();
+    for account in accounts.into_iter().filter(|account| account.is_active()) {
+        let account_id = account.account_id.trim().to_string();
+        let Some(api) = api_registry.telegram.get(&account_id).cloned() else {
+            continue;
+        };
+        for group in account.project_groups {
+            let project_cwd = group.cwd.trim();
+            if project_cwd.is_empty() || !cwd_is_within_project(thread_cwd, project_cwd) {
+                continue;
+            }
+            let specificity = Path::new(project_cwd).components().count();
+            matches.push((
+                specificity,
+                AutoTopicTarget {
+                    account_id: account_id.clone(),
+                    chat_id: group.chat_id.trim().to_string(),
+                    api: api.clone(),
+                },
+            ));
+        }
+    }
+    if matches.is_empty() {
+        state
+            .push_event(
+                "info",
+                "telegram_auto_topic_skipped",
+                format!(
+                    "cwd={} reason=没有匹配的 Telegram 项目群",
+                    thread_cwd.trim()
+                ),
+            )
+            .await;
+        return None;
+    }
+    let best_specificity = matches.iter().map(|(specificity, _)| *specificity).max()?;
+    let mut best = matches
+        .into_iter()
+        .filter(|(specificity, _)| *specificity == best_specificity)
+        .map(|(_, target)| target);
+    let target = best.next()?;
+    if best.next().is_some() {
+        state
+            .push_event(
+                "warn",
+                "telegram_auto_topic_skipped",
+                format!(
+                    "cwd={} reason=匹配到多个同级 Telegram 项目群",
+                    thread_cwd.trim()
+                ),
+            )
+            .await;
+        return None;
+    }
+    Some(target)
+}
+
+async fn started_thread_metadata(
+    state: &SharedState,
+    remote_client_key: &str,
+    connection_epoch: Option<u64>,
+    params: &Value,
+    thread_id: &str,
+) -> Option<(String, String)> {
+    let thread_value = params.get("thread").unwrap_or(params);
+    let mut cwd = started_thread_field(params, thread_value, &["cwd", "workingDirectory"]);
+    let mut title = started_thread_field(params, thread_value, &["name", "title", "threadName"]);
+
+    if cwd.is_none() || title.is_none() {
+        let history = match connection_epoch {
+            Some(connection_epoch) => {
+                remote_control_backend::session_history_threads_for_client_on_connection(
+                    state,
+                    connection_epoch,
+                    remote_client_key,
+                    AUTO_TOPIC_SESSION_PAGE_LIMIT,
+                    AUTO_TOPIC_SESSION_MAX_PAGES,
+                    false,
+                )
+                .await
+            }
+            None => {
+                remote_control_backend::session_history_threads(
+                    state,
+                    remote_client_key,
+                    AUTO_TOPIC_SESSION_PAGE_LIMIT,
+                    AUTO_TOPIC_SESSION_MAX_PAGES,
+                    false,
+                )
+                .await
+            }
+        };
+        let threads = match history {
+            Ok(threads) => threads,
+            Err(err) => {
+                state
+                    .push_event(
+                        "warn",
+                        "telegram_auto_topic_metadata_query_failed",
+                        format!(
+                            "thread={} connection_epoch={} err={}",
+                            thread_id,
+                            connection_epoch
+                                .map(|epoch| epoch.to_string())
+                                .unwrap_or_else(|| "any".to_string()),
+                            err
+                        ),
+                    )
+                    .await;
+                // A notification with a known source must never query a
+                // different Codex connection after that source disappears.
+                if connection_epoch.is_some() {
+                    return None;
+                }
+                Vec::new()
+            }
+        };
+        if let Some(thread) = threads.iter().find(|thread| {
+            thread
+                .get("id")
+                .or_else(|| thread.get("threadId"))
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.trim() == thread_id)
+        }) {
+            cwd = cwd.or_else(|| {
+                thread
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string)
+            });
+            title =
+                title.or_else(|| Some(summarize_thread_title(thread, im_text_for_state(state))));
+        }
+    }
+
+    let title = title.unwrap_or_else(|| "未命名会话".to_string());
+    Some((cwd.unwrap_or_default(), title))
+}
+
+fn started_thread_id(params: &Value) -> Option<String> {
+    let non_empty = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    non_empty(params.get("threadId"))
+        .or_else(|| non_empty(params.get("thread_id")))
+        .or_else(|| non_empty(params.get("thread").and_then(|thread| thread.get("id"))))
+}
+
+fn started_thread_field(params: &Value, thread: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        thread
+            .get(*key)
+            .and_then(Value::as_str)
+            .or_else(|| params.get(*key).and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
+}
+
+fn cwd_is_within_project(thread_cwd: &str, project_cwd: &str) -> bool {
+    let thread_cwd = thread_cwd.trim();
+    let project_cwd = project_cwd.trim();
+    if thread_cwd.is_empty() || project_cwd.is_empty() {
+        return false;
+    }
+    let thread_path = Path::new(thread_cwd);
+    let project_path = Path::new(project_cwd);
+    thread_path == project_path || thread_path.starts_with(project_path)
+}
+
+async fn existing_binding_for_thread(
+    state: &SharedState,
+    thread_id: &str,
+) -> Option<(String, RouteTarget)> {
+    if let Some(route) = state.runtime.lock().await.route_for_thread(thread_id) {
+        return Some((route.conversation_key.clone(), route));
+    }
+    let persisted = state.persisted.lock().await;
+    persisted
+        .im_thread_bindings
+        .iter()
+        .find(|(_, bound_thread_id)| bound_thread_id.trim() == thread_id)
+        .and_then(|(conversation_key, _)| {
+            route_from_conversation_key(conversation_key)
+                .map(|route| (conversation_key.clone(), route))
+        })
+}
+
+async fn persist_auto_topic_name(
+    state: &SharedState,
+    conversation_key: &str,
+    thread_id: &str,
+    codex_title: &str,
+    topic_name: &str,
+) -> anyhow::Result<()> {
+    let mut persisted = state.persisted.lock().await;
+    let Some(binding) = persisted
+        .telegram_topic_binding_states
+        .get_mut(conversation_key)
+    else {
+        return Ok(());
+    };
+    if binding.thread_id != thread_id {
+        return Ok(());
+    }
+    binding.codex_title = codex_title.to_string();
+    binding.topic_name = topic_name.to_string();
+    binding.last_synced_codex_title = codex_title.to_string();
+    binding.last_synced_topic_name = topic_name.to_string();
+    binding.last_checked_at_ms = now_ms();
+    let path = state.config.lock().await.state_path.clone();
+    persisted.save(&path)
+}
+
+async fn delete_auto_created_topic(
+    state: &SharedState,
+    api: &TelegramApi,
+    chat_id: &str,
+    topic_id: i64,
+    thread_id: &str,
+) {
+    match api.delete_forum_topic(chat_id, topic_id).await {
+        Ok(true) => {
+            state
+                .push_event(
+                    "info",
+                    "telegram_auto_topic_cleanup",
+                    format!(
+                        "thread={} chat={} topic={} deleted",
+                        thread_id, chat_id, topic_id
+                    ),
+                )
+                .await;
+        }
+        Ok(false) => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_auto_topic_cleanup_failed",
+                    format!(
+                        "thread={} chat={} topic={} api returned false",
+                        thread_id, chat_id, topic_id
+                    ),
+                )
+                .await;
+        }
+        Err(err) => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_auto_topic_cleanup_failed",
+                    format!(
+                        "thread={} chat={} topic={} err={err}",
+                        thread_id, chat_id, topic_id
+                    ),
+                )
+                .await;
+        }
+    }
+}
 
 pub async fn listen_polling(
     state: SharedState,
@@ -2127,6 +2777,114 @@ mod tests {
         assert_eq!(forum_topic_name("MochiPort", "   "), "MochiPort");
         let long = "a".repeat(100);
         assert_eq!(forum_topic_name("MochiPort", &long).chars().count(), 64);
+    }
+
+    #[test]
+    fn started_thread_metadata_accepts_nested_fields_and_fallback_keys() {
+        let params = serde_json::json!({
+            "threadId": "",
+            "thread": {
+                "id": "thread-1",
+                "cwd": "/tmp/project",
+                "name": null,
+                "title": "会话标题"
+            }
+        });
+
+        assert_eq!(started_thread_id(&params).as_deref(), Some("thread-1"));
+        let thread = params.get("thread").expect("nested thread");
+        assert_eq!(
+            started_thread_field(&params, thread, &["name", "title"]).as_deref(),
+            Some("会话标题")
+        );
+        assert_eq!(
+            started_thread_field(&params, thread, &["cwd"]).as_deref(),
+            Some("/tmp/project")
+        );
+    }
+
+    #[test]
+    fn cwd_matching_is_component_aware() {
+        assert!(cwd_is_within_project("/tmp/project", "/tmp/project"));
+        assert!(cwd_is_within_project("/tmp/project/src", "/tmp/project"));
+        assert!(!cwd_is_within_project("/tmp/project-old", "/tmp/project"));
+        assert!(!cwd_is_within_project("", "/tmp/project"));
+    }
+
+    #[tokio::test]
+    async fn auto_topic_target_prefers_the_most_specific_project_group() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut config = crate::config::AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        config.telegram_accounts = vec![crate::config::TelegramConfig {
+            enabled: true,
+            account_id: "telegram".to_string(),
+            bot_token: "token".to_string(),
+            project_groups: vec![
+                crate::config::TelegramProjectGroupConfig {
+                    chat_id: "-100-parent".to_string(),
+                    project_name: "Parent".to_string(),
+                    cwd: "/tmp/project".to_string(),
+                },
+                crate::config::TelegramProjectGroupConfig {
+                    chat_id: "-100-child".to_string(),
+                    project_name: "Child".to_string(),
+                    cwd: "/tmp/project/frontend".to_string(),
+                },
+            ],
+            ..Default::default()
+        }];
+        let state = crate::app_state::AppState::new(
+            temp_dir.path().join("config.toml"),
+            config,
+            None,
+            None,
+        );
+        let mut registry = ImApiRegistry::default();
+        registry.telegram.insert(
+            "telegram".to_string(),
+            TelegramApi::new(TelegramSettings {
+                account_id: "telegram".to_string(),
+                bot_token: "token".to_string(),
+                ..Default::default()
+            }),
+        );
+
+        let target = find_auto_topic_target(&state, &registry, "/tmp/project/frontend/src")
+            .await
+            .expect("matching project group");
+        assert_eq!(target.chat_id, "-100-child");
+    }
+
+    #[tokio::test]
+    async fn auto_topic_creation_stops_when_bridge_generation_is_invalidated() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut config = crate::config::AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = crate::app_state::AppState::new(
+            temp_dir.path().join("config.toml"),
+            config,
+            None,
+            None,
+        );
+        let generation = state.runtime.lock().await.start_bridge_generation();
+        state.runtime.lock().await.invalidate_bridge_generation();
+
+        auto_create_topic_for_codex_thread_for_generation(
+            &state,
+            &ImApiRegistry::default(),
+            "default:codex_app",
+            serde_json::json!({
+                "threadId": "thread-stale",
+                "cwd": "/tmp/project",
+                "name": "stale session"
+            }),
+            generation,
+            None,
+        )
+        .await;
+
+        assert!(state.events.lock().await.is_empty());
     }
 
     #[test]

@@ -658,6 +658,30 @@ async fn session_history_threads_on_connection(
     Ok(threads)
 }
 
+/// Read session history from one specific remote-control websocket.
+///
+/// Automatic Telegram Topic creation uses this entry point after receiving a
+/// `thread/started` notification. Keeping the connection epoch fixed prevents
+/// a delayed metadata lookup from silently switching to another Codex client.
+pub async fn session_history_threads_for_client_on_connection(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_key: &str,
+    page_limit: u32,
+    max_pages: usize,
+    archived: bool,
+) -> Result<Vec<Value>> {
+    session_history_threads_on_connection(
+        state,
+        connection_epoch,
+        client_key,
+        page_limit,
+        max_pages,
+        archived,
+    )
+    .await
+}
+
 pub async fn session_history_threads(
     state: &SharedState,
     client_key: &str,
@@ -768,6 +792,36 @@ pub async fn resume_thread_for_client(
             "threadId": thread_id,
             "excludeTurns": exclude_turns,
         }),
+    )
+    .await?;
+    mark_thread_active_for_client(state, Some(client_key), thread_id).await;
+    Ok(response)
+}
+
+/// Resume a thread on the websocket that delivered its discovery event.
+///
+/// Automatic Telegram Topic creation must not move a newly-created binding to
+/// another Codex client if the source connection changes while Telegram is
+/// creating the Topic. Unlike the normal route-based helper, this variant
+/// fails when the requested connection is gone instead of falling back to the
+/// currently active connection.
+pub async fn resume_thread_for_client_on_connection(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_key: &str,
+    thread_id: &str,
+    exclude_turns: bool,
+) -> Result<Value> {
+    let response = request_once_with_timeout_for_client_on_connection(
+        state,
+        connection_epoch,
+        client_key,
+        "thread/resume",
+        json!({
+            "threadId": thread_id,
+            "excludeTurns": exclude_turns,
+        }),
+        REMOTE_REQUEST_TIMEOUT,
     )
     .await?;
     mark_thread_active_for_client(state, Some(client_key), thread_id).await;

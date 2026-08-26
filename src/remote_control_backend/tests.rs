@@ -808,6 +808,7 @@ async fn unbound_thread_started_does_not_replace_bound_im_thread() {
     let state = test_state();
     let (_outbound_tx, _outbound_rx, client_id, stream_id, connection_epoch) =
         setup_connected_default_client(&state).await;
+    let mut notifications = state.remote_control.notifications.subscribe();
     {
         let mut runtime = state.runtime.lock().await;
         runtime.bind_route(
@@ -856,6 +857,46 @@ async fn unbound_thread_started_does_not_replace_bound_im_thread() {
         .get(DEFAULT_REMOTE_CLIENT_KEY)
         .expect("default client");
     assert_eq!(client.current_thread_id.as_deref(), Some("thread-1"));
+    drop(remote);
+
+    let notification = notifications
+        .try_recv()
+        .expect("unbound thread/started should be forwarded for discovery");
+    assert_eq!(notification.method, "thread/started");
+    assert_eq!(
+        notification.remote_client_key.as_deref(),
+        Some(DEFAULT_REMOTE_CLIENT_KEY)
+    );
+    assert_eq!(notification.remote_connection_epoch, Some(connection_epoch));
+}
+
+#[tokio::test]
+async fn unbound_non_started_thread_notification_is_not_forwarded_to_im() {
+    let state = test_state();
+    let (_outbound_tx, _outbound_rx, client_id, stream_id, connection_epoch) =
+        setup_connected_default_client(&state).await;
+    let mut notifications = state.remote_control.notifications.subscribe();
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &stream_id,
+        &json!({
+            "method": "item/agentMessage/delta",
+            "params": {
+                "threadId": "unbound-thread",
+                "itemId": "message-1",
+                "delta": "hello"
+            }
+        }),
+    )
+    .await;
+
+    assert!(matches!(
+        notifications.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
 }
 
 #[tokio::test]
@@ -1972,6 +2013,194 @@ async fn session_history_falls_back_to_another_connection_and_uses_all_root_sour
         .expect("session history task")
         .expect("session history response");
     assert_eq!(threads, vec![json!({"id": "thread-1"})]);
+}
+
+#[tokio::test]
+async fn session_history_for_client_on_connection_does_not_switch_connections() {
+    let state = test_state();
+    let (codex_tx, mut codex_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (vscode_tx, mut vscode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let codex_client_id = "codex-client";
+    let codex_stream_id = "codex-stream";
+    let vscode_client_id = "vscode-client";
+    let vscode_stream_id = "vscode-stream";
+
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.clients.clear();
+        let codex_client = ensure_client_state_locked(&mut remote, "default:codex_app");
+        codex_client.initialized = true;
+        codex_client.client_id = codex_client_id.to_string();
+        codex_client.stream_id = codex_stream_id.to_string();
+        let vscode_client = ensure_client_state_locked(&mut remote, "default:vscode");
+        vscode_client.initialized = true;
+        vscode_client.client_id = vscode_client_id.to_string();
+        vscode_client.stream_id = vscode_stream_id.to_string();
+        remote.connections.insert(
+            "conn-codex".to_string(),
+            test_connection(
+                "conn-codex",
+                20,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(codex_tx),
+            ),
+        );
+        remote.connections.insert(
+            "conn-vscode".to_string(),
+            test_connection(
+                "conn-vscode",
+                10,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::Vscode,
+                Some(vscode_tx),
+            ),
+        );
+        sync_legacy_from_active_connection_locked(&mut remote);
+    }
+
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        session_history_threads_for_client_on_connection(
+            &request_state,
+            20,
+            "default:codex_app",
+            100,
+            20,
+            false,
+        )
+        .await
+    });
+    let envelope = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(OutboundWsMessage::Text(envelope)) = codex_rx.recv().await
+                && envelope_message_method(&envelope) == Some("thread/list")
+            {
+                return envelope;
+            }
+        }
+    })
+    .await
+    .expect("thread/list should use the requested connection");
+    assert!(vscode_rx.try_recv().is_err());
+
+    let request_id = envelope["message"]["id"].clone();
+    observe_app_server_message(
+        &state,
+        20,
+        codex_client_id,
+        codex_stream_id,
+        &json!({
+            "id": request_id,
+            "result": {"data": [{"id": "thread-from-codex"}], "nextCursor": null}
+        }),
+    )
+    .await;
+
+    let threads = request
+        .await
+        .expect("session history task")
+        .expect("session history response");
+    assert_eq!(threads, vec![json!({"id": "thread-from-codex"})]);
+}
+
+#[tokio::test]
+async fn resume_for_client_on_connection_does_not_switch_connections() {
+    let state = test_state();
+    let (codex_tx, mut codex_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (vscode_tx, mut vscode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let codex_client_id = "codex-client";
+    let codex_stream_id = "codex-stream";
+    let vscode_client_id = "vscode-client";
+    let vscode_stream_id = "vscode-stream";
+
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.clients.clear();
+        let codex_client = ensure_client_state_locked(&mut remote, "default:codex_app");
+        codex_client.initialized = true;
+        codex_client.client_id = codex_client_id.to_string();
+        codex_client.stream_id = codex_stream_id.to_string();
+        let vscode_client = ensure_client_state_locked(&mut remote, "default:vscode");
+        vscode_client.initialized = true;
+        vscode_client.client_id = vscode_client_id.to_string();
+        vscode_client.stream_id = vscode_stream_id.to_string();
+        remote.connections.insert(
+            "conn-codex".to_string(),
+            test_connection(
+                "conn-codex",
+                20,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(codex_tx),
+            ),
+        );
+        remote.connections.insert(
+            "conn-vscode".to_string(),
+            test_connection(
+                "conn-vscode",
+                10,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::Vscode,
+                Some(vscode_tx),
+            ),
+        );
+        sync_legacy_from_active_connection_locked(&mut remote);
+    }
+
+    let request_state = state.clone();
+    let request = tokio::spawn(async move {
+        resume_thread_for_client_on_connection(
+            &request_state,
+            20,
+            "default:codex_app",
+            "thread-from-codex",
+            true,
+        )
+        .await
+    });
+    let envelope = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(OutboundWsMessage::Text(envelope)) = codex_rx.recv().await
+                && envelope_message_method(&envelope) == Some("thread/resume")
+            {
+                return envelope;
+            }
+        }
+    })
+    .await
+    .expect("thread/resume should use the requested connection");
+    assert!(vscode_rx.try_recv().is_err());
+    assert_eq!(
+        envelope["message"]["params"],
+        json!({
+            "threadId": "thread-from-codex",
+            "excludeTurns": true,
+        })
+    );
+
+    let request_id = envelope["message"]["id"].clone();
+    observe_app_server_message(
+        &state,
+        20,
+        codex_client_id,
+        codex_stream_id,
+        &json!({
+            "id": request_id,
+            "result": {"thread": {"id": "thread-from-codex"}}
+        }),
+    )
+    .await;
+
+    let response = request
+        .await
+        .expect("thread resume task")
+        .expect("thread resume response");
+    assert_eq!(response, json!({"thread": {"id": "thread-from-codex"}}));
 }
 
 #[tokio::test]

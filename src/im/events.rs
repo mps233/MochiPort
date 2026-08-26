@@ -1568,12 +1568,37 @@ async fn schedule_terminal_status_fallback(
     });
 }
 
+#[allow(dead_code)]
 pub(crate) async fn handle_codex_notification(
     state: SharedState,
     api_registry: ImApiRegistry,
     outbound_tx: ImOutboundSender,
     notification: &crate::codex::CodexNotification,
 ) {
+    let generation = state.runtime.lock().await.bridge_generation;
+    handle_codex_notification_for_generation(
+        state,
+        api_registry,
+        outbound_tx,
+        notification,
+        generation,
+    )
+    .await;
+}
+
+/// Handle a notification only for the bridge generation that received it.
+/// Keeping the generation explicit lets the long-running automatic Topic
+/// workflow exit when its router is superseded by a bridge restart.
+pub(crate) async fn handle_codex_notification_for_generation(
+    state: SharedState,
+    api_registry: ImApiRegistry,
+    outbound_tx: ImOutboundSender,
+    notification: &crate::codex::CodexNotification,
+    generation: u64,
+) {
+    if !state.runtime.lock().await.is_bridge_generation(generation) {
+        return;
+    }
     let Some(params) = notification.params.as_ref() else {
         return;
     };
@@ -1692,7 +1717,35 @@ pub(crate) async fn handle_codex_notification(
                 start_next_telegram_queued_turn_if_ready(&state, &api_registry, &route).await;
             }
         }
-        "thread/started" => {}
+        "thread/started" => {
+            // Only the official Codex app's root client should create Topics
+            // automatically. CLI and VS Code sessions keep their existing
+            // explicit/manual routing behavior.
+            if matches!(
+                notification.remote_client_key.as_deref(),
+                Some("default") | Some("default:codex_app")
+            ) {
+                let state_for_auto_topic = state.clone();
+                let api_registry_for_auto_topic = api_registry.clone();
+                let remote_client_key =
+                    notification.remote_client_key.clone().unwrap_or_else(|| {
+                        crate::remote_control_backend::default_remote_client_key().to_string()
+                    });
+                let connection_epoch = notification.remote_connection_epoch;
+                let params_for_auto_topic = params.clone();
+                tokio::spawn(async move {
+                    crate::im::telegram::polling::auto_create_topic_for_codex_thread_for_generation(
+                        &state_for_auto_topic,
+                        &api_registry_for_auto_topic,
+                        &remote_client_key,
+                        params_for_auto_topic,
+                        generation,
+                        connection_epoch,
+                    )
+                    .await;
+                });
+            }
+        }
         "thread/name/updated" => {
             sync_codex_thread_name_to_telegram(&state, &api_registry, params).await;
         }
@@ -3976,6 +4029,7 @@ mod tests {
             remote_client_key: None,
             remote_client_id: None,
             remote_stream_id: None,
+            remote_connection_epoch: None,
         };
         handle_codex_notification(state.clone(), api_registry, outbound_tx, &notification).await;
 
@@ -4075,6 +4129,7 @@ mod tests {
                 remote_client_key: None,
                 remote_client_id: None,
                 remote_stream_id: None,
+                remote_connection_epoch: None,
             };
             handle_codex_notification(
                 state.clone(),
@@ -4113,6 +4168,7 @@ mod tests {
             remote_client_key: None,
             remote_client_id: None,
             remote_stream_id: None,
+            remote_connection_epoch: None,
         };
         handle_codex_notification(
             state.clone(),
@@ -4177,6 +4233,7 @@ mod tests {
                 remote_client_key: None,
                 remote_client_id: None,
                 remote_stream_id: None,
+                remote_connection_epoch: None,
             };
             handle_codex_notification(
                 state.clone(),
@@ -4451,6 +4508,7 @@ mod tests {
             remote_client_key: None,
             remote_client_id: None,
             remote_stream_id: None,
+            remote_connection_epoch: None,
         };
 
         let desktop_state = test_state();

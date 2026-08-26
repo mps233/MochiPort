@@ -12,6 +12,13 @@ pub struct CodexNotification {
     pub remote_client_key: Option<String>,
     pub remote_client_id: Option<String>,
     pub remote_stream_id: Option<String>,
+    /// The remote-control websocket that delivered this notification.
+    ///
+    /// This is kept alongside the logical client key because multiple Codex
+    /// clients can use the same key/stream identity. Consumers that need to
+    /// query session metadata must use this epoch to stay on the source
+    /// connection instead of falling back to whichever connection is active.
+    pub remote_connection_epoch: Option<u64>,
 }
 
 pub fn extract_agent_delta(notification: &CodexNotification) -> Option<String> {
@@ -949,6 +956,7 @@ mod tests {
             remote_client_key: None,
             remote_client_id: None,
             remote_stream_id: None,
+            remote_connection_epoch: None,
         }
     }
 

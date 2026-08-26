@@ -50,6 +50,8 @@ Telegram 不需要为每个项目、每个会话单独创建机器人。通常�
 
 这样，同一个项目的多个会话可以放在同一个群里，分别使用不同的话题。话题名称会使用 Codex 会话标题，消息也只会回到对应的话题里。以后你在 Codex 客户端改了会话名称，MochiPort 会实时同步 Telegram 话题；你在 Telegram 里改话题名称，也会实时同步回 Codex 会话。
 
+在官方 Codex 客户端新建会话时，只要会话目录匹配某个项目群，MochiPort 会自动创建同名 Topic 并完成绑定。已经绑定过、没有匹配项目群或项目配置有歧义的会话会跳过，不会重复创建；手动同步仍可作为补偿入口。
+
 <table>
   <tr>
     <td align="center"><strong>项目群话题列表</strong><br><img src="docs/assets/product/telegram-mobile-topics.jpg" alt="Telegram 手机端项目群话题列表" width="280"></td>

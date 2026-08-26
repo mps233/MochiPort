@@ -260,6 +260,41 @@ pub(in crate::remote_control_backend) fn remote_client_key_for_stream_locked(
         .map(|(client_key, _)| client_key.clone())
 }
 
+/// Resolve a stream using the websocket that delivered the message whenever
+/// possible. The same Codex client/stream identifiers can be reused by more
+/// than one websocket, so a global stream lookup is ambiguous during source
+/// discovery and recovery.
+pub(in crate::remote_control_backend) fn remote_client_key_for_stream_on_connection_locked(
+    remote: &RemoteControlInner,
+    connection_epoch: u64,
+    client_id: &str,
+    stream_id: &str,
+) -> Option<String> {
+    if let Some(connection) = remote
+        .connections
+        .values()
+        .find(|connection| connection.connection_epoch == connection_epoch)
+    {
+        if let Some(client) = remote.clients.get(&connection.default_client_key)
+            && client.client_id == client_id
+            && client.stream_id == stream_id
+        {
+            return Some(connection.default_client_key.clone());
+        }
+        if let Some((client_key, _)) = remote.clients.iter().find(|(_, client)| {
+            client.client_id == client_id
+                && client.stream_id == stream_id
+                && client
+                    .pending
+                    .values()
+                    .any(|pending| pending.connection_epoch == connection_epoch)
+        }) {
+            return Some(client_key.clone());
+        }
+    }
+    remote_client_key_for_stream_locked(remote, client_id, stream_id)
+}
+
 pub(in crate::remote_control_backend) fn sync_default_client_legacy_locked(
     remote: &mut RemoteControlInner,
 ) {

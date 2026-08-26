@@ -695,11 +695,12 @@ async fn codex_event_router(
         if !is_current_generation(&state, generation).await {
             break;
         }
-        events::handle_codex_notification(
+        events::handle_codex_notification_for_generation(
             state.clone(),
             api_registry.clone(),
             outbound_tx.clone(),
             &notification,
+            generation,
         )
         .await;
         if notification.method == "serverRequest/resolved" {

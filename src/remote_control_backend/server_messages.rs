@@ -11,7 +11,7 @@ use crate::{
 
 use super::client_state::{
     is_legacy_default_client_key, migrate_source_default_client_key_locked,
-    normalize_remote_client_key, remote_client_key_for_stream_locked,
+    normalize_remote_client_key, remote_client_key_for_stream_on_connection_locked,
     select_active_connection_id_locked, source_kind_from_user_agent,
     sync_default_client_legacy_locked, sync_legacy_from_active_connection_locked,
 };
@@ -43,7 +43,12 @@ pub(super) async fn observe_app_server_message(
     let is_selected_connection = is_selected_active_connection_epoch(state, connection_epoch).await;
     let client_key = {
         let remote = state.remote_control.inner.lock().await;
-        remote_client_key_for_stream_locked(&remote, client_id, stream_id)
+        remote_client_key_for_stream_on_connection_locked(
+            &remote,
+            connection_epoch,
+            client_id,
+            stream_id,
+        )
     };
     let message = message.get("message").unwrap_or(message);
     chain_log::write_line(format!(
@@ -134,6 +139,7 @@ pub(super) async fn observe_app_server_message(
                 remote_client_key: client_key.clone(),
                 remote_client_id: Some(client_id.to_string()),
                 remote_stream_id: Some(stream_id.to_string()),
+                remote_connection_epoch: Some(connection_epoch),
             });
             return;
         }
@@ -541,6 +547,7 @@ pub(super) async fn observe_app_server_message(
             remote_client_key: client_key,
             remote_client_id: Some(client_id.to_string()),
             remote_stream_id: Some(stream_id.to_string()),
+            remote_connection_epoch: Some(connection_epoch),
         });
     }
 }
@@ -554,7 +561,16 @@ async fn should_forward_server_notification_to_im(
     let Some(thread_id) = params.and_then(thread_id_from_payload) else {
         return true;
     };
-    if should_track_notification_thread_for_client(state, client_key, &thread_id).await {
+    let is_tracked =
+        should_track_notification_thread_for_client(state, client_key, &thread_id).await;
+    if is_tracked || method == "thread/started" {
+        if !is_tracked {
+            chain_log::write_line(format!(
+                "[remote_control] event=notification_broadcast_allowed reason=thread_started_discovery client_key={} thread={}",
+                client_key.unwrap_or(""),
+                thread_id
+            ));
+        }
         return true;
     }
     chain_log::write_line(format!(

@@ -10,7 +10,7 @@ use crate::{
 
 use super::client_state::{
     active_connection_epoch_locked, outbound_tx_for_connection_epoch_locked,
-    remote_client_key_for_stream_locked, resolve_remote_client_key_locked,
+    remote_client_key_for_stream_on_connection_locked, resolve_remote_client_key_locked,
 };
 use super::client_state::{
     ensure_client_state_locked, is_legacy_default_client_key, normalize_remote_client_key,
@@ -52,8 +52,12 @@ pub(super) async fn send_response_for_stream(
 ) -> Result<()> {
     let seq_id = {
         let mut remote = state.remote_control.inner.lock().await;
-        let Some(client_key) = remote_client_key_for_stream_locked(&remote, client_id, stream_id)
-        else {
+        let Some(client_key) = remote_client_key_for_stream_on_connection_locked(
+            &remote,
+            connection_epoch,
+            client_id,
+            stream_id,
+        ) else {
             return Err(anyhow!(
                 "remote-control response target is not registered: client_id={client_id} stream_id={stream_id}"
             ));
@@ -164,8 +168,12 @@ pub(super) async fn send_initialized_for_stream(
 ) -> Result<()> {
     let seq_id = {
         let mut remote = state.remote_control.inner.lock().await;
-        let Some(client_key) = remote_client_key_for_stream_locked(&remote, client_id, stream_id)
-        else {
+        let Some(client_key) = remote_client_key_for_stream_on_connection_locked(
+            &remote,
+            connection_epoch,
+            client_id,
+            stream_id,
+        ) else {
             return Err(anyhow!(
                 "remote-control initialized target is not registered: client_id={client_id} stream_id={stream_id}"
             ));
