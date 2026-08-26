@@ -648,17 +648,6 @@ private struct TopologyConnectorCanvas: View {
     }
 }
 
-private extension StatusTint {
-    var color: Color {
-        switch self {
-        case .secondary: .secondary
-        case .positive: .green
-        case .caution: .orange
-        case .negative: .red
-        }
-    }
-}
-
 private extension View {
     @ViewBuilder
     func topologyEndpointSurface(tint _: StatusTint, isHovering: Bool) -> some View {

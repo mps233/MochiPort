@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// Brand mark shown next to an AI Gateway provider. The mapping mirrors the
-/// legacy GUI (`provider_logo_kind` in `src/gui/ai_gateway.rs`).
+/// Shared provider logo mapping used by the management clients.
 enum ProviderLogoKind: String {
     case openAI = "openai"
     case deepSeek = "deepseek"

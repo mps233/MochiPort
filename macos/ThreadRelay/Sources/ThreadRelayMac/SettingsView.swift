@@ -44,7 +44,7 @@ struct SettingsView: View {
             synchronizeSettings(model.settings)
             await model.refresh()
         }
-        .onChange(of: model.settings) { settings in
+        .onChange(of: model.settings) { _, settings in
             synchronizeSettings(settings)
         }
         .confirmationDialog(

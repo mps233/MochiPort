@@ -51,15 +51,37 @@ struct GatewayQuotaRequestID: Hashable {
 func gatewayQuotaMeterPresentation(
     _ usage: ManageProviderUsageResponse.Usage
 ) -> GatewayQuotaMeterPresentation {
-    if usage.accountValid == false {
+    gatewayQuotaMeterPresentation(
+        accountValid: usage.accountValid,
+        accountStatus: usage.accountStatus,
+        unlimited: usage.unlimited,
+        remaining: usage.remaining,
+        unit: usage.unit,
+        unavailableStatusText: usage.balanceStatus == "available"
+            ? "额度可用"
+            : providerUsageStatusText(usage.balanceStatus),
+        unavailableTone: usage.balanceStatus == "available" ? .normal : .unavailable
+    )
+}
+
+private func gatewayQuotaMeterPresentation(
+    accountValid: Bool?,
+    accountStatus: String?,
+    unlimited: Bool,
+    remaining: Double?,
+    unit: String?,
+    unavailableStatusText: String,
+    unavailableTone: GatewayQuotaTone
+) -> GatewayQuotaMeterPresentation {
+    if accountValid == false {
         return GatewayQuotaMeterPresentation(
             fraction: 0,
-            statusText: providerUsageAccountWarning(usage.accountStatus) ?? "账户不可用",
+            statusText: providerUsageAccountWarning(accountStatus) ?? "账户不可用",
             tone: .critical,
             warningThreshold: nil
         )
     }
-    if usage.unlimited {
+    if unlimited {
         return GatewayQuotaMeterPresentation(
             fraction: 1,
             statusText: "无限额度",
@@ -67,19 +89,17 @@ func gatewayQuotaMeterPresentation(
             warningThreshold: nil
         )
     }
-    guard let remaining = usage.remaining, remaining.isFinite else {
+    guard let remaining, remaining.isFinite else {
         return GatewayQuotaMeterPresentation(
             fraction: nil,
-            statusText: usage.balanceStatus == "available"
-                ? "额度可用"
-                : providerUsageStatusText(usage.balanceStatus),
-            tone: usage.balanceStatus == "available" ? .normal : .unavailable,
+            statusText: unavailableStatusText,
+            tone: unavailableTone,
             warningThreshold: nil
         )
     }
 
-    let progressReference = gatewayQuotaProgressReference(unit: usage.unit)
-    let warningThreshold = gatewayQuotaWarningThreshold(unit: usage.unit)
+    let progressReference = gatewayQuotaProgressReference(unit: unit)
+    let warningThreshold = gatewayQuotaWarningThreshold(unit: unit)
     let fraction = max(0, min(remaining / progressReference, 1))
     if remaining <= 0 {
         return GatewayQuotaMeterPresentation(
@@ -157,55 +177,14 @@ func gatewayQuotaSub2ApiRateText(
 func gatewayQuotaMeterPresentation(
     _ balance: ManageSub2ApiAccountPoolResponse.Account.Balance
 ) -> GatewayQuotaMeterPresentation {
-    if balance.accountValid == false {
-        return GatewayQuotaMeterPresentation(
-            fraction: 0,
-            statusText: providerUsageAccountWarning(balance.accountStatus) ?? "账户不可用",
-            tone: .critical,
-            warningThreshold: nil
-        )
-    }
-    if balance.unlimited {
-        return GatewayQuotaMeterPresentation(
-            fraction: 1,
-            statusText: "无限额度",
-            tone: .normal,
-            warningThreshold: nil
-        )
-    }
-    guard let remaining = balance.remaining, remaining.isFinite else {
-        return GatewayQuotaMeterPresentation(
-            fraction: nil,
-            statusText: sub2ApiCapabilityStateText(balance.state),
-            tone: balance.state == "available" ? .normal : .unavailable,
-            warningThreshold: nil
-        )
-    }
-
-    let progressReference = gatewayQuotaProgressReference(unit: balance.unit)
-    let warningThreshold = gatewayQuotaWarningThreshold(unit: balance.unit)
-    let fraction = max(0, min(remaining / progressReference, 1))
-    if remaining <= 0 {
-        return GatewayQuotaMeterPresentation(
-            fraction: 0,
-            statusText: "额度耗尽",
-            tone: .critical,
-            warningThreshold: warningThreshold
-        )
-    }
-    if remaining < warningThreshold {
-        return GatewayQuotaMeterPresentation(
-            fraction: fraction,
-            statusText: "余额偏低",
-            tone: .warning,
-            warningThreshold: warningThreshold
-        )
-    }
-    return GatewayQuotaMeterPresentation(
-        fraction: fraction,
-        statusText: "余额充足",
-        tone: .normal,
-        warningThreshold: warningThreshold
+    gatewayQuotaMeterPresentation(
+        accountValid: balance.accountValid,
+        accountStatus: balance.accountStatus,
+        unlimited: balance.unlimited,
+        remaining: balance.remaining,
+        unit: balance.unit,
+        unavailableStatusText: sub2ApiCapabilityStateText(balance.state),
+        unavailableTone: balance.state == "available" ? .normal : .unavailable
     )
 }
 
@@ -330,7 +309,7 @@ struct GatewayQuotaDock: View {
             gatewayGeneration &+= 1
             synchronizeSelectedProvider()
         }
-        .onChange(of: selectedProviderName) { _ in
+        .onChange(of: selectedProviderName) { _, _ in
             providerUsage = nil
             providerUsageError = nil
             recentAccountResponse = nil

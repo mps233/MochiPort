@@ -1,7 +1,7 @@
 # MochiPort for macOS
 
 Native SwiftUI client for the formal macOS 26 app target. The Swift package
-manifest remains buildable on macOS 14 and newer for local tests. It includes the overview,
+manifest also targets macOS 26 for local builds and tests. It includes the overview,
 Codex integration, session movement, messaging accounts, AI Gateway providers,
 request logs, and native Settings over the authenticated versioned loopback
 management API.
@@ -53,7 +53,7 @@ changes in-memory view state.
 Generate the UI version settings independently from the Rust daemon with:
 
 ```sh
-MOCHIPORT_UI_VERSION=0.5.3 MOCHIPORT_UI_BUILD_NUMBER=446 \
+MOCHIPORT_UI_VERSION=0.5.4 MOCHIPORT_UI_BUILD_NUMBER=457 \
   scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 ```
@@ -67,7 +67,7 @@ already running. The complete handoff rule is in
 [`docs/threadrelay-change-handoff.zh-CN.md`](../../docs/threadrelay-change-handoff.zh-CN.md).
 
 ```sh
-DAEMON_BUILD_NUMBER=439
+DAEMON_BUILD_NUMBER=457
 MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
   --target aarch64-apple-darwin --bin mochiport
 MOCHIPORT_DAEMON_BUILD_NUMBER="$DAEMON_BUILD_NUMBER" cargo build --release \
@@ -78,7 +78,7 @@ lipo -create \
   target/x86_64-apple-darwin/release/mochiport \
   -output target/release/mochiport
 chmod 755 target/release/mochiport
-MOCHIPORT_UI_VERSION=0.5.3 MOCHIPORT_UI_BUILD_NUMBER=446 \
+MOCHIPORT_UI_VERSION=0.5.4 MOCHIPORT_UI_BUILD_NUMBER=457 \
   scripts/generate-swift-version.sh \
   macos/ThreadRelay/Config/Version.xcconfig
 xcodebuild \

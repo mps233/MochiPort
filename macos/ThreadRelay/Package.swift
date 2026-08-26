@@ -5,7 +5,7 @@ import PackageDescription
 let package = Package(
     name: "MochiPort",
     platforms: [
-        .macOS(.v14),
+        .macOS("26.0"),
     ],
     products: [
         .executable(name: "MochiPort", targets: ["ThreadRelayMac"]),

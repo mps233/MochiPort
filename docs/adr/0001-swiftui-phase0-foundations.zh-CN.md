@@ -6,7 +6,7 @@
 
 ## 背景
 
-MochiPort 正在从 macOS wxDragon 前端渐进迁移到 SwiftUI。迁移期间，stable、SwiftUI preview 和最后一个桥接版可能同时连接同一用户数据域与同一个 daemon。任何前端生命周期动作都不能误停正在承载 Codex 或消息通道工作的 daemon。
+MochiPort 已从 macOS wxDragon 前端迁移到 SwiftUI。macOS SwiftUI、Windows React/Tauri 和 Rust daemon 可能同时连接同一用户数据域与同一个 daemon。任何前端生命周期动作都不能误停正在承载 Codex 或消息通道工作的 daemon。
 
 ## 决策
 
@@ -32,14 +32,14 @@ Rust daemon 是配置和凭据的唯一事实来源。SwiftUI 不复制业务配
 - SwiftUI preview Bundle ID：`io.github.mps233.threadrelay.preview`
 - 产品语义版本：根目录 `Cargo.toml` 的 package version
 - UI 构建号：显式 `MOCHIPORT_UI_BUILD_NUMBER`；daemon 构建号：显式 `MOCHIPORT_DAEMON_BUILD_NUMBER`
-- 正式 Xcode App 目标：macOS 26；SwiftPM manifest 保持 macOS 14 作为本地测试最低版本
+- 正式 Xcode App 与 SwiftPM manifest 均以 macOS 26 为 deployment target
 - stable 与 preview 使用同一签名 Team ID；Team ID 在首次正式签名前由发布环境提供并冻结
 
-旧 `com.codexhub.app` 不能直接覆盖安装为 SwiftUI stable。它先进入最后一个 ThreadRelay wxDragon 桥接版，或与 SwiftUI preview 并行安装。
+旧 `com.codexhub.app` 不再直接覆盖安装为 SwiftUI stable；既有数据由 Rust 兼容路径读取。
 
 ### Liquid Glass 边界
 
-macOS 26 只在真实导航、控制或浮层重叠处使用系统 `glassEffect`；macOS 14-25 使用系统 `Material` 回退。业务列表、表格、表单和日志内容使用稳定系统表面，不实现自制 blur、shader 或截图材质。
+macOS 26 只在真实导航、控制或浮层重叠处使用系统 `glassEffect`。业务列表、表格、表单和日志内容使用稳定系统表面，不实现自制 blur、shader 或截图材质。
 
 ## 控制平面协议
 

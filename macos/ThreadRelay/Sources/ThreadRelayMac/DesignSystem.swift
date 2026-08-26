@@ -1,4 +1,3 @@
-import AppKit
 import SwiftUI
 
 enum ThreadRelaySpacing {
@@ -24,22 +23,82 @@ enum ThreadRelayPageLayout {
     static let sectionSpacing: CGFloat = 24
 }
 
-/// Neutral grouped surface matching the body of a native grouped `Form`.
-/// Glass remains reserved for floating chrome such as the quota dock.
-struct SettingsGroupSurface<Content: View>: View {
-    @ViewBuilder let content: Content
+protocol ThreadRelaySegmentItem: CaseIterable, Equatable, Identifiable {
+    var title: String { get }
+    var symbol: String { get }
+}
 
-    init(@ViewBuilder content: () -> Content) {
-        self.content = content()
+extension StatusTint {
+    var color: Color {
+        switch self {
+        case .secondary: .secondary
+        case .positive: .green
+        case .caution: .orange
+        case .negative: .red
+        }
+    }
+}
+
+struct GlassSegmentedControl<Item: ThreadRelaySegmentItem>: View {
+    @Binding private var selection: Item
+    let accessibilityLabel: String
+    let help: (Item) -> String
+    @Namespace private var selectionNamespace
+
+    init(
+        selection: Binding<Item>,
+        accessibilityLabel: String,
+        help: @escaping (Item) -> String
+    ) {
+        _selection = selection
+        self.accessibilityLabel = accessibilityLabel
+        self.help = help
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            content
+        HStack(spacing: 2) {
+            ForEach(Array(Item.allCases)) { item in
+                segment(item)
+            }
         }
-            .padding(16)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .settingsGroupedBackground()
+        .padding(3)
+        .glassEffect(.regular.interactive(), in: .capsule)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilityLabel)
+    }
+
+    private func segment(_ item: Item) -> some View {
+        let isSelected = selection == item
+
+        return Button {
+            guard selection != item else { return }
+            withAnimation(.easeInOut(duration: 0.2)) {
+                selection = item
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: item.symbol)
+                    .font(.system(size: 10, weight: .semibold))
+                Text(item.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
+        .background {
+            if isSelected {
+                Capsule()
+                    .fill(Color.accentColor)
+                    .matchedGeometryEffect(id: "selected", in: selectionNamespace)
+            }
+        }
+        .accessibilityLabel(item.title)
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .help(help(item))
     }
 }
 
@@ -69,58 +128,6 @@ struct SettingsGroupedSurfaceBackground: View {
 extension View {
     func settingsGroupedBackground() -> some View {
         modifier(SettingsGroupedBackgroundModifier())
-    }
-}
-
-/// AppKit owns the complete search-field geometry, appearance and interaction.
-struct NativeSearchField: NSViewRepresentable {
-    @Binding var text: String
-    let prompt: String
-
-    init(_ prompt: String, text: Binding<String>) {
-        self.prompt = prompt
-        _text = text
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text)
-    }
-
-    func makeNSView(context: Context) -> NSSearchField {
-        let field = NSSearchField()
-        field.controlSize = .large
-        field.placeholderString = prompt
-        field.sendsSearchStringImmediately = true
-        field.sendsWholeSearchString = false
-        field.delegate = context.coordinator
-        field.setAccessibilityLabel(prompt)
-        field.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        return field
-    }
-
-    func updateNSView(_ field: NSSearchField, context: Context) {
-        context.coordinator.text = $text
-        if field.stringValue != text {
-            field.stringValue = text
-        }
-        if field.placeholderString != prompt {
-            field.placeholderString = prompt
-            field.setAccessibilityLabel(prompt)
-        }
-    }
-
-    final class Coordinator: NSObject, NSSearchFieldDelegate {
-        var text: Binding<String>
-
-        init(text: Binding<String>) {
-            self.text = text
-        }
-
-        func controlTextDidChange(_ notification: Notification) {
-            guard let field = notification.object as? NSSearchField else { return }
-            text.wrappedValue = field.stringValue
-        }
     }
 }
 

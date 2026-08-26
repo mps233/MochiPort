@@ -207,7 +207,7 @@ struct MessagingAccountAvatar: View {
     }
 }
 
-private enum MessagingAccountFilter: String, CaseIterable, Identifiable {
+private enum MessagingAccountFilter: String, CaseIterable, Identifiable, ThreadRelaySegmentItem {
     case all
     case feishu
     case telegram
@@ -238,68 +238,6 @@ private enum MessagingAccountFilter: String, CaseIterable, Identifiable {
 
     func matches(_ account: MessagingAccountSummary) -> Bool {
         self == .all || rawValue == account.platform.rawValue
-    }
-}
-
-private struct MessagingAccountFilterControl: View {
-    @Binding var selection: MessagingAccountFilter
-    @Namespace private var selectionNamespace
-
-    var body: some View {
-        Group {
-            if #available(macOS 26.0, *) {
-                segments
-                    .glassEffect(.regular.interactive(), in: .capsule)
-            } else {
-                segments
-                    .background(.quaternary.opacity(0.5), in: Capsule())
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("消息渠道")
-    }
-
-    private var segments: some View {
-        HStack(spacing: 2) {
-            ForEach(MessagingAccountFilter.allCases) { item in
-                segment(item)
-            }
-        }
-        .padding(3)
-    }
-
-    private func segment(_ item: MessagingAccountFilter) -> some View {
-        let isSelected = selection == item
-
-        return Button {
-            guard selection != item else { return }
-            withAnimation(.easeInOut(duration: 0.2)) {
-                selection = item
-            }
-        } label: {
-            HStack(spacing: 5) {
-                Image(systemName: item.symbol)
-                    .font(.system(size: 10, weight: .semibold))
-                Text(item.title)
-                    .font(.system(size: 11, weight: .semibold))
-                    .lineLimit(1)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 5)
-            .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(isSelected ? AnyShapeStyle(.white) : AnyShapeStyle(.secondary))
-        .background {
-            if isSelected {
-                Capsule()
-                    .fill(Color.accentColor)
-                    .matchedGeometryEffect(id: "selectedMessagingFilter", in: selectionNamespace)
-            }
-        }
-        .accessibilityLabel(item.title)
-        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
-        .help("只显示\(item.title)账号")
     }
 }
 
@@ -365,7 +303,7 @@ struct MessagingAccountsView: View {
         }
         .scrollIndicators(.never)
         .searchable(text: $searchText, prompt: "搜索账号")
-        .onChange(of: accounts) { newAccounts in
+        .onChange(of: accounts) { _, newAccounts in
             // Drop optimistic values once the parent has acknowledged them.
             enabledOverrides = enabledOverrides.filter { id, value in
                 guard let account = newAccounts.first(where: { $0.id == id }) else { return false }
@@ -484,7 +422,11 @@ struct MessagingAccountsView: View {
     }
 
     private var filterBar: some View {
-        MessagingAccountFilterControl(selection: $filter)
+        GlassSegmentedControl(
+            selection: $filter,
+            accessibilityLabel: "消息渠道",
+            help: { "只显示\($0.title)账号" }
+        )
         .frame(width: 440)
         .accessibilityIdentifier("messaging-accounts.channel-filter")
     }

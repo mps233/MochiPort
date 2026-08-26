@@ -252,7 +252,7 @@ struct MessagingOnboardingView: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-            .onChange(of: feishuMethod) { method in
+            .onChange(of: feishuMethod) { _, method in
                 switch method {
                 case .scan:
                     startFeishuScanFlow()
