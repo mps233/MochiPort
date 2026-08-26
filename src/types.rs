@@ -27,6 +27,16 @@ impl ImPlatformKind {
             Self::Wecom => "wecom",
         }
     }
+
+    pub fn from_key(value: &str) -> Option<Self> {
+        match value.trim() {
+            value if value.eq_ignore_ascii_case("feishu") => Some(Self::Feishu),
+            value if value.eq_ignore_ascii_case("telegram") => Some(Self::Telegram),
+            value if value.eq_ignore_ascii_case("wechat") => Some(Self::Wechat),
+            value if value.eq_ignore_ascii_case("wecom") => Some(Self::Wecom),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

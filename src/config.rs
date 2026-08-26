@@ -7,8 +7,22 @@ use std::{
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::types::ImPlatformKind;
+
 const DEFAULT_BIND: &str = "127.0.0.1:3847";
 const LEGACY_DEFAULT_BIND: &str = "127.0.0.1:8000";
+
+pub(crate) fn normalize_config_paths(config: &mut AppConfig, config_path: &Path) {
+    let base = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    if config.state_path.is_relative() {
+        config.state_path = base.join(&config.state_path);
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -470,20 +484,20 @@ impl AppConfig {
         if account_id.is_empty() {
             return false;
         }
-        match platform.trim().to_ascii_lowercase().as_str() {
-            "feishu" => self
+        match ImPlatformKind::from_key(platform) {
+            Some(ImPlatformKind::Feishu) => self
                 .effective_feishu_accounts()
                 .iter()
                 .any(|account| account.account_id.trim() == account_id),
-            "telegram" => self
+            Some(ImPlatformKind::Telegram) => self
                 .effective_telegram_accounts()
                 .iter()
                 .any(|account| account.account_id.trim() == account_id),
-            "wechat" => self
+            Some(ImPlatformKind::Wechat) => self
                 .effective_wechat_accounts()
                 .iter()
                 .any(|account| account.account_id.trim() == account_id),
-            "wecom" => self
+            Some(ImPlatformKind::Wecom) => self
                 .effective_wecom_accounts()
                 .iter()
                 .any(|account| account.account_id.trim() == account_id),
@@ -520,19 +534,27 @@ impl AppConfig {
         if account_id.is_empty() {
             return false;
         }
-        match platform.trim().to_ascii_lowercase().as_str() {
-            "feishu" => remove_account(&mut self.feishu_accounts, account_id, |account| {
-                account.account_id.as_str()
-            }),
-            "telegram" => remove_account(&mut self.telegram_accounts, account_id, |account| {
-                account.account_id.as_str()
-            }),
-            "wechat" => remove_account(&mut self.wechat_accounts, account_id, |account| {
-                account.account_id.as_str()
-            }),
-            "wecom" => remove_account(&mut self.wecom_accounts, account_id, |account| {
-                account.account_id.as_str()
-            }),
+        match ImPlatformKind::from_key(platform) {
+            Some(ImPlatformKind::Feishu) => {
+                remove_account(&mut self.feishu_accounts, account_id, |account| {
+                    account.account_id.as_str()
+                })
+            }
+            Some(ImPlatformKind::Telegram) => {
+                remove_account(&mut self.telegram_accounts, account_id, |account| {
+                    account.account_id.as_str()
+                })
+            }
+            Some(ImPlatformKind::Wechat) => {
+                remove_account(&mut self.wechat_accounts, account_id, |account| {
+                    account.account_id.as_str()
+                })
+            }
+            Some(ImPlatformKind::Wecom) => {
+                remove_account(&mut self.wecom_accounts, account_id, |account| {
+                    account.account_id.as_str()
+                })
+            }
             _ => false,
         }
     }
@@ -547,29 +569,29 @@ impl AppConfig {
         if account_id.is_empty() {
             return false;
         }
-        match platform.trim().to_ascii_lowercase().as_str() {
-            "feishu" => set_account_enabled(
+        match ImPlatformKind::from_key(platform) {
+            Some(ImPlatformKind::Feishu) => set_account_enabled(
                 &mut self.feishu_accounts,
                 account_id,
                 enabled,
                 |account| account.account_id.as_str(),
                 |account| &mut account.enabled,
             ),
-            "telegram" => set_account_enabled(
+            Some(ImPlatformKind::Telegram) => set_account_enabled(
                 &mut self.telegram_accounts,
                 account_id,
                 enabled,
                 |account| account.account_id.as_str(),
                 |account| &mut account.enabled,
             ),
-            "wechat" => set_account_enabled(
+            Some(ImPlatformKind::Wechat) => set_account_enabled(
                 &mut self.wechat_accounts,
                 account_id,
                 enabled,
                 |account| account.account_id.as_str(),
                 |account| &mut account.enabled,
             ),
-            "wecom" => set_account_enabled(
+            Some(ImPlatformKind::Wecom) => set_account_enabled(
                 &mut self.wecom_accounts,
                 account_id,
                 enabled,
@@ -892,7 +914,7 @@ mod tests {
         let effective = config.effective_feishu_accounts();
         assert_eq!(effective.len(), 1);
         assert_eq!(effective[0].account_id, "legacy-bridge");
-        assert!(config.has_im_account("feishu", "legacy-bridge"));
+        assert!(config.has_im_account(" FEISHU ", "legacy-bridge"));
 
         assert!(config.migrate_legacy_im_accounts());
         assert!(config.has_im_account("feishu", "legacy-bridge"));

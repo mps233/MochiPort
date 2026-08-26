@@ -111,7 +111,7 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
     let config_path = config_path_from_cli(cli.config_path.clone());
     let mut config = AppConfig::load_or_default(&config_path)?;
     let should_save_config = !config_path.exists() || config.apply_platform_defaults();
-    normalize_config_paths(&mut config, &config_path);
+    config::normalize_config_paths(&mut config, &config_path);
     let log_path = init_logging(&config)?;
     tracing::info!(
         target: "threadrelay::logging",
@@ -634,18 +634,6 @@ fn config_directory_is_writable(dir: &Path) -> bool {
             true
         }
         Err(_) => false,
-    }
-}
-
-fn normalize_config_paths(config: &mut AppConfig, config_path: &Path) {
-    let base = config_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    if config.state_path.is_relative() {
-        config.state_path = base.join(&config.state_path);
     }
 }
 

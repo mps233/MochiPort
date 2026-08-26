@@ -200,7 +200,7 @@ pub struct AppState {
     pub wecom_onboard: Mutex<Option<WecomOnboardSession>>,
     pub safe_relaunch: Mutex<Option<crate::safe_relaunch::PendingSafeRelaunch>>,
     pub im_account_profiles: Mutex<HashMap<String, ImAccountProfile>>,
-    pub im_account_profile_refresh: Mutex<()>,
+    pub im_account_profile_refresh: AtomicU8,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
     pub lifecycle_admission: Arc<LifecycleAdmission>,
     pub enhanced_launch_operations: Arc<crate::codex_app_enhanced::EnhancedLaunchOperationManager>,
@@ -549,7 +549,7 @@ impl AppState {
             wecom_onboard: Mutex::new(None),
             safe_relaunch: Mutex::new(None),
             im_account_profiles: Mutex::new(HashMap::new()),
-            im_account_profile_refresh: Mutex::new(()),
+            im_account_profile_refresh: AtomicU8::new(0),
             shutdown_tx: Mutex::new(shutdown_tx),
             lifecycle_admission: Arc::new(LifecycleAdmission::new()),
             enhanced_launch_operations: Arc::new(
@@ -646,7 +646,8 @@ fn restore_persisted_im_bindings(
         restored_topic_states.insert(conversation_key.clone(), binding_state);
     }
 
-    let changed = restored_bindings != original_bindings || restored_topic_states != original_topic_states;
+    let changed =
+        restored_bindings != original_bindings || restored_topic_states != original_topic_states;
     persisted.im_thread_bindings = restored_bindings;
     persisted.telegram_topic_binding_states = restored_topic_states;
     (runtime, changed)

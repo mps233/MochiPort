@@ -1,9 +1,11 @@
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crate::{
@@ -11,9 +13,7 @@ use crate::{
     bridge, chain_log,
     config::{AppConfig, FeishuConfig, TelegramConfig, TelegramProjectGroupConfig},
     im::core::{
-        i18n::im_text_for_state,
-        session::bind_thread_to_route,
-        thread::summarize_thread_title,
+        i18n::im_text_for_state, session::bind_thread_to_route, thread::summarize_thread_title,
     },
     im::feishu::{FeishuApi, FeishuSettings},
     im::telegram::{api::TelegramApi, types::TelegramSettings},
@@ -24,6 +24,11 @@ use crate::{
 
 const IM_ACCOUNT_PROFILE_REFRESH_MS: u128 = 60 * 60 * 1_000;
 const IM_ACCOUNT_AVATAR_MAX_DATA_BYTES: usize = 512 * 1024;
+
+enum ProfileAccount {
+    Feishu(FeishuConfig),
+    Telegram(TelegramConfig),
+}
 
 pub(super) async fn start_bridge(State(state): State<SharedState>) -> impl IntoResponse {
     {
@@ -263,14 +268,6 @@ pub(super) async fn manage_im_accounts(
     })
 }
 
-pub(super) async fn im_accounts_snapshot(state: &SharedState) -> ImAccountsResponse {
-    let config = state.config.lock().await.clone();
-    refresh_im_account_profiles(state, &config).await;
-    let runtime = state.im_accounts.lock().await.clone();
-    ImAccountsResponse {
-        accounts: im_account_items(state, &config, &runtime),
-    }
-}
 pub(super) async fn manage_telegram_project_groups(
     State(state): State<SharedState>,
 ) -> Json<TelegramProjectGroupsResponse> {
@@ -487,9 +484,7 @@ pub(super) async fn sync_telegram_topics(
         let current_topic_bindings = existing_bindings
             .iter()
             .filter(|(_, route)| {
-                if route.platform != ImPlatformKind::Telegram
-                    || route.account_id != account_id
-                {
+                if route.platform != ImPlatformKind::Telegram || route.account_id != account_id {
                     return false;
                 }
                 let (bound_chat_id, topic_id) = split_telegram_message_target(&route.chat_id);
@@ -538,8 +533,10 @@ pub(super) async fn sync_telegram_topics(
                         probe_error = Some("Telegram 未确认原 Topic 是否存在".to_string());
                     }
                 }
-                Err(err) if err.downcast_ref::<crate::im::telegram::api::TelegramApiError>()
-                    .is_some_and(|error| error.is_forum_topic_missing()) =>
+                Err(err)
+                    if err
+                        .downcast_ref::<crate::im::telegram::api::TelegramApiError>()
+                        .is_some_and(|error| error.is_forum_topic_missing()) =>
                 {
                     missing_binding_keys.push(conversation_key.clone());
                 }
@@ -552,9 +549,8 @@ pub(super) async fn sync_telegram_topics(
                         )
                         .await;
                     if !current_topic_alive && probe_error.is_none() {
-                        probe_error = Some(
-                            "无法确认原 Telegram Topic 是否仍存在，已保留原绑定".to_string(),
-                        );
+                        probe_error =
+                            Some("无法确认原 Telegram Topic 是否仍存在，已保留原绑定".to_string());
                     }
                 }
             }
@@ -562,12 +558,8 @@ pub(super) async fn sync_telegram_topics(
         if current_topic_alive {
             probe_error = None;
             if let Some(conversation_key) = alive_binding_key.as_deref()
-                && let Err(err) = persist_telegram_topic_name(
-                    &state,
-                    conversation_key,
-                    &topic_name,
-                )
-                .await
+                && let Err(err) =
+                    persist_telegram_topic_name(&state, conversation_key, &topic_name).await
             {
                 probe_error = Some(format!("保存 Topic 名称失败：{err}"));
             }
@@ -586,7 +578,9 @@ pub(super) async fn sync_telegram_topics(
         }
         let has_other_binding = existing_bindings.iter().any(|(conversation_key, _)| {
             !current_topic_keys.contains(&conversation_key.as_str())
-                && !missing_binding_keys.iter().any(|key| key == conversation_key)
+                && !missing_binding_keys
+                    .iter()
+                    .any(|key| key == conversation_key)
                 && !private_bindings
                     .iter()
                     .any(|(key, _)| key == conversation_key)
@@ -678,12 +672,7 @@ pub(super) async fn sync_telegram_topics(
             transferred_private_bindings.push((conversation_key.clone(), private_route.clone()));
         }
         if private_transfer_error.is_some() {
-            restore_private_bindings(
-                &state,
-                &thread_id,
-                &transferred_private_bindings,
-            )
-            .await;
+            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
             continue;
         }
 
@@ -707,12 +696,7 @@ pub(super) async fn sync_telegram_topics(
         {
             failed += 1;
             let error = cleanup_created_topic(&api, &chat_id, topic.message_thread_id, err).await;
-            restore_private_bindings(
-                &state,
-                &thread_id,
-                &transferred_private_bindings,
-            )
-            .await;
+            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
             items.push(TelegramTopicSyncItem {
                 thread_id: thread_id.clone(),
                 title: title.clone(),
@@ -734,12 +718,7 @@ pub(super) async fn sync_telegram_topics(
         {
             failed += 1;
             let error = cleanup_created_topic(&api, &chat_id, topic.message_thread_id, err).await;
-            restore_private_bindings(
-                &state,
-                &thread_id,
-                &transferred_private_bindings,
-            )
-            .await;
+            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
             items.push(TelegramTopicSyncItem {
                 thread_id,
                 title,
@@ -750,7 +729,9 @@ pub(super) async fn sync_telegram_topics(
             continue;
         }
 
-        if let Err(err) = persist_telegram_topic_name(&state, &route.conversation_key, &topic_name).await {
+        if let Err(err) =
+            persist_telegram_topic_name(&state, &route.conversation_key, &topic_name).await
+        {
             state
                 .push_event(
                     "warn",
@@ -844,9 +825,9 @@ async fn cleanup_created_topic(
     match api.delete_forum_topic(chat_id, topic_id).await {
         Ok(true) => format!("{binding_error}（已清理未绑定的 Topic）"),
         Ok(false) => format!("{binding_error}（清理未绑定的 Topic 未确认成功）"),
-        Err(cleanup_error) => format!(
-            "{binding_error}（清理未绑定的 Topic 失败：{cleanup_error}）"
-        ),
+        Err(cleanup_error) => {
+            format!("{binding_error}（清理未绑定的 Topic 失败：{cleanup_error}）")
+        }
     }
 }
 
@@ -902,17 +883,22 @@ fn thread_belongs_to_project(thread: &serde_json::Value, project_cwd: &str) -> b
 }
 
 fn thread_updated_at(thread: &serde_json::Value) -> i128 {
-    ["updatedAt", "updated_at", "lastUpdatedAt", "last_updated_at"]
-        .iter()
-        .find_map(|key| {
-            let value = thread.get(*key)?;
-            value
-                .as_i64()
-                .map(i128::from)
-                .or_else(|| value.as_u64().map(i128::from))
-                .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
-        })
-        .unwrap_or_default()
+    [
+        "updatedAt",
+        "updated_at",
+        "lastUpdatedAt",
+        "last_updated_at",
+    ]
+    .iter()
+    .find_map(|key| {
+        let value = thread.get(*key)?;
+        value
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| value.as_u64().map(i128::from))
+            .or_else(|| value.as_str().and_then(|value| value.trim().parse().ok()))
+    })
+    .unwrap_or_default()
 }
 
 fn thread_id_for_sort(thread: &serde_json::Value) -> &str {
@@ -925,10 +911,22 @@ fn thread_id_for_sort(thread: &serde_json::Value) -> &str {
 
 fn truncate_telegram_topic_name(title: &str) -> String {
     let title = title.trim();
-    let title = if title.is_empty() { "未命名会话" } else { title };
+    let title = if title.is_empty() {
+        "未命名会话"
+    } else {
+        title
+    };
     title.chars().take(64).collect()
 }
 
+pub(super) async fn im_accounts_snapshot(state: &SharedState) -> ImAccountsResponse {
+    let config = state.config.lock().await.clone();
+    schedule_im_account_profiles_refresh(state, &config);
+    let runtime = state.im_accounts.lock().await.clone();
+    ImAccountsResponse {
+        accounts: im_account_items(state, &config, &runtime),
+    }
+}
 
 /// API contract with the SwiftUI client: `APIClient.performIMMutation`
 /// matches this exact string to tell "the account does not exist" apart from
@@ -1268,14 +1266,58 @@ pub(super) fn im_bridge_configured(config: &AppConfig) -> bool {
         || wecom_active(config)
 }
 
-async fn refresh_im_account_profiles(state: &SharedState, config: &AppConfig) {
-    let _refresh_guard = state.im_account_profile_refresh.lock().await;
+fn schedule_im_account_profiles_refresh(state: &SharedState, config: &AppConfig) {
     let now = crate::types::now_ms();
-    enum ProfileAccount {
-        Feishu(FeishuConfig),
-        Telegram(TelegramConfig),
+    let accounts = profile_accounts(config);
+    let stale = state
+        .im_account_profiles
+        .try_lock()
+        .ok()
+        .is_some_and(|profiles| {
+            accounts.iter().any(|(platform, account_id, account)| {
+                let key = im_account_key(*platform, account_id);
+                let fresh = profiles
+                    .get(&key)
+                    .and_then(|profile| profile.avatar_checked_at_ms)
+                    .is_some_and(|checked| {
+                        now.saturating_sub(checked) < IM_ACCOUNT_PROFILE_REFRESH_MS
+                    });
+                let configured = match account {
+                    ProfileAccount::Feishu(account) => account.is_configured(),
+                    ProfileAccount::Telegram(account) => account.is_configured(),
+                };
+                configured && !fresh
+            })
+        });
+    if !stale
+        || state
+            .im_account_profile_refresh
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return;
     }
-    let accounts = config
+
+    let state = state.clone();
+    let config = config.clone();
+    tokio::spawn(async move {
+        let _reset = ProfileRefreshReset(state.clone());
+        refresh_im_account_profiles(&state, &config).await;
+    });
+}
+
+struct ProfileRefreshReset(SharedState);
+
+impl Drop for ProfileRefreshReset {
+    fn drop(&mut self) {
+        self.0
+            .im_account_profile_refresh
+            .store(0, Ordering::Release);
+    }
+}
+
+fn profile_accounts(config: &AppConfig) -> Vec<(ImPlatformKind, String, ProfileAccount)> {
+    config
         .effective_feishu_accounts()
         .into_iter()
         .map(|account| {
@@ -1297,85 +1339,106 @@ async fn refresh_im_account_profiles(state: &SharedState, config: &AppConfig) {
                     )
                 }),
         )
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+}
 
-    for (platform, account_id, profile_account) in accounts {
-        let key = im_account_key(platform, &account_id);
-        let fresh = state
-            .im_account_profiles
-            .lock()
-            .await
-            .get(&key)
-            .and_then(|profile| profile.avatar_checked_at_ms)
-            .is_some_and(|checked| now.saturating_sub(checked) < IM_ACCOUNT_PROFILE_REFRESH_MS);
-        let configured = match &profile_account {
-            ProfileAccount::Feishu(account) => account.is_configured(),
-            ProfileAccount::Telegram(account) => account.is_configured(),
-        };
-        if fresh || !configured {
-            continue;
-        }
+async fn refresh_im_account_profiles(state: &SharedState, config: &AppConfig) {
+    let now = crate::types::now_ms();
+    let profiles = state.im_account_profiles.lock().await.clone();
+    let tasks = profile_accounts(config).into_iter().filter_map(
+        |(platform, account_id, profile_account)| {
+            let key = im_account_key(platform, &account_id);
+            let fresh = profiles
+                .get(&key)
+                .and_then(|profile| profile.avatar_checked_at_ms)
+                .is_some_and(|checked| now.saturating_sub(checked) < IM_ACCOUNT_PROFILE_REFRESH_MS);
+            let configured = match &profile_account {
+                ProfileAccount::Feishu(account) => account.is_configured(),
+                ProfileAccount::Telegram(account) => account.is_configured(),
+            };
+            if fresh || !configured {
+                return None;
+            }
+            Some(refresh_one_im_account_profile(
+                platform,
+                key,
+                profile_account,
+                now,
+            ))
+        },
+    );
 
-        let mut profile = ImAccountProfile {
-            avatar_checked_at_ms: Some(now),
-            ..Default::default()
-        };
-        match platform {
-            ImPlatformKind::Telegram => {
-                let ProfileAccount::Telegram(account) = profile_account else {
-                    continue;
-                };
-                let api = TelegramApi::new(TelegramSettings::from_app_config(&account));
-                let result = tokio::time::timeout(Duration::from_secs(5), async {
-                    let user = api.get_me().await?;
-                    let photos = api.get_user_profile_photos(user.id, 1).await?;
-                    let photo = photos
-                        .photos
-                        .first()
-                        .and_then(|sizes| sizes.iter().max_by_key(|size| size.width * size.height));
-                    let Some(photo) = photo else {
-                        return Ok::<_, anyhow::Error>(None);
-                    };
-                    let file = api.get_file(&photo.file_id).await?;
-                    let Some(path) = file.file_path else {
-                        return Ok(None);
-                    };
-                    let bytes = api.download_file(&path).await?;
-                    let mime = mime_guess::from_path(&path)
-                        .first_raw()
-                        .filter(|mime| mime.starts_with("image/"))
-                        .unwrap_or("image/jpeg")
-                        .to_string();
-                    Ok(Some((bytes, mime)))
-                })
-                .await;
-                if let Ok(Ok(Some((bytes, mime)))) = result {
-                    profile.avatar_data = image_data_url(bytes, &mime);
-                    profile.avatar_mime_type = Some(mime);
-                }
-            }
-            ImPlatformKind::Feishu => {
-                let ProfileAccount::Feishu(account) = profile_account else {
-                    continue;
-                };
-                let api = FeishuApi::new(FeishuSettings::from_app_config(&account));
-                let result = tokio::time::timeout(Duration::from_secs(5), async {
-                    let info = api.get_application_info(account.app_id.trim()).await?;
-                    let Some(url) = info.avatar_url else {
-                        return Ok::<_, anyhow::Error>(None);
-                    };
-                    Ok(Some(api.download_application_avatar(&url).await?))
-                })
-                .await;
-                if let Ok(Ok(Some((bytes, mime)))) = result {
-                    profile.avatar_data = image_data_url(bytes, &mime);
-                    profile.avatar_mime_type = Some(mime);
-                }
-            }
-            _ => {}
-        }
+    let mut tasks = stream::iter(tasks).buffer_unordered(4);
+    while let Some((key, profile)) = tasks.next().await {
         state.im_account_profiles.lock().await.insert(key, profile);
     }
+}
+
+async fn refresh_one_im_account_profile(
+    platform: ImPlatformKind,
+    key: String,
+    profile_account: ProfileAccount,
+    now: u128,
+) -> (String, ImAccountProfile) {
+    let mut profile = ImAccountProfile {
+        avatar_checked_at_ms: Some(now),
+        ..Default::default()
+    };
+    match platform {
+        ImPlatformKind::Telegram => {
+            let ProfileAccount::Telegram(account) = profile_account else {
+                return (key, profile);
+            };
+            let api = TelegramApi::new(TelegramSettings::from_app_config(&account));
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                let user = api.get_me().await?;
+                let photos = api.get_user_profile_photos(user.id, 1).await?;
+                let photo = photos
+                    .photos
+                    .first()
+                    .and_then(|sizes| sizes.iter().max_by_key(|size| size.width * size.height));
+                let Some(photo) = photo else {
+                    return Ok::<_, anyhow::Error>(None);
+                };
+                let file = api.get_file(&photo.file_id).await?;
+                let Some(path) = file.file_path else {
+                    return Ok(None);
+                };
+                let bytes = api.download_file(&path).await?;
+                let mime = mime_guess::from_path(&path)
+                    .first_raw()
+                    .filter(|mime| mime.starts_with("image/"))
+                    .unwrap_or("image/jpeg")
+                    .to_string();
+                Ok(Some((bytes, mime)))
+            })
+            .await;
+            if let Ok(Ok(Some((bytes, mime)))) = result {
+                profile.avatar_data = image_data_url(bytes, &mime);
+                profile.avatar_mime_type = Some(mime);
+            }
+        }
+        ImPlatformKind::Feishu => {
+            let ProfileAccount::Feishu(account) = profile_account else {
+                return (key, profile);
+            };
+            let api = FeishuApi::new(FeishuSettings::from_app_config(&account));
+            let result = tokio::time::timeout(Duration::from_secs(5), async {
+                let info = api.get_application_info(account.app_id.trim()).await?;
+                let Some(url) = info.avatar_url else {
+                    return Ok::<_, anyhow::Error>(None);
+                };
+                Ok(Some(api.download_application_avatar(&url).await?))
+            })
+            .await;
+            if let Ok(Ok(Some((bytes, mime)))) = result {
+                profile.avatar_data = image_data_url(bytes, &mime);
+                profile.avatar_mime_type = Some(mime);
+            }
+        }
+        _ => {}
+    }
+    (key, profile)
 }
 
 fn image_data_url(bytes: Vec<u8>, mime_type: &str) -> Option<String> {
@@ -1402,10 +1465,11 @@ fn im_account_items(
     config: &AppConfig,
     runtime: &HashMap<String, ImAccountRuntimeState>,
 ) -> Vec<ImAccountItem> {
+    let profiles = state.im_account_profiles.try_lock().ok();
     let mut accounts = Vec::new();
     for account in config.effective_feishu_accounts() {
         accounts.push(im_account_item(
-            state,
+            profiles.as_deref(),
             ImPlatformKind::Feishu,
             &account.account_id,
             non_empty_string(&account.display_name)
@@ -1419,7 +1483,7 @@ fn im_account_items(
     }
     for account in config.effective_telegram_accounts() {
         accounts.push(im_account_item(
-            state,
+            profiles.as_deref(),
             ImPlatformKind::Telegram,
             &account.account_id,
             non_empty_string(&account.display_name).or_else(|| Some("Telegram 机器人".to_string())),
@@ -1431,7 +1495,7 @@ fn im_account_items(
     }
     for account in config.effective_wechat_accounts() {
         accounts.push(im_account_item(
-            state,
+            profiles.as_deref(),
             ImPlatformKind::Wechat,
             &account.account_id,
             non_empty_string(&account.display_name).or_else(|| Some("微信机器人".to_string())),
@@ -1443,7 +1507,7 @@ fn im_account_items(
     }
     for account in config.effective_wecom_accounts() {
         accounts.push(im_account_item(
-            state,
+            profiles.as_deref(),
             ImPlatformKind::Wecom,
             &account.account_id,
             non_empty_string(&account.display_name).or_else(|| Some("企业微信机器人".to_string())),
@@ -1457,7 +1521,7 @@ fn im_account_items(
 }
 
 fn im_account_item(
-    state: &SharedState,
+    profiles: Option<&HashMap<String, ImAccountProfile>>,
     platform: ImPlatformKind,
     account_id: &str,
     display_name: Option<String>,
@@ -1467,12 +1531,9 @@ fn im_account_item(
     runtime: &HashMap<String, ImAccountRuntimeState>,
 ) -> ImAccountItem {
     let runtime = runtime.get(&im_account_key(platform, account_id));
-    let avatar_data = state
-        .im_account_profiles
-        .try_lock()
-        .ok()
-        .and_then(|profiles| profiles.get(&im_account_key(platform, account_id)).cloned())
-        .and_then(|profile| profile.avatar_data);
+    let avatar_data = profiles
+        .and_then(|profiles| profiles.get(&im_account_key(platform, account_id)))
+        .and_then(|profile| profile.avatar_data.clone());
     ImAccountItem {
         platform: platform.key().to_string(),
         account_id: account_id.to_string(),
@@ -1496,70 +1557,56 @@ fn set_legacy_im_account_enabled(
     account_id: &str,
     enabled: bool,
 ) {
+    if !legacy_im_account_matches(config, platform, account_id) {
+        return;
+    }
     match platform {
-        "feishu"
-            if config.feishu.account_id.trim() == account_id
-                || (config.feishu.account_id.trim().is_empty()
-                    && (config.feishu.app_id.trim() == account_id
-                        || config.bridge.account_id.trim() == account_id)) =>
-        {
-            config.feishu.enabled = enabled
-        }
-        "telegram"
-            if config.telegram.account_id.trim() == account_id
-                || (config.telegram.account_id.trim().is_empty() && account_id == "telegram") =>
-        {
-            config.telegram.enabled = enabled
-        }
-        "wechat"
-            if config.wechat.account_id.trim() == account_id
-                || (config.wechat.account_id.trim().is_empty() && account_id == "wechat") =>
-        {
-            config.wechat.enabled = enabled
-        }
-        "wecom"
-            if config.wecom.account_id.trim() == account_id
-                || (config.wecom.account_id.trim().is_empty() && account_id == "wecom") =>
-        {
-            config.wecom.enabled = enabled
-        }
+        "feishu" => config.feishu.enabled = enabled,
+        "telegram" => config.telegram.enabled = enabled,
+        "wechat" => config.wechat.enabled = enabled,
+        "wecom" => config.wecom.enabled = enabled,
         _ => {}
     }
 }
 
 fn is_supported_im_platform(platform: &str) -> bool {
-    matches!(platform, "feishu" | "telegram" | "wechat" | "wecom")
+    im_platform_from_key(platform).is_some()
 }
 
 fn clear_legacy_im_account(config: &mut AppConfig, platform: &str, account_id: &str) {
+    if !legacy_im_account_matches(config, platform, account_id) {
+        return;
+    }
     match platform {
-        "feishu"
-            if config.feishu.account_id.trim() == account_id
+        "feishu" => config.feishu = Default::default(),
+        "telegram" => config.telegram = Default::default(),
+        "wechat" => config.wechat = Default::default(),
+        "wecom" => config.wecom = Default::default(),
+        _ => {}
+    }
+}
+
+fn legacy_im_account_matches(config: &AppConfig, platform: &str, account_id: &str) -> bool {
+    match platform {
+        "feishu" => {
+            config.feishu.account_id.trim() == account_id
                 || (config.feishu.account_id.trim().is_empty()
                     && (config.feishu.app_id.trim() == account_id
-                        || config.bridge.account_id.trim() == account_id)) =>
-        {
-            config.feishu = Default::default();
+                        || config.bridge.account_id.trim() == account_id))
         }
-        "telegram"
-            if config.telegram.account_id.trim() == account_id
-                || (config.telegram.account_id.trim().is_empty() && account_id == "telegram") =>
-        {
-            config.telegram = Default::default();
+        "telegram" => {
+            config.telegram.account_id.trim() == account_id
+                || (config.telegram.account_id.trim().is_empty() && account_id == "telegram")
         }
-        "wechat"
-            if config.wechat.account_id.trim() == account_id
-                || (config.wechat.account_id.trim().is_empty() && account_id == "wechat") =>
-        {
-            config.wechat = Default::default();
+        "wechat" => {
+            config.wechat.account_id.trim() == account_id
+                || (config.wechat.account_id.trim().is_empty() && account_id == "wechat")
         }
-        "wecom"
-            if config.wecom.account_id.trim() == account_id
-                || (config.wecom.account_id.trim().is_empty() && account_id == "wecom") =>
-        {
-            config.wecom = Default::default();
+        "wecom" => {
+            config.wecom.account_id.trim() == account_id
+                || (config.wecom.account_id.trim().is_empty() && account_id == "wecom")
         }
-        _ => {}
+        _ => false,
     }
 }
 
@@ -1630,13 +1677,7 @@ async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_
 }
 
 fn im_platform_from_key(platform: &str) -> Option<ImPlatformKind> {
-    match platform {
-        "feishu" => Some(ImPlatformKind::Feishu),
-        "telegram" => Some(ImPlatformKind::Telegram),
-        "wechat" => Some(ImPlatformKind::Wechat),
-        "wecom" => Some(ImPlatformKind::Wecom),
-        _ => None,
-    }
+    ImPlatformKind::from_key(platform)
 }
 
 #[derive(Serialize)]
@@ -2096,6 +2137,7 @@ mod tests {
                 .iter()
                 .map(|chat_id| (*chat_id).to_string())
                 .collect(),
+            project_groups: Vec::new(),
         }
     }
 
@@ -2105,9 +2147,17 @@ mod tests {
 
     #[test]
     fn telegram_topic_name_matches_title_and_respects_telegram_limit() {
-        assert_eq!(truncate_telegram_topic_name("  修复启动流程  "), "修复启动流程");
+        assert_eq!(
+            truncate_telegram_topic_name("  修复启动流程  "),
+            "修复启动流程"
+        );
         assert_eq!(truncate_telegram_topic_name(""), "未命名会话");
-        assert_eq!(truncate_telegram_topic_name(&"x".repeat(80)).chars().count(), 64);
+        assert_eq!(
+            truncate_telegram_topic_name(&"x".repeat(80))
+                .chars()
+                .count(),
+            64
+        );
     }
 
     #[test]
@@ -2129,7 +2179,10 @@ mod tests {
             &thread("/Users/miaopasi/da-2/CellularBridge"),
             "/Users/miaopasi/codexhub"
         ));
-        assert!(!thread_belongs_to_project(&json!({}), "/Users/miaopasi/codexhub"));
+        assert!(!thread_belongs_to_project(
+            &json!({}),
+            "/Users/miaopasi/codexhub"
+        ));
     }
 
     #[test]
@@ -2145,10 +2198,7 @@ mod tests {
                 .then_with(|| thread_id_for_sort(left).cmp(&thread_id_for_sort(right)))
         });
         assert_eq!(
-            threads
-                .iter()
-                .map(thread_id_for_sort)
-                .collect::<Vec<_>>(),
+            threads.iter().map(thread_id_for_sort).collect::<Vec<_>>(),
             vec!["old", "middle", "new"]
         );
     }
