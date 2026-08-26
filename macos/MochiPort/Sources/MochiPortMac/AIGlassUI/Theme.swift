@@ -3,6 +3,17 @@ import SwiftUI
 enum Theme {
     static let safeGreen = Color(red: 0.35, green: 0.82, blue: 0.54)
 
+    /// The quiet gray used by the light-mode "today's requests" card.
+    static let usageLightSurface = Color.primary.opacity(0.055)
+
+    /// Opaque equivalent of the heatmap's first populated gray level. It
+    /// keeps chart grid lines from showing through while staying restrained.
+    static let usageLightOpaqueGray = Color(red: 0.82, green: 0.82, blue: 0.82)
+
+    /// Light-mode Mochi colors sampled from the user's blue mascot reference.
+    static let mascotLightFill = Color(red: 0.808, green: 0.929, blue: 0.941)
+    static let mascotLightInk = Color(red: 0.271, green: 0.271, blue: 0.271)
+
     static func color(for service: ServiceID) -> Color {
         let c = rgb(for: service)
         return Color(red: c.r, green: c.g, blue: c.b)

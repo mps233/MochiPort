@@ -191,6 +191,7 @@ public struct TokenCompanionAnimator: View {
     @State private var reactionStart = Date.distantPast
     @State private var displayedState: TokenCompanionState = .idle
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
 
     private let usesExternalBinding: Bool
 
@@ -224,13 +225,13 @@ public struct TokenCompanionAnimator: View {
             ZStack {
                 Group {
                     ThreadBlobBody(wobble: move.wobble, squish: move.squish)
-                        .fill(bodyFill(for: state))
+                        .fill(bodyFill(for: state, colorScheme: colorScheme))
                         .frame(width: 76, height: 58)
 
                     ThreadBlobFace(
                         eyeOffsetX: move.eyeOffsetX,
                         eyeScaleY: move.eyeScaleY,
-                        state: state
+                        colorScheme: colorScheme
                     )
                 }
                 .scaleEffect(x: move.scaleX, y: move.scaleY, anchor: .bottom)
@@ -261,10 +262,13 @@ public struct TokenCompanionAnimator: View {
 private struct ThreadBlobFace: View {
     let eyeOffsetX: CGFloat
     let eyeScaleY: CGFloat
-    let state: TokenCompanionState
+    let colorScheme: ColorScheme
 
-    private let ink = Color(red: 0.306, green: 0.306, blue: 0.306)
-    private let cheek = Color(red: 0.847, green: 0.647, blue: 0.698)
+    private var ink: Color {
+        colorScheme == .light
+            ? Theme.mascotLightInk
+            : Color(red: 0.306, green: 0.306, blue: 0.306)
+    }
 
     // Exact relative measurements of the CodePen's outer 268 x 168 dango.
     private let bodyWidth: CGFloat = 62.5
@@ -284,8 +288,6 @@ private struct ThreadBlobFace: View {
             let eyeHeight = openEyeHeight + (closedEyeHeight - openEyeHeight) * closedAmount
             let eyeY = -bodyHeight * (32 / 168) + bodyHeight * (7.5 / 168) * closedAmount
             let eyeCenterDistance = bodyWidth * (20.5 / 268)
-            let cheekSize = bodyHeight * (35 / 168)
-            let cheekCenterDistance = bodyWidth * (52.5 / 268)
 
             HStack(spacing: eyeCenterDistance * 2 - eyeWidth) {
                 Capsule()
@@ -296,22 +298,12 @@ private struct ThreadBlobFace: View {
                     .frame(width: eyeWidth, height: eyeHeight)
             }
             .offset(x: eyeOffsetX, y: eyeY)
-
-            HStack(spacing: cheekCenterDistance * 2 - cheekSize) {
-                Ellipse()
-                    .fill(cheek.opacity(state == .error ? 0.22 : 0.55))
-                    .frame(width: cheekSize, height: cheekSize)
-                Ellipse()
-                    .fill(cheek.opacity(state == .error ? 0.22 : 0.55))
-                    .frame(width: cheekSize, height: cheekSize)
-            }
-            .offset(y: bodyHeight * (0.5 / 168))
         }
         .frame(width: 76, height: 58)
     }
 }
 
-private func bodyFill(for state: TokenCompanionState) -> LinearGradient {
+private func bodyFill(for state: TokenCompanionState, colorScheme: ColorScheme) -> LinearGradient {
     let top: Color
     let bottom: Color
 
@@ -323,8 +315,13 @@ private func bodyFill(for state: TokenCompanionState) -> LinearGradient {
         top = Color(red: 0.98, green: 0.98, blue: 0.98)
         bottom = Color(red: 0.87, green: 0.87, blue: 0.88)
     default:
-        top = Color.primary
-        bottom = Color.primary
+        if colorScheme == .light {
+            top = Theme.mascotLightFill
+            bottom = Theme.mascotLightFill
+        } else {
+            top = Color.primary
+            bottom = Color.primary
+        }
     }
 
     return LinearGradient(

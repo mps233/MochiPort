@@ -600,7 +600,7 @@ private struct OverviewUsageMetricCard: View {
 
     private var background: Color {
         emphasis == .hero
-            ? Color.primary.opacity(0.055)
+            ? Theme.usageLightSurface
             : Color.primary.opacity(0.035)
     }
 
@@ -619,6 +619,7 @@ struct OverviewUsageInsightsView: View {
     let statsStore: DailyStatsStore?
     let providerUsage: ManageProviderUsageResponse?
     @State private var range: UsageTrendRange = .week
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         let metrics = UsageMetricSnapshot(
@@ -707,6 +708,7 @@ struct OverviewUsageInsightsView: View {
         .pickerStyle(.segmented)
         .labelsHidden()
         .controlSize(.small)
+        .tint(colorScheme == .light ? Theme.usageLightOpaqueGray : .accentColor)
         .accessibilityLabel("用量范围")
     }
 
@@ -779,6 +781,7 @@ private struct TrendsTab: View {
     /// 세그먼트 변경 시 잔디(높이 ≠ 차트)로 패널 크기가 달라지므로 리사이즈를 트리거한다.
     var onResize: () -> Void = {}
     @State private var range: UsageTrendRange = .week
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
         VStack(spacing: 8) {
@@ -789,6 +792,7 @@ private struct TrendsTab: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .controlSize(.small)
+                .tint(colorScheme == .light ? Theme.usageLightOpaqueGray : .accentColor)
                 .onChange(of: range) { _, _ in
                     // 잔디↔차트 높이가 달라 패널 크기 재조정 필요.
                     onResize()
@@ -826,6 +830,7 @@ private struct UsageTrendContent: View {
     var heatmapLegendPlacement: HeatmapView.LegendPlacement = .bottom
     var keepsStableHeight = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.colorScheme) private var colorScheme
     /// 0.0→1.0으로 증가하며 BarMark y값에만 곱해진다.
     /// 축/눈금/레이아웃은 최종 데이터로 고정되어 움직이지 않는다.
     @State private var growFactor: Double = 0
@@ -907,7 +912,7 @@ private struct UsageTrendContent: View {
                 .cornerRadius(3)
         }
         .chartForegroundStyleScale(domain: services.map(\.displayName),
-                                   range: services.map { _ in Color.primary })
+                                   range: services.map { _ in chartBarColor })
         .chartXScale(domain: xDomain)
         .chartYScale(domain: 0...maxY)
         .chartXAxis {
@@ -937,6 +942,10 @@ private struct UsageTrendContent: View {
         .font(.system(size: 9))
         .frame(height: chartHeight)
         .onAppear { startGrow() }
+    }
+
+    private var chartBarColor: Color {
+        colorScheme == .light ? Theme.usageLightOpaqueGray : .primary
     }
 
     private static let dayFormat = Date.FormatStyle(
