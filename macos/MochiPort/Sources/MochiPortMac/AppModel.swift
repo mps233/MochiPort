@@ -1212,9 +1212,12 @@ final class AppModel: ObservableObject {
     func uninstallCodex() async -> Bool {
         await performManagementAction(section: .codex) {
             let currentGateway = try await self.gatewaySnapshot()
-            _ = try await self.apiClient.uninstallCodex()
+            let response = try await self.apiClient.uninstallCodex()
             self.gateway = try await self.updateGateway(currentGateway, enabled: false)
             try await self.requireSectionRefresh(.codex)
+            if response.requiresCodexRestart == true {
+                return "已恢复设置，MochiPort 已关闭\n请完全退出并重新打开 Codex"
+            }
             return "已恢复原来的 Codex 设置，MochiPort 已关闭"
         }
     }

@@ -154,6 +154,7 @@ struct ManageCodexStatus: Decodable, Equatable {
         let name: String
         let baseUrl: String?
         let secretSet: Bool
+        let requiresOpenaiAuth: Bool
         let supportsWebsockets: Bool
 
         var id: String { name }
@@ -222,6 +223,19 @@ struct ManageCodexSession: Decodable, Equatable, Identifiable {
         if !preferred.isEmpty { return preferred }
         let fallback = preview.trimmingCharacters(in: .whitespacesAndNewlines)
         return fallback.isEmpty ? "未命名会话" : fallback
+    }
+
+    var displayProvider: String {
+        let normalized = modelProvider.trimmingCharacters(in: .whitespacesAndNewlines)
+        if normalized.caseInsensitiveCompare("ai-gateway") == .orderedSame
+            || normalized.caseInsensitiveCompare("ai gateway") == .orderedSame
+            || normalized.caseInsensitiveCompare("mochiport") == .orderedSame {
+            return "MochiPort"
+        }
+        if normalized.caseInsensitiveCompare("openai") == .orderedSame {
+            return "OpenAI"
+        }
+        return normalized.isEmpty ? "OpenAI" : normalized
     }
 }
 
@@ -400,6 +414,7 @@ struct ManageRequestLogDetail: Decodable, Equatable, Identifiable {
 struct ManageActionResponse: Decodable, Equatable {
     let ok: Bool
     let deleted: Int?
+    let requiresCodexRestart: Bool?
 }
 
 /// Result of asking the daemon to list models from an upstream provider.

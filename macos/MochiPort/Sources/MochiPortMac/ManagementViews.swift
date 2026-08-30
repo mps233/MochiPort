@@ -37,7 +37,6 @@ struct CodexAccessView: View {
     @EnvironmentObject private var model: AppModel
     @State private var confirmsRestore = false
     @State private var showsEnhancedDetails = false
-    @State private var showsTechnicalDetails = false
 
     private var gatewayServiceEnabled: Bool? {
         model.gateway?.enabled ?? model.dashboard?.aiGatewayEnabled
@@ -265,12 +264,8 @@ struct CodexAccessView: View {
 
     private func diagnosticsSection(_ status: ManageCodexStatus) -> some View {
         Section("检查设置") {
-            DisclosureGroup(isExpanded: $showsTechnicalDetails) {
-                CodexDiagnosticList(status: status)
-                    .padding(.top, 4)
-            } label: {
-                Label("查看详细信息", systemImage: "stethoscope")
-            }
+            CodexDiagnosticList(status: status)
+                .padding(.top, 4)
         }
     }
 
@@ -482,10 +477,14 @@ private struct CodexRequestPathRow: View {
 private struct CodexProviderRow: View {
     let provider: ManageCodexStatus.Provider
 
+    private var usesCodexLogin: Bool {
+        provider.requiresOpenaiAuth && !provider.secretSet
+    }
+
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: provider.secretSet ? "key.fill" : "key.slash")
-                .foregroundStyle(provider.secretSet ? Color.secondary : Color.orange)
+            Image(systemName: usesCodexLogin ? "person.crop.circle.badge.checkmark" : (provider.secretSet ? "key.fill" : "key.slash"))
+                .foregroundStyle(usesCodexLogin || provider.secretSet ? Color.secondary : Color.orange)
                 .frame(width: 18)
 
             VStack(alignment: .leading, spacing: 3) {
@@ -502,9 +501,9 @@ private struct CodexProviderRow: View {
             Spacer(minLength: 12)
 
             VStack(alignment: .trailing, spacing: 3) {
-                Text(provider.secretSet ? "已设置 Key" : "还没设置 Key")
+                Text(usesCodexLogin ? "使用 Codex 登录" : (provider.secretSet ? "已设置 Key" : "还没设置 Key"))
                     .font(.caption)
-                    .foregroundStyle(provider.secretSet ? Color.secondary : Color.orange)
+                    .foregroundStyle(usesCodexLogin || provider.secretSet ? Color.secondary : Color.orange)
                 if provider.supportsWebsockets {
                     Text("支持实时回复")
                         .font(.caption2)
@@ -745,38 +744,6 @@ private struct SessionProjectGroup: Identifiable {
     }
 }
 
-private enum SessionRouteFilter: String, CaseIterable, Identifiable, MochiPortSegmentItem {
-    case all
-    case gateway
-    case direct
-
-    var id: Self { self }
-
-    var title: String {
-        switch self {
-        case .all: "全部"
-        case .gateway: "AI Gateway"
-        case .direct: "直连"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .all: "rectangle.stack.fill"
-        case .gateway: "server.rack"
-        case .direct: "arrow.up.right"
-        }
-    }
-
-    func matches(_ session: ManageCodexSession) -> Bool {
-        switch self {
-        case .all: true
-        case .gateway: session.modelProvider == "ai-gateway"
-        case .direct: session.modelProvider != "ai-gateway"
-        }
-    }
-}
-
 private enum SessionSourceState {
     case waiting
     case connected
@@ -841,16 +808,39 @@ private enum SessionSourceState {
 struct SessionsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var query = ""
-    @State private var routeFilter: SessionRouteFilter = .all
-    @State private var selectedIDs = Set<String>()
-    @State private var moveInFlight = false
+    @State private var providerFilter = ""
 
     private let unknownProjectKey = "__mochiport_unknown_project__"
+
+    private var providerFilterOptions: [String] {
+        var seen = Set<String>()
+        return model.codexSessions
+            .map(\.displayProvider)
+            .filter { provider in
+                let key = provider.localizedLowercase
+                return !key.isEmpty && seen.insert(key).inserted
+            }
+            .sorted { left, right in
+                left.localizedStandardCompare(right) == .orderedAscending
+            }
+    }
+
+    private var providerFilterTitle: String {
+        providerFilter.isEmpty ? "全部 Provider" : providerFilter
+    }
+
+    private func matchesProvider(_ session: ManageCodexSession) -> Bool {
+        guard !providerFilter.isEmpty else { return true }
+        if providerFilter == "MochiPort" {
+            return session.displayProvider == "MochiPort"
+        }
+        return session.displayProvider == providerFilter
+    }
 
     private var filteredSessions: [ManageCodexSession] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return model.codexSessions.filter { session in
-            guard routeFilter.matches(session) else { return false }
+            guard matchesProvider(session) else { return false }
             guard !needle.isEmpty else { return true }
             return session.displayName.lowercased().contains(needle)
                 || session.modelProvider.lowercased().contains(needle)
@@ -884,10 +874,6 @@ struct SessionsView: View {
             }
     }
 
-    private var selectedSessions: [ManageCodexSession] {
-        model.codexSessions.filter { selectedIDs.contains($0.id) }
-    }
-
     private var sessionSourceState: SessionSourceState {
         guard let dashboard = model.dashboard else {
             return model.isLoading(.sessions)
@@ -910,7 +896,7 @@ struct SessionsView: View {
                 .padding(.top, MochiPortPageLayout.topPadding)
                 .padding(.bottom, 12)
 
-            List(selection: $selectedIDs) {
+            List {
                 if let error = model.sectionErrors[.sessions] {
                     InlineManagementError(
                         message: error,
@@ -927,11 +913,11 @@ struct SessionsView: View {
                    !model.isLoading(.sessions),
                    model.sectionErrors[.sessions] == nil {
                     ManagementEmptyState(
-                        title: query.isEmpty ? sessionSourceState.emptyTitle : "没有匹配的会话",
-                        message: query.isEmpty
+                        title: query.isEmpty && providerFilter.isEmpty ? sessionSourceState.emptyTitle : "没有匹配的会话",
+                        message: query.isEmpty && providerFilter.isEmpty
                             ? sessionSourceState.emptyMessage
-                            : "调整搜索词后重试。",
-                        symbol: query.isEmpty ? sessionSourceState.symbol : "magnifyingglass"
+                            : "调整搜索词或 Provider 筛选后重试。",
+                        symbol: query.isEmpty && providerFilter.isEmpty ? sessionSourceState.symbol : "magnifyingglass"
                     )
                     .frame(maxWidth: .infinity, minHeight: 240)
                     .listRowSeparator(.hidden)
@@ -944,12 +930,9 @@ struct SessionsView: View {
 
                     ForEach(Array(tableSessions.enumerated()), id: \.element.id) { index, session in
                         sessionListRow(session)
-                            .tag(session.id)
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .contextMenu {
-                                moveMenuEntries(for: session)
-                                Divider()
                                 Button("复制会话 ID") {
                                     NSPasteboard.general.clearContents()
                                     NSPasteboard.general.setString(session.id, forType: .string)
@@ -970,35 +953,44 @@ struct SessionsView: View {
         }
         .task { await model.loadSection(.sessions) }
         .searchable(text: $query, placement: .toolbar, prompt: "搜索会话")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                sessionActions
-            }
-        }
     }
 
     private var sessionToolbar: some View {
         VStack(alignment: .leading, spacing: 12) {
             sessionSourceBanner
 
-            HStack(spacing: 12) {
-                GlassSegmentedControl(
-                    selection: $routeFilter,
-                    accessibilityLabel: "会话范围",
-                    help: { "只显示\($0.title)会话" }
-                )
-                    .frame(width: 320)
-                Spacer(minLength: 0)
-
-                if !selectedIDs.isEmpty {
-                    Text("已选 \(selectedIDs.count) 项")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                        .fixedSize()
-                        .accessibilityIdentifier("sessions.selection-count")
+            Menu {
+                Button {
+                    providerFilter = ""
+                } label: {
+                    if providerFilter.isEmpty {
+                        Label("全部 Provider", systemImage: "checkmark")
+                    } else {
+                        Text("全部 Provider")
+                    }
                 }
+
+                if !providerFilterOptions.isEmpty {
+                    Divider()
+                    ForEach(providerFilterOptions, id: \.self) { provider in
+                        Button {
+                            providerFilter = provider
+                        } label: {
+                            if providerFilter == provider {
+                                Label(provider, systemImage: "checkmark")
+                            } else {
+                                Text(provider)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label(providerFilterTitle, systemImage: "line.3.horizontal.decrease.circle")
             }
+            .menuStyle(.borderlessButton)
+            .help("按 Provider 筛选会话")
+            .accessibilityLabel("按 Provider 筛选会话")
+            .fixedSize()
         }
     }
 
@@ -1099,9 +1091,9 @@ struct SessionsView: View {
             }
             .frame(minWidth: 170, maxWidth: .infinity, alignment: .leading)
 
-            Text(session.modelProvider == "ai-gateway" ? "AI Gateway" : session.modelProvider)
+            Text(session.displayProvider)
                 .font(.callout)
-                .foregroundStyle(session.modelProvider == "ai-gateway" ? Color.accentColor : .secondary)
+                .foregroundStyle(session.displayProvider == "MochiPort" ? Color.accentColor : .secondary)
                 .lineLimit(1)
                 .frame(width: 120, alignment: .leading)
 
@@ -1144,67 +1136,6 @@ struct SessionsView: View {
         return name.isEmpty ? path : name
     }
 
-    /// Context-menu entries act on the whole selection when the clicked row
-    /// is part of it, otherwise only on the clicked row.
-    @ViewBuilder
-    private func moveMenuEntries(for session: ManageCodexSession) -> some View {
-        let targets = selectedIDs.contains(session.id) ? selectedSessions : [session]
-        Button(menuTitle("AI Gateway", count: targets.count)) {
-            moveSessions(targets, to: nil)
-        }
-        .disabled(moveInFlight || targets.allSatisfy { $0.modelProvider == "ai-gateway" })
-        let providers = model.codexSessionProviders.filter { $0 != "ai-gateway" }
-        ForEach(providers, id: \.self) { provider in
-            Button(menuTitle(provider, count: targets.count)) {
-                moveSessions(targets, to: provider)
-            }
-            .disabled(moveInFlight || targets.allSatisfy { $0.modelProvider == provider })
-        }
-    }
-
-    private func menuTitle(_ target: String, count: Int) -> String {
-        count > 1 ? "切换 \(count) 项到 \(target)" : "切换到 \(target)"
-    }
-
-    private var sessionActions: some View {
-        Menu {
-            Section("切换 Provider") {
-                Button("AI Gateway") {
-                    moveSessions(selectedSessions, to: nil)
-                }
-                let providers = model.codexSessionProviders.filter { $0 != "ai-gateway" }
-                if !providers.isEmpty {
-                    ForEach(providers, id: \.self) { provider in
-                        Button(provider) {
-                            moveSessions(selectedSessions, to: provider)
-                        }
-                    }
-                }
-            }
-        } label: {
-            Image(systemName: "ellipsis")
-        }
-        .disabled(selectedIDs.isEmpty || moveInFlight)
-        .menuStyle(.borderlessButton)
-        .accessibilityLabel("更多会话操作")
-        .help("更多会话操作")
-    }
-
-    /// Skips sessions already on the target, then deselects the updated ones so
-    /// only failed sessions stay selected for a retry.
-    private func moveSessions(_ sessions: [ManageCodexSession], to provider: String?) {
-        let target = provider ?? "ai-gateway"
-        let ids = sessions.filter { $0.modelProvider != target }.map(\.id)
-        guard !ids.isEmpty, !moveInFlight else { return }
-        moveInFlight = true
-        Task {
-            let result = await model.moveCodexSessions(ids: ids, to: provider)
-            let skipped = sessions.filter { $0.modelProvider == target }.map(\.id)
-            selectedIDs.subtract(result.movedIds)
-            selectedIDs.subtract(skipped)
-            moveInFlight = false
-        }
-    }
 }
 
 private enum GatewaySection: String, CaseIterable, Identifiable, MochiPortSegmentItem {
