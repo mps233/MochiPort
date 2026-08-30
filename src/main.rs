@@ -140,10 +140,13 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
                     codex_home,
                     backend_url: backend_url.clone(),
                     connection_mode: config.local_connection_mode,
-                    account_id: "acct_codexhub_local".to_string(),
-                    user_id: "user_codexhub_local".to_string(),
-                    email: "codexhub-local@example.local".to_string(),
-                    plan_type: "pro".to_string(),
+                    // The Codex login remains owned by Codex. The configure
+                    // path derives a real account id from auth.json and skips
+                    // enrollment entirely when the user is not logged in.
+                    account_id: String::new(),
+                    user_id: String::new(),
+                    email: String::new(),
+                    plan_type: String::new(),
                     provider_name,
                     provider_base_url,
                     provider_key,
@@ -233,6 +236,120 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             format!("path={}", chain_log_path.display()),
         )
         .await;
+    // Finish desktop environment cleanup before publishing the service locator
+    // or declaring the listener ready. Normal takeover uses config.toml only;
+    // stale global API overrides can redirect Codex's login flow to MochiPort.
+    if desktop_integration_enabled {
+        let backend_url = state.config.lock().await.remote_control_base_url();
+        let environment_state = state.clone();
+        tracing::info!(target: "mochiport::startup", "starting Codex App environment synchronization");
+        let mutation = environment_state.codex_app_mutations.lock().await;
+        let result = tokio::task::spawn_blocking(move || {
+            tracing::info!(target: "mochiport::startup", "Codex App environment synchronization entered blocking worker");
+            let preserve_direct_api_mode =
+                codex_app_config::should_preserve_direct_api_mode(None, &backend_url);
+            let takeover_migration = if preserve_direct_api_mode {
+                Ok(false)
+            } else {
+                codex_app_config::migrate_legacy_codex_takeover(None, &backend_url)
+            };
+            let gui_api_base = if preserve_direct_api_mode {
+                codex_app_config::inspect_gui_api_base_url(&backend_url)
+            } else {
+                codex_app_config::cleanup_gui_environment(&backend_url)
+            };
+            let proxy_cleanup = if preserve_direct_api_mode {
+                Ok(())
+            } else {
+                codex_app_config::cleanup_legacy_app_server_proxy_environment()
+            };
+            (
+                gui_api_base,
+                proxy_cleanup,
+                preserve_direct_api_mode,
+                takeover_migration,
+            )
+        })
+        .await;
+        drop(mutation);
+
+        match result {
+            Ok((gui_api_base, proxy_cleanup, preserve_direct_api_mode, takeover_migration)) => {
+                tracing::info!(
+                    target: "mochiport::startup",
+                    configured = gui_api_base.configured,
+                    proxy_cleanup_ok = proxy_cleanup.is_ok(),
+                    preserve_direct_api_mode,
+                    takeover_migration = ?takeover_migration,
+                    "Codex App environment synchronization finished"
+                );
+                state
+                    .push_event(
+                        "info",
+                        "codex_app_direct_api_environment_checked",
+                        format!(
+                            "configured={} value={} error={}",
+                            gui_api_base.configured,
+                            gui_api_base.value.as_deref().unwrap_or_default(),
+                            gui_api_base.error.as_deref().unwrap_or_default()
+                        ),
+                    )
+                    .await;
+                state
+                    .push_event(
+                        if proxy_cleanup.is_ok() {
+                            "info"
+                        } else {
+                            "warn"
+                        },
+                        "codex_app_server_proxy_environment_cleanup_checked",
+                        match proxy_cleanup {
+                            Ok(()) => "cleaned=true".to_string(),
+                            Err(error) => format!("cleaned=false error={error}"),
+                        },
+                    )
+                    .await;
+                state
+                    .push_event(
+                        if takeover_migration.is_err() {
+                            "warn"
+                        } else {
+                            "info"
+                        },
+                        "codex_app_takeover_migration_checked",
+                        match takeover_migration {
+                            Ok(true) => "migrated=true".to_string(),
+                            Ok(false) => "migrated=false".to_string(),
+                            Err(error) => format!("migrated=false error={error}"),
+                        },
+                    )
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "mochiport::startup",
+                    error = %error,
+                    "Codex App environment synchronization worker failed"
+                );
+                state
+                    .push_event(
+                        "warn",
+                        "codex_app_direct_api_environment_check_failed",
+                        format!("error={error}"),
+                    )
+                    .await;
+            }
+        }
+    } else {
+        state
+            .push_event(
+                "info",
+                "desktop_integration_skipped",
+                format!("requested_by={SKIP_DESKTOP_INTEGRATION_ENV}"),
+            )
+            .await;
+    }
+
     let app = web::router(state.clone()).layer(TraceLayer::new_for_http());
     let addr: SocketAddr = bind
         .parse()
@@ -252,92 +369,6 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
     println!("mochiport web: http://{addr}");
     tracing::info!(target: "mochiport::startup", addr = %addr, "local service listener ready");
 
-    // Environment-variable updates can synchronously broadcast WM_SETTINGCHANGE
-    // to every desktop window on Windows. Keep that work out of the service's
-    // startup path so the local API can respond even if another application is
-    // slow or hung while handling the broadcast.
-    if desktop_integration_enabled {
-        let backend_url = state.config.lock().await.remote_control_base_url();
-        let environment_state = state.clone();
-        tokio::spawn(async move {
-            tracing::info!(target: "mochiport::startup", "starting Codex App environment synchronization");
-            let mutation = environment_state.codex_app_mutations.lock().await;
-            let result = tokio::task::spawn_blocking(move || {
-                tracing::info!(target: "mochiport::startup", "Codex App environment synchronization entered blocking worker");
-                let preserve_direct_api_mode =
-                    codex_app_config::should_preserve_direct_api_mode(None, &backend_url);
-                let gui_api_base = if preserve_direct_api_mode {
-                    codex_app_config::inspect_gui_api_base_url(&backend_url)
-                } else {
-                    codex_app_config::configure_gui_environment(&backend_url, true)
-                };
-                let proxy_cleanup = if preserve_direct_api_mode {
-                    Ok(())
-                } else {
-                    codex_app_config::cleanup_legacy_app_server_proxy_environment()
-                };
-                (gui_api_base, proxy_cleanup, preserve_direct_api_mode)
-            })
-            .await;
-            drop(mutation);
-
-            match result {
-                Ok((gui_api_base, proxy_cleanup, preserve_direct_api_mode)) => {
-                    tracing::info!(
-                        target: "mochiport::startup",
-                        configured = gui_api_base.configured,
-                        proxy_cleanup_ok = proxy_cleanup.is_ok(),
-                        preserve_direct_api_mode,
-                        "Codex App environment synchronization finished"
-                    );
-                    environment_state
-                        .push_event(
-                            "info",
-                            "codex_app_direct_api_environment_checked",
-                            format!(
-                                "configured={} value={} error={}",
-                                gui_api_base.configured,
-                                gui_api_base.value.as_deref().unwrap_or_default(),
-                                gui_api_base.error.as_deref().unwrap_or_default()
-                            ),
-                        )
-                        .await;
-                    environment_state
-                        .push_event(
-                            if proxy_cleanup.is_ok() {
-                                "info"
-                            } else {
-                                "warn"
-                            },
-                            "codex_app_server_proxy_environment_cleanup_checked",
-                            match proxy_cleanup {
-                                Ok(()) => "cleaned=true".to_string(),
-                                Err(error) => format!("cleaned=false error={error}"),
-                            },
-                        )
-                        .await;
-                }
-                Err(error) => {
-                    tracing::warn!(target: "mochiport::startup", error = %error, "Codex App environment synchronization worker failed");
-                    environment_state
-                        .push_event(
-                            "warn",
-                            "codex_app_direct_api_environment_check_failed",
-                            format!("error={error}"),
-                        )
-                        .await;
-                }
-            }
-        });
-    } else {
-        state
-            .push_event(
-                "info",
-                "desktop_integration_skipped",
-                format!("requested_by={SKIP_DESKTOP_INTEGRATION_ENV}"),
-            )
-            .await;
-    }
     tokio::spawn(run_daemon_startup_tasks(
         state.clone(),
         desktop_integration_enabled,

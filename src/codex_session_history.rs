@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{chain_log, codex_app_config};
 
-const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
+const MOCHIPORT_PROVIDER_NAME: &str = "MochiPort";
 const MIGRATION_LOG_FILE: &str = "session-provider-moves.json";
 
 #[derive(Debug, Clone, Serialize)]
@@ -43,12 +43,7 @@ pub fn move_thread_to_ai_gateway(
     thread_id: &str,
     rollout_path: Option<PathBuf>,
 ) -> Result<SessionProviderMoveReport> {
-    move_thread_to_provider(
-        codex_home,
-        thread_id,
-        rollout_path,
-        AI_GATEWAY_PROVIDER_NAME,
-    )
+    move_thread_to_provider(codex_home, thread_id, rollout_path, MOCHIPORT_PROVIDER_NAME)
 }
 
 pub fn move_thread_to_provider(
@@ -429,14 +424,14 @@ mod tests {
         )
         .unwrap();
 
-        let previous = rewrite_rollout_provider(&rollout, "thread-1", "ai-gateway").unwrap();
+        let previous = rewrite_rollout_provider(&rollout, "thread-1", "MochiPort").unwrap();
         assert_eq!(previous.as_deref(), Some("openai"));
         let raw = std::fs::read_to_string(&rollout).unwrap();
         let lines = raw.lines().collect::<Vec<_>>();
         let first: Value = serde_json::from_str(lines[0]).unwrap();
         assert_eq!(
             first["payload"]["model_provider"].as_str(),
-            Some("ai-gateway")
+            Some("MochiPort")
         );
         assert_eq!(lines.len(), 2);
         let _ = std::fs::remove_dir_all(dir);
@@ -473,7 +468,7 @@ mod tests {
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        rewrite_rollout_provider(&rollout, "thread-1", "ai-gateway").unwrap();
+        rewrite_rollout_provider(&rollout, "thread-1", "MochiPort").unwrap();
 
         let modified = std::fs::metadata(&rollout).unwrap().modified().unwrap();
         assert_eq!(modified, original);
@@ -497,7 +492,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        assert!(update_state_db_provider(&dir, "thread-1", "ai-gateway").unwrap());
+        assert!(update_state_db_provider(&dir, "thread-1", "MochiPort").unwrap());
         let conn = Connection::open(&db).unwrap();
         let provider: String = conn
             .query_row(
@@ -506,7 +501,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(provider, "ai-gateway");
+        assert_eq!(provider, "MochiPort");
         let _ = std::fs::remove_dir_all(dir);
     }
 

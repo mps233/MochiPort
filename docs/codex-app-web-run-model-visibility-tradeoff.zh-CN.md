@@ -1,14 +1,14 @@
 # Codex App 模型显示与 `web.run` Provider 取舍
 
-日期：2026-07-15
+日期：2026-08-27
 
-状态：方案 1 的 Codex App 模型显示已通过可选增强启动解决；普通启动模型显示和账号态相关市场仍有边界。
+状态：当前默认配置已同时保留 Codex App 账号态（包括 Fast 模式）并注册原生 `web.run`；旧版 Actor Authorization 形态仅作为兼容配置保留。
 
 本文记录 MochiPort 接入 Codex App 时，自定义模型显示、原生 `web.run` 和本地压缩之间的条件冲突。该结论基于 `references/codex-main` 最新源码和 Codex App `26.707.9981` 的实际 renderer bundle 分析。
 
 ## 1. 当前决策
 
-目前没有一个只靠公开配置的组合，可以同时满足以下全部目标：
+当前默认配置可以同时满足以下目标：
 
 1. Provider 名称保持 `ai-gateway`。
 2. Codex App 显示 MochiPort 的完整自定义模型列表。
@@ -16,16 +16,16 @@
 4. 保持本地压缩，不进入 OpenAI Remote Compact V2。
 5. 不修改 Codex App 本体，不代理或替换 Codex App 自己的 app-server。
 
-现有两套方案如下：
+当前配置与旧兼容配置如下：
 
-| 方案 | Provider 配置 | 已解决 | 待解决 |
+| 方案 | Provider 配置 | 已解决 | 适用范围 |
 | --- | --- | --- | --- |
-| 方案 1 | `ai-gateway + requires_openai_auth=false + Actor Authorization` | `web.run`、本地压缩、增强模式下的 Codex App 模型显示 | 普通启动下的模型显示；账号态相关的 curated 市场 |
-| 方案 2 | `ai-gateway + requires_openai_auth=true` | 模型显示、账号态、本地压缩 | `web.run` 注册 |
+| 当前默认 | `ai-gateway + requires_openai_auth=true + supports_standalone_web_search=true` | 账号态、Fast、`web.run`、本地压缩 | 当前 Codex |
+| 旧兼容 | `ai-gateway + requires_openai_auth=false + Actor Authorization` | 旧版 `web.run`、本地压缩 | 仅用于迁移、卸载和旧版 Codex |
 
 MochiPort 不修改 ASAR，也不接管默认官方入口。需要完整模型列表时，用户从 MochiPort 主动使用增强模式启动。
 
-## 2. 方案 1：Actor Authorization
+## 2. 当前方案：独立 Web Search capability
 
 配置形态：
 
@@ -36,38 +36,39 @@ web_search = "live"
 [model_providers.ai-gateway]
 name = "ai-gateway"
 wire_api = "responses"
-requires_openai_auth = false
+requires_openai_auth = true
 base_url = "http://127.0.0.1:3847/ai-gateway/v1"
 experimental_bearer_token = "dummy-token"
-http_headers = { x-openai-actor-authorization = "codexhub-local" }
+supports_standalone_web_search = true
 ```
 
 ### 2.1 已解决的能力
 
-Codex 最新源码中，Web Search Extension 的可用条件为：
+当前 Codex 对自定义 Provider 的独立搜索 capability 使用：
 
 ```rust
-(config.model_provider.is_openai()
-    || config.model_provider.uses_openai_actor_authorization())
+provider.supports_standalone_web_search
     && web_search_mode != WebSearchMode::Disabled
 ```
 
-Actor Authorization 的判断为：
+当前配置形态为：
 
 ```rust
-!self.requires_openai_auth
-    && http_headers 中存在非空 x-openai-actor-authorization
+requires_openai_auth = true
+supports_standalone_web_search = true
 ```
 
-因此该配置可以创建 `web.run` executor。Responses Lite 会把 `web.run` 放进 `input[].additional_tools`，工具执行时再请求 Provider 的 `/alpha/search`。
+因此该配置既保留 ChatGPT 账号态，又可以创建 `web.run` executor。Responses Lite 会把 `web.run` 放进 `input[].additional_tools`，工具执行时再请求 Provider 的 `/alpha/search`。
 
 Provider 名称仍为 `ai-gateway`，不满足 `provider.is_openai()`，也不满足 Azure Responses Provider 判断，因此不会启用 OpenAI Remote Compact V2，继续使用 Codex 本地文本压缩。
 
-### 2.2 未解决的模型显示
+### 2.2 模型显示与账号态
 
 自定义 Provider 的 Core、CLI、app-server 和 Remote Control 都能从 Provider 的 `/models` 拉取完整模型目录。问题不在 AI Gateway 的 `/models`，而在 Codex App renderer 的二次过滤。
 
-`requires_openai_auth=false` 时，Core 的账户响应为：
+当前配置使用 `requires_openai_auth=true`，Codex Core 会保留本地 ChatGPT-shaped 账号态，Codex App 不会因为 `authMethod=null` 进入旧的 pre-login 分支。模型目录仍由 MochiPort `/models` 提供。
+
+旧 Actor Authorization 配置使用 `requires_openai_auth=false` 时，Core 的账户响应为：
 
 ```json
 {
@@ -84,7 +85,7 @@ https://ab.chatgpt.com/v1
 
 它不会调用 MochiPort 的 `/wham/statsig/bootstrap`。官方 Statsig dynamic config `107580212` 中的 `available_models` 和 `use_hidden_models` 会再次过滤 app-server 的 `model/list`，最终只显示官方白名单模型。
 
-所以即使以下链路都正常，Codex App 下拉框仍可能看不到 DeepSeek、Grok、GLM、Opus 和 Sonnet：
+旧配置即使以下链路都正常，旧版 Codex App 下拉框仍可能看不到 DeepSeek、Grok、GLM、Opus 和 Sonnet：
 
 ```text
 MochiPort /models
@@ -94,13 +95,13 @@ MochiPort /models
   -> Codex App renderer 再次过滤
 ```
 
-### 2.3 可选增强启动
+### 2.3 旧版兼容：可选增强启动
 
 MochiPort 可以用 loopback-only CDP 启动 Codex App，在 renderer 第一帧增量合并 Statsig `107580212` 和关键 gate。该模式已实机验证完整显示 DeepSeek、Grok、GLM、Opus 和 Sonnet，同时保留官方 primary runtime 和插件配置。
 
-增强模式不修改 ASAR、LevelDB 或快捷方式，只影响本次由 MochiPort 启动的 Codex App。VS Code 插件和用户从官方入口普通启动的 Codex App 不受影响。
+增强模式不修改 ASAR、LevelDB 或快捷方式，只影响本次由 MochiPort 启动的 Codex App；它主要用于旧版 Codex 或仍保留 Actor 配置的用户。VS Code 插件和用户从官方入口普通启动的 Codex App 不受影响。
 
-### 2.4 插件市场与账号态副作用
+### 2.4 旧 Actor 配置的插件市场副作用
 
 `requires_openai_auth=false` 不只影响模型白名单。Codex app-server 会基于当前 Provider 明确返回等价状态：`account/read` 中 `account=null`、`requiresOpenaiAuth=false`，`getAuthStatus` 中 `authMethod=null`、`requiresOpenaiAuth=false`。
 
@@ -156,9 +157,9 @@ Codex App `26.715.8383` 的 renderer 仍按 2.4 节所述过滤市场，同时�
 
 当前限制是 renderer 仍会按原始 `@openai-curated` 后缀过滤 featured 推荐位，因此完整插件目录可以显示，但 curated 插件不一定进入首页推荐区。这里不改写插件 ID，避免为了推荐位破坏安装、卸载和历史配置身份。
 
-不采用 CDP 修改全局 `authMethod`。该值还控制账号区域、套餐、共享市场和其他 ChatGPT 行为，伪造后影响面远大于插件列表。也不把 `requires_openai_auth` 改回 `true` 作为局部修复，因为这会重新关闭 Actor Authorization 路径下的原生 `web.run`。普通启动、CLI 和 VS Code 插件不经过该适配。
+不采用 CDP 修改全局 `authMethod`。该值还控制账号区域、套餐、共享市场和其他 ChatGPT 行为，伪造后影响面远大于插件列表。当前配置通过显式 `supports_standalone_web_search` 保留账号态并注册 `web.run`，不依赖 Actor Authorization。普通启动、CLI 和 VS Code 插件不经过旧版兼容适配。
 
-## 3. 方案 2：保留 OpenAI 账号要求
+## 3. 旧版 Codex：仅保留 OpenAI 账号要求
 
 配置形态：
 
@@ -173,13 +174,15 @@ requires_openai_auth = true
 base_url = "http://127.0.0.1:3847/ai-gateway/v1"
 ```
 
+这是一种没有独立搜索 capability 字段时的旧配置。当前 MochiPort 会额外写入 `supports_standalone_web_search = true`，因此不再使用下面的限制。
+
 ### 3.1 已解决的能力
 
 该配置保留 Codex App 的 ChatGPT 账号态。renderer 不会进入 `authMethod=null` 的 pre-login 分支，因此模型显示、账号区域以及依赖账号态的前端行为保持正常。
 
 Provider 名称仍为 `ai-gateway`，所以 `provider.is_openai()` 为 false，继续使用本地压缩，不触发 OpenAI Remote Compact V2。
 
-### 3.2 未解决的 `web.run`
+### 3.2 旧版未解决的 `web.run`
 
 该配置既不满足：
 

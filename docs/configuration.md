@@ -306,7 +306,7 @@ experimental_bearer_token = "your-third-party-key"
 `chatgpt_base_url` is not the model API base URL. It is the ChatGPT backend-shaped URL used by Codex App features such as remote-control enrollment.
 MochiPort preserves unrelated Codex App settings. Its compatibility setup only manages the local backend/provider, required bundled plugin entries, the local curated marketplace, telemetry defaults, and `features.apps = false` because the host-owned Apps MCP backend is not implemented locally.
 
-When MochiPort injects its default local AI Gateway provider, remote control continues to use the local ChatGPT-shaped identity while model requests use Actor Authorization:
+When MochiPort injects its default local AI Gateway provider, Codex keeps its existing official account state while model requests use the standalone web-search capability:
 
 ```toml
 web_search = "live"
@@ -315,52 +315,26 @@ web_search = "live"
 name = "ai-gateway"
 base_url = "http://127.0.0.1:3847/ai-gateway/v1"
 wire_api = "responses"
-requires_openai_auth = false
+requires_openai_auth = true
 supports_websockets = false
-experimental_bearer_token = "dummy-token"
-http_headers = { x-openai-actor-authorization = "codexhub-local" }
+supports_standalone_web_search = true
 ```
 
-The provider identity remains `ai-gateway`, so OpenAI-only private-state behavior is not enabled accidentally. Actor Authorization lets current Codex builds expose native `web.run` for this custom provider; the model catalog still comes from MochiPort's `/models` endpoint. The header value retains the legacy `codexhub-local` compatibility marker and must not be renamed independently.
+The provider identity remains `ai-gateway`, so OpenAI-only private-state behavior is not enabled accidentally. `supports_standalone_web_search` lets current Codex builds expose native `web.run` for this custom provider while preserving the account state used by Codex App. The default local provider does not need a dummy bearer token, and normal takeover does not depend on a global `CODEX_API_BASE_URL` override. The model catalog still comes from MochiPort's `/models` endpoint. Older Actor Authorization configurations remain recognized for migration and cleanup only.
 
 ## Codex App Auth
 
-Remote-control requires ChatGPT-compatible auth. API-key-only auth is rejected before the websocket connects.
+Codex App owns `auth.json`. Sign in through Codex's official OAuth or API-key
+flow; MochiPort preserves that file and does not generate ChatGPT-shaped JWTs.
+Remote control still requires a supported ChatGPT account and may reject
+API-key-only auth before its websocket connects. A third-party model provider
+key controls model calls only and does not replace the Codex account login.
 
-For this local backend, use `chatgptAuthTokens` in Codex App's `auth.json`:
-
-```json
-{
-  "auth_mode": "chatgptAuthTokens",
-  "OPENAI_API_KEY": null,
-  "tokens": {
-    "id_token": "<local ChatGPT-shaped JWT>",
-    "access_token": "<local ChatGPT-shaped JWT>",
-    "refresh_token": "",
-    "account_id": "acct_codexhub_local"
-  },
-  "last_refresh": "2026-05-26T00:00:00Z"
-}
-```
-
-The local JWT needs to parse as a JWT and include the ChatGPT-shaped auth metadata Codex reads:
-
-```json
-{
-  "email": "codexhub-local@example.local",
-  "https://api.openai.com/auth": {
-    "chatgpt_account_id": "acct_codexhub_local",
-    "chatgpt_user_id": "user_codexhub_local",
-    "user_id": "user_codexhub_local",
-    "chatgpt_plan_type": "pro",
-    "chatgpt_account_is_fedramp": false
-  }
-}
-```
-
-This identity is local bridge identity only. The model provider key controls the actual model provider.
-
-The `codexhub` strings in this identity are retained compatibility values for existing Codex configuration and migration logic. Do not rename them manually.
+On startup, MochiPort recognizes auth placeholders written by older versions
+only when the active configuration is the local `ai-gateway`. It restores the
+saved official auth file if one exists, or removes the legacy placeholder so
+Codex can present its normal login flow. It does not alter direct third-party
+provider configurations.
 
 The desktop GUI provides Codex App configuration controls that write the local Codex App config for you.
 

@@ -26,7 +26,11 @@ use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 use crate::{chain_log, config::LocalConnectionMode};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
-const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
+const MOCHIPORT_PROVIDER_NAME: &str = "MochiPort";
+const LEGACY_AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
+// Keep this alias for code paths whose public function names still mention
+// the old gateway terminology. New configuration always writes MochiPort.
+const AI_GATEWAY_PROVIDER_NAME: &str = MOCHIPORT_PROVIDER_NAME;
 const OPENAI_PROVIDER_NAME: &str = "OpenAI";
 const OPENAI_ACTOR_AUTHORIZATION_HEADER: &str = "x-openai-actor-authorization";
 const CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE: &str = "codexhub-local";
@@ -49,6 +53,7 @@ const CODEX_APP_SERVER_DAEMON_DIR: &str = "app-server-daemon";
 const CODEX_APP_SERVER_DAEMON_SETTINGS: &str = "settings.json";
 const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
 const CODEX_APP_REMOTE_CONTROL_SERVER_NAME: &str = "MochiPort";
+const CODEX_APP_REMOTE_CONTROL_CLIENT_NAME: &str = "Codex Desktop";
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const CODEX_CONNECTOR_DIRECTORY_CACHE_DIR: &str = "cache/codex_app_directory";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -220,6 +225,7 @@ pub struct CodexAppProviderStatus {
     pub name: String,
     pub base_url: Option<String>,
     pub key: Option<String>,
+    pub requires_openai_auth: bool,
     pub supports_websockets: bool,
 }
 
@@ -282,12 +288,12 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     ));
 
     chain_log::write_line(format!(
-        "[codex_app_config] event=write_auth_start path={}",
+        "[codex_app_config] event=preserve_auth_start path={}",
         auth_path.display()
     ));
-    write_auth_json(&auth_path, &options)?;
+    preserve_codex_auth(&codex_home, &auth_path)?;
     chain_log::write_line(format!(
-        "[codex_app_config] event=write_auth_done path={}",
+        "[codex_app_config] event=preserve_auth_done path={}",
         auth_path.display()
     ));
 
@@ -316,12 +322,23 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
 
     chain_log::write_line("[codex_app_config] event=remote_control_switch_start");
     let codex_backend_url = options.codex_backend_url();
+    // Remote-control enrollment must be keyed by the account Codex actually
+    // logged in with. Older callers supplied a synthetic local account; keep a
+    // non-placeholder explicit value for tests/internal callers, but never
+    // create an enrollment when auth.json has no real account id.
+    let enrollment_account_id = read_codex_auth_account_id(&auth_path).or_else(|| {
+        let account_id = options.account_id.trim();
+        (!account_id.is_empty() && account_id != "acct_codexhub_local")
+            .then(|| account_id.to_string())
+    });
     let remote_control_switch = enable_remote_control_switch_in_home(
         &codex_home,
-        Some(RemoteControlPreferenceInput {
-            backend_url: &codex_backend_url,
-            account_id: &options.account_id,
-        }),
+        enrollment_account_id
+            .as_deref()
+            .map(|account_id| RemoteControlPreferenceInput {
+                backend_url: &codex_backend_url,
+                account_id,
+            }),
     )?;
     chain_log::write_line(format!(
         "[codex_app_config] event=remote_control_switch_done configured={}",
@@ -329,13 +346,13 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     ));
 
     #[cfg(not(test))]
-    chain_log::write_line("[codex_app_config] event=gui_environment_configure_start");
+    chain_log::write_line("[codex_app_config] event=gui_environment_cleanup_start");
     #[cfg(not(test))]
-    let _ = configure_gui_environment(&options.backend_url, true);
+    let _ = cleanup_gui_environment(&options.backend_url);
     #[cfg(not(test))]
     cleanup_app_server_proxy_environment().map_err(anyhow::Error::msg)?;
     #[cfg(not(test))]
-    chain_log::write_line("[codex_app_config] event=gui_environment_configure_done");
+    chain_log::write_line("[codex_app_config] event=gui_environment_cleanup_done");
 
     write_provider_mode(&codex_home, CodexProviderMode::MochiPort)?;
 
@@ -395,7 +412,7 @@ pub fn inspect_codex_app_config(
     codex_home: Option<PathBuf>,
     backend_url: &str,
 ) -> CodexAppConfigStatus {
-    inspect_codex_app_config_for_mode(codex_home, backend_url, false)
+    inspect_codex_app_config_for_mode(codex_home, backend_url, true)
 }
 
 pub fn prepare_codex_app_config_recovery_snapshot(
@@ -426,10 +443,8 @@ pub fn inspect_codex_app_config_for_mode(
     let config_path = codex_home.join("config.toml");
     let auth_path = codex_home.join("auth.json");
 
-    let (config_ok, config_error) = inspect_config_toml(&config_path, backend_url);
     let (auth_ok, auth_error) = inspect_auth_json(&auth_path);
     let (provider, providers, image_generation_enabled) = inspect_provider_catalog(&config_path);
-    let provider_ok = inspect_managed_ai_gateway_provider(&config_path, backend_url);
     let connection_mode = inspect_connection_mode(&config_path, backend_url);
     let active_provider = provider.as_ref().map(|provider| provider.name.clone());
     let provider_mode = inspect_provider_mode(
@@ -438,17 +453,39 @@ pub fn inspect_codex_app_config_for_mode(
         backend_url,
         active_provider.as_deref(),
     );
+    let local_api_mode = provider_mode != CodexProviderMode::DirectApi;
+    let (config_ok, config_error) = inspect_config_toml(&config_path, backend_url);
+    let provider_ok = if local_api_mode {
+        inspect_managed_ai_gateway_provider(&config_path, backend_url)
+    } else {
+        parse_existing_config_toml(&config_path)
+            .ok()
+            .as_ref()
+            .zip(active_provider.as_deref())
+            .is_some_and(|(doc, provider)| provider_is_external(doc, provider, backend_url))
+    };
 
+    // Normal takeover is scoped to config.toml provider routing. A global
+    // CODEX_API_BASE_URL would also redirect Codex's account/login traffic and
+    // can prevent the normal OAuth flow from starting.
+    // The global GUI environment is intentionally kept clean. Provider
+    // routing is configured in config.toml, so a missing CODEX_API_BASE_URL is
+    // the healthy state for both local takeover and direct API mode.
     let gui_api_base = inspect_gui_api_base_url(backend_url);
     let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
     let remote_control_switch = inspect_remote_control_switch_in_home(&codex_home);
     let remote_control_ok = remote_control_switch.configured;
+    let configured = if local_api_mode {
+        config_ok && auth_ok && provider_ok && gui_ok && remote_control_ok
+    } else {
+        config_ok && provider_ok
+    };
 
     CodexAppConfigStatus {
         codex_home,
         config_path,
         auth_path,
-        configured: config_ok && auth_ok && provider_ok && gui_ok && remote_control_ok,
+        configured,
         config_ok,
         auth_ok,
         provider_ok,
@@ -554,6 +591,112 @@ pub fn should_preserve_direct_api_mode(codex_home: Option<PathBuf>, backend_url:
     ) == CodexProviderMode::DirectApi
 }
 
+/// Migrate the takeover state written by pre-CC-Switch-style builds.
+///
+/// This is intentionally limited to an active MochiPort provider. A user's
+/// direct-api configuration must never cause the daemon to rewrite its provider
+/// or `auth.json`. The migration is safe to run at daemon startup and preserves
+/// Codex-owned OAuth/API-key records.
+pub fn migrate_legacy_codex_takeover(
+    codex_home: Option<PathBuf>,
+    backend_url: &str,
+) -> Result<bool> {
+    let codex_home = codex_home.unwrap_or_else(default_codex_home);
+    let config_path = codex_home.join("config.toml");
+    let Ok(mut doc) = parse_existing_config_toml_for_update(&config_path) else {
+        return Ok(false);
+    };
+    let renamed_legacy_provider = migrate_legacy_mochiport_provider_name(&mut doc);
+    let active_provider = doc
+        .get("model_provider")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let managed_names = mochiport_local_provider_names(&doc, backend_url);
+    let active_provider = active_provider.map(str::to_string);
+    if !active_provider
+        .as_deref()
+        .is_some_and(|provider| managed_names.contains(provider))
+    {
+        return Ok(false);
+    }
+
+    let mut migrated = renamed_legacy_provider;
+    let mut config_changed = renamed_legacy_provider;
+    let connection_mode = inspect_connection_mode(&config_path, backend_url);
+    let expected_chatgpt_base_url = codex_connection_url(backend_url, connection_mode);
+    let chatgpt_base_url_matches = doc
+        .get("chatgpt_base_url")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .is_some_and(|value| backend_urls_equivalent(value, &expected_chatgpt_base_url));
+    if !chatgpt_base_url_matches {
+        doc["chatgpt_base_url"] = toml_edit::value(&expected_chatgpt_base_url);
+        config_changed = true;
+    }
+    let auth_path = codex_home.join("auth.json");
+    if let Some(account_id) = read_codex_auth_account_id(&auth_path) {
+        upsert_official_remote_control_enrollment(&codex_home, backend_url, &account_id)?;
+        enable_app_server_daemon_remote_control(&codex_home)?;
+        migrated = true;
+    }
+    if active_provider.as_deref() == Some(AI_GATEWAY_PROVIDER_NAME) {
+        let expected_base_url = ai_gateway_base_url_from_backend_url(backend_url);
+        let provider = provider_table_mut(&mut doc, AI_GATEWAY_PROVIDER_NAME);
+        let had_legacy_auth = provider
+            .get("requires_openai_auth")
+            .and_then(|item| item.as_bool())
+            != Some(true)
+            || provider.get("experimental_bearer_token").is_some()
+            || provider.get("auth").is_some()
+            || provider.get("env_key").is_some()
+            || provider.get("env_key_instructions").is_some()
+            || provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER).is_some()
+            || provider
+                .get("supports_standalone_web_search")
+                .and_then(|item| item.as_bool())
+                != Some(true);
+        if had_legacy_auth {
+            provider["name"] = toml_edit::value(AI_GATEWAY_PROVIDER_NAME);
+            provider["base_url"] = toml_edit::value(expected_base_url);
+            provider["wire_api"] = toml_edit::value("responses");
+            provider["requires_openai_auth"] = toml_edit::value(true);
+            provider["supports_standalone_web_search"] = toml_edit::value(true);
+            provider.remove("experimental_bearer_token");
+            provider.remove("auth");
+            provider.remove("env_key");
+            provider.remove("env_key_instructions");
+            remove_provider_http_header(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER);
+            config_changed = true;
+        }
+    }
+
+    if config_changed {
+        backup_existing(&config_path)?;
+        let raw = normalize_config_toml_order(&doc.to_string());
+        write_file_atomically(&config_path, raw.as_bytes())?;
+        migrated = true;
+        chain_log::write_line(format!(
+            "[codex_app_config] event=legacy_takeover_config_repaired path={}",
+            config_path.display()
+        ));
+    }
+
+    if !auth_path.exists() {
+        return Ok(migrated);
+    }
+    let raw = std::fs::read_to_string(&auth_path)
+        .with_context(|| format!("failed to read Codex auth {}", auth_path.display()))?;
+    let auth = serde_json::from_str::<serde_json::Value>(&raw)
+        .with_context(|| format!("failed to parse Codex auth {}", auth_path.display()))?;
+    if !is_mochiport_managed_auth_json(&auth) {
+        return Ok(migrated);
+    }
+
+    preserve_codex_auth(&codex_home, &auth_path)?;
+    Ok(true)
+}
+
 #[cfg(test)]
 pub fn enable_codex_app_remote_control_switch(
     codex_home: Option<PathBuf>,
@@ -567,14 +710,15 @@ pub fn enable_codex_app_remote_control_switch_for_backend(
     backend_url: &str,
 ) -> Result<CodexAppRemoteControlSwitchStatus> {
     let codex_home = codex_home.unwrap_or_else(default_codex_home);
-    let account_id = read_local_auth_account_id(&codex_home.join("auth.json"))
-        .unwrap_or_else(|| "acct_codexhub_local".to_string());
+    let account_id = read_codex_auth_account_id(&codex_home.join("auth.json"));
     enable_remote_control_switch_in_home(
         &codex_home,
-        Some(RemoteControlPreferenceInput {
-            backend_url,
-            account_id: &account_id,
-        }),
+        account_id
+            .as_deref()
+            .map(|account_id| RemoteControlPreferenceInput {
+                backend_url,
+                account_id,
+            }),
     )
 }
 
@@ -765,6 +909,57 @@ fn upsert_official_remote_control_enrollment(
     let server_id = stable_remote_control_id("srv", &installation_id);
     let environment_id = stable_remote_control_id("env", &installation_id);
     let updated_at = i64::try_from(unix_now()?).map_err(|_| anyhow!("system time is too large"))?;
+    // Builds before the client-name fix wrote an empty value. Migrate only
+    // that legacy row for this exact backend/account pair; other Codex client
+    // enrollments must remain untouched.
+    connection
+        .execute(
+            r#"
+            DELETE FROM remote_control_enrollments
+            WHERE websocket_url = ?1
+              AND account_id = ?2
+              AND app_server_client_name = ''
+              AND EXISTS (
+                  SELECT 1
+                  FROM remote_control_enrollments
+                  WHERE websocket_url = ?1
+                    AND account_id = ?2
+                    AND app_server_client_name = ?3
+              )
+            "#,
+            params![
+                websocket_url,
+                account_id,
+                CODEX_APP_REMOTE_CONTROL_CLIENT_NAME,
+            ],
+        )
+        .with_context(|| {
+            format!(
+                "failed to remove legacy remote_control enrollment in {}",
+                state_db_path.display()
+            )
+        })?;
+    connection
+        .execute(
+            r#"
+            UPDATE remote_control_enrollments
+            SET app_server_client_name = ?3
+            WHERE websocket_url = ?1
+              AND account_id = ?2
+              AND app_server_client_name = ''
+            "#,
+            params![
+                websocket_url,
+                account_id,
+                CODEX_APP_REMOTE_CONTROL_CLIENT_NAME,
+            ],
+        )
+        .with_context(|| {
+            format!(
+                "failed to migrate legacy remote_control enrollment in {}",
+                state_db_path.display()
+            )
+        })?;
     connection
         .execute(
             r#"
@@ -788,7 +983,7 @@ fn upsert_official_remote_control_enrollment(
             params![
                 websocket_url,
                 account_id,
-                "",
+                CODEX_APP_REMOTE_CONTROL_CLIENT_NAME,
                 server_id,
                 environment_id,
                 CODEX_APP_REMOTE_CONTROL_SERVER_NAME,
@@ -1031,14 +1226,18 @@ fn read_remote_control_switch_db(path: &Path) -> Result<(Option<bool>, Option<i6
 }
 
 pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    inspect_gui_api_base_url_for_mode(backend_url, true)
+    inspect_gui_api_base_url_for_mode(backend_url, false)
 }
 
 pub fn inspect_gui_api_base_url_for_mode(
     backend_url: &str,
-    _legacy_mode: bool,
+    local_api_mode: bool,
 ) -> CodexAppGuiApiBaseStatus {
-    let expected = codex_app_gui_api_base_url(backend_url);
+    let expected = if local_api_mode {
+        codex_app_gui_api_base_url(backend_url)
+    } else {
+        String::new()
+    };
     let login_issuer_expected = String::new();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -1096,13 +1295,18 @@ pub fn inspect_gui_api_base_url_for_mode(
                     .map(|value| format!("{CODEX_API_BASE_URL_ENV}={value}"))
             });
         let direct_expected = expected.as_str();
-        let direct_configured = api_base
-            .as_deref()
-            .map(str::trim_end)
-            .is_some_and(|value| value.eq_ignore_ascii_case(direct_expected));
+        let direct_configured = local_api_mode
+            && api_base
+                .as_deref()
+                .map(str::trim_end)
+                .is_some_and(|value| value.eq_ignore_ascii_case(direct_expected));
         CodexAppGuiApiBaseStatus {
             supported: true,
-            configured: direct_configured && api_endpoint.is_none(),
+            configured: if local_api_mode {
+                direct_configured && api_endpoint.is_none()
+            } else {
+                api_base.is_none() && api_endpoint.is_none()
+            },
             expected,
             value,
             login_issuer_configured: login_issuer.is_none(),
@@ -1125,16 +1329,6 @@ pub fn inspect_gui_api_base_url_for_mode(
             error: None,
         }
     }
-}
-
-pub fn configure_gui_environment(
-    backend_url: &str,
-    _legacy_mode: bool,
-) -> CodexAppGuiApiBaseStatus {
-    let configure_result = configure_gui_direct_api_base(backend_url);
-    let mut status = inspect_gui_api_base_url(backend_url);
-    status.error = configure_result.err();
-    status
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1237,31 +1431,13 @@ pub fn codex_app_gui_api_base_url(backend_url: &str) -> String {
 }
 
 pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
         let legacy_proxy_cleanup_result = cleanup_legacy_global_proxy_bypass();
-        let cleanup_result = gui_unsetenv_many(&[
-            CODEX_API_BASE_URL_ENV,
-            CODEX_API_ENDPOINT_ENV,
-            CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
-        ]);
+        let cleanup_result = cleanup_managed_gui_environment_values(backend_url);
         let mut status = inspect_gui_api_base_url(backend_url);
         status.error = cleanup_result
             .err()
-            .or_else(|| legacy_proxy_cleanup_result.err());
-        status
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let legacy_proxy_cleanup_result = cleanup_legacy_global_proxy_bypass();
-        let api_result =
-            gui_unsetenv(CODEX_API_BASE_URL_ENV).and_then(|_| gui_unsetenv(CODEX_API_ENDPOINT_ENV));
-        let issuer_result = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
-        let mut status = inspect_gui_api_base_url(backend_url);
-        status.error = api_result
-            .err()
-            .or_else(|| issuer_result.err())
             .or_else(|| legacy_proxy_cleanup_result.err());
         status
     }
@@ -1270,6 +1446,66 @@ pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
     {
         inspect_gui_api_base_url(backend_url)
     }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn cleanup_managed_gui_environment_values(backend_url: &str) -> Result<(), String> {
+    let mut errors = Vec::new();
+    for name in [
+        CODEX_API_BASE_URL_ENV,
+        CODEX_API_ENDPOINT_ENV,
+        CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
+    ] {
+        let current = match gui_getenv(name) {
+            Ok(current) => current,
+            Err(error) => {
+                errors.push(format!("{name}: {error}"));
+                continue;
+            }
+        };
+        let Some(current) = current else {
+            continue;
+        };
+        if !is_mochiport_managed_gui_environment_value(name, &current, backend_url) {
+            continue;
+        }
+        if let Err(error) = gui_unsetenv(name) {
+            errors.push(format!("{name}: {error}"));
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn is_mochiport_managed_gui_environment_value(name: &str, value: &str, backend_url: &str) -> bool {
+    match name {
+        CODEX_API_BASE_URL_ENV => {
+            backend_urls_equivalent(value, &codex_app_gui_api_base_url(backend_url))
+                || backend_urls_equivalent(value, backend_url)
+        }
+        CODEX_API_ENDPOINT_ENV => value.eq_ignore_ascii_case("localhost"),
+        CODEX_APP_SERVER_LOGIN_ISSUER_ENV => {
+            backend_urls_equivalent(value, &codex_app_login_issuer_url(backend_url))
+        }
+        _ => false,
+    }
+}
+
+fn codex_app_login_issuer_url(backend_url: &str) -> String {
+    if let Ok(mut url) = url::Url::parse(backend_url) {
+        url.set_path("/");
+        url.set_query(None);
+        url.set_fragment(None);
+        return url.to_string().trim_end_matches('/').to_string();
+    }
+    backend_url
+        .trim_end_matches('/')
+        .strip_suffix("/backend-api")
+        .unwrap_or_else(|| backend_url.trim_end_matches('/'))
+        .to_string()
 }
 
 pub fn cleanup_legacy_app_server_proxy_environment() -> Result<(), String> {
@@ -1600,23 +1836,11 @@ fn inspect_config_toml(path: &Path, backend_url: &str) -> (bool, Option<String>)
         Ok(doc) => doc,
         Err(err) => return (false, Some(err.to_string())),
     };
-    let actual = doc
-        .get("chatgpt_base_url")
-        .and_then(|item| item.as_str())
-        .map(str::trim);
-    if actual
-        .map(|actual| backend_urls_equivalent(actual, backend_url))
-        .unwrap_or(false)
-    {
+    let _ = backend_url;
+    if doc.iter().next().is_some() {
         (true, None)
     } else {
-        (
-            false,
-            Some(format!(
-                "chatgpt_base_url is {}, expected {backend_url}",
-                actual.unwrap_or("<missing>")
-            )),
-        )
+        (false, Some("config.toml is empty".to_string()))
     }
 }
 
@@ -1648,26 +1872,57 @@ fn inspect_auth_json(path: &Path) -> (bool, Option<String>) {
         Err(err) => return (false, Some(err.to_string())),
     };
     if is_mochiport_managed_auth_json(&auth) {
+        return (
+            false,
+            Some("auth.json contains an old MochiPort placeholder login".to_string()),
+        );
+    }
+    if is_codex_auth_json_ready(&auth) {
         (true, None)
     } else {
         (
             false,
-            Some("auth.json is not MochiPort-managed local auth".to_string()),
+            Some("auth.json has no usable Codex login".to_string()),
         )
     }
 }
 
-fn read_local_auth_account_id(path: &Path) -> Option<String> {
+fn is_codex_auth_json_ready(auth: &serde_json::Value) -> bool {
+    let auth_mode = auth.get("auth_mode").and_then(|value| value.as_str());
+    match auth_mode {
+        Some(LOCAL_AUTH_MODE) | Some(LEGACY_LOCAL_AUTH_MODE) => auth
+            .pointer("/tokens/access_token")
+            .or_else(|| auth.pointer("/tokens/id_token"))
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty()),
+        Some("apiKey") => auth
+            .get("OPENAI_API_KEY")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| !value.trim().is_empty()),
+        _ => false,
+    }
+}
+
+fn read_codex_auth_account_id(path: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
     let auth = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
-    if !is_mochiport_managed_auth_json(&auth) {
-        return None;
-    }
     auth.pointer("/tokens/account_id")
         .and_then(|value| value.as_str())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+        .or_else(|| {
+            auth.pointer("/tokens/access_token")
+                .and_then(|value| value.as_str())
+                .and_then(|token| {
+                    decode_jwt_payload_value(token).and_then(|payload| {
+                        payload
+                            .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
+                            .and_then(|value| value.as_str())
+                            .map(str::to_string)
+                    })
+                })
+        })
 }
 
 fn inspect_provider_catalog(
@@ -1733,11 +1988,16 @@ fn provider_status_from_table(
         .and_then(|table| table.get("supports_websockets"))
         .and_then(|item| item.as_bool())
         .unwrap_or(false);
+    let requires_openai_auth = provider
+        .and_then(|table| table.get("requires_openai_auth"))
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false);
 
     CodexAppProviderStatus {
         name: name.to_string(),
         base_url,
         key,
+        requires_openai_auth,
         supports_websockets,
     }
 }
@@ -1759,8 +2019,14 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     };
     let codex_home = path.parent().unwrap_or_else(|| Path::new("."));
 
+    // Codex App uses this ChatGPT-shaped endpoint for remote-control enrollment
+    // and its app-server websocket. Model requests still use the provider's
+    // `base_url` below, so these are deliberately separate settings.
     let codex_backend_url = options.codex_backend_url();
     doc["chatgpt_base_url"] = toml_edit::value(&codex_backend_url);
+    // Older builds called the local Provider `ai-gateway`. Normalize that
+    // managed entry before writing the canonical MochiPort configuration.
+    migrate_legacy_mochiport_provider_name(&mut doc);
 
     let explicit_provider_name = non_empty(options.provider_name.as_deref());
     let explicit_provider_base_url = options.provider_base_url.as_deref().and_then(config_value);
@@ -1794,20 +2060,24 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         let provider = provider_table_mut(&mut doc, provider_name.as_str());
         provider["name"] = toml_edit::value(provider_name.as_str());
         provider["wire_api"] = toml_edit::value("responses");
-        provider["requires_openai_auth"] = toml_edit::value(!inject_default_ai_gateway);
+        // The local gateway uses the managed ChatGPT-compatible auth identity so the
+        // Codex App can expose account-gated controls such as Fast mode. Standalone
+        // web search keeps `web.run` available without using the actor-auth gate.
+        provider["requires_openai_auth"] = toml_edit::value(true);
 
         if inject_default_ai_gateway {
             provider["base_url"] =
                 toml_edit::value(default_ai_gateway_base_url.as_deref().unwrap_or_default());
             provider.remove("env_key");
             provider.remove("env_key_instructions");
-            provider["experimental_bearer_token"] = toml_edit::value("dummy-token");
+            // `requires_openai_auth = true` makes Codex use the official OAuth
+            // session from auth.json. A placeholder bearer token would short
+            // circuit that fallback and make the App treat the route as an
+            // external-auth provider.
+            provider.remove("experimental_bearer_token");
             provider.remove("auth");
-            set_provider_http_header(
-                provider,
-                OPENAI_ACTOR_AUTHORIZATION_HEADER,
-                CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE,
-            );
+            provider["supports_standalone_web_search"] = toml_edit::value(true);
+            remove_provider_http_header(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER);
         } else if let Some(provider_base_url) = explicit_provider_base_url {
             provider["base_url"] = toml_edit::value(provider_base_url);
         }
@@ -2178,6 +2448,74 @@ fn uninstall_config_toml(path: &Path, backend_url: &str) -> Result<(bool, bool)>
     cleanup_mochiport_config(path, backend_url, true, None)
 }
 
+/// Rename the local gateway Provider written by older MochiPort builds.
+///
+/// The `/ai-gateway` URL is intentionally unchanged; only the Codex Provider
+/// key and its display name move to the canonical `MochiPort` value. The old
+/// key is reserved by MochiPort, so any existing entry under it is normalized
+/// and then repaired by the regular write path.
+fn migrate_legacy_mochiport_provider_name(doc: &mut toml_edit::DocumentMut) -> bool {
+    let should_rename = doc
+        .get("model_providers")
+        .and_then(|item| item.as_table())
+        .and_then(|providers| providers.get(LEGACY_AI_GATEWAY_PROVIDER_NAME))
+        .and_then(|item| item.as_table())
+        .is_some_and(|provider| {
+            let base_url = provider
+                .get("base_url")
+                .and_then(|item| item.as_str())
+                .map(str::trim);
+            let local_url = base_url.is_some_and(|value| {
+                value.contains("127.0.0.1:3847/ai-gateway")
+                    || value.contains("localhost:3847/ai-gateway")
+            });
+            let legacy_marker = provider
+                .get("env_key")
+                .and_then(|item| item.as_str())
+                .is_some_and(|value| value == "AI_GATEWAY_API_KEY")
+                || provider.get("env_key_instructions").is_some()
+                || provider.get("auth").is_some()
+                || provider
+                    .get("experimental_bearer_token")
+                    .and_then(|item| item.as_str())
+                    .is_some_and(|value| value == "dummy-token" || value == "old-token");
+            local_url || legacy_marker
+        });
+    if !should_rename {
+        return false;
+    }
+
+    let mut changed = false;
+    if active_model_provider(doc).as_deref() == Some(LEGACY_AI_GATEWAY_PROVIDER_NAME) {
+        doc["model_provider"] = toml_edit::value(MOCHIPORT_PROVIDER_NAME);
+        changed = true;
+    }
+
+    if let Some(providers) = doc
+        .get_mut("model_providers")
+        .and_then(|item| item.as_table_mut())
+    {
+        if let Some(legacy_item) = providers.remove(LEGACY_AI_GATEWAY_PROVIDER_NAME) {
+            if providers.get(MOCHIPORT_PROVIDER_NAME).is_none() {
+                providers.insert(MOCHIPORT_PROVIDER_NAME, legacy_item);
+            }
+            changed = true;
+        }
+    }
+
+    if changed {
+        if let Some(provider) = doc
+            .get_mut("model_providers")
+            .and_then(|item| item.as_table_mut())
+            .and_then(|providers| providers.get_mut(MOCHIPORT_PROVIDER_NAME))
+            .and_then(|item| item.as_table_mut())
+        {
+            provider["name"] = toml_edit::value(MOCHIPORT_PROVIDER_NAME);
+        }
+    }
+    changed
+}
+
 fn managed_provider_names_in_config(
     doc: &toml_edit::DocumentMut,
     backend_url: &str,
@@ -2189,7 +2527,11 @@ fn managed_provider_names_in_config(
         return names;
     };
 
-    for provider_name in [AI_GATEWAY_PROVIDER_NAME, DEFAULT_PROVIDER_NAME] {
+    for provider_name in [
+        MOCHIPORT_PROVIDER_NAME,
+        LEGACY_AI_GATEWAY_PROVIDER_NAME,
+        DEFAULT_PROVIDER_NAME,
+    ] {
         let Some(provider) = providers
             .get(provider_name)
             .and_then(|item| item.as_table())
@@ -2219,16 +2561,22 @@ fn mochiport_local_provider_names(
 ) -> HashSet<String> {
     let mut names = managed_provider_names_in_config(doc, backend_url, true);
     let local_gateway_url = ai_gateway_base_url_from_backend_url(backend_url);
-    let local_ai_gateway = doc
-        .get("model_providers")
-        .and_then(|item| item.as_table())
-        .and_then(|providers| providers.get(AI_GATEWAY_PROVIDER_NAME))
-        .and_then(|item| item.as_table())
-        .and_then(|provider| provider.get("base_url"))
-        .and_then(|item| item.as_str())
-        .is_some_and(|value| backend_urls_equivalent(value.trim(), &local_gateway_url));
-    if local_ai_gateway {
-        names.insert(AI_GATEWAY_PROVIDER_NAME.to_string());
+    if let Some(providers) = doc.get("model_providers").and_then(|item| item.as_table()) {
+        for provider_name in [
+            MOCHIPORT_PROVIDER_NAME,
+            LEGACY_AI_GATEWAY_PROVIDER_NAME,
+            DEFAULT_PROVIDER_NAME,
+        ] {
+            let local_provider = providers
+                .get(provider_name)
+                .and_then(|item| item.as_table())
+                .and_then(|provider| provider.get("base_url"))
+                .and_then(|item| item.as_str())
+                .is_some_and(|value| backend_urls_equivalent(value.trim(), &local_gateway_url));
+            if local_provider {
+                names.insert(provider_name.to_string());
+            }
+        }
     }
     names
 }
@@ -2265,6 +2613,36 @@ fn inspect_connection_mode(path: &Path, backend_url: &str) -> LocalConnectionMod
     let Ok(doc) = parse_existing_config_toml(path) else {
         return LocalConnectionMode::Standard;
     };
+
+    // Current configurations keep the local route in the managed model
+    // provider. `chatgpt_base_url` is only a legacy signal from older builds
+    // and must not be required for Codex App login.
+    if let Some(active_provider) = active_model_provider(&doc) {
+        let managed_names = mochiport_local_provider_names(&doc, backend_url);
+        if managed_names.contains(&active_provider) {
+            let base_url = doc
+                .get("model_providers")
+                .and_then(|item| item.as_table())
+                .and_then(|providers| providers.get(&active_provider))
+                .and_then(|item| item.as_table())
+                .and_then(|provider| provider.get("base_url"))
+                .and_then(|item| item.as_str())
+                .map(str::trim);
+            if let Some(base_url) = base_url {
+                let expected_base_url = ai_gateway_base_url_from_backend_url(backend_url);
+                if backend_urls_equivalent(base_url, &expected_base_url) {
+                    return url::Url::parse(base_url)
+                        .ok()
+                        .and_then(|url| (url.host_str() == Some("localhost")).then_some(()))
+                        .map_or(LocalConnectionMode::Standard, |_| {
+                            LocalConnectionMode::VpnCompatible
+                        });
+                }
+            }
+        }
+    }
+
+    // Read old configurations for status/migration compatibility only.
     let Some(value) = doc
         .get("chatgpt_base_url")
         .and_then(|item| item.as_str())
@@ -2410,22 +2788,42 @@ fn provider_mode_message(mode: CodexProviderMode, active_provider: Option<&str>)
 }
 
 fn provider_table_has_mochiport_shape(provider: &toml_edit::Table, provider_name: &str) -> bool {
-    provider_name == AI_GATEWAY_PROVIDER_NAME
-        && provider_table_has_mochiport_identity(provider, AI_GATEWAY_PROVIDER_NAME)
-        && provider
-            .get("requires_openai_auth")
-            .and_then(|item| item.as_bool())
-            == Some(false)
+    if !matches!(
+        provider_name,
+        MOCHIPORT_PROVIDER_NAME | LEGACY_AI_GATEWAY_PROVIDER_NAME
+    ) {
+        return false;
+    }
+
+    let identity_matches = provider_table_has_mochiport_identity(provider, provider_name)
+        || provider_name == LEGACY_AI_GATEWAY_PROVIDER_NAME
+            && provider_table_has_mochiport_identity(provider, OPENAI_PROVIDER_NAME);
+    if !identity_matches {
+        return false;
+    }
+
+    let requires_openai_auth = provider
+        .get("requires_openai_auth")
+        .and_then(|item| item.as_bool());
+    let standalone_web_search = provider
+        .get("supports_standalone_web_search")
+        .and_then(|item| item.as_bool())
+        == Some(true);
+    let actor_authorized = requires_openai_auth == Some(false)
         && provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER)
-            == Some(CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE)
+            == Some(CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE);
+
+    actor_authorized || (requires_openai_auth == Some(true) && standalone_web_search)
 }
 
 fn provider_table_has_legacy_codexhub_shape(
     provider: &toml_edit::Table,
     provider_name: &str,
 ) -> bool {
-    if provider_name == AI_GATEWAY_PROVIDER_NAME
-        && provider_table_has_mochiport_identity(provider, OPENAI_PROVIDER_NAME)
+    if matches!(
+        provider_name,
+        MOCHIPORT_PROVIDER_NAME | LEGACY_AI_GATEWAY_PROVIDER_NAME
+    ) && provider_table_has_mochiport_identity(provider, OPENAI_PROVIDER_NAME)
     {
         return provider
             .get("requires_openai_auth")
@@ -2523,25 +2921,6 @@ fn remove_provider_http_header(provider: &mut toml_edit::Table, header_name: &st
     }
     if remove_headers {
         provider.remove("http_headers");
-    }
-}
-
-fn set_provider_http_header(provider: &mut toml_edit::Table, header_name: &str, value: &str) {
-    remove_provider_http_header(provider, header_name);
-    if provider.get("http_headers").is_none() {
-        provider["http_headers"] =
-            toml_edit::Item::Value(toml_edit::Value::InlineTable(toml_edit::InlineTable::new()));
-    }
-    if let Some(headers) = provider
-        .get_mut("http_headers")
-        .and_then(toml_edit::Item::as_inline_table_mut)
-    {
-        headers.insert(header_name, toml_edit::Value::from(value));
-    } else if let Some(headers) = provider
-        .get_mut("http_headers")
-        .and_then(toml_edit::Item::as_table_mut)
-    {
-        headers[header_name] = toml_edit::value(value);
     }
 }
 
@@ -2828,6 +3207,79 @@ impl LocalAuthIdentity {
     }
 }
 
+/// Keep Codex's own OAuth/API-key state authoritative.
+///
+/// CC Switch treats `auth.json` as Codex-owned state. Older MochiPort builds
+/// wrote a synthetic local JWT there; migrate that placeholder back to the
+/// first managed backup when possible, and otherwise remove it so Codex can
+/// show its normal login flow. A real auth file is never replaced.
+fn preserve_codex_auth(codex_home: &Path, path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read Codex auth {}", path.display()))?;
+    let auth = serde_json::from_str::<serde_json::Value>(&raw)
+        .with_context(|| format!("failed to parse Codex auth {}", path.display()))?;
+    if !is_mochiport_managed_auth_json(&auth) {
+        chain_log::write_line(format!(
+            "[codex_app_config] event=auth_preserved path={} reason=codex_owned",
+            path.display()
+        ));
+        return Ok(());
+    }
+
+    let backup = managed_backup_paths(codex_home);
+    let manifest = backup
+        .manifest_path
+        .exists()
+        .then(|| read_managed_backup_manifest(&backup.manifest_path))
+        .transpose()?;
+    if manifest
+        .as_ref()
+        .is_some_and(|manifest| manifest.auth_existed)
+        && backup.auth_path.exists()
+    {
+        let backup_raw = std::fs::read_to_string(&backup.auth_path).with_context(|| {
+            format!(
+                "failed to read managed Codex auth backup {}",
+                backup.auth_path.display()
+            )
+        })?;
+        let backup_auth =
+            serde_json::from_str::<serde_json::Value>(&backup_raw).with_context(|| {
+                format!(
+                    "failed to parse managed Codex auth backup {}",
+                    backup.auth_path.display()
+                )
+            })?;
+        if !is_mochiport_managed_auth_json(&backup_auth) {
+            backup_existing(path)?;
+            write_file_atomically(path, backup_raw.as_bytes())?;
+            chain_log::write_line(format!(
+                "[codex_app_config] event=legacy_auth_restored path={} backup={}",
+                path.display(),
+                backup.auth_path.display()
+            ));
+            return Ok(());
+        }
+    }
+
+    backup_existing(path)?;
+    std::fs::remove_file(path).with_context(|| {
+        format!(
+            "failed to remove MochiPort placeholder auth {}",
+            path.display()
+        )
+    })?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=legacy_auth_removed path={} reason=no_codex_owned_backup",
+        path.display()
+    ));
+    Ok(())
+}
+
+#[cfg(test)]
 fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()> {
     let identity = derive_local_auth_identity(path, options);
     let jwt = local_chatgpt_jwt(&identity)?;
@@ -2926,12 +3378,25 @@ fn ensure_managed_backup(codex_home: &Path, config_path: &Path, auth_path: &Path
         )
     })?;
     let config_existed = config_path.exists();
+    // A legacy MochiPort placeholder is not user-owned auth. Do not record it
+    // as the original file, otherwise uninstall would restore the fake token.
+    let auth_existed = if auth_path.exists() {
+        match std::fs::read_to_string(auth_path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        {
+            Some(auth) => !is_mochiport_managed_auth_json(&auth),
+            None => true,
+        }
+    } else {
+        false
+    };
     let manifest = ManagedCodexAppBackupManifest {
         version: MANAGED_BACKUP_VERSION,
         created_at_ms: unix_now_millis()?,
         codex_home: codex_home.to_path_buf(),
         config_existed,
-        auth_existed: auth_path.exists(),
+        auth_existed,
         original_model_provider: if config_existed {
             read_active_model_provider(config_path)?
         } else {
@@ -3193,6 +3658,47 @@ fn restore_or_remove_managed_file(
     remove_guard: Option<fn(&Path) -> Result<bool>>,
 ) -> Result<bool> {
     if originally_existed {
+        // A malformed/legacy manifest may point at an older MochiPort
+        // placeholder. Never restore that placeholder over Codex's current
+        // login state; keep a real live auth file and remove only a managed
+        // placeholder if one is still present.
+        let backup_is_managed = if backup_path.exists() {
+            if let Some(guard) = remove_guard {
+                guard(backup_path)?
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        let target_is_managed = if target_path.exists() {
+            if let Some(guard) = remove_guard {
+                guard(target_path)?
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if !backup_path.exists() || backup_is_managed {
+            if target_is_managed {
+                std::fs::remove_file(target_path).with_context(|| {
+                    format!(
+                        "failed to remove stale managed file {}",
+                        target_path.display()
+                    )
+                })?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        // auth.json remains Codex-owned after takeover. Keep a real live auth
+        // generation (which may have refreshed since the backup was created),
+        // and restore the backup only when the live file is absent or is one of
+        // MochiPort's legacy placeholders.
+        if remove_guard.is_some() && target_path.exists() && !target_is_managed {
+            return Ok(false);
+        }
         if let Some(parent) = target_path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create {}", parent.display()))?;
@@ -3668,10 +4174,14 @@ fn clear_legacy_codexhub_bundled_remote_catalog_files(codex_home: &Path) -> Resu
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    #[cfg(target_os = "macos")]
+    use std::sync::{Mutex, MutexGuard};
 
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    #[cfg(target_os = "macos")]
+    static GUI_ENVIRONMENT_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    fn assert_actor_authorized_provider(config: &str, provider_name: &str) {
+    fn assert_standalone_web_search_provider(config: &str, provider_name: &str) {
         let doc = config
             .parse::<toml_edit::DocumentMut>()
             .expect("parse config");
@@ -3689,11 +4199,17 @@ mod tests {
             provider
                 .get("requires_openai_auth")
                 .and_then(|item| item.as_bool()),
-            Some(false)
+            Some(true)
+        );
+        assert_eq!(
+            provider
+                .get("supports_standalone_web_search")
+                .and_then(|item| item.as_bool()),
+            Some(true)
         );
         assert_eq!(
             provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER),
-            Some(CODEX_COMPAT_ACTOR_AUTHORIZATION_VALUE)
+            None
         );
     }
 
@@ -3849,7 +4365,7 @@ mod tests {
     }
 
     #[test]
-    fn configure_codex_app_writes_provider_and_local_auth() {
+    fn configure_codex_app_writes_provider_without_replacing_auth() {
         let codex_home = unique_temp_dir();
         let report = configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
@@ -3869,7 +4385,6 @@ mod tests {
         .expect("configure codex app");
 
         let config = std::fs::read_to_string(report.config_path).expect("read config");
-        assert!(config.starts_with("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\"\n"));
         assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
         assert!(config.contains("model_provider = \"ai-codex\""));
         assert!(!config.contains("model = \"gpt-5.5\""));
@@ -3891,10 +4406,7 @@ mod tests {
         assert!(config.contains("experimental_bearer_token = \"test-provider-key\""));
         assert!(!config.contains(OPENAI_ACTOR_AUTHORIZATION_HEADER));
 
-        let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
-        assert!(auth.contains(&format!("\"auth_mode\": \"{LOCAL_AUTH_MODE}\"")));
-        assert!(auth.contains("\"OPENAI_API_KEY\": null"));
-        assert!(auth.contains("\"account_id\": \"acct_test\""));
+        assert!(!report.auth_path.exists());
         assert!(report.remote_control_switch.configured);
 
         let _ = std::fs::remove_dir_all(codex_home);
@@ -3922,16 +4434,17 @@ mod tests {
 
         let config = std::fs::read_to_string(report.config_path).expect("read config");
         assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
-        assert!(config.contains("model_provider = \"ai-gateway\""));
+        assert!(config.contains("model_provider = \"MochiPort\""));
         assert!(config.contains("web_search = \"live\""));
-        assert!(config.contains("[model_providers.ai-gateway]"));
-        assert!(config.contains("name = \"ai-gateway\""));
+        assert!(config.contains("[model_providers.MochiPort]"));
+        assert!(config.contains("name = \"MochiPort\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
         assert!(config.contains("wire_api = \"responses\""));
-        assert!(config.contains("requires_openai_auth = false"));
+        assert!(config.contains("requires_openai_auth = true"));
         assert!(config.contains("supports_websockets = false"));
-        assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
-        assert_actor_authorized_provider(&config, AI_GATEWAY_PROVIDER_NAME);
+        assert!(config.contains("supports_standalone_web_search = true"));
+        assert!(!config.contains("experimental_bearer_token"));
+        assert_standalone_web_search_provider(&config, AI_GATEWAY_PROVIDER_NAME);
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -3966,9 +4479,50 @@ experimental_bearer_token = "dummy-token"
 http_headers = { x-openai-actor-authorization = "codexhub-local" }
 "#,
         )
-        .expect("write current actor-authorized gateway config");
+        .expect("write legacy actor-authorized gateway config");
 
         assert!(inspect_managed_ai_gateway_provider(
+            &config_path,
+            "http://127.0.0.1:3847/backend-api",
+        ));
+
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_standalone_web_search = true
+experimental_bearer_token = "dummy-token"
+"#,
+        )
+        .expect("write current standalone-web-search gateway config");
+
+        assert!(inspect_managed_ai_gateway_provider(
+            &config_path,
+            "http://127.0.0.1:3847/backend-api",
+        ));
+
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "dummy-token"
+"#,
+        )
+        .expect("write incomplete standalone-web-search gateway config");
+
+        assert!(!inspect_managed_ai_gateway_provider(
             &config_path,
             "http://127.0.0.1:3847/backend-api",
         ));
@@ -4051,73 +4605,23 @@ http_headers = { x-openai-actor-authorization = "codexhub-local" }
     }
 
     #[test]
-    fn configure_codex_app_replaces_existing_chatgpt_auth_with_local_tokens() {
+    fn configure_codex_app_preserves_existing_chatgpt_auth() {
         let codex_home = unique_temp_dir();
         let auth_path = codex_home.join("auth.json");
-        std::fs::write(
-            &auth_path,
-            official_chatgpt_auth_json(
-                "acct_official",
-                "user_official",
-                "official@example.test",
-                "plus",
-                true,
-            ),
-        )
-        .expect("write existing auth");
+        let original_auth = official_chatgpt_auth_json(
+            "acct_official",
+            "user_official",
+            "official@example.test",
+            "plus",
+            true,
+        );
+        std::fs::write(&auth_path, &original_auth).expect("write existing auth");
 
         let report =
             configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
-        let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
-        let auth = serde_json::from_str::<serde_json::Value>(&auth).expect("parse auth");
         assert_eq!(
-            auth.get("auth_mode").and_then(|value| value.as_str()),
-            Some(LOCAL_AUTH_MODE)
-        );
-        assert!(
-            auth.get("OPENAI_API_KEY")
-                .is_some_and(serde_json::Value::is_null)
-        );
-        assert_eq!(
-            auth.pointer("/tokens/account_id")
-                .and_then(|value| value.as_str()),
-            Some("acct_test")
-        );
-        let payload = auth
-            .pointer("/tokens/id_token")
-            .and_then(|value| value.as_str())
-            .and_then(decode_jwt_payload_value)
-            .expect("local jwt payload");
-        let claim_auth = payload
-            .get("https://api.openai.com/auth")
-            .expect("auth claims");
-        assert_eq!(
-            claim_auth
-                .get("chatgpt_account_id")
-                .and_then(|value| value.as_str()),
-            Some("acct_test")
-        );
-        assert_eq!(
-            claim_auth
-                .get("chatgpt_user_id")
-                .and_then(|value| value.as_str()),
-            Some("user_test")
-        );
-        assert_eq!(
-            claim_auth
-                .get("chatgpt_plan_type")
-                .and_then(|value| value.as_str()),
-            Some("pro")
-        );
-        assert_eq!(
-            claim_auth
-                .get("chatgpt_account_is_fedramp")
-                .and_then(|value| value.as_bool()),
-            Some(false)
-        );
-        assert_eq!(
-            payload.get("email").and_then(|value| value.as_str()),
-            Some("local@example.test")
+            std::fs::read_to_string(report.auth_path).expect("read auth"),
+            original_auth
         );
 
         let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
@@ -4125,47 +4629,241 @@ http_headers = { x-openai-actor-authorization = "codexhub-local" }
     }
 
     #[test]
-    fn configure_codex_app_replaces_existing_api_key_auth_with_local_tokens() {
+    fn configure_codex_app_preserves_existing_api_key_auth() {
         let codex_home = unique_temp_dir();
         let auth_path = codex_home.join("auth.json");
-        std::fs::write(
-            &auth_path,
-            r#"{
+        let original_auth = r#"{
   "auth_mode": "apiKey",
   "OPENAI_API_KEY": "sk-test"
 }
-"#,
-        )
-        .expect("write api key auth");
+"#;
+        std::fs::write(&auth_path, original_auth).expect("write api key auth");
 
         let report =
             configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
-        let auth = std::fs::read_to_string(report.auth_path).expect("read auth");
-        let auth = serde_json::from_str::<serde_json::Value>(&auth).expect("parse auth");
         assert_eq!(
-            auth.get("auth_mode").and_then(|value| value.as_str()),
-            Some(LOCAL_AUTH_MODE)
-        );
-        assert!(
-            auth.get("OPENAI_API_KEY")
-                .is_some_and(serde_json::Value::is_null)
-        );
-        assert_eq!(
-            auth.pointer("/tokens/account_id")
-                .and_then(|value| value.as_str()),
-            Some("acct_test")
-        );
-        let payload = auth
-            .pointer("/tokens/id_token")
-            .and_then(|value| value.as_str())
-            .and_then(decode_jwt_payload_value)
-            .expect("local jwt payload");
-        assert_eq!(
-            payload.get("email").and_then(|value| value.as_str()),
-            Some("local@example.test")
+            std::fs::read_to_string(report.auth_path).expect("read auth"),
+            original_auth
         );
 
         let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn migrate_legacy_codex_takeover_restores_official_auth_and_repairs_provider() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let auth_path = codex_home.join("auth.json");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://localhost:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = false
+experimental_bearer_token = "dummy-token"
+http_headers = { x-existing = "keep", x-openai-actor-authorization = "codexhub-local" }
+"#,
+        )
+        .expect("write legacy gateway config");
+        write_auth_json(&auth_path, &test_configure_options(codex_home.clone()))
+            .expect("write placeholder auth");
+
+        let official_auth = official_chatgpt_auth_json(
+            "acct_official",
+            "user_official",
+            "official@example.test",
+            "plus",
+            false,
+        );
+        write_managed_auth_backup(&codex_home, &official_auth);
+
+        assert!(
+            migrate_legacy_codex_takeover(
+                Some(codex_home.clone()),
+                "http://127.0.0.1:3847/backend-api",
+            )
+            .expect("migrate takeover")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&auth_path).expect("read restored auth"),
+            official_auth
+        );
+        let config = std::fs::read_to_string(&config_path).expect("read migrated config");
+        assert!(config.contains("model_provider = \"MochiPort\""));
+        assert!(config.contains("[model_providers.MochiPort]"));
+        assert!(!config.contains("[model_providers.ai-gateway]"));
+        assert!(config.contains("requires_openai_auth = true"));
+        assert!(config.contains("supports_standalone_web_search = true"));
+        assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
+        assert!(!config.contains("experimental_bearer_token"));
+        assert!(!config.contains(OPENAI_ACTOR_AUTHORIZATION_HEADER));
+        assert!(config.contains("x-existing = \"keep\""));
+
+        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn migrate_legacy_codex_takeover_removes_placeholder_without_backup() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let auth_path = codex_home.join("auth.json");
+        std::fs::write(
+            &config_path,
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_standalone_web_search = true
+experimental_bearer_token = "dummy-token"
+"#,
+        )
+        .expect("write gateway config");
+        write_auth_json(&auth_path, &test_configure_options(codex_home.clone()))
+            .expect("write placeholder auth");
+        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
+
+        assert!(
+            migrate_legacy_codex_takeover(
+                Some(codex_home.clone()),
+                "http://127.0.0.1:3847/backend-api",
+            )
+            .expect("migrate takeover")
+        );
+        assert!(!auth_path.exists());
+        let config = std::fs::read_to_string(&config_path).expect("read migrated config");
+        assert!(!config.contains("experimental_bearer_token"));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn migrate_legacy_codex_takeover_repairs_remote_control_enrollment() {
+        let codex_home = unique_temp_dir();
+        let installation_id = "33333333-3333-4333-8333-333333333333";
+        let backend_url = "http://127.0.0.1:3847/backend-api";
+        let websocket_url = "ws://127.0.0.1:3847/backend-api/wham/remote/control/server";
+        std::fs::write(codex_home.join("installation_id"), installation_id)
+            .expect("write installation id");
+        std::fs::write(
+            codex_home.join("config.toml"),
+            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "ai-gateway"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_standalone_web_search = true
+"#,
+        )
+        .expect("write config");
+        std::fs::write(
+            codex_home.join("auth.json"),
+            official_chatgpt_auth_json(
+                "acct_official",
+                "user_official",
+                "official@example.test",
+                "plus",
+                false,
+            ),
+        )
+        .expect("write auth");
+        create_remote_control_enrollment_state_db(&codex_home);
+        let connection =
+            Connection::open(codex_home.join(CODEX_APP_STATE_DB)).expect("open state db");
+        connection
+            .execute(
+                r#"
+                INSERT INTO remote_control_enrollments (
+                    websocket_url, account_id, app_server_client_name, server_id,
+                    environment_id, server_name, updated_at, remote_control_enabled
+                ) VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, 1)
+                "#,
+                params![
+                    websocket_url,
+                    "acct_official",
+                    "legacy-server",
+                    "legacy-environment",
+                    CODEX_APP_REMOTE_CONTROL_SERVER_NAME,
+                    1_i64,
+                ],
+            )
+            .expect("insert legacy enrollment");
+        drop(connection);
+
+        assert!(
+            migrate_legacy_codex_takeover(Some(codex_home.clone()), backend_url)
+                .expect("migrate takeover")
+        );
+
+        let connection =
+            Connection::open(codex_home.join(CODEX_APP_STATE_DB)).expect("reopen state db");
+        let row = connection
+            .query_row(
+                "SELECT app_server_client_name, server_id, environment_id FROM remote_control_enrollments",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("read migrated enrollment");
+        assert_eq!(row.0, CODEX_APP_REMOTE_CONTROL_CLIENT_NAME);
+        assert_eq!(row.1, test_stable_id("srv", installation_id));
+        assert_eq!(row.2, test_stable_id("env", installation_id));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn migrate_legacy_codex_takeover_ignores_direct_provider() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let auth_path = codex_home.join("auth.json");
+        let config = r#"model_provider = "custom"
+
+[model_providers.custom]
+name = "custom"
+base_url = "https://api.example.invalid/v1"
+wire_api = "responses"
+requires_openai_auth = true
+experimental_bearer_token = "third-party-key"
+"#;
+        std::fs::write(&config_path, config).expect("write direct config");
+        write_auth_json(&auth_path, &test_configure_options(codex_home.clone()))
+            .expect("write placeholder fixture");
+        let auth_before = std::fs::read_to_string(&auth_path).expect("read auth fixture");
+
+        assert!(
+            !migrate_legacy_codex_takeover(
+                Some(codex_home.clone()),
+                "http://127.0.0.1:3847/backend-api",
+            )
+            .expect("skip direct provider")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read direct config"),
+            config
+        );
+        assert_eq!(
+            std::fs::read_to_string(&auth_path).expect("read preserved auth fixture"),
+            auth_before
+        );
+
         let _ = std::fs::remove_dir_all(codex_home);
     }
 
@@ -4209,14 +4907,15 @@ command = "print-token"
         .expect("configure codex app");
 
         let config = std::fs::read_to_string(config_path).expect("read config");
-        assert!(config.contains("model_provider = \"ai-gateway\""));
+        assert!(config.contains("model_provider = \"MochiPort\""));
         assert!(config.contains("model = \"custom-model\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
-        assert!(config.contains("requires_openai_auth = false"));
+        assert!(config.contains("requires_openai_auth = true"));
         assert!(!config.contains("env_key"));
-        assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
-        assert!(!config.contains("[model_providers.ai-gateway.auth]"));
-        assert_actor_authorized_provider(&config, AI_GATEWAY_PROVIDER_NAME);
+        assert!(config.contains("supports_standalone_web_search = true"));
+        assert!(!config.contains("experimental_bearer_token"));
+        assert!(!config.contains("[model_providers.MochiPort.auth]"));
+        assert_standalone_web_search_provider(&config, AI_GATEWAY_PROVIDER_NAME);
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -4260,13 +4959,14 @@ http_headers = { x-existing = "keep", X-OpenAI-Actor-Authorization = "codexhub-l
         .expect("configure codex app");
 
         let config = std::fs::read_to_string(config_path).expect("read config");
-        assert!(config.contains("model_provider = \"ai-gateway\""));
+        assert!(config.contains("model_provider = \"MochiPort\""));
         assert!(config.contains("model = \"custom-model\""));
         assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
-        assert!(config.contains("requires_openai_auth = false"));
+        assert!(config.contains("requires_openai_auth = true"));
         assert!(!config.contains("env_key"));
-        assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
-        assert_actor_authorized_provider(&config, AI_GATEWAY_PROVIDER_NAME);
+        assert!(config.contains("supports_standalone_web_search = true"));
+        assert!(!config.contains("experimental_bearer_token"));
+        assert_standalone_web_search_provider(&config, AI_GATEWAY_PROVIDER_NAME);
         let doc = config
             .parse::<toml_edit::DocumentMut>()
             .expect("parse config");
@@ -4818,6 +5518,69 @@ base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
 
     #[test]
+    fn enable_remote_control_switch_migrates_legacy_empty_client_name() {
+        let codex_home = unique_temp_dir();
+        let installation_id = "22222222-2222-4222-8222-222222222222";
+        let backend_url = "http://127.0.0.1:3847/backend-api";
+        let websocket_url = "ws://127.0.0.1:3847/backend-api/wham/remote/control/server";
+        std::fs::write(codex_home.join("installation_id"), installation_id)
+            .expect("write installation id");
+        create_remote_control_enrollment_state_db(&codex_home);
+
+        let connection =
+            Connection::open(codex_home.join(CODEX_APP_STATE_DB)).expect("open state db");
+        connection
+            .execute(
+                r#"
+                INSERT INTO remote_control_enrollments (
+                    websocket_url, account_id, app_server_client_name, server_id,
+                    environment_id, server_name, updated_at, remote_control_enabled
+                ) VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, 1)
+                "#,
+                params![
+                    websocket_url,
+                    "acct_test",
+                    "legacy-server",
+                    "legacy-environment",
+                    CODEX_APP_REMOTE_CONTROL_SERVER_NAME,
+                    1_i64,
+                ],
+            )
+            .expect("insert legacy enrollment");
+        drop(connection);
+
+        enable_remote_control_switch_in_home(
+            &codex_home,
+            Some(RemoteControlPreferenceInput {
+                backend_url,
+                account_id: "acct_test",
+            }),
+        )
+        .expect("enable remote-control switch");
+
+        let connection =
+            Connection::open(codex_home.join(CODEX_APP_STATE_DB)).expect("reopen state db");
+        let row = connection
+            .query_row(
+                "SELECT app_server_client_name, server_id, environment_id FROM remote_control_enrollments",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .expect("read migrated enrollment");
+        assert_eq!(row.0, CODEX_APP_REMOTE_CONTROL_CLIENT_NAME);
+        assert_eq!(row.1, test_stable_id("srv", installation_id));
+        assert_eq!(row.2, test_stable_id("env", installation_id));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
     fn configure_codex_app_persists_official_remote_control_preference() {
         let codex_home = unique_temp_dir();
         let installation_id = "11111111-1111-4111-8111-111111111111";
@@ -4870,7 +5633,7 @@ base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
             "ws://127.0.0.1:3847/backend-api/wham/remote/control/server"
         );
         assert_eq!(row.1, "acct_test");
-        assert_eq!(row.2, "");
+        assert_eq!(row.2, CODEX_APP_REMOTE_CONTROL_CLIENT_NAME);
         assert_eq!(row.3, test_stable_id("srv", installation_id));
         assert_eq!(row.4, test_stable_id("env", installation_id));
         assert_eq!(row.5, 1);
@@ -5143,7 +5906,10 @@ base_url = "https://api.openai.com/v1"
 
         assert!(report.removed_chatgpt_base_url);
         assert!(report.removed_model_provider);
-        assert!(report.removed_auth);
+        // `auth.json` is Codex-owned. Even an older/partially populated Codex
+        // auth file must survive uninstall rather than being replaced by a
+        // stale MochiPort backup.
+        assert!(!report.removed_auth);
         let config = std::fs::read_to_string(&config_path).expect("read cleaned config");
         assert!(!config.contains("chatgpt_base_url"));
         assert!(!config.contains("model_provider = \"ai-gateway\""));
@@ -5153,8 +5919,48 @@ base_url = "https://api.openai.com/v1"
         assert!(config.contains("new_codex_app_flag = true"));
         assert!(config.contains("[model_providers.openai]"));
         assert_eq!(
-            std::fs::read_to_string(&auth_path).expect("read restored auth"),
+            std::fs::read_to_string(&auth_path).expect("read preserved auth"),
             original_auth
+        );
+
+        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn uninstall_codex_app_preserves_refreshed_official_auth_over_older_backup() {
+        let codex_home = unique_temp_dir();
+        let auth_path = codex_home.join("auth.json");
+        let original_auth = official_chatgpt_auth_json(
+            "acct_original",
+            "user_original",
+            "original@example.test",
+            "plus",
+            false,
+        );
+        std::fs::write(&auth_path, original_auth).expect("write original auth");
+        configure_codex_app(test_configure_options(codex_home.clone()))
+            .expect("configure codex app");
+
+        let refreshed_auth = official_chatgpt_auth_json(
+            "acct_refreshed",
+            "user_refreshed",
+            "refreshed@example.test",
+            "pro",
+            false,
+        );
+        std::fs::write(&auth_path, &refreshed_auth).expect("write refreshed auth");
+
+        let report = uninstall_codex_app(
+            Some(codex_home.clone()),
+            "http://127.0.0.1:3847/backend-api",
+        )
+        .expect("uninstall codex app");
+
+        assert!(!report.removed_auth);
+        assert_eq!(
+            std::fs::read_to_string(&auth_path).expect("read preserved auth"),
+            refreshed_auth
         );
 
         let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
@@ -5182,7 +5988,7 @@ requires_openai_auth = true
         configure_codex_app(test_configure_options(codex_home.clone()))
             .expect("configure codex app");
         let configured = std::fs::read_to_string(&config_path).expect("read configured config");
-        assert!(configured.contains("model_provider = \"ai-gateway\""));
+        assert!(configured.contains("model_provider = \"MochiPort\""));
 
         uninstall_codex_app(
             Some(codex_home.clone()),
@@ -5304,7 +6110,7 @@ base_url = "https://custom.example/v1"
 
         assert!(report.removed_chatgpt_base_url);
         assert!(report.removed_model_provider);
-        assert!(report.removed_auth);
+        assert!(!report.removed_auth);
         assert!(!config_path.exists());
         assert!(!auth_path.exists());
 
@@ -5476,6 +6282,58 @@ base_url = "https://api.example.invalid"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
+        }
+    }
+
+    fn write_managed_auth_backup(codex_home: &Path, auth: &str) {
+        let backup = managed_backup_paths(codex_home);
+        std::fs::create_dir_all(&backup.dir).expect("create managed backup dir");
+        let manifest = ManagedCodexAppBackupManifest {
+            version: MANAGED_BACKUP_VERSION,
+            created_at_ms: 1,
+            codex_home: codex_home.to_path_buf(),
+            config_existed: true,
+            auth_existed: true,
+            original_model_provider: Some("custom".to_string()),
+        };
+        let raw = serde_json::to_string_pretty(&manifest).expect("serialize manifest");
+        std::fs::write(&backup.manifest_path, format!("{raw}\n")).expect("write managed manifest");
+        std::fs::write(&backup.auth_path, auth).expect("write managed auth backup");
+    }
+
+    #[cfg(target_os = "macos")]
+    struct GuiEnvironmentTestGuard {
+        _lock: MutexGuard<'static, ()>,
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    #[cfg(target_os = "macos")]
+    impl GuiEnvironmentTestGuard {
+        fn capture() -> Self {
+            let lock = GUI_ENVIRONMENT_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let values = [
+                CODEX_API_BASE_URL_ENV,
+                CODEX_API_ENDPOINT_ENV,
+                CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
+            ]
+            .into_iter()
+            .map(|name| (name, gui_getenv(name).expect("capture GUI environment")))
+            .collect();
+            Self {
+                _lock: lock,
+                values,
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    impl Drop for GuiEnvironmentTestGuard {
+        fn drop(&mut self) {
+            for (name, value) in &self.values {
+                let _ = gui_set_or_unsetenv(name, value.as_deref());
+            }
         }
     }
 
@@ -5734,6 +6592,80 @@ base_url = "https://api.example.invalid"
             codex_app_gui_api_base_url("http://localhost:3847/backend-api/"),
             "http://localhost:3847/api"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cleanup_gui_environment_removes_mochiport_api_endpoint_and_issuer() {
+        let _environment = GuiEnvironmentTestGuard::capture();
+        let backend_url = "http://127.0.0.1:3847/backend-api";
+        gui_setenv(CODEX_API_BASE_URL_ENV, "http://127.0.0.1:3847/api")
+            .expect("set managed api base");
+        gui_setenv(CODEX_API_ENDPOINT_ENV, "localhost").expect("set legacy endpoint");
+        gui_setenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV, "http://127.0.0.1:3847")
+            .expect("set managed issuer");
+
+        cleanup_managed_gui_environment_values(backend_url).expect("cleanup managed values");
+        let status = inspect_gui_api_base_url(backend_url);
+
+        assert!(status.configured);
+        assert!(status.login_issuer_configured);
+        assert_eq!(status.value, None);
+        assert_eq!(status.login_issuer_value, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cleanup_gui_environment_removes_legacy_backend_api_base() {
+        let _environment = GuiEnvironmentTestGuard::capture();
+        let backend_url = "http://127.0.0.1:3847/backend-api";
+        gui_setenv(CODEX_API_BASE_URL_ENV, backend_url).expect("set legacy backend api base");
+        gui_unsetenv(CODEX_API_ENDPOINT_ENV).expect("unset endpoint");
+        gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV).expect("unset issuer");
+
+        cleanup_managed_gui_environment_values(backend_url).expect("cleanup managed values");
+
+        assert_eq!(
+            gui_getenv(CODEX_API_BASE_URL_ENV).expect("read api base"),
+            None
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cleanup_gui_environment_preserves_custom_values_and_reports_conflict() {
+        let _environment = GuiEnvironmentTestGuard::capture();
+        let backend_url = "http://127.0.0.1:3847/backend-api";
+        let custom_api_base = "https://gateway.example.test/v1";
+        let custom_endpoint = "remote.example.test";
+        let custom_issuer = "https://login.example.test";
+        gui_setenv(CODEX_API_BASE_URL_ENV, custom_api_base).expect("set custom api base");
+        gui_setenv(CODEX_API_ENDPOINT_ENV, custom_endpoint).expect("set custom endpoint");
+        gui_setenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV, custom_issuer).expect("set custom issuer");
+
+        cleanup_managed_gui_environment_values(backend_url).expect("cleanup managed values");
+        let status = inspect_gui_api_base_url(backend_url);
+
+        assert_eq!(
+            gui_getenv(CODEX_API_BASE_URL_ENV).expect("read api base"),
+            Some(custom_api_base.to_string())
+        );
+        assert_eq!(
+            gui_getenv(CODEX_API_ENDPOINT_ENV).expect("read endpoint"),
+            Some(custom_endpoint.to_string())
+        );
+        assert_eq!(
+            gui_getenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV).expect("read issuer"),
+            Some(custom_issuer.to_string())
+        );
+        assert!(!status.configured);
+        assert_eq!(
+            status.value.as_deref(),
+            Some("CODEX_API_ENDPOINT=remote.example.test")
+        );
+        assert!(!status.login_issuer_configured);
+        assert_eq!(status.login_issuer_value.as_deref(), Some(custom_issuer));
+        assert_eq!(status.error, None);
     }
 
     #[test]

@@ -4,41 +4,45 @@ This document records the current Codex App auth boundary for MochiPort.
 
 ## Current Decision
 
-MochiPort writes Codex App `auth.json` in a local ChatGPT-shaped token mode:
+Codex owns and maintains its `auth.json`. MochiPort preserves the user's existing
+official OAuth or API-key login and does not write synthetic ChatGPT JWTs or a
+placeholder API key.
 
-```json
-{
-  "auth_mode": "chatgptAuthTokens",
-  "OPENAI_API_KEY": null,
-  "tokens": {
-    "id_token": "<local ChatGPT-shaped JWT>",
-    "access_token": "<local ChatGPT-shaped JWT>",
-    "refresh_token": "",
-    "account_id": "acct_codexhub_local"
-  },
-  "last_refresh": "2026-06-29T00:00:00Z"
-}
-```
-
-Do not switch normal initialization to API-key-only auth. Upstream remote-control rejects pure API key auth before MochiPort can bridge the session.
+Normal takeover routes model requests through the `ai-gateway` provider in
+`config.toml`. It does not log Codex in or out. Features that require a ChatGPT
+account, including upstream remote control, still require the user to sign in
+through Codex's official login flow; a model provider key does not satisfy that
+account check.
 
 ## Config Injection
 
 `mochiport configure-codex-app` writes:
 
 - `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"` for local backend fallback endpoints.
-- A default Actor Authorized `ai-gateway` provider at `http://127.0.0.1:3847/ai-gateway/v1` with `requires_openai_auth = false` and the legacy-compatible `x-openai-actor-authorization = "codexhub-local"` marker.
-- `experimental_bearer_token = "dummy-token"` so model requests still authenticate to MochiPort through the provider.
+- A default `ai-gateway` provider at `http://127.0.0.1:3847/ai-gateway/v1` with `requires_openai_auth = true` and `supports_standalone_web_search = true`. This preserves the Codex App account state, including Fast mode, while registering native `web.run`.
 - A local `openai-curated` marketplace entry when the cached curated catalog exists.
 - `features.apps = false`, because the host-owned Apps/Connectors MCP backend is not implemented locally.
 - Cleanup for legacy plugin-blocking flags such as `plugins = false` and `computer_use = false`.
 - Cleanup for old CodexHub-generated bundled remote plugin state.
 
+Older Actor Authorization (`requires_openai_auth = false` plus
+`x-openai-actor-authorization`) is recognized only for migration, uninstall, and
+cleanup; current configuration no longer writes that header.
+
+The default local provider does not use `experimental_bearer_token` and normal
+takeover does not depend on a global `CODEX_API_BASE_URL` environment override.
+
 MochiPort does not publish `openai-bundled` plugins through remote `list` or `installed` fallback. Bundled plugins, including `computer-use`, must come from Codex App's own local `openai-bundled` marketplace.
 
 ## Legacy Compatibility
 
-One in-progress CodexHub build briefly wrote `OPENAI_API_KEY = "codexhub-dummy-key"` without `auth_mode`. Current code treats that as legacy CodexHub-managed auth only so uninstall/cleanup can remove it safely. It is not the target auth shape.
+Older MochiPort/CodexHub builds wrote synthetic `chatgptAuthTokens`, and one
+in-progress build wrote `OPENAI_API_KEY = "codexhub-dummy-key"` without
+`auth_mode`. These shapes are recognized only as legacy MochiPort-managed auth.
+When the active configuration is the local `ai-gateway`, daemon startup restores
+the saved official `auth.json` when available, or removes the synthetic
+placeholder so Codex can run its normal login flow. Direct third-party provider
+configurations and unrelated auth files are not changed.
 
 The local `/backend-api/ps/plugins/*` fallback remains narrow:
 

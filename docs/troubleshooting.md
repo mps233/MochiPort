@@ -35,11 +35,11 @@ Important fields:
 If `connected=false`, check the Codex App side:
 
 1. Codex App config contains `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`.
-2. Codex App auth is local `chatgptAuthTokens`, not API-key-only auth.
+2. Codex App is signed in through the official ChatGPT login flow; API-key-only auth does not enable remote control.
 3. The `mochiport daemon` process is running before remote control is enabled.
 4. Remote control is enabled in Codex App.
 
-## API Key Auth Error
+## Codex Auth Errors
 
 If Codex prints:
 
@@ -49,23 +49,22 @@ remote control requires ChatGPT authentication; API key auth is not supported
 
 then Codex App never reached the remote-control websocket. The local backend cannot fix this after the fact.
 
-Use a local ChatGPT-shaped auth record:
+Sign in through Codex's official ChatGPT login flow. Do not create or paste a
+synthetic `chatgptAuthTokens` record into `auth.json`; MochiPort does not own
+that file. The third-party model key belongs in the model provider config and
+does not satisfy the remote-control account check.
 
-```json
-{
-  "auth_mode": "chatgptAuthTokens",
-  "OPENAI_API_KEY": null,
-  "tokens": {
-    "id_token": "<local ChatGPT-shaped JWT>",
-    "access_token": "<local ChatGPT-shaped JWT>",
-    "refresh_token": "",
-    "account_id": "acct_codexhub_local"
-  },
-  "last_refresh": "2026-05-26T00:00:00Z"
-}
+Older MochiPort builds could leave Codex in external-auth mode and produce:
+
+```text
+External auth is active. Use account/login/start (chatgptAuthTokens) to update it or account/logout to clear it.
 ```
 
-The third-party model key does not satisfy this check. It belongs in the model provider config and is used later for model calls.
+With the local `ai-gateway` active, start the updated MochiPort daemon once so
+its legacy migration can restore the saved official auth or remove the old
+placeholder. Then fully quit Codex and open it again. If no official auth backup
+exists, complete Codex's normal login flow. Direct third-party provider setups
+are intentionally not modified by this migration.
 
 ## Feishu Does Not Receive Messages
 

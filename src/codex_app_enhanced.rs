@@ -664,8 +664,6 @@ pub async fn launch_and_inject_controlled(
 
 #[derive(Default)]
 struct EnhancedLaunchRecovery {
-    gui_environment: Option<crate::codex_app_config::CodexAppGuiEnvironmentSnapshot>,
-    environment_may_have_changed: bool,
     app_was_running: bool,
     launch_attempted: bool,
 }
@@ -689,20 +687,10 @@ impl PendingEnhancedLaunch {
 fn recover_launch_failure(
     err: anyhow::Error,
     recovery: &EnhancedLaunchRecovery,
-    backend_url: &str,
+    _backend_url: &str,
 ) -> EnhancedLaunchFailure {
     let cancelled = err.downcast_ref::<EnhancedLaunchCancelled>().is_some();
     let mut recovery_notes = Vec::new();
-    if recovery.environment_may_have_changed
-        && let Some(snapshot) = recovery.gui_environment.as_ref()
-    {
-        match crate::codex_app_config::restore_gui_environment(snapshot, backend_url) {
-            Ok(()) => recovery_notes.push("已恢复启动前的 Codex GUI 环境".to_string()),
-            Err(restore_error) => recovery_notes.push(format!(
-                "Codex GUI 环境自动恢复失败，请在设置中修复：{restore_error}"
-            )),
-        }
-    }
     if recovery.launch_attempted {
         recovery_notes.push(
             "Codex App 可能已经启动，但无法确认本轮进程归属，因此未自动退出；请手动退出后重试"
@@ -736,12 +724,6 @@ async fn launch_and_inject_pending(
     ));
     crate::codex_app_config::prepare_codex_app_config_recovery_snapshot(None)
         .context("准备 Codex 配置恢复快照失败")?;
-    recovery.gui_environment = Some(
-        crate::codex_app_config::capture_gui_environment()
-            .map_err(anyhow::Error::msg)
-            .context("读取 Codex GUI 环境失败")?,
-    );
-
     let client = reqwest::Client::builder()
         .no_proxy()
         .timeout(Duration::from_secs(2))
@@ -765,18 +747,10 @@ async fn launch_and_inject_pending(
     recovery.app_was_running = app_running;
     let target = if app_running {
         match find_app_target(&client, DEFAULT_CDP_PORT, control).await? {
-            Some(target) => {
-                recovery.environment_may_have_changed = true;
-                crate::codex_app_config::configure_gui_direct_api_base(backend_url)
-                    .map_err(|err| anyhow!("配置 CODEX_API_BASE_URL 失败: {err}"))?;
-                target
-            }
+            Some(target) => target,
             None => bail!("Codex App 正在运行。请先完全退出，再使用增强模式启动 Codex"),
         }
     } else {
-        recovery.environment_may_have_changed = true;
-        crate::codex_app_config::configure_gui_direct_api_base(backend_url)
-            .map_err(|err| anyhow!("配置 CODEX_API_BASE_URL 失败: {err}"))?;
         let early_attach_blocked =
             match find_browser_websocket_url(&client, DEFAULT_CDP_PORT, control).await {
                 Ok(Some(_)) => Some(format!(
@@ -2451,28 +2425,46 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
 
   const localUser = (values, envelope) => {{
     const evaluatedCustomIDs = values?.evaluated_keys?.customIDs;
+    const existingUser = values?.user && typeof values.user === "object"
+      ? values.user
+      : {{}};
+    const existingCustomIDs = existingUser.customIDs && typeof existingUser.customIDs === "object"
+      ? existingUser.customIDs
+      : {{}};
+    const existingCustom = existingUser.custom && typeof existingUser.custom === "object"
+      ? existingUser.custom
+      : {{}};
     const stableIDKey = Object.keys(localStorage)
       .find((key) => key.startsWith("statsig.stable_id."));
     const stableID = envelope?.stableID
       ?? evaluatedCustomIDs?.stableID
+      ?? existingCustomIDs?.stableID
       ?? (stableIDKey ? originalGetItem.call(localStorage, stableIDKey) : undefined)
       ?? undefined;
+    const customIDs = {{
+      ...existingCustomIDs,
+      ...(evaluatedCustomIDs && typeof evaluatedCustomIDs === "object" ? evaluatedCustomIDs : {{}}),
+      ...(stableID ? {{ stableID, source_surface_stable_id: stableID }} : {{}}),
+    }};
+    const accountID = customIDs.account_id
+      ?? customIDs.chatgpt_account_id
+      ?? existingCustom.account_id;
+    if (accountID) customIDs.account_id = accountID;
+    else delete customIDs.account_id;
+    const userID = existingUser.userID
+      ?? values?.evaluated_keys?.userID
+      ?? undefined;
+    if (!userID && !accountID && Object.keys(customIDs).length === 0
+      && Object.keys(existingCustom).length === 0) return null;
+    const custom = {{ ...existingCustom }};
+    if (accountID) custom.account_id = accountID;
+    else delete custom.account_id;
     return {{
-      userID: "user_codexhub_local",
-      email: "codexhub-local@example.local",
-      locale: navigator.language || "en",
-      customIDs: {{
-        ...(evaluatedCustomIDs && typeof evaluatedCustomIDs === "object" ? evaluatedCustomIDs : {{}}),
-        ...(stableID ? {{ stableID, source_surface_stable_id: stableID }} : {{}}),
-        account_id: "acct_codexhub_local",
-      }},
-      custom: {{
-        auth_status: "logged_in",
-        auth_method: "chatgpt",
-        account_id: "acct_codexhub_local",
-        plan_type: "pro",
-        brand_name: "codex",
-      }},
+      ...existingUser,
+      ...(userID ? {{ userID }} : {{}}),
+      locale: existingUser.locale ?? navigator.language ?? "en",
+      customIDs,
+      custom,
     }};
   }};
 
@@ -2486,9 +2478,10 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
         if (!isCompleteOfficialValues(values)) continue;
         const receivedAt = Number(envelope.receivedAt ?? values.time ?? 0);
         const evaluatedUserID = values?.evaluated_keys?.userID;
-        const priority = evaluatedUserID == null
-          ? 2
-          : evaluatedUserID === "user_codexhub_local" ? 1 : 0;
+        // Prefer a cache that is not bound to a synthetic/local user. Any
+        // real evaluated user is equally valid here; the injected payload
+        // preserves its identity instead of manufacturing an account id.
+        const priority = evaluatedUserID == null ? 2 : 1;
         if (!selected
           || priority > selected.priority
           || (priority === selected.priority && receivedAt > selected.receivedAt)) {{
@@ -2522,7 +2515,8 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
       state.bootstrapSource = "statsig-cache-unsupported";
       return null;
     }}
-    values.user = localUser(values, selected?.envelope);
+    const user = localUser(values, selected?.envelope);
+    if (user) values.user = user;
     state.bootstrapSource = cachedBootstrapSource(selected, false);
     return JSON.stringify(values);
   }};

@@ -21,10 +21,18 @@ pub(super) struct OAuthTokenRequest {
 }
 
 pub(super) async fn oauth_authorize(Query(query): Query<OAuthAuthorizeQuery>) -> impl IntoResponse {
-    let account_id = query
+    let Some(account_id) = query
         .current_workspace_id
         .or(query.allowed_workspace_id)
-        .unwrap_or_else(|| "acct_codexhub_local".to_string());
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            "Codex official login is required before remote control can be enabled",
+        )
+            .into_response();
+    };
     let code = local_step_up_code(&account_id);
     let mut redirect_uri = match reqwest::Url::parse(&query.redirect_uri) {
         Ok(url) => url,
@@ -41,8 +49,13 @@ pub(super) async fn oauth_authorize(Query(query): Query<OAuthAuthorizeQuery>) ->
 }
 
 pub(super) async fn oauth_token(Form(request): Form<OAuthTokenRequest>) -> impl IntoResponse {
-    let account_id = account_id_from_step_up_code(&request.code)
-        .unwrap_or_else(|| "acct_codexhub_local".to_string());
+    let Some(account_id) = account_id_from_step_up_code(&request.code) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Invalid or expired Codex remote-control authorization code",
+        )
+            .into_response();
+    };
     let user_id = "user_codexhub_local";
     let account_user_id = format!("{user_id}__{account_id}");
     let now = unix_now();
@@ -83,6 +96,8 @@ fn account_id_from_step_up_code(code: &str) -> Option<String> {
     value
         .get("account_id")
         .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_string)
 }
 

@@ -113,6 +113,7 @@ struct ManageCodexAppProviderStatus {
     name: String,
     base_url: Option<String>,
     secret_set: bool,
+    requires_openai_auth: bool,
     supports_websockets: bool,
 }
 
@@ -182,10 +183,13 @@ pub(super) async fn configure_codex_app(
         codex_home,
         backend_url: backend_url.clone(),
         connection_mode,
-        account_id: "acct_codexhub_local".to_string(),
-        user_id: "user_codexhub_local".to_string(),
-        email: "codexhub-local@example.local".to_string(),
-        plan_type: "pro".to_string(),
+        // Codex owns the login identity. `configure_codex_app` derives the
+        // account from the real auth.json when it exists; an unauthenticated
+        // install must not create a placeholder enrollment.
+        account_id: String::new(),
+        user_id: String::new(),
+        email: String::new(),
+        plan_type: String::new(),
         provider_name,
         provider_base_url,
         provider_key,
@@ -326,6 +330,7 @@ pub(super) async fn uninstall_codex_app(State(state): State<SharedState>) -> imp
     };
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
+
     match codex_app_config::uninstall_codex_app(None, &backend_url) {
         Ok(report) => {
             state
@@ -346,7 +351,7 @@ pub(super) async fn uninstall_codex_app(State(state): State<SharedState>) -> imp
                 .await;
             (
                 StatusCode::OK,
-                Json(json!({ "ok": true, "report": report })),
+                Json(json!({ "ok": true, "report": report, "requiresCodexRestart": true })),
             )
         }
         Err(err) => (
@@ -799,14 +804,14 @@ pub(super) async fn codex_app_sessions(State(state): State<SharedState>) -> impl
         .collect::<Vec<_>>();
     let mut providers = threads
         .iter()
-        .map(|thread| thread.model_provider.clone())
+        .map(|thread| normalize_session_provider_name(&thread.model_provider))
         .collect::<Vec<_>>();
     providers.extend(
         codex_app_status_snapshot(&state)
             .await
             .providers
             .into_iter()
-            .map(|provider| provider.name),
+            .map(|provider| normalize_session_provider_name(&provider.name)),
     );
     providers.push("openai".to_string());
     providers.retain(|provider| !provider.trim().is_empty());
@@ -828,6 +833,7 @@ fn normalize_managed_session(thread: serde_json::Value) -> Option<ManageCodexSes
     let id = first_session_string(&thread, &["id", "threadId"])?;
     let preview = first_session_string(&thread, &["preview"]).unwrap_or_default();
     let model_provider = first_session_string(&thread, &["modelProvider", "model_provider"])
+        .map(|provider| normalize_session_provider_name(&provider))
         .unwrap_or_else(|| "openai".to_string());
     let updated_at = first_session_i64(&thread, &["updatedAt", "updated_at"]).unwrap_or_default();
     let path = first_session_string(&thread, &["path", "rolloutPath", "rollout_path"]);
@@ -842,6 +848,14 @@ fn normalize_managed_session(thread: serde_json::Value) -> Option<ManageCodexSes
         name,
         cwd,
     })
+}
+
+fn normalize_session_provider_name(provider: &str) -> String {
+    if provider.trim().eq_ignore_ascii_case("ai-gateway") {
+        "MochiPort".to_string()
+    } else {
+        provider.to_string()
+    }
 }
 
 fn session_path_value(value: &Value) -> Option<String> {
@@ -917,7 +931,11 @@ fn move_session_provider(
             None,
             thread_id.as_str(),
             rollout_path,
-            provider,
+            if provider.eq_ignore_ascii_case("ai-gateway") {
+                "MochiPort"
+            } else {
+                provider
+            },
         ),
         None => {
             codex_session_history::move_thread_to_ai_gateway(None, thread_id.as_str(), rollout_path)
@@ -970,11 +988,11 @@ pub(super) async fn repair_codex_app_gui_environment(
                 );
             }
         };
-    let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
+    let gui_api_base = codex_app_config::cleanup_gui_environment(&backend_url);
     state
         .push_event(
             "info",
-            "codex_app_gui_environment_configured",
+            "codex_app_gui_environment_cleaned",
             format!(
                 "gui_api_base={} login_issuer={} remote_control_switch={}",
                 gui_api_base.value.as_deref().unwrap_or_default(),
@@ -1063,12 +1081,13 @@ pub(super) async fn manage_codex_app_status(
             .providers
             .into_iter()
             .map(|provider| ManageCodexAppProviderStatus {
-                name: provider.name,
+                name: normalize_session_provider_name(&provider.name),
                 base_url: provider.base_url.as_deref().map(masked_url),
                 secret_set: provider
                     .key
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty()),
+                requires_openai_auth: provider.requires_openai_auth,
                 supports_websockets: provider.supports_websockets,
             })
             .collect(),
@@ -1076,7 +1095,9 @@ pub(super) async fn manage_codex_app_status(
         connection_mode: status.connection_mode,
         provider_mode: status.provider_mode,
         provider_mode_message: status.provider_mode_message,
-        active_provider: status.active_provider,
+        active_provider: status
+            .active_provider
+            .map(|provider| normalize_session_provider_name(&provider)),
     })
 }
 

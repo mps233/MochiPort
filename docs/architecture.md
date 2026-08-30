@@ -85,44 +85,22 @@ Protocol notes:
 - Server envelopes are acknowledged by `seq_id`; chunk acknowledgements include `segment_id`.
 - Large outbound client JSON-RPC messages are segmented with the same 100 KiB target used by official Codex.
 
-## Local Auth Shape
+## Codex Auth Ownership
 
-Remote-control startup is gated by Codex auth, before the websocket reaches MochiPort. API-key-only auth is rejected by official Codex app-server.
+Codex owns `auth.json` and performs its official OAuth or API-key login flow.
+MochiPort's normal takeover changes provider routing in `config.toml`; it does
+not synthesize ChatGPT tokens, write a dummy key, or log the user out.
 
-For this project, the local identity shape is `chatgptAuthTokens`:
+Remote-control startup is gated by Codex auth before the websocket reaches
+MochiPort. Users who need remote control must sign in with a supported ChatGPT
+account in Codex. A third-party model provider key is used only for that
+provider's model calls and does not satisfy the remote-control account check.
 
-```json
-{
-  "auth_mode": "chatgptAuthTokens",
-  "OPENAI_API_KEY": null,
-  "tokens": {
-    "id_token": "<local ChatGPT-shaped JWT>",
-    "access_token": "<local ChatGPT-shaped JWT>",
-    "refresh_token": "",
-    "account_id": "acct_codexhub_local"
-  },
-  "last_refresh": "2026-05-26T00:00:00Z"
-}
-```
-
-The JWT only needs the ChatGPT-shaped claims Codex reads locally, especially:
-
-```json
-{
-  "email": "codexhub-local@example.local",
-  "https://api.openai.com/auth": {
-    "chatgpt_account_id": "acct_codexhub_local",
-    "chatgpt_user_id": "user_codexhub_local",
-    "user_id": "user_codexhub_local",
-    "chatgpt_plan_type": "pro",
-    "chatgpt_account_is_fedramp": false
-  }
-}
-```
-
-The `codexhub` strings in this local identity are compatibility identifiers used by existing Codex configuration and migration logic. They are intentionally unchanged and are not the current product name.
-
-The third-party model key is separate. It belongs in the Codex model provider configuration and is used for model calls, not remote-control enrollment.
+Daemon startup includes a narrow migration for legacy MochiPort-managed auth.
+It runs only when the active provider is the local `ai-gateway`, restores a
+saved official auth file when possible, and otherwise removes the synthetic
+placeholder so Codex can present its normal login flow. Direct provider setups
+remain untouched.
 
 ## IM Bridge
 
