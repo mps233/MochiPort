@@ -13,10 +13,19 @@ use crate::{
     bridge, chain_log,
     config::{AppConfig, FeishuConfig, TelegramConfig, TelegramProjectGroupConfig},
     im::core::{
-        i18n::im_text_for_state, session::bind_thread_to_route, thread::summarize_thread_title,
+        i18n::im_text_for_state,
+        session::{bind_thread_to_route, bind_thread_to_route_for_generation},
+        thread::summarize_thread_title,
     },
     im::feishu::{FeishuApi, FeishuSettings},
-    im::telegram::{api::TelegramApi, types::TelegramSettings},
+    im::telegram::{
+        api::{TelegramApi, TelegramForumTopicEditOutcome},
+        polling::{
+            delete_forum_topic_with_retry, run_telegram_topic_edit_with_marker,
+            run_telegram_topic_mutation_while,
+        },
+        types::TelegramSettings,
+    },
     im_runtime::{RouteTarget, route_from_conversation_key},
     remote_control_backend,
     types::{ImPlatformKind, split_telegram_message_target, telegram_message_target},
@@ -404,7 +413,9 @@ pub(super) async fn sync_telegram_topics(
     // A sync can take longer than the management client's request timeout.
     // Keep retries serialized so a timed-out client cannot start a second
     // pass that creates duplicate Telegram topics.
-    let _sync_guard = state.telegram_topic_sync_ops.lock().await;
+    let sync_gate = state.telegram_topic_sync_gate(&account_id).await;
+    let _sync_guard = sync_gate.lock().await;
+    let generation = state.runtime.lock().await.bridge_generation;
 
     let raw_threads = match remote_control_backend::session_history_threads(
         &state,
@@ -446,7 +457,7 @@ pub(super) async fn sync_telegram_topics(
     let mut skipped = 0;
     let mut failed = 0;
 
-    for raw_thread in raw_threads {
+    'threads: for raw_thread in raw_threads {
         let Some(thread_id) = raw_thread
             .get("id")
             .or_else(|| raw_thread.get("threadId"))
@@ -466,6 +477,34 @@ pub(super) async fn sync_telegram_topics(
             .map(str::to_string)
             .unwrap_or_else(|| summarize_thread_title(&raw_thread, text));
         let topic_name = truncate_telegram_topic_name(&title);
+        if !state
+            .observe_telegram_thread_started(&thread_id, generation)
+            .await
+            || !manual_telegram_topic_creation_is_current(&state, &thread_id, generation).await
+        {
+            skipped += 1;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "skipped".to_string(),
+                topic_id: None,
+                error: Some("会话已归档、删除或连接已更新".to_string()),
+            });
+            continue;
+        }
+        let creation_gate = state.telegram_topic_creation_gate(&thread_id).await;
+        let _creation_guard = creation_gate.lock().await;
+        if !manual_telegram_topic_creation_is_current(&state, &thread_id, generation).await {
+            skipped += 1;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "skipped".to_string(),
+                topic_id: None,
+                error: Some("会话状态在等待 Topic 创建期间已变化".to_string()),
+            });
+            continue;
+        }
 
         let existing_bindings = {
             let persisted = state.persisted.lock().await;
@@ -512,7 +551,6 @@ pub(super) async fn sync_telegram_topics(
             .map(|(key, route)| (key.clone(), route.clone()))
             .collect::<Vec<_>>();
         let mut current_topic_alive = false;
-        let mut alive_binding_key = None;
         let mut probe_error = None;
         let mut missing_binding_keys = Vec::new();
         for (conversation_key, route) in &current_topic_bindings {
@@ -520,13 +558,57 @@ pub(super) async fn sync_telegram_topics(
             let Some(topic_id) = topic_id else {
                 continue;
             };
-            match api
-                .edit_forum_topic(bound_chat_id, topic_id, &topic_name)
+            let expected_binding = state
+                .persisted
+                .lock()
                 .await
-            {
+                .telegram_topic_binding_states
+                .get(conversation_key)
+                .cloned();
+            let edit_result = run_telegram_topic_mutation_while(
+                &state,
+                &account_id,
+                None,
+                || {
+                    manual_telegram_topic_edit_is_current(
+                        &state,
+                        conversation_key,
+                        &thread_id,
+                        expected_binding.as_ref(),
+                        &topic_name,
+                    )
+                },
+                || async {
+                    let edited = run_telegram_topic_edit_with_marker(
+                        &state,
+                        conversation_key,
+                        &topic_name,
+                        || api.edit_forum_topic(bound_chat_id, topic_id, &topic_name),
+                    )
+                    .await?;
+                    if edited {
+                        let _ = persist_manual_telegram_topic_name_if_current(
+                            &state,
+                            conversation_key,
+                            &thread_id,
+                            expected_binding.as_ref(),
+                            &topic_name,
+                        )
+                        .await?;
+                    }
+                    Ok(edited)
+                },
+            )
+            .await;
+            let Some(edit_result) = edit_result else {
+                // A concurrent lifecycle or real-time name update owns the
+                // newer state. Preserve the binding and let that operation win.
+                current_topic_alive = true;
+                continue;
+            };
+            match edit_result {
                 Ok(true) => {
                     current_topic_alive = true;
-                    alive_binding_key = Some(conversation_key.clone());
                 }
                 Ok(false) => {
                     if !current_topic_alive && probe_error.is_none() {
@@ -541,6 +623,9 @@ pub(super) async fn sync_telegram_topics(
                     missing_binding_keys.push(conversation_key.clone());
                 }
                 Err(err) => {
+                    let rate_limited = err
+                        .downcast_ref::<crate::im::telegram::api::TelegramApiError>()
+                        .is_some_and(crate::im::telegram::api::TelegramApiError::is_rate_limited);
                     state
                         .push_event(
                             "warn",
@@ -552,17 +637,22 @@ pub(super) async fn sync_telegram_topics(
                         probe_error =
                             Some("无法确认原 Telegram Topic 是否仍存在，已保留原绑定".to_string());
                     }
+                    if rate_limited {
+                        failed += 1;
+                        items.push(TelegramTopicSyncItem {
+                            thread_id,
+                            title,
+                            status: "failed".to_string(),
+                            topic_id: None,
+                            error: probe_error,
+                        });
+                        break 'threads;
+                    }
                 }
             }
         }
         if current_topic_alive {
             probe_error = None;
-            if let Some(conversation_key) = alive_binding_key.as_deref()
-                && let Err(err) =
-                    persist_telegram_topic_name(&state, conversation_key, &topic_name).await
-            {
-                probe_error = Some(format!("保存 Topic 名称失败：{err}"));
-            }
         }
         for conversation_key in &missing_binding_keys {
             if let Err(err) = crate::im::core::routing::clear_thread_binding_with_reason(
@@ -612,7 +702,26 @@ pub(super) async fn sync_telegram_topics(
             continue;
         }
 
-        let topic = match api.create_forum_topic(&chat_id, &topic_name).await {
+        let create_result = run_telegram_topic_mutation_while(
+            &state,
+            &account_id,
+            None,
+            || manual_telegram_topic_creation_is_current(&state, &thread_id, generation),
+            || api.create_forum_topic(&chat_id, &topic_name),
+        )
+        .await;
+        let Some(create_result) = create_result else {
+            skipped += 1;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "skipped".to_string(),
+                topic_id: None,
+                error: Some("会话状态在创建 Topic 前已变化".to_string()),
+            });
+            continue;
+        };
+        let topic = match create_result {
             Ok(topic) if topic.message_thread_id > 0 => topic,
             Ok(topic) => {
                 failed += 1;
@@ -629,6 +738,9 @@ pub(super) async fn sync_telegram_topics(
                 continue;
             }
             Err(err) => {
+                let rate_limited = err
+                    .downcast_ref::<crate::im::telegram::api::TelegramApiError>()
+                    .is_some_and(crate::im::telegram::api::TelegramApiError::is_rate_limited);
                 failed += 1;
                 items.push(TelegramTopicSyncItem {
                     thread_id: thread_id.clone(),
@@ -637,9 +749,32 @@ pub(super) async fn sync_telegram_topics(
                     topic_id: None,
                     error: Some(err.to_string()),
                 });
+                if rate_limited {
+                    break 'threads;
+                }
                 continue;
             }
         };
+
+        if !manual_telegram_topic_creation_is_current(&state, &thread_id, generation).await {
+            failed += 1;
+            let error = cleanup_created_topic(
+                &state,
+                &api,
+                &chat_id,
+                topic.message_thread_id,
+                anyhow::anyhow!("会话状态在 Topic 创建期间已变化"),
+            )
+            .await;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "failed".to_string(),
+                topic_id: Some(topic.message_thread_id),
+                error: Some(error),
+            });
+            continue;
+        }
 
         let mut transferred_private_bindings = Vec::new();
         let mut private_transfer_error = None;
@@ -652,6 +787,7 @@ pub(super) async fn sync_telegram_topics(
             .await
             {
                 let error = cleanup_created_topic(
+                    &state,
                     &api,
                     &chat_id,
                     topic.message_thread_id,
@@ -676,6 +812,27 @@ pub(super) async fn sync_telegram_topics(
             continue;
         }
 
+        if !manual_telegram_topic_creation_is_current(&state, &thread_id, generation).await {
+            failed += 1;
+            let error = cleanup_created_topic(
+                &state,
+                &api,
+                &chat_id,
+                topic.message_thread_id,
+                anyhow::anyhow!("会话状态在绑定 Topic 前已变化"),
+            )
+            .await;
+            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "failed".to_string(),
+                topic_id: Some(topic.message_thread_id),
+                error: Some(error),
+            });
+            continue;
+        }
+
         let target = telegram_message_target(&chat_id, Some(topic.message_thread_id));
         let route = RouteTarget {
             platform: ImPlatformKind::Telegram,
@@ -695,7 +852,8 @@ pub(super) async fn sync_telegram_topics(
         .await
         {
             failed += 1;
-            let error = cleanup_created_topic(&api, &chat_id, topic.message_thread_id, err).await;
+            let error =
+                cleanup_created_topic(&state, &api, &chat_id, topic.message_thread_id, err).await;
             restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
             items.push(TelegramTopicSyncItem {
                 thread_id: thread_id.clone(),
@@ -707,17 +865,40 @@ pub(super) async fn sync_telegram_topics(
             continue;
         }
 
-        if let Err(err) = bind_thread_to_route(
+        if !manual_telegram_topic_creation_is_current(&state, &thread_id, generation).await {
+            failed += 1;
+            let error = cleanup_created_topic(
+                &state,
+                &api,
+                &chat_id,
+                topic.message_thread_id,
+                anyhow::anyhow!("会话状态在订阅期间已变化"),
+            )
+            .await;
+            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "failed".to_string(),
+                topic_id: Some(topic.message_thread_id),
+                error: Some(error),
+            });
+            continue;
+        }
+
+        if let Err(err) = bind_thread_to_route_for_generation(
             &state,
             &route,
             &thread_id,
             None,
             route.remote_client_key.clone(),
+            Some(generation),
         )
         .await
         {
             failed += 1;
-            let error = cleanup_created_topic(&api, &chat_id, topic.message_thread_id, err).await;
+            let error =
+                cleanup_created_topic(&state, &api, &chat_id, topic.message_thread_id, err).await;
             restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
             items.push(TelegramTopicSyncItem {
                 thread_id,
@@ -815,14 +996,113 @@ async fn persist_telegram_topic_name(
     persisted.save(&path)
 }
 
+async fn manual_telegram_topic_creation_is_current(
+    state: &SharedState,
+    thread_id: &str,
+    generation: u64,
+) -> bool {
+    state.runtime.lock().await.is_bridge_generation(generation)
+        && state
+            .telegram_thread_allows_topic_binding(thread_id, generation)
+            .await
+}
+
+async fn manual_telegram_topic_edit_is_current(
+    state: &SharedState,
+    conversation_key: &str,
+    thread_id: &str,
+    expected: Option<&crate::store::TelegramTopicBindingState>,
+    topic_name: &str,
+) -> bool {
+    let name_updates = state.telegram_topic_name_update_ops.lock().await;
+    if name_updates.contains_key(conversation_key)
+        || !manual_telegram_topic_title_matches(expected, topic_name)
+    {
+        return false;
+    }
+    let _binding_guard = state.im_route_binding_ops.lock().await;
+    let persisted = state.persisted.lock().await;
+    persisted
+        .im_thread_bindings
+        .get(conversation_key)
+        .is_some_and(|bound_thread_id| bound_thread_id == thread_id)
+        && persisted
+            .telegram_topic_binding_states
+            .get(conversation_key)
+            == expected
+}
+
+async fn persist_manual_telegram_topic_name_if_current(
+    state: &SharedState,
+    conversation_key: &str,
+    thread_id: &str,
+    expected: Option<&crate::store::TelegramTopicBindingState>,
+    topic_name: &str,
+) -> anyhow::Result<bool> {
+    let path = state.config.lock().await.state_path.clone();
+    let name_updates = state.telegram_topic_name_update_ops.lock().await;
+    if name_updates.contains_key(conversation_key)
+        || !manual_telegram_topic_title_matches(expected, topic_name)
+    {
+        return Ok(false);
+    }
+    let _binding_guard = state.im_route_binding_ops.lock().await;
+    let mut persisted = state.persisted.lock().await;
+    let binding_matches = persisted
+        .im_thread_bindings
+        .get(conversation_key)
+        .is_some_and(|bound_thread_id| bound_thread_id == thread_id);
+    let state_matches = persisted
+        .telegram_topic_binding_states
+        .get(conversation_key)
+        == expected;
+    if !binding_matches || !state_matches {
+        return Ok(false);
+    }
+    let Some(binding) = persisted
+        .telegram_topic_binding_states
+        .get_mut(conversation_key)
+    else {
+        return Ok(false);
+    };
+    binding.topic_name = topic_name.to_string();
+    if binding.codex_title.trim().is_empty() {
+        binding.codex_title = topic_name.to_string();
+    }
+    if binding.last_synced_codex_title.trim().is_empty() {
+        binding.last_synced_codex_title = binding.codex_title.clone();
+    }
+    if binding.last_synced_topic_name.trim().is_empty() {
+        binding.last_synced_topic_name = topic_name.to_string();
+    }
+    binding.last_checked_at_ms = crate::types::now_ms();
+    persisted.save(&path)?;
+    drop(name_updates);
+    Ok(true)
+}
+
+fn manual_telegram_topic_title_matches(
+    expected: Option<&crate::store::TelegramTopicBindingState>,
+    topic_name: &str,
+) -> bool {
+    let Some(expected) = expected else {
+        return true;
+    };
+    let codex_title = expected.codex_title.trim();
+    codex_title.is_empty() || truncate_telegram_topic_name(codex_title) == topic_name
+}
+
 async fn cleanup_created_topic(
+    state: &SharedState,
     api: &TelegramApi,
     chat_id: &str,
     topic_id: i64,
     binding_error: anyhow::Error,
 ) -> String {
     let binding_error = binding_error.to_string();
-    match api.delete_forum_topic(chat_id, topic_id).await {
+    match delete_forum_topic_with_retry(state, api, chat_id, topic_id, "manual_topic_sync_orphan")
+        .await
+    {
         Ok(true) => format!("{binding_error}（已清理未绑定的 Topic）"),
         Ok(false) => format!("{binding_error}（清理未绑定的 Topic 未确认成功）"),
         Err(cleanup_error) => {
@@ -2413,6 +2693,300 @@ mod tests {
         assert_eq!(
             PersistedState::load(&config.state_path).im_thread_bindings,
             expected
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_topic_sync_rejects_a_stale_history_title() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let conversation_key = "telegram:bot:-100|topic=71";
+        let binding = crate::store::TelegramTopicBindingState {
+            thread_id: "thread-name".to_string(),
+            codex_title: "B".to_string(),
+            topic_name: "B".to_string(),
+            last_synced_codex_title: "B".to_string(),
+            last_synced_topic_name: "B".to_string(),
+            ..Default::default()
+        };
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted
+                .im_thread_bindings
+                .insert(conversation_key.to_string(), "thread-name".to_string());
+            persisted
+                .telegram_topic_binding_states
+                .insert(conversation_key.to_string(), binding.clone());
+        }
+
+        assert!(
+            !manual_telegram_topic_edit_is_current(
+                &state,
+                conversation_key,
+                "thread-name",
+                Some(&binding),
+                "A",
+            )
+            .await
+        );
+        assert!(!manual_telegram_topic_title_matches(Some(&binding), "A"));
+        let mut legacy_binding = binding;
+        legacy_binding.codex_title.clear();
+        assert!(manual_telegram_topic_title_matches(
+            Some(&legacy_binding),
+            "A"
+        ));
+        assert!(manual_telegram_topic_title_matches(None, "A"));
+    }
+
+    #[tokio::test]
+    async fn manual_topic_sync_waiting_for_the_gate_is_cancelled_by_realtime_rename() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let conversation_key = "telegram:bot:-100|topic=72".to_string();
+        let binding = crate::store::TelegramTopicBindingState {
+            thread_id: "thread-name".to_string(),
+            codex_title: "A".to_string(),
+            topic_name: "A".to_string(),
+            ..Default::default()
+        };
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted
+                .im_thread_bindings
+                .insert(conversation_key.clone(), "thread-name".to_string());
+            persisted
+                .telegram_topic_binding_states
+                .insert(conversation_key.clone(), binding.clone());
+        }
+        let gate = state.telegram_topic_mutation_gate("bot").await;
+        let guard = gate.lock().await;
+        let preflight_seen = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let preflight_ready = std::sync::Arc::new(tokio::sync::Notify::new());
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = tokio::spawn({
+            let state = state.clone();
+            let conversation_key = conversation_key.clone();
+            let binding = binding.clone();
+            let preflight_seen = preflight_seen.clone();
+            let preflight_ready = preflight_ready.clone();
+            let executed = executed.clone();
+            async move {
+                run_telegram_topic_mutation_while(
+                    &state,
+                    "bot",
+                    None,
+                    || {
+                        let state = state.clone();
+                        let conversation_key = conversation_key.clone();
+                        let binding = binding.clone();
+                        let preflight_seen = preflight_seen.clone();
+                        let preflight_ready = preflight_ready.clone();
+                        async move {
+                            let current = manual_telegram_topic_edit_is_current(
+                                &state,
+                                &conversation_key,
+                                "thread-name",
+                                Some(&binding),
+                                "A",
+                            )
+                            .await;
+                            if !preflight_seen.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                preflight_ready.notify_one();
+                            }
+                            current
+                        }
+                    },
+                    || async move {
+                        executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
+        tokio::time::timeout(Duration::from_millis(100), preflight_ready.notified())
+            .await
+            .expect("manual preflight");
+        let realtime_token = state
+            .begin_telegram_topic_name_update(&conversation_key)
+            .await;
+        drop(guard);
+
+        let result = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("manual sync leaves the gate queue")
+            .expect("manual sync task");
+        assert!(result.is_none());
+        assert!(!executed.load(std::sync::atomic::Ordering::SeqCst));
+        state
+            .finish_telegram_topic_name_update(&conversation_key, realtime_token)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manual_topic_sync_does_not_commit_after_realtime_starts_during_its_api_call() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let conversation_key = "telegram:bot:-100|topic=73".to_string();
+        let binding = crate::store::TelegramTopicBindingState {
+            thread_id: "thread-name".to_string(),
+            codex_title: "A".to_string(),
+            topic_name: "A".to_string(),
+            ..Default::default()
+        };
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted
+                .im_thread_bindings
+                .insert(conversation_key.clone(), "thread-name".to_string());
+            persisted
+                .telegram_topic_binding_states
+                .insert(conversation_key.clone(), binding.clone());
+        }
+        let (api_started_tx, api_started_rx) = tokio::sync::oneshot::channel();
+        let (release_api_tx, release_api_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn({
+            let state = state.clone();
+            let conversation_key = conversation_key.clone();
+            let binding_for_check = binding.clone();
+            let binding_for_commit = binding.clone();
+            async move {
+                run_telegram_topic_mutation_while(
+                    &state,
+                    "bot",
+                    None,
+                    || {
+                        manual_telegram_topic_edit_is_current(
+                            &state,
+                            &conversation_key,
+                            "thread-name",
+                            Some(&binding_for_check),
+                            "A",
+                        )
+                    },
+                    || async {
+                        let edited = run_telegram_topic_edit_with_marker(
+                            &state,
+                            &conversation_key,
+                            "A",
+                            || async {
+                                let _ = api_started_tx.send(());
+                                let _ = release_api_rx.await;
+                                Ok(TelegramForumTopicEditOutcome::Changed)
+                            },
+                        )
+                        .await?;
+                        let persisted = persist_manual_telegram_topic_name_if_current(
+                            &state,
+                            &conversation_key,
+                            "thread-name",
+                            Some(&binding_for_commit),
+                            "A",
+                        )
+                        .await?;
+                        Ok((edited, persisted))
+                    },
+                )
+                .await
+            }
+        });
+        api_started_rx.await.expect("manual API started");
+        let realtime_token = state
+            .begin_telegram_topic_name_update(&conversation_key)
+            .await;
+        release_api_tx.send(()).expect("release manual API");
+
+        let result = task.await.expect("manual sync task");
+        assert!(matches!(result, Some(Ok((true, false)))));
+        let persisted = state.persisted.lock().await;
+        assert_eq!(
+            persisted.telegram_topic_binding_states[&conversation_key],
+            binding
+        );
+        drop(persisted);
+        state
+            .finish_telegram_topic_name_update(&conversation_key, realtime_token)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn manual_topic_name_commit_uses_the_complete_binding_snapshot() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(
+            temp_dir.path().join("config.toml"),
+            config.clone(),
+            None,
+            None,
+        );
+        let conversation_key = "telegram:bot:-100|topic=74";
+        let expected = crate::store::TelegramTopicBindingState {
+            thread_id: "thread-name".to_string(),
+            codex_title: "A".to_string(),
+            topic_name: "A".to_string(),
+            last_synced_codex_title: "A".to_string(),
+            last_synced_topic_name: "A".to_string(),
+            lifecycle_revision: 1,
+            ..Default::default()
+        };
+        let newer = crate::store::TelegramTopicBindingState {
+            codex_title: "B".to_string(),
+            topic_name: "B".to_string(),
+            last_synced_codex_title: "B".to_string(),
+            last_synced_topic_name: "B".to_string(),
+            lifecycle_revision: 2,
+            ..expected.clone()
+        };
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted
+                .im_thread_bindings
+                .insert(conversation_key.to_string(), "thread-name".to_string());
+            persisted
+                .telegram_topic_binding_states
+                .insert(conversation_key.to_string(), newer.clone());
+            persisted
+                .save(&config.state_path)
+                .expect("save newer state");
+        }
+
+        assert!(
+            !manual_telegram_topic_edit_is_current(
+                &state,
+                conversation_key,
+                "thread-name",
+                Some(&expected),
+                "A",
+            )
+            .await
+        );
+        assert!(
+            !persist_manual_telegram_topic_name_if_current(
+                &state,
+                conversation_key,
+                "thread-name",
+                Some(&expected),
+                "A",
+            )
+            .await
+            .expect("conditional persistence")
+        );
+        assert_eq!(
+            state.persisted.lock().await.telegram_topic_binding_states[conversation_key],
+            newer
+        );
+        assert_eq!(
+            PersistedState::load(&config.state_path).telegram_topic_binding_states
+                [conversation_key],
+            newer
         );
     }
 }

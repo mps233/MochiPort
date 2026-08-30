@@ -25,6 +25,12 @@ pub struct TelegramTopicBindingState {
     pub telegram_state: String,
     pub archived_at_ms: Option<u128>,
     pub missing_at_ms: Option<u128>,
+    /// Bridge generation that last committed a Codex lifecycle state. This is
+    /// reset when persisted bindings are restored after a daemon restart.
+    pub lifecycle_generation: u64,
+    /// Monotonic binding-local lifecycle intent. Unlike the bridge generation,
+    /// this distinguishes archive/unarchive/rearchive races in one generation.
+    pub lifecycle_revision: u64,
     pub last_checked_at_ms: u128,
 }
 
@@ -40,6 +46,8 @@ impl Default for TelegramTopicBindingState {
             telegram_state: "open".to_string(),
             archived_at_ms: None,
             missing_at_ms: None,
+            lifecycle_generation: 0,
+            lifecycle_revision: 0,
             last_checked_at_ms: 0,
         }
     }
@@ -128,5 +136,6 @@ mod tests {
         assert_eq!(binding.thread_id, "t-7");
         assert_eq!(binding.topic_name, "旧标题");
         assert!(binding.last_synced_codex_title.is_empty());
+        assert_eq!(binding.lifecycle_revision, 0);
     }
 }

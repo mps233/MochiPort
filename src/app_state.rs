@@ -2,9 +2,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     sync::{
-        Arc,
-        atomic::{AtomicU8, AtomicUsize, Ordering},
+        Arc, Weak,
+        atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 use tokio::{
@@ -28,6 +29,32 @@ use crate::{
 };
 
 pub type SharedState = Arc<AppState>;
+
+pub(crate) struct TelegramTopicCleanupRegistration {
+    pub(crate) token: u64,
+    pub(crate) lifecycle_generation: u64,
+    pub(crate) lifecycle_revision: u64,
+    pub(crate) notifier: Arc<Notify>,
+}
+
+pub(crate) struct TelegramTopicNameSyncMarker {
+    pub(crate) name: String,
+    pub(crate) token: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelegramThreadLifecycleState {
+    Active,
+    Archived,
+    Deleted,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TelegramThreadLifecycleIntent {
+    generation: u64,
+    revision: u64,
+    state: TelegramThreadLifecycleState,
+}
 
 /// Admission state for work that must not be cut off during a daemon restart.
 ///
@@ -176,18 +203,37 @@ pub struct AppState {
     pub runtime: Mutex<RuntimeState>,
     pub im_route_binding_ops: Mutex<()>,
     pub telegram_queue_start_ops: Mutex<()>,
-    /// Serializes the long-running Telegram session-to-topic synchronization
-    /// so a client timeout/retry cannot create a second topic for the same
-    /// Codex session while the first request is still finishing.
-    pub telegram_topic_sync_ops: Mutex<()>,
+    /// Serializes complete Topic discovery/import workflows per account so a
+    /// timed-out management request cannot start a duplicate pass.
+    pub telegram_topic_sync_ops: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// Serializes Topic discovery and binding for one Codex thread across
+    /// Telegram accounts. Weak entries disappear after the workflow releases
+    /// its gate, so session history cannot grow this map without bound.
+    telegram_topic_creation_ops: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    /// Serializes only the individual Telegram Topic API attempt. Retry-After
+    /// and generic backoff waits deliberately happen outside this gate.
+    pub telegram_topic_mutation_ops: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Names MochiPort is currently applying to Telegram Topics. Telegram
     /// echoes bot edits as service messages; these markers prevent that echo
     /// from being mistaken for a user rename.
-    pub telegram_topic_name_sync_ops: Mutex<HashMap<String, String>>,
-    /// Names MochiPort is currently applying to Codex threads. Codex emits a
-    /// notification after `thread/name/set`; these markers prevent a second
-    /// Telegram edit for the same change.
-    pub codex_thread_name_sync_ops: Mutex<HashMap<String, String>>,
+    pub telegram_topic_name_sync_ops: Mutex<HashMap<String, VecDeque<TelegramTopicNameSyncMarker>>>,
+    telegram_topic_name_sync_next_token: AtomicU64,
+    /// Orders Codex-to-Telegram name notifications independently from Telegram
+    /// service-message echo markers. A newer token supersedes stale API work.
+    pub telegram_topic_name_update_ops: Mutex<HashMap<String, u64>>,
+    telegram_topic_name_update_next_token: AtomicU64,
+    telegram_thread_lifecycle_intents: Mutex<HashMap<String, TelegramThreadLifecycleIntent>>,
+    telegram_thread_lifecycle_latest_generation: AtomicU64,
+    telegram_thread_lifecycle_next_revision: AtomicU64,
+    /// Telegram Topic deletions can be requested by both Codex lifecycle
+    /// notifications and reconciliation. Each registration atomically owns
+    /// the worker token, latest lifecycle revision, and cancellation notifier.
+    pub telegram_topic_cleanup_registrations:
+        Mutex<HashMap<String, TelegramTopicCleanupRegistration>>,
+    telegram_topic_cleanup_next_token: AtomicU64,
+    /// Account-wide Retry-After deadlines shared by every Telegram Topic
+    /// create, edit, and delete attempt.
+    telegram_topic_cleanup_retry_deadlines: Mutex<HashMap<String, Instant>>,
     pub remote_control: RemoteControlState,
     pub events: Mutex<Vec<EventRecord>>,
     pub bridge_task: Mutex<Option<JoinHandle<()>>>,
@@ -534,9 +580,19 @@ impl AppState {
             runtime: Mutex::new(runtime),
             im_route_binding_ops: Mutex::new(()),
             telegram_queue_start_ops: Mutex::new(()),
-            telegram_topic_sync_ops: Mutex::new(()),
+            telegram_topic_sync_ops: Mutex::new(HashMap::new()),
+            telegram_topic_creation_ops: Mutex::new(HashMap::new()),
+            telegram_topic_mutation_ops: Mutex::new(HashMap::new()),
             telegram_topic_name_sync_ops: Mutex::new(HashMap::new()),
-            codex_thread_name_sync_ops: Mutex::new(HashMap::new()),
+            telegram_topic_name_sync_next_token: AtomicU64::new(1),
+            telegram_topic_name_update_ops: Mutex::new(HashMap::new()),
+            telegram_topic_name_update_next_token: AtomicU64::new(1),
+            telegram_thread_lifecycle_intents: Mutex::new(HashMap::new()),
+            telegram_thread_lifecycle_latest_generation: AtomicU64::new(0),
+            telegram_thread_lifecycle_next_revision: AtomicU64::new(1),
+            telegram_topic_cleanup_registrations: Mutex::new(HashMap::new()),
+            telegram_topic_cleanup_next_token: AtomicU64::new(1),
+            telegram_topic_cleanup_retry_deadlines: Mutex::new(HashMap::new()),
             remote_control: RemoteControlState::new(),
             events: Mutex::new(Vec::new()),
             bridge_task: Mutex::new(None),
@@ -599,6 +655,324 @@ impl AppState {
         }
     }
 
+    pub async fn telegram_topic_sync_gate(&self, account_id: &str) -> Arc<Mutex<()>> {
+        let account_id = normalized_telegram_account_id(account_id);
+        self.telegram_topic_sync_ops
+            .lock()
+            .await
+            .entry(account_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    pub async fn telegram_topic_mutation_gate(&self, account_id: &str) -> Arc<Mutex<()>> {
+        let account_id = normalized_telegram_account_id(account_id);
+        self.telegram_topic_mutation_ops
+            .lock()
+            .await
+            .entry(account_id)
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    pub async fn telegram_topic_creation_gate(&self, thread_id: &str) -> Arc<Mutex<()>> {
+        let thread_id = thread_id.trim();
+        let mut gates = self.telegram_topic_creation_ops.lock().await;
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(thread_id).and_then(Weak::upgrade) {
+            return gate;
+        }
+        let gate = Arc::new(Mutex::new(()));
+        gates.insert(thread_id.to_string(), Arc::downgrade(&gate));
+        gate
+    }
+
+    pub async fn telegram_topic_cleanup_pending_for_account(&self, account_id: &str) -> bool {
+        let account_id = normalized_telegram_account_id(account_id);
+        self.telegram_topic_cleanup_registrations
+            .lock()
+            .await
+            .keys()
+            .any(|conversation_key| {
+                route_from_conversation_key(conversation_key)
+                    .is_some_and(|route| route.account_id == account_id)
+            })
+    }
+
+    pub(crate) async fn begin_telegram_topic_name_update(&self, conversation_key: &str) -> u64 {
+        let token = self
+            .telegram_topic_name_update_next_token
+            .fetch_add(1, Ordering::Relaxed);
+        self.telegram_topic_name_update_ops
+            .lock()
+            .await
+            .insert(conversation_key.to_string(), token);
+        token
+    }
+
+    pub(crate) fn next_telegram_topic_name_sync_token(&self) -> u64 {
+        self.telegram_topic_name_sync_next_token
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) async fn telegram_topic_name_update_is_current(
+        &self,
+        conversation_key: &str,
+        token: u64,
+    ) -> bool {
+        self.telegram_topic_name_update_ops
+            .lock()
+            .await
+            .get(conversation_key)
+            .is_some_and(|current| *current == token)
+    }
+
+    pub(crate) async fn finish_telegram_topic_name_update(
+        &self,
+        conversation_key: &str,
+        token: u64,
+    ) {
+        let mut operations = self.telegram_topic_name_update_ops.lock().await;
+        if operations
+            .get(conversation_key)
+            .is_some_and(|current| *current == token)
+        {
+            operations.remove(conversation_key);
+        }
+    }
+
+    /// Record a start without reviving an archive/delete already observed in
+    /// the same bridge generation. This closes the detached auto-create race.
+    pub(crate) async fn observe_telegram_thread_started(
+        &self,
+        thread_id: &str,
+        generation: u64,
+    ) -> bool {
+        let previous_generation = self
+            .telegram_thread_lifecycle_latest_generation
+            .fetch_max(generation, Ordering::Relaxed);
+        if generation < previous_generation {
+            return false;
+        }
+        let mut intents = self.telegram_thread_lifecycle_intents.lock().await;
+        if generation > previous_generation {
+            intents.retain(|_, intent| intent.generation >= generation);
+        }
+        match intents.get_mut(thread_id) {
+            Some(intent) if intent.generation > generation => false,
+            Some(intent) if intent.generation == generation => {
+                intent.state == TelegramThreadLifecycleState::Active
+            }
+            Some(intent) => {
+                *intent = TelegramThreadLifecycleIntent {
+                    generation,
+                    revision: 0,
+                    state: TelegramThreadLifecycleState::Active,
+                };
+                true
+            }
+            None => {
+                intents.insert(
+                    thread_id.to_string(),
+                    TelegramThreadLifecycleIntent {
+                        generation,
+                        revision: 0,
+                        state: TelegramThreadLifecycleState::Active,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    pub(crate) async fn observe_telegram_thread_lifecycle(
+        &self,
+        thread_id: &str,
+        generation: u64,
+        next_state: TelegramThreadLifecycleState,
+    ) -> bool {
+        self.observe_telegram_thread_lifecycle_inner(thread_id, generation, None, next_state)
+            .await
+            .unwrap_or(false)
+    }
+
+    pub(crate) async fn telegram_thread_lifecycle_revision(
+        &self,
+        thread_id: &str,
+        generation: u64,
+    ) -> Option<u64> {
+        if generation
+            < self
+                .telegram_thread_lifecycle_latest_generation
+                .load(Ordering::Relaxed)
+        {
+            return None;
+        }
+        let intents = self.telegram_thread_lifecycle_intents.lock().await;
+        match intents.get(thread_id) {
+            Some(intent) if intent.generation > generation => None,
+            Some(intent) if intent.generation == generation => Some(intent.revision),
+            _ => Some(0),
+        }
+    }
+
+    pub(crate) async fn observe_telegram_thread_lifecycle_if_revision(
+        &self,
+        thread_id: &str,
+        generation: u64,
+        expected_revision: u64,
+        next_state: TelegramThreadLifecycleState,
+    ) -> Option<bool> {
+        self.observe_telegram_thread_lifecycle_inner(
+            thread_id,
+            generation,
+            Some(expected_revision),
+            next_state,
+        )
+        .await
+    }
+
+    async fn observe_telegram_thread_lifecycle_inner(
+        &self,
+        thread_id: &str,
+        generation: u64,
+        expected_revision: Option<u64>,
+        next_state: TelegramThreadLifecycleState,
+    ) -> Option<bool> {
+        let previous_generation = self
+            .telegram_thread_lifecycle_latest_generation
+            .fetch_max(generation, Ordering::Relaxed);
+        if generation < previous_generation {
+            return None;
+        }
+        let mut intents = self.telegram_thread_lifecycle_intents.lock().await;
+        if generation > previous_generation {
+            intents.retain(|_, intent| intent.generation >= generation);
+        }
+        let current = intents.get(thread_id).copied();
+        if current.is_some_and(|intent| intent.generation > generation) {
+            return None;
+        }
+        let current_revision = current
+            .filter(|intent| intent.generation == generation)
+            .map_or(0, |intent| intent.revision);
+        if expected_revision.is_some_and(|expected| expected != current_revision) {
+            return None;
+        }
+        if current.is_some_and(|intent| {
+            intent.generation == generation
+                && intent.state == TelegramThreadLifecycleState::Deleted
+                && next_state != TelegramThreadLifecycleState::Deleted
+        }) {
+            return None;
+        }
+        let revision = self
+            .telegram_thread_lifecycle_next_revision
+            .fetch_add(1, Ordering::Relaxed);
+        intents.insert(
+            thread_id.to_string(),
+            TelegramThreadLifecycleIntent {
+                generation,
+                revision,
+                state: next_state,
+            },
+        );
+        Some(next_state == TelegramThreadLifecycleState::Active)
+    }
+
+    pub(crate) async fn telegram_thread_allows_topic_binding(
+        &self,
+        thread_id: &str,
+        generation: u64,
+    ) -> bool {
+        if generation
+            < self
+                .telegram_thread_lifecycle_latest_generation
+                .load(Ordering::Relaxed)
+        {
+            return false;
+        }
+        self.telegram_thread_lifecycle_intents
+            .lock()
+            .await
+            .get(thread_id)
+            .is_none_or(|intent| {
+                intent.generation < generation
+                    || (intent.generation == generation
+                        && intent.state == TelegramThreadLifecycleState::Active)
+            })
+    }
+
+    pub(crate) fn next_telegram_topic_cleanup_token(&self) -> u64 {
+        self.telegram_topic_cleanup_next_token
+            .fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub(crate) async fn notify_telegram_topic_cleanup_if_older(
+        &self,
+        conversation_key: &str,
+        lifecycle_generation: u64,
+        lifecycle_revision: u64,
+    ) {
+        let notifier = self
+            .telegram_topic_cleanup_registrations
+            .lock()
+            .await
+            .get(conversation_key)
+            .filter(|registration| {
+                (
+                    registration.lifecycle_generation,
+                    registration.lifecycle_revision,
+                ) < (lifecycle_generation, lifecycle_revision)
+            })
+            .map(|registration| registration.notifier.clone());
+        if let Some(notifier) = notifier {
+            notifier.notify_one();
+        }
+    }
+
+    pub(crate) async fn extend_telegram_topic_cleanup_retry_deadline(
+        &self,
+        account_id: &str,
+        delay: Duration,
+    ) -> Instant {
+        let account_id = normalized_telegram_account_id(account_id);
+        let requested = Instant::now() + delay;
+        let mut deadlines = self.telegram_topic_cleanup_retry_deadlines.lock().await;
+        let deadline = deadlines.entry(account_id).or_insert(requested);
+        if *deadline < requested {
+            *deadline = requested;
+        }
+        *deadline
+    }
+
+    pub(crate) async fn telegram_topic_cleanup_retry_deadline(
+        &self,
+        account_id: &str,
+    ) -> Option<Instant> {
+        let account_id = normalized_telegram_account_id(account_id);
+        self.telegram_topic_cleanup_retry_deadlines
+            .lock()
+            .await
+            .get(&account_id)
+            .copied()
+    }
+
+    pub(crate) async fn clear_telegram_topic_cleanup_retry_deadline_if_elapsed(
+        &self,
+        account_id: &str,
+        observed_deadline: Instant,
+    ) {
+        let account_id = normalized_telegram_account_id(account_id);
+        let mut deadlines = self.telegram_topic_cleanup_retry_deadlines.lock().await;
+        if deadlines
+            .get(&account_id)
+            .is_some_and(|deadline| *deadline <= observed_deadline && *deadline <= Instant::now())
+        {
+            deadlines.remove(&account_id);
+        }
+    }
+
     pub async fn request_shutdown(&self) -> bool {
         let mut shutdown_tx = self.shutdown_tx.lock().await;
         if let Some(tx) = shutdown_tx.take() {
@@ -606,6 +980,15 @@ impl AppState {
         } else {
             false
         }
+    }
+}
+
+fn normalized_telegram_account_id(account_id: &str) -> String {
+    let account_id = account_id.trim();
+    if account_id.is_empty() {
+        "telegram".to_string()
+    } else {
+        account_id.to_string()
     }
 }
 
@@ -643,6 +1026,7 @@ fn restore_persisted_im_bindings(
             .cloned()
             .unwrap_or_default();
         binding_state.thread_id = thread_id.to_string();
+        binding_state.lifecycle_generation = 0;
         restored_topic_states.insert(conversation_key.clone(), binding_state);
     }
 
@@ -728,6 +1112,194 @@ mod tests {
         assert!(admission.cancel_draining());
         assert_eq!(admission.state(), LifecycleAdmissionState::Active);
         assert!(admission.try_admit().is_some());
+    }
+
+    #[tokio::test]
+    async fn telegram_topic_sync_gates_are_shared_per_account_and_independent_across_accounts() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+
+        let account_a = state.telegram_topic_sync_gate(" account-a ").await;
+        let account_a_again = state.telegram_topic_sync_gate("account-a").await;
+        let account_b = state.telegram_topic_sync_gate("account-b").await;
+
+        assert!(Arc::ptr_eq(&account_a, &account_a_again));
+        assert!(!Arc::ptr_eq(&account_a, &account_b));
+        let _account_a_guard = account_a.lock().await;
+        assert!(account_a_again.try_lock().is_err());
+        assert!(account_b.try_lock().is_ok());
+    }
+
+    #[tokio::test]
+    async fn telegram_topic_mutation_gates_are_separate_from_workflow_gates() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+
+        let workflow_gate = state.telegram_topic_sync_gate("account-a").await;
+        let mutation_gate = state.telegram_topic_mutation_gate("account-a").await;
+        let mutation_gate_again = state.telegram_topic_mutation_gate(" account-a ").await;
+        let other_account_gate = state.telegram_topic_mutation_gate("account-b").await;
+
+        assert!(!Arc::ptr_eq(&workflow_gate, &mutation_gate));
+        assert!(Arc::ptr_eq(&mutation_gate, &mutation_gate_again));
+        assert!(!Arc::ptr_eq(&mutation_gate, &other_account_gate));
+    }
+
+    #[tokio::test]
+    async fn telegram_topic_creation_gate_is_shared_per_thread_without_retaining_history() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+
+        let first = state.telegram_topic_creation_gate(" thread-1 ").await;
+        let same = state.telegram_topic_creation_gate("thread-1").await;
+        let other = state.telegram_topic_creation_gate("thread-2").await;
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!Arc::ptr_eq(&first, &other));
+        let expired = Arc::downgrade(&first);
+        drop(first);
+        drop(same);
+        drop(other);
+        assert!(expired.upgrade().is_none());
+
+        let replacement = state.telegram_topic_creation_gate("thread-1").await;
+        assert_eq!(state.telegram_topic_creation_ops.lock().await.len(), 1);
+        assert_eq!(Arc::strong_count(&replacement), 1);
+    }
+
+    #[tokio::test]
+    async fn telegram_thread_lifecycle_tombstones_survive_stale_started_snapshots() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+
+        assert!(state.observe_telegram_thread_started("thread-1", 7).await);
+        state
+            .observe_telegram_thread_lifecycle(
+                "thread-1",
+                7,
+                TelegramThreadLifecycleState::Archived,
+            )
+            .await;
+        assert!(!state.observe_telegram_thread_started("thread-1", 7).await);
+        assert!(
+            !state
+                .telegram_thread_allows_topic_binding("thread-1", 7)
+                .await
+        );
+
+        assert!(
+            state
+                .observe_telegram_thread_lifecycle(
+                    "thread-1",
+                    7,
+                    TelegramThreadLifecycleState::Active,
+                )
+                .await
+        );
+        assert!(
+            state
+                .telegram_thread_allows_topic_binding("thread-1", 7)
+                .await
+        );
+
+        state
+            .observe_telegram_thread_lifecycle("thread-1", 7, TelegramThreadLifecycleState::Deleted)
+            .await;
+        assert!(
+            !state
+                .observe_telegram_thread_lifecycle(
+                    "thread-1",
+                    7,
+                    TelegramThreadLifecycleState::Active,
+                )
+                .await
+        );
+        assert!(!state.observe_telegram_thread_started("thread-1", 7).await);
+
+        assert!(state.observe_telegram_thread_started("thread-1", 8).await);
+        assert!(
+            state
+                .telegram_thread_allows_topic_binding("thread-1", 8)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_topic_cleanup_pending_is_scoped_to_account() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        state
+            .telegram_topic_cleanup_registrations
+            .lock()
+            .await
+            .insert(
+                "telegram:account-a:-100|topic=42".to_string(),
+                TelegramTopicCleanupRegistration {
+                    token: 1,
+                    lifecycle_generation: 1,
+                    lifecycle_revision: 1,
+                    notifier: Arc::new(Notify::new()),
+                },
+            );
+
+        assert!(
+            state
+                .telegram_topic_cleanup_pending_for_account("account-a")
+                .await
+        );
+        assert!(
+            !state
+                .telegram_topic_cleanup_pending_for_account("account-b")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn active_lifecycle_only_wakes_an_older_topic_cleanup_registration() {
+        let temp_dir = tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let conversation_key = "telegram:account-a:-100|topic=42";
+        let notifier = Arc::new(Notify::new());
+        state
+            .telegram_topic_cleanup_registrations
+            .lock()
+            .await
+            .insert(
+                conversation_key.to_string(),
+                TelegramTopicCleanupRegistration {
+                    token: 1,
+                    lifecycle_generation: 3,
+                    lifecycle_revision: 5,
+                    notifier: notifier.clone(),
+                },
+            );
+
+        state
+            .notify_telegram_topic_cleanup_if_older(conversation_key, 3, 4)
+            .await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), notifier.notified())
+                .await
+                .is_err()
+        );
+
+        state
+            .notify_telegram_topic_cleanup_if_older(conversation_key, 3, 6)
+            .await;
+        tokio::time::timeout(Duration::from_millis(100), notifier.notified())
+            .await
+            .expect("newer active lifecycle wakes stale cleanup");
     }
 
     use crate::config::TelegramConfig;
@@ -832,6 +1404,14 @@ mod tests {
             "telegram:active:-100|topic=17".to_string(),
             "topic-thread".to_string(),
         )]);
+        persisted.telegram_topic_binding_states.insert(
+            "telegram:active:-100|topic=17".to_string(),
+            crate::store::TelegramTopicBindingState {
+                thread_id: "topic-thread".to_string(),
+                lifecycle_generation: 9,
+                ..Default::default()
+            },
+        );
 
         let (runtime, changed) = restore_persisted_im_bindings(&config, &mut persisted);
 
@@ -842,6 +1422,11 @@ mod tests {
                 .get("telegram:active:-100|topic=17")
                 .map(|state| state.thread_id.as_str()),
             Some("topic-thread")
+        );
+        assert_eq!(
+            persisted.telegram_topic_binding_states["telegram:active:-100|topic=17"]
+                .lifecycle_generation,
+            0
         );
         assert_eq!(
             runtime

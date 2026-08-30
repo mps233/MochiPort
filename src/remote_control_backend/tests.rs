@@ -5,7 +5,9 @@ use base64::Engine;
 use serde_json::{Value, json};
 
 use super::outbound::ack_server_envelope;
-use super::server_messages::observe_thread_status_changed;
+use super::server_messages::{
+    observe_thread_status_changed, should_forward_server_notification_to_im,
+};
 use super::*;
 use crate::{
     app_state::{AppState, PendingRemoteRequest},
@@ -152,6 +154,27 @@ fn envelope_message_method(envelope: &Value) -> Option<&str> {
         .get("message")
         .and_then(|message| message.get("method"))
         .and_then(Value::as_str)
+}
+
+async fn recv_text_envelope_with_method(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<OutboundWsMessage>,
+    method: &str,
+) -> Value {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match rx.recv().await {
+                Some(OutboundWsMessage::Text(envelope))
+                    if envelope_message_method(&envelope) == Some(method) =>
+                {
+                    return envelope;
+                }
+                Some(_) => {}
+                None => panic!("remote-control outbound channel closed before {method}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for remote-control method {method}"))
 }
 
 fn envelope_is_ack(envelope: &Value) -> bool {
@@ -973,6 +996,78 @@ async fn non_owner_thread_notification_is_not_forwarded_to_im() {
         .expect("owner notification should be forwarded");
     assert_eq!(notification.method, "item/agentMessage/delta");
     assert_eq!(notification.remote_client_key.as_deref(), Some(feishu_key));
+}
+
+#[tokio::test]
+async fn bound_telegram_lifecycle_notifications_bypass_the_non_owner_filter() {
+    let state = test_state();
+    state.runtime.lock().await.bind_route(
+        "thread-telegram",
+        RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:bot:-100|topic=42".to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "-100|topic=42".to_string(),
+            remote_client_key: "im:telegram:owner".to_string(),
+        },
+    );
+    let params = json!({"threadId": "thread-telegram"});
+
+    for method in ["thread/archived", "thread/unarchived", "thread/deleted"] {
+        assert!(
+            should_forward_server_notification_to_im(
+                &state,
+                Some("im:wechat:non-owner"),
+                method,
+                Some(&params),
+            )
+            .await,
+            "{method} should reach the lifecycle cleanup handler"
+        );
+    }
+    assert!(
+        !should_forward_server_notification_to_im(
+            &state,
+            Some("im:wechat:non-owner"),
+            "item/agentMessage/delta",
+            Some(&params),
+        )
+        .await
+    );
+}
+
+#[tokio::test]
+async fn official_unbound_lifecycle_notifications_reach_topic_creation_tombstones() {
+    let state = test_state();
+    let params = json!({"threadId": "thread-not-yet-bound"});
+
+    for client_key in [DEFAULT_REMOTE_CLIENT_KEY, "default:codex_app"] {
+        for method in ["thread/archived", "thread/unarchived", "thread/deleted"] {
+            assert!(
+                should_forward_server_notification_to_im(
+                    &state,
+                    Some(client_key),
+                    method,
+                    Some(&params),
+                )
+                .await,
+                "{client_key} {method} should reach the lifecycle intent handler"
+            );
+        }
+    }
+
+    for client_key in ["default:cli", "default:vscode", "im:telegram:other"] {
+        assert!(
+            !should_forward_server_notification_to_im(
+                &state,
+                Some(client_key),
+                "thread/archived",
+                Some(&params),
+            )
+            .await,
+            "{client_key} must not gain access to an unbound thread lifecycle"
+        );
+    }
 }
 
 #[tokio::test]
@@ -2201,6 +2296,207 @@ async fn resume_for_client_on_connection_does_not_switch_connections() {
         .expect("thread resume task")
         .expect("thread resume response");
     assert_eq!(response, json!({"thread": {"id": "thread-from-codex"}}));
+}
+
+#[tokio::test]
+async fn resume_for_new_client_on_connection_waits_for_initialize_response() {
+    let state = test_state();
+    let (codex_tx, mut codex_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (vscode_tx, mut vscode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let route_client_key = RouteTarget::deterministic_remote_client_key_for(
+        ImPlatformKind::Telegram,
+        "default",
+        "-100|topic=902",
+    );
+
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.clients.clear();
+        ensure_client_state_locked(&mut remote, "default:codex_app").initialized = true;
+        ensure_client_state_locked(&mut remote, "default:vscode").initialized = true;
+        remote.connections.insert(
+            "conn-codex".to_string(),
+            test_connection(
+                "conn-codex",
+                20,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(codex_tx),
+            ),
+        );
+        remote.connections.insert(
+            "conn-vscode".to_string(),
+            test_connection(
+                "conn-vscode",
+                10,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::Vscode,
+                Some(vscode_tx),
+            ),
+        );
+        sync_legacy_from_active_connection_locked(&mut remote);
+        assert!(!remote.clients.contains_key(&route_client_key));
+    }
+
+    let request_state = state.clone();
+    let request_client_key = route_client_key.clone();
+    let request = tokio::spawn(async move {
+        resume_thread_for_client_on_connection(
+            &request_state,
+            20,
+            &request_client_key,
+            "thread-new",
+            true,
+        )
+        .await
+    });
+
+    let initialize = recv_text_envelope_with_method(&mut codex_rx, "initialize").await;
+    assert!(vscode_rx.try_recv().is_err());
+    tokio::task::yield_now().await;
+    assert!(!request.is_finished());
+    assert!(
+        take_text_envelopes(&mut codex_rx)
+            .iter()
+            .all(|envelope| envelope_message_method(envelope) != Some("thread/resume"))
+    );
+
+    let client_id = initialize["client_id"]
+        .as_str()
+        .expect("initialize client id")
+        .to_string();
+    let stream_id = initialize["stream_id"]
+        .as_str()
+        .expect("initialize stream id")
+        .to_string();
+    let initialize_request_id = initialize["message"]["id"].clone();
+    observe_app_server_message(
+        &state,
+        20,
+        &client_id,
+        &stream_id,
+        &json!({
+            "id": initialize_request_id,
+            "result": {"userAgent": "Codex Desktop/1.0"}
+        }),
+    )
+    .await;
+
+    let resume = recv_text_envelope_with_method(&mut codex_rx, "thread/resume").await;
+    assert!(vscode_rx.try_recv().is_err());
+    assert_eq!(resume["client_id"], client_id);
+    assert_eq!(resume["stream_id"], stream_id);
+    assert_eq!(
+        resume["message"]["params"],
+        json!({
+            "threadId": "thread-new",
+            "excludeTurns": true,
+        })
+    );
+
+    let resume_request_id = resume["message"]["id"].clone();
+    observe_app_server_message(
+        &state,
+        20,
+        &client_id,
+        &stream_id,
+        &json!({
+            "id": resume_request_id,
+            "result": {"thread": {"id": "thread-new"}}
+        }),
+    )
+    .await;
+
+    let response = request
+        .await
+        .expect("thread resume task")
+        .expect("thread resume response");
+    assert_eq!(response, json!({"thread": {"id": "thread-new"}}));
+    let remote = state.remote_control.inner.lock().await;
+    let route_client = remote
+        .clients
+        .get(&route_client_key)
+        .expect("new Telegram route client");
+    assert!(route_client.initialized);
+    assert_eq!(
+        route_client.current_thread_id.as_deref(),
+        Some("thread-new")
+    );
+}
+
+#[tokio::test]
+async fn resume_for_new_client_on_connection_does_not_fallback_after_disconnect() {
+    let state = test_state();
+    let (codex_tx, mut codex_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (vscode_tx, mut vscode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let route_client_key = RouteTarget::deterministic_remote_client_key_for(
+        ImPlatformKind::Telegram,
+        "default",
+        "-100|topic=903",
+    );
+
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.clients.clear();
+        ensure_client_state_locked(&mut remote, "default:codex_app").initialized = true;
+        ensure_client_state_locked(&mut remote, "default:vscode").initialized = true;
+        remote.connections.insert(
+            "conn-codex".to_string(),
+            test_connection(
+                "conn-codex",
+                20,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(codex_tx),
+            ),
+        );
+        remote.connections.insert(
+            "conn-vscode".to_string(),
+            test_connection(
+                "conn-vscode",
+                10,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::Vscode,
+                Some(vscode_tx),
+            ),
+        );
+        sync_legacy_from_active_connection_locked(&mut remote);
+    }
+
+    let request_state = state.clone();
+    let request_client_key = route_client_key.clone();
+    let request = tokio::spawn(async move {
+        resume_thread_for_client_on_connection(
+            &request_state,
+            20,
+            &request_client_key,
+            "thread-disconnected",
+            true,
+        )
+        .await
+    });
+
+    let _initialize = recv_text_envelope_with_method(&mut codex_rx, "initialize").await;
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.connections.remove("conn-codex");
+        sync_legacy_from_active_connection_locked(&mut remote);
+    }
+
+    let error = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("resume should stop waiting after target disconnect")
+        .expect("thread resume task")
+        .expect_err("resume should fail after target disconnect");
+    let message = error.to_string();
+    assert!(message.contains("target connection disconnected"));
+    assert!(message.contains("connection_epoch=20"));
+    assert!(message.contains(&route_client_key));
+    assert!(vscode_rx.try_recv().is_err());
 }
 
 #[tokio::test]

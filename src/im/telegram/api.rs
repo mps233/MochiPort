@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
@@ -11,12 +12,19 @@ use crate::types::split_telegram_message_target;
 use super::types::TelegramSettings;
 
 const TELEGRAM_API_BASE: &str = "https://api.telegram.org";
+const TELEGRAM_GET_UPDATES_TIMEOUT_MARGIN_SECONDS: u64 = 10;
+const TELEGRAM_GET_UPDATES_MIN_TIMEOUT_SECONDS: u64 = 10;
+const TELEGRAM_TOPIC_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const TELEGRAM_MAX_DOWNLOAD_BYTES: u64 = 20 * 1024 * 1024;
 pub(crate) const TELEGRAM_MAX_MEDIA_GROUP_ITEMS: usize = 10;
 
 #[derive(Debug, Clone)]
 pub struct TelegramApi {
     settings: TelegramSettings,
+    #[cfg(test)]
+    api_base: String,
+    #[cfg(test)]
+    topic_request_timeout: Duration,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +276,13 @@ impl TelegramInputRichMessageMedia {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramForumTopicEditOutcome {
+    Changed,
+    NotModified,
+    Rejected,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error(
     "telegram api {method} failed: status={status} error_code={error_code:?} description={description}"
@@ -283,6 +298,10 @@ pub struct TelegramApiError {
 impl TelegramApiError {
     pub fn is_conflict(&self) -> bool {
         self.error_code == Some(409)
+    }
+
+    pub fn is_rate_limited(&self) -> bool {
+        self.error_code == Some(429) || self.status == StatusCode::TOO_MANY_REQUESTS
     }
 
     pub fn is_message_not_modified(&self) -> bool {
@@ -303,11 +322,13 @@ impl TelegramApiError {
         description.contains("topic_not_modified") || description.contains("topic is not modified")
     }
 
-    /// Match only Telegram errors that identify a missing forum topic. Other
-    /// 400/403/network errors must remain inconclusive so callers do not
+    /// Match only Topic management errors that identify a missing forum topic.
+    /// Other 400/403/network errors must remain inconclusive so callers do not
     /// create duplicate topics or discard a valid binding.
     pub fn is_forum_topic_missing(&self) -> bool {
-        if !self.method.eq_ignore_ascii_case("editForumTopic") {
+        if !self.method.eq_ignore_ascii_case("editForumTopic")
+            && !self.method.eq_ignore_ascii_case("deleteForumTopic")
+        {
             return false;
         }
         let description = self.description.to_ascii_lowercase();
@@ -418,7 +439,19 @@ impl TelegramApiError {
 
 impl TelegramApi {
     pub fn new(settings: TelegramSettings) -> Self {
-        Self { settings }
+        Self {
+            settings,
+            #[cfg(test)]
+            api_base: TELEGRAM_API_BASE.to_string(),
+            #[cfg(test)]
+            topic_request_timeout: TELEGRAM_TOPIC_REQUEST_TIMEOUT,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_api_base(mut self, api_base: impl Into<String>) -> Self {
+        self.api_base = api_base.into();
+        self
     }
 
     pub fn is_configured(&self) -> bool {
@@ -437,7 +470,12 @@ impl TelegramApi {
         if let Some(offset) = offset {
             body["offset"] = serde_json::json!(offset);
         }
-        self.post("getUpdates", &body).await
+        self.post_with_timeout(
+            "getUpdates",
+            &body,
+            Some(get_updates_request_timeout(timeout_seconds)),
+        )
+        .await
     }
 
     pub async fn set_my_commands(&self, commands: &[TelegramBotCommand]) -> Result<()> {
@@ -457,14 +495,36 @@ impl TelegramApi {
         name: &str,
     ) -> Result<TelegramForumTopic> {
         let body = create_forum_topic_body(chat_id, name);
-        self.post("createForumTopic", &body).await
+        self.post_with_timeout(
+            "createForumTopic",
+            &body,
+            Some(self.topic_request_timeout()),
+        )
+        .await
     }
 
-    /// Remove a forum topic that was created for a session whose binding
-    /// could not be completed. This keeps retries from leaving orphan topics.
+    /// Remove a forum topic. Telegram can report an already-absent Topic as a
+    /// 400 response, which is an idempotent success for deletion callers.
     pub async fn delete_forum_topic(&self, chat_id: &str, message_thread_id: i64) -> Result<bool> {
         let body = delete_forum_topic_body(chat_id, message_thread_id);
-        self.post("deleteForumTopic", &body).await
+        match self
+            .post_with_timeout(
+                "deleteForumTopic",
+                &body,
+                Some(self.topic_request_timeout()),
+            )
+            .await
+        {
+            Ok(result) => Ok(result),
+            Err(err)
+                if err
+                    .downcast_ref::<TelegramApiError>()
+                    .is_some_and(TelegramApiError::is_forum_topic_missing) =>
+            {
+                Ok(true)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Probe whether a forum topic still exists by applying its expected name.
@@ -475,16 +535,20 @@ impl TelegramApi {
         chat_id: &str,
         message_thread_id: i64,
         name: &str,
-    ) -> Result<bool> {
+    ) -> Result<TelegramForumTopicEditOutcome> {
         let body = edit_forum_topic_body(chat_id, message_thread_id, name);
-        match self.post("editForumTopic", &body).await {
-            Ok(result) => Ok(result),
+        match self
+            .post_with_timeout("editForumTopic", &body, Some(self.topic_request_timeout()))
+            .await
+        {
+            Ok(true) => Ok(TelegramForumTopicEditOutcome::Changed),
+            Ok(false) => Ok(TelegramForumTopicEditOutcome::Rejected),
             Err(err)
                 if err
                     .downcast_ref::<TelegramApiError>()
                     .is_some_and(|error| error.is_topic_not_modified()) =>
             {
-                Ok(true)
+                Ok(TelegramForumTopicEditOutcome::NotModified)
             }
             Err(err) => Err(err),
         }
@@ -921,27 +985,40 @@ impl TelegramApi {
     where
         T: for<'de> Deserialize<'de>,
     {
+        self.post_with_timeout(method, body, None).await
+    }
+
+    async fn post_with_timeout<T>(
+        &self,
+        method: &str,
+        body: &serde_json::Value,
+        request_timeout: Option<Duration>,
+    ) -> Result<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
         if !self.is_configured() {
             return Err(anyhow!("telegram bot_token is empty"));
         }
         let url = format!(
-            "{TELEGRAM_API_BASE}/bot{}/{}",
+            "{}/bot{}/{}",
+            self.api_base(),
             self.settings.bot_token.trim(),
             method
         );
-        let response = crate::outbound_http::get()
-            .post(url)
-            .json(body)
-            .send()
-            .await
-            .map_err(|err| {
-                let message = self.sanitize_error(&err.to_string());
-                chain_log::write_line(format!(
-                    "[telegram_api] event=request_failed method={} err={}",
-                    method, message
-                ));
-                anyhow!("telegram api {method} request failed: {}", message)
-            })?;
+        let request = crate::outbound_http::get().post(url).json(body);
+        let request = match request_timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        };
+        let response = request.send().await.map_err(|err| {
+            let message = self.sanitize_error(&err.to_string());
+            chain_log::write_line(format!(
+                "[telegram_api] event=request_failed method={} err={}",
+                method, message
+            ));
+            anyhow!("telegram api {method} request failed: {}", message)
+        })?;
         let status = response.status();
         let payload: TelegramResponse<T> = response
             .json()
@@ -1069,6 +1146,36 @@ impl TelegramApi {
             message.replace(token, "***")
         }
     }
+
+    fn api_base(&self) -> &str {
+        #[cfg(test)]
+        {
+            &self.api_base
+        }
+        #[cfg(not(test))]
+        {
+            TELEGRAM_API_BASE
+        }
+    }
+
+    fn topic_request_timeout(&self) -> Duration {
+        #[cfg(test)]
+        {
+            self.topic_request_timeout
+        }
+        #[cfg(not(test))]
+        {
+            TELEGRAM_TOPIC_REQUEST_TIMEOUT
+        }
+    }
+}
+
+fn get_updates_request_timeout(timeout_seconds: u32) -> Duration {
+    Duration::from_secs(
+        u64::from(timeout_seconds)
+            .saturating_add(TELEGRAM_GET_UPDATES_TIMEOUT_MARGIN_SECONDS)
+            .max(TELEGRAM_GET_UPDATES_MIN_TIMEOUT_SECONDS),
+    )
 }
 
 /// Build the JSON payload separately from the network call so it can be
@@ -1272,15 +1379,17 @@ fn photo_group_media_item(
 #[cfg(test)]
 mod tests {
     use reqwest::StatusCode;
-    use std::path::PathBuf;
+    use std::{path::PathBuf, time::Duration};
+    use tokio::sync::oneshot;
 
     use super::{
-        TelegramApi, TelegramApiError, TelegramBotCommand, TelegramInputRichMessage,
-        TelegramInputRichMessageMedia, TelegramParseMode, TelegramResponse, TelegramUpdate,
-        create_forum_topic_body, delete_forum_topic_body, edit_forum_topic_body,
-        edit_message_reply_markup_body, edit_message_text_body, edit_rich_message_body,
-        send_chat_action_body, send_message_draft_body, send_photo_group_body,
-        send_photo_group_media_body, send_rich_message_body, send_rich_message_draft_body,
+        TELEGRAM_TOPIC_REQUEST_TIMEOUT, TelegramApi, TelegramApiError, TelegramBotCommand,
+        TelegramInputRichMessage, TelegramInputRichMessageMedia, TelegramParseMode,
+        TelegramResponse, TelegramUpdate, create_forum_topic_body, delete_forum_topic_body,
+        edit_forum_topic_body, edit_message_reply_markup_body, edit_message_text_body,
+        edit_rich_message_body, get_updates_request_timeout, send_chat_action_body,
+        send_message_draft_body, send_photo_group_body, send_photo_group_media_body,
+        send_rich_message_body, send_rich_message_draft_body,
     };
     use crate::im::telegram::types::TelegramSettings;
 
@@ -1297,6 +1406,68 @@ mod tests {
             description: description.to_string(),
             retry_after: None,
         }
+    }
+
+    #[test]
+    fn request_timeouts_bound_long_poll_and_topic_mutations() {
+        assert_eq!(get_updates_request_timeout(0), Duration::from_secs(10));
+        assert_eq!(get_updates_request_timeout(25), Duration::from_secs(35));
+        assert_eq!(TELEGRAM_TOPIC_REQUEST_TIMEOUT, Duration::from_secs(30));
+    }
+
+    async fn stalled_topic_api() -> (TelegramApi, oneshot::Receiver<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind stalled Telegram server");
+        let address = listener.local_addr().expect("stalled server address");
+        let (accepted_tx, accepted_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (_stream, _) = listener.accept().await.expect("accept Topic request");
+            let _ = accepted_tx.send(());
+            std::future::pending::<()>().await;
+        });
+
+        let mut api = TelegramApi::new(TelegramSettings {
+            bot_token: "test-token".to_string(),
+            ..TelegramSettings::default()
+        });
+        api.api_base = format!("http://{address}");
+        api.topic_request_timeout = Duration::from_millis(50);
+        (api, accepted_rx)
+    }
+
+    #[tokio::test]
+    async fn stalled_create_forum_topic_times_out() {
+        let (api, accepted) = stalled_topic_api().await;
+        let request = tokio::spawn(async move { api.create_forum_topic("-100", "Topic").await });
+
+        tokio::time::timeout(Duration::from_secs(1), accepted)
+            .await
+            .expect("create request must reach stalled server")
+            .expect("stalled server must report accepted request");
+        let result = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .expect("create request must honor its request timeout")
+            .expect("create request task must finish");
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn stalled_edit_forum_topic_times_out() {
+        let (api, accepted) = stalled_topic_api().await;
+        let request = tokio::spawn(async move { api.edit_forum_topic("-100", 17, "Topic").await });
+
+        tokio::time::timeout(Duration::from_secs(1), accepted)
+            .await
+            .expect("edit request must reach stalled server")
+            .expect("stalled server must report accepted request");
+        let result = tokio::time::timeout(Duration::from_secs(1), request)
+            .await
+            .expect("edit request must honor its request timeout")
+            .expect("edit request task must finish");
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1471,6 +1642,15 @@ mod tests {
         );
         assert!(
             api_error(
+                "deleteForumTopic",
+                StatusCode::BAD_REQUEST,
+                400,
+                "Bad Request: TOPIC_ID_INVALID",
+            )
+            .is_forum_topic_missing()
+        );
+        assert!(
+            api_error(
                 "editForumTopic",
                 StatusCode::BAD_REQUEST,
                 400,
@@ -1513,6 +1693,28 @@ mod tests {
                 "Bad Request: TOPIC_ID_INVALID",
             )
             .is_forum_topic_missing()
+        );
+    }
+
+    #[test]
+    fn classifies_rate_limits_with_or_without_retry_parameters() {
+        assert!(
+            api_error(
+                "deleteForumTopic",
+                StatusCode::TOO_MANY_REQUESTS,
+                429,
+                "Too Many Requests",
+            )
+            .is_rate_limited()
+        );
+        assert!(
+            !api_error(
+                "deleteForumTopic",
+                StatusCode::FORBIDDEN,
+                403,
+                "Forbidden: not enough rights",
+            )
+            .is_rate_limited()
         );
     }
 

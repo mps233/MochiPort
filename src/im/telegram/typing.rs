@@ -415,7 +415,7 @@ fn typing_retry_delay(error: &anyhow::Error, consecutive_failures: u32) -> Durat
         .downcast_ref::<TelegramApiError>()
         .and_then(|error| error.retry_after)
     {
-        return Duration::from_secs(retry_after.clamp(1, TELEGRAM_TYPING_RETRY_MAX_SECONDS));
+        return Duration::from_secs(retry_after.max(1));
     }
     let exponent = consecutive_failures.saturating_sub(1).min(4);
     Duration::from_secs(
@@ -463,6 +463,18 @@ mod tests {
             retry_after: Some(7),
         });
         assert_eq!(typing_retry_delay(&server_error, 1), Duration::from_secs(7));
+
+        let long_server_error = anyhow::Error::new(TelegramApiError {
+            method: "sendChatAction".to_string(),
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error_code: Some(429),
+            description: "retry later".to_string(),
+            retry_after: Some(43),
+        });
+        assert_eq!(
+            typing_retry_delay(&long_server_error, 1),
+            Duration::from_secs(43)
+        );
 
         let generic_error = anyhow::anyhow!("network unavailable");
         assert_eq!(

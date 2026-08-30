@@ -552,7 +552,7 @@ pub(super) async fn observe_app_server_message(
     }
 }
 
-async fn should_forward_server_notification_to_im(
+pub(super) async fn should_forward_server_notification_to_im(
     state: &SharedState,
     client_key: Option<&str>,
     method: &str,
@@ -563,10 +563,29 @@ async fn should_forward_server_notification_to_im(
     };
     let is_tracked =
         should_track_notification_thread_for_client(state, client_key, &thread_id).await;
-    if is_tracked || method == "thread/started" {
+    let bound_lifecycle = matches!(
+        method,
+        "thread/archived" | "thread/unarchived" | "thread/deleted"
+    ) && telegram_thread_is_bound(state, &thread_id).await;
+    let official_unbound_lifecycle = matches!(
+        client_key,
+        Some(DEFAULT_REMOTE_CLIENT_KEY) | Some("default:codex_app")
+    ) && matches!(
+        method,
+        "thread/archived" | "thread/unarchived" | "thread/deleted"
+    );
+    if is_tracked || method == "thread/started" || bound_lifecycle || official_unbound_lifecycle {
         if !is_tracked {
+            let reason = if bound_lifecycle {
+                "bound_thread_lifecycle"
+            } else if official_unbound_lifecycle {
+                "official_unbound_thread_lifecycle"
+            } else {
+                "thread_started_discovery"
+            };
             chain_log::write_line(format!(
-                "[remote_control] event=notification_broadcast_allowed reason=thread_started_discovery client_key={} thread={}",
+                "[remote_control] event=notification_broadcast_allowed reason={} client_key={} thread={}",
+                reason,
                 client_key.unwrap_or(""),
                 thread_id
             ));
@@ -580,6 +599,25 @@ async fn should_forward_server_notification_to_im(
         thread_id
     ));
     false
+}
+
+async fn telegram_thread_is_bound(state: &SharedState, thread_id: &str) -> bool {
+    if state
+        .runtime
+        .lock()
+        .await
+        .route_for_thread(thread_id)
+        .is_some_and(|route| route.platform == crate::types::ImPlatformKind::Telegram)
+    {
+        return true;
+    }
+    state.persisted.lock().await.im_thread_bindings.iter().any(
+        |(conversation_key, bound_thread_id)| {
+            bound_thread_id == thread_id
+                && crate::im_runtime::route_from_conversation_key(conversation_key)
+                    .is_some_and(|route| route.platform == crate::types::ImPlatformKind::Telegram)
+        },
+    )
 }
 
 pub(super) async fn observe_thread_status_changed(

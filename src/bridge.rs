@@ -226,6 +226,7 @@ pub async fn start_bridge(state: SharedState) {
         let telegram_state = state.clone();
         let telegram_tx = tx.clone();
         let telegram_attachment_root = telegram_attachment_root.clone();
+        let telegram_api_registry = api_registry.clone();
         tasks.spawn(async move {
             loop {
                 if !is_current_generation(&telegram_state, generation).await {
@@ -241,6 +242,7 @@ pub async fn start_bridge(state: SharedState) {
                 match listen_polling(
                     telegram_state.clone(),
                     telegram_api.clone(),
+                    telegram_api_registry.clone(),
                     telegram_attachment_root.clone(),
                     telegram_tx.clone(),
                 )

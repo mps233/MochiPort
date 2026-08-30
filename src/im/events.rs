@@ -26,10 +26,11 @@ use crate::{
             },
         },
         telegram::{
-            adapter::TelegramAdapter, api::TelegramApiError,
+            adapter::TelegramAdapter,
+            api::{TelegramApiError, TelegramForumTopicEditOutcome},
             collab_progress as telegram_collab_progress, commentary as telegram_commentary,
-            flow as telegram_flow, progress as telegram_progress, search as telegram_search,
-            typing as telegram_typing,
+            flow as telegram_flow, polling as telegram_polling, progress as telegram_progress,
+            search as telegram_search, typing as telegram_typing,
         },
         wechat::adapter::WechatAdapter,
     },
@@ -594,7 +595,7 @@ fn telegram_command_progress_retry_delay_ms(
     if let Some(api_err) = err.downcast_ref::<TelegramApiError>()
         && let Some(retry_after) = api_err.retry_after
     {
-        return Some(retry_after.saturating_mul(1_000).min(5_000));
+        return Some(retry_after.max(1).saturating_mul(1_000));
     }
     (has_message_id && final_update).then_some(500)
 }
@@ -1724,7 +1725,14 @@ pub(crate) async fn handle_codex_notification_for_generation(
             if matches!(
                 notification.remote_client_key.as_deref(),
                 Some("default") | Some("default:codex_app")
-            ) {
+            ) && match lifecycle_notification_thread_id(params) {
+                Some(thread_id) => {
+                    state
+                        .observe_telegram_thread_started(&thread_id, generation)
+                        .await
+                }
+                None => true,
+            } {
                 let state_for_auto_topic = state.clone();
                 let api_registry_for_auto_topic = api_registry.clone();
                 let remote_client_key =
@@ -1744,6 +1752,36 @@ pub(crate) async fn handle_codex_notification_for_generation(
                     )
                     .await;
                 });
+            }
+        }
+        "thread/archived" => {
+            if let Some(thread_id) = lifecycle_notification_thread_id(params) {
+                telegram_polling::archive_telegram_topic_for_codex_thread(
+                    &state,
+                    &api_registry,
+                    &thread_id,
+                    generation,
+                )
+                .await;
+            }
+        }
+        "thread/deleted" => {
+            if let Some(thread_id) = lifecycle_notification_thread_id(params) {
+                telegram_polling::delete_telegram_topic_for_codex_thread(
+                    &state,
+                    &api_registry,
+                    &thread_id,
+                    generation,
+                )
+                .await;
+            }
+        }
+        "thread/unarchived" => {
+            if let Some(thread_id) = lifecycle_notification_thread_id(params) {
+                telegram_polling::unarchive_telegram_topic_for_codex_thread(
+                    &state, &thread_id, generation,
+                )
+                .await;
             }
         }
         "thread/name/updated" => {
@@ -2617,6 +2655,147 @@ pub(crate) async fn handle_codex_notification_for_generation(
     }
 }
 
+fn lifecycle_notification_thread_id(params: &serde_json::Value) -> Option<String> {
+    params
+        .get("threadId")
+        .and_then(|value| value.as_str())
+        .or_else(|| params.get("thread_id").and_then(|value| value.as_str()))
+        .or_else(|| {
+            params
+                .get("thread")
+                .and_then(|thread| thread.get("id"))
+                .and_then(|value| value.as_str())
+        })
+        .or_else(|| params.get("id").and_then(|value| value.as_str()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TelegramTopicNameDecision {
+    Committed,
+    StaleBinding,
+    Superseded,
+}
+
+async fn commit_telegram_topic_name_if_current(
+    state: &SharedState,
+    conversation_key: &str,
+    thread_id: &str,
+    codex_title: &str,
+    topic_name: &str,
+    operation_token: u64,
+) -> TelegramTopicNameDecision {
+    let path = state.config.lock().await.state_path.clone();
+    let operations = state.telegram_topic_name_update_ops.lock().await;
+    if !operations
+        .get(conversation_key)
+        .is_some_and(|current| *current == operation_token)
+    {
+        return TelegramTopicNameDecision::Superseded;
+    }
+    let mut persisted = state.persisted.lock().await;
+    if !persisted
+        .im_thread_bindings
+        .get(conversation_key)
+        .is_some_and(|bound_thread_id| bound_thread_id == thread_id)
+    {
+        return TelegramTopicNameDecision::StaleBinding;
+    }
+    let Some(binding) = persisted
+        .telegram_topic_binding_states
+        .get_mut(conversation_key)
+    else {
+        return TelegramTopicNameDecision::StaleBinding;
+    };
+    if binding.thread_id != thread_id {
+        return TelegramTopicNameDecision::StaleBinding;
+    }
+    binding.codex_title = codex_title.to_string();
+    binding.topic_name = topic_name.to_string();
+    binding.last_synced_codex_title = codex_title.to_string();
+    binding.last_synced_topic_name = topic_name.to_string();
+    binding.last_checked_at_ms = crate::types::now_ms();
+    if let Err(err) = persisted.save(&path) {
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[telegram_topic] event=real_time_sync_save_failed key={} err={err}",
+                conversation_key
+            )
+        });
+    }
+    TelegramTopicNameDecision::Committed
+}
+
+async fn telegram_topic_name_edit_is_current(
+    state: &SharedState,
+    route: &RouteTarget,
+    thread_id: &str,
+    operation_token: u64,
+) -> bool {
+    if !state
+        .telegram_topic_name_update_is_current(&route.conversation_key, operation_token)
+        .await
+        || state
+            .telegram_topic_cleanup_pending_for_account(&route.account_id)
+            .await
+    {
+        return false;
+    }
+
+    let _binding_guard = state.im_route_binding_ops.lock().await;
+    let runtime_route = state.runtime.lock().await.route_for_thread(thread_id);
+    let runtime_matches = runtime_route.as_ref().is_some_and(|current| {
+        current.conversation_key == route.conversation_key
+            && current.account_id == route.account_id
+            && current.chat_id == route.chat_id
+    });
+    if !runtime_matches {
+        return false;
+    }
+    let persisted = state.persisted.lock().await;
+    persisted
+        .im_thread_bindings
+        .get(&route.conversation_key)
+        .is_some_and(|bound_thread_id| bound_thread_id == thread_id)
+        && persisted
+            .telegram_topic_binding_states
+            .get(&route.conversation_key)
+            .is_some_and(|binding| {
+                binding.thread_id == thread_id && binding.codex_state == "active"
+            })
+}
+
+async fn run_telegram_topic_name_edit_while_current<M, MutationFuture>(
+    state: &SharedState,
+    route: &RouteTarget,
+    thread_id: &str,
+    topic_name: &str,
+    operation_token: u64,
+    mutation: M,
+) -> Option<Result<bool>>
+where
+    M: FnOnce() -> MutationFuture,
+    MutationFuture: std::future::Future<Output = Result<TelegramForumTopicEditOutcome>>,
+{
+    telegram_polling::run_telegram_topic_mutation_while(
+        state,
+        &route.account_id,
+        None,
+        || telegram_topic_name_edit_is_current(state, route, thread_id, operation_token),
+        || {
+            telegram_polling::run_telegram_topic_edit_with_marker(
+                state,
+                &route.conversation_key,
+                topic_name,
+                mutation,
+            )
+        },
+    )
+    .await
+}
+
 async fn sync_codex_thread_name_to_telegram(
     state: &SharedState,
     api_registry: &ImApiRegistry,
@@ -2641,90 +2820,82 @@ async fn sync_codex_thread_name_to_telegram(
     if route.platform != ImPlatformKind::Telegram {
         return;
     }
-    let Some(api) = api_registry.telegram_for_route(&route) else {
-        log_missing_api(state, &route, "thread_name_sync").await;
-        return;
-    };
     let (_, Some(topic_id)) = crate::types::split_telegram_message_target(&route.chat_id) else {
         return;
     };
     let conversation_key = route.conversation_key.clone();
     let topic_name = crate::im::telegram::polling::truncate_topic_name(thread_name);
-    let originated_from_telegram = {
-        let mut ops = state.codex_thread_name_sync_ops.lock().await;
-        match ops.get(thread_id) {
-            Some(expected) if expected == &topic_name => {
-                ops.remove(thread_id);
-                true
-            }
-            Some(_) => {
-                ops.remove(thread_id);
-                false
-            }
-            None => false,
-        }
-    };
+    let operation_token = state
+        .begin_telegram_topic_name_update(&conversation_key)
+        .await;
 
-    if originated_from_telegram {
-        persist_synced_telegram_topic_name(
+    let Some(api) = api_registry.telegram_for_route(&route) else {
+        persist_codex_title_only(
             state,
             &conversation_key,
             thread_id,
             thread_name,
-            &topic_name,
+            operation_token,
         )
         .await;
+        state
+            .finish_telegram_topic_name_update(&conversation_key, operation_token)
+            .await;
+        log_missing_api(state, &route, "thread_name_sync").await;
         return;
-    }
+    };
 
-    {
-        let mut ops = state.telegram_topic_name_sync_ops.lock().await;
-        ops.insert(conversation_key.clone(), topic_name.clone());
-    }
-    let marker_state = state.clone();
-    let marker_key = conversation_key.clone();
-    let marker_topic_name = topic_name.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        let mut ops = marker_state.telegram_topic_name_sync_ops.lock().await;
-        if ops
-            .get(&marker_key)
-            .is_some_and(|expected| expected == &marker_topic_name)
-        {
-            ops.remove(&marker_key);
-        }
-    });
-    match api
-        .edit_forum_topic(
-            crate::types::split_telegram_message_target(&route.chat_id).0,
-            topic_id,
-            &topic_name,
+    let edit_result = run_telegram_topic_name_edit_while_current(
+        state,
+        &route,
+        thread_id,
+        &topic_name,
+        operation_token,
+        || {
+            api.edit_forum_topic(
+                crate::types::split_telegram_message_target(&route.chat_id).0,
+                topic_id,
+                &topic_name,
+            )
+        },
+    )
+    .await;
+    let Some(edit_result) = edit_result else {
+        persist_codex_title_only(
+            state,
+            &conversation_key,
+            thread_id,
+            thread_name,
+            operation_token,
         )
-        .await
-    {
+        .await;
+        state
+            .finish_telegram_topic_name_update(&conversation_key, operation_token)
+            .await;
+        return;
+    };
+    match edit_result {
         Ok(true) => {
-            persist_synced_telegram_topic_name(
+            let committed = commit_telegram_topic_name_if_current(
                 state,
                 &conversation_key,
                 thread_id,
                 thread_name,
                 &topic_name,
+                operation_token,
             )
             .await;
-            state
-                .push_event(
-                    "info",
-                    "codex_thread_name_synced_to_telegram",
-                    format!("thread={} name={}", thread_id, topic_name),
-                )
-                .await;
+            if committed == TelegramTopicNameDecision::Committed {
+                state
+                    .push_event(
+                        "info",
+                        "codex_thread_name_synced_to_telegram",
+                        format!("thread={} name={}", thread_id, topic_name),
+                    )
+                    .await;
+            }
         }
         Ok(false) | Err(_) => {
-            state
-                .telegram_topic_name_sync_ops
-                .lock()
-                .await
-                .remove(&conversation_key);
             state
                 .push_event(
                     "warn",
@@ -2732,42 +2903,19 @@ async fn sync_codex_thread_name_to_telegram(
                     format!("thread={} name={}", thread_id, topic_name),
                 )
                 .await;
-            persist_codex_title_only(state, &conversation_key, thread_id, thread_name).await;
+            persist_codex_title_only(
+                state,
+                &conversation_key,
+                thread_id,
+                thread_name,
+                operation_token,
+            )
+            .await;
         }
     }
-}
-
-async fn persist_synced_telegram_topic_name(
-    state: &SharedState,
-    conversation_key: &str,
-    thread_id: &str,
-    codex_title: &str,
-    topic_name: &str,
-) {
-    let mut persisted = state.persisted.lock().await;
-    let Some(binding) = persisted
-        .telegram_topic_binding_states
-        .get_mut(conversation_key)
-    else {
-        return;
-    };
-    if binding.thread_id != thread_id {
-        return;
-    }
-    binding.codex_title = codex_title.to_string();
-    binding.topic_name = topic_name.to_string();
-    binding.last_synced_codex_title = codex_title.to_string();
-    binding.last_synced_topic_name = topic_name.to_string();
-    binding.last_checked_at_ms = crate::types::now_ms();
-    let path = state.config.lock().await.state_path.clone();
-    if let Err(err) = persisted.save(&path) {
-        chain_log::write_diagnostic_lazy(|| {
-            format!(
-                "[telegram_topic] event=real_time_sync_save_failed key={} err={err}",
-                conversation_key
-            )
-        });
-    }
+    state
+        .finish_telegram_topic_name_update(&conversation_key, operation_token)
+        .await;
 }
 
 async fn persist_codex_title_only(
@@ -2775,8 +2923,24 @@ async fn persist_codex_title_only(
     conversation_key: &str,
     thread_id: &str,
     title: &str,
+    operation_token: u64,
 ) {
+    let path = state.config.lock().await.state_path.clone();
+    let operations = state.telegram_topic_name_update_ops.lock().await;
+    if !operations
+        .get(conversation_key)
+        .is_some_and(|current| *current == operation_token)
+    {
+        return;
+    }
     let mut persisted = state.persisted.lock().await;
+    if !persisted
+        .im_thread_bindings
+        .get(conversation_key)
+        .is_some_and(|bound_thread_id| bound_thread_id == thread_id)
+    {
+        return;
+    }
     let Some(binding) = persisted
         .telegram_topic_binding_states
         .get_mut(conversation_key)
@@ -2788,7 +2952,6 @@ async fn persist_codex_title_only(
     }
     binding.codex_title = title.to_string();
     binding.last_checked_at_ms = crate::types::now_ms();
-    let path = state.config.lock().await.state_path.clone();
     if let Err(err) = persisted.save(&path) {
         chain_log::write_diagnostic_lazy(|| {
             format!(
@@ -3753,8 +3916,34 @@ mod tests {
         }
     }
 
+    async fn bind_active_telegram_topic(
+        state: &SharedState,
+        route: &RouteTarget,
+        thread_id: &str,
+        topic_name: &str,
+    ) {
+        state
+            .runtime
+            .lock()
+            .await
+            .bind_route(thread_id, route.clone());
+        let mut persisted = state.persisted.lock().await;
+        persisted
+            .im_thread_bindings
+            .insert(route.conversation_key.clone(), thread_id.to_string());
+        persisted.telegram_topic_binding_states.insert(
+            route.conversation_key.clone(),
+            crate::store::TelegramTopicBindingState {
+                thread_id: thread_id.to_string(),
+                topic_name: topic_name.to_string(),
+                codex_state: "active".to_string(),
+                ..Default::default()
+            },
+        );
+    }
+
     #[test]
-    fn telegram_command_progress_retry_caps_server_retry_after() {
+    fn telegram_command_progress_retry_honors_server_retry_after() {
         let error = anyhow::Error::from(TelegramApiError {
             method: "editMessageText".to_string(),
             status: StatusCode::TOO_MANY_REQUESTS,
@@ -3765,8 +3954,553 @@ mod tests {
 
         assert_eq!(
             telegram_command_progress_retry_delay_ms(&error, false, false),
-            Some(5_000)
+            Some(30_000)
         );
+    }
+
+    #[test]
+    fn lifecycle_notifications_extract_supported_thread_id_shapes() {
+        assert_eq!(
+            lifecycle_notification_thread_id(&json!({"threadId": " thread-direct "})).as_deref(),
+            Some("thread-direct")
+        );
+        assert_eq!(
+            lifecycle_notification_thread_id(&json!({"thread": {"id": "thread-nested"}}))
+                .as_deref(),
+            Some("thread-nested")
+        );
+        assert_eq!(
+            lifecycle_notification_thread_id(&json!({"thread_id": "thread-snake"})).as_deref(),
+            Some("thread-snake")
+        );
+        assert_eq!(
+            lifecycle_notification_thread_id(&json!({"id": "thread-id"})).as_deref(),
+            Some("thread-id")
+        );
+        assert!(lifecycle_notification_thread_id(&json!({"threadId": "  "})).is_none());
+    }
+
+    #[tokio::test]
+    async fn confirmed_codex_name_update_commits_only_the_current_binding() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let conversation_key = "telegram:bot:-100|topic=41";
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted
+                .im_thread_bindings
+                .insert(conversation_key.to_string(), "thread-name".to_string());
+            persisted.telegram_topic_binding_states.insert(
+                conversation_key.to_string(),
+                crate::store::TelegramTopicBindingState {
+                    thread_id: "thread-name".to_string(),
+                    topic_name: "Same title".to_string(),
+                    codex_state: "archived".to_string(),
+                    lifecycle_revision: 7,
+                    ..Default::default()
+                },
+            );
+        }
+        let operation_token = state
+            .begin_telegram_topic_name_update(conversation_key)
+            .await;
+
+        assert_eq!(
+            commit_telegram_topic_name_if_current(
+                &state,
+                conversation_key,
+                "thread-name",
+                "Same title with full Codex metadata",
+                "Same title",
+                operation_token,
+            )
+            .await,
+            TelegramTopicNameDecision::Committed
+        );
+        {
+            let persisted = state.persisted.lock().await;
+            let binding = &persisted.telegram_topic_binding_states[conversation_key];
+            assert_eq!(binding.codex_title, "Same title with full Codex metadata");
+            assert_eq!(binding.last_synced_topic_name, "Same title");
+            assert_eq!(binding.codex_state, "archived");
+            assert_eq!(binding.lifecycle_revision, 7);
+        }
+
+        state
+            .persisted
+            .lock()
+            .await
+            .im_thread_bindings
+            .insert(conversation_key.to_string(), "newer-thread".to_string());
+        assert_eq!(
+            commit_telegram_topic_name_if_current(
+                &state,
+                conversation_key,
+                "thread-name",
+                "Stale title",
+                "Same title",
+                operation_token,
+            )
+            .await,
+            TelegramTopicNameDecision::StaleBinding
+        );
+        assert_eq!(
+            state.persisted.lock().await.telegram_topic_binding_states[conversation_key]
+                .codex_title,
+            "Same title with full Codex metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn superseded_topic_name_update_cannot_mutate_or_commit_its_old_name() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:bot:-100|topic=51".to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "-100|topic=51".to_string(),
+            remote_client_key: "im:telegram:owner".to_string(),
+        };
+        bind_active_telegram_topic(&state, &route, "thread-name", "Before").await;
+        let mutation_gate = state.telegram_topic_mutation_gate(&route.account_id).await;
+        let guard = mutation_gate.lock().await;
+        let old_token = state
+            .begin_telegram_topic_name_update(&route.conversation_key)
+            .await;
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = tokio::spawn({
+            let state = state.clone();
+            let route = route.clone();
+            let executed = executed.clone();
+            async move {
+                telegram_polling::run_telegram_topic_mutation_while(
+                    &state,
+                    &route.account_id,
+                    None,
+                    || {
+                        telegram_topic_name_edit_is_current(
+                            &state,
+                            &route,
+                            "thread-name",
+                            old_token,
+                        )
+                    },
+                    || async move {
+                        executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        let new_token = state
+            .begin_telegram_topic_name_update(&route.conversation_key)
+            .await;
+        drop(guard);
+
+        let result = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("superseded update leaves the mutation queue")
+            .expect("name update task");
+        assert!(result.is_none());
+        assert!(!executed.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            state
+                .telegram_topic_name_update_is_current(&route.conversation_key, new_token)
+                .await
+        );
+
+        assert_eq!(
+            commit_telegram_topic_name_if_current(
+                &state,
+                &route.conversation_key,
+                "thread-name",
+                "Old title",
+                "Old title",
+                old_token,
+            )
+            .await,
+            TelegramTopicNameDecision::Superseded
+        );
+        assert_eq!(
+            state.persisted.lock().await.telegram_topic_binding_states[&route.conversation_key]
+                .topic_name,
+            "Before"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_realtime_failure_cannot_overwrite_a_telegram_originated_name() {
+        let state = test_state();
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:bot:-100|topic=55".to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "-100|topic=55".to_string(),
+            remote_client_key: "im:telegram:owner".to_string(),
+        };
+        bind_active_telegram_topic(&state, &route, "thread-name", "A").await;
+        let stale_c_token = state
+            .begin_telegram_topic_name_update(&route.conversation_key)
+            .await;
+        let telegram_b_token = state
+            .begin_telegram_topic_name_update(&route.conversation_key)
+            .await;
+        {
+            let mut persisted = state.persisted.lock().await;
+            let binding = persisted
+                .telegram_topic_binding_states
+                .get_mut(&route.conversation_key)
+                .expect("binding");
+            binding.codex_title = "B".to_string();
+            binding.topic_name = "B".to_string();
+            binding.last_synced_codex_title = "B".to_string();
+            binding.last_synced_topic_name = "B".to_string();
+        }
+
+        persist_codex_title_only(
+            &state,
+            &route.conversation_key,
+            "thread-name",
+            "C",
+            stale_c_token,
+        )
+        .await;
+
+        let persisted = state.persisted.lock().await;
+        let binding = &persisted.telegram_topic_binding_states[&route.conversation_key];
+        assert_eq!(binding.codex_title, "B");
+        assert_eq!(binding.topic_name, "B");
+        drop(persisted);
+        assert!(
+            state
+                .telegram_topic_name_update_is_current(&route.conversation_key, telegram_b_token)
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn a_to_b_to_a_name_race_executes_the_final_a_edit() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:bot:-100|topic=54".to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "-100|topic=54".to_string(),
+            remote_client_key: "im:telegram:owner".to_string(),
+        };
+        bind_active_telegram_topic(&state, &route, "thread-name", "A").await;
+
+        let calls = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (b_started_tx, b_started_rx) = tokio::sync::oneshot::channel();
+        let (release_b_tx, release_b_rx) = tokio::sync::oneshot::channel();
+        let b_token = state
+            .begin_telegram_topic_name_update(&route.conversation_key)
+            .await;
+        let b_task = tokio::spawn({
+            let state = state.clone();
+            let route = route.clone();
+            let calls = calls.clone();
+            async move {
+                let result = run_telegram_topic_name_edit_while_current(
+                    &state,
+                    &route,
+                    "thread-name",
+                    "B",
+                    b_token,
+                    || async move {
+                        calls.lock().await.push("B".to_string());
+                        let _ = b_started_tx.send(());
+                        let _ = release_b_rx.await;
+                        Ok(TelegramForumTopicEditOutcome::Changed)
+                    },
+                )
+                .await;
+                let decision = commit_telegram_topic_name_if_current(
+                    &state,
+                    &route.conversation_key,
+                    "thread-name",
+                    "B",
+                    "B",
+                    b_token,
+                )
+                .await;
+                (result, decision)
+            }
+        });
+        b_started_rx.await.expect("B edit started");
+
+        let a_token = state
+            .begin_telegram_topic_name_update(&route.conversation_key)
+            .await;
+        let a_task = tokio::spawn({
+            let state = state.clone();
+            let route = route.clone();
+            let calls = calls.clone();
+            async move {
+                let result = run_telegram_topic_name_edit_while_current(
+                    &state,
+                    &route,
+                    "thread-name",
+                    "A",
+                    a_token,
+                    || async move {
+                        calls.lock().await.push("A".to_string());
+                        Ok(TelegramForumTopicEditOutcome::Changed)
+                    },
+                )
+                .await;
+                let decision = commit_telegram_topic_name_if_current(
+                    &state,
+                    &route.conversation_key,
+                    "thread-name",
+                    "A",
+                    "A",
+                    a_token,
+                )
+                .await;
+                (result, decision)
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(!a_task.is_finished());
+        release_b_tx.send(()).expect("release B edit");
+
+        let (b_result, b_decision) = b_task.await.expect("B task");
+        let (a_result, a_decision) = a_task.await.expect("A task");
+        assert!(matches!(b_result, Some(Ok(true))));
+        assert_eq!(b_decision, TelegramTopicNameDecision::Superseded);
+        assert!(matches!(a_result, Some(Ok(true))));
+        assert_eq!(a_decision, TelegramTopicNameDecision::Committed);
+        assert_eq!(&*calls.lock().await, &["B".to_string(), "A".to_string()]);
+
+        let persisted = state.persisted.lock().await;
+        let binding = &persisted.telegram_topic_binding_states[&route.conversation_key];
+        assert_eq!(binding.codex_title, "A");
+        assert_eq!(binding.topic_name, "A");
+        assert_eq!(binding.last_synced_codex_title, "A");
+        assert_eq!(binding.last_synced_topic_name, "A");
+    }
+
+    #[tokio::test]
+    async fn stale_name_failure_cannot_clear_a_newer_echo_marker() {
+        let state = test_state();
+        let conversation_key = "telegram:bot:-100|topic=52";
+        let old_token = telegram_polling::install_telegram_topic_name_marker(
+            &state,
+            conversation_key,
+            "Old title",
+        )
+        .await;
+        let new_token = telegram_polling::install_telegram_topic_name_marker(
+            &state,
+            conversation_key,
+            "New title",
+        )
+        .await;
+
+        telegram_polling::clear_telegram_topic_name_marker(&state, conversation_key, old_token)
+            .await;
+        let markers = state.telegram_topic_name_sync_ops.lock().await;
+        assert_eq!(markers[conversation_key].len(), 1);
+        let marker = &markers[conversation_key][0];
+        assert_eq!(marker.name, "New title");
+        assert_eq!(marker.token, new_token);
+    }
+
+    #[tokio::test]
+    async fn binding_change_while_name_update_waits_prevents_wrong_topic_edit() {
+        let state = test_state();
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:bot:-100|topic=53".to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "-100|topic=53".to_string(),
+            remote_client_key: "im:telegram:owner".to_string(),
+        };
+        bind_active_telegram_topic(&state, &route, "thread-name", "Before").await;
+        let mutation_gate = state.telegram_topic_mutation_gate(&route.account_id).await;
+        let guard = mutation_gate.lock().await;
+        let operation_token = state
+            .begin_telegram_topic_name_update(&route.conversation_key)
+            .await;
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task = tokio::spawn({
+            let state = state.clone();
+            let route = route.clone();
+            let executed = executed.clone();
+            async move {
+                telegram_polling::run_telegram_topic_mutation_while(
+                    &state,
+                    &route.account_id,
+                    None,
+                    || {
+                        telegram_topic_name_edit_is_current(
+                            &state,
+                            &route,
+                            "thread-name",
+                            operation_token,
+                        )
+                    },
+                    || async move {
+                        executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await
+            }
+        });
+        tokio::task::yield_now().await;
+        state.persisted.lock().await.im_thread_bindings.insert(
+            route.conversation_key.clone(),
+            "different-thread".to_string(),
+        );
+        drop(guard);
+
+        let result = tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("stale binding leaves the mutation queue")
+            .expect("name update task");
+        assert!(result.is_none());
+        assert!(!executed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_notifications_update_telegram_binding_state_in_order() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let generation = state.runtime.lock().await.start_bridge_generation();
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:bot:-100|topic=42".to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "-100|topic=42".to_string(),
+            remote_client_key: "im:telegram:owner".to_string(),
+        };
+        state
+            .runtime
+            .lock()
+            .await
+            .bind_route("thread-lifecycle", route.clone());
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted.im_thread_bindings.insert(
+                route.conversation_key.clone(),
+                "thread-lifecycle".to_string(),
+            );
+            persisted.telegram_topic_binding_states.insert(
+                route.conversation_key.clone(),
+                crate::store::TelegramTopicBindingState {
+                    thread_id: "thread-lifecycle".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        let (outbound_tx, _outbound_rx) = outbound_channel();
+
+        for (method, expected_state) in [
+            ("thread/archived", "archived"),
+            ("thread/unarchived", "active"),
+            ("thread/deleted", "deleted"),
+        ] {
+            let notification = crate::codex::CodexNotification {
+                method: method.to_string(),
+                params: Some(json!({"threadId": "thread-lifecycle"})),
+                request_id: None,
+                remote_client_key: Some("default:codex_app".to_string()),
+                remote_client_id: None,
+                remote_stream_id: None,
+                remote_connection_epoch: None,
+            };
+            handle_codex_notification_for_generation(
+                state.clone(),
+                ImApiRegistry::default(),
+                outbound_tx.clone(),
+                &notification,
+                generation,
+            )
+            .await;
+            assert_eq!(
+                state.persisted.lock().await.telegram_topic_binding_states[&route.conversation_key]
+                    .codex_state,
+                expected_state
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_telegram_api_does_not_claim_an_unchanged_name_was_synced() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let mut config = AppConfig::default();
+        config.state_path = temp_dir.path().join("state.json");
+        let state = AppState::new(temp_dir.path().join("config.toml"), config, None, None);
+        let generation = state.runtime.lock().await.start_bridge_generation();
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:bot:-100|topic=43".to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "-100|topic=43".to_string(),
+            remote_client_key: "im:telegram:owner".to_string(),
+        };
+        state
+            .runtime
+            .lock()
+            .await
+            .bind_route("thread-name-lifecycle", route.clone());
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted.im_thread_bindings.insert(
+                route.conversation_key.clone(),
+                "thread-name-lifecycle".to_string(),
+            );
+            persisted.telegram_topic_binding_states.insert(
+                route.conversation_key.clone(),
+                crate::store::TelegramTopicBindingState {
+                    thread_id: "thread-name-lifecycle".to_string(),
+                    topic_name: "Same title".to_string(),
+                    codex_state: "archived".to_string(),
+                    archived_at_ms: Some(1),
+                    lifecycle_generation: generation,
+                    lifecycle_revision: 1,
+                    ..Default::default()
+                },
+            );
+        }
+
+        telegram_polling::unarchive_telegram_topic_for_codex_thread(
+            &state,
+            "thread-name-lifecycle",
+            generation,
+        )
+        .await;
+        sync_codex_thread_name_to_telegram(
+            &state,
+            &ImApiRegistry::default(),
+            &json!({
+                "threadId": "thread-name-lifecycle",
+                "threadName": "Same title"
+            }),
+        )
+        .await;
+
+        let persisted = state.persisted.lock().await;
+        let binding = &persisted.telegram_topic_binding_states[&route.conversation_key];
+        assert_eq!(binding.codex_state, "active");
+        assert_eq!(binding.codex_title, "Same title");
+        assert_eq!(binding.topic_name, "Same title");
+        assert!(binding.last_synced_codex_title.is_empty());
+        assert!(binding.last_synced_topic_name.is_empty());
     }
 
     #[test]

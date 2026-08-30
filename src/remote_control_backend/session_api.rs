@@ -158,7 +158,7 @@ async fn request_once_with_timeout_for_client_inner(
         .try_admit()
         .ok_or_else(|| anyhow!("daemon lifecycle is draining; retry after restart"))?;
     let requested_client_key = normalize_remote_client_key(client_key);
-    let client_key = {
+    let mut client_key = {
         let mut remote = state.remote_control.inner.lock().await;
         if let Some(connection_epoch) = target_connection_epoch {
             resolve_remote_client_key_for_connection_locked(
@@ -175,6 +175,9 @@ async fn request_once_with_timeout_for_client_inner(
     }
     if let Some(connection_epoch) = target_connection_epoch {
         ensure_remote_control_client_initialized(state, connection_epoch, &client_key).await?;
+        client_key =
+            wait_for_remote_control_initialized_on_connection(state, connection_epoch, &client_key)
+                .await?;
     } else {
         ensure_remote_control_client_ready(state, &client_key).await?;
     }
@@ -382,6 +385,75 @@ pub(super) async fn wait_for_remote_control_initialized(
                 "remote-control client initialize did not complete within {}s: client_key={}",
                 REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT.as_secs(),
                 client_key
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn wait_for_remote_control_initialized_on_connection(
+    state: &SharedState,
+    connection_epoch: u64,
+    client_key: &str,
+) -> Result<String> {
+    let requested_client_key = normalize_remote_client_key(client_key);
+    let start = tokio::time::Instant::now();
+    loop {
+        {
+            let remote = state.remote_control.inner.lock().await;
+            let connection_initialized = if remote.connections.is_empty() {
+                if remote.connection_epoch != connection_epoch
+                    || !remote.connected
+                    || remote.outbound_tx.is_none()
+                {
+                    return Err(anyhow!(
+                        "remote-control target connection disconnected during initialize: connection_epoch={} client_key={}",
+                        connection_epoch,
+                        requested_client_key
+                    ));
+                }
+                true
+            } else {
+                let Some(connection) = remote
+                    .connections
+                    .values()
+                    .find(|connection| connection.connection_epoch == connection_epoch)
+                else {
+                    return Err(anyhow!(
+                        "remote-control target connection disconnected during initialize: connection_epoch={} client_key={}",
+                        connection_epoch,
+                        requested_client_key
+                    ));
+                };
+                if !connection.connected || connection.outbound_tx.is_none() {
+                    return Err(anyhow!(
+                        "remote-control target connection disconnected during initialize: connection_epoch={} client_key={}",
+                        connection_epoch,
+                        requested_client_key
+                    ));
+                }
+                connection.initialized
+            };
+            let resolved_client_key = resolve_remote_client_key_for_connection_locked(
+                &remote,
+                connection_epoch,
+                &requested_client_key,
+            );
+            if connection_initialized
+                && remote
+                    .clients
+                    .get(&resolved_client_key)
+                    .is_some_and(|client| client.initialized)
+            {
+                return Ok(resolved_client_key);
+            }
+        }
+        if start.elapsed() >= REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT {
+            return Err(anyhow!(
+                "remote-control client initialize did not complete within {}s: connection_epoch={} client_key={}",
+                REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT.as_secs(),
+                connection_epoch,
+                requested_client_key
             ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

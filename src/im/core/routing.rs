@@ -101,6 +101,32 @@ pub(crate) async fn clear_thread_binding_with_reason(
     Ok(())
 }
 
+pub(crate) async fn clear_thread_binding_if_matches_with_reason(
+    state: &SharedState,
+    conversation_key: &str,
+    thread_id: &str,
+    reason: &str,
+) -> anyhow::Result<bool> {
+    let _binding_guard = state.im_route_binding_ops.lock().await;
+    let still_matches = state
+        .persisted
+        .lock()
+        .await
+        .im_thread_bindings
+        .get(conversation_key)
+        .is_some_and(|bound_thread_id| bound_thread_id == thread_id);
+    if !still_matches {
+        return Ok(false);
+    }
+    state
+        .runtime
+        .lock()
+        .await
+        .unbind_routes_for_conversation_with_reason(conversation_key, reason);
+    forget_persisted_thread_binding(state, conversation_key).await?;
+    Ok(true)
+}
+
 pub(crate) async fn clear_thread_binding_for_thread_with_reason(
     state: &SharedState,
     thread_id: &str,
@@ -260,6 +286,59 @@ mod tests {
                 .get("telegram:new:42")
                 .map(String::as_str),
             Some("thread-42")
+        );
+    }
+
+    #[tokio::test]
+    async fn conditional_cleanup_refuses_a_changed_conversation_binding() {
+        let (state, config, _temp_dir) = test_state();
+        let route = RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:bot:-100|topic=42".to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "-100|topic=42".to_string(),
+            remote_client_key: "im:telegram:new-owner".to_string(),
+        };
+        state
+            .runtime
+            .lock()
+            .await
+            .bind_route("thread-new", route.clone());
+        {
+            let mut persisted = state.persisted.lock().await;
+            persisted
+                .im_thread_bindings
+                .insert(route.conversation_key.clone(), "thread-new".to_string());
+            persisted.save(&config.state_path).expect("persist binding");
+        }
+
+        let cleared = clear_thread_binding_if_matches_with_reason(
+            &state,
+            &route.conversation_key,
+            "thread-old",
+            "late_topic_delete",
+        )
+        .await
+        .expect("conditional cleanup");
+
+        assert!(!cleared);
+        assert_eq!(
+            state
+                .persisted
+                .lock()
+                .await
+                .im_thread_bindings
+                .get(&route.conversation_key)
+                .map(String::as_str),
+            Some("thread-new")
+        );
+        assert!(
+            state
+                .runtime
+                .lock()
+                .await
+                .route_by_thread
+                .contains_key("thread-new")
         );
     }
 }
