@@ -17,6 +17,8 @@ import { useAppModel } from "../state/AppModel";
 import { formatDateTime } from "../utils/format";
 
 type RouteFilter = "all" | "gateway" | "direct";
+const MOCHIPORT_PROVIDER = "MochiPort";
+const isMochiPortProvider = (provider: string) => provider === MOCHIPORT_PROVIDER || provider === "ai-gateway";
 type SessionSourceState = "waiting" | "connected" | "offline" | "unavailable";
 
 function sessionTitle(session: CodexSession): string {
@@ -57,12 +59,12 @@ export function SessionsPage() {
   const [query, setQuery] = useState("");
   const [routeFilter, setRouteFilter] = useState<RouteFilter>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [target, setTarget] = useState<string>("ai-gateway");
-  const directProviders = useMemo(() => model.sessionProviders.filter((provider) => provider !== "ai-gateway"), [model.sessionProviders]);
+  const [target, setTarget] = useState<string>(MOCHIPORT_PROVIDER);
+  const directProviders = useMemo(() => model.sessionProviders.filter((provider) => !isMochiPortProvider(provider)), [model.sessionProviders]);
   const filtered = useMemo(() => {
     const matching = model.sessions.filter((session) => {
       const matchesQuery = !query.trim() || `${sessionTitle(session)} ${session.preview} ${session.cwd ?? ""} ${session.modelProvider} ${session.id}`.toLowerCase().includes(query.toLowerCase());
-      const gatewayRoute = session.modelProvider === "ai-gateway";
+      const gatewayRoute = isMochiPortProvider(session.modelProvider);
       const matchesRoute = routeFilter === "all" || (routeFilter === "gateway" ? gatewayRoute : !gatewayRoute);
       return matchesQuery && matchesRoute;
     });
@@ -106,7 +108,7 @@ export function SessionsPage() {
     return next;
   });
   const moveSelected = async () => {
-    const targetProvider = target === "ai-gateway" ? "ai-gateway" : target;
+    const targetProvider = isMochiPortProvider(target) ? MOCHIPORT_PROVIDER : target;
     const ids = model.sessions
       .filter((session) => selected.has(session.id) && session.modelProvider !== targetProvider)
       .map((session) => session.id);
@@ -114,7 +116,7 @@ export function SessionsPage() {
       setSelected(new Set());
       return;
     }
-    const failed = await model.moveSessions(ids, target === "ai-gateway" ? null : target);
+    const failed = await model.moveSessions(ids, target === MOCHIPORT_PROVIDER ? null : target);
     setSelected(new Set(failed));
   };
 
@@ -140,7 +142,7 @@ export function SessionsPage() {
           <span><Check size={15} />已选 {selected.size} 项</span>
           <div>
             <Select value={target} onChange={(event) => setTarget(event.target.value)} aria-label="目标 Provider">
-              <option value="ai-gateway">AI 网关</option>
+              <option value={MOCHIPORT_PROVIDER}>MochiPort</option>
               {directProviders.map((provider) => <option value={provider} key={provider}>{provider}</option>)}
             </Select>
             <Button variant="primary" icon={Route} loading={model.busy["sessions-move"]} onClick={() => void moveSelected()}>移动会话</Button>
@@ -157,13 +159,13 @@ export function SessionsPage() {
               <span>会话</span><span>项目</span><span>路由</span><span>最后更新</span><span />
             </div>
             {filtered.map((session) => {
-              const throughGateway = session.modelProvider === "ai-gateway";
+              const throughGateway = isMochiPortProvider(session.modelProvider);
               return (
                 <div className={cn("data-table__row session-table-grid", selected.has(session.id) && "data-table__row--selected")} key={session.id}>
                   <label className="table-checkbox"><input type="checkbox" checked={selected.has(session.id)} onChange={() => toggle(session.id)} aria-label={`选择会话 ${sessionTitle(session)}`} /></label>
                   <div className="session-primary"><strong>{sessionTitle(session)}</strong><span>{session.preview || session.id}</span></div>
                   <div className="session-project"><strong><Folder size={11} />{projectTitle(projectPath(session))}</strong><small>{projectPath(session) ?? "没有工作目录"}</small></div>
-                  <div className="route-cell"><StatusPill tone={throughGateway ? "accent" : "neutral"}>{throughGateway ? "AI 网关" : "原始"}</StatusPill><small>{session.modelProvider}</small></div>
+                  <div className="route-cell"><StatusPill tone={throughGateway ? "accent" : "neutral"}>{throughGateway ? "MochiPort" : "原始"}</StatusPill><small>{throughGateway ? MOCHIPORT_PROVIDER : session.modelProvider}</small></div>
                   <span className="time-cell">{formatDateTime(session.updatedAt)}</span>
                   <Button variant="ghost" size="small" icon={Copy} aria-label="复制会话 ID" onClick={() => void navigator.clipboard.writeText(session.id)}>复制 ID</Button>
                 </div>

@@ -269,7 +269,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
   const [lifecycleOperationError, setLifecycleOperationError] = useState<string>();
   const [codexStatus, setCodexStatus] = useState<CodexStatus | undefined>(fixtureMode ? fixtureCodexStatus : undefined);
   const [sessions, setSessions] = useState<CodexSession[]>(fixtureMode ? fixtureSessions : []);
-  const [sessionProviders, setSessionProviders] = useState<string[]>(fixtureMode ? ["ai-gateway", "openai"] : []);
+  const [sessionProviders, setSessionProviders] = useState<string[]>(fixtureMode ? ["MochiPort", "openai"] : []);
   const [gateway, setGateway] = useState<Gateway | undefined>(fixtureMode ? fixtureGateway : undefined);
   const [accounts, setAccounts] = useState<IMAccount[]>(fixtureMode ? fixtureAccounts : []);
   const [telegramProjectGroupAccounts, setTelegramProjectGroupAccounts] = useState<TelegramProjectGroupAccount[]>([]);
@@ -1141,7 +1141,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
       for (const id of ids) {
         try {
           if (!fixtureMode) await api.moveSession(id, targetProvider);
-          else setSessions((current) => current.map((session) => session.id === id ? { ...session, modelProvider: targetProvider ?? "ai-gateway" } : session));
+          else setSessions((current) => current.map((session) => session.id === id ? { ...session, modelProvider: targetProvider ?? "MochiPort" } : session));
         } catch (error) {
           failed.push(id);
           firstFailure ??= error instanceof Error ? error.message : String(error);

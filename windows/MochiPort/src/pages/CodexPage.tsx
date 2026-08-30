@@ -46,6 +46,10 @@ function providerModeLabel(mode: string | null | undefined): string {
   }
 }
 
+function providerDisplayName(name: string | null | undefined): string {
+  return name?.trim().toLowerCase() === "ai-gateway" ? "MochiPort" : name ?? "";
+}
+
 function enhancedPhaseLabel(phase: string): string {
   switch (phase) {
     case "preparing": return "正在准备";
@@ -129,7 +133,7 @@ export function CodexPage() {
               <div className="provider-status-row" key={provider.name}>
                 <div className="provider-logo"><Boxes size={17} /></div>
                 <div className="provider-status-row__copy">
-                  <strong>{provider.name}</strong>
+                  <strong>{providerDisplayName(provider.name)}</strong>
                   <span>{provider.baseUrl ?? "本地默认地址"}</span>
                 </div>
                 <StatusPill tone={provider.secretSet ? "positive" : "warning"}>{provider.secretSet ? "密钥已保存" : "缺少密钥"}</StatusPill>
@@ -198,7 +202,7 @@ export function CodexPage() {
             <div className="mode-card__icon"><ShieldCheck size={19} /></div>
             <strong>{providerModeLabel(status?.providerMode)}</strong>
             <p>{status?.providerModeMessage ?? "连接后会在这里显示 Codex 的路由模式。"}</p>
-            <div className="mode-card__meta"><TerminalSquare size={14} /> {status?.activeProvider ?? "无活动 Provider"}</div>
+            <div className="mode-card__meta"><TerminalSquare size={14} /> {providerDisplayName(status?.activeProvider) || "无活动 Provider"}</div>
           </Card>
         </aside>
       </div>

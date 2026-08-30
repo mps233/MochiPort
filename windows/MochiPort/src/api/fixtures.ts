@@ -84,13 +84,13 @@ export const fixtureCodexStatus: CodexStatus = {
   remoteControlSupported: true,
   remoteControlConfigured: true,
   providers: [
-    { name: "mochiport", baseUrl: "http://127.0.0.1:3847/ai-gateway/v1", secretSet: true, supportsWebsockets: true },
+    { name: "MochiPort", baseUrl: "http://127.0.0.1:3847/ai-gateway/v1", secretSet: true, supportsWebsockets: true },
   ],
   imageGenerationEnabled: true,
   connectionMode: "remoteControl",
   providerMode: "threadrelay",
   providerModeMessage: "Codex 通过 MochiPort AI 网关连接模型服务",
-  activeProvider: "mochiport",
+  activeProvider: "MochiPort",
 };
 
 export const fixtureGateway: Gateway = {
@@ -169,7 +169,7 @@ export const fixtureSessions: CodexSession[] = [
     id: "019d1e6c-8f22-7c01-a8aa-b20f01aaea5e",
     name: "Windows 客户端界面复刻",
     preview: "复刻 Mac 端各个页面并接入 Tauri 管理 API",
-    modelProvider: "ai-gateway",
+    modelProvider: "MochiPort",
     updatedAt: Math.floor((now - 85_000) / 1000),
     cwd: "C:\\Code\\mochiport",
   },
@@ -185,7 +185,7 @@ export const fixtureSessions: CodexSession[] = [
     id: "019d1d09-7a71-7828-9431-6ef49982a51c",
     name: null,
     preview: "整理发布检查清单",
-    modelProvider: "ai-gateway",
+    modelProvider: "MochiPort",
     updatedAt: Math.floor((now - 1000 * 60 * 60 * 3) / 1000),
     cwd: "D:\\Projects\\release-notes",
   },
