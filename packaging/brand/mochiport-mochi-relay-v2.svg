@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MochiPort "Mochi Relay" concept v2.
+
+  The mark keeps the existing Mochi face language and uses one asymmetric
+  side port as the product cue. This exploratory file is not wired to either
+  platform bundle.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>MochiPort Mochi Relay concept v2</title>
+  <desc>A flat outlined Mochi with one side port and a green handoff packet.</desc>
+
+  <defs>
+    <filter id="shadow" x="-24%" y="-30%" width="148%" height="190%">
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+    <clipPath id="bodyClip">
+      <path d="M160 480 C160 260 318 108 512 108 C706 108 864 260 864 480 L864 660 C864 820 770 910 630 910 L394 910 C254 910 160 820 160 660 Z"/>
+    </clipPath>
+  </defs>
+
+  <!-- Quiet full-bleed field; platform masks remain external. -->
+  <rect width="1024" height="1024" fill="#1865EE"/>
+  <rect width="1024" height="1024" fill="#3FA1F9" fill-opacity="0.10"/>
+
+  <ellipse cx="510" cy="920" rx="300" ry="26" fill="#102A4A" fill-opacity="0.32" filter="url(#shadow)"/>
+
+  <g transform="rotate(-2 512 512)">
+    <!-- Original broad mochi silhouette, deliberately simple at launcher size. -->
+    <path d="M160 480 C160 260 318 108 512 108 C706 108 864 260 864 480 L864 660 C864 820 770 910 630 910 L394 910 C254 910 160 820 160 660 Z" fill="#CEEDF0" stroke="#183653" stroke-width="18" stroke-linejoin="round"/>
+
+    <!-- One broad light plane keeps the flat lane tactile without a glossy scene. -->
+    <g clip-path="url(#bodyClip)">
+      <ellipse cx="342" cy="214" rx="286" ry="118" fill="#F8F6F5" fill-opacity="0.52"/>
+      <path d="M170 720 C330 650 540 646 852 746 L852 930 L170 930 Z" fill="#8CCED9" fill-opacity="0.24"/>
+    </g>
+
+    <!-- The single product cue: a side-mounted local relay port. -->
+    <rect x="650" y="652" width="158" height="76" rx="38" fill="#183653"/>
+    <rect x="704" y="670" width="116" height="40" rx="20" fill="#60F32E"/>
+    <rect x="724" y="681" width="44" height="8" rx="4" fill="#F8F6F5" fill-opacity="0.86"/>
+
+    <!-- Existing Mochi face language, kept large and quiet. -->
+    <rect x="414" y="374" width="34" height="150" rx="17" fill="#454B53"/>
+    <rect x="580" y="374" width="34" height="150" rx="17" fill="#454B53"/>
+    <ellipse cx="346" cy="574" rx="55" ry="55" fill="#D8A5B2" fill-opacity="0.90"/>
+    <ellipse cx="682" cy="574" rx="55" ry="55" fill="#D8A5B2" fill-opacity="0.90"/>
+  </g>
+</svg>

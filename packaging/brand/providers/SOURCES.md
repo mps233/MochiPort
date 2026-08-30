@@ -16,12 +16,21 @@ Lucide UI icons are copied from Lucide Icons and covered by `packaging/brand/LIC
 
 - Codex CLI terminal: custom terminal treatment -> `Resources/ClientLogos/codex-cli.svg`
 - VS Code: custom SVG using official VS Code brand colors -> `Resources/ClientLogos/vscode.svg`
-- App icon sources: `packaging/macos/AppIcon.svg` (light) and
-  `packaging/macos/AppIcon-dark.svg` (dark). The assembled macOS application
-  uses `AppIcon.icns` as its default light icon and carries the matching
-  `AppIcon-dark.icns` variant in its resources.
+- App icon authoring sources: `packaging/brand/mochiport-liquid-glass-icon.json`,
+  `packaging/brand/mochiport-liquid-glass-background.svg`, and
+  `packaging/brand/mochiport-liquid-glass-face.svg`. The production Icon
+  Composer document is `packaging/macos/AppIcon.icon`; Xcode compiles it with
+  `actool` into `Assets.car` and a standalone `AppIcon.icns`, and the assembler
+  preserves those compiled resources. The SVGs contain no authored border
+  stroke; the background layer keeps glass disabled, while Icon Composer adds
+  restrained glass, refraction, specular, and translucency to the face and
+  macOS renders the outer chiclet edge.
 
-The `references/` directory is intentionally ignored by git, so runtime SVGs are tracked directly in the SwiftUI resource directories. Windows uses `packaging/icons/AppIcon.ico`; macOS release packaging uses the tracked ICNS files above.
+`packaging/macos/AppIcon.svg` and `packaging/macos/AppIcon-dark.svg` remain the
+static README artwork. Their matching tracked ICNS exports are not copied into
+the formal macOS application.
+
+The `references/` directory is intentionally ignored by git, so runtime SVGs are tracked directly in the SwiftUI resource directories. Windows uses `packaging/icons/AppIcon.ico`; the macOS release build compiles the tracked Icon Composer package above.
 
 ## High-DPI Rendering
 

@@ -1,36 +1,30 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- MochiPort macOS dark appearance icon source. -->
+<!--
+  MochiPort macOS dark appearance icon source.
+
+  The approved a2 palette is shared with the light appearance so the icon
+  remains visually consistent while the system switches resources.
+-->
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient id="background" x1="0.08" y1="0.02" x2="0.92" y2="0.98">
-      <stop offset="0" stop-color="#3C3C3F"/>
-      <stop offset="0.32" stop-color="#303033"/>
-      <stop offset="0.70" stop-color="#202023"/>
-      <stop offset="1" stop-color="#151517"/>
+    <linearGradient id="background" x1="0.00" y1="0.00" x2="1.00" y2="1.00">
+      <stop offset="0" stop-color="#000000"/>
+      <stop offset="0.28" stop-color="#000309"/>
+      <stop offset="0.62" stop-color="#000914"/>
+      <stop offset="1" stop-color="#00102D"/>
     </linearGradient>
-    <radialGradient id="coolRefraction" cx="0.08" cy="0.06" r="1.05">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.14"/>
-      <stop offset="0.42" stop-color="#D9DCE0" stop-opacity="0.035"/>
-      <stop offset="1" stop-color="#D9DCE0" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="glassSurface" x1="0.08" y1="0" x2="0.88" y2="1">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.08"/>
-      <stop offset="0.44" stop-color="#FFFFFF" stop-opacity="0.025"/>
-      <stop offset="1" stop-color="#C4C8CD" stop-opacity="0.025"/>
+    <linearGradient id="warmMark" x1="0.12" y1="0.06" x2="0.88" y2="0.98">
+      <stop offset="0" stop-color="#FFD27A"/>
+      <stop offset="0.50" stop-color="#FFC76B"/>
+      <stop offset="1" stop-color="#FFBF5F"/>
     </linearGradient>
-    <linearGradient id="glassEdge" x1="0.08" y1="0.02" x2="0.94" y2="0.96">
-      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.38"/>
-      <stop offset="0.42" stop-color="#D5D8DC" stop-opacity="0.12"/>
-      <stop offset="1" stop-color="#8B8F95" stop-opacity="0.20"/>
+    <linearGradient id="warmMarkRight" x1="0.10" y1="0.04" x2="0.90" y2="0.98">
+      <stop offset="0" stop-color="#FFD078"/>
+      <stop offset="0.52" stop-color="#FFC465"/>
+      <stop offset="1" stop-color="#FFB95A"/>
     </linearGradient>
     <filter id="tileShadow" x="-12%" y="-12%" width="124%" height="134%">
       <feGaussianBlur stdDeviation="12"/>
-    </filter>
-    <filter id="softBlur" x="-30%" y="-40%" width="160%" height="180%">
-      <feGaussianBlur stdDeviation="18"/>
-    </filter>
-    <filter id="edgeBlur" x="-30%" y="-50%" width="160%" height="200%">
-      <feGaussianBlur stdDeviation="3.5"/>
     </filter>
     <clipPath id="iconClip">
       <rect x="30" y="30" width="964" height="964" rx="224"/>
@@ -40,33 +34,19 @@
   <!-- Match the transparent safe area used by neighboring macOS icons. -->
   <g id="macos-icon-safe-area" transform="translate(512 512) scale(0.90) translate(-512 -512)">
   <g id="background-layer">
-    <rect x="48" y="58" width="928" height="928" rx="214" fill="#000000" fill-opacity="0.55" filter="url(#tileShadow)"/>
+    <rect x="48" y="58" width="928" height="928" rx="214" fill="#00030A" fill-opacity="0.72" filter="url(#tileShadow)"/>
     <g clip-path="url(#iconClip)">
       <rect x="30" y="30" width="964" height="964" rx="224" fill="url(#background)"/>
-      <rect x="30" y="30" width="964" height="964" rx="224" fill="url(#coolRefraction)"/>
-      <path d="M30 720 C270 620 610 660 994 882 L994 994 L30 994 Z" fill="#9CA0A6" fill-opacity="0.045"/>
-      <path d="M30 352 C286 178 624 148 994 276 L994 30 L30 30 Z" fill="#FFFFFF" fill-opacity="0.045"/>
     </g>
   </g>
 
-  <g id="glass-layer" clip-path="url(#iconClip)">
-    <rect x="58" y="58" width="908" height="908" rx="205" fill="url(#glassSurface)" stroke="url(#glassEdge)" stroke-width="4"/>
-    <path d="M92 410 C260 196 556 96 900 164" fill="none" stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="22" stroke-linecap="round" filter="url(#softBlur)"/>
-    <path d="M84 285 C260 112 526 88 734 128" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="5" stroke-linecap="round"/>
-    <path d="M124 906 C366 812 690 830 928 924" fill="none" stroke="#BFC3C8" stroke-opacity="0.055" stroke-width="44" stroke-linecap="round" filter="url(#softBlur)"/>
-  </g>
-
-  <!-- Same face geometry as the light icon, with dark-mode contrast colors. -->
+  <!-- Same face geometry as the light icon, with the approved warm palette. -->
   <g id="mascot-face-layer" transform="translate(512 560) scale(26.5) translate(-38 -29)">
-    <rect x="32.23" y="16.17" width="1.98" height="10.73" rx="0.99" fill="#F1F2F3"/>
-    <rect x="41.79" y="16.17" width="1.98" height="10.73" rx="0.99" fill="#F1F2F3"/>
-    <ellipse cx="25.76" cy="29.12" rx="4.08" ry="4.08" fill="#B9BDC2" fill-opacity="0.58"/>
-    <ellipse cx="50.24" cy="29.12" rx="4.08" ry="4.08" fill="#B9BDC2" fill-opacity="0.58"/>
+    <rect x="32.23" y="16.17" width="1.98" height="10.73" rx="0.99" fill="url(#warmMark)"/>
+    <rect x="41.79" y="16.17" width="1.98" height="10.73" rx="0.99" fill="url(#warmMarkRight)"/>
+    <ellipse cx="25.76" cy="29.12" rx="4.08" ry="4.08" fill="#FFC76B"/>
+    <ellipse cx="50.24" cy="29.12" rx="4.08" ry="4.08" fill="#FFBF5F"/>
   </g>
 
-  <g id="specular-layer" clip-path="url(#iconClip)">
-    <path d="M132 154 C304 68 550 72 712 122" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="8" stroke-linecap="round" filter="url(#edgeBlur)"/>
-    <rect x="46" y="46" width="932" height="932" rx="214" fill="none" stroke="#FFFFFF" stroke-opacity="0.16" stroke-width="2.5"/>
-  </g>
   </g>
 </svg>

@@ -26,6 +26,7 @@
 		A10000000000000000000015 /* ClientLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* ClientLogos */; };
 		A10000000000000000000016 /* DaemonUpdateInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* DaemonUpdateInstaller.swift */; };
 		A10000000000000000000017 /* UpdateCheckerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* UpdateCheckerTests.swift */; };
+		A10000000000000000000018 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* AppIcon.icon */; };
 		B100000000000000000000 /* AIGlassUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000000 /* AIGlassUpdateChecker.swift */; };
 		B100000000000000000003 /* BriefingEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000003 /* BriefingEngine.swift */; };
 		B100000000000000000006 /* CodexLogParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000006 /* CodexLogParser.swift */; };
@@ -82,6 +83,7 @@
 		A20000000000000000000015 /* ClientLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ClientLogos; sourceTree = "<group>"; };
 		A20000000000000000000016 /* DaemonUpdateInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonUpdateInstaller.swift; sourceTree = "<group>"; };
 		A20000000000000000000017 /* UpdateCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCheckerTests.swift; sourceTree = "<group>"; };
+		A20000000000000000000018 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = ../../packaging/macos/AppIcon.icon; sourceTree = SOURCE_ROOT; };
 		B200000000000000000000 /* AIGlassUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/AIGlassUpdateChecker.swift; sourceTree = "<group>"; };
 		B200000000000000000003 /* BriefingEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/BriefingEngine.swift; sourceTree = "<group>"; };
 		B200000000000000000006 /* CodexLogParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/CodexLogParser.swift; sourceTree = "<group>"; };
@@ -134,6 +136,7 @@
 			children = (
 				A40000000000000000000001 /* MochiPortMac */,
 				A40000000000000000000002 /* Config */,
+				A20000000000000000000018 /* AppIcon.icon */,
 				A40000000000000000000003 /* Products */,
 				A40000000000000000000004 /* Tests */,
 			);
@@ -274,7 +277,7 @@
 /* End PBXTargetDependency section */
 
 /* Begin PBXResourcesBuildPhase section */
-			A70000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000013 /* ProviderLogos in Resources */, A10000000000000000000015 /* ClientLogos in Resources */); runOnlyForDeploymentPostprocessing = 0; };
+			A70000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (A10000000000000000000013 /* ProviderLogos in Resources */, A10000000000000000000015 /* ClientLogos in Resources */, A10000000000000000000018 /* AppIcon.icon in Resources */); runOnlyForDeploymentPostprocessing = 0; };
 			A70000000000000000000004 /* Test Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
@@ -349,6 +352,8 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = A20000000000000000000006 /* Version.xcconfig */;
 				buildSettings = {
+					ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+					ASSETCATALOG_COMPILER_STANDALONE_ICON_BEHAVIOR = all;
 					CODE_SIGNING_ALLOWED = NO;
 					COMBINE_HIDPI_IMAGES = YES;
 					DEFINES_MODULE = YES;
@@ -371,6 +376,8 @@
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = A20000000000000000000006 /* Version.xcconfig */;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_STANDALONE_ICON_BEHAVIOR = all;
 				CODE_SIGNING_ALLOWED = NO;
 				COMBINE_HIDPI_IMAGES = YES;
 				GENERATE_INFOPLIST_FILE = NO;

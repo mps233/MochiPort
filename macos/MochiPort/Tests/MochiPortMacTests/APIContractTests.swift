@@ -1,5 +1,4 @@
 import Foundation
-import AppKit
 import SQLite3
 import XCTest
 
@@ -30,14 +29,6 @@ final class APIContractTests: XCTestCase {
         XCTAssertTrue(isNewerVersion("0.6", than: "0.5.9"))
         XCTAssertFalse(isNewerVersion("v0.5.0", than: "0.5"))
         XCTAssertFalse(isNewerVersion("0.4.9", than: "0.5.0"))
-    }
-
-    func testAppIconVariantFollowsSystemAppearance() throws {
-        let light = try XCTUnwrap(NSAppearance(named: .aqua))
-        let dark = try XCTUnwrap(NSAppearance(named: .darkAqua))
-
-        XCTAssertEqual(appIconVariant(for: light), .light)
-        XCTAssertEqual(appIconVariant(for: dark), .dark)
     }
 
     func testUsageTrendDomainUsesLocalSevenDayWindowAndHalfDayPadding() throws {

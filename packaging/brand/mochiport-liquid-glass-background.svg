@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Full-bleed source for the MochiPort Icon Composer document. The rounded mask
+     and material edge belong to Icon Composer, not this artwork. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#000000"/>
+      <stop offset="0.28" stop-color="#000309"/>
+      <stop offset="0.62" stop-color="#000914"/>
+      <stop offset="1" stop-color="#00102D"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#background)"/>
+</svg>

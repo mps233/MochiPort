@@ -11,8 +11,6 @@ XCODE_APP=$2
 DAEMON_BINARY=$3
 OUTPUT_APP=$4
 GUI_SUPERVISOR=packaging/macos/mochiport-gui-supervisor
-APP_ICON=packaging/macos/AppIcon.icns
-APP_ICON_DARK=packaging/macos/AppIcon-dark.icns
 THIRD_PARTY_LICENSE_GENERATOR=packaging/generate-third-party-licenses.py
 LUCIDE_LICENSE=packaging/brand/LICENSE.lucide-icons
 PROVIDER_LICENSE=packaging/brand/providers/LICENSE.lobehub-icons
@@ -37,7 +35,7 @@ if [ ! -f "$GUI_SUPERVISOR" ]; then
   echo "GUI supervisor script is unavailable" >&2
   exit 1
 fi
-for RESOURCE in "$APP_ICON" "$APP_ICON_DARK" "$THIRD_PARTY_LICENSE_GENERATOR" LICENSE NOTICE \
+for RESOURCE in "$THIRD_PARTY_LICENSE_GENERATOR" LICENSE NOTICE \
   "$LUCIDE_LICENSE" "$PROVIDER_LICENSE" "$PROVIDER_SOURCES"; do
   if [ ! -f "$RESOURCE" ]; then
     echo "required bundle resource is unavailable: $RESOURCE" >&2
@@ -149,14 +147,18 @@ trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 /usr/bin/ditto "$XCODE_APP" "$STAGED_APP"
+for ICON_RESOURCE in Assets.car AppIcon.icns; do
+  if [ ! -f "$STAGED_APP/Contents/Resources/$ICON_RESOURCE" ]; then
+    echo "compiled AppIcon resource is unavailable: $ICON_RESOURCE" >&2
+    exit 1
+  fi
+done
 mkdir -p "$STAGED_APP/Contents/Helpers"
 mkdir -p "$STAGED_APP/Contents/Resources/brand/providers"
 cp "$DAEMON_BINARY" "$STAGED_APP/Contents/Helpers/mochiport-daemon"
 chmod 755 "$STAGED_APP/Contents/Helpers/mochiport-daemon"
 cp "$GUI_SUPERVISOR" "$STAGED_APP/Contents/Helpers/mochiport-gui-supervisor"
 chmod 755 "$STAGED_APP/Contents/Helpers/mochiport-gui-supervisor"
-cp "$APP_ICON" "$STAGED_APP/Contents/Resources/AppIcon.icns"
-cp "$APP_ICON_DARK" "$STAGED_APP/Contents/Resources/AppIcon-dark.icns"
 python3 "$THIRD_PARTY_LICENSE_GENERATOR" \
   "$STAGED_APP/Contents/Resources/THIRD_PARTY_LICENSES.txt"
 cp LICENSE NOTICE "$STAGED_APP/Contents/Resources/"
@@ -184,6 +186,12 @@ if /usr/libexec/PlistBuddy -c "Print :CFBundleIconFile" \
   /usr/libexec/PlistBuddy -c "Set :CFBundleIconFile AppIcon" "$STAGED_APP/Contents/Info.plist"
 else
   /usr/libexec/PlistBuddy -c "Add :CFBundleIconFile string AppIcon" "$STAGED_APP/Contents/Info.plist"
+fi
+if /usr/libexec/PlistBuddy -c "Print :CFBundleIconName" \
+  "$STAGED_APP/Contents/Info.plist" >/dev/null 2>&1; then
+  /usr/libexec/PlistBuddy -c "Set :CFBundleIconName AppIcon" "$STAGED_APP/Contents/Info.plist"
+else
+  /usr/libexec/PlistBuddy -c "Add :CFBundleIconName string AppIcon" "$STAGED_APP/Contents/Info.plist"
 fi
 
 codesign --force --deep --sign - "$STAGED_APP"

@@ -1,0 +1,60 @@
+{
+  "features": [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill": {
+    "solid": "extended-srgb:0.00000,0.00000,0.00000,1.00000"
+  },
+  "groups": [
+    {
+      "blur-material": 0.12,
+      "layers": [
+        {
+          "glass": true,
+          "image-name": "02-mochi-face.svg",
+          "name": "Mochi face"
+        }
+      ],
+      "lighting": "individual",
+      "name": "Mochi face",
+      "refractivity": {
+        "depth": 0.12,
+        "enabled": true,
+        "strength": 0.18
+      },
+      "shadow": {
+        "kind": "layer-color",
+        "opacity": 0.08
+      },
+      "specular": true,
+      "specular-highlight-placement": "inside",
+      "translucency": {
+        "enabled": true,
+        "value": 0.08
+      }
+    },
+    {
+      "layers": [
+        {
+          "glass": false,
+          "image-name": "01-background.svg",
+          "name": "Background"
+        }
+      ],
+      "name": "Background",
+      "shadow": {
+        "kind": "neutral",
+        "opacity": 0.1
+      },
+      "specular": true,
+      "translucency": {
+        "enabled": true,
+        "value": 0.08
+      }
+    }
+  ],
+  "supported-platforms": {
+    "squares": "shared"
+  }
+}
