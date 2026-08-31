@@ -531,6 +531,7 @@ impl ImText {
             ImLocale::ZhCn => vec![
                 ("new", "创建新会话"),
                 ("sessions", "恢复历史会话"),
+                ("model", "管理模型、推理强度和速度"),
                 ("status", "查看连接和任务状态"),
                 ("steer", "调整当前任务方向"),
                 ("queue", "排队下一条任务"),
@@ -541,6 +542,7 @@ impl ImText {
             ImLocale::EnUs => vec![
                 ("new", "Create a new session"),
                 ("sessions", "Resume a previous session"),
+                ("model", "Manage model, reasoning, and speed"),
                 ("status", "Show connection and task status"),
                 ("steer", "Steer the current task"),
                 ("queue", "Queue the next task"),
@@ -553,8 +555,8 @@ impl ImText {
 
     pub(crate) fn telegram_help(self) -> &'static str {
         self.choose(
-            "Telegram 命令\n\n会话\n/new    创建新会话\n/sessions    恢复历史会话\n/status    查看连接、任务和队列状态\n/exit    退出当前会话\n\n任务\n/steer <内容>    调整当前任务方向\n/queue <内容>    当前任务完成后执行\n/stop    中断当前任务\n\n任务运行时直接发送普通文字，也会调整当前任务方向。\n\n/help    查看这份帮助\n\n兼容别名：/s = /stop，/q = /exit。审批和会话选择请按消息中的按钮或编号操作。",
-            "Telegram commands\n\nSessions\n/new    Create a new session\n/sessions    Resume a previous session\n/status    Show connection, task, and queue status\n/exit    Exit the current session\n\nTask\n/steer <text>    Steer the current task\n/queue <text>    Run after the current task\n/stop    Interrupt the current task\n\nOrdinary text sent while a task is running also steers the current task.\n\n/help    Show this help\n\nCompatibility aliases: /s = /stop, /q = /exit. Use the buttons or numbers shown in approval and session messages.",
+            "Telegram 命令\n\n会话\n/new    创建新会话\n/sessions    恢复历史会话\n/model    管理当前会话的模型、推理强度和速度\n/status    查看连接、任务和队列状态\n/exit    退出当前会话\n\n任务\n/steer <内容>    调整当前任务方向\n/queue <内容>    当前任务完成后执行\n/stop    中断当前任务\n\n任务运行时直接发送普通文字，也会调整当前任务方向。\n\n/help    查看这份帮助\n\n兼容别名：/s = /stop，/q = /exit。审批和会话选择请按消息中的按钮或编号操作；会话设置仅使用按钮。",
+            "Telegram commands\n\nSessions\n/new    Create a new session\n/sessions    Resume a previous session\n/model    Manage model, reasoning, and speed for the current session\n/status    Show connection, task, and queue status\n/exit    Exit the current session\n\nTask\n/steer <text>    Steer the current task\n/queue <text>    Run after the current task\n/stop    Interrupt the current task\n\nOrdinary text sent while a task is running also steers the current task.\n\n/help    Show this help\n\nCompatibility aliases: /s = /stop, /q = /exit. Use the buttons or numbers shown in approval and session messages; session settings use buttons only.",
         )
     }
 
@@ -1083,6 +1085,193 @@ impl ImText {
 
     pub(crate) fn thread_list_title_telegram(self) -> &'static str {
         self.choose("恢复历史会话", "Restore history session")
+    }
+
+    pub(crate) fn telegram_thread_settings_title(self) -> &'static str {
+        self.choose("会话设置", "Session settings")
+    }
+
+    pub(crate) fn telegram_thread_settings_effective_heading(self) -> &'static str {
+        self.choose("已生效", "Effective")
+    }
+
+    pub(crate) fn telegram_thread_settings_draft_heading(self) -> &'static str {
+        self.choose("待应用", "Pending")
+    }
+
+    pub(crate) fn telegram_thread_settings_unchanged(self) -> &'static str {
+        self.choose("未修改", "Unchanged")
+    }
+
+    pub(crate) fn telegram_thread_settings_unknown(self) -> &'static str {
+        self.choose(
+            "保持当前值（尚未观察到）",
+            "Keep current value (not observed yet)",
+        )
+    }
+
+    pub(crate) fn telegram_thread_settings_standard_speed(self) -> &'static str {
+        self.choose("标准", "Standard")
+    }
+
+    pub(crate) fn telegram_thread_settings_fast_speed(self) -> &'static str {
+        self.choose("快速", "Fast")
+    }
+
+    pub(crate) fn telegram_thread_settings_model_button(self) -> &'static str {
+        self.choose("模型", "Model")
+    }
+
+    pub(crate) fn telegram_thread_settings_effort_button(self) -> &'static str {
+        self.choose("推理强度", "Reasoning")
+    }
+
+    pub(crate) fn telegram_thread_settings_speed_button(self) -> &'static str {
+        self.choose("速度", "Speed")
+    }
+
+    pub(crate) fn telegram_thread_settings_apply_button(self) -> &'static str {
+        self.choose("应用", "Apply")
+    }
+
+    pub(crate) fn telegram_thread_settings_cancel_button(self) -> &'static str {
+        self.choose("取消", "Cancel")
+    }
+
+    pub(crate) fn telegram_thread_settings_back_button(self) -> &'static str {
+        self.choose("返回", "Back")
+    }
+
+    pub(crate) fn telegram_thread_settings_choose_model(self) -> &'static str {
+        self.choose("选择模型", "Choose model")
+    }
+
+    pub(crate) fn telegram_thread_settings_choose_effort(self) -> &'static str {
+        self.choose("选择推理强度", "Choose reasoning effort")
+    }
+
+    pub(crate) fn telegram_thread_settings_choose_speed(self) -> &'static str {
+        self.choose("选择速度", "Choose speed")
+    }
+
+    pub(crate) fn telegram_thread_settings_fast_unavailable(self) -> &'static str {
+        self.choose(
+            "所选模型不支持快速模式。",
+            "The selected model does not support Fast mode.",
+        )
+    }
+
+    pub(crate) fn telegram_thread_settings_effort_unavailable(self) -> &'static str {
+        self.choose(
+            "所选模型没有可选的推理强度。",
+            "The selected model has no selectable reasoning efforts.",
+        )
+    }
+
+    pub(crate) fn telegram_thread_settings_confirm_title(self) -> &'static str {
+        self.choose("需要确认兼容性", "Compatibility confirmation")
+    }
+
+    pub(crate) fn telegram_thread_settings_confirm_body(
+        self,
+        reset_effort: bool,
+        reset_speed: bool,
+    ) -> String {
+        let mut items = Vec::new();
+        if reset_effort {
+            items.push(self.choose(
+                "推理强度将恢复为目标模型默认值",
+                "Reasoning will use the target model default",
+            ));
+        }
+        if reset_speed {
+            items.push(self.choose("速度将恢复为标准", "Speed will return to Standard"));
+        }
+        match self.locale {
+            ImLocale::ZhCn => format!("{}。确认后才会提交设置。", items.join("；")),
+            ImLocale::EnUs => format!("{}. Confirm to submit the settings.", items.join("; ")),
+        }
+    }
+
+    pub(crate) fn telegram_thread_settings_confirm_button(self) -> &'static str {
+        self.choose("确认并应用", "Confirm and apply")
+    }
+
+    pub(crate) fn telegram_thread_settings_stale(self) -> &'static str {
+        self.choose(
+            "Codex 客户端已更新本草稿涉及的设置，草稿已失效。请重新发送 /model。",
+            "Codex updated a setting in this draft. The draft expired; send /model again.",
+        )
+    }
+
+    pub(crate) fn telegram_thread_settings_applied(self) -> &'static str {
+        self.choose(
+            "设置已应用，Codex 客户端会同步显示。",
+            "Settings applied. Codex will show the update.",
+        )
+    }
+
+    pub(crate) fn telegram_thread_settings_submitted_unconfirmed(self) -> &'static str {
+        self.choose(
+            "设置已提交，尚未确认。",
+            "Settings submitted but not yet confirmed.",
+        )
+    }
+
+    pub(crate) fn telegram_thread_settings_no_changes(self) -> &'static str {
+        self.choose(
+            "没有待应用的设置。",
+            "There are no pending settings to apply.",
+        )
+    }
+
+    pub(crate) fn telegram_thread_settings_cancelled(self) -> &'static str {
+        self.choose("已取消设置更改。", "Settings changes cancelled.")
+    }
+
+    pub(crate) fn telegram_thread_settings_apply_failed(
+        self,
+        error: &dyn std::fmt::Display,
+    ) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("设置应用失败：{error}"),
+            ImLocale::EnUs => format!("Failed to apply settings: {error}"),
+        }
+    }
+
+    pub(crate) fn telegram_model_switch_requires_thread(self) -> &'static str {
+        self.choose(
+            "当前话题还没有绑定 Codex 会话。请先使用 /new 或 /sessions 接入会话。",
+            "This topic is not attached to a Codex session. Use /new or /sessions first.",
+        )
+    }
+
+    pub(crate) fn telegram_model_list_failed(self, error: &dyn std::fmt::Display) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("模型列表加载失败：{error}"),
+            ImLocale::EnUs => format!("Failed to load the model list: {error}"),
+        }
+    }
+
+    pub(crate) fn telegram_model_list_empty(self) -> &'static str {
+        self.choose(
+            "Codex App 当前没有返回可切换的模型。",
+            "Codex App did not return any switchable models.",
+        )
+    }
+
+    pub(crate) fn telegram_model_switch_expired(self) -> &'static str {
+        self.choose(
+            "这个模型菜单已经失效，请重新发送 /model。",
+            "This model menu has expired. Send /model again.",
+        )
+    }
+
+    pub(crate) fn telegram_model_switch_not_current(self) -> &'static str {
+        self.choose(
+            "这个模型菜单不属于当前会话，或会话绑定已经变化。请重新发送 /model。",
+            "This model menu no longer belongs to the current session. Send /model again.",
+        )
     }
 
     pub(crate) fn thread_list_title_feishu(self) -> &'static str {
@@ -1769,7 +1958,7 @@ mod tests {
         assert_eq!(
             zh_commands,
             vec![
-                "new", "sessions", "status", "steer", "queue", "stop", "exit", "help"
+                "new", "sessions", "model", "status", "steer", "queue", "stop", "exit", "help"
             ]
         );
         assert!(zh.telegram_help().contains("/stop"));

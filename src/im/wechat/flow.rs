@@ -1426,6 +1426,25 @@ async fn handle_thread_routing_action(
             .await?;
             Ok(true)
         }
+        InboundAction::ThreadSettingsOpenField { .. }
+        | InboundAction::ThreadSettingsModelPage { .. }
+        | InboundAction::ThreadSettingsChooseModel { .. }
+        | InboundAction::ThreadSettingsChooseEffort { .. }
+        | InboundAction::ThreadSettingsChooseSpeed { .. }
+        | InboundAction::ThreadSettingsBack { .. }
+        | InboundAction::ThreadSettingsApply { .. }
+        | InboundAction::ThreadSettingsCompatibilityConfirm { .. }
+        | InboundAction::ThreadSettingsCancel { .. } => {
+            adapter
+                .send_text(
+                    state,
+                    &message.account_id,
+                    &message.chat_id,
+                    &im_text_for_state(state).unsupported_thread_action("Telegram 专属模型切换"),
+                )
+                .await?;
+            Ok(true)
+        }
         _ => Ok(false),
     }
 }

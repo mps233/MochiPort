@@ -22,8 +22,8 @@ use crate::{
     im_runtime::{RouteTarget, route_from_conversation_key},
     remote_control_backend,
     types::{
-        ChatType, ImPlatformKind, InboundAction, InboundMessage, ThreadRouteDirection, now_ms,
-        telegram_message_target,
+        ChatType, ImPlatformKind, InboundAction, InboundMessage, ThreadRouteDirection,
+        ThreadSettingsField, now_ms, telegram_message_target,
     },
 };
 
@@ -299,6 +299,12 @@ pub(crate) async fn auto_create_topic_for_codex_thread_for_generation(
         connection_epoch,
     )
     .await;
+    if let Ok(response) = resume_result.as_ref() {
+        state.runtime.lock().await.observe_thread_settings(
+            &thread_id,
+            crate::im_runtime::ThreadSettingsSnapshot::from_protocol_value(response),
+        );
+    }
     if !telegram_topic_creation_is_current(state, &thread_id, generation).await {
         delete_auto_created_topic(
             state,
@@ -800,25 +806,13 @@ async fn delete_auto_created_topic(
 ) {
     let context = format!("auto_create thread={thread_id}");
     match delete_forum_topic_with_retry(state, api, chat_id, topic_id, &context).await {
-        Ok(true) => {
+        Ok(()) => {
             state
                 .push_event(
                     "info",
                     "telegram_auto_topic_cleanup",
                     format!(
                         "thread={} chat={} topic={} deleted",
-                        thread_id, chat_id, topic_id
-                    ),
-                )
-                .await;
-        }
-        Ok(false) => {
-            state
-                .push_event(
-                    "warn",
-                    "telegram_auto_topic_cleanup_failed",
-                    format!(
-                        "thread={} chat={} topic={} api returned false",
                         thread_id, chat_id, topic_id
                     ),
                 )
@@ -991,7 +985,7 @@ pub(crate) async fn archive_telegram_topic_for_codex_thread(
         api_registry,
         thread_id,
         generation,
-        "archived",
+        TelegramTopicLifecycle::Archived,
         "codex_thread_archived_notification",
     )
     .await;
@@ -1008,7 +1002,7 @@ pub(crate) async fn delete_telegram_topic_for_codex_thread(
         api_registry,
         thread_id,
         generation,
-        "deleted",
+        TelegramTopicLifecycle::Deleted,
         "codex_thread_deleted_notification",
     )
     .await;
@@ -1019,14 +1013,14 @@ async fn remove_telegram_topic_for_codex_thread(
     api_registry: &ImApiRegistry,
     thread_id: &str,
     generation: u64,
-    codex_state: &'static str,
+    lifecycle: TelegramTopicLifecycle,
     reason: &'static str,
 ) {
     if !is_current_bridge_generation(state, generation).await {
         return;
     }
     let targets =
-        mark_telegram_topic_bindings_for_cleanup(state, thread_id, codex_state, generation).await;
+        mark_telegram_topic_bindings_for_cleanup(state, thread_id, lifecycle, generation).await;
     for target in targets {
         let Some(api) = api_registry.telegram_for_route(&target.route) else {
             state
@@ -1087,12 +1081,13 @@ pub(crate) async fn unarchive_telegram_topic_for_codex_thread(
             {
                 continue;
             }
-            binding.codex_state = "active".to_string();
-            binding.archived_at_ms = None;
-            binding.missing_at_ms = None;
-            binding.lifecycle_generation = generation;
+            apply_binding_lifecycle(
+                binding,
+                TelegramTopicLifecycle::Active,
+                generation,
+                now_ms(),
+            );
             binding.lifecycle_revision = binding.lifecycle_revision.saturating_add(1);
-            binding.last_checked_at_ms = now_ms();
             changed_keys.push((
                 key,
                 binding.lifecycle_generation,
@@ -1101,15 +1096,15 @@ pub(crate) async fn unarchive_telegram_topic_for_codex_thread(
         }
     }
     drop(runtime);
-    if !changed_keys.is_empty() {
-        if let Err(err) = persisted.save(&path) {
-            chain_log::write_diagnostic_lazy(|| {
-                format!(
-                    "[telegram_topic] event=unarchive_save_failed thread={} err={err}",
-                    thread_id
-                )
-            });
-        }
+    if !changed_keys.is_empty()
+        && let Err(err) = persisted.save(&path)
+    {
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[telegram_topic] event=unarchive_save_failed thread={} err={err}",
+                thread_id
+            )
+        });
     }
     drop(persisted);
     drop(_binding_guard);
@@ -1124,7 +1119,7 @@ pub(crate) async fn unarchive_telegram_topic_for_codex_thread(
 async fn mark_telegram_topic_bindings_for_cleanup(
     state: &SharedState,
     thread_id: &str,
-    codex_state: &str,
+    lifecycle: TelegramTopicLifecycle,
     generation: u64,
 ) -> Vec<TelegramTopicCleanupTarget> {
     let now = now_ms();
@@ -1134,10 +1129,10 @@ async fn mark_telegram_topic_bindings_for_cleanup(
     if runtime.bridge_generation != generation {
         return Vec::new();
     }
-    let lifecycle_state = if codex_state == "deleted" {
-        TelegramThreadLifecycleState::Deleted
-    } else {
-        TelegramThreadLifecycleState::Archived
+    let lifecycle_state = match lifecycle {
+        TelegramTopicLifecycle::Deleted => TelegramThreadLifecycleState::Deleted,
+        TelegramTopicLifecycle::Archived => TelegramThreadLifecycleState::Archived,
+        _ => unreachable!("Topic cleanup notifications are archive or delete events"),
     };
     state
         .observe_telegram_thread_lifecycle(thread_id, generation, lifecycle_state)
@@ -1171,14 +1166,13 @@ async fn mark_telegram_topic_bindings_for_cleanup(
         }
         let same_generation = binding.lifecycle_generation == generation;
         binding.thread_id = thread_id.to_string();
-        if !same_generation || binding.codex_state != "deleted" || codex_state == "deleted" {
-            binding.codex_state = codex_state.to_string();
-        }
-        binding.archived_at_ms.get_or_insert(now);
-        binding.missing_at_ms = None;
-        binding.lifecycle_generation = generation;
+        let lifecycle = if same_generation && binding.codex_state == "deleted" {
+            TelegramTopicLifecycle::Deleted
+        } else {
+            lifecycle
+        };
+        apply_binding_lifecycle(binding, lifecycle, generation, now);
         binding.lifecycle_revision = binding.lifecycle_revision.saturating_add(1);
-        binding.last_checked_at_ms = now;
         targets.push(TelegramTopicCleanupTarget {
             conversation_key,
             route,
@@ -1189,15 +1183,15 @@ async fn mark_telegram_topic_bindings_for_cleanup(
         });
     }
     drop(runtime);
-    if !targets.is_empty() {
-        if let Err(err) = persisted.save(&path) {
-            chain_log::write_diagnostic_lazy(|| {
-                format!(
-                    "[telegram_topic] event=archive_save_failed thread={} err={err}",
-                    thread_id
-                )
-            });
-        }
+    if !targets.is_empty()
+        && let Err(err) = persisted.save(&path)
+    {
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[telegram_topic] event=archive_save_failed thread={} err={err}",
+                thread_id
+            )
+        });
     }
     targets
 }
@@ -1463,7 +1457,7 @@ async fn run_telegram_topic_cleanup(
         target.topic_id,
         &context,
         Some(retry_notifier),
-        Some(&target.route.account_id),
+        &target.route.account_id,
         || telegram_topic_cleanup_can_continue(state, target, generation, lifecycle_revision),
     )
     .await
@@ -1583,20 +1577,20 @@ pub(crate) async fn delete_forum_topic_with_retry(
     chat_id: &str,
     topic_id: i64,
     context: &str,
-) -> Result<bool> {
+) -> Result<()> {
     let account_id = api.settings().account_id();
-    let outcome = delete_forum_topic_with_retry_while(
+    delete_forum_topic_with_retry_while(
         state,
         api,
         chat_id,
         topic_id,
         context,
         None,
-        Some(&account_id),
+        &account_id,
         || std::future::ready(true),
     )
     .await?;
-    Ok(matches!(outcome, TelegramTopicDeleteOutcome::Deleted))
+    Ok(())
 }
 
 async fn delete_forum_topic_with_retry_while<F, Fut>(
@@ -1606,7 +1600,7 @@ async fn delete_forum_topic_with_retry_while<F, Fut>(
     topic_id: i64,
     context: &str,
     retry_notifier: Option<&tokio::sync::Notify>,
-    retry_account_id: Option<&str>,
+    retry_account_id: &str,
     should_continue: F,
 ) -> Result<TelegramTopicDeleteOutcome>
 where
@@ -1618,7 +1612,7 @@ where
         || {
             run_telegram_topic_mutation_while(
                 state,
-                retry_account_id.unwrap_or_else(|| api.settings().account_id.as_str()),
+                retry_account_id,
                 retry_notifier,
                 should_continue.clone(),
                 || api.delete_forum_topic(chat_id, topic_id),
@@ -1640,14 +1634,16 @@ where
                 )
                 .await;
             wait_for_telegram_topic_delete_retry(retry.delay, retry_notifier).await;
-            if let Some(account_id) = retry_account_id
-                && let Some(deadline) = state
-                    .telegram_topic_cleanup_retry_deadline(account_id)
-                    .await
+            if let Some(deadline) = state
+                .telegram_topic_cleanup_retry_deadline(retry_account_id)
+                .await
                 && deadline <= Instant::now()
             {
                 state
-                    .clear_telegram_topic_cleanup_retry_deadline_if_elapsed(account_id, deadline)
+                    .clear_telegram_topic_cleanup_retry_deadline_if_elapsed(
+                        retry_account_id,
+                        deadline,
+                    )
                     .await;
             }
         },
@@ -1767,7 +1763,7 @@ fn telegram_topic_delete_retry_delay(err: Option<&anyhow::Error>, attempt: usize
 }
 
 fn telegram_topic_delete_should_retry(err: &anyhow::Error) -> bool {
-    err.downcast_ref::<TelegramApiError>().map_or(true, |err| {
+    err.downcast_ref::<TelegramApiError>().is_none_or(|err| {
         let api_error = err.error_code.unwrap_or_default();
         err.is_rate_limited()
             || err.status == reqwest::StatusCode::REQUEST_TIMEOUT
@@ -1938,9 +1934,10 @@ async fn handle_forum_topic_service_message(
     };
     let topic_state = if message.forum_topic_closed.is_some() {
         Some("closed")
-    } else if message.forum_topic_reopened.is_some() {
-        Some("open")
-    } else if message.forum_topic_created.is_some() || message.forum_topic_edited.is_some() {
+    } else if message.forum_topic_reopened.is_some()
+        || message.forum_topic_created.is_some()
+        || message.forum_topic_edited.is_some()
+    {
         Some("open")
     } else {
         None
@@ -2270,6 +2267,41 @@ enum TelegramTopicLifecycle {
     Deleted,
     MissingGrace,
     MissingDelete,
+}
+
+fn apply_binding_lifecycle(
+    binding: &mut crate::store::TelegramTopicBindingState,
+    lifecycle: TelegramTopicLifecycle,
+    generation: u64,
+    now: u128,
+) -> bool {
+    let previous_generation = binding.lifecycle_generation;
+    let previous_codex_state = binding.codex_state.clone();
+    let codex_state = match lifecycle {
+        TelegramTopicLifecycle::Active => "active",
+        TelegramTopicLifecycle::Archived => "archived",
+        TelegramTopicLifecycle::Deleted => "deleted",
+        TelegramTopicLifecycle::MissingGrace | TelegramTopicLifecycle::MissingDelete => "missing",
+    };
+    binding.codex_state.clear();
+    binding.codex_state.push_str(codex_state);
+    match lifecycle {
+        TelegramTopicLifecycle::Active => {
+            binding.archived_at_ms = None;
+            binding.missing_at_ms = None;
+        }
+        TelegramTopicLifecycle::Archived | TelegramTopicLifecycle::Deleted => {
+            binding.archived_at_ms.get_or_insert(now);
+            binding.missing_at_ms = None;
+        }
+        TelegramTopicLifecycle::MissingGrace | TelegramTopicLifecycle::MissingDelete => {
+            binding.archived_at_ms = None;
+            binding.missing_at_ms.get_or_insert(now);
+        }
+    }
+    binding.lifecycle_generation = generation;
+    binding.last_checked_at_ms = now;
+    previous_generation != generation || previous_codex_state != binding.codex_state
 }
 
 async fn reconcile_telegram_topic_bindings(
@@ -2670,36 +2702,22 @@ fn update_telegram_topic_lifecycle(
     generation: u64,
     now: u128,
 ) -> TelegramTopicLifecycle {
-    let previous_generation = state.lifecycle_generation;
-    let previous_codex_state = state.codex_state.clone();
     let same_generation = state.lifecycle_generation == generation;
-    state.lifecycle_generation = generation;
-    state.last_checked_at_ms = now;
     let lifecycle = if same_generation && state.codex_state == "deleted" {
-        state.archived_at_ms.get_or_insert(now);
-        state.missing_at_ms = None;
         TelegramTopicLifecycle::Deleted
     } else if active_ids.contains(thread_id) {
-        state.codex_state = "active".to_string();
-        state.archived_at_ms = None;
-        state.missing_at_ms = None;
         TelegramTopicLifecycle::Active
     } else if archived_ids.contains(thread_id) {
-        state.codex_state = "archived".to_string();
-        state.archived_at_ms.get_or_insert(now);
-        state.missing_at_ms = None;
         TelegramTopicLifecycle::Archived
     } else {
-        state.codex_state = "missing".to_string();
-        state.archived_at_ms = None;
-        let missing_at = state.missing_at_ms.get_or_insert(now);
-        if now.saturating_sub(*missing_at) >= TELEGRAM_TOPIC_STATE_GRACE.as_millis() {
+        let missing_at = state.missing_at_ms.unwrap_or(now);
+        if now.saturating_sub(missing_at) >= TELEGRAM_TOPIC_STATE_GRACE.as_millis() {
             TelegramTopicLifecycle::MissingDelete
         } else {
             TelegramTopicLifecycle::MissingGrace
         }
     };
-    if previous_generation != generation || previous_codex_state != state.codex_state {
+    if apply_binding_lifecycle(state, lifecycle, generation, now) {
         state.lifecycle_revision = state.lifecycle_revision.saturating_add(1);
     }
     lifecycle
@@ -2890,18 +2908,14 @@ async fn persist_telegram_topic_binding_state(
         }
     }
     if let Some(lifecycle_intent) = lifecycle_intent {
-        if state
+        state
             .observe_telegram_thread_lifecycle_if_revision(
                 thread_id,
                 generation,
                 expected_lifecycle_revision,
                 lifecycle_intent,
             )
-            .await
-            .is_none()
-        {
-            return None;
-        }
+            .await?;
     }
     let Some(current_key) = current_key else {
         return Some(TelegramTopicBindingCommit {
@@ -3934,6 +3948,70 @@ fn action_from_callback_data(data: &str) -> Option<InboundAction> {
                 _ => return None,
             },
         }),
+        ["tmo", request_id, revision, field] => Some(InboundAction::ThreadSettingsOpenField {
+            request_id: (*request_id).to_string(),
+            revision: revision.parse().ok()?,
+            field: match *field {
+                "model" => ThreadSettingsField::Model,
+                "effort" => ThreadSettingsField::Effort,
+                "speed" => ThreadSettingsField::Speed,
+                _ => return None,
+            },
+        }),
+        ["tmp", request_id, revision, direction] => Some(InboundAction::ThreadSettingsModelPage {
+            request_id: (*request_id).to_string(),
+            revision: revision.parse().ok()?,
+            direction: match *direction {
+                "prev" => ThreadRouteDirection::Prev,
+                "next" => ThreadRouteDirection::Next,
+                _ => return None,
+            },
+        }),
+        ["tms", request_id, revision, page, index] => {
+            Some(InboundAction::ThreadSettingsChooseModel {
+                request_id: (*request_id).to_string(),
+                revision: revision.parse().ok()?,
+                page: page.parse().ok()?,
+                index: index.parse().ok()?,
+            })
+        }
+        ["tme", request_id, revision, index] => Some(InboundAction::ThreadSettingsChooseEffort {
+            request_id: (*request_id).to_string(),
+            revision: revision.parse().ok()?,
+            index: index.parse().ok()?,
+        }),
+        ["tmv", request_id, revision, value] => Some(InboundAction::ThreadSettingsChooseSpeed {
+            request_id: (*request_id).to_string(),
+            revision: revision.parse().ok()?,
+            fast: match *value {
+                "std" => false,
+                "fast" => true,
+                _ => return None,
+            },
+        }),
+        ["tmb", request_id, revision] => Some(InboundAction::ThreadSettingsBack {
+            request_id: (*request_id).to_string(),
+            revision: revision.parse().ok()?,
+        }),
+        ["tma", request_id, revision] => Some(InboundAction::ThreadSettingsApply {
+            request_id: (*request_id).to_string(),
+            revision: revision.parse().ok()?,
+        }),
+        ["tmq", request_id, revision, decision] => {
+            Some(InboundAction::ThreadSettingsCompatibilityConfirm {
+                request_id: (*request_id).to_string(),
+                revision: revision.parse().ok()?,
+                accept: match *decision {
+                    "yes" => true,
+                    "no" => false,
+                    _ => return None,
+                },
+            })
+        }
+        ["tmc", request_id, revision] => Some(InboundAction::ThreadSettingsCancel {
+            request_id: (*request_id).to_string(),
+            revision: revision.parse().ok()?,
+        }),
         _ => None,
     }
 }
@@ -4036,6 +4114,51 @@ mod tests {
             ),
             TelegramTopicLifecycle::MissingDelete
         );
+    }
+
+    #[test]
+    fn binding_lifecycle_fields_are_applied_without_changing_revision_policy() {
+        let mut binding = crate::store::TelegramTopicBindingState {
+            archived_at_ms: Some(100),
+            missing_at_ms: Some(200),
+            lifecycle_revision: 7,
+            ..Default::default()
+        };
+
+        assert!(apply_binding_lifecycle(
+            &mut binding,
+            TelegramTopicLifecycle::MissingGrace,
+            3,
+            300,
+        ));
+        assert_eq!(binding.codex_state, "missing");
+        assert_eq!(binding.archived_at_ms, None);
+        assert_eq!(binding.missing_at_ms, Some(200));
+        assert_eq!(binding.lifecycle_generation, 3);
+        assert_eq!(binding.lifecycle_revision, 7);
+        assert_eq!(binding.last_checked_at_ms, 300);
+
+        assert!(apply_binding_lifecycle(
+            &mut binding,
+            TelegramTopicLifecycle::Archived,
+            3,
+            400,
+        ));
+        assert_eq!(binding.codex_state, "archived");
+        assert_eq!(binding.archived_at_ms, Some(400));
+        assert_eq!(binding.missing_at_ms, None);
+        assert_eq!(binding.lifecycle_revision, 7);
+
+        assert!(apply_binding_lifecycle(
+            &mut binding,
+            TelegramTopicLifecycle::Active,
+            3,
+            500,
+        ));
+        assert_eq!(binding.codex_state, "active");
+        assert_eq!(binding.archived_at_ms, None);
+        assert_eq!(binding.missing_at_ms, None);
+        assert_eq!(binding.lifecycle_revision, 7);
     }
 
     #[test]
@@ -5458,9 +5581,14 @@ mod tests {
         .await
         .expect("bind Topic");
         assert_eq!(
-            mark_telegram_topic_bindings_for_cleanup(&state, thread_id, "archived", generation,)
-                .await
-                .len(),
+            mark_telegram_topic_bindings_for_cleanup(
+                &state,
+                thread_id,
+                TelegramTopicLifecycle::Archived,
+                generation,
+            )
+            .await
+            .len(),
             1
         );
         let expected = state.persisted.lock().await.telegram_topic_binding_states
@@ -6485,5 +6613,72 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_thread_settings_callback_data() {
+        let action =
+            action_from_callback_data("tmo:thread-model-7:12:model").expect("open model action");
+        match action {
+            InboundAction::ThreadSettingsOpenField {
+                request_id,
+                revision,
+                field,
+            } => {
+                assert_eq!(request_id, "thread-model-7");
+                assert_eq!(revision, 12);
+                assert_eq!(field, ThreadSettingsField::Model);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let action =
+            action_from_callback_data("tmp:thread-model-7:12:prev").expect("model page action");
+        match action {
+            InboundAction::ThreadSettingsModelPage {
+                request_id,
+                revision,
+                direction,
+            } => {
+                assert_eq!(request_id, "thread-model-7");
+                assert_eq!(revision, 12);
+                assert_eq!(direction, ThreadRouteDirection::Prev);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let action =
+            action_from_callback_data("tms:thread-model-7:12:3:2").expect("model select action");
+        match action {
+            InboundAction::ThreadSettingsChooseModel {
+                request_id,
+                revision,
+                page,
+                index,
+            } => {
+                assert_eq!(request_id, "thread-model-7");
+                assert_eq!(revision, 12);
+                assert_eq!(page, 3);
+                assert_eq!(index, 2);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+
+        let action = action_from_callback_data("tmv:thread-model-7:12:fast").expect("speed action");
+        assert!(matches!(
+            action,
+            InboundAction::ThreadSettingsChooseSpeed {
+                revision: 12,
+                fast: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            action_from_callback_data("tmq:thread-model-7:12:yes"),
+            Some(InboundAction::ThreadSettingsCompatibilityConfirm { accept: true, .. })
+        ));
+        assert!(action_from_callback_data("tmp:thread-model-7:12:sideways").is_none());
+        assert!(action_from_callback_data("tms:thread-model-7:not-a-revision:3:2").is_none());
+        assert!(action_from_callback_data("tmo:thread-model-7:12:other").is_none());
     }
 }

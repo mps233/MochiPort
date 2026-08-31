@@ -1,7 +1,10 @@
 use anyhow::{Result, anyhow};
 
 use crate::{
-    app_state::SharedState, im_runtime::RouteTarget, remote_control_backend, types::ImPlatformKind,
+    app_state::SharedState,
+    im_runtime::{RouteTarget, ThreadSettingsSnapshot},
+    remote_control_backend,
+    types::ImPlatformKind,
 };
 
 pub(crate) async fn create_and_bind_thread(
@@ -31,6 +34,10 @@ pub(crate) async fn resume_and_bind_thread(
         true,
     )
     .await?;
+    state.runtime.lock().await.observe_thread_settings(
+        thread_id,
+        ThreadSettingsSnapshot::from_protocol_value(&response),
+    );
     bind_thread_to_route(state, route, thread_id, request_id, remote_client_key).await?;
     Ok(response
         .get("thread")

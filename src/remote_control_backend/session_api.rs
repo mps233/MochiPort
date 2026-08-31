@@ -30,6 +30,36 @@ use super::{
 // history view works regardless of which Codex client created the thread.
 const INTERACTIVE_ROOT_SOURCE_KINDS: [&str; 3] = ["cli", "vscode", "appServer"];
 
+/// One field in a `thread/settings/update` patch.
+///
+/// The app-server distinguishes an omitted field from an explicit JSON null:
+/// omission preserves the current override, while null clears it. Keep that
+/// distinction in the Rust API so callers cannot accidentally change unrelated
+/// thread settings while applying a staged Telegram draft.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ThreadSettingsPatchValue {
+    #[default]
+    Unchanged,
+    Set(String),
+    Clear,
+}
+
+/// The minimal set of live-thread settings to change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ThreadSettingsPatch {
+    pub model: ThreadSettingsPatchValue,
+    pub effort: ThreadSettingsPatchValue,
+    pub service_tier: ThreadSettingsPatchValue,
+}
+
+impl ThreadSettingsPatch {
+    pub fn is_empty(&self) -> bool {
+        matches!(&self.model, ThreadSettingsPatchValue::Unchanged)
+            && matches!(&self.effort, ThreadSettingsPatchValue::Unchanged)
+            && matches!(&self.service_tier, ThreadSettingsPatchValue::Unchanged)
+    }
+}
+
 pub async fn request_for_client(
     state: &SharedState,
     client_key: &str,
@@ -570,6 +600,86 @@ fn thread_set_name_params(thread_id: &str, name: &str) -> Value {
         "threadId": thread_id,
         "name": name,
     })
+}
+
+/// Update settings that apply to all subsequent turns in an existing thread.
+///
+/// `thread/settings/update` is the app-server operation for changing a live
+/// thread's model, reasoning effort, or service tier. Keep this separate from
+/// `thread/resume`: resuming a thread is a lifecycle operation and older
+/// callers rely on its existing request shape and connection behavior.
+pub async fn update_thread_settings_for_client(
+    state: &SharedState,
+    client_key: &str,
+    thread_id: &str,
+    patch: &ThreadSettingsPatch,
+) -> Result<Value> {
+    let params = thread_settings_update_params(thread_id, patch)?;
+    request_for_client(state, client_key, "thread/settings/update", params).await
+}
+
+/// Update an existing thread's model, optionally changing its reasoning
+/// effort at the same time.
+#[allow(dead_code)]
+pub async fn update_thread_model_for_client(
+    state: &SharedState,
+    client_key: &str,
+    thread_id: &str,
+    model: &str,
+    effort: Option<&str>,
+) -> Result<Value> {
+    let model = model.trim();
+    if model.is_empty() {
+        return Err(anyhow!("thread model must not be empty"));
+    }
+    let patch = ThreadSettingsPatch {
+        model: ThreadSettingsPatchValue::Set(model.to_string()),
+        effort: optional_thread_settings_patch_value(effort),
+        ..Default::default()
+    };
+    update_thread_settings_for_client(state, client_key, thread_id, &patch).await
+}
+
+fn thread_settings_update_params(thread_id: &str, patch: &ThreadSettingsPatch) -> Result<Value> {
+    if patch.is_empty() {
+        return Err(anyhow!(
+            "thread settings update requires at least one changed field"
+        ));
+    }
+    let mut params = json!({
+        "threadId": thread_id,
+    });
+    append_thread_settings_patch_value(&mut params, "model", &patch.model)?;
+    append_thread_settings_patch_value(&mut params, "effort", &patch.effort)?;
+    append_thread_settings_patch_value(&mut params, "serviceTier", &patch.service_tier)?;
+    Ok(params)
+}
+
+#[allow(dead_code)]
+fn optional_thread_settings_patch_value(value: Option<&str>) -> ThreadSettingsPatchValue {
+    match non_empty(value) {
+        Some(value) => ThreadSettingsPatchValue::Set(value.to_string()),
+        None => ThreadSettingsPatchValue::Unchanged,
+    }
+}
+
+fn append_thread_settings_patch_value(
+    params: &mut Value,
+    field: &str,
+    patch_value: &ThreadSettingsPatchValue,
+) -> Result<()> {
+    match patch_value {
+        ThreadSettingsPatchValue::Unchanged => {}
+        ThreadSettingsPatchValue::Clear => params[field] = Value::Null,
+        ThreadSettingsPatchValue::Set(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                return Err(anyhow!("thread settings field `{field}` must not be empty"));
+            }
+            params[field] = json!(value);
+        }
+    }
+    Ok(())
 }
 
 pub async fn config_read_for_client(
@@ -1216,7 +1326,10 @@ fn turn_input_items(text: &str, attachments: &[InboundAttachment]) -> Vec<Value>
 
 #[cfg(test)]
 mod tests {
-    use super::{thread_set_name_params, turn_input_items};
+    use super::{
+        ThreadSettingsPatch, ThreadSettingsPatchValue, thread_set_name_params,
+        thread_settings_update_params, turn_input_items,
+    };
     use crate::types::InboundAttachment;
 
     #[test]
@@ -1244,5 +1357,51 @@ mod tests {
             thread_set_name_params("thread-7", "Renamed"),
             serde_json::json!({"threadId": "thread-7", "name": "Renamed"})
         );
+    }
+
+    #[test]
+    fn thread_settings_update_params_preserve_set_and_clear_distinctions() {
+        let patch = ThreadSettingsPatch {
+            model: ThreadSettingsPatchValue::Set(" gpt-5-codex ".to_string()),
+            effort: ThreadSettingsPatchValue::Clear,
+            service_tier: ThreadSettingsPatchValue::Set(" priority ".to_string()),
+        };
+        assert_eq!(
+            thread_settings_update_params("thread-7", &patch).expect("valid patch"),
+            serde_json::json!({
+                "threadId": "thread-7",
+                "model": "gpt-5-codex",
+                "effort": null,
+                "serviceTier": "priority",
+            })
+        );
+    }
+
+    #[test]
+    fn thread_settings_update_params_omit_unchanged_fields() {
+        let patch = ThreadSettingsPatch {
+            effort: ThreadSettingsPatchValue::Set("medium".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            thread_settings_update_params("thread-7", &patch).expect("valid patch"),
+            serde_json::json!({
+                "threadId": "thread-7",
+                "effort": "medium",
+            })
+        );
+    }
+
+    #[test]
+    fn thread_settings_update_params_reject_empty_or_blank_patches() {
+        assert!(
+            thread_settings_update_params("thread-7", &ThreadSettingsPatch::default()).is_err()
+        );
+
+        let patch = ThreadSettingsPatch {
+            service_tier: ThreadSettingsPatchValue::Set("   ".to_string()),
+            ..Default::default()
+        };
+        assert!(thread_settings_update_params("thread-7", &patch).is_err());
     }
 }

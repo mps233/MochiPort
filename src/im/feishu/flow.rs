@@ -348,6 +348,24 @@ pub(crate) async fn handle_inbound_action(
             request_id,
             direction,
         } => handle_thread_route_list_page(state, api, message, &request_id, direction).await,
+        InboundAction::ThreadSettingsOpenField { .. }
+        | InboundAction::ThreadSettingsModelPage { .. }
+        | InboundAction::ThreadSettingsChooseModel { .. }
+        | InboundAction::ThreadSettingsChooseEffort { .. }
+        | InboundAction::ThreadSettingsChooseSpeed { .. }
+        | InboundAction::ThreadSettingsBack { .. }
+        | InboundAction::ThreadSettingsApply { .. }
+        | InboundAction::ThreadSettingsCompatibilityConfirm { .. }
+        | InboundAction::ThreadSettingsCancel { .. } => {
+            let text = im_text_for_state(&state);
+            send_text_to_message(
+                &api,
+                &message,
+                &text.unsupported_thread_action("Telegram 专属模型切换"),
+            )
+            .await?;
+            Ok(())
+        }
     }
 }
 

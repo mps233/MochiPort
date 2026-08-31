@@ -19,7 +19,7 @@ use crate::{
     },
     im::feishu::{FeishuApi, FeishuSettings},
     im::telegram::{
-        api::{TelegramApi, TelegramForumTopicEditOutcome},
+        api::TelegramApi,
         polling::{
             delete_forum_topic_with_retry, run_telegram_topic_edit_with_marker,
             run_telegram_topic_mutation_while,
@@ -447,7 +447,7 @@ pub(super) async fn sync_telegram_topics(
     raw_threads.sort_by(|left, right| {
         thread_updated_at(left)
             .cmp(&thread_updated_at(right))
-            .then_with(|| thread_id_for_sort(left).cmp(&thread_id_for_sort(right)))
+            .then_with(|| thread_id_for_sort(left).cmp(thread_id_for_sort(right)))
     });
 
     let text = im_text_for_state(&state);
@@ -1103,8 +1103,7 @@ async fn cleanup_created_topic(
     match delete_forum_topic_with_retry(state, api, chat_id, topic_id, "manual_topic_sync_orphan")
         .await
     {
-        Ok(true) => format!("{binding_error}（已清理未绑定的 Topic）"),
-        Ok(false) => format!("{binding_error}（清理未绑定的 Topic 未确认成功）"),
+        Ok(()) => format!("{binding_error}（已清理未绑定的 Topic）"),
         Err(cleanup_error) => {
             format!("{binding_error}（清理未绑定的 Topic 失败：{cleanup_error}）")
         }
@@ -2399,7 +2398,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{app_state::AppState, im_runtime::RouteTarget, store::PersistedState};
+    use crate::{
+        app_state::AppState, im::telegram::api::TelegramForumTopicEditOutcome,
+        im_runtime::RouteTarget, store::PersistedState,
+    };
 
     fn telegram_account(
         account_id: &str,
@@ -2467,7 +2469,7 @@ mod tests {
 
     #[test]
     fn telegram_topic_sync_sorts_by_actual_update_time() {
-        let mut threads = vec![
+        let mut threads = [
             json!({"id": "new", "updatedAt": 300}),
             json!({"id": "old", "updated_at": 100}),
             json!({"id": "middle", "updatedAt": 200}),
@@ -2475,7 +2477,7 @@ mod tests {
         threads.sort_by(|left, right| {
             thread_updated_at(left)
                 .cmp(&thread_updated_at(right))
-                .then_with(|| thread_id_for_sort(left).cmp(&thread_id_for_sort(right)))
+                .then_with(|| thread_id_for_sort(left).cmp(thread_id_for_sort(right)))
         });
         assert_eq!(
             threads.iter().map(thread_id_for_sort).collect::<Vec<_>>(),

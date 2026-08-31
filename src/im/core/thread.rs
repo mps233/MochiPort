@@ -25,6 +25,32 @@ pub struct ThreadModelChoice {
     pub value: String,
 }
 
+/// A service tier advertised by one `model/list` catalog entry.
+///
+/// The identifier is the value accepted by `thread/settings/update`, while
+/// `name` and `description` are only presentation metadata for IM clients.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ThreadModelServiceTierChoice {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+}
+
+/// A visible model choice with the settings capabilities advertised by Codex.
+///
+/// This is deliberately separate from `ThreadModelChoice`: creation flows can
+/// continue using their legacy fallback list, but live thread settings must use
+/// only the dynamically discovered app-server catalog.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ThreadModelSettingsChoice {
+    pub(crate) model: String,
+    pub(crate) label: String,
+    pub(crate) supported_efforts: Vec<String>,
+    pub(crate) default_effort: Option<String>,
+    pub(crate) service_tiers: Vec<ThreadModelServiceTierChoice>,
+    pub(crate) default_service_tier: Option<String>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct ThreadCreateDefaults {
     pub remote_name: Option<String>,
@@ -52,6 +78,8 @@ struct ThreadModelCatalogEntry {
     is_default: bool,
     supported_efforts: Vec<String>,
     default_effort: Option<String>,
+    service_tiers: Vec<ThreadModelServiceTierChoice>,
+    default_service_tier: Option<String>,
 }
 
 pub(crate) fn thread_create_form_from_draft(draft: &ThreadCreateDraftState) -> ThreadCreateForm {
@@ -859,25 +887,70 @@ async fn load_model_catalog_for_client(
 ) -> Result<Vec<ThreadModelCatalogEntry>> {
     let response =
         remote_control_backend::model_list_for_client(state, client_key, true, Some(100)).await?;
-    Ok(parse_model_catalog(&response))
+    parse_model_catalog(&response)
 }
 
-fn parse_model_catalog(response: &serde_json::Value) -> Vec<ThreadModelCatalogEntry> {
-    response
+/// Load the live-thread settings catalog for one Codex app-server client.
+///
+/// Hidden entries and duplicate model identifiers are excluded. Unlike the
+/// older creation menu, this intentionally has no static fallback because the
+/// selected thread can only accept capabilities published by its client.
+pub(crate) async fn load_thread_model_settings_choices_for_client(
+    state: &SharedState,
+    client_key: &str,
+) -> Result<Vec<ThreadModelSettingsChoice>> {
+    let catalog = load_model_catalog_for_client(state, client_key).await?;
+    Ok(visible_thread_model_settings_choices(&catalog))
+}
+
+fn visible_thread_model_settings_choices(
+    catalog: &[ThreadModelCatalogEntry],
+) -> Vec<ThreadModelSettingsChoice> {
+    let mut choices = Vec::new();
+    for entry in catalog.iter().filter(|entry| !entry.hidden) {
+        if choices
+            .iter()
+            .any(|choice: &ThreadModelSettingsChoice| choice.model == entry.model)
+        {
+            continue;
+        }
+        choices.push(ThreadModelSettingsChoice {
+            model: entry.model.clone(),
+            label: entry.label.clone(),
+            supported_efforts: entry.supported_efforts.clone(),
+            default_effort: entry.default_effort.clone(),
+            service_tiers: entry.service_tiers.clone(),
+            default_service_tier: entry.default_service_tier.clone(),
+        });
+    }
+    choices
+}
+
+fn parse_model_catalog(response: &serde_json::Value) -> Result<Vec<ThreadModelCatalogEntry>> {
+    let data = response
         .get("data")
         .and_then(|value| value.as_array())
-        .into_iter()
-        .flatten()
+        .ok_or_else(|| anyhow!("model/list response missing data array"))?;
+
+    Ok(data
+        .iter()
         .filter_map(|value| {
             let model = value
                 .get("model")
-                .or_else(|| value.get("id"))
                 .and_then(|value| value.as_str())
                 .map(str::trim)
-                .filter(|value| !value.is_empty())?
+                .filter(|value| !value.is_empty())
+                .or_else(|| {
+                    value
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                })?
                 .to_string();
             let display_name = value
                 .get("displayName")
+                .or_else(|| value.get("display_name"))
                 .and_then(|value| value.as_str())
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -889,16 +962,52 @@ fn parse_model_catalog(response: &serde_json::Value) -> Vec<ThreadModelCatalogEn
             };
             let supported_efforts = value
                 .get("supportedReasoningEfforts")
+                .or_else(|| value.get("supported_reasoning_efforts"))
                 .and_then(|value| value.as_array())
                 .into_iter()
                 .flatten()
                 .filter_map(|value| {
                     value
                         .get("reasoningEffort")
+                        .or_else(|| value.get("reasoning_effort"))
                         .and_then(|value| value.as_str())
+                        .or_else(|| value.as_str())
                         .map(str::trim)
                         .filter(|value| !value.is_empty())
                         .map(str::to_string)
+                })
+                .collect::<Vec<_>>();
+            let service_tiers = value
+                .get("serviceTiers")
+                .or_else(|| value.get("service_tiers"))
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|tier| {
+                    let id = tier
+                        .get("id")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())?
+                        .to_string();
+                    let name = tier
+                        .get("name")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or(&id)
+                        .to_string();
+                    let description = tier
+                        .get("description")
+                        .and_then(|value| value.as_str())
+                        .map(str::trim)
+                        .unwrap_or_default()
+                        .to_string();
+                    Some(ThreadModelServiceTierChoice {
+                        id,
+                        name,
+                        description,
+                    })
                 })
                 .collect::<Vec<_>>();
             Some(ThreadModelCatalogEntry {
@@ -906,22 +1015,33 @@ fn parse_model_catalog(response: &serde_json::Value) -> Vec<ThreadModelCatalogEn
                 label,
                 hidden: value
                     .get("hidden")
+                    .or_else(|| value.get("isHidden"))
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false),
                 is_default: value
                     .get("isDefault")
+                    .or_else(|| value.get("is_default"))
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false),
                 supported_efforts: dedupe_strings(supported_efforts),
                 default_effort: value
                     .get("defaultReasoningEffort")
+                    .or_else(|| value.get("default_reasoning_effort"))
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+                service_tiers: dedupe_service_tiers(service_tiers),
+                default_service_tier: value
+                    .get("defaultServiceTier")
+                    .or_else(|| value.get("default_service_tier"))
                     .and_then(|value| value.as_str())
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .map(str::to_string),
             })
         })
-        .collect()
+        .collect())
 }
 
 fn thread_model_choices(
@@ -1046,6 +1166,21 @@ fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     output
 }
 
+fn dedupe_service_tiers(
+    values: Vec<ThreadModelServiceTierChoice>,
+) -> Vec<ThreadModelServiceTierChoice> {
+    let mut output = Vec::new();
+    for value in values {
+        if !output
+            .iter()
+            .any(|existing: &ThreadModelServiceTierChoice| existing.id == value.id)
+        {
+            output.push(value);
+        }
+    }
+    output
+}
+
 fn config_string(config: Option<&serde_json::Value>, key: &str) -> Option<String> {
     config
         .and_then(|config| config.get(key))
@@ -1154,7 +1289,10 @@ fn push_path_once(paths: &mut Vec<PathBuf>, path: PathBuf) {
 mod tests {
     use serde_json::json;
 
-    use super::{build_thread_entries, thread_model_choices};
+    use super::{
+        build_thread_entries, parse_model_catalog, thread_model_choices,
+        visible_thread_model_settings_choices,
+    };
     use crate::im::core::i18n::ImText;
 
     #[test]
@@ -1195,5 +1333,71 @@ mod tests {
             );
         }
         assert!(!values.contains(&"gpt-5.2"));
+    }
+
+    #[test]
+    fn model_catalog_parser_requires_a_data_array_and_skips_invalid_entries() {
+        assert!(parse_model_catalog(&json!({"models": []})).is_err());
+
+        let catalog = parse_model_catalog(&json!({
+            "data": [
+                {"id": "gpt-visible", "displayName": "Visible"},
+                {"id": "gpt-hidden", "hidden": true},
+                {"id": "  "},
+                {"model": "", "id": "gpt-from-id", "displayName": "ID fallback"},
+                {"displayName": "missing id"},
+                {"id": "gpt-visible", "displayName": "Duplicate"}
+            ]
+        }))
+        .expect("valid model/list response");
+
+        assert_eq!(catalog.len(), 4);
+        assert_eq!(catalog[0].model, "gpt-visible");
+        assert!(!catalog[0].hidden);
+        assert!(catalog[1].hidden);
+        assert_eq!(catalog[2].model, "gpt-from-id");
+        assert_eq!(catalog[3].model, "gpt-visible");
+    }
+
+    #[test]
+    fn visible_thread_settings_catalog_preserves_capabilities_and_deduplicates_models() {
+        let catalog = parse_model_catalog(&json!({
+            "data": [
+                {
+                    "model": "gpt-live",
+                    "displayName": "Live model",
+                    "supportedReasoningEfforts": [
+                        {"reasoningEffort": "high"},
+                        "medium",
+                        {"reasoningEffort": "high"}
+                    ],
+                    "defaultReasoningEffort": "medium",
+                    "serviceTiers": [
+                        {"id": "priority", "name": "Fast", "description": "1.5x speed"},
+                        {"id": "priority", "name": "Duplicate", "description": "ignored"},
+                        {"id": "default", "name": "Standard", "description": "normal"}
+                    ],
+                    "defaultServiceTier": "priority",
+                    "additionalSpeedTiers": ["deprecated-tier"]
+                },
+                {"model": "gpt-hidden", "hidden": true},
+                {"model": "gpt-live", "displayName": "Duplicate visible entry"}
+            ]
+        }))
+        .expect("valid model/list response");
+
+        let choices = visible_thread_model_settings_choices(&catalog);
+        assert_eq!(choices.len(), 1);
+        let choice = &choices[0];
+        assert_eq!(choice.model, "gpt-live");
+        assert_eq!(choice.label, "Live model (gpt-live)");
+        assert_eq!(choice.supported_efforts, vec!["high", "medium"]);
+        assert_eq!(choice.default_effort.as_deref(), Some("medium"));
+        assert_eq!(choice.default_service_tier.as_deref(), Some("priority"));
+        assert_eq!(choice.service_tiers.len(), 2);
+        assert_eq!(choice.service_tiers[0].id, "priority");
+        assert_eq!(choice.service_tiers[0].name, "Fast");
+        assert_eq!(choice.service_tiers[0].description, "1.5x speed");
+        assert_eq!(choice.service_tiers[1].id, "default");
     }
 }

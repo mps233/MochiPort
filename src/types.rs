@@ -56,6 +56,17 @@ pub enum ThreadRouteDirection {
     Next,
 }
 
+/// The setting section selected from Telegram's staged thread-settings editor.
+/// Values are deliberately short because they are encoded into Telegram
+/// callback payloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreadSettingsField {
+    Model,
+    Effort,
+    Speed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum InboundCallbackKind {
@@ -122,6 +133,50 @@ pub enum InboundAction {
     ThreadRouteListPage {
         request_id: String,
         direction: ThreadRouteDirection,
+    },
+    /// Open one section of a staged settings editor for an existing thread.
+    ThreadSettingsOpenField {
+        request_id: String,
+        revision: u64,
+        field: ThreadSettingsField,
+    },
+    ThreadSettingsModelPage {
+        request_id: String,
+        revision: u64,
+        direction: ThreadRouteDirection,
+    },
+    ThreadSettingsChooseModel {
+        request_id: String,
+        revision: u64,
+        page: usize,
+        index: usize,
+    },
+    ThreadSettingsChooseEffort {
+        request_id: String,
+        revision: u64,
+        index: usize,
+    },
+    ThreadSettingsChooseSpeed {
+        request_id: String,
+        revision: u64,
+        fast: bool,
+    },
+    ThreadSettingsBack {
+        request_id: String,
+        revision: u64,
+    },
+    ThreadSettingsApply {
+        request_id: String,
+        revision: u64,
+    },
+    ThreadSettingsCompatibilityConfirm {
+        request_id: String,
+        revision: u64,
+        accept: bool,
+    },
+    ThreadSettingsCancel {
+        request_id: String,
+        revision: u64,
     },
 }
 

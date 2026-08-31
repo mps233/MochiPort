@@ -1257,6 +1257,145 @@ final class APIContractTests: XCTestCase {
         )
     }
 
+    func testDaemonLauncherRestagesOlderInconsistentRuntimeWhenServiceIsMissing() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let configuration = DaemonLaunchConfiguration(
+            helperURL: fixture.configuration.helperURL,
+            configURL: fixture.configuration.configURL,
+            launchAgentURL: fixture.configuration.launchAgentURL,
+            logURL: fixture.configuration.logURL,
+            homeURL: fixture.configuration.homeURL,
+            buildIdentifier: "478"
+        )
+        let runtimeRoot = configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+        let staleRuntime = runtimeRoot
+            .appendingPathComponent("473", isDirectory: true)
+            .appendingPathComponent(configuration.helperURL.lastPathComponent)
+        try FileManager.default.createDirectory(
+            at: staleRuntime.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: staleRuntime.path,
+                contents: Data("stale-runtime".utf8)
+            )
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: staleRuntime.path
+        )
+        let current = runtimeRoot.appendingPathComponent("current", isDirectory: true)
+        try FileManager.default.createSymbolicLink(atPath: current.path, withDestinationPath: "473")
+
+        let versionCalls = IntCounter()
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 1, output: "not loaded")
+            }
+            if arguments == ["--version"] {
+                let build = versionCalls.next() == 1 ? "474" : "478"
+                return CommandResult(
+                    exitCode: 0,
+                    output: "mochiport 0.5.5 (build \(build))\n"
+                )
+            }
+            return CommandResult(exitCode: arguments.first == "bootstrap" ? 0 : 1, output: "")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { configuration },
+            commandRunner: commands.run
+        )
+
+        try await launcher.startIfNeeded()
+
+        XCTAssertEqual(commands.arguments.map(\.first), ["print", "--version", "--version", "bootstrap"])
+        XCTAssertEqual(commands.executablePaths[1], configuration.activeHelperURL())
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: current.path),
+            "478"
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: try configuration.stagedHelperURL().path))
+        let plist = try daemonLaunchAgentPropertyList(at: configuration.launchAgentURL)
+        XCTAssertEqual(
+            plist["ProgramArguments"] as? [String],
+            [
+                configuration.activeHelperURL().path,
+                "--config",
+                configuration.configURL.path,
+                "daemon",
+            ]
+        )
+    }
+
+    func testDaemonLauncherDoesNotRestageNewerInconsistentRuntime() async throws {
+        let fixture = try makeDaemonLauncherFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+
+        let configuration = DaemonLaunchConfiguration(
+            helperURL: fixture.configuration.helperURL,
+            configURL: fixture.configuration.configURL,
+            launchAgentURL: fixture.configuration.launchAgentURL,
+            logURL: fixture.configuration.logURL,
+            homeURL: fixture.configuration.homeURL,
+            buildIdentifier: "478"
+        )
+        let runtimeRoot = configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+        let staleRuntime = runtimeRoot
+            .appendingPathComponent("473", isDirectory: true)
+            .appendingPathComponent(configuration.helperURL.lastPathComponent)
+        try FileManager.default.createDirectory(
+            at: staleRuntime.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        XCTAssertTrue(
+            FileManager.default.createFile(
+                atPath: staleRuntime.path,
+                contents: Data("newer-runtime".utf8)
+            )
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: staleRuntime.path
+        )
+        let current = runtimeRoot.appendingPathComponent("current", isDirectory: true)
+        try FileManager.default.createSymbolicLink(atPath: current.path, withDestinationPath: "473")
+
+        let commands = CommandInvocationRecorder { arguments in
+            if arguments.first == "print" {
+                return CommandResult(exitCode: 1, output: "not loaded")
+            }
+            if arguments == ["--version"] {
+                return CommandResult(exitCode: 0, output: "mochiport 0.5.5 (build 479)\n")
+            }
+            return CommandResult(exitCode: 1, output: "unexpected command")
+        }
+        let launcher = DaemonLauncher(
+            configurationLoader: { configuration },
+            commandRunner: commands.run
+        )
+
+        do {
+            try await launcher.startIfNeeded()
+            XCTFail("Expected newer inconsistent runtime to remain untouched")
+        } catch let error as DaemonLaunchError {
+            XCTAssertEqual(error, .runtimeVersionMismatch(expected: "473", actual: "479"))
+        }
+
+        XCTAssertEqual(commands.arguments.map(\.first), ["print", "--version"])
+        XCTAssertEqual(
+            try FileManager.default.destinationOfSymbolicLink(atPath: current.path),
+            "473"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: try configuration.stagedHelperURL().path))
+    }
+
     func testDaemonLauncherRejectsMismatchedRuntimeBuildBeforePublishing() async throws {
         let fixture = try makeDaemonLauncherFixture()
         defer { try? FileManager.default.removeItem(at: fixture.root) }
@@ -3105,7 +3244,7 @@ final class APIContractTests: XCTestCase {
             case "/api/v1/manage/codex/status":
                 return MockResponse(
                     statusCode: 200,
-                    json: #"{"codexHome":"/fixture/.codex","configured":true,"configOk":true,"authOk":true,"providerOk":true,"configError":null,"authError":null,"guiConfigured":true,"guiError":null,"remoteControlSupported":true,"remoteControlConfigured":true,"remoteControlError":null,"providers":[{"name":"ai-gateway","baseUrl":"http://127.0.0.1:3847/backend-api","secretSet":true,"supportsWebsockets":true}],"imageGenerationEnabled":true,"connectionMode":"standard"}"#
+                    json: Self.codexStatusJSON
                 )
             case "/api/v1/manage/codex/enhanced/preflight":
                 return MockResponse(
@@ -3131,7 +3270,7 @@ final class APIContractTests: XCTestCase {
         let status = try await client.codexStatus()
         XCTAssertTrue(status.configured)
         XCTAssertTrue(status.providers[0].secretSet)
-        XCTAssertEqual(status.providers[0].name, "ai-gateway")
+        XCTAssertEqual(status.providers[0].name, "MochiPort")
 
         let preflight = try await client.codexEnhancedPreflight()
         XCTAssertFalse(preflight.status.running)
@@ -3388,6 +3527,33 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(model.dashboardState, .loaded)
         XCTAssertEqual(model.dashboard?.service.instanceId, "fixture-instance")
         XCTAssertNotNil(model.lastCheckedAt)
+    }
+
+    @MainActor
+    func testAppModelStartupProbeRunsOnlyOnce() async {
+        let started = LockedValue(false)
+        let healthCalls = IntCounter()
+        let launcher = StartupRecordingDaemonLauncher {
+            started.value = true
+        }
+        let client = makeClient { request in
+            if request.url?.path == "/healthz" {
+                _ = healthCalls.next()
+                if started.value {
+                    return MockResponse(statusCode: 200, json: Self.healthJSON)
+                }
+                return MockResponse(error: URLError(.cannotConnectToHost))
+            }
+            return MockResponse(statusCode: 500, json: #"{"error":"test stops after startup probe"}"#)
+        }
+        let model = AppModel(apiClient: client, daemonLauncher: launcher)
+
+        await model.startAtAppLaunch()
+        let callsAfterFirstStartup = healthCalls.current
+        await model.startAtAppLaunch()
+
+        XCTAssertEqual(launcher.startCount, 1)
+        XCTAssertEqual(healthCalls.current, callsAfterFirstStartup)
     }
 
     @MainActor
@@ -5194,7 +5360,7 @@ final class APIContractTests: XCTestCase {
     private static let healthJSON = #"{"service":"threadrelay","apiMajor":1,"ready":true}"#
     private static let dashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"bridgeRunning":true,"remoteControlConnected":true,"remoteControlHealthy":true,"executionClients":{"codexApp":{"configured":true,"connected":true},"vscode":{"configured":true,"connected":true},"cli":{"configured":false,"connected":false}},"messageChannels":{"telegram":{"accountCount":2,"connectedAccountCount":1},"feishu":{"accountCount":1,"connectedAccountCount":1},"wechat":{"accountCount":1,"connectedAccountCount":1},"wecom":{"accountCount":0,"connectedAccountCount":0}},"aiGatewayEnabled":true,"aiGatewayProviderCount":2,"requestLoggingEnabled":true}"#
     private static let imAccountsJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"accounts":[{"platform":"telegram","accountId":"telegram-main","displayName":"主 Telegram","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":true,"connected":true,"lastError":null,"lastEventAtMs":1754000120000,"lastInboundAtMs":1754000100000},{"platform":"wecom","accountId":"wecom-offline","displayName":"企业微信","enabled":true,"configured":true,"secretSet":true,"connecting":false,"polling":false,"connected":false,"lastError":"连接失败","lastEventAtMs":null,"lastInboundAtMs":null}]}"#
-    private static let codexStatusJSON = #"{"codexHome":"/fixture/.codex","configured":true,"configOk":true,"authOk":true,"providerOk":true,"configError":null,"authError":null,"guiConfigured":true,"guiError":null,"remoteControlSupported":true,"remoteControlConfigured":true,"remoteControlError":null,"providers":[{"name":"ai-gateway","baseUrl":"http://127.0.0.1:3847/backend-api","secretSet":true,"supportsWebsockets":true}],"imageGenerationEnabled":true,"connectionMode":"standard"}"#
+    private static let codexStatusJSON = #"{"codexHome":"/fixture/.codex","configured":true,"configOk":true,"authOk":true,"providerOk":true,"configError":null,"authError":null,"guiConfigured":true,"guiError":null,"remoteControlSupported":true,"remoteControlConfigured":true,"remoteControlError":null,"providers":[{"name":"MochiPort","baseUrl":"http://127.0.0.1:3847/backend-api","secretSet":true,"requiresOpenaiAuth":true,"supportsWebsockets":true}],"imageGenerationEnabled":true,"connectionMode":"standard"}"#
     private static let lifecycleJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"fixture-instance","pid":123,"startedAtMs":456},"executable":"/fixture/MochiPort","configPath":"/fixture/config.toml","bind":"127.0.0.1:3847","runtime":{"state":"active","productVersion":"0.5.0","buildNumber":388,"apiMajor":1},"protectedWorkItems":{"aiGatewayRequests":0,"codexTurns":0,"imStreams":0,"pendingApprovals":0,"remoteControlRequests":0,"total":0},"management":{"state":"unmanaged","mode":"readOnly","canControl":false,"installationId":null,"leaseGeneration":null,"leaseExpiresAtMs":null}}"#
     private static let originalV1DashboardJSON = #"{"service":{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"legacy-instance","pid":456,"startedAtMs":789},"bridgeRunning":true,"remoteControlConnected":false,"remoteControlHealthy":false,"codexAppConfigured":true,"imAccountCount":5,"connectedImAccountCount":3,"aiGatewayEnabled":false,"aiGatewayProviderCount":1,"requestLoggingEnabled":true}"#
     // Mirrors the daemon payload where the Anthropic TTL-split keys are
@@ -5732,6 +5898,35 @@ private final class IdentityVerifyingDaemonLauncher: DaemonLaunching, @unchecked
         lock.withLock { verifications += 1 }
         if let error { throw error }
         return ManageDaemonIdentity(
+            pid: lifecycle.service.pid,
+            startedAtMs: lifecycle.service.startedAtMs,
+            executable: lifecycle.executable,
+            executableSha256: lifecycle.executableSha256 ?? "",
+            bind: lifecycle.bind
+        )
+    }
+}
+
+private final class StartupRecordingDaemonLauncher: DaemonLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private let onStart: @Sendable () -> Void
+    private var starts = 0
+
+    init(onStart: @escaping @Sendable () -> Void) {
+        self.onStart = onStart
+    }
+
+    var startCount: Int {
+        lock.withLock { starts }
+    }
+
+    func startIfNeeded() async throws {
+        lock.withLock { starts += 1 }
+        onStart()
+    }
+
+    func verifiedDaemonIdentity(for lifecycle: ManageLifecycle) async throws -> ManageDaemonIdentity {
+        ManageDaemonIdentity(
             pid: lifecycle.service.pid,
             startedAtMs: lifecycle.service.startedAtMs,
             executable: lifecycle.executable,

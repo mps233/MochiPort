@@ -137,8 +137,6 @@ pub(super) async fn observe_app_server_message(
                 params,
                 request_id: Some(id.clone()),
                 remote_client_key: client_key.clone(),
-                remote_client_id: Some(client_id.to_string()),
-                remote_stream_id: Some(stream_id.to_string()),
                 remote_connection_epoch: Some(connection_epoch),
             });
             return;
@@ -545,8 +543,6 @@ pub(super) async fn observe_app_server_message(
             params,
             request_id: message.get("id").cloned(),
             remote_client_key: client_key,
-            remote_client_id: Some(client_id.to_string()),
-            remote_stream_id: Some(stream_id.to_string()),
             remote_connection_epoch: Some(connection_epoch),
         });
     }

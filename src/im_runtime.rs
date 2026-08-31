@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
     sync::Arc,
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use serde_json::Value;
@@ -26,6 +27,9 @@ const TELEGRAM_REASONING_MAX_CHARS: usize = 12_000;
 const TELEGRAM_PLAN_MAX_STEPS: usize = 64;
 const TELEGRAM_DIFF_MAX_PATHS: usize = 128;
 const TELEGRAM_WEB_SEARCH_MAX_ENTRIES: usize = 16;
+pub(crate) const TELEGRAM_THREAD_SETTINGS_DRAFT_MAX_AGE_MS: u128 = 30 * 60 * 1000;
+
+static TELEGRAM_MODEL_SWITCH_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TelegramCommentaryEntry {
@@ -133,6 +137,164 @@ pub struct ThreadRoutingRequestState {
     pub history_has_next: bool,
 }
 
+/// A setting value observed from Codex. `Unknown` is intentionally distinct
+/// from `Known(None)`: the latter means Codex explicitly has no override.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum ObservedSetting<T> {
+    #[default]
+    Unknown,
+    Known(Option<T>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ThreadSettingsSnapshot {
+    pub model: ObservedSetting<String>,
+    pub effort: ObservedSetting<String>,
+    pub service_tier: ObservedSetting<String>,
+}
+
+impl ThreadSettingsSnapshot {
+    pub fn merge_from(&mut self, update: &Self) {
+        merge_observed_setting(&mut self.model, &update.model);
+        merge_observed_setting(&mut self.effort, &update.effort);
+        merge_observed_setting(&mut self.service_tier, &update.service_tier);
+    }
+
+    pub fn from_protocol_value(value: &Value) -> Self {
+        let value = value.get("thread").unwrap_or(value);
+        Self {
+            model: observed_string(value, &["model"]),
+            effort: observed_string(value, &["reasoningEffort", "effort"]),
+            service_tier: observed_string(value, &["serviceTier", "service_tier"]),
+        }
+    }
+}
+
+fn merge_observed_setting<T: Clone>(target: &mut ObservedSetting<T>, update: &ObservedSetting<T>) {
+    if !matches!(update, ObservedSetting::Unknown) {
+        *target = update.clone();
+    }
+}
+
+fn observed_string(value: &Value, keys: &[&str]) -> ObservedSetting<String> {
+    for key in keys {
+        if let Some(value) = value.get(*key) {
+            return ObservedSetting::Known(
+                value
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
+            );
+        }
+    }
+    ObservedSetting::Unknown
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TelegramThreadSettingsModelChoice {
+    pub model: String,
+    pub label: String,
+    pub supported_efforts: Vec<String>,
+    pub default_effort: Option<String>,
+    pub supports_fast: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramThreadSettingsSpeed {
+    Standard,
+    Fast,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TelegramThreadSettingsDraft {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub speed: Option<TelegramThreadSettingsSpeed>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramThreadSettingsPatchValue {
+    Unchanged,
+    Set(String),
+    Clear,
+}
+
+impl Default for TelegramThreadSettingsPatchValue {
+    fn default() -> Self {
+        Self::Unchanged
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TelegramThreadSettingsPatch {
+    pub model: TelegramThreadSettingsPatchValue,
+    pub effort: TelegramThreadSettingsPatchValue,
+    pub service_tier: TelegramThreadSettingsPatchValue,
+}
+
+impl TelegramThreadSettingsPatch {
+    pub fn is_empty(&self) -> bool {
+        matches!(&self.model, TelegramThreadSettingsPatchValue::Unchanged)
+            && matches!(&self.effort, TelegramThreadSettingsPatchValue::Unchanged)
+            && matches!(
+                &self.service_tier,
+                TelegramThreadSettingsPatchValue::Unchanged
+            )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TelegramThreadSettingsStage {
+    #[default]
+    Overview,
+    Model,
+    Effort,
+    Speed,
+    CompatibilityConfirmation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramThreadSettingsCompatibility {
+    pub reset_effort: bool,
+    pub reset_speed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingTelegramThreadSettingsApply {
+    pub patch: TelegramThreadSettingsPatch,
+    pub submitted_at_ms: u128,
+}
+
+/// One staged Telegram settings editor for an already-bound Codex thread.
+/// Model ids remain in server-side state; callback payloads only contain
+/// request id, revision and indexes or fixed tokens.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TelegramModelSwitchRequestState {
+    pub request_id: String,
+    pub conversation_key: String,
+    pub account_id: String,
+    pub chat_id: String,
+    pub expected_thread_id: String,
+    pub remote_client_key: String,
+    pub catalog: Vec<TelegramThreadSettingsModelChoice>,
+    pub observed: ThreadSettingsSnapshot,
+    pub draft: TelegramThreadSettingsDraft,
+    pub revision: u64,
+    pub expires_at_ms: u128,
+    pub stage: TelegramThreadSettingsStage,
+    pub model_page: usize,
+    pub compatibility: Option<TelegramThreadSettingsCompatibility>,
+    pub pending_apply: Option<PendingTelegramThreadSettingsApply>,
+    pub stale: bool,
+    pub message_id: Option<String>,
+}
+
+pub fn next_telegram_model_switch_request_id() -> String {
+    let value = TELEGRAM_MODEL_SWITCH_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    format!("thread-model-{value}")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadRoutingStage {
     Choice,
@@ -191,6 +353,9 @@ pub struct RuntimeState {
     next_telegram_typing_generation: i64,
     pub wecom_streams_by_thread: HashMap<String, WecomStreamState>,
     pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
+    telegram_model_switch_requests: HashMap<String, TelegramModelSwitchRequestState>,
+    telegram_model_switch_request_by_conversation: HashMap<String, String>,
+    thread_settings_by_thread: HashMap<String, ThreadSettingsSnapshot>,
     pending_attachments_by_conversation: HashMap<String, PendingAttachments>,
     pending_telegram_turns_by_conversation: HashMap<String, VecDeque<PendingTelegramTurn>>,
 }
@@ -425,6 +590,9 @@ impl RuntimeState {
         self.terminal_notice_turn_order.clear();
         self.terminal_status_fallback_by_thread.clear();
         self.wecom_streams_by_thread.clear();
+        self.telegram_model_switch_requests.clear();
+        self.telegram_model_switch_request_by_conversation.clear();
+        self.thread_settings_by_thread.clear();
         self.pending_attachments_by_conversation.clear();
         self.pending_telegram_turns_by_conversation.clear();
         self.bridge_generation
@@ -440,6 +608,9 @@ impl RuntimeState {
         self.terminal_notice_turn_order.clear();
         self.terminal_status_fallback_by_thread.clear();
         self.wecom_streams_by_thread.clear();
+        self.telegram_model_switch_requests.clear();
+        self.telegram_model_switch_request_by_conversation.clear();
+        self.thread_settings_by_thread.clear();
         self.pending_attachments_by_conversation.clear();
         self.pending_telegram_turns_by_conversation.clear();
     }
@@ -453,6 +624,17 @@ impl RuntimeState {
         let previous = self
             .route_by_thread
             .insert(thread_id.to_string(), route.clone());
+        if previous.as_ref().is_none_or(|previous| {
+            previous.conversation_key != route.conversation_key
+                || previous.remote_client_key != route.remote_client_key
+        }) {
+            self.clear_telegram_model_switch_requests_for_conversation(&route.conversation_key);
+            if let Some(previous) = previous.as_ref() {
+                self.clear_telegram_model_switch_requests_for_conversation(
+                    &previous.conversation_key,
+                );
+            }
+        }
         log_route_bind(thread_id, &route, previous.as_ref());
     }
 
@@ -479,10 +661,12 @@ impl RuntimeState {
             self.telegram_command_progress_by_thread.remove(thread_id);
             self.telegram_commentary_by_thread.remove(thread_id);
             self.terminal_status_fallback_by_thread.remove(thread_id);
+            self.thread_settings_by_thread.remove(thread_id);
             self.pending_telegram_turns_by_conversation
                 .remove(&route.conversation_key);
             log_route_unbind("unbind_conversation", reason, thread_id, route);
         }
+        self.clear_telegram_model_switch_requests_for_conversation(conversation_key);
         entries
             .into_iter()
             .map(|(thread_id, _)| thread_id)
@@ -2039,6 +2223,10 @@ impl RuntimeState {
     }
 
     pub fn remember_thread_routing_request(&mut self, request: ThreadRoutingRequestState) {
+        // A conversation can have only one active interactive menu. Opening
+        // a thread-routing menu invalidates any model picker that was shown
+        // before it, so numeric replies cannot be consumed by the wrong flow.
+        self.clear_telegram_model_switch_requests_for_conversation(&request.conversation_key);
         self.thread_routing_requests
             .insert(request.request_id.clone(), request);
     }
@@ -2065,6 +2253,286 @@ impl RuntimeState {
     ) -> Option<ThreadRoutingRequestState> {
         self.thread_routing_requests.remove(request_id)
     }
+
+    pub fn clear_thread_routing_requests_for_conversation(&mut self, conversation_key: &str) {
+        let request_ids = self
+            .thread_routing_requests
+            .iter()
+            .filter(|(_, request)| request.conversation_key == conversation_key)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            self.thread_routing_requests.remove(&request_id);
+        }
+    }
+
+    /// Remember the latest staged thread-settings editor for a conversation.
+    /// Replacing it removes older request ids so delayed callbacks cannot
+    /// mutate a newer draft.
+    pub fn remember_telegram_model_switch_request(
+        &mut self,
+        request: TelegramModelSwitchRequestState,
+    ) {
+        // Keep model and thread-routing menus mutually exclusive within one
+        // Telegram conversation.
+        self.clear_thread_routing_requests_for_conversation(&request.conversation_key);
+        if let Some(previous) = self
+            .telegram_model_switch_requests
+            .remove(&request.request_id)
+            && self
+                .telegram_model_switch_request_by_conversation
+                .get(&previous.conversation_key)
+                .is_some_and(|current_id| current_id == &request.request_id)
+        {
+            self.telegram_model_switch_request_by_conversation
+                .remove(&previous.conversation_key);
+        }
+        self.clear_telegram_model_switch_requests_for_conversation(&request.conversation_key);
+        self.telegram_model_switch_request_by_conversation
+            .insert(request.conversation_key.clone(), request.request_id.clone());
+        self.telegram_model_switch_requests
+            .insert(request.request_id.clone(), request);
+    }
+
+    pub fn telegram_model_switch_request(
+        &self,
+        request_id: &str,
+    ) -> Option<TelegramModelSwitchRequestState> {
+        self.telegram_model_switch_requests.get(request_id).cloned()
+    }
+
+    pub fn current_telegram_model_switch_request(
+        &self,
+        conversation_key: &str,
+    ) -> Option<TelegramModelSwitchRequestState> {
+        let request_id = self
+            .telegram_model_switch_request_by_conversation
+            .get(conversation_key)?;
+        self.telegram_model_switch_requests.get(request_id).cloned()
+    }
+
+    pub fn thread_settings_snapshot(&self, thread_id: &str) -> ThreadSettingsSnapshot {
+        self.thread_settings_by_thread
+            .get(thread_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn observe_thread_settings(
+        &mut self,
+        thread_id: &str,
+        update: ThreadSettingsSnapshot,
+    ) -> TelegramThreadSettingsObservation {
+        let previous = self.thread_settings_snapshot(thread_id);
+        let mut merged = previous.clone();
+        merged.merge_from(&update);
+        self.thread_settings_by_thread
+            .insert(thread_id.to_string(), merged.clone());
+
+        let Some(request_id) =
+            self.telegram_model_switch_requests
+                .iter()
+                .find_map(|(request_id, request)| {
+                    (request.expected_thread_id == thread_id).then(|| request_id.clone())
+                })
+        else {
+            return TelegramThreadSettingsObservation::None;
+        };
+        let Some(request) = self.telegram_model_switch_requests.get_mut(&request_id) else {
+            return TelegramThreadSettingsObservation::None;
+        };
+        request.observed = merged.clone();
+        if let Some(pending) = request.pending_apply.as_ref()
+            && telegram_thread_settings_patch_matches(&pending.patch, &merged)
+        {
+            let request = self
+                .clear_telegram_model_switch_request(&request_id)
+                .expect("matching request must remain registered");
+            return TelegramThreadSettingsObservation::Confirmed(request);
+        }
+        if !request.stale
+            && telegram_thread_settings_draft_was_changed_externally(
+                &request.draft,
+                &previous,
+                &update,
+            )
+        {
+            request.stale = true;
+            request.pending_apply = None;
+            request.compatibility = None;
+            request.stage = TelegramThreadSettingsStage::Overview;
+            request.revision = request.revision.saturating_add(1);
+            return TelegramThreadSettingsObservation::Stale(request.clone());
+        }
+        TelegramThreadSettingsObservation::None
+    }
+
+    pub fn update_telegram_model_switch_request(
+        &mut self,
+        request: TelegramModelSwitchRequestState,
+    ) -> bool {
+        if !self.is_current_telegram_model_switch_request(
+            &request.request_id,
+            &request.conversation_key,
+        ) {
+            return false;
+        }
+        self.telegram_model_switch_requests
+            .insert(request.request_id.clone(), request);
+        true
+    }
+
+    pub fn claim_telegram_thread_settings_apply(
+        &mut self,
+        request_id: &str,
+        revision: u64,
+        patch: TelegramThreadSettingsPatch,
+        submitted_at_ms: u128,
+    ) -> Option<TelegramModelSwitchRequestState> {
+        let request = self.telegram_model_switch_requests.get_mut(request_id)?;
+        if request.revision != revision || request.pending_apply.is_some() || request.stale {
+            return None;
+        }
+        request.pending_apply = Some(PendingTelegramThreadSettingsApply {
+            patch,
+            submitted_at_ms,
+        });
+        Some(request.clone())
+    }
+
+    pub fn take_unconfirmed_telegram_thread_settings_apply(
+        &mut self,
+        request_id: &str,
+        revision: u64,
+    ) -> Option<TelegramModelSwitchRequestState> {
+        let request = self.telegram_model_switch_requests.get(request_id)?;
+        if request.revision != revision || request.pending_apply.is_none() {
+            return None;
+        }
+        self.clear_telegram_model_switch_request(request_id)
+    }
+
+    pub fn release_telegram_thread_settings_apply(
+        &mut self,
+        request_id: &str,
+        revision: u64,
+    ) -> Option<TelegramModelSwitchRequestState> {
+        let request = self.telegram_model_switch_requests.get_mut(request_id)?;
+        if request.revision != revision || request.pending_apply.is_none() {
+            return None;
+        }
+        request.pending_apply = None;
+        Some(request.clone())
+    }
+
+    pub fn update_telegram_model_switch_request_message_id(
+        &mut self,
+        request_id: &str,
+        message_id: String,
+    ) -> bool {
+        let Some(request) = self.telegram_model_switch_requests.get_mut(request_id) else {
+            return false;
+        };
+        request.message_id = Some(message_id);
+        true
+    }
+
+    /// Return whether a picker request is still the latest one for a
+    /// conversation. Callers should additionally compare its expected thread
+    /// and remote client key with the current route before mutating a thread.
+    pub fn is_current_telegram_model_switch_request(
+        &self,
+        request_id: &str,
+        conversation_key: &str,
+    ) -> bool {
+        self.telegram_model_switch_request_by_conversation
+            .get(conversation_key)
+            .is_some_and(|current_id| current_id == request_id)
+    }
+
+    pub fn clear_telegram_model_switch_request(
+        &mut self,
+        request_id: &str,
+    ) -> Option<TelegramModelSwitchRequestState> {
+        let request = self.telegram_model_switch_requests.remove(request_id)?;
+        if self
+            .telegram_model_switch_request_by_conversation
+            .get(&request.conversation_key)
+            .is_some_and(|current_id| current_id == request_id)
+        {
+            self.telegram_model_switch_request_by_conversation
+                .remove(&request.conversation_key);
+        }
+        Some(request)
+    }
+
+    pub fn clear_telegram_model_switch_requests_for_conversation(
+        &mut self,
+        conversation_key: &str,
+    ) {
+        let request_ids = self
+            .telegram_model_switch_requests
+            .iter()
+            .filter(|(_, request)| request.conversation_key == conversation_key)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        for request_id in request_ids {
+            self.telegram_model_switch_requests.remove(&request_id);
+        }
+        self.telegram_model_switch_request_by_conversation
+            .remove(conversation_key);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramThreadSettingsObservation {
+    None,
+    Confirmed(TelegramModelSwitchRequestState),
+    Stale(TelegramModelSwitchRequestState),
+}
+
+fn telegram_thread_settings_patch_matches(
+    patch: &TelegramThreadSettingsPatch,
+    snapshot: &ThreadSettingsSnapshot,
+) -> bool {
+    patch_value_matches(&patch.model, &snapshot.model)
+        && patch_value_matches(&patch.effort, &snapshot.effort)
+        && patch_value_matches(&patch.service_tier, &snapshot.service_tier)
+}
+
+fn patch_value_matches(
+    patch: &TelegramThreadSettingsPatchValue,
+    observed: &ObservedSetting<String>,
+) -> bool {
+    match patch {
+        TelegramThreadSettingsPatchValue::Unchanged => true,
+        TelegramThreadSettingsPatchValue::Set(expected) => {
+            matches!(observed, ObservedSetting::Known(Some(actual)) if actual == expected)
+        }
+        TelegramThreadSettingsPatchValue::Clear => {
+            matches!(observed, ObservedSetting::Known(None))
+        }
+    }
+}
+
+fn telegram_thread_settings_draft_was_changed_externally(
+    draft: &TelegramThreadSettingsDraft,
+    previous: &ThreadSettingsSnapshot,
+    update: &ThreadSettingsSnapshot,
+) -> bool {
+    draft.model.is_some() && observed_setting_changed(&previous.model, &update.model)
+        || draft.effort.is_some() && observed_setting_changed(&previous.effort, &update.effort)
+        || draft.speed.is_some()
+            && observed_setting_changed(&previous.service_tier, &update.service_tier)
+}
+
+fn observed_setting_changed<T: PartialEq>(
+    previous: &ObservedSetting<T>,
+    update: &ObservedSetting<T>,
+) -> bool {
+    matches!(previous, ObservedSetting::Known(_))
+        && matches!(update, ObservedSetting::Known(_))
+        && previous != update
 }
 
 fn merge_telegram_collab_progress_updates(
@@ -2408,13 +2876,17 @@ mod tests {
     use crate::types::{ImPlatformKind, InboundAttachment};
 
     use super::{
-        PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, PendingTelegramTurn, RouteTarget,
-        RuntimeState, TELEGRAM_QUEUED_TURNS_MAX_COUNT, TelegramCollabProgressStatus,
+        ObservedSetting, PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, PendingTelegramTurn,
+        RouteTarget, RuntimeState, TELEGRAM_QUEUED_TURNS_MAX_COUNT,
+        TELEGRAM_THREAD_SETTINGS_DRAFT_MAX_AGE_MS, TelegramCollabProgressStatus,
         TelegramCollabProgressUpdate, TelegramCommandProgressEntry,
         TelegramCommandProgressEntryKind, TelegramCommandProgressStatus, TelegramDiffFileSummary,
-        TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus, TelegramQueueEnqueueOutcome,
-        TelegramTypingSendAction, TelegramWebSearchProgressEntry, ThreadTurnState, TurnOrigin,
-        route_from_conversation_key,
+        TelegramDiffSummary, TelegramModelSwitchRequestState, TelegramPlanStep,
+        TelegramPlanStepStatus, TelegramQueueEnqueueOutcome, TelegramThreadSettingsModelChoice,
+        TelegramThreadSettingsObservation, TelegramThreadSettingsPatch,
+        TelegramThreadSettingsPatchValue, TelegramThreadSettingsStage, TelegramTypingSendAction,
+        TelegramWebSearchProgressEntry, ThreadRoutingRequestState, ThreadRoutingStage,
+        ThreadSettingsSnapshot, ThreadTurnState, TurnOrigin, route_from_conversation_key,
     };
 
     fn approval(id: i64) -> PendingApproval {
@@ -4870,5 +5342,271 @@ mod tests {
                 "chat-2"
             )
         );
+    }
+
+    fn model_switch_request(
+        request_id: &str,
+        conversation_key: &str,
+        thread_id: &str,
+    ) -> TelegramModelSwitchRequestState {
+        TelegramModelSwitchRequestState {
+            request_id: request_id.to_string(),
+            conversation_key: conversation_key.to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "chat".to_string(),
+            expected_thread_id: thread_id.to_string(),
+            remote_client_key: "im:telegram:bot:chat".to_string(),
+            catalog: vec![TelegramThreadSettingsModelChoice {
+                model: "gpt-test".to_string(),
+                label: "GPT Test".to_string(),
+                supported_efforts: vec!["medium".to_string()],
+                default_effort: Some("medium".to_string()),
+                supports_fast: true,
+            }],
+            observed: Default::default(),
+            draft: Default::default(),
+            revision: 1,
+            expires_at_ms: crate::types::now_ms() + TELEGRAM_THREAD_SETTINGS_DRAFT_MAX_AGE_MS,
+            stage: TelegramThreadSettingsStage::Overview,
+            model_page: 1,
+            compatibility: None,
+            pending_apply: None,
+            stale: false,
+            message_id: None,
+        }
+    }
+
+    fn thread_routing_request(
+        request_id: &str,
+        conversation_key: &str,
+    ) -> ThreadRoutingRequestState {
+        ThreadRoutingRequestState {
+            request_id: request_id.to_string(),
+            conversation_key: conversation_key.to_string(),
+            account_id: "bot".to_string(),
+            chat_id: "chat".to_string(),
+            message_id: None,
+            stage: ThreadRoutingStage::Choice,
+            page: 1,
+            page_cursors: vec![None],
+            thread_ids_by_page: vec![vec![]],
+            create_draft: Default::default(),
+            create_option_values_by_field_page: Default::default(),
+            history_cursor: None,
+            history_has_next: false,
+        }
+    }
+
+    #[test]
+    fn telegram_model_switch_request_lifecycle_invalidates_older_menu() {
+        let mut runtime = RuntimeState::default();
+        let first = model_switch_request("model-1", "telegram:bot:chat", "thread-1");
+        runtime.remember_telegram_model_switch_request(first);
+
+        assert!(runtime.is_current_telegram_model_switch_request("model-1", "telegram:bot:chat"));
+        assert!(
+            runtime.update_telegram_model_switch_request_message_id("model-1", "101".to_string())
+        );
+        assert_eq!(
+            runtime
+                .telegram_model_switch_request("model-1")
+                .and_then(|request| request.message_id),
+            Some("101".to_string())
+        );
+
+        runtime.remember_telegram_model_switch_request(model_switch_request(
+            "model-2",
+            "telegram:bot:chat",
+            "thread-1",
+        ));
+        assert!(runtime.telegram_model_switch_request("model-1").is_none());
+        assert!(!runtime.is_current_telegram_model_switch_request("model-1", "telegram:bot:chat"));
+        assert!(runtime.is_current_telegram_model_switch_request("model-2", "telegram:bot:chat"));
+
+        let cleared = runtime
+            .clear_telegram_model_switch_request("model-2")
+            .expect("current model picker should clear");
+        assert_eq!(cleared.expected_thread_id, "thread-1");
+        assert!(!runtime.is_current_telegram_model_switch_request("model-2", "telegram:bot:chat"));
+    }
+
+    #[test]
+    fn telegram_thread_settings_drafts_are_cleared_when_route_is_rebound_but_not_turn_start() {
+        let mut runtime = RuntimeState::default();
+        runtime.remember_telegram_model_switch_request(model_switch_request(
+            "model-1",
+            "telegram:bot:chat",
+            "thread-1",
+        ));
+        runtime.bind_route(
+            "thread-1",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "telegram:bot:chat".to_string(),
+                account_id: "bot".to_string(),
+                chat_id: "chat".to_string(),
+                remote_client_key: "im:telegram:bot:chat".to_string(),
+            },
+        );
+        assert!(runtime.telegram_model_switch_request("model-1").is_none());
+
+        runtime.remember_telegram_model_switch_request(model_switch_request(
+            "model-2",
+            "telegram:bot:chat",
+            "thread-1",
+        ));
+        runtime
+            .try_mark_turn_starting("thread-1")
+            .expect("thread should be idle");
+        assert!(runtime.telegram_model_switch_request("model-2").is_some());
+    }
+
+    #[test]
+    fn matching_thread_settings_echo_confirms_pending_apply() {
+        let mut runtime = RuntimeState::default();
+        runtime.observe_thread_settings(
+            "thread-1",
+            ThreadSettingsSnapshot {
+                model: ObservedSetting::Known(Some("gpt-old".to_string())),
+                effort: ObservedSetting::Known(Some("low".to_string())),
+                service_tier: ObservedSetting::Known(None),
+            },
+        );
+        let mut request = model_switch_request("model-1", "telegram:bot:chat", "thread-1");
+        request.draft.model = Some("gpt-test".to_string());
+        runtime.remember_telegram_model_switch_request(request);
+        let pending = runtime
+            .claim_telegram_thread_settings_apply(
+                "model-1",
+                1,
+                TelegramThreadSettingsPatch {
+                    model: TelegramThreadSettingsPatchValue::Set("gpt-test".to_string()),
+                    ..Default::default()
+                },
+                1,
+            )
+            .expect("apply should be claimed");
+        assert!(pending.pending_apply.is_some());
+
+        let outcome = runtime.observe_thread_settings(
+            "thread-1",
+            ThreadSettingsSnapshot {
+                model: ObservedSetting::Known(Some("gpt-test".to_string())),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            outcome,
+            TelegramThreadSettingsObservation::Confirmed(_)
+        ));
+        assert!(runtime.telegram_model_switch_request("model-1").is_none());
+    }
+
+    #[test]
+    fn initial_settings_observation_does_not_stale_a_draft() {
+        let mut runtime = RuntimeState::default();
+        let mut request = model_switch_request("model-1", "telegram:bot:chat", "thread-1");
+        request.draft.effort = Some("medium".to_string());
+        runtime.remember_telegram_model_switch_request(request);
+
+        let outcome = runtime.observe_thread_settings(
+            "thread-1",
+            ThreadSettingsSnapshot {
+                effort: ObservedSetting::Known(Some("low".to_string())),
+                ..Default::default()
+            },
+        );
+
+        assert!(matches!(outcome, TelegramThreadSettingsObservation::None));
+        assert!(
+            runtime
+                .telegram_model_switch_request("model-1")
+                .is_some_and(|request| !request.stale)
+        );
+    }
+
+    #[test]
+    fn external_change_to_a_drafted_field_marks_the_draft_stale() {
+        let mut runtime = RuntimeState::default();
+        runtime.observe_thread_settings(
+            "thread-1",
+            ThreadSettingsSnapshot {
+                effort: ObservedSetting::Known(Some("low".to_string())),
+                ..Default::default()
+            },
+        );
+        let mut request = model_switch_request("model-1", "telegram:bot:chat", "thread-1");
+        request.draft.effort = Some("medium".to_string());
+        runtime.remember_telegram_model_switch_request(request);
+
+        let outcome = runtime.observe_thread_settings(
+            "thread-1",
+            ThreadSettingsSnapshot {
+                effort: ObservedSetting::Known(Some("high".to_string())),
+                ..Default::default()
+            },
+        );
+        assert!(matches!(
+            outcome,
+            TelegramThreadSettingsObservation::Stale(_)
+        ));
+        assert!(
+            runtime
+                .telegram_model_switch_request("model-1")
+                .is_some_and(|request| request.stale)
+        );
+    }
+
+    #[test]
+    fn telegram_model_switch_requests_are_cleared_from_the_previous_conversation_on_rebind() {
+        let mut runtime = RuntimeState::default();
+        runtime.bind_route(
+            "thread-1",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "telegram:bot:old-chat".to_string(),
+                account_id: "bot".to_string(),
+                chat_id: "old-chat".to_string(),
+                remote_client_key: "im:telegram:bot:old-chat".to_string(),
+            },
+        );
+        runtime.remember_telegram_model_switch_request(model_switch_request(
+            "model-old",
+            "telegram:bot:old-chat",
+            "thread-1",
+        ));
+
+        runtime.bind_route(
+            "thread-1",
+            RouteTarget {
+                platform: ImPlatformKind::Telegram,
+                conversation_key: "telegram:bot:new-chat".to_string(),
+                account_id: "bot".to_string(),
+                chat_id: "new-chat".to_string(),
+                remote_client_key: "im:telegram:bot:new-chat".to_string(),
+            },
+        );
+
+        assert!(runtime.telegram_model_switch_request("model-old").is_none());
+    }
+
+    #[test]
+    fn telegram_model_and_thread_routing_menus_are_mutually_exclusive() {
+        let mut runtime = RuntimeState::default();
+        let conversation_key = "telegram:bot:chat";
+
+        runtime
+            .remember_thread_routing_request(thread_routing_request("route-1", conversation_key));
+        runtime.remember_telegram_model_switch_request(model_switch_request(
+            "model-1",
+            conversation_key,
+            "thread-1",
+        ));
+        assert!(runtime.thread_routing_request("route-1").is_none());
+
+        runtime
+            .remember_thread_routing_request(thread_routing_request("route-2", conversation_key));
+        assert!(runtime.telegram_model_switch_request("model-1").is_none());
+        assert!(runtime.thread_routing_request("route-2").is_some());
     }
 }

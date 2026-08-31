@@ -36,7 +36,8 @@ use crate::{
     },
     im_runtime::{
         PendingApproval, RouteTarget, TelegramCommandProgressSnapshot,
-        TelegramWebSearchProgressEntry, TurnOrigin,
+        TelegramThreadSettingsObservation, TelegramWebSearchProgressEntry, ThreadSettingsSnapshot,
+        TurnOrigin,
     },
     types::ImPlatformKind,
 };
@@ -1605,6 +1606,62 @@ pub(crate) async fn handle_codex_notification_for_generation(
     };
     log_codex_to_im_handler(notification);
     match notification.method.as_str() {
+        "thread/settings/updated" => {
+            let Some(thread_id) = params.get("threadId").and_then(|value| value.as_str()) else {
+                return;
+            };
+            let route = state.runtime.lock().await.route_for_thread(thread_id);
+            let Some(route) = route else {
+                return;
+            };
+            if notification
+                .remote_client_key
+                .as_deref()
+                .is_some_and(|client_key| client_key != route.remote_client_key)
+            {
+                return;
+            }
+            let settings = params.get("threadSettings").unwrap_or(params);
+            let outcome = state.runtime.lock().await.observe_thread_settings(
+                thread_id,
+                ThreadSettingsSnapshot::from_protocol_value(settings),
+            );
+            match outcome {
+                TelegramThreadSettingsObservation::None => {}
+                TelegramThreadSettingsObservation::Confirmed(request) => {
+                    if let Some(api) = api_registry.telegram_for_route(&route) {
+                        let adapter = TelegramAdapter::new(api);
+                        let body = im_text_for_state(&state).telegram_thread_settings_applied();
+                        let _ = adapter
+                            .send_or_update_text(
+                                &request.chat_id,
+                                request.message_id.as_deref(),
+                                body,
+                            )
+                            .await;
+                        let _ = adapter
+                            .clear_reply_markup(&request.chat_id, request.message_id.as_deref())
+                            .await;
+                    }
+                }
+                TelegramThreadSettingsObservation::Stale(request) => {
+                    if let Some(api) = api_registry.telegram_for_route(&route) {
+                        let adapter = TelegramAdapter::new(api);
+                        let body = im_text_for_state(&state).telegram_thread_settings_stale();
+                        let _ = adapter
+                            .send_or_update_text(
+                                &request.chat_id,
+                                request.message_id.as_deref(),
+                                body,
+                            )
+                            .await;
+                        let _ = adapter
+                            .clear_reply_markup(&request.chat_id, request.message_id.as_deref())
+                            .await;
+                    }
+                }
+            }
+        }
         "turn/started" => {
             let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
                 return;
@@ -4419,8 +4476,6 @@ mod tests {
                 params: Some(json!({"threadId": "thread-lifecycle"})),
                 request_id: None,
                 remote_client_key: Some("default:codex_app".to_string()),
-                remote_client_id: None,
-                remote_stream_id: None,
                 remote_connection_epoch: None,
             };
             handle_codex_notification_for_generation(
@@ -4761,8 +4816,6 @@ mod tests {
             })),
             request_id: None,
             remote_client_key: None,
-            remote_client_id: None,
-            remote_stream_id: None,
             remote_connection_epoch: None,
         };
         handle_codex_notification(state.clone(), api_registry, outbound_tx, &notification).await;
@@ -4861,8 +4914,6 @@ mod tests {
                 })),
                 request_id: None,
                 remote_client_key: None,
-                remote_client_id: None,
-                remote_stream_id: None,
                 remote_connection_epoch: None,
             };
             handle_codex_notification(
@@ -4900,8 +4951,6 @@ mod tests {
             })),
             request_id: None,
             remote_client_key: None,
-            remote_client_id: None,
-            remote_stream_id: None,
             remote_connection_epoch: None,
         };
         handle_codex_notification(
@@ -4965,8 +5014,6 @@ mod tests {
                 })),
                 request_id: None,
                 remote_client_key: None,
-                remote_client_id: None,
-                remote_stream_id: None,
                 remote_connection_epoch: None,
             };
             handle_codex_notification(
@@ -5240,8 +5287,6 @@ mod tests {
             })),
             request_id: None,
             remote_client_key: None,
-            remote_client_id: None,
-            remote_stream_id: None,
             remote_connection_epoch: None,
         };
 
