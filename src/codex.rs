@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use serde_json::{Value, json};
 
 use crate::im_runtime::ApprovalDecisionOption;
@@ -10,8 +8,6 @@ pub struct CodexNotification {
     pub params: Option<Value>,
     pub request_id: Option<Value>,
     pub remote_client_key: Option<String>,
-    pub remote_client_id: Option<String>,
-    pub remote_stream_id: Option<String>,
     /// The remote-control websocket that delivered this notification.
     ///
     /// This is kept alongside the logical client key because multiple Codex
@@ -19,18 +15,6 @@ pub struct CodexNotification {
     /// query session metadata must use this epoch to stay on the source
     /// connection instead of falling back to whichever connection is active.
     pub remote_connection_epoch: Option<u64>,
-}
-
-pub fn extract_agent_delta(notification: &CodexNotification) -> Option<String> {
-    match notification.method.as_str() {
-        "item/agentMessage/delta" | "item/reasoning/summaryTextDelta" => notification
-            .params
-            .as_ref()
-            .and_then(|p| p.get("delta").or_else(|| p.get("text")))
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        _ => None,
-    }
 }
 
 pub fn is_agent_message_item(item: &Value) -> bool {
@@ -175,17 +159,6 @@ fn text_from_content_entry(entry: &Value) -> Option<String> {
 fn non_empty_text(text: &str) -> Option<String> {
     let text = text.trim().to_string();
     (!text.is_empty()).then_some(text)
-}
-
-pub fn is_turn_completed(notification: &CodexNotification, turn_id: &str) -> bool {
-    notification.method == "turn/completed"
-        && notification.params.as_ref().and_then(|p| {
-            p.get("turnId").and_then(|v| v.as_str()).or_else(|| {
-                p.get("turn")
-                    .and_then(|t| t.get("id"))
-                    .and_then(|v| v.as_str())
-            })
-        }) == Some(turn_id)
 }
 
 pub fn notification_thread_id(notification: &CodexNotification) -> Option<String> {
@@ -954,8 +927,6 @@ mod tests {
             params: Some(params),
             request_id: Some(json!(1)),
             remote_client_key: None,
-            remote_client_id: None,
-            remote_stream_id: None,
             remote_connection_epoch: None,
         }
     }

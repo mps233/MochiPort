@@ -101,7 +101,7 @@ pub struct TelegramConfig {
     pub project_groups: Vec<TelegramProjectGroupConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TelegramProjectGroupConfig {
     pub chat_id: String,
@@ -200,16 +200,6 @@ impl Default for TelegramConfig {
             mention_only: false,
             allowed_chat_ids: Vec::new(),
             project_groups: Vec::new(),
-        }
-    }
-}
-
-impl Default for TelegramProjectGroupConfig {
-    fn default() -> Self {
-        Self {
-            chat_id: String::new(),
-            project_name: String::new(),
-            cwd: String::new(),
         }
     }
 }

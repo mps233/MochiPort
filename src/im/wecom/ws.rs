@@ -52,7 +52,7 @@ pub async fn listen_ws(
             "plug_version": env!("CARGO_PKG_VERSION")
         }
     });
-    sink.send(Message::Text(auth.to_string())).await?;
+    sink.send(Message::Text(auth.to_string().into())).await?;
     wait_for_auth(&mut source, &auth_req_id).await?;
 
     let (send_tx, mut send_rx) = mpsc::unbounded_channel();
@@ -141,7 +141,7 @@ pub async fn listen_ws(
                     "cmd": "ping",
                     "headers": { "req_id": request_id("ping") }
                 });
-                sink.send(Message::Text(ping.to_string())).await?;
+                sink.send(Message::Text(ping.to_string().into())).await?;
             }
         }
     };
@@ -197,7 +197,7 @@ where
         "headers": { "req_id": req_id },
         "body": command.body
     });
-    sink.send(Message::Text(frame.to_string())).await?;
+    sink.send(Message::Text(frame.to_string().into())).await?;
     pending.insert(req_id, command.result);
     Ok(())
 }

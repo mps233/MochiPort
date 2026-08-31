@@ -1272,7 +1272,7 @@ async fn send_cdp_request(
         control,
         CDP_COMMAND_TIMEOUT,
         &format!("发送 CDP {method}"),
-        socket.send(Message::Text(request.to_string())),
+        socket.send(Message::Text(request.to_string().into())),
     )
     .await??;
     Ok(id)
@@ -1523,7 +1523,9 @@ where
         CDP_COMMAND_TIMEOUT,
         &format!("发送 CDP {method}"),
         socket.send(Message::Text(
-            json!({ "id": id, "method": method, "params": params }).to_string(),
+            json!({ "id": id, "method": method, "params": params })
+                .to_string()
+                .into(),
         )),
     )
     .await??;

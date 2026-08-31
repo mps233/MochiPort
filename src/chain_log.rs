@@ -3,16 +3,14 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, OnceLock,
         mpsc::{SyncSender, sync_channel},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
-use once_cell::sync::OnceCell;
-
-static CHAIN_LOG: OnceCell<ChainLog> = OnceCell::new();
+static CHAIN_LOG: OnceLock<ChainLog> = OnceLock::new();
 
 struct ChainLog {
     inner: Arc<Mutex<ChainLogInner>>,

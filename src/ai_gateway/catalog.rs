@@ -1,12 +1,11 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::LazyLock};
 
-use once_cell::sync::Lazy;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::config::AiGatewayConfig;
 
-static BASE_MODEL_CATALOG: Lazy<Value> = Lazy::new(|| {
+static BASE_MODEL_CATALOG: LazyLock<Value> = LazyLock::new(|| {
     serde_json::from_str(include_str!("models.json")).expect("embedded AI Gateway model catalog")
 });
 

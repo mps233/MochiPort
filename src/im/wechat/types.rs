@@ -71,19 +71,13 @@ pub struct WechatGetUpdatesResponse {
     pub longpolling_timeout_ms: Option<u64>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct WechatMessage {
     pub seq: Option<i64>,
     pub message_id: Option<i64>,
     pub from_user_id: Option<String>,
-    pub to_user_id: Option<String>,
     pub client_id: Option<String>,
-    pub create_time_ms: Option<u64>,
-    pub session_id: Option<String>,
-    pub group_id: Option<String>,
     pub message_type: Option<i64>,
-    pub message_state: Option<i64>,
     pub item_list: Option<Vec<WechatMessageItem>>,
     pub context_token: Option<String>,
 }

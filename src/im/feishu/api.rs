@@ -1,9 +1,8 @@
 use std::time::{Duration, Instant};
-use std::{fs, path::Path};
+use std::{fs, path::Path, sync::LazyLock};
 
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
-use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,10 +22,10 @@ const TOKEN_REFRESH_SKEW: Duration = Duration::from_secs(120);
 const FEISHU_AVATAR_MAX_BYTES: u64 = 2 * 1024 * 1024;
 // Process-wide tenant token cache to avoid fetching a token for every message send.
 // Keyed by (app_id, app_secret) since both define the credential pair.
-static TENANT_TOKEN_CACHE: Lazy<RwLock<HashMap<String, CachedTenantToken>>> =
-    Lazy::new(|| RwLock::new(HashMap::new()));
-static TENANT_TOKEN_LOCKS: Lazy<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static TENANT_TOKEN_CACHE: LazyLock<RwLock<HashMap<String, CachedTenantToken>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static TENANT_TOKEN_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 fn tenant_token_cache_key(settings: &FeishuSettings) -> Option<String> {
     let app_id = settings

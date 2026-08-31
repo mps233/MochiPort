@@ -201,20 +201,18 @@ pub async fn fetch_provider_usage(
         snapshot.today_cost = balance.today_cost;
         snapshot.today_actual_cost = balance.today_actual_cost;
     }
-    if !use_new_api {
-        if let Probe::Available(billing) = billing {
-            snapshot.group_rate_multiplier = Some(billing.group_rate_multiplier);
-            snapshot.user_rate_multiplier = billing.user_rate_multiplier;
-            snapshot.resolved_rate_multiplier = Some(billing.resolved_rate_multiplier);
-            snapshot.effective_rate_multiplier = Some(billing.effective_rate_multiplier);
-            snapshot.peak_rate_enabled = Some(billing.peak_rate_enabled);
-            snapshot.peak_start = billing.peak_start;
-            snapshot.peak_end = billing.peak_end;
-            snapshot.peak_rate_multiplier = billing.peak_rate_multiplier;
-            snapshot.applied_peak_multiplier = billing.applied_peak_multiplier;
-            snapshot.timezone = billing.timezone;
-            snapshot.observed_at = Some(billing.observed_at);
-        }
+    if !use_new_api && let Probe::Available(billing) = billing {
+        snapshot.group_rate_multiplier = Some(billing.group_rate_multiplier);
+        snapshot.user_rate_multiplier = billing.user_rate_multiplier;
+        snapshot.resolved_rate_multiplier = Some(billing.resolved_rate_multiplier);
+        snapshot.effective_rate_multiplier = Some(billing.effective_rate_multiplier);
+        snapshot.peak_rate_enabled = Some(billing.peak_rate_enabled);
+        snapshot.peak_start = billing.peak_start;
+        snapshot.peak_end = billing.peak_end;
+        snapshot.peak_rate_multiplier = billing.peak_rate_multiplier;
+        snapshot.applied_peak_multiplier = billing.applied_peak_multiplier;
+        snapshot.timezone = billing.timezone;
+        snapshot.observed_at = Some(billing.observed_at);
     }
     snapshot
 }
