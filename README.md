@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="packaging/macos/AppIcon-dark.svg">
-    <img src="packaging/macos/AppIcon.svg" alt="MochiPort logo" width="132">
-  </picture>
+  <img src="packaging/macos/AppIcon.svg" alt="MochiPort logo" width="132">
 </p>
 
 <h1 align="center">MochiPort</h1>
