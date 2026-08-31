@@ -2,12 +2,14 @@
 
 日期：2026-07-14
 
+现行前提更新：2026-08-30
+
 状态：备选方案，暂不实施。本文档保留 Compact V2 截获、统一摘要和 portable marker 的完整设计，供未来跨 Provider 压缩状态丢失成为必须解决的问题时重新评估。
 
-当前决定（2026-07-14）：
+当前决定（2026-08-30）：
 
-- 当前主路径继续使用 hosted `web_search`，暂不启用原生 `web.run`。
-- Codex Provider 配置保持 `name = "ai-gateway"`，不伪装成 OpenAI Provider。
+- 当前主路径让 Responses Lite 使用原生 `web.run`，标准 Responses 继续兼容 hosted `web_search`。
+- Codex Provider 的表键和 `name` 均使用规范名称 `MochiPort`，不伪装成 OpenAI Provider。
 - 因为 `provider.is_openai() == false`，Codex 不启用 Remote Compact V2，而是使用本地文本摘要压缩。
 - 本地摘要由旧模型生成，并以普通 `role=user` 摘要进入新历史，天然可供 OpenAI、Grok、DeepSeek 和 Anthropic 读取。
 - 不实现 Compact V2 截获和 synthetic compaction SSE。
@@ -22,7 +24,7 @@
 
 - [`ai-gateway-provider-private-state-conversion.zh-CN.md`](ai-gateway-provider-private-state-conversion.zh-CN.md)：Provider 私有 reasoning、签名和密文的作用域隔离。
 - [`ai-gateway-encrypted-content-scope.zh-CN.md`](ai-gateway-encrypted-content-scope.zh-CN.md)：Responses 原生密文透传、Anthropic typed marker 和旧前缀迁移规则。
-- [`ai-gateway-responses-lite-web-search.zh-CN.md`](ai-gateway-responses-lite-web-search.zh-CN.md)：Responses Lite、`web.run` 和 OpenAI Provider 身份约束。
+- [`ai-gateway-responses-lite-web-search.zh-CN.md`](ai-gateway-responses-lite-web-search.zh-CN.md)：Responses Lite、`web.run` standalone capability 和 Provider 身份约束。
 - [OpenAI Compaction 指南](https://developers.openai.com/api/docs/guides/compaction)：OpenAI 官方 compaction item 和 opaque `encrypted_content` 说明。
 - [OpenAI Compact API Reference](https://developers.openai.com/api/reference/resources/responses/methods/compact/)：standalone compact 请求与响应字段。
 
@@ -39,7 +41,7 @@ Codex 的 Compact V2 适合在 OpenAI 模型内部保存长会话状态，但它
 
 如果用户在同一会话中从 OpenAI 切换到 Grok、DeepSeek 或 Anthropic，直接过滤 OpenAI compaction blob 虽然能避免协议错误，但会同时丢失 blob 承载的旧 assistant 状态、工具进度和任务结论。
 
-本文的目标是在保留 Codex Compact V2 生命周期和 `web.run` 能力的前提下，让所有压缩结果都能跨 Provider 使用。
+本文的目标是：如果未来显式启用 Remote Compact V2，让所有压缩结果都能跨 Provider 使用。当前 `web.run` 已通过 standalone capability 与 OpenAI 身份解耦，不再是启用本文方案的理由或前提。
 
 ## 2. 已核实事实
 
@@ -103,36 +105,41 @@ GPT-5.6 -> Grok-4.6
 
 Gateway 只能看到旧模型 `gpt-5.6` 和 `reason=comp_hash_changed`，无法无状态地判断目标是否仍为 OpenAI。
 
-### 2.3 若启用 `web.run`，需要 OpenAI Provider 身份
+### 2.3 `web.run` 已与 OpenAI Provider 身份解耦
 
-原生 `web.run` 是本文备选方案成立的前提。若未来启用它，MochiPort 的 Provider 配置键和 Provider 能力名称是两个概念：
+当前 Codex 支持显式的 standalone search capability，MochiPort 默认写入：
 
 ```toml
-model_provider = "ai-gateway"
+model_provider = "MochiPort"
+web_search = "live"
 
-[model_providers.ai-gateway]
-name = "OpenAI"
+[model_providers.MochiPort]
+name = "MochiPort"
 base_url = "http://127.0.0.1:3847/ai-gateway/v1"
 wire_api = "responses"
 requires_openai_auth = true
+supports_standalone_web_search = true
 ```
 
-- `ai-gateway` 是 Codex 配置中的 Provider ID。
-- `name = "OpenAI"` 用于通过 Codex 的 OpenAI capability gate。
-- 把 `name` 改成 `ai-gateway` 会关闭原生 `web.run` 等依赖 OpenAI 身份的能力。
+- `MochiPort` 同时是 Codex 配置中的 Provider ID 和身份字段。
+- `supports_standalone_web_search = true` 通过独立搜索 gate 注册原生 `web.run`。
+- Provider 不满足 `is_openai()`，因此不会仅为搜索启用 OpenAI Remote Compact V2、请求压缩或其他私有行为。
+- 旧 `ai-gateway`/`ai-codex` 配置只作为迁移和清理输入识别。
 
-当前主路径不启用 `web.run`，所以继续使用 `name = "ai-gateway"` 和 hosted `web_search`，并直接获得 Codex 本地摘要压缩。只有未来重新启用 `web.run` 时，才需要面对 OpenAI Provider 身份与 Remote Compact V2 的耦合。
+因此当前主路径可以同时使用原生 `web.run` 和 Codex 本地文本摘要压缩。只有未来决定启用本文的 portable Compact V2 方案时，才需要重新面对 Remote Compact V2 的 Provider gate。
 
 ### 2.4 启用本备选方案时 Compact V2 必须保持开启
 
-如果未来启用本文的 portable V2 备选方案，则保持：
+如果未来启用本文的 portable V2 备选方案，则必须让 Codex 实际进入 Remote Compact V2。若届时该能力仍依赖 `provider.is_openai()`，就需要把受管理 provider 的 `name` 显式改为 `OpenAI`，并重新审计由此开启的其他 OpenAI 私有行为；这不是当前配置。
+
+同时保持：
 
 ```toml
 [features]
 remote_compaction_v2 = true
 ```
 
-该功能当前默认开启，可以不显式写入配置。MochiPort 不使用旧 `/responses/compact` 作为主要实现，也不依赖 Compact V1。
+实施时必须重新核对目标 Codex 版本是否仍提供该 feature 及其默认值，并显式确保 Remote Compact V2 已生效，不能依赖 2026-07-14 时的旧默认。MochiPort 不使用旧 `/responses/compact` 作为主要实现，也不依赖 Compact V1。
 
 ## 3. 备选方案设计
 
@@ -793,8 +800,8 @@ portable marker 绝不能原样发给任何上游。
 
 ### 16.6 能力回归
 
-- Provider 配置 ID 仍为 `ai-gateway`
-- Provider `name` 保持 `OpenAI`
+- Provider 配置 ID 仍为 `MochiPort`
+- 启用备选方案时 Provider `name` 按届时的 Remote Compact V2 gate 配置；当前默认仍为 `MochiPort`
 - `web.run` 仍出现在 GPT-5.6 工具注册表
 - `/alpha/search` 路由不受影响
 - `remote_compaction_v2` 保持开启
@@ -831,7 +838,7 @@ portable marker 绝不能原样发给任何上游。
 - 不需要推断未知的目标 Provider。
 - 压缩内容可检查、可测试、可迁移。
 - 模型切换时不依赖 foreign opaque blob。
-- 保留 `name = "OpenAI"` 和原生 `web.run`。
+- 保留原生 `web.run`；它继续使用 standalone search capability，不依赖 `name = "OpenAI"`。
 - 继续使用 Codex 当前 Compact V2 生命周期，不依赖旧 Compact V1。
 
 ## 19. 非目标
@@ -853,7 +860,7 @@ Codex 或 OpenAI 协议升级后至少检查：
 4. `x-codex-turn-metadata.compaction` 是否新增目标模型信息。
 5. retained message token budget 是否仍为 64K。
 6. `remote_compaction_v2` 是否仍默认开启。
-7. Provider `name = "OpenAI"` 是否仍是 `web.run` gate 的组成部分。
+7. `supports_standalone_web_search` 是否仍能独立注册 `web.run`，Remote Compact V2 是否仍依赖 `provider.is_openai()`。
 8. Compact V2 SSE 事件是否新增必填字段。
 9. 新模型目录中的 `comp_hash` 是否变化。
 10. portable marker 是否仍会被 Codex 原样保存和回放。

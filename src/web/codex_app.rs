@@ -30,8 +30,6 @@ pub(super) struct ConfigureCodexAppRequest {
     provider_base_url: Option<String>,
     provider_key: Option<String>,
     activate: Option<bool>,
-    #[allow(dead_code)]
-    image_generation_enabled: Option<bool>,
     supports_websockets: Option<bool>,
 }
 
@@ -183,18 +181,10 @@ pub(super) async fn configure_codex_app(
         codex_home,
         backend_url: backend_url.clone(),
         connection_mode,
-        // Codex owns the login identity. `configure_codex_app` derives the
-        // account from the real auth.json when it exists; an unauthenticated
-        // install must not create a placeholder enrollment.
-        account_id: String::new(),
-        user_id: String::new(),
-        email: String::new(),
-        plan_type: String::new(),
         provider_name,
         provider_base_url,
         provider_key,
         activate_provider,
-        image_generation_enabled: None,
         provider_supports_websockets,
     }) {
         Ok(report) => {

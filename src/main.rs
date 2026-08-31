@@ -140,18 +140,10 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
                     codex_home,
                     backend_url: backend_url.clone(),
                     connection_mode: config.local_connection_mode,
-                    // The Codex login remains owned by Codex. The configure
-                    // path derives a real account id from auth.json and skips
-                    // enrollment entirely when the user is not logged in.
-                    account_id: String::new(),
-                    user_id: String::new(),
-                    email: String::new(),
-                    plan_type: String::new(),
                     provider_name,
                     provider_base_url,
                     provider_key,
                     activate_provider: true,
-                    image_generation_enabled: None,
                     provider_supports_websockets: None,
                 },
             )?;

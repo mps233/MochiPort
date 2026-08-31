@@ -8,7 +8,6 @@
 
 相关文档：
 
-- [`codex-app-web-run-model-visibility-tradeoff.zh-CN.md`](codex-app-web-run-model-visibility-tradeoff.zh-CN.md)：Codex App 模型显示、原生 `web.run` 与本地压缩之间的当前取舍和暂缓决策。
 - [`ai-gateway-web-search-protocol.zh-CN.md`](ai-gateway-web-search-protocol.zh-CN.md)：标准 Responses 托管 `web_search` 以及 Anthropic/GLM 转换规则。
 - [`ai-gateway-architecture.zh-CN.md`](ai-gateway-architecture.zh-CN.md)：AI Gateway 总体架构。
 
@@ -20,7 +19,7 @@
 2. Responses Lite 把客户端执行工具放进 `input[].additional_tools`，而不是顶层 `tools`。
 3. Codex 原生 Lite 搜索工具是客户端工具 `web.run`，不是托管工具 `web_search`。
 4. `web.run` 执行时会独立请求 provider 的 `/alpha/search`，不会在当前 `/responses` 请求中完成搜索。
-5. MochiPort 默认 provider 使用 `name="ai-gateway"`、`requires_openai_auth=true` 和 `supports_standalone_web_search=true`；保留账号态并满足独立搜索 capability，但不满足 `provider.is_openai()`，因此不会触发 OpenAI 远程压缩。
+5. MochiPort 默认 provider 的表键和 `name` 均为 `MochiPort`，并使用 `requires_openai_auth=true` 和 `supports_standalone_web_search=true`；保留账号态并满足独立搜索 capability，但不满足 `provider.is_openai()`，因此不会触发 OpenAI 远程压缩。
 6. MochiPort 已提供 `/ai-gateway/v1/alpha/search`，当前 Sub2API `0.1.152` 也已提供 `/v1/alpha/search`；搜索请求可以按 OpenAI Responses Provider 路由并透明转发。
 7. 把托管 `{"type":"web_search"}` 塞进 `additional_tools.tools` 会被当前上游静默忽略。这不是 Codex 原生 Lite 结构。
 8. **不要**再向 Responses Lite 请求顶层 `tools` 注入 hosted `web_search`。上游会返回 `unsupported_value`：`X-OpenAI-Internal-Codex-Responses-Lite only supports function tools, custom tools, and client-executed tool search.`
@@ -380,17 +379,18 @@ MochiPort 默认写入的本地 provider：
 
 ```toml
 chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+model_provider = "MochiPort"
 web_search = "live"
 
-[model_providers.ai-gateway]
-name = "ai-gateway"
+[model_providers.MochiPort]
+name = "MochiPort"
 wire_api = "responses"
 requires_openai_auth = true
 base_url = "http://127.0.0.1:3847/ai-gateway/v1"
 supports_standalone_web_search = true
 ```
 
-表键和身份字段都保持 `ai-gateway`，因此 `provider.is_openai()` 为假，不会仅因本地 Gateway 身份而启用 OpenAI 私有协议行为。`supports_standalone_web_search` 是当前 Codex 的显式搜索 capability，MochiPort 默认配置会注册 `web.run`。默认 provider 不写占位 bearer token；Codex 官方 OAuth/API key 仍由 Codex 自己维护，普通接管也不依赖全局 `CODEX_API_BASE_URL`。Actor header 只作为旧配置的兼容识别，仍被列为敏感 header，不会转发给 Sub2API。
+表键和身份字段都是规范名称 `MochiPort`，因此 `provider.is_openai()` 为假，不会仅因本地 Gateway 身份而启用 OpenAI 私有协议行为。`supports_standalone_web_search` 是当前 Codex 的显式搜索 capability，MochiPort 默认配置会注册 `web.run`。默认 provider 不写占位 bearer token；Codex 官方 OAuth/API key 仍由 Codex 自己维护，普通接管也不依赖全局 `CODEX_API_BASE_URL`。`ai-gateway`、`ai-codex` 和 Actor header 只作为旧配置的兼容形态识别；Actor header 仍被列为敏感 header，不会转发给 Sub2API。
 
 ### 6.1 搜索 capability 与旧 Actor Authorization 兼容
 
@@ -429,7 +429,7 @@ Codex App 旧版本仍可能使用 Statsig `107580212` 的 `available_models` �
 
 这些行为与开启搜索无关，却扩大了所有渠道的协议面，尤其会把 Grok、Anthropic 和 DeepSeek 会话也带入 OpenAI remote compaction 判断。因此默认配置既不伪装 OpenAI，也不依赖 Actor Authorization，而是使用显式 standalone search capability；标准 Responses 仍保留 hosted `web_search` 兼容链路。
 
-其中一个立即可见的差异是请求压缩。Codex 的 `enable_request_compression` 默认开启；当认证使用 Codex backend 且 `provider.is_openai()` 为真时，流式 `/responses` body 会使用 zstd，并携带 `Content-Encoding: zstd`。默认 `ai-gateway` 身份不再触发该分支，但 MochiPort 仍保留 zstd 解压支持，以兼容旧配置和用户显式配置的 OpenAI provider。
+其中一个立即可见的差异是请求压缩。Codex 的 `enable_request_compression` 默认开启；当认证使用 Codex backend 且 `provider.is_openai()` 为真时，流式 `/responses` body 会使用 zstd，并携带 `Content-Encoding: zstd`。默认 `MochiPort` 身份不触发该分支，但 MochiPort 仍保留 zstd 解压支持，以兼容旧配置和用户显式配置的 OpenAI provider。
 
 ### 6.3 Image generation 与 Web Search 使用不同 gate
 
@@ -617,7 +617,7 @@ Lite 的搜索能力由客户端工具 `web.run` + `/alpha/search` 提供，不�
 | 在 `additional_tools` 伪造 function `web_search` | 模型可能调用，但 Codex 无本地 runtime | 不使用 |
 | 只在请求中伪造 `web.run` | 没有 Codex 本地 runtime，模型调用后无法执行 | 不使用 |
 | 默认注入 Actor Authorization（旧 Codex） | `account=None`，旧前端套用官方 Statsig 模型白名单 | 历史失败；当前默认不使用 |
-| 表键保持 `ai-gateway`，身份写为 `OpenAI` | 启用原生 `web.run`，同时开启 remote compaction、请求压缩等 OpenAI 私有行为 | 不使用 |
+| 旧表键保持 `ai-gateway`，身份写为 `OpenAI` | 启用原生 `web.run`，同时开启 remote compaction、请求压缩等 OpenAI 私有行为 | 不使用 |
 | MochiPort 将 `/alpha/search` 透明转发到当前 Sub2API OpenAI 渠道 | 保留 command 协议和 opaque response，不做错误的 `/responses` 转换 | 已采用 |
 | 直接把 `use_responses_lite=false` | 会改变完整请求编码，GPT-5.6 兼容性未知 | 需单独验证 |
 | 把 `/alpha/search` body 原样转成 `/responses` body | 两个协议字段和返回完全不同 | 无效 |
@@ -630,11 +630,11 @@ Lite 的搜索能力由客户端工具 `web.run` + `/alpha/search` 提供，不�
 
 当前实现：
 
-1. provider 表键和身份字段都保持 `ai-gateway`。
+1. provider 表键和身份字段都使用规范名称 `MochiPort`。
 2. 默认本地 provider 写入 `requires_openai_auth=true`、`supports_standalone_web_search=true` 和顶层 `web_search="live"`；不再写入 Actor Authorization header。
 3. GPT-5.6 Responses Lite 自动选择 standalone search，并把 `web.run` 放入 `additional_tools`；标准 Responses 模型仍可继续使用 hosted `web_search`。
 4. Gateway 的 `/alpha/search` transport 将请求限定路由到 OpenAI Responses Provider；Actor header 在 Gateway 入口被过滤。
-5. `requires_openai_auth=true`、`name="OpenAI"` 和旧 `ai-codex` 仍作为升级/卸载兼容形态识别；重新配置会迁移到当前带 standalone capability 的 `ai-gateway` 身份。
+5. 旧 `ai-gateway`/`ai-codex` provider key 和 `name="OpenAI"` 身份仍作为升级/卸载兼容输入识别；重新配置会迁移到当前带 standalone capability 的 `MochiPort` 身份。
 
 实机验收必须同时覆盖 `/alpha/search` 调用、工具结果回填、前端完整模型展示、账户区、手机入口和 Remote Control。任一前端能力回归都应保留日志并回滚默认配置，再评估是否增加用户开关。
 
@@ -679,9 +679,23 @@ Codex App 前端据此得到 `authMethod=null`，不会调用 MochiPort 的 `/wh
 
 曾验证通过 `CODEX_CLI_PATH` 代理改写 `account/read` 可以让前端走 MochiPort Statsig，并显示完整模型列表。但该方案会修改用户级 GUI 环境并介入 Codex App 的 app-server 启动链路，当前发布版本不采用。
 
-当前模型目录仍由 `ai-gateway /models` 提供。实机验证表明 app-server 和 Remote Control 可以读取完整目录，但 Codex App 前端仍可能使用官方 Statsig `available_models` 二次过滤。这个问题属于桌面前端展示层，不影响 Core 请求、模型路由和原生 `web.run` 执行，后续围绕 `account/read` 单独设计不依赖 `CODEX_CLI_PATH` 的方案。
+兼容增强启动模式使用仅回环可访问的 CDP，在 renderer 第一帧增量合并 Statsig `107580212` 和已经确认的功能 gate。它不修改 ASAR、LevelDB 或应用快捷方式，只影响本次由 MochiPort 启动的 Codex App，主要服务旧版 Codex 或历史 Actor 配置；普通启动、CLI 和 VS Code 插件不经过该适配。
 
-### 11.4 MochiPort 路由
+当前模型目录仍由 `MochiPort` provider 的 `/models` endpoint 提供。实机验证表明 app-server 和 Remote Control 可以读取完整目录，但旧版 Codex App 前端仍可能使用官方 Statsig `available_models` 二次过滤。这个问题属于桌面前端展示层，不影响 Core 请求、模型路由和原生 `web.run` 执行。
+
+### 11.4 旧 Actor 配置的插件市场副作用
+
+旧 Actor 配置的 `requires_openai_auth=false` 不只影响模型白名单。Codex app-server 会返回 `account=null`、`authMethod=null` 和 `requiresOpenaiAuth=false`；即使 `auth.json` 仍保存官方账号记录，renderer 看到的 `authMethod` 仍由当前 provider 决定。
+
+旧版 Codex App 在 `authMethod` 不是 `chatgpt`、`apikey` 或 `amazonBedrock` 时，还会从插件目录中隐藏 `openai-curated` 和 `openai-curated-remote`。这不会阻止本地 `openai-bundled`、`openai-primary-runtime` 插件显示，也不表示 `/backend-api/ps/plugins/list` 路由失败；它是 renderer 的独立市场过滤。
+
+兼容增强启动模式只对 `vscode://codex/list-plugins` 的对应响应做窄范围展示适配：把顶层本地市场名 `openai-curated` 临时映射为 renderer 接受的 `codex-official`，同时保持 `marketplace.path`、插件 ID、名称、安装/启用状态和配置身份不变。它不修改 `openai-curated-remote`、bundled/primary-runtime 或其他用户市场，也不伪造全局 `authMethod`。诊断字段 `pluginCatalogBridgeInstalled` 和 `pluginCatalogResponsesAdapted` 用于确认这条适配是否安装并命中。
+
+renderer 仍可能按插件 ID 的原始 `@openai-curated` 后缀过滤 featured 推荐位，因此完整目录可以显示，但 curated 插件不一定进入首页推荐区。适配器不会为了推荐位改写插件 ID，以免破坏安装、卸载和历史配置身份。
+
+`features.apps=false` 关闭的是依赖官方 ChatGPT 后端的 Apps/Connectors MCP，与本地 plugin/skill 是另一条链路；在 MochiPort 尚未实现官方 Apps backend 前不能用开启它来绕过插件市场过滤。
+
+### 11.5 MochiPort 路由
 
 按当前 base URL，MochiPort 已实现：
 
@@ -697,11 +711,11 @@ POST {provider_api_root}/v1/alpha/search
 
 原始 query string、除 `model` 映射外的未知 JSON 字段、上游状态码、`content-type` 和响应 body 均保留。
 
-### 11.5 SearchRequest 支持范围
+### 11.6 SearchRequest 支持范围
 
 MochiPort 不绑定不断演进的 SearchRequest schema，只要求顶层 `model` 是非空字符串。`id`、`input`、全部 `commands`、`settings`、`max_output_tokens` 以及未来新增字段均透明转发。因此命令支持范围由当前 Sub2API 和最终 OpenAI-compatible 上游决定，而不是由 MochiPort 白名单决定。
 
-### 11.6 搜索 backend 选择
+### 11.7 搜索 backend 选择
 
 当前采用原生透明转发，不再把 `/alpha/search` 转换成 hosted `/responses + web_search`。后者仍有以下语义差距：
 
@@ -712,7 +726,7 @@ MochiPort 不绑定不断演进的 SearchRequest schema，只要求顶层 `model
 
 因此 hosted `web_search` 只作为另一条兼容路径，不能冒充 `/alpha/search`。
 
-### 11.7 SearchResponse
+### 11.8 SearchResponse
 
 Codex 当前最低可解析响应：
 
@@ -729,7 +743,7 @@ Codex 当前最低可解析响应：
 - `encrypted_output` 是可选 opaque 数据，MochiPort 不解析、不修改。
 - MochiPort 不重组 SearchResponse；成功、错误和未来新增字段都按上游 wire body 返回。
 
-### 11.8 UI 事件
+### 11.9 UI 事件
 
 原生 `web.run` runtime 会由 Codex extension 产生 WebSearch begin/end item。若使用原生链路，Gateway 不需要把 `/alpha/search` 本身伪装成 Responses `web_search_call`。
 
@@ -923,6 +937,13 @@ upstream_response_sse：上游原始流
 - Codex App 显示搜索 item。
 - 搜索结束后会话能继续，不产生孤儿 tool call。
 
+### 14.6 Codex App renderer
+
+- `authMethod=null` 时是否仍走硬编码 Statsig endpoint，并用 `107580212` 二次过滤 `model/list`。
+- renderer 是否仍隐藏 `openai-curated` / `openai-curated-remote`。
+- 增强模式的本地 curated 展示别名是否仍保持 marketplace path、插件 ID 和安装状态不变。
+- Apps/Connectors 是否仍与本地 plugin/skill 使用独立的功能开关和后端链路。
+
 ## 15. 测试要求
 
 当前兼容方案至少保留以下单元测试：
@@ -958,7 +979,7 @@ upstream_response_sse：上游原始流
 
 ```text
 保留 Responses Lite
-+ provider 表键和身份均保持 ai-gateway
++ provider 表键和身份均使用 MochiPort
 + 默认 requires_openai_auth=true、supports_standalone_web_search=true 且 web_search=live
 + GPT-5.6 Lite 使用 Codex 原生 web.run
 + 提供 /ai-gateway/v1/alpha/search 透明代理

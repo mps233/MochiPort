@@ -309,10 +309,11 @@ MochiPort preserves unrelated Codex App settings. Its compatibility setup only m
 When MochiPort injects its default local AI Gateway provider, Codex keeps its existing official account state while model requests use the standalone web-search capability:
 
 ```toml
+model_provider = "MochiPort"
 web_search = "live"
 
-[model_providers.ai-gateway]
-name = "ai-gateway"
+[model_providers.MochiPort]
+name = "MochiPort"
 base_url = "http://127.0.0.1:3847/ai-gateway/v1"
 wire_api = "responses"
 requires_openai_auth = true
@@ -320,7 +321,7 @@ supports_websockets = false
 supports_standalone_web_search = true
 ```
 
-The provider identity remains `ai-gateway`, so OpenAI-only private-state behavior is not enabled accidentally. `supports_standalone_web_search` lets current Codex builds expose native `web.run` for this custom provider while preserving the account state used by Codex App. The default local provider does not need a dummy bearer token, and normal takeover does not depend on a global `CODEX_API_BASE_URL` override. The model catalog still comes from MochiPort's `/models` endpoint. Older Actor Authorization configurations remain recognized for migration and cleanup only.
+The provider key and identity are both `MochiPort`. Because that identity is not `OpenAI`, OpenAI-only private-state behavior is not enabled accidentally. `supports_standalone_web_search` lets current Codex builds expose native `web.run` for this custom provider while preserving the account state used by Codex App. The default local provider does not need a dummy bearer token, and normal takeover does not depend on a global `CODEX_API_BASE_URL` override. The model catalog still comes from MochiPort's `/models` endpoint. Older `ai-gateway`/`ai-codex` and Actor Authorization configurations remain recognized for migration and cleanup only.
 
 ## Codex App Auth
 
@@ -331,10 +332,10 @@ API-key-only auth before its websocket connects. A third-party model provider
 key controls model calls only and does not replace the Codex account login.
 
 On startup, MochiPort recognizes auth placeholders written by older versions
-only when the active configuration is the local `ai-gateway`. It restores the
-saved official auth file if one exists, or removes the legacy placeholder so
-Codex can present its normal login flow. It does not alter direct third-party
-provider configurations.
+only when the active configuration is the managed local `MochiPort` provider or
+a recognized legacy `ai-gateway`/`ai-codex` shape. It restores the saved official
+auth file if one exists, or removes the legacy placeholder so Codex can present
+its normal login flow. It does not alter direct third-party provider configurations.
 
 The desktop GUI provides Codex App configuration controls that write the local Codex App config for you.
 

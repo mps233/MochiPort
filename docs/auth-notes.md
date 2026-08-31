@@ -8,7 +8,7 @@ Codex owns and maintains its `auth.json`. MochiPort preserves the user's existin
 official OAuth or API-key login and does not write synthetic ChatGPT JWTs or a
 placeholder API key.
 
-Normal takeover routes model requests through the `ai-gateway` provider in
+Normal takeover routes model requests through the `MochiPort` provider in
 `config.toml`. It does not log Codex in or out. Features that require a ChatGPT
 account, including upstream remote control, still require the user to sign in
 through Codex's official login flow; a model provider key does not satisfy that
@@ -19,7 +19,7 @@ account check.
 `mochiport configure-codex-app` writes:
 
 - `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"` for local backend fallback endpoints.
-- A default `ai-gateway` provider at `http://127.0.0.1:3847/ai-gateway/v1` with `requires_openai_auth = true` and `supports_standalone_web_search = true`. This preserves the Codex App account state, including Fast mode, while registering native `web.run`.
+- A default `MochiPort` provider at `http://127.0.0.1:3847/ai-gateway/v1` with `requires_openai_auth = true` and `supports_standalone_web_search = true`. This preserves the Codex App account state, including Fast mode, while registering native `web.run`.
 - A local `openai-curated` marketplace entry when the cached curated catalog exists.
 - `features.apps = false`, because the host-owned Apps/Connectors MCP backend is not implemented locally.
 - Cleanup for legacy plugin-blocking flags such as `plugins = false` and `computer_use = false`.
@@ -39,10 +39,11 @@ MochiPort does not publish `openai-bundled` plugins through remote `list` or `in
 Older MochiPort/CodexHub builds wrote synthetic `chatgptAuthTokens`, and one
 in-progress build wrote `OPENAI_API_KEY = "codexhub-dummy-key"` without
 `auth_mode`. These shapes are recognized only as legacy MochiPort-managed auth.
-When the active configuration is the local `ai-gateway`, daemon startup restores
-the saved official `auth.json` when available, or removes the synthetic
-placeholder so Codex can run its normal login flow. Direct third-party provider
-configurations and unrelated auth files are not changed.
+When the active configuration is the managed local `MochiPort` provider or a
+recognized legacy `ai-gateway`/`ai-codex` shape, daemon startup restores the saved
+official `auth.json` when available, or removes the synthetic placeholder so
+Codex can run its normal login flow. Direct third-party provider configurations
+and unrelated auth files are not changed.
 
 The local `/backend-api/ps/plugins/*` fallback remains narrow:
 

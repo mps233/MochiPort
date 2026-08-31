@@ -144,22 +144,27 @@ models = ["deepseek-v4-flash", "deepseek-v4-pro"]
 Codex 侧 provider 配置示例：
 
 ```toml
-[model_providers.ai-gateway]
-name = "ai-gateway"
-base_url = "http://127.0.0.1:3847/ai-gateway/v1"
-env_key = "AI_GATEWAY_API_KEY"
-wire_api = "responses"
-supports_websockets = false
-
 model = "gpt-5.5"
-model_provider = "ai-gateway"
+model_provider = "MochiPort"
+web_search = "live"
+
+[model_providers.MochiPort]
+name = "MochiPort"
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
+supports_standalone_web_search = true
 ```
 
 新增渠道时 `models` 初始为空。模型列表只来自手工添加或远端模型列表同步；空列表不会按渠道名自动匹配模型。
 
 Codex 可见模型由 `aiGateway.codexVisibleModels` 控制。它不是 provider 上游模型列表的简单合并，而是一个显式白名单：只有配置在该列表里，并且内置 `src/ai_gateway/models.json` 中 `supported_in_api = true`、`visibility = "list"` 的模型，才会出现在 `GET /ai-gateway/v1/models` 返回值里。
 
-`AI_GATEWAY_API_KEY` 第一阶段可以是本地占位 key。真实上游 provider key 放在 `mochiport` 运行环境里，不写入 Codex 配置。
+默认本地 provider 不写占位 bearer token 或 `env_key`。Codex 官方账号状态由
+Codex 自己的 `auth.json` 维护；真实上游 provider key 只保存在 MochiPort 配置或
+运行环境中，不写入 Codex 配置。旧 `ai-gateway`/`ai-codex` provider 只作为迁移
+和清理输入识别。
 
 ## 5. 路由设计
 

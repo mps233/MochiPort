@@ -7,7 +7,7 @@
 Codex App 的 `auth.json` 由 Codex 自己维护。MochiPort 保留用户已有的官方
 OAuth 或 API key 登录，不写入伪造的 ChatGPT JWT，也不写占位 API key。
 
-普通接管只通过 `config.toml` 中的 `ai-gateway` provider 路由模型请求，不会
+普通接管只通过 `config.toml` 中的 `MochiPort` provider 路由模型请求，不会
 替 Codex 登录或退出。Remote Control 等依赖 ChatGPT 账号的功能仍要求用户在
 Codex 中完成官方登录；模型服务的 API key 不能代替这个账号状态。
 
@@ -16,7 +16,7 @@ Codex 中完成官方登录；模型服务的 API key 不能代替这个账号�
 `mochiport configure-codex-app` 会写入：
 
 - `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`，用于本地 backend fallback 接口。
-- 默认 `ai-gateway` provider，地址是 `http://127.0.0.1:3847/ai-gateway/v1`，使用 `requires_openai_auth = true` 和 `supports_standalone_web_search = true`。这样 Codex App 保留账号态（包括 Fast 模式），同时注册原生 `web.run`。
+- 默认 `MochiPort` provider，地址是 `http://127.0.0.1:3847/ai-gateway/v1`，使用 `requires_openai_auth = true` 和 `supports_standalone_web_search = true`。这样 Codex App 保留账号态（包括 Fast 模式），同时注册原生 `web.run`。
 - 如果本地存在 cached curated catalog，则写入本地 `openai-curated` marketplace。
 - 固定写入 `features.apps = false`，因为本地没有实现由官方托管的 Apps/Connectors MCP 后端。
 - 清理历史插件阻断项，例如 `plugins = false`、`computer_use = false`。
@@ -35,9 +35,10 @@ MochiPort 不通过 remote `list` 或 `installed` fallback 发布 `openai-bundle
 旧版 MochiPort/CodexHub 曾写入 synthetic `chatgptAuthTokens`；某个未发布的
 中间版本还写过不带 `auth_mode` 的
 `OPENAI_API_KEY = "codexhub-dummy-key"`。这些形态只作为历史 MochiPort-managed
-auth 识别。当前配置确实使用本地 `ai-gateway` 时，daemon 启动迁移会优先恢复
-已备份的官方 `auth.json`；没有备份时删除 synthetic 占位认证，让 Codex 重新走
-正常登录流程。第三方直连 provider 和无关 auth 文件不会被修改。
+auth 识别。当前配置确实使用受管理的本地 `MochiPort` provider，或可识别的旧
+`ai-gateway`/`ai-codex` 形态时，daemon 启动迁移会优先恢复已备份的官方
+`auth.json`；没有备份时删除 synthetic 占位认证，让 Codex 重新走正常登录流程。
+第三方直连 provider 和无关 auth 文件不会被修改。
 
 本地 `/backend-api/ps/plugins/*` fallback 继续保持窄范围：
 

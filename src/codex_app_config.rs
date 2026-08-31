@@ -90,16 +90,10 @@ pub struct ConfigureCodexAppOptions {
     pub codex_home: Option<PathBuf>,
     pub backend_url: String,
     pub connection_mode: LocalConnectionMode,
-    pub account_id: String,
-    pub user_id: String,
-    pub email: String,
-    pub plan_type: String,
     pub provider_name: Option<String>,
     pub provider_base_url: Option<String>,
     pub provider_key: Option<String>,
     pub activate_provider: bool,
-    #[allow(dead_code)]
-    pub image_generation_enabled: Option<bool>,
     pub provider_supports_websockets: Option<bool>,
 }
 
@@ -323,14 +317,9 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     chain_log::write_line("[codex_app_config] event=remote_control_switch_start");
     let codex_backend_url = options.codex_backend_url();
     // Remote-control enrollment must be keyed by the account Codex actually
-    // logged in with. Older callers supplied a synthetic local account; keep a
-    // non-placeholder explicit value for tests/internal callers, but never
-    // create an enrollment when auth.json has no real account id.
-    let enrollment_account_id = read_codex_auth_account_id(&auth_path).or_else(|| {
-        let account_id = options.account_id.trim();
-        (!account_id.is_empty() && account_id != "acct_codexhub_local")
-            .then(|| account_id.to_string())
-    });
+    // logged in with. An unauthenticated install must not create a placeholder
+    // enrollment.
+    let enrollment_account_id = read_codex_auth_account_id(&auth_path);
     let remote_control_switch = enable_remote_control_switch_in_home(
         &codex_home,
         enrollment_account_id
@@ -1328,91 +1317,6 @@ pub fn inspect_gui_api_base_url_for_mode(
             login_issuer_value: None,
             error: None,
         }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct CodexAppGuiEnvironmentSnapshot {
-    values: Vec<(&'static str, Option<String>)>,
-}
-
-pub fn capture_gui_environment() -> Result<CodexAppGuiEnvironmentSnapshot, String> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let mut values = Vec::with_capacity(3);
-        for name in [
-            CODEX_API_BASE_URL_ENV,
-            CODEX_API_ENDPOINT_ENV,
-            CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
-        ] {
-            values.push((name, gui_getenv(name)?));
-        }
-        Ok(CodexAppGuiEnvironmentSnapshot { values })
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        Ok(CodexAppGuiEnvironmentSnapshot::default())
-    }
-}
-
-pub fn restore_gui_environment(
-    snapshot: &CodexAppGuiEnvironmentSnapshot,
-    backend_url: &str,
-) -> Result<(), String> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let managed_api_base = codex_app_gui_api_base_url(backend_url);
-        let mut errors = Vec::new();
-        for (name, value) in &snapshot.values {
-            let managed_value = match *name {
-                CODEX_API_BASE_URL_ENV => Some(managed_api_base.as_str()),
-                CODEX_API_ENDPOINT_ENV | CODEX_APP_SERVER_LOGIN_ISSUER_ENV => None,
-                _ => continue,
-            };
-            let current = match gui_getenv(name) {
-                Ok(current) => current,
-                Err(err) => {
-                    errors.push(format!("{name}: {err}"));
-                    continue;
-                }
-            };
-            if current.as_deref() != managed_value {
-                continue;
-            }
-            if let Err(err) = gui_set_or_unsetenv(name, value.as_deref()) {
-                errors.push(format!("{name}: {err}"));
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(errors.join("; "))
-        }
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = (snapshot, backend_url);
-        Ok(())
-    }
-}
-
-pub fn configure_gui_direct_api_base(backend_url: &str) -> Result<(), String> {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    {
-        let gui_api_base_url = codex_app_gui_api_base_url(backend_url);
-        cleanup_legacy_global_proxy_bypass()?;
-        gui_setenv(CODEX_API_BASE_URL_ENV, &gui_api_base_url)?;
-        gui_unsetenv(CODEX_API_ENDPOINT_ENV)?;
-        gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV)?;
-        Ok(())
-    }
-
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    {
-        let _ = backend_url;
-        Err("Codex App GUI environment is only supported on Windows and macOS".to_string())
     }
 }
 
@@ -2494,24 +2398,22 @@ fn migrate_legacy_mochiport_provider_name(doc: &mut toml_edit::DocumentMut) -> b
     if let Some(providers) = doc
         .get_mut("model_providers")
         .and_then(|item| item.as_table_mut())
+        && let Some(legacy_item) = providers.remove(LEGACY_AI_GATEWAY_PROVIDER_NAME)
     {
-        if let Some(legacy_item) = providers.remove(LEGACY_AI_GATEWAY_PROVIDER_NAME) {
-            if providers.get(MOCHIPORT_PROVIDER_NAME).is_none() {
-                providers.insert(MOCHIPORT_PROVIDER_NAME, legacy_item);
-            }
-            changed = true;
+        if providers.get(MOCHIPORT_PROVIDER_NAME).is_none() {
+            providers.insert(MOCHIPORT_PROVIDER_NAME, legacy_item);
         }
+        changed = true;
     }
 
-    if changed {
-        if let Some(provider) = doc
+    if changed
+        && let Some(provider) = doc
             .get_mut("model_providers")
             .and_then(|item| item.as_table_mut())
             .and_then(|providers| providers.get_mut(MOCHIPORT_PROVIDER_NAME))
             .and_then(|item| item.as_table_mut())
-        {
-            provider["name"] = toml_edit::value(MOCHIPORT_PROVIDER_NAME);
-        }
+    {
+        provider["name"] = toml_edit::value(MOCHIPORT_PROVIDER_NAME);
     }
     changed
 }
@@ -3186,27 +3088,6 @@ fn provider_name(value: Option<&str>) -> Result<String> {
     }
 }
 
-#[derive(Debug, Clone)]
-struct LocalAuthIdentity {
-    account_id: String,
-    user_id: String,
-    email: String,
-    plan_type: String,
-    account_is_fedramp: bool,
-}
-
-impl LocalAuthIdentity {
-    fn from_options(options: &ConfigureCodexAppOptions) -> Self {
-        Self {
-            account_id: options.account_id.clone(),
-            user_id: options.user_id.clone(),
-            email: options.email.clone(),
-            plan_type: options.plan_type.clone(),
-            account_is_fedramp: false,
-        }
-    }
-}
-
 /// Keep Codex's own OAuth/API-key state authoritative.
 ///
 /// CC Switch treats `auth.json` as Codex-owned state. Older MochiPort builds
@@ -3277,34 +3158,6 @@ fn preserve_codex_auth(codex_home: &Path, path: &Path) -> Result<()> {
         path.display()
     ));
     Ok(())
-}
-
-#[cfg(test)]
-fn write_auth_json(path: &Path, options: &ConfigureCodexAppOptions) -> Result<()> {
-    let identity = derive_local_auth_identity(path, options);
-    let jwt = local_chatgpt_jwt(&identity)?;
-    let auth = json!({
-        "auth_mode": LOCAL_AUTH_MODE,
-        "OPENAI_API_KEY": null,
-        "tokens": {
-            "id_token": jwt,
-            "access_token": jwt,
-            "refresh_token": "",
-            "account_id": identity.account_id,
-        },
-        "last_refresh": rfc3339_now(),
-    });
-    let raw = serde_json::to_string_pretty(&auth)?;
-    backup_existing(path)?;
-    let raw = format!("{raw}\n");
-    write_file_atomically(path, raw.as_bytes())
-}
-
-fn derive_local_auth_identity(
-    _path: &Path,
-    options: &ConfigureCodexAppOptions,
-) -> LocalAuthIdentity {
-    LocalAuthIdentity::from_options(options)
 }
 
 fn is_mochiport_managed_auth_json(auth: &serde_json::Value) -> bool {
@@ -3929,62 +3782,6 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn local_chatgpt_jwt(identity: &LocalAuthIdentity) -> Result<String> {
-    let now = unix_now()?;
-    let exp = now + 10 * 365 * 24 * 60 * 60;
-    let payload = json!({
-        "iss": "https://auth.openai.com",
-        "aud": ["https://api.openai.com/v1"],
-        "iat": now,
-        "nbf": now,
-        "exp": exp,
-        "sub": format!("local|{}", identity.user_id),
-        "email": identity.email,
-        "email_verified": true,
-        "https://api.openai.com/profile": {
-            "email": identity.email,
-            "email_verified": true,
-        },
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": identity.account_id,
-            "account_id": identity.account_id,
-            "chatgpt_account_user_id": format!("{}__{}", identity.user_id, identity.account_id),
-            "account_user_id": format!("{}__{}", identity.user_id, identity.account_id),
-            "chatgpt_plan_type": identity.plan_type,
-            "chatgpt_user_id": identity.user_id,
-            "user_id": identity.user_id,
-            "chatgpt_account_is_fedramp": identity.account_is_fedramp,
-            "localhost": true,
-            "groups": [],
-            "organizations": [{
-                "id": identity.account_id,
-                "is_default": true,
-                "role": "owner",
-                "title": "MochiPort Local",
-            }]
-        },
-        "scp": [
-            "openid",
-            "profile",
-            "email",
-            "offline_access",
-            "api.connectors.read",
-            "api.connectors.invoke"
-        ],
-    });
-
-    Ok(format!(
-        "{}.{}.{}",
-        b64url_json(&json!({ "alg": "none", "typ": "JWT" }))?,
-        b64url_json(&payload)?,
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig")
-    ))
-}
-
-fn b64url_json(value: &serde_json::Value) -> Result<String> {
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(value)?))
-}
-
 fn unix_now() -> Result<u64> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4371,15 +4168,10 @@ mod tests {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: Some(true),
         })
         .expect("configure codex app");
@@ -4419,15 +4211,10 @@ mod tests {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: None,
         })
         .expect("configure codex app");
@@ -4578,15 +4365,10 @@ http_headers = { x-openai-actor-authorization = "codexhub-local" }
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::VpnCompatible,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "test@example.com".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: Some(false),
         })
         .expect("configure");
@@ -4670,8 +4452,7 @@ http_headers = { x-existing = "keep", x-openai-actor-authorization = "codexhub-l
 "#,
         )
         .expect("write legacy gateway config");
-        write_auth_json(&auth_path, &test_configure_options(codex_home.clone()))
-            .expect("write placeholder auth");
+        write_auth_json(&auth_path).expect("write placeholder auth");
 
         let official_auth = official_chatgpt_auth_json(
             "acct_official",
@@ -4728,8 +4509,7 @@ experimental_bearer_token = "dummy-token"
 "#,
         )
         .expect("write gateway config");
-        write_auth_json(&auth_path, &test_configure_options(codex_home.clone()))
-            .expect("write placeholder auth");
+        write_auth_json(&auth_path).expect("write placeholder auth");
         let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
 
         assert!(
@@ -4844,8 +4624,7 @@ requires_openai_auth = true
 experimental_bearer_token = "third-party-key"
 "#;
         std::fs::write(&config_path, config).expect("write direct config");
-        write_auth_json(&auth_path, &test_configure_options(codex_home.clone()))
-            .expect("write placeholder fixture");
+        write_auth_json(&auth_path).expect("write placeholder fixture");
         let auth_before = std::fs::read_to_string(&auth_path).expect("read auth fixture");
 
         assert!(
@@ -4893,15 +4672,10 @@ command = "print-token"
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: None,
         })
         .expect("configure codex app");
@@ -4945,15 +4719,10 @@ http_headers = { x-existing = "keep", X-OpenAI-Actor-Authorization = "codexhub-l
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: None,
         })
         .expect("configure codex app");
@@ -4982,7 +4751,7 @@ http_headers = { x-existing = "keep", X-OpenAI-Actor-Authorization = "codexhub-l
     }
 
     #[test]
-    fn configure_codex_app_forces_apps_feature_off() {
+    fn configure_codex_app_forces_apps_off_and_preserves_image_generation() {
         let codex_home = unique_temp_dir();
         let config_path = codex_home.join("config.toml");
         std::fs::write(
@@ -5001,15 +4770,10 @@ name = "old-provider"
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: Some(true),
             provider_supports_websockets: None,
         })
         .expect("configure codex app");
@@ -5378,15 +5142,10 @@ experimental_bearer_token = "existing-qwen-key"
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: Some("qwen".to_string()),
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: None,
         })
         .expect("configure codex app");
@@ -5423,17 +5182,12 @@ base_url = "https://old.example.invalid"
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: Some("qwen".to_string()),
             provider_base_url: Some(
                 "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             ),
             provider_key: Some("existing-qwen-key".to_string()),
             activate_provider: false,
-            image_generation_enabled: None,
             provider_supports_websockets: Some(false),
         })
         .expect("configure codex app");
@@ -5587,20 +5341,16 @@ base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
         std::fs::write(codex_home.join("installation_id"), installation_id)
             .expect("write installation id");
         create_remote_control_enrollment_state_db(&codex_home);
+        write_official_auth_json(&codex_home, "acct_test");
 
         configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: None,
         })
         .expect("configure codex app");
@@ -5642,22 +5392,47 @@ base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     }
 
     #[test]
+    fn configure_codex_app_without_auth_skips_remote_control_enrollment() {
+        let codex_home = unique_temp_dir();
+        create_remote_control_enrollment_state_db(&codex_home);
+
+        let report = configure_codex_app(test_configure_options(codex_home.clone()))
+            .expect("configure codex app");
+
+        let connection =
+            Connection::open(codex_home.join(CODEX_APP_STATE_DB)).expect("open state db");
+        let enrollment_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM remote_control_enrollments",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("count remote control enrollments");
+        assert_eq!(enrollment_count, 0);
+        assert!(!report.auth_path.exists());
+        assert!(
+            !codex_home
+                .join(CODEX_APP_SERVER_DAEMON_DIR)
+                .join(CODEX_APP_SERVER_DAEMON_SETTINGS)
+                .exists()
+        );
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
     fn configure_codex_app_enables_app_server_daemon_remote_control() {
         let codex_home = unique_temp_dir();
+        write_official_auth_json(&codex_home, "acct_test");
 
         configure_codex_app(ConfigureCodexAppOptions {
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: None,
         })
         .expect("configure codex app");
@@ -5700,15 +5475,10 @@ requires_openai_auth = true
             codex_home: Some(codex_home.clone()),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: None,
         })
         .expect("configure codex app");
@@ -6142,8 +5912,7 @@ base_url = "https://api.example.invalid"
 "#,
         )
         .expect("write config");
-        write_auth_json(&auth_path, &test_configure_options(codex_home.clone()))
-            .expect("write auth");
+        write_auth_json(&auth_path).expect("write auth");
 
         let report = uninstall_codex_app(
             Some(codex_home.clone()),
@@ -6267,20 +6036,110 @@ base_url = "https://api.example.invalid"
         let _ = std::fs::remove_dir_all(codex_home);
     }
 
+    #[derive(Debug, Clone)]
+    struct LocalAuthIdentity {
+        account_id: String,
+        user_id: String,
+        email: String,
+        plan_type: String,
+        account_is_fedramp: bool,
+    }
+
+    fn write_auth_json(path: &Path) -> Result<()> {
+        let identity = derive_local_auth_identity();
+        let jwt = local_chatgpt_jwt(&identity)?;
+        let auth = json!({
+            "auth_mode": LOCAL_AUTH_MODE,
+            "OPENAI_API_KEY": null,
+            "tokens": {
+                "id_token": jwt,
+                "access_token": jwt,
+                "refresh_token": "",
+                "account_id": identity.account_id,
+            },
+            "last_refresh": rfc3339_now(),
+        });
+        let raw = serde_json::to_string_pretty(&auth)?;
+        backup_existing(path)?;
+        let raw = format!("{raw}\n");
+        write_file_atomically(path, raw.as_bytes())
+    }
+
+    fn derive_local_auth_identity() -> LocalAuthIdentity {
+        LocalAuthIdentity {
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "local@example.test".to_string(),
+            plan_type: "pro".to_string(),
+            account_is_fedramp: false,
+        }
+    }
+
+    fn local_chatgpt_jwt(identity: &LocalAuthIdentity) -> Result<String> {
+        let now = unix_now()?;
+        let exp = now + 10 * 365 * 24 * 60 * 60;
+        let payload = json!({
+            "iss": "https://auth.openai.com",
+            "aud": ["https://api.openai.com/v1"],
+            "iat": now,
+            "nbf": now,
+            "exp": exp,
+            "sub": format!("local|{}", identity.user_id),
+            "email": identity.email,
+            "email_verified": true,
+            "https://api.openai.com/profile": {
+                "email": identity.email,
+                "email_verified": true,
+            },
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": identity.account_id,
+                "account_id": identity.account_id,
+                "chatgpt_account_user_id": format!("{}__{}", identity.user_id, identity.account_id),
+                "account_user_id": format!("{}__{}", identity.user_id, identity.account_id),
+                "chatgpt_plan_type": identity.plan_type,
+                "chatgpt_user_id": identity.user_id,
+                "user_id": identity.user_id,
+                "chatgpt_account_is_fedramp": identity.account_is_fedramp,
+                "localhost": true,
+                "groups": [],
+                "organizations": [{
+                    "id": identity.account_id,
+                    "is_default": true,
+                    "role": "owner",
+                    "title": "MochiPort Local",
+                }]
+            },
+            "scp": [
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "api.connectors.read",
+                "api.connectors.invoke"
+            ],
+        });
+
+        Ok(format!(
+            "{}.{}.{}",
+            b64url_json(&json!({ "alg": "none", "typ": "JWT" }))?,
+            b64url_json(&payload)?,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"sig")
+        ))
+    }
+
+    fn b64url_json(value: &serde_json::Value) -> Result<String> {
+        Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(serde_json::to_vec(value)?))
+    }
+
     fn test_configure_options(codex_home: PathBuf) -> ConfigureCodexAppOptions {
         ConfigureCodexAppOptions {
             codex_home: Some(codex_home),
             backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
             connection_mode: LocalConnectionMode::Standard,
-            account_id: "acct_test".to_string(),
-            user_id: "user_test".to_string(),
-            email: "local@example.test".to_string(),
-            plan_type: "pro".to_string(),
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
             activate_provider: true,
-            image_generation_enabled: None,
             provider_supports_websockets: None,
         }
     }
@@ -6418,6 +6277,20 @@ base_url = "https://api.example.invalid"
             "last_refresh": "2026-01-01T00:00:00Z",
         }))
         .expect("serialize auth")
+    }
+
+    fn write_official_auth_json(codex_home: &Path, account_id: &str) {
+        std::fs::write(
+            codex_home.join("auth.json"),
+            official_chatgpt_auth_json(
+                account_id,
+                "user_official",
+                "official@example.test",
+                "plus",
+                false,
+            ),
+        )
+        .expect("write official auth");
     }
 
     fn test_jwt(payload: &serde_json::Value) -> String {
