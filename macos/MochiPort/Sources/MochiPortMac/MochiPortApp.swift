@@ -205,8 +205,16 @@ struct MochiPortApp: App {
     @StateObject private var glass: AIGlassCoordinator
 
     init() {
-        _model = StateObject(wrappedValue: AppModel(fixtureStatus: Self.fixtureStatusFromEnvironment()))
+        let appModel = AppModel(fixtureStatus: Self.fixtureStatusFromEnvironment())
+        _model = StateObject(wrappedValue: appModel)
         _glass = StateObject(wrappedValue: AIGlassCoordinator())
+
+        // SwiftUI may defer both the main window and the menu-bar content.
+        // Start the first daemon probe from the App lifecycle itself so a
+        // menu-bar-only launch can still register a missing backend.
+        Task { @MainActor in
+            await appModel.startAtAppLaunch()
+        }
     }
 
     private static func fixtureStatusFromEnvironment() -> ServiceStatus? {
@@ -258,7 +266,8 @@ struct MochiPortApp: App {
         MenuBarExtra {
             MenuBarStatusView(glass: glass, model: model)
         } label: {
-            MenuBarStatusLabel(status: model.serviceStatus,
+            MenuBarStatusLabel(model: model,
+                               status: model.serviceStatus,
                                glass: glass,
                                settings: glass.settings)
         }
@@ -387,6 +396,7 @@ private struct WindowVisibilityObserver: NSViewRepresentable {
 }
 
 private struct MenuBarStatusLabel: View {
+    @ObservedObject var model: AppModel
     let status: ServiceStatus
     @ObservedObject var glass: AIGlassCoordinator
     @Bindable var settings: AppSettings
@@ -420,6 +430,9 @@ private struct MenuBarStatusLabel: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("MochiPort \(displayText) · " + title)
         .help("MochiPort：" + status.title)
+        .task {
+            await model.startAtAppLaunch()
+        }
     }
 
     private var displayText: String {

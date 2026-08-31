@@ -129,11 +129,7 @@ struct RootView: View {
             .animation(.easeInOut(duration: 0.18), value: model.actionFeedback)
         }
         .task {
-            await model.refresh()
-            model.startAutoRefresh()
-            // Silent one-shot update check; delayed inside so it never
-            // competes with the startup refresh burst.
-            model.scheduleStartupUpdateCheck()
+            await model.startAtAppLaunch()
         }
         .toolbar {
             if model.selection == .overview {

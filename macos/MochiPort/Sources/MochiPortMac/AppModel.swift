@@ -138,6 +138,7 @@ final class AppModel: ObservableObject {
     private let codexEnhancedOperationRecoveryPollDelay: Duration
     private var refreshInFlight = false
     private var launchAttempted = false
+    private var startupRefreshStarted = false
     private var refreshTask: Task<Void, Never>?
     private var autoRefreshStarted = false
     private var windowVisible = true
@@ -476,6 +477,17 @@ final class AppModel: ObservableObject {
         guard !autoRefreshStarted else { return }
         autoRefreshStarted = true
         restartAutoRefresh()
+    }
+
+    /// Starts the first daemon probe independently of the main window. The
+    /// menu-bar-only launch path may never materialize `RootView`, so keeping
+    /// this work behind the window task leaves the daemon unregistered.
+    func startAtAppLaunch() async {
+        guard !startupRefreshStarted else { return }
+        startupRefreshStarted = true
+        await refresh()
+        startAutoRefresh()
+        scheduleStartupUpdateCheck()
     }
 
     private func restartAutoRefresh() {

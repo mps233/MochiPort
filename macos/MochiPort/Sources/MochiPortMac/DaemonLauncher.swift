@@ -728,11 +728,30 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             throw DaemonLaunchError.runtimeVersionMismatch(expected: target, actual: nil)
         }
         let actualBuild = daemonBuildIdentifier(fromVersionOutput: versionResult.output)
-        guard versionResult.exitCode == 0, actualBuild == target else {
+        guard versionResult.exitCode == 0 else {
             throw DaemonLaunchError.runtimeVersionMismatch(
                 expected: target,
                 actual: actualBuild
             )
+        }
+
+        if actualBuild != target {
+            // The service was already confirmed absent before this method was
+            // reached. A previous interrupted package can leave `current`
+            // pointing at a directory whose helper reports an older build.
+            // Re-stage only when the observed helper is not newer than this
+            // bundle; never replace an unknown or newer runtime on launch.
+            guard canRestageInconsistentActiveRuntime(
+                actualBuild: actualBuild,
+                targetBuild: target,
+                expectedBuild: expectedBuild
+            ) else {
+                throw DaemonLaunchError.runtimeVersionMismatch(
+                    expected: target,
+                    actual: actualBuild
+                )
+            }
+            return false
         }
 
         if target == expectedBuild {
@@ -745,6 +764,21 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             return true
         }
         return false
+    }
+
+    private static func canRestageInconsistentActiveRuntime(
+        actualBuild: String?,
+        targetBuild: String,
+        expectedBuild: String
+    ) -> Bool {
+        guard let actualBuild else { return false }
+        guard let actualNumber = Int(actualBuild),
+              let targetNumber = Int(targetBuild),
+              let expectedNumber = Int(expectedBuild)
+        else {
+            return false
+        }
+        return targetNumber <= expectedNumber && actualNumber < expectedNumber
     }
 
     private static func isSafeRuntimeBuildIdentifier(_ value: String) -> Bool {
