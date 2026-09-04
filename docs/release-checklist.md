@@ -33,9 +33,9 @@ cargo build --release --bin mochiport
 ```
 
 For every daemon-affecting change, build the Rust daemon and Xcode app with
-independent version/build values, then assemble the formal bundle. This packaging step
-is automatic in the handoff workflow, but it never changes the running GUI or
-daemon:
+independent version/build values, then assemble the formal bundle. The formal
+handoff launches the assembled app; its startup performs the protected daemon
+handoff automatically when the embedded build is newer:
 
 ```sh
 UI_VERSION=0.5.4
@@ -57,7 +57,11 @@ scripts/assemble-swiftui-macos-app.sh "$DAEMON_BUILD_NUMBER" "$XCODE_APP" target
 ```
 
 - [ ] Confirm the assembled app and embedded daemon report the expected build.
-- [ ] Restart the GUI or daemon manually only when the release procedure calls for it.
+- [ ] Launch `/Users/miaopasi/codexhub/outputs/MochiPort.app` and verify that the GUI
+      observes the newer daemon build, drains protected work, reloads the LaunchAgent,
+      waits for a new ready instance, and reacquires the management lease.
+- [ ] If handoff readiness fails, verify that the old runtime, plist, and daemon are
+      restored and that the GUI reports the rollback instead of claiming success.
 - [ ] Confirm the release contains `latest-macos.json` and `latest-windows.json` with MochiPort asset URLs.
 - [ ] Publish daemon metadata only from a signed macOS build; unsigned releases intentionally publish UI metadata only.
 
@@ -72,7 +76,8 @@ Remove-Item *.log -ErrorAction SilentlyContinue
 ## Functional Smoke Test
 
 - [ ] Start the MochiPort daemon with a clean config.
-- [ ] Confirm `GET http://127.0.0.1:3847/api/status` returns service status.
+- [ ] Confirm `GET http://127.0.0.1:3847/healthz` returns `service=mochiport`, `apiMajor=1`, and `ready=true`.
+- [ ] If legacy CLI compatibility is in scope, separately confirm `GET http://127.0.0.1:3847/api/status`; this is not the primary health check.
 - [ ] Complete Feishu onboarding or enter app credentials.
 - [ ] Configure Codex App from the desktop GUI, or run `mochiport --config config.toml configure-codex-app`.
 - [ ] Open Codex App by double-clicking it.

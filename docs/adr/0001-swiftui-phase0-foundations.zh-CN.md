@@ -12,7 +12,7 @@ MochiPort 已从 macOS wxDragon 前端迁移到 SwiftUI。macOS SwiftUI、Window
 
 ### App Sandbox
 
-首个 SwiftUI 正式版暂不启用 App Sandbox。应用需要启动并校验随包 Rust helper、兼容读取既有配置和日志目录、连接 loopback 服务，并与外部 Codex 应用协同。正式发布仍要求 Hardened Runtime、Developer ID 签名和公证。Sandbox 迁移作为独立安全项目评估，不在页面实现中临时开启。
+首个 SwiftUI 正式版暂不启用 App Sandbox。应用需要启动并校验随包 Rust helper、访问当前配置和日志目录、连接 loopback 服务，并与外部 Codex 应用协同；历史目录只通过显式迁移工具处理。正式发布仍要求 Hardened Runtime、Developer ID 签名和公证。Sandbox 迁移作为独立安全项目评估，不在页面实现中临时开启。
 
 ### Universal 构建
 
@@ -20,22 +20,22 @@ macOS App 与 Rust helper 均继续提供 `arm64 + x86_64`。CI 和打包流程�
 
 ### 凭据与旧数据兼容
 
-Rust daemon 是配置和凭据的唯一事实来源。SwiftUI 不复制业务配置、不直接读取 Provider Key 或 Bot Token，也不迁移旧数据目录。新密钥未来只通过窄写接口提交，读接口只返回是否已设置。既有 `Application Support/CodexHub` 兼容读取继续由 Rust 负责。
+Rust daemon 是配置和凭据的唯一事实来源。SwiftUI 不复制业务配置、不直接读取 Provider Key 或 Bot Token，也不在普通启动时读取旧数据目录。新密钥未来只通过窄写接口提交，读接口只返回是否已设置；历史 `Application Support/CodexHub` 数据仅由用户显式运行 `mochiport migrate-storage` 迁移。
 
 ### 管理 API 鉴权
 
-`/healthz` 是唯一匿名管理面端点，并严格只返回 `service`、`apiMajor`、`ready`。`/api/v1/manage/*` 使用当前用户数据域共享的 bearer credential；该凭据保存在配置目录旁的 `threadrelay-control.json`，不得进入日志、诊断包、崩溃报告、命令行或 App Bundle。Codex/AI Gateway 协议不复用管理凭据。
+`/healthz` 是唯一匿名管理面端点，并严格只返回 `service=mochiport`、`apiMajor`、`ready`。`/api/v1/manage/*` 使用当前用户数据域共享的 bearer credential；该凭据保存在配置目录旁的 `mochiport-control.json`，旧 `threadrelay-control.json`/`codexhub-control.json` 只作为迁移输入读取，不再生成。Codex/AI Gateway 协议不复用管理凭据。
 
 ### Bundle 与版本身份
 
-- stable Bundle ID：`io.github.mps233.threadrelay`
-- SwiftUI preview Bundle ID：`io.github.mps233.threadrelay.preview`
+- stable Bundle ID：`io.github.mps233.threadrelay`（已发布身份，故意保留）
+- SwiftUI preview Bundle ID：`io.github.mps233.threadrelay.preview`（已发布预览身份，故意保留）
 - 产品语义版本：根目录 `Cargo.toml` 的 package version
 - UI 构建号：显式 `MOCHIPORT_UI_BUILD_NUMBER`；daemon 构建号：显式 `MOCHIPORT_DAEMON_BUILD_NUMBER`
 - 正式 Xcode App 与 SwiftPM manifest 均以 macOS 26 为 deployment target
 - stable 与 preview 使用同一签名 Team ID；Team ID 在首次正式签名前由发布环境提供并冻结
 
-旧 `com.codexhub.app` 不再直接覆盖安装为 SwiftUI stable；既有数据由 Rust 兼容路径读取。
+旧 `com.codexhub.app` 不再直接覆盖安装为 SwiftUI stable；既有数据不会在普通启动时自动读取，需通过显式存储迁移处理。
 
 ### Liquid Glass 边界
 
@@ -56,15 +56,15 @@ Phase 0 已实现最小凭据字段；新增字段必须向后兼容，旧客户
 
 ### 凭据发现与轮换
 
-stable、preview 和桥接版从同一配置目录发现控制文件。凭据只在首次初始化、可信管理接管或明确的泄漏恢复中轮换。轮换采用文件锁、临时文件、`fsync` 和原子替换；成功后 generation 递增。不能因 GUI 普通启动或崩溃自动轮换。
+stable 和 preview 从当前 MochiPort 配置目录发现控制文件；历史桥接版只参与只读身份检查或显式迁移。凭据只在首次初始化、可信管理接管或明确的泄漏恢复中轮换。轮换采用文件锁、临时文件、`fsync` 和原子替换；成功后 generation 递增。不能因 GUI 普通启动或崩溃自动轮换。
 
-控制文件中的 `managementTokenGeneration` 从 1 开始，缺少该字段的旧控制文件按 1 读取。控制文件的认证读取、租约修改和凭据轮换统一使用稳定的 `threadrelay-control.lock`：读取持有共享锁，初始化与修改持有独占锁；不能锁定会被原子替换的 JSON 文件本身。写入必须先同步临时文件，再原子替换目标并同步父目录；任何平台都不得通过“先删除旧文件再重命名”模拟替换。读写新字段时保留无法识别的控制文件字段，避免不同版本续租时抹除扩展状态。
+控制文件中的 `managementTokenGeneration` 从 1 开始，缺少该字段的旧控制文件按 1 读取。管理凭据、租约和控制文件 JSON 的读写统一使用稳定的 `mochiport-control.lock`；daemon 实例另使用 `mochiport-daemon.lock` 防止重复进程。旧 `threadrelay-control.json`、`codexhub-control.json` 以及旧 daemon 锁只用于只读识别和显式迁移，不再生成。读取持有共享锁，初始化与修改持有独占锁；不能锁定会被原子替换的 JSON 文件本身。写入必须先同步临时文件，再原子替换目标并同步父目录；任何平台都不得通过“先删除旧文件再重命名”模拟替换。读写新字段时保留无法识别的控制文件字段，避免不同版本续租时抹除扩展状态。
 
 明确的泄漏恢复使用 `POST /api/v1/manage/lifecycle/credential/rotate`。请求必须携带 installation ID、daemon instance ID、租约 generation、预期凭据 generation、唯一 request ID 和轮换原因；只有当前有效租约持有者可以执行。daemon 持久化最后一次不含秘密的轮换记录，使同一 request ID 在响应丢失后可以幂等重试。响应只返回执行状态、request ID 和新的 generation，不返回 token，也不给旧 token 设置宽限期。
 
 ### 唯一管理租约
 
-同一用户数据域任一时刻只有一个安装持有管理租约。只有租约持有者可轮换凭据、执行用户主动重启或停止 daemon。读取状态与经过 revision 保护的业务配置写入不要求租约。管理租约不授予 GUI 自动构建、替换、升级或切换 daemon 的能力。
+同一用户数据域任一时刻只有一个安装持有管理租约。只有租约持有者可轮换凭据、执行用户主动重启或停止 daemon，并在新正式 GUI 已安装、内嵌 daemon 构建号更高时协调一次受保护的版本切换。读取状态与经过 revision 保护的业务配置写入不要求租约。管理租约不授予 GUI 自动构建、无条件替换、强制接管或在状态未知时干预 daemon 的能力。
 
 租约获取必须校验 daemon PID、instance ID、可执行路径、runtime 哈希和端口归属。租约仍存活时，另一安装只能只读，除非用户明确确认接管。租约过期不等于立即可杀进程；候选安装必须重新完成身份校验后才能接管。
 
@@ -76,8 +76,8 @@ stable、preview 和桥接版从同一配置目录发现控制文件。凭据只
 
 ### 崩溃恢复与手动生命周期
 
-GUI 关闭或崩溃不停止 daemon。daemon 不依赖 GUI 父进程、管道或临时目录存活。普通 GUI 启动只复用已运行的 daemon；只有服务不存在时才安装并首次启动随包 helper。版本不一致时提示用户手动更新后台服务，不自动准备候选版本或执行切换。用户在设置页主动重启时必须先确认受保护工作项为空，且只重启当前 launchd 配置指向的 daemon。遇到身份冲突只提供诊断，不停止未知进程。
+GUI 关闭或崩溃不停止 daemon。daemon 不依赖 GUI 父进程、管道或临时目录存活。普通 GUI 启动只复用已运行的 daemon；只有服务不存在时才安装并首次启动随包 helper。新正式 GUI 发现内嵌 daemon 构建号更高时，仅在租约、受保护任务、旧 runtime、LaunchAgent 和运行身份均已验证后，执行 staging、daemon 排空、`current` 原子切换与 `launchctl bootout/bootstrap`。新 instance、构建号、readiness 和租约回收任一失败时恢复旧 runtime 与 plist；身份冲突、状态未知或受保护任务存在时只提供诊断，不停止未知进程。用户在设置页主动重启时仍必须先确认受保护工作项为空，且只重启当前 launchd 配置指向的 daemon。
 
 ## 结果
 
-SwiftUI preview 可以在不接管 daemon 生命周期的前提下独立构建和只读探测。Phase 2 保留首次启动、基础 launchd 托管和用户主动安全重启，不实现自动 runtime 切换；若要改变鉴权、数据域、Bundle 身份或生命周期边界，需要新 ADR。
+SwiftUI preview 可以在不接管 daemon 生命周期的前提下独立构建和只读探测。Phase 2 保留首次启动、基础 launchd 托管、用户主动安全重启，以及由新正式 GUI 触发的一次受保护 runtime 切换；不实现后台 watcher、强制重启、自动接管或不透明恢复。若要改变鉴权、数据域、Bundle 身份或生命周期边界，需要新 ADR。

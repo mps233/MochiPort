@@ -20,9 +20,9 @@
 GUI 与 daemon 的分类、构建、重启和身份核对规则见
 [`docs/mochiport-change-handoff.zh-CN.md`](docs/mochiport-change-handoff.zh-CN.md)。
 
-- 仅 SwiftUI/GUI 改动可以更新并重启正式 GUI，但不得替换或重启 daemon。
-- daemon 相关改动不得自动替换、切换、停止或重启正在运行的 daemon；构建完成后通知用户手动处理。
-- 不恢复自动 runtime staging、切换 journal、自动回滚或强制重启流程。
+- 仅 SwiftUI/GUI 改动可以更新并重启正式 GUI；如果内置 daemon 没有变化，必须复用当前 daemon。
+- daemon 相关改动在正式 App 组装并启动后，由 GUI 通过租约、受保护任务、身份和 readiness 校验自动完成安全切换；构建交接不得要求用户再手动重启后台服务。
+- 自动切换必须先 staging、排空，再原子替换 runtime 并 reload LaunchAgent；失败时恢复旧 runtime 和 plist。不得强杀、强制接管或在状态未知时干预 daemon。
 
 ## 正式版发布说明
 

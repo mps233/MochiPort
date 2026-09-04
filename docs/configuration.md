@@ -15,14 +15,23 @@ Use an explicit config path for predictable behavior:
 mochiport --config D:\path\to\config.toml daemon
 ```
 
-Without `--config`, installed builds prefer the current MochiPort application-data directory
-(`MochiPort/config.toml`). `MOCHIPORT_HOME` can point at a specific data directory, and
-`MOCHIPORT_USE_REPO_CONFIG=1` enables repository-local `config.toml` discovery for development.
+Without `--config`, installed builds use the current MochiPort application-data directory
+(`MochiPort/config.toml`). `MOCHIPORT_HOME` can point at a specific data directory. There is no
+implicit repository-local or legacy-directory fallback; use an explicit `--config` path for
+development or a test fixture.
 
-For migration, MochiPort falls back to existing `ThreadRelay` and `CodexHub` config directories,
-`THREADRELAY_HOME` / `CODEXHUB_HOME`, and their old repository-config switches when no current
-MochiPort config has been created. These names are compatibility inputs only; new automation and
-new installations should use the `MOCHIPORT_*` variables.
+Historical `ThreadRelay` and `CodexHub` directories, plus `THREADRELAY_HOME` /
+`CODEXHUB_HOME`, are migration inputs only. Ordinary startup never selects them. To move one
+legacy directory atomically, choose the destination with `MOCHIPORT_HOME` and run the explicit
+command (or pass `--from`):
+
+```powershell
+$env:MOCHIPORT_HOME = "D:\path\to\MochiPort"
+mochiport migrate-storage --from "D:\path\to\ThreadRelay"
+```
+
+Migrations never merge an existing MochiPort directory. New automation and new installations
+should use the `MOCHIPORT_*` variables and `mochiport` names.
 
 Example:
 
@@ -331,11 +340,14 @@ Remote control still requires a supported ChatGPT account and may reject
 API-key-only auth before its websocket connects. A third-party model provider
 key controls model calls only and does not replace the Codex account login.
 
-On startup, MochiPort recognizes auth placeholders written by older versions
-only when the active configuration is the managed local `MochiPort` provider or
-a recognized legacy `ai-gateway`/`ai-codex` shape. It restores the saved official
-auth file if one exists, or removes the legacy placeholder so Codex can present
-its normal login flow. It does not alter direct third-party provider configurations.
+When you explicitly configure Codex App (from the desktop GUI or with
+`mochiport configure-codex-app`), MochiPort recognizes auth placeholders written by
+older versions only when the active configuration is the managed local `MochiPort`
+provider or a recognized legacy `ai-gateway`/`ai-codex` shape. It restores the saved
+official auth file if one exists, or removes the legacy placeholder so Codex can
+present its normal login flow. Daemon startup only inspects the Codex environment and
+does not perform this migration. Direct third-party provider configurations are not
+altered.
 
 The desktop GUI provides Codex App configuration controls that write the local Codex App config for you.
 

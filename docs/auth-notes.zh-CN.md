@@ -36,9 +36,10 @@ MochiPort 不通过 remote `list` 或 `installed` fallback 发布 `openai-bundle
 中间版本还写过不带 `auth_mode` 的
 `OPENAI_API_KEY = "codexhub-dummy-key"`。这些形态只作为历史 MochiPort-managed
 auth 识别。当前配置确实使用受管理的本地 `MochiPort` provider，或可识别的旧
-`ai-gateway`/`ai-codex` 形态时，daemon 启动迁移会优先恢复已备份的官方
-`auth.json`；没有备份时删除 synthetic 占位认证，让 Codex 重新走正常登录流程。
-第三方直连 provider 和无关 auth 文件不会被修改。
+`ai-gateway`/`ai-codex` 形态时，显式执行 Codex 接入配置（GUI 或
+`mochiport configure-codex-app`）会优先恢复已备份的官方 `auth.json`；没有备份时
+删除 synthetic 占位认证，让 Codex 重新走正常登录流程。daemon 启动只做只读环境检查，
+不会自动执行这项迁移。第三方直连 provider 和无关 auth 文件不会被修改。
 
 本地 `/backend-api/ps/plugins/*` fallback 继续保持窄范围：
 

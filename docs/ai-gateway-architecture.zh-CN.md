@@ -275,7 +275,7 @@ GatewayContext {
    - `session-id`
    - `thread-id`
    - `X-Codex-Turn-Metadata.session_id`
-3. 如果仍然没有，生成 `codexhub:<request/session fallback>`。
+3. 如果仍然没有，生成 `mochiport:<request/session fallback>`。
 4. 出站 OpenAI Responses 时写入：
 
 ```json

@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://github.com/mps233/MochiPort/releases/latest"><img src="https://img.shields.io/github/v/release/mps233/MochiPort?display_name=tag&style=flat-square" alt="Latest release"></a>
   <a href="https://github.com/mps233/MochiPort/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mps233/MochiPort/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
-  <span> <code>v0.5.5</code></span>
+  <span> <code>v0.5.6</code></span>
 </p>
 
 MochiPort is a local-first agent session relay. It connects local Codex App, the Codex VS Code extension, and Codex CLI sessions to Telegram, Feishu, WeChat, and WeCom while providing session management and an AI Gateway.
@@ -35,7 +35,7 @@ This project is derived from [`happy-loki/codexhub`](https://github.com/happy-lo
 | Feature | Description |
 | --- | --- |
 | Remote and local side by side | Use Feishu, WeChat, and Telegram to control local Codex App, the Codex VS Code extension, and Codex CLI. The same Codex session can stay synchronized between IM and local clients. |
-| Local Codex access | Connect Codex App, the VS Code extension, and Codex CLI through the local backend. When needed, the daemon backs up and patches the VS Code extension's `extension.js` to add `--remote-control`, then attempts to restore it when the daemon stops. |
+| Local Codex access | Connect Codex App, the VS Code extension, and Codex CLI through the local backend. A legacy VS Code fallback is available only through the explicit `mochiport vscode-remote-control patch-fallback` command and can be undone with `restore-fallback`; daemon startup and shutdown never modify the extension automatically. |
 | Codex session management | Read sessions directly from the current Codex App over its remote-control connection and manage them in the GUI. No session files need to be copied or migrated; change a session's provider only when needed. |
 | Manage Codex sessions from IM | Use the native Codex remote-control protocol to create and resume Codex sessions from IM. |
 | Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
@@ -65,7 +65,7 @@ The main MochiPort flow is: download the app -> configure a model provider -> co
 
 Download the appropriate package from [MochiPort Releases](https://github.com/mps233/mochiport/releases). On macOS, open `MochiPort-<version>-build<build-number>-macos-<architecture>.dmg` and drag MochiPort to Applications. On Windows, install `MochiPort-<version>-windows-x64.msi` or run `MochiPort.exe` from the ZIP package. A Linux desktop package is not currently published; a separate client may be designed later.
 
-If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs per-user LaunchAgents that keep the local backend running and recover the GUI after an abnormal exit; a normal GUI quit does not reopen the window.
+If macOS warns that the app was downloaded from the internet, confirm the system prompt. The macOS client installs a per-user LaunchAgent that keeps the local backend running; GUI exit or a GUI crash does not stop the daemon, and a normal GUI quit does not reopen the window.
 
 Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The Rust desktop client can download, verify, and launch the platform installer after confirmation; the SwiftUI macOS client opens the verified release page/update flow. Neither client silently replaces the local app.
 
@@ -105,7 +105,7 @@ If a provider rejects Codex's image generation tool, enable `Filter image genera
 
 Turn on `连接 MochiPort` on the `Codex 接入` page. This single switch starts the local MochiPort connection for Codex App and the Codex VS Code extension.
 
-Turning the switch off first restores the Codex connection from before setup, then stops MochiPort for Codex. The restore action is shown only after Codex config has been written. It does not directly undo the VS Code extension patch; that patch is attempted when the daemon stops.
+Turning the switch off first restores the Codex connection from before setup, then stops MochiPort for Codex. The restore action is shown only after Codex config has been written. The daemon does not modify or restore the VS Code extension automatically; use the explicit VS Code fallback commands only when needed for a legacy extension.
 
 ### 6. Open Codex
 
@@ -203,7 +203,7 @@ Approval prompts are updated after selection where the platform supports it.
 
 ## Restore Codex Config
 
-Click `Restore Previous Settings` in the GUI to remove MochiPort's connection configuration while preserving later Codex config changes and session history. After restore, Codex App no longer sends model requests through MochiPort. The action does not directly undo the VS Code extension's `--remote-control` patch; the daemon attempts that restore when it stops.
+Click `Restore Previous Settings` in the GUI to remove MochiPort's connection configuration while preserving later Codex config changes and session history. After restore, Codex App no longer sends model requests through MochiPort. VS Code fallback artifacts are independent and are restored only by the explicit `mochiport vscode-remote-control restore-fallback` command.
 
 This does not uninstall Codex and does not delete Codex session history.
 
@@ -218,7 +218,7 @@ It does not:
 - launch Codex App through a shim
 - change Codex model, sandbox, approval policy, cwd, or environment
 
-The macOS client installs only per-user LaunchAgents for MochiPort itself, not a system-wide service. They keep the local backend running and recover the GUI only after an abnormal exit; a normal GUI quit stays quit.
+The macOS client installs only a per-user LaunchAgent for the MochiPort daemon, not a system-wide service. It keeps the local backend running independently of the GUI; a normal GUI quit stays quit.
 
 ## Technical Notes
 
@@ -254,7 +254,7 @@ POST /backend-api/wham/remote/control/server/enroll
 GET  /backend-api/wham/remote/control/server
 ```
 
-Codex remote-control requires a ChatGPT-compatible auth mode. This project writes local `ChatgptAuthTokens` to satisfy Codex App's remote-control account check. API-key-only auth does not start remote control.
+Codex remote-control requires a ChatGPT-compatible auth mode. MochiPort preserves Codex's official `auth.json` and does not synthesize `ChatgptAuthTokens` or a placeholder API key. API-key-only auth may still be rejected by remote control.
 
 Thread binding model:
 
@@ -275,11 +275,15 @@ cargo build --release --bin mochiport
 Useful status endpoints while the daemon is running:
 
 ```text
+GET http://127.0.0.1:3847/healthz
 GET http://127.0.0.1:3847/api/status
 GET http://127.0.0.1:3847/api/remote-control/status
 GET http://127.0.0.1:3847/api/remote-control/backend-status
 GET http://127.0.0.1:3847/api/events
 ```
+
+`/healthz` is the primary anonymous readiness check. `/api/status` is retained
+for legacy CLI and compatibility checks.
 
 ## Security Notes
 
@@ -300,7 +304,7 @@ GET http://127.0.0.1:3847/api/events
 ## Independent Maintenance And Compatibility
 
 - New installations use the MochiPort name, the `MochiPort` config directory, and the `mochiport` command.
-- Existing ThreadRelay and CodexHub users continue to load the legacy config directories, `THREADRELAY_*` and `CODEXHUB_*` environment variables, preserving IM credentials, session bindings, and provider configuration.
+- Existing ThreadRelay and CodexHub data is available to the explicit `mochiport migrate-storage` command and read-only legacy-daemon checks. Ordinary startup uses the MochiPort directory and never silently switches to a legacy directory; new installations use `MOCHIPORT_HOME` and `mochiport` names.
 - Releases and update metadata are published only from [`mps233/mochiport`](https://github.com/mps233/mochiport); maintainers can still selectively merge upstream changes.
 - ThreadRelay `0.5.0` and `0.5.1` still point at the retired update URL. There is no compatibility repository, so those users must install one MochiPort release manually before future update checks follow the new repository.
 

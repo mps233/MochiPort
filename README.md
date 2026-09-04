@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://github.com/mps233/MochiPort/releases/latest"><img src="https://img.shields.io/github/v/release/mps233/MochiPort?display_name=tag&style=flat-square" alt="Latest release"></a>
   <a href="https://github.com/mps233/MochiPort/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mps233/MochiPort/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
-  <span> <code>v0.5.5</code></span>
+  <span> <code>v0.5.6</code></span>
 </p>
 
 MochiPort 是一个本地优先的 Codex 会话中继。它把 Codex App、Codex VS Code 插件和 Codex CLI 接到 Telegram、飞书、微信或企业微信，让你可以在消息软件里创建会话、跟进任务和处理审批。
@@ -32,7 +32,7 @@ MochiPort 还内置 AI Gateway：Codex 只连接一个本地入口，模型请�
 
 ## 能做什么
 
-- 通过官方 remote-control 接入 Codex App、VS Code 插件和 Codex CLI；daemon 启动时会检查 VS Code 插件，必要时备份并改写其 `extension.js` 以加入 `--remote-control`，停止时尝试恢复；不安装包装命令。
+- 通过官方 remote-control 接入 Codex App、VS Code 插件和 Codex CLI；优先使用 VS Code 原生 remote-control。仍需兼容旧版插件时，可显式运行 `mochiport vscode-remote-control patch-fallback`，完成后用 `restore-fallback` 恢复；daemon 启动和停止不会自动修改插件，也不安装包装命令。
 - 在消息软件中创建、恢复和操作 Codex thread，接收进度并处理审批。
 - 在 macOS SwiftUI 或 Windows 客户端中管理模型服务、模型别名、路由、请求日志和消息渠道。
 - 查看 Sub2API 账号池的在线状态、倍率和最近命中账号；查询会调用上游用量探测，强制刷新还会调用 billing 探测，可能同步倍率并持久化快照；不会通过 MochiPort 执行账号的创建、删除或手动编辑。
@@ -98,7 +98,7 @@ MochiPort 会记住“哪个话题对应哪个会话”。Codex 会话被归档�
 | macOS | `MochiPort-<版本>-build<构建号>-macos-<架构>.dmg` | 拖入 Applications 后打开 |
 | Windows | `MochiPort-<版本>-windows-x64.msi` 或 `.zip` | 安装或直接运行 |
 
-打开客户端后，MochiPort 会启动本地 backend。macOS 使用当前用户范围的 LaunchAgent 保持 backend 运行；正常退出 GUI 不会自动重新打开窗口。Linux 桌面包暂不发布，未来将单独设计新的客户端。
+打开客户端后，MochiPort 会启动本地 backend。macOS 使用当前用户范围的 LaunchAgent 保持 backend 运行；GUI 退出或崩溃不会停止后台服务，也不会自动重新打开窗口。Linux 桌面包暂不发布，未来将单独设计新的客户端。
 
 ### 2. 配置模型
 
@@ -172,7 +172,7 @@ http://127.0.0.1:3847
 - Sub2API Admin API Key
 - Codex 本地认证数据
 
-GUI 中的“恢复原来的设置”会移除 MochiPort 写入的 Codex 连接配置，同时保留后续 Codex 配置变化和会话历史；不会卸载 Codex。该操作本身不会直接撤销 VS Code 插件的 `--remote-control` 补丁，插件还原会在 daemon 停止时尝试执行。
+GUI 中的“恢复原来的设置”会移除 MochiPort 写入的 Codex 连接配置，同时保留后续 Codex 配置变化和会话历史；不会卸载 Codex。VS Code fallback 不会在 daemon 启动或停止时自动修改插件；需要兼容旧版插件时，请显式运行 `mochiport vscode-remote-control patch-fallback`，完成后用 `mochiport vscode-remote-control restore-fallback` 恢复。
 
 ## 更多文档
 
@@ -185,7 +185,7 @@ GUI 中的“恢复原来的设置”会移除 MochiPort 写入的 Codex 连接�
 - [构建和交接规则](docs/mochiport-change-handoff.zh-CN.md)
 - [发布检查清单](docs/release-checklist.md)
 
-旧版本的 `ThreadRelay`、`CodexHub` 配置目录和环境变量仍会被兼容读取，用于迁移已有数据；新安装请使用 `MochiPort`、`MOCHIPORT_HOME` 和 `mochiport-*`。
+旧版本的 `ThreadRelay`、`CodexHub` 配置目录和环境变量仅在显式 `mochiport migrate-storage` 或只读锁检查中兼容读取；普通启动不会隐式切换到旧目录。新安装请使用 `MochiPort`、`MOCHIPORT_HOME` 和 `mochiport-*`。
 
 ## 致谢
 

@@ -3,21 +3,23 @@
 ## Check The Daemon
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:3847/api/status
+Invoke-RestMethod http://127.0.0.1:3847/healthz
 ```
 
 Expected:
 
 ```json
 {
-  "running": true,
-  "feishuWs": {
-    "connected": true
-  }
+  "service": "mochiport",
+  "apiMajor": 1,
+  "ready": true
 }
 ```
 
-If `feishuWs.connected` is false, check Feishu credentials, websocket subscription, and `GET /api/events`.
+`/healthz` only confirms daemon readiness. For legacy aggregate status and Feishu
+connectivity details, query `GET http://127.0.0.1:3847/api/status`; if
+`feishuWs.connected` is false, check Feishu credentials, websocket subscription,
+and `GET /api/events`.
 
 ## Check Remote-Control
 
@@ -60,11 +62,13 @@ Older MochiPort builds could leave Codex in external-auth mode and produce:
 External auth is active. Use account/login/start (chatgptAuthTokens) to update it or account/logout to clear it.
 ```
 
-With the local `ai-gateway` active, start the updated MochiPort daemon once so
-its legacy migration can restore the saved official auth or remove the old
-placeholder. Then fully quit Codex and open it again. If no official auth backup
-exists, complete Codex's normal login flow. Direct third-party provider setups
-are intentionally not modified by this migration.
+With the local `ai-gateway` (or a migrated `MochiPort`) provider active, run the
+explicit Codex setup action from the GUI or
+`mochiport configure-codex-app`. It can restore the saved official auth or remove
+the old placeholder. Then fully quit Codex and open it again. If no official auth
+backup exists, complete Codex's normal login flow. Starting the daemon alone is
+read-only and does not migrate auth. Direct third-party provider setups are
+intentionally not modified.
 
 ## Feishu Does Not Receive Messages
 

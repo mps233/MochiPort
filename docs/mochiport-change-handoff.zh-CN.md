@@ -2,7 +2,7 @@
 
 本文档适用于 `/Users/miaopasi/codexhub`，是构建和交接 macOS SwiftUI App、Rust daemon 时的项目级约定。
 
-本规则的目标是：更新界面时不打断正在运行的后台服务；更新 daemon 时不在后台偷偷替换运行中的版本。任何可能影响用户会话、IM 流式消息、Codex turn 或 AI Gateway 请求的操作，都必须让用户知道实际发生了什么。
+本规则的目标是：GUI 与 daemon 仍由 launchd 分别托管，但正式 App 更新后由 GUI 自动完成一次受保护的 daemon 版本切换。任何可能影响用户会话、IM 流式消息、Codex turn 或 AI Gateway 请求的操作，都必须经过 daemon 排空、管理租约和 readiness 校验。
 
 ## 先判断改动范围
 
@@ -83,17 +83,31 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
 
    实际使用时分别将 `UI_BUILD_NUMBER` 和 `DAEMON_BUILD_NUMBER` 改为本次发布使用的下一个正整数；不要复用已经发布的构建号。
 
-3. 可以生成和更新构建产物，但不得对当前运行中的 daemon 执行以下操作：
+3. 正式 App 组装完成后，使用统一脚本或等价流程退出并重新打开
+   `/Users/miaopasi/codexhub/outputs/MochiPort.app`。GUI 启动时发现内置 daemon
+   构建号高于当前 runtime，且当前安装持有管理租约、受保护任务为零时，会执行以下事务：
 
-   - kill、bootstrap、kickstart 或 unload
-   - 自动替换或切换 runtime
-   - 自动重启、回滚或故障恢复
-   - 通过 GUI 关闭旧 daemon 并启动新 daemon
+   - 先校验当前 runtime、LaunchAgent 身份和旧 plist，并把新 helper 原子 staging；
+   - 请求 daemon 执行带租约的安全排空，拒绝强杀和强制接管；
+   - 原子切换 `runtimes/current`，通过 `launchctl bootout/bootstrap` 重新加载同一 LaunchAgent；
+   - 等待新 instance、build 和健康状态稳定，并重新取得管理租约后才报告成功；
+   - 新 daemon 未 ready、身份不符或 launchd 操作失败时，自动恢复旧 runtime、plist 和服务。
 
-4. 不要因为 GUI 启动、版本不一致、构建完成或正式 App 产物更新而自动安装新 helper。
-5. 向用户明确说明：正式 App 已打包完成，但 daemon 改动要等用户在确认合适的时机后手动重启后台服务才会生效。
+4. 受保护任务非零、管理租约失效、当前 runtime 身份无法核验或回滚条件不完整时，升级必须 fail closed：不切换、不强杀，并在 GUI 中显示可操作错误，等待下一次刷新或重新打开正式 App。
 
-设置页保留的“安全重启后台服务”是用户主动操作，不属于自动交接流程。该操作只能针对当前已确认身份的 daemon，并由 daemon 先检查受保护工作项。
+5. GUI-only 改动仍不得重启 daemon；只有 daemon-affecting 改动且新正式 App 已安装时，才允许按上一事务自动切换。用户无需再手动重启后台服务。
+
+设置页保留的“安全重启后台服务”是用户主动操作，不属于版本升级流程。该操作只能针对当前已确认身份的 daemon，并由 daemon 先检查受保护工作项。
+
+## GUI 启动时的受限恢复
+
+本节只定义正常 GUI 启动的可用性恢复；不适用于 daemon 改动交接、版本升级或用户主动“安全重启”。
+
+1. GUI 先通过 `launchctl print` 读取已登记服务的实际 job 状态，并核验已加载 LaunchAgent 的配置和其指向 runtime 的身份。
+2. 服务已登记且状态为运行中时，健康检查通过则复用；健康检查未通过则显示“进程仍在运行但健康检查未通过”的诊断，绝不 `kickstart`、重启、替换或干预该 daemon。
+3. 服务已登记且 `launchctl` 明确表明未运行时，只有配置和 runtime 身份均已验证，才可执行不带 `-k` 的 `launchctl kickstart` 恢复现有服务。恢复不得写入 plist、复制、staging、替换或升级 runtime。
+4. 只有 `launchctl` 明确返回服务不存在，才可走随包 helper 的校验、首次 runtime 安装和 `bootstrap`。查询报错、输出未知、配置不可信或 runtime 身份不符时一律 fail closed：不写 plist、不 stage runtime、不 `bootstrap`，也不 `kickstart`。
+5. 自动启动最多尝试两次；每次等待有限次数的就绪探测。自动尝试用尽后，界面应区分“服务仍在运行但健康检查未通过”和“已多次启动仍未就绪”，提供“启动本地服务”重试和“查看诊断”。手动重试仍需执行同一套身份和状态验证，不能放宽上述限制。
 
 ## 版本和身份核对
 
@@ -105,19 +119,19 @@ GUI-only 交接不得重新构建、替换、切换或重启 daemon。组装 App
 - daemon build number
 - daemon 可执行文件 SHA-256
 
-GUI 更新前后 daemon 的 PID、路径和 SHA-256 应保持一致。若 daemon 改动需要生效，必须明确标注“等待手动重启”，不能把 GUI 已更新描述成 daemon 已更新。
+GUI-only 更新前后 daemon 的 PID、路径和 SHA-256 应保持一致。daemon-affecting 更新则必须记录切换前后的 instance、PID、路径、build 和 SHA-256；只有 readiness 与租约回收都通过，才能把 daemon 描述成已更新。
 
 ## 禁止恢复的旧流程
 
 项目不再使用以下机制：
 
-- 自动候选 runtime、升级 staging 或 runtime 切换
-- runtime 切换 journal
-- 自动回滚和重试驱动的 daemon 重启
+- 自动候选 runtime、无条件升级 staging 或无保护的 runtime 切换
+- runtime 切换 journal 和不透明的后台恢复任务
+- 没有排空、租约或 readiness 校验的 daemon 重启
 - GUI 驱动的强制接管、强制停止或版本恢复
 - 为了交接创建 ZIP 压缩包
 
-普通 GUI 启动只复用已运行的兼容 daemon；只有服务不存在时，才允许把随包 helper 安装到当前 build 的 runtime 目录并首次启动。不得因为版本不一致自动升级、切换或回滚已运行的 daemon。GUI 关闭或崩溃不应停止 launchd 托管的 daemon。
+普通 GUI 启动会复用已运行的兼容 daemon，或按上一节以无 `-k` 的 `kickstart` 恢复已验证停止的服务。只有 daemon-affecting 更新同时满足租约、受保护任务和身份校验时，才允许执行一次明确的 runtime 切换；GUI 关闭或崩溃不应停止 launchd 托管的 daemon。
 
 ## 交接后的报告
 
@@ -126,7 +140,7 @@ GUI 更新前后 daemon 的 PID、路径和 SHA-256 应保持一致。若 daemon
 1. 改动属于 GUI-only 还是 daemon-affecting。
 2. 执行了哪些测试和构建。
 3. 是否更新并重启了正式 GUI。
-4. daemon 是否被重启；若没有，说明用户需要何时手动重启。
+4. daemon 是否按自动升级事务完成切换；若未切换，说明阻塞原因和下一步操作。
 5. 当前 App 版本、build number 和 daemon 身份是否核对通过。
 
 本规则只约束构建和运行交接，不自动提交、推送或创建 Pull Request；这些操作需要单独得到用户请求。

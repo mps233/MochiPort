@@ -40,10 +40,12 @@ Older MochiPort/CodexHub builds wrote synthetic `chatgptAuthTokens`, and one
 in-progress build wrote `OPENAI_API_KEY = "codexhub-dummy-key"` without
 `auth_mode`. These shapes are recognized only as legacy MochiPort-managed auth.
 When the active configuration is the managed local `MochiPort` provider or a
-recognized legacy `ai-gateway`/`ai-codex` shape, daemon startup restores the saved
-official `auth.json` when available, or removes the synthetic placeholder so
-Codex can run its normal login flow. Direct third-party provider configurations
-and unrelated auth files are not changed.
+recognized legacy `ai-gateway`/`ai-codex` shape, an explicit Codex setup action
+(the GUI or `mochiport configure-codex-app`) restores the saved official
+`auth.json` when available, or removes the synthetic placeholder so Codex can
+run its normal login flow. Daemon startup only performs a read-only environment
+check and never runs this migration automatically. Direct third-party provider
+configurations and unrelated auth files are not changed.
 
 The local `/backend-api/ps/plugins/*` fallback remains narrow:
 

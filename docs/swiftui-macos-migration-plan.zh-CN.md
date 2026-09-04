@@ -4,8 +4,8 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 状态 | Phase 3 已完成；Phase 2 采用 launchd 基础托管、缺失时首次启动和用户主动安全重启，不再包含 daemon 自动构建、版本切换、候选 runtime、事务 journal 或自动回滚；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页与增强启动完整状态机已完成，剩余重点为诊断导出和发布级无障碍收尾 |
-| 最近核验 | 2026-08-18；自动 daemon 构建与运行时切换代码已删除，SwiftPM 134 项通过，Rust 912 项通过（1 项忽略），Xcode 双架构 Debug 构建成功。增强启动 operation 的幂等、并发冲突、取消和失败恢复仍有契约测试覆盖 |
+| 状态 | Phase 3 已完成；Phase 2 采用 launchd 基础托管，并已接入 GUI/daemon 的受保护自动版本切换、有限 readiness 探测和失败回滚；Phase 4-6 的核心页面已接入真实版本化管理 API，请求日志服务端分页与增强启动完整状态机已完成，剩余重点为诊断导出和发布级无障碍收尾 |
+| 最近核验 | 2026-09-02；SwiftPM 168 项通过，Rust 全量测试通过，Xcode Debug 构建成功。自动升级事务覆盖 staging、排空、launchd reload、新 instance/build readiness、租约回收和失败回滚 |
 | 目标版本 | 0.5.x 预览阶段 |
 | 主平台 | 正式 Xcode App 与 SwiftPM manifest 均以 macOS 26 为 deployment target |
 | 主前端 | SwiftUI |
@@ -70,7 +70,6 @@ Rust daemon 已提供 `/api/v1/manage/dashboard`、版本化设置、Codex App�
 MochiPort.app
 ├── Contents/MacOS/MochiPort                 # SwiftUI 主程序
 ├── Contents/Helpers/mochiport-daemon         # Rust 可执行文件
-├── Contents/Helpers/mochiport-gui-supervisor # GUI 恢复辅助程序
 ├── Contents/Frameworks/                      # 仅在选择更新框架后加入
 ├── SwiftUI macOS GUI
 │   ├── URLSession API Client
@@ -87,23 +86,24 @@ MochiPort.app
 
 ### 5.1 进程模型
 
-第一版继续采用 GUI 与 daemon 分离的双进程模型：
+第一版继续采用 GUI 与 daemon 分离的双进程模型，并由 GUI 负责受保护的版本切换：
 
-1. SwiftUI 应用启动后探测既有 daemon。
-2. 若存在匹配的 MochiPort daemon，或可识别的旧 ThreadRelay/CodexHub 兼容 daemon，则直接复用，不因 GUI 与 daemon 版本不同而自动替换或重启。
-3. 若不存在，则校验并安装随包 helper，由 launchd 首次启动。
-4. 关闭主窗口永远不停止 daemon；默认隐藏到菜单栏，用户可在 Settings 改为退出 GUI，但这仍不等于停止本地服务。
-5. 所有停止、重启和升级操作必须校验 daemon PID、instance ID、可执行文件路径和端口归属。
+1. SwiftUI 应用启动后探测既有 daemon；需要启动时，通过 `launchctl print` 读取已登记服务的实际 job 状态。
+2. 若服务已登记且运行中，并且 daemon 身份、配置和健康检查通过，则直接复用；健康检查未通过或身份无法确认时只显示诊断，绝不自动替换、`kickstart` 或重启。
+3. 若服务已登记且 `launchctl` 明确表明未运行，只有已加载 LaunchAgent 配置和其指向 runtime 的身份均通过验证，才可用不带 `-k` 的 `launchctl kickstart` 恢复现有服务；不得写 plist、staging、替换或升级 runtime。
+4. 只有 `launchctl` 明确返回服务不存在，才校验并安装随包 helper，由 launchd 首次启动。查询报错、输出未知、配置不可信或 runtime 身份不符时 fail closed，只提供诊断，不写入、不 `bootstrap` 也不 `kickstart`。
+5. 关闭主窗口永远不停止 daemon；默认隐藏到菜单栏，用户可在 Settings 改为退出 GUI，但这仍不等于停止本地服务。
+6. 所有停止、重启和升级操作必须校验 daemon PID、instance ID、可执行文件路径和端口归属。
 
 禁止只根据进程名或端口直接杀进程。当前模型请求可能经过 MochiPort AI Gateway，错误关闭 `3847` 会中断正在进行的会话。
 
 GUI 关闭、崩溃和自身更新不得通过父进程退出、进程组、继承管道或临时目录清理带走 daemon。daemon 启动后脱离 GUI 的标准输出和错误管道，日志写入固定文件；退出主界面和停止本地服务必须是两个不同命令。
 
-运行时控制文件与业务数据分开，至少记录管理凭据、daemon 身份和管理租约。现有 `CodexHub/config.toml`、状态、Provider 和请求日志继续由 Rust 兼容读取，本次迁移不搬目录。
+运行时控制文件与业务数据分开，至少记录管理凭据、daemon 身份和管理租约。正常运行路径使用 `MochiPort` 数据目录；旧 `ThreadRelay`/`CodexHub` 目录只用于只读锁检查和显式 `mochiport migrate-storage`，不会在普通启动时被隐式选用。
 
 实现只需区分四类产品状态：未运行、可复用、由当前安装管理、身份冲突。排空和更新是短暂过程状态，不需要暴露成另一套用户概念。GUI 只能停止自己启动或完成认证接管的 daemon；遇到身份或端口冲突只提供诊断，不结束对方进程。
 
-同一用户数据域只运行一个 daemon。stable 与 preview 都可读取状态并通过 revision 写业务配置，但任一时刻只有持有管理租约的已验证安装可以轮换管理凭据、执行用户主动重启或停止 daemon。账号与凭据、Provider、网络设置、Codex 配置和卸载、日志开关与清理等业务写操作不要求管理租约，但必须校验共享凭据、instance ID 和资源 revision；破坏性操作还要使用显式确认与幂等请求 ID。管理者已退出时，另一安装在重新核验 PID、instance ID、可执行路径和端口归属后可接管；管理者仍存活时必须显式确认接管，失败则退回只读。Phase 0 的控制平面 ADR 冻结共享控制文件、凭据发现与轮换、租约获取与回收、多 GUI 并发写和崩溃恢复规则；Phase 2 不提供版本切换协议。
+同一用户数据域只运行一个 daemon。stable 与 preview 都可读取状态并通过 revision 写业务配置，但任一时刻只有持有管理租约的已验证安装可以轮换管理凭据、执行用户主动重启或受保护的版本切换。账号与凭据、Provider、网络设置、Codex 配置和卸载、日志开关与清理等业务写操作不要求管理租约，但必须校验共享凭据、instance ID 和资源 revision；破坏性操作还要使用显式确认与幂等请求 ID。管理者已退出时，另一安装在重新核验 PID、instance ID、可执行路径和端口归属后可接管；管理者仍存活时必须显式确认接管，失败则退回只读。Phase 0 的控制平面 ADR 冻结共享控制文件、凭据发现与轮换、租约获取与回收、多 GUI 并发写和崩溃恢复规则；版本切换额外要求旧 runtime 可回滚以及新版本 readiness。
 
 ### 5.2 通信边界
 
@@ -133,9 +133,11 @@ Phase 0 先审计全部旧 `/api/*`：除新 `/healthz` 外，旧管理端点必
 
 统一脱敏策略覆盖 HTTP 访问日志、chain log、daemon 启动日志、崩溃报告、fixture 和诊断导出。必须移除或替换 Authorization、Cookie、管理凭据、Provider Key、Bot Token、App Secret、代理用户名/密码、二维码内容、device code、验证码、请求体敏感字段和本地用户标识。脱敏测试使用 canary secret，任何产物中出现原值都视为测试失败。
 
-#### 手动生命周期协议
+#### 协同生命周期协议
 
-SwiftUI GUI 更新不重启 daemon。只要 API 兼容，新 GUI 继续复用旧 daemon；若 daemon 源码或随包 helper 已更新，界面仅提示用户手动重启后台服务，不在后台构建、准备或切换版本。
+SwiftUI GUI 与 Rust daemon 继续保持双进程模型，但正式 App 更新后由 GUI 自动协调 daemon 切换。只要 API 兼容，新 GUI 继续复用旧 daemon；当内置 helper 构建号更高时，GUI 只在持有管理租约且受保护任务为零时 staging、请求排空、切换 runtime 并等待新版本 ready。
+
+升级事务要求旧 runtime、LaunchAgent 身份和旧 plist 可回滚；新 instance、build、健康状态和租约回收全部通过后才报告成功。任何校验失败、受保护任务存在、租约失效或新 daemon 未 ready 都 fail closed，并自动恢复旧 runtime 与 LaunchAgent；不使用强杀或无条件接管。
 
 设置页保留受鉴权的用户主动重启操作。重启前由 daemon 检查 AI Gateway 请求、Codex turn、IM 流式消息、最终回复和审批动作等受保护工作项；存在阻塞项时拒绝本次操作，不提供自动重试或强制切换。该操作只重启当前 launchd 配置指向的 daemon，不安装或升级 helper。
 
@@ -153,18 +155,18 @@ SwiftUI GUI 更新不重启 daemon。只要 API 兼容，新 GUI 继续复用旧
 | 凭据存储 | 首版保持现有 Rust 配置兼容 | UI 只向窄写接口提交新密钥，读接口仅返回 `secretSet`；Keychain 迁移作为独立安全项目，避免阻塞界面迁移 |
 | 本地管理 API | loopback + 当前用户数据域共享凭据 | 防止匿名 HTTP、浏览器跨站、其他系统用户和连错实例；不把同一用户权限下的恶意进程纳入首版威胁模型，远程控制兼容端点不受影响 |
 | CPU 架构 | 继续发布 Universal（arm64 + x86_64） | 当前发布链已经支持两种架构，迁移阶段不额外制造平台回退 |
-| 自动更新 | 预览期只保留手动检查和安全切换；Sparkle 2 是否进入首个 stable 在 Phase 6 决定 | 自动更新不阻塞核心 GUI 迁移，采用时仍必须满足签名、排空和回滚门槛 |
+| 自动更新 | 预览期保留手动检查和安装；安装新版 GUI 后自动执行受保护 daemon 切换；Sparkle 2 是否进入首个 stable 在 Phase 6 决定 | 自动切换必须满足签名、租约、排空、readiness 和回滚门槛 |
 
-SwiftUI 首版不负责把旧 `Application Support/CodexHub` 数据搬到新目录。兼容读取策略继续由 Rust daemon 负责，目录迁移在稳定版之后单独设计。
+SwiftUI 首版不负责把旧 `Application Support/CodexHub` 数据搬到新目录。普通启动不会读取旧目录；需要迁移时由用户显式运行 `mochiport migrate-storage`，由 Rust 工具完成身份校验和原子移动，且不会把两个数据目录合并。
 
 ### 5.4 版本、升级身份与兼容窗口
 
 - UI 产品语义版本和构建号由 `MOCHIPORT_UI_VERSION` / `MOCHIPORT_UI_BUILD_NUMBER` 提供；daemon 版本来自 Rust `Cargo.toml`，构建号由 `MOCHIPORT_DAEMON_BUILD_NUMBER` 提供。
 - UI 与 daemon 独立检查和发布更新；构建脚本分别校验 Xcode、daemon `--version`、Info.plist 和发布清单，不再要求两者共享同一构建号。
-- `/healthz` 仅返回 `service=threadrelay`、API 主版本和 `ready`；受鉴权运行状态接口另行返回 `productVersion`、`buildNumber`、`apiMajor`、PID、启动时间和 runtime 状态。
-- Bundle ID 固定为 `io.github.mps233.threadrelay`，正式签名 Team ID 在 SwiftUI 迁移前后保持一致。
+- `/healthz` 仅返回 `service=mochiport`、API 主版本和 `ready`；受鉴权运行状态接口另行返回 `productVersion`、`buildNumber`、`apiMajor`、PID、启动时间和 runtime 状态。
+- 稳定版继续使用已发布的 Bundle ID `io.github.mps233.threadrelay` 以保持安装和 UserDefaults 连续性；这不代表 daemon、配置目录或协议仍使用 ThreadRelay 身份。
 - `swiftui-preview` 使用独立 Bundle ID 和更新 feed，可与 stable GUI 并行安装；两者复用同一兼容 daemon，不各自启动服务。
-- 旧 `com.codexhub.app` 数据仍由 Rust 兼容路径读取，不再提供 wxDragon 桥接版。
+- 旧 `com.codexhub.app` 数据不由 SwiftUI 自动迁移；若数据位于历史 `ThreadRelay`/`CodexHub` 目录，需显式运行 `mochiport migrate-storage`，不再提供 wxDragon 桥接版。
 - 管理 API 面向 macOS SwiftUI、Windows React/Tauri 和未来可能的 Linux 客户端，配置写操作使用窄 DTO 和 revision/ETag。
 - Linux CLI 遵循 daemon API 兼容窗口；需要调整时单独发布适配版本。
 
@@ -297,6 +299,7 @@ AI Gateway 的运行开关与 Provider 列表放在该页面。请求日志页�
 - 无数据时说明缺少什么，并只给一个下一步动作；不把“暂无数据”伪装成错误。
 - 后台刷新保留旧内容并标记更新时间；只有首次加载失败才替换整个内容区。
 - 错误显示在受影响对象附近，并提供重试、打开设置或查看诊断等具体动作；同一错误不同时弹 alert、banner 和通知。
+- 本地服务自动启动最多尝试两次，每次等待有限次数的就绪探测；自动尝试用尽后，明确区分“服务仍在运行但健康检查未通过”和“已多次启动仍未就绪”，并提供“启动本地服务”重试与“查看诊断”。手动重试仍须通过相同的 LaunchAgent、runtime 和状态验证。
 - 长任务在原位置显示阶段和取消入口，完成后就地更新；不为普通成功操作弹 modal。
 - daemon 离线时保留可读取的最后状态，但禁用需要写入的动作，并明确数据可能过期。
 - daemon 身份或端口冲突时，总览显示阻塞性问题，只提供“重试检查”和“查看诊断”；不得提供停止未知进程。API 不兼容时说明需要更新 GUI 或 daemon，并禁用不受支持的写操作。
@@ -370,24 +373,24 @@ API 完成标准：Swift 端不需要导入或复制 Rust 内部实现类型，�
 
 ### Phase 2：daemon 生命周期与菜单栏
 
-当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon 与 GUI supervisor。SwiftUI 会复用已经运行的 daemon，只有在服务不存在时才安装并首次启动随包 helper；普通启动和版本不一致都不会替换或重启现有 daemon。设置页保留用户主动的安全重启，受保护工作存在时由 daemon 拒绝操作。自动 runtime staging、切换 journal、候选 hold、失败回滚和 GUI 驱动的版本恢复均已删除。
+当前状态：正式 App 已内嵌 Universal Rust daemon，并通过 LaunchAgent 维持 daemon。SwiftUI 会复用身份可核验的 daemon；已登记但停止的服务只用不带 `-k` 的 `kickstart` 恢复，服务缺失时才首次安装随包 helper。GUI 发现内置 daemon 构建号更高时，只有当前安装持有租约、受保护任务为零且旧 runtime 可回滚，才执行 staging、排空、`current` 原子切换和 `launchctl bootout/bootstrap`；新 instance/build/readiness/租约均通过后才完成。失败自动回滚，身份未知、状态未知或受保护任务存在时 fail closed。设置页仍保留用户主动的安全重启。
 
-2026-08-16 的现场只读证据为 GUI build 422 复用正式 daemon build 410，升级期间 daemon PID 70418 未变化；`/healthz`、`/api/v1/manage/dashboard`、`/api/v1/manage/lifecycle`、`/api/v1/manage/codex/status`、`/api/v1/manage/settings`、`/api/v1/manage/im/accounts`、`/api/v1/manage/gateway` 和 `/api/v1/manage/request-logs` 均返回 200。该证据证明新 GUI 可以读取并继续使用兼容的旧 daemon；不兼容或无法识别 build 的 daemon 必须提示用户手动更新后台服务。
+2026-08-16 的现场只读证据为 GUI build 422 复用正式 daemon build 410，升级期间 daemon PID 70418 未变化；`/healthz`、`/api/v1/manage/dashboard`、`/api/v1/manage/lifecycle`、`/api/v1/manage/codex/status`、`/api/v1/manage/settings`、`/api/v1/manage/im/accounts`、`/api/v1/manage/gateway` 和 `/api/v1/manage/request-logs` 均返回 200。该证据证明新 GUI 可以读取兼容的旧 daemon；当内置 helper 更新时，新的自动切换事务会在安全条件满足后替换 runtime，否则保留旧 daemon 并显示阻塞原因。
 
 交付物：
 
 - [x] 实现现有 daemon 探测、精确 PID、instance、路径、参数和环境校验、启动及受保护关闭。
 - [x] 将 Rust daemon 作为独立可执行文件嵌入 App Bundle。
-- [x] 服务不存在时校验并安装随包 helper，由 launchd 首次启动；服务已存在时不复制或替换 helper。
+- [x] 通过 `launchctl print` 区分真实服务状态：只有明确不存在时才校验并安装随包 helper，由 launchd 首次启动；已登记且验证通过但停止的服务只用不带 `-k` 的 `kickstart` 恢复，运行中服务绝不自动重启，检查错误或身份不可信时 fail closed。
 - [x] 按 Phase 0 控制平面 ADR 使用和轮换共享管理凭据，落实唯一管理租约与可信接管；控制文件使用稳定锁与原子替换，接管和泄漏恢复均通过 generation、daemon 身份快照和幂等 request ID 防止竞态。
 - [x] 实现 daemon 管理租约、受保护工作检查，以及只针对当前 daemon 的用户主动安全重启。
 - [x] 实现 `MenuBarExtra`：打开主窗口、服务状态、检查更新、退出。
-- [x] 处理重复启动和 GUI 崩溃恢复，GUI 生命周期不影响 launchd 管理的 daemon。
+- [x] 处理重复启动和 GUI 崩溃时保持 launchd 管理的 daemon 独立，GUI 生命周期不影响 daemon。
 - [x] 完成固定 fixture 与旧 daemon 的只读 API 兼容验证；GUI build 422 复用正式 daemon build 410 时主要管理路由均返回 200，daemon PID 在 GUI 升级期间未变化。
-- [ ] 在隔离环境验证用户主动重启只重启当前 daemon，存在受保护工作时可靠拒绝，且不会升级或切换版本。
+- [x] 在隔离环境验证用户主动重启只重启当前 daemon，存在受保护工作时可靠拒绝；版本升级另走独立的排空、切换和回滚事务。
 - [x] 实现“关闭窗口后隐藏或退出 GUI”的偏好；两种行为都不停止 daemon，停止受管服务保留为独立危险操作。
 
-验收：正常启动、重复启动和 GUI 崩溃不会误杀、替换或重启现有 daemon；GUI 关闭造成的受保护工作项主动终止数为 0。服务缺失时可完成首次启动，用户主动重启存在阻塞项时明确拒绝，版本不一致时只提示手动更新后台服务。此阶段不代表已接入自动更新。
+验收：正常启动、重复启动和 GUI 崩溃不会误杀或干预现有 daemon；GUI 关闭造成的受保护工作项主动终止数为 0。已登记、可信且明确停止的服务只以无 `-k` 的 `kickstart` 恢复；运行中但未健康的服务不因普通探测自动重启。版本升级仅在租约和受保护任务检查通过后排空并切换，readiness 失败自动回滚；`launchctl` 查询错误、身份不可信或回滚条件不完整时不写 plist、不 stage、不 bootstrap。服务缺失时可完成首次启动；自动启动与就绪探测有界，耗尽后显示可操作错误而非无限重试。
 
 ### Phase 3：IM 账号与 Onboarding
 
@@ -463,7 +466,7 @@ RC 准备：
 - [ ] 生成 Universal 包，并验证 Apple Silicon 与 Intel 两种架构。
 - [ ] 运行完整迁移、升级、回滚和长时间稳定性测试。
 - [x] 更新 README、架构、故障排查和平台支持等级。
-- [ ] 验证 SwiftUI App 更新不重启兼容 daemon；helper 更新由用户在明确提示后手动重启后台服务生效。
+- [x] 验证 SwiftUI App 更新不重启兼容 daemon；helper 更新由新 GUI 在租约、排空和 readiness 检查通过后自动切换，失败自动回滚。
 - [ ] 确认 macOS legacy 管理端点已删除；保留给 Windows/Linux 客户端的端点全部鉴权，唯一匿名管理面端点仍是 `/healthz`。
 - [ ] 完成第 6.2 节 Liquid Glass 发布评审，归档核心页面和无障碍模式的基准截图与交互测试结果。
 
@@ -475,7 +478,7 @@ RC 准备：
 
 - Rust：继续运行 `cargo fmt`、`cargo check` 和完整测试集。
 - API：为 Swift 使用的每个端点增加 Rust 契约测试和稳定 JSON fixture。
-- Swift：对 API 解码、ViewModel 状态机、配置校验和 daemon 管理增加单元测试。
+- Swift：对 API 解码、ViewModel 状态机、配置校验和 daemon 管理增加单元测试，覆盖 `launchctl` 实际状态分支、可信停止服务恢复、运行中服务不重启、未知状态 fail closed，以及有界启动/就绪重试。
 - SwiftUI：对首次启动、离线、账号管理、Provider 管理、请求日志和设置增加 UI 测试。
 - Bundle：校验嵌入 daemon 的架构、执行权限、签名、Entitlements、版本和哈希。
 - 发布：从已安装旧版本执行真实升级，不只验证全新安装。
@@ -485,7 +488,7 @@ RC 准备：
 
 ### 10.2 发布前手工场景
 
-- 旧数据启动后账号、凭据、绑定、Provider 和日志完整；GUI 重启不要求重新连接。
+- 完成显式存储迁移后，账号、凭据、绑定、Provider 和日志保持完整；GUI 重启不要求重新连接。
 - 既有 daemon、端口冲突、GUI/daemon 崩溃以及休眠/网络切换均按第 5 节规则工作且不误杀或自动替换进程；GUI 关闭造成的受保护工作项主动终止数为 0。
 - Codex、四种消息通道、Provider、会话移动、请求日志和设置完成各自主路径与失败恢复。
 - 浅色、深色、VoiceOver、键盘和长文本可用；macOS 26 使用原生 Liquid Glass，降低透明度/增强对比度/减弱动态效果可用。
@@ -513,5 +516,5 @@ SwiftUI 未通过退出条件前，不覆盖 `stable` 更新清单。
 - 不在同一提交中同时重构 Rust 业务逻辑和重写对应 SwiftUI 页面。
 - SwiftUI 预览版不得写入另一套配置目录；始终复用现有用户数据策略。
 - 所有 daemon 关闭动作必须可审计，并记录目标 PID、instance ID、可执行路径和结果。
-- 每次完成并验证 macOS 改动后，构建正式 `.app`，启动该包，并确认运行路径、版本和 `/healthz.service`；桥接期同时验证旧 `/api/status.service`。
+- 每次完成并验证 macOS 改动后，构建正式 `.app`，启动该包，并确认运行路径、版本和 `/healthz` 返回的 `service=mochiport`；旧 `/api/status` 只在兼容性测试需要时单独验证。
 - 不删除用户数据，不自动清理旧 CodexHub 目录；目录独立迁移另行立项。

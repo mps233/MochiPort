@@ -96,11 +96,13 @@ MochiPort. Users who need remote control must sign in with a supported ChatGPT
 account in Codex. A third-party model provider key is used only for that
 provider's model calls and does not satisfy the remote-control account check.
 
-Daemon startup includes a narrow migration for legacy MochiPort-managed auth.
-It runs only when the active provider is the local `ai-gateway`, restores a
-saved official auth file when possible, and otherwise removes the synthetic
-placeholder so Codex can present its normal login flow. Direct provider setups
-remain untouched.
+An explicit Codex setup action (the GUI or `mochiport configure-codex-app`)
+includes a narrow migration for legacy MochiPort-managed auth. It runs only when
+the active provider is the local `MochiPort` provider or a recognized legacy
+`ai-gateway`/`ai-codex` shape, restores a saved official auth file when possible,
+and otherwise removes the synthetic placeholder so Codex can present its normal
+login flow. Daemon startup only performs a read-only environment check. Direct
+provider setups remain untouched.
 
 ## IM Bridge
 
