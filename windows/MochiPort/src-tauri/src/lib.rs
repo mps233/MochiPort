@@ -88,12 +88,6 @@ struct ManagementStatusResponse {
     instance_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyStatusResponse {
-    service: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ManagementCredential {
     token: String,
@@ -161,15 +155,20 @@ fn user_data_root() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
-fn configured_home_directories() -> Vec<PathBuf> {
-    let mut directories = ["MOCHIPORT_HOME", "THREADRELAY_HOME", "CODEXHUB_HOME"]
-        .iter()
-        .filter_map(|key| env::var_os(key).map(PathBuf::from))
-        .collect::<Vec<_>>();
-    if let Some(root) = user_data_root() {
-        directories.extend(["MochiPort", "ThreadRelay", "CodexHub"].map(|name| root.join(name)));
-    }
-    directories
+fn current_home_directory() -> Option<PathBuf> {
+    current_home_directory_from(
+        env::var_os("MOCHIPORT_HOME")
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
+        user_data_root(),
+    )
+}
+
+fn current_home_directory_from(
+    mochiport_home: Option<PathBuf>,
+    user_data_root: Option<PathBuf>,
+) -> Option<PathBuf> {
+    mochiport_home.or_else(|| user_data_root.map(|root| root.join("MochiPort")))
 }
 
 fn validate_loopback_base_url(raw: &str) -> Option<Url> {
@@ -189,11 +188,9 @@ fn validate_loopback_base_url(raw: &str) -> Option<Url> {
 }
 
 fn read_locator() -> Option<ActiveDaemonLocator> {
-    let path = user_data_root()?
-        .join("MochiPort")
-        .join("mochiport-active-daemon.json");
+    let path = current_home_directory()?.join("mochiport-active-daemon.json");
     let locator: ActiveDaemonLocator = serde_json::from_slice(&fs::read(path).ok()?).ok()?;
-    if locator.service != "threadrelay"
+    if locator.service != "mochiport"
         || locator.api_major != 1
         || locator.instance_id.is_empty()
         || locator.pid == 0
@@ -276,11 +273,9 @@ fn resolve_connection() -> ManagementConnection {
         })
     });
 
-    let mut fallback_paths = Vec::new();
-    for directory in configured_home_directories() {
-        fallback_paths.push(directory.join("mochiport-control.json"));
-        fallback_paths.push(directory.join("threadrelay-control.json"));
-    }
+    let fallback_paths = current_home_directory()
+        .map(|directory| vec![directory.join("mochiport-control.json")])
+        .unwrap_or_default();
 
     let fallback_tokens = fallback_paths
         .iter()
@@ -324,9 +319,7 @@ fn validated_relative_path(path: &str) -> Result<String, String> {
         return Err("请求路径无效".to_string());
     }
     let normalized_path = normalized.path().trim_start_matches('/');
-    if normalized_path != "healthz"
-        && normalized_path != "api/status"
-        && !normalized_path.starts_with("api/v1/manage/")
+    if normalized_path != "healthz" && !normalized_path.starts_with("api/v1/manage/")
     {
         return Err("只允许访问 MochiPort 管理 API".to_string());
     }
@@ -411,23 +404,10 @@ async fn send_probe_request(
     .await
 }
 
-fn compatible_service(service: &str) -> bool {
-    matches!(service, "threadrelay" | "codexhub")
-}
-
-fn parse_legacy_identity(response: &NativeResponse) -> Option<LegacyStatusResponse> {
-    if response.status != 200 {
-        return None;
-    }
-    serde_json::from_str::<LegacyStatusResponse>(&response.body)
-        .ok()
-        .filter(|status| compatible_service(&status.service))
-}
-
 fn is_ready_mochiport_health(response: &NativeResponse) -> bool {
     response.status == 200
         && serde_json::from_str::<HealthResponse>(&response.body).is_ok_and(|health| {
-            health.service == "threadrelay" && health.api_major == 1 && health.ready
+            health.service == "mochiport" && health.api_major == 1 && health.ready
         })
 }
 
@@ -437,25 +417,22 @@ fn management_status_matches(
 ) -> bool {
     response.status == 200
         && serde_json::from_str::<ManagementStatusResponse>(&response.body).is_ok_and(|status| {
-            status.service == "threadrelay"
+            status.service == "mochiport"
                 && status.api_major == 1
                 && status.ready
                 && expected_instance_id.is_none_or(|expected| status.instance_id == expected)
         })
 }
 
-fn classify_endpoint_probe(
-    health: Option<&NativeResponse>,
-    legacy: Option<&NativeResponse>,
-) -> EndpointProbe {
+fn classify_endpoint_probe(health: Option<&NativeResponse>) -> EndpointProbe {
     if health.is_some_and(is_ready_mochiport_health) {
         EndpointProbe::CompatibleV1
-    } else if health.is_none() && legacy.is_none() {
+    } else if health.is_none() {
         EndpointProbe::Offline
     } else {
         // Any HTTP response proves that something owns the endpoint. This
-        // includes legacy ThreadRelay and newer-but-incompatible management
-        // APIs, neither of which may be bypassed to control another daemon.
+        // includes a stale or incompatible management API, neither of which
+        // may be bypassed to control another daemon.
         EndpointProbe::OccupiedOrIncompatible
     }
 }
@@ -480,35 +457,6 @@ async fn credential_matches_instance(
         return false;
     };
     management_status_matches(&response, credential.expected_instance_id.as_deref())
-}
-
-async fn health_with_legacy_fallback(
-    client: &Client,
-    base_url: &Url,
-) -> Result<NativeResponse, String> {
-    let health = send_probe_request(client, base_url, "healthz", None).await?;
-    if health.status != 404 {
-        return Ok(health);
-    }
-
-    let legacy = match send_probe_request(client, base_url, "api/status", None).await {
-        Ok(response) => response,
-        Err(_) => return Ok(health),
-    };
-    if parse_legacy_identity(&legacy).is_none() {
-        return Ok(legacy);
-    }
-
-    let body = serde_json::to_string(&HealthResponse {
-        service: "threadrelay".to_string(),
-        // API major zero is the bridge compatibility signal used by the
-        // frontend. It keeps the legacy daemon visible without claiming the
-        // authenticated v1 management surface exists.
-        api_major: 0,
-        ready: true,
-    })
-    .map_err(|error| format!("无法编码旧版后台服务状态：{error}"))?;
-    Ok(NativeResponse { status: 200, body })
 }
 
 async fn management_request_inner(
@@ -554,7 +502,7 @@ async fn management_request_inner(
         .map_err(|error| format!("无法建立本地连接：{error}"))?;
     let connection = resolve_connection();
 
-    if path == "healthz" || path == "api/status" {
+    if path == "healthz" {
         if method != Method::GET || body.is_some() {
             return Err("健康检查只允许无请求体的 GET 请求".to_string());
         }
@@ -668,11 +616,10 @@ async fn probe_endpoint(client: &Client, base_url: &Url) -> EndpointProbe {
         return EndpointProbe::CompatibleV1;
     }
     if let Ok(response) = &health {
-        return classify_endpoint_probe(Some(response), None);
+        return classify_endpoint_probe(Some(response));
     }
 
-    let legacy = send_probe_request(client, base_url, "api/status", None).await;
-    classify_endpoint_probe(None, legacy.as_ref().ok())
+    classify_endpoint_probe(None)
 }
 
 fn candidate_base_urls() -> Vec<Url> {
@@ -747,11 +694,7 @@ async fn public_request_with_fallback(
 ) -> Result<NativeResponse, String> {
     let mut last_error = None;
     for endpoint in endpoints {
-        let response = if path == "healthz" {
-            health_with_legacy_fallback(client, &endpoint.base_url).await
-        } else {
-            send_probe_request(client, &endpoint.base_url, path, None).await
-        };
+        let response = send_probe_request(client, &endpoint.base_url, path, None).await;
         match response {
             Ok(response) => return Ok(response),
             Err(error) => last_error = Some(error),
@@ -998,6 +941,24 @@ mod tests {
     }
 
     #[test]
+    fn current_home_uses_only_mochiport_identity() {
+        assert_eq!(
+            current_home_directory_from(
+                Some(PathBuf::from("C:/Users/test/custom-mochiport")),
+                Some(PathBuf::from("C:/Users/test/AppData/Local")),
+            ),
+            Some(PathBuf::from("C:/Users/test/custom-mochiport"))
+        );
+        assert_eq!(
+            current_home_directory_from(
+                None,
+                Some(PathBuf::from("C:/Users/test/AppData/Local")),
+            ),
+            Some(PathBuf::from("C:/Users/test/AppData/Local/MochiPort"))
+        );
+    }
+
+    #[test]
     fn fallback_control_tokens_remain_unconstrained_and_deduplicated() {
         let credentials = fallback_credentials(vec![
             "shared-token".to_string(),
@@ -1030,37 +991,37 @@ mod tests {
     }
 
     #[test]
-    fn probe_classification_does_not_bypass_active_legacy_or_incompatible_service() {
+    fn probe_classification_rejects_stale_or_incompatible_service() {
         let ready = response(
             200,
-            r#"{"service":"threadrelay","apiMajor":1,"ready":true}"#,
+            r#"{"service":"mochiport","apiMajor":1,"ready":true}"#,
         );
-        let legacy = response(200, r#"{"service":"threadrelay"}"#);
+        let stale = response(200, r#"{"service":"threadrelay","apiMajor":1,"ready":true}"#);
         let incompatible = response(
             200,
-            r#"{"service":"threadrelay","apiMajor":0,"ready":true}"#,
+            r#"{"service":"mochiport","apiMajor":0,"ready":true}"#,
         );
 
         assert_eq!(
-            classify_endpoint_probe(Some(&ready), None),
+            classify_endpoint_probe(Some(&ready)),
             EndpointProbe::CompatibleV1
         );
         assert_eq!(
-            classify_endpoint_probe(None, Some(&legacy)),
+            classify_endpoint_probe(Some(&stale)),
             EndpointProbe::OccupiedOrIncompatible
         );
         assert_eq!(
-            classify_endpoint_probe(Some(&incompatible), None),
+            classify_endpoint_probe(Some(&incompatible)),
             EndpointProbe::OccupiedOrIncompatible
         );
-        assert_eq!(classify_endpoint_probe(None, None), EndpointProbe::Offline);
+        assert_eq!(classify_endpoint_probe(None), EndpointProbe::Offline);
     }
 
     #[test]
     fn management_status_requires_ready_v1_mochiport_and_optional_instance_match() {
         let current = response(
             200,
-            r#"{"service":"threadrelay","apiMajor":1,"ready":true,"instanceId":"current"}"#,
+            r#"{"service":"mochiport","apiMajor":1,"ready":true,"instanceId":"current"}"#,
         );
         let wrong_service = response(
             200,
@@ -1068,11 +1029,11 @@ mod tests {
         );
         let wrong_version = response(
             200,
-            r#"{"service":"threadrelay","apiMajor":2,"ready":true,"instanceId":"current"}"#,
+            r#"{"service":"mochiport","apiMajor":2,"ready":true,"instanceId":"current"}"#,
         );
         let not_ready = response(
             200,
-            r#"{"service":"threadrelay","apiMajor":1,"ready":false,"instanceId":"current"}"#,
+            r#"{"service":"mochiport","apiMajor":1,"ready":false,"instanceId":"current"}"#,
         );
 
         assert!(management_status_matches(&current, None));
@@ -1098,6 +1059,7 @@ mod tests {
             validated_relative_path("/api/v1/manage/request-logs?query=hello%20world").as_deref(),
             Ok("api/v1/manage/request-logs?query=hello%20world")
         );
+        assert!(validated_relative_path("api/status").is_err());
     }
 
     #[test]

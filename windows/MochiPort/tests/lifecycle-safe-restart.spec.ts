@@ -15,7 +15,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 }
 
 function service(instanceId = "daemon-before", pid = 42, startedAtMs = 1_700_000_000_000) {
-  return { service: "threadrelay", apiMajor: 1, ready: true, instanceId, pid, startedAtMs };
+  return { service: "mochiport", apiMajor: 1, ready: true, instanceId, pid, startedAtMs };
 }
 
 function dashboard(instance = service()) {
@@ -96,7 +96,7 @@ test("safe restart is sent only after confirmation and reclaims the same path an
     }
     const path = new URL(request.url()).pathname.replace(/^\//, "");
     if (path === "healthz") {
-      await fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+      await fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
       return;
     }
     if (path === "api/v1/manage/dashboard") {
@@ -192,7 +192,7 @@ test("a protected-work rejection is surfaced without forcing or claiming a repla
       return;
     }
     const path = new URL(request.url()).pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, dashboard());
     if (path === "api/v1/manage/im/accounts") return fulfillJson(route, { accounts: [] });
     if (path === "api/v1/manage/settings") return fulfillJson(route, { language: "zh-CN", theme: "system", localConnectionMode: "standard", bind: "127.0.0.1:3847", outboundProxy: { mode: "system", url: "<none>", credentialSet: false } });
@@ -238,7 +238,7 @@ test("conflicting lease takeover and credential rotation require separate confir
       return;
     }
     const path = new URL(request.url()).pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, dashboard(currentLifecycle.service));
     if (path === "api/v1/manage/im/accounts") return fulfillJson(route, { accounts: [] });
     if (path === "api/v1/manage/settings") return fulfillJson(route, { language: "zh-CN", theme: "system", localConnectionMode: "standard", bind: "127.0.0.1:3847", outboundProxy: { mode: "system", url: "<none>", credentialSet: false } });

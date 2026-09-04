@@ -23,7 +23,7 @@ export const fixtureCodexModelCatalog: CodexCatalogModel[] = [
 
 export const fixtureDashboard: Dashboard = {
   service: {
-    service: "threadrelay",
+    service: "mochiport",
     apiMajor: 1,
     ready: true,
     instanceId: "fixture-mochiport-daemon",
@@ -88,7 +88,7 @@ export const fixtureCodexStatus: CodexStatus = {
   ],
   imageGenerationEnabled: true,
   connectionMode: "remoteControl",
-  providerMode: "threadrelay",
+  providerMode: "mochiport",
   providerModeMessage: "Codex 通过 MochiPort AI 网关连接模型服务",
   activeProvider: "MochiPort",
 };

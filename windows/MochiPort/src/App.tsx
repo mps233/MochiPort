@@ -28,7 +28,7 @@ const metadata = {
   codex: { title: "Codex 接入", icon: Bot, subtitle: "连接和管理本机 Codex" },
   gateway: { title: "AI 网关", icon: Boxes, subtitle: "模型服务、路由与账号池" },
   messaging: { title: "消息渠道", icon: MessageCircleMore, subtitle: "连接手机里的消息账号" },
-  sessions: { title: "会话", icon: Clock3, subtitle: "查看和移动 Codex 会话" },
+  sessions: { title: "会话", icon: Clock3, subtitle: "查看 Codex 会话" },
   requestLogs: { title: "请求日志", icon: FileClock, subtitle: "检查模型请求和响应" },
   settings: { title: "设置", icon: Settings, subtitle: "MochiPort 偏好与诊断" },
 } as const;

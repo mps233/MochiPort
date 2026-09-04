@@ -18,7 +18,7 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 function dashboard() {
   return {
     service: {
-      service: "threadrelay",
+      service: "mochiport",
       apiMajor: 1,
       ready: true,
       instanceId: "response-validation-test",
@@ -92,7 +92,7 @@ test("a supported legacy v1 dashboard is normalized instead of rejected", async 
       return;
     }
     const path = new URL(request.url()).pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, legacyDashboard());
     if (path === "api/v1/manage/im/accounts") return fulfillJson(route, { accounts: [] });
     if (path === "api/v1/manage/lifecycle") return fulfillJson(route, lifecycle());
@@ -114,7 +114,7 @@ test("legacy sessions with omitted display fields keep safe defaults", async ({ 
       return;
     }
     const path = new URL(request.url()).pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, dashboard());
     if (path === "api/v1/manage/im/accounts") return fulfillJson(route, { accounts: [] });
     if (path === "api/v1/manage/lifecycle") return fulfillJson(route, lifecycle());
@@ -141,7 +141,7 @@ async function installManagementMock(page: Page, invalidGatewayBody: string, con
 
     const path = new URL(request.url()).pathname.replace(/^\//, "");
     if (path === "healthz") {
-      await fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+      await fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
       return;
     }
     if (path === "api/v1/manage/dashboard") {

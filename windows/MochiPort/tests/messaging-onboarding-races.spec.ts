@@ -35,7 +35,7 @@ async function installManagementRoutes(
     const path = new URL(route.request().url()).pathname.replace(/^\//, "");
     if (await handleOnboarding(route, path)) return;
     if (path === "healthz") {
-      await fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+      await fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
       return;
     }
     if (path === "api/v1/manage/dashboard") {

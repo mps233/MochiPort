@@ -54,7 +54,7 @@ test("messaging account states and safe avatars match the Mac client", async ({ 
       return;
     }
     const path = new URL(request.url()).pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, fixtureDashboard);
     if (path === "api/v1/manage/lifecycle") return fulfillJson(route, fixtureLifecycle);
     if (path === "api/v1/manage/gateway/sub2api") return fulfillJson(route, { configured: false, baseUrl: "", secretSet: false });

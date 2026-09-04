@@ -35,7 +35,7 @@ async function installFailureRoutes(page: Page, section: Section) {
     }
 
     const path = new URL(request.url()).pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, fixtureDashboard);
     if (path === "api/v1/manage/im/accounts") return fulfillJson(route, { accounts: fixtureAccounts });
     if (path === "api/v1/manage/lifecycle") return fulfillJson(route, fixtureLifecycle);

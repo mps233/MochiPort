@@ -48,7 +48,7 @@ function codexStatus(connected: boolean): CodexStatus {
     providers: [],
     imageGenerationEnabled: true,
     connectionMode: "remoteControl",
-    providerMode: connected ? "threadrelay" : "direct-api",
+    providerMode: connected ? "mochiport" : "direct-api",
     providerModeMessage: connected ? "Codex 通过 MochiPort 连接" : "Codex 使用直连 API",
     activeProvider: connected ? "mochiport" : "openai",
   };
@@ -72,12 +72,12 @@ async function installManagementMock(page: Page, state: MockManagementState) {
     state.requests.push({ method: request.method(), path, body });
 
     if (path === "healthz") {
-      await fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+      await fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
       return;
     }
     if (path === "api/v1/manage/dashboard") {
       await fulfillJson(route, {
-        service: { service: "threadrelay", apiMajor: 1, ready: true, instanceId: "test", pid: 42, startedAtMs: 1 },
+        service: { service: "mochiport", apiMajor: 1, ready: true, instanceId: "test", pid: 42, startedAtMs: 1 },
         bridgeRunning: true,
         remoteControlConnected: true,
         remoteControlHealthy: true,

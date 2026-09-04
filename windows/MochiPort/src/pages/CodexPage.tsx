@@ -39,6 +39,7 @@ function CheckRow({ ok, title, detail }: { ok: boolean; title: string; detail: s
 
 function providerModeLabel(mode: string | null | undefined): string {
   switch (mode) {
+    case "mochiport":
     case "threadrelay": return "MochiPort AI 网关";
     case "direct-api": return "Codex 原始设置";
     case "unknown": return "尚未连接";
@@ -69,7 +70,7 @@ export function CodexPage() {
   const [technicalOpen, setTechnicalOpen] = useState(false);
   const [confirmUninstall, setConfirmUninstall] = useState(false);
   const gatewayEnabled = model.gateway?.enabled ?? model.dashboard?.aiGatewayEnabled;
-  const routeEnabled = status?.providerMode === "threadrelay" && gatewayEnabled !== false;
+  const routeEnabled = (status?.providerMode === "mochiport" || status?.providerMode === "threadrelay") && gatewayEnabled !== false;
   const canEnhancedLaunch = Boolean(status?.configured && routeEnabled);
   const codexConnectionTransitionInProgress = Boolean(
     model.busy["codex:configure"]

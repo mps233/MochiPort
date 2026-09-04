@@ -35,7 +35,7 @@ async function setInitialSection(page: Page, section: "codex" | "sessions") {
 
 async function fulfillReadyBaseRead(route: Route, path: string): Promise<boolean> {
   if (path === "healthz") {
-    await fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    await fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     return true;
   }
   if (path === "api/v1/manage/dashboard") {
@@ -79,11 +79,11 @@ test("an initially selected section loads after daemon readiness polling", async
         return;
       }
       if (healthCalls < 4) {
-        await fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: false });
+        await fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: false });
         return;
       }
       daemonReady = true;
-      await fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+      await fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
       return;
     }
     if (path === "api/v1/manage/dashboard") {
@@ -135,7 +135,7 @@ test("session source and empty state distinguish an offline Codex App", async ({
   await page.route(`${managementOrigin}/**`, async (route) => {
     if (await handlePreflight(route)) return;
     const path = new URL(route.request().url()).pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") {
       return fulfillJson(route, {
         ...fixtureDashboard,
@@ -186,7 +186,7 @@ test("a non-terminal enhanced cancel response is polled until cancelled", async 
     const request = route.request();
     const path = new URL(request.url()).pathname.replace(/^\//, "");
     if (path === "healthz") {
-      await fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+      await fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
       return;
     }
     if (path === "api/v1/manage/dashboard") {

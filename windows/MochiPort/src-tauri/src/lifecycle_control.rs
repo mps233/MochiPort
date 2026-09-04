@@ -361,7 +361,7 @@ fn verify_observation(
     locator: &ActiveDaemonLocator,
     observed: &ObservedProcess,
 ) -> Result<DaemonIdentityProof, String> {
-    if lifecycle.service.service != "threadrelay"
+    if lifecycle.service.service != "mochiport"
         || lifecycle.service.api_major != 1
         || !lifecycle.service.ready
         || lifecycle.service.instance_id.trim().is_empty()
@@ -382,7 +382,7 @@ fn verify_observation(
         return Err("后台服务定位器与生命周期身份不一致".to_string());
     }
     let control_file_is_known = file_name(&locator.control_file).as_deref()
-        == Some("threadrelay-control.json")
+        == Some("mochiport-control.json")
         && parent_path(&locator.control_file) == parent_path(&lifecycle.config_path);
     if !control_file_is_known {
         return Err("后台服务管理凭据路径不可信".to_string());
@@ -972,7 +972,7 @@ mod tests {
     fn lifecycle() -> LifecycleSnapshot {
         LifecycleSnapshot {
             service: LifecycleService {
-                service: "threadrelay".to_string(),
+                service: "mochiport".to_string(),
                 api_major: 1,
                 ready: true,
                 instance_id: "daemon-a".to_string(),
@@ -1012,13 +1012,13 @@ mod tests {
 
     fn locator(lifecycle: &LifecycleSnapshot) -> ActiveDaemonLocator {
         ActiveDaemonLocator {
-            service: "threadrelay".to_string(),
+            service: "mochiport".to_string(),
             api_major: 1,
             instance_id: lifecycle.service.instance_id.clone(),
             pid: lifecycle.service.pid,
             started_at_ms: lifecycle.service.started_at_ms,
             base_url: "http://127.0.0.1:3847".to_string(),
-            control_file: "C:/Users/test/AppData/Local/MochiPort/threadrelay-control.json"
+            control_file: "C:/Users/test/AppData/Local/MochiPort/mochiport-control.json"
                 .to_string(),
         }
     }

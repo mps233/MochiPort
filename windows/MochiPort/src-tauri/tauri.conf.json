@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MochiPort",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "identifier": "io.github.mps233.mochiport.windows",
   "build": {
     "runner": {

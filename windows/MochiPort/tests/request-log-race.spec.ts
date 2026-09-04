@@ -37,7 +37,7 @@ test("a slow initial request-log load cannot overwrite newer filtered results", 
     }
     const url = new URL(request.url());
     const path = url.pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, fixtureDashboard);
     if (path === "api/v1/manage/im/accounts") return fulfillJson(route, { accounts: fixtureAccounts });
     if (path === "api/v1/manage/lifecycle") return fulfillJson(route, fixtureLifecycle);
@@ -87,7 +87,7 @@ test("a stale initial request-log failure cannot clear a newer query's loading s
     }
     const url = new URL(request.url());
     const path = url.pathname.replace(/^\//, "");
-    if (path === "healthz") return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+    if (path === "healthz") return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, fixtureDashboard);
     if (path === "api/v1/manage/im/accounts") return fulfillJson(route, { accounts: fixtureAccounts });
     if (path === "api/v1/manage/lifecycle") return fulfillJson(route, fixtureLifecycle);

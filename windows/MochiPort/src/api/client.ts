@@ -320,7 +320,7 @@ export const api = {
   health: () => request("healthz", isHealthResponse),
   probe: async (): Promise<ServiceProbe> => {
     const health = await request("healthz", isHealthResponse);
-    if (health.service !== "threadrelay") {
+    if (health.service !== "mochiport") {
       throw new ManagementError("MochiPort 端口正被其他服务占用");
     }
     return health.apiMajor === 0
@@ -428,8 +428,6 @@ export const api = {
     request("api/v1/manage/codex/enhanced/operation/cancel", isCodexEnhancedOperationResponse, "POST", { requestId }),
   launchCodexEnhancedLegacy: () =>
     request("api/v1/manage/codex/enhanced/launch", isActionResponse, "POST", {}),
-  moveSession: (threadId: string, targetProvider: string | null) =>
-    request("api/v1/manage/sessions/provider", isActionResponse, "POST", { threadId, targetProvider }),
   lifecycleInstallationId: async () => {
     if (!isTauri()) return browserLifecycleInstallationId();
     const value = await invoke<unknown>("lifecycle_installation_id");

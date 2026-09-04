@@ -192,7 +192,6 @@ interface AppModelValue {
   runCodexAction: (action: CodexAction) => Promise<boolean>;
   beginCodexEnhancedLaunch: () => Promise<boolean>;
   cancelCodexEnhancedLaunch: () => Promise<void>;
-  moveSessions: (ids: string[], targetProvider: string | null) => Promise<string[]>;
   saveSettings: (draft: SettingsDraft) => Promise<boolean>;
   takeOverDaemonManagement: () => Promise<boolean>;
   rotateManagementCredential: () => Promise<boolean>;
@@ -643,7 +642,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
         return;
       }
       const health = probe.health;
-      if (health.service !== "threadrelay") throw new Error("MochiPort 端口正被其他服务占用");
+      if (health.service !== "mochiport") throw new Error("MochiPort 端口正被其他服务占用");
       if (health.apiMajor !== 1) {
         setStatus("bridgeAvailable");
         setStatusMessage(`后台管理 API v${health.apiMajor} 与当前界面不兼容`);
@@ -1132,42 +1131,6 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     }
   }, []);
 
-  const moveSessions = useCallback(async (ids: string[], targetProvider: string | null) => {
-    if (ids.length === 0) return [];
-    return withBusy("sessions-move", async () => {
-      const failed: string[] = [];
-      let firstFailure: string | undefined;
-      setErrors((current) => ({ ...current, sessions: undefined }));
-      for (const id of ids) {
-        try {
-          if (!fixtureMode) await api.moveSession(id, targetProvider);
-          else setSessions((current) => current.map((session) => session.id === id ? { ...session, modelProvider: targetProvider ?? "MochiPort" } : session));
-        } catch (error) {
-          failed.push(id);
-          firstFailure ??= error instanceof Error ? error.message : String(error);
-        }
-      }
-
-      // The daemon is the source of truth. A move can rewrite more metadata
-      // than modelProvider, and a partial failure may leave a mixed result, so
-      // always replace local rows with a fresh authoritative session snapshot.
-      const refreshFailure = fixtureMode ? undefined : await reloadSessionsFromDaemon();
-      const movedCount = ids.length - failed.length;
-      const problems: string[] = [];
-      if (failed.length > 0) {
-        problems.push(`移动完成：成功 ${movedCount} 条、失败 ${failed.length} 条。${firstFailure ?? ""}`);
-      }
-      if (refreshFailure) problems.push(`会话列表刷新失败：${refreshFailure}`);
-      if (problems.length > 0) {
-        setErrors((current) => ({ ...current, sessions: problems.join(" ") }));
-        setFeedback(undefined);
-      } else {
-        setFeedback(`已移动 ${movedCount} 个会话`);
-      }
-      return failed;
-    });
-  }, [fixtureMode, reloadSessionsFromDaemon, withBusy]);
-
   const saveSettings = useCallback(async (draft: SettingsDraft) => {
     return withBusy("settings-save", async () => {
       try {
@@ -1271,6 +1234,9 @@ export function AppModelProvider({ children }: PropsWithChildren) {
       setLifecycleOperationError("当前 Windows 安装没有后台服务管理权。");
       return false;
     }
+    // A user-requested safe restart permanently consumes this GUI session's
+    // automatic bootstrap allowance; failed recovery must stay observation-only.
+    daemonStartAttempted.current = true;
     daemonTransitionRef.current = true;
     setDaemonTransitionInProgress(true);
     setLifecycleOperationError(undefined);
@@ -1455,7 +1421,6 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     runCodexAction,
     beginCodexEnhancedLaunch: enhancedLaunch.begin,
     cancelCodexEnhancedLaunch: enhancedLaunch.cancel,
-    moveSessions,
     saveSettings,
     takeOverDaemonManagement,
     rotateManagementCredential,
@@ -1469,7 +1434,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     deleteAccount, deleteProvider, disconnectSub2Api, errors, feedback, fixtureMode, gateway, lastCheckedAt,
     lifecycle, ownsDaemonLease, daemonLeaseConflict, daemonTransitionInProgress, daemonLeaseTakeoverInProgress,
     managementCredentialRotationInProgress, lifecycleOperationError,
-    loadRequestLogDetail, loadSection, loading, moveSessions, queryRequestLogs, refresh, startDaemon, requestLogs,
+    loadRequestLogDetail, loadSection, loading, queryRequestLogs, refresh, startDaemon, requestLogs,
     requestLogsHasMore,
     refreshSub2ApiPool, restartDaemon, rotateManagementCredential, runCodexAction, saveGatewaySettings, saveProvider,
     saveSettings, takeOverDaemonManagement, saveSub2Api, selectionState, sessionProviders,

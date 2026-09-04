@@ -37,7 +37,7 @@ test("provider tools and request-log filters remain interactive", async ({ page 
   expect(runtimeErrors).toEqual([]);
 });
 
-test("session routes and enhanced launch use the Mac-compatible semantics", async ({ page }) => {
+test("session inspection and enhanced launch use the Mac-compatible semantics", async ({ page }) => {
   const runtimeErrors: string[] = [];
   page.on("console", (message) => {
     if (message.type() === "error") runtimeErrors.push(`console: ${message.text()}`);
@@ -50,18 +50,8 @@ test("session routes and enhanced launch use the Mac-compatible semantics", asyn
   await page.getByRole("button", { name: "会话" }).click();
   const gatewaySession = page.locator(".data-table__row", { hasText: "Windows 客户端界面复刻" });
   const directSession = page.locator(".data-table__row", { hasText: "优化消息渠道接入" });
-  await expect(gatewaySession.locator(".route-cell small")).toHaveText("ai-gateway");
+  await expect(gatewaySession.locator(".route-cell small")).toHaveText("MochiPort");
   await expect(directSession.locator(".route-cell small")).toHaveText("openai");
-  await gatewaySession.getByRole("checkbox").check();
-  await page.getByLabel("目标 Provider").selectOption("openai");
-  await page.getByRole("button", { name: "移动会话" }).click();
-  await expect(gatewaySession.locator(".route-cell small")).toHaveText("openai");
-
-  await gatewaySession.getByRole("checkbox").check();
-  await page.getByLabel("目标 Provider").selectOption("ai-gateway");
-  await page.getByRole("button", { name: "移动会话" }).click();
-  await expect(gatewaySession.locator(".route-cell small")).toHaveText("ai-gateway");
-
   await page.getByRole("button", { name: "Codex" }).click();
   await expect(page.locator(".mode-card > strong")).toHaveText("MochiPort AI 网关");
   await page.getByRole("button", { name: "增强模式启动 Codex" }).click();

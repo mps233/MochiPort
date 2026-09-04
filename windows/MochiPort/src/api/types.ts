@@ -160,7 +160,7 @@ export interface CodexStatus {
   providers: CodexProvider[];
   imageGenerationEnabled: boolean;
   connectionMode: string;
-  providerMode?: "threadrelay" | "direct-api" | "unknown" | null;
+  providerMode?: "mochiport" | "threadrelay" | "direct-api" | "unknown" | null;
   providerModeMessage?: string | null;
   activeProvider?: string | null;
 }

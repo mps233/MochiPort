@@ -197,6 +197,7 @@ export const isCodexStatus: Validator<CodexStatus> = (value): value is CodexStat
     || !isNullableString(value.activeProvider)) return false;
   return value.providerMode === undefined
     || value.providerMode === null
+    || value.providerMode === "mochiport"
     || value.providerMode === "threadrelay"
     || value.providerMode === "direct-api"
     || value.providerMode === "unknown";

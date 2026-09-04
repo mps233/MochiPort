@@ -51,7 +51,7 @@ test("a stale Sub2API pool request cannot overwrite a newly saved connection", a
     const request = route.request();
     const body = request.postDataJSON() as Record<string, unknown> | null;
     if (path === "healthz") {
-      return fulfillJson(route, { service: "threadrelay", apiMajor: 1, ready: true });
+      return fulfillJson(route, { service: "mochiport", apiMajor: 1, ready: true });
     }
     if (path === "api/v1/manage/dashboard") return fulfillJson(route, fixtureDashboard);
     if (path === "api/v1/manage/im/accounts") return fulfillJson(route, { accounts: fixtureAccounts });

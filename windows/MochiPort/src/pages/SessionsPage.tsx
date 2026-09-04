@@ -1,18 +1,14 @@
 import {
-  ArrowRight,
-  Check,
-  Clock3,
   Copy,
   Folder,
   Inbox,
   Laptop,
   RefreshCw,
-  Route,
   Search,
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { CodexSession } from "../api/types";
-import { Button, Card, EmptyState, InlineError, SearchField, SectionHeading, Select, StatusPill, cn } from "../components/ui";
+import { Button, Card, EmptyState, InlineError, SearchField, SectionHeading, StatusPill, cn } from "../components/ui";
 import { useAppModel } from "../state/AppModel";
 import { formatDateTime } from "../utils/format";
 
@@ -58,9 +54,6 @@ export function SessionsPage() {
   const model = useAppModel();
   const [query, setQuery] = useState("");
   const [routeFilter, setRouteFilter] = useState<RouteFilter>("all");
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [target, setTarget] = useState<string>(MOCHIPORT_PROVIDER);
-  const directProviders = useMemo(() => model.sessionProviders.filter((provider) => !isMochiPortProvider(provider)), [model.sessionProviders]);
   const filtered = useMemo(() => {
     const matching = model.sessions.filter((session) => {
       const matchesQuery = !query.trim() || `${sessionTitle(session)} ${session.preview} ${session.cwd ?? ""} ${session.modelProvider} ${session.id}`.toLowerCase().includes(query.toLowerCase());
@@ -94,32 +87,6 @@ export function SessionsPage() {
       : model.dashboard.executionClients.codexApp.configured ? "offline" : "unavailable";
   const source = sourceCopy(sourceState);
 
-  const toggle = (id: string) => setSelected((current) => {
-    const next = new Set(current);
-    if (next.has(id)) next.delete(id); else next.add(id);
-    return next;
-  });
-  const toggleAll = () => setSelected((current) => {
-    const next = new Set(current);
-    const allFilteredSelected = filtered.length > 0 && filtered.every((session) => current.has(session.id));
-    for (const session of filtered) {
-      if (allFilteredSelected) next.delete(session.id); else next.add(session.id);
-    }
-    return next;
-  });
-  const moveSelected = async () => {
-    const targetProvider = isMochiPortProvider(target) ? MOCHIPORT_PROVIDER : target;
-    const ids = model.sessions
-      .filter((session) => selected.has(session.id) && session.modelProvider !== targetProvider)
-      .map((session) => session.id);
-    if (ids.length === 0) {
-      setSelected(new Set());
-      return;
-    }
-    const failed = await model.moveSessions(ids, target === MOCHIPORT_PROVIDER ? null : target);
-    setSelected(new Set(failed));
-  };
-
   return (
     <div className="page page--table">
       <Card className="source-banner">
@@ -137,32 +104,17 @@ export function SessionsPage() {
         <Button variant="ghost" icon={RefreshCw} size="small" loading={model.loading.sessions} onClick={() => void model.loadSection("sessions", true)}>刷新</Button>
       </div>
 
-      {selected.size > 0 && (
-        <div className="selection-bar">
-          <span><Check size={15} />已选 {selected.size} 项</span>
-          <div>
-            <Select value={target} onChange={(event) => setTarget(event.target.value)} aria-label="目标 Provider">
-              <option value={MOCHIPORT_PROVIDER}>MochiPort</option>
-              {directProviders.map((provider) => <option value={provider} key={provider}>{provider}</option>)}
-            </Select>
-            <Button variant="primary" icon={Route} loading={model.busy["sessions-move"]} onClick={() => void moveSelected()}>移动会话</Button>
-          </div>
-        </div>
-      )}
-
-      <SectionHeading title="会话" description={`${filtered.length} 个会话${selected.size ? ` · 已选 ${selected.size}` : ""}`} />
+      <SectionHeading title="会话" description={`${filtered.length} 个会话`} />
       <Card className="data-table-card sessions-table-card">
         {filtered.length ? (
           <div className="data-table sessions-table">
             <div className="data-table__header session-table-grid">
-              <label className="table-checkbox"><input type="checkbox" checked={filtered.length > 0 && filtered.every((session) => selected.has(session.id))} onChange={toggleAll} aria-label="选择全部会话" /></label>
               <span>会话</span><span>项目</span><span>路由</span><span>最后更新</span><span />
             </div>
             {filtered.map((session) => {
               const throughGateway = isMochiPortProvider(session.modelProvider);
               return (
-                <div className={cn("data-table__row session-table-grid", selected.has(session.id) && "data-table__row--selected")} key={session.id}>
-                  <label className="table-checkbox"><input type="checkbox" checked={selected.has(session.id)} onChange={() => toggle(session.id)} aria-label={`选择会话 ${sessionTitle(session)}`} /></label>
+                <div className="data-table__row session-table-grid" key={session.id}>
                   <div className="session-primary"><strong>{sessionTitle(session)}</strong><span>{session.preview || session.id}</span></div>
                   <div className="session-project"><strong><Folder size={11} />{projectTitle(projectPath(session))}</strong><small>{projectPath(session) ?? "没有工作目录"}</small></div>
                   <div className="route-cell"><StatusPill tone={throughGateway ? "accent" : "neutral"}>{throughGateway ? "MochiPort" : "原始"}</StatusPill><small>{throughGateway ? MOCHIPORT_PROVIDER : session.modelProvider}</small></div>
