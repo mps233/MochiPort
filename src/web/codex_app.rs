@@ -8,7 +8,7 @@ use crate::{
     ai_gateway::catalog::configured_models_response_with_etag,
     app_state::{LifecycleAdmissionPermit, SharedState},
     codex_app_config::{self, ConfigureCodexAppOptions},
-    codex_app_enhanced, codex_session_history,
+    codex_app_enhanced,
     config::LocalConnectionMode,
     remote_control_backend,
 };
@@ -44,21 +44,6 @@ pub(super) struct DeleteCodexAppProviderRequest {
 pub(super) struct SetCodexAppProviderWebSocketRequest {
     provider_name: String,
     enabled: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct MoveCodexAppSessionProviderRequest {
-    thread_id: String,
-    rollout_path: Option<String>,
-    target_provider: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(super) struct MoveManagedCodexAppSessionProviderRequest {
-    thread_id: String,
-    target_provider: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -248,8 +233,7 @@ pub(super) async fn set_codex_app_provider_websocket(
     let backend_url = config.remote_control_base_url();
     match codex_app_config::set_codex_app_provider_websocket(None, provider_name, request.enabled) {
         Ok(config_path) => {
-            let status =
-                codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url, true);
+            let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url);
             state
                 .push_event(
                     "info",
@@ -287,8 +271,7 @@ pub(super) async fn delete_codex_app_provider(
     let backend_url = config.remote_control_base_url();
     match codex_app_config::delete_codex_app_provider(None, request.provider_name.trim()) {
         Ok(config_path) => {
-            let status =
-                codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url, true);
+            let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url);
             state
                 .push_event(
                     "info",
@@ -887,62 +870,6 @@ fn first_session_i64(value: &serde_json::Value, keys: &[&str]) -> Option<i64> {
     })
 }
 
-pub(super) async fn move_codex_app_session_provider(
-    Json(request): Json<MoveCodexAppSessionProviderRequest>,
-) -> impl IntoResponse {
-    let rollout_path = request
-        .rollout_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(std::path::PathBuf::from);
-    move_session_provider(request.thread_id, request.target_provider, rollout_path)
-}
-
-pub(super) async fn move_managed_codex_app_session_provider(
-    Json(request): Json<MoveManagedCodexAppSessionProviderRequest>,
-) -> impl IntoResponse {
-    // The authenticated management API resolves the rollout from the thread ID.
-    // Never trust a GUI-supplied local path for a file mutation.
-    move_session_provider(request.thread_id, request.target_provider, None)
-}
-
-fn move_session_provider(
-    thread_id: String,
-    target_provider: Option<String>,
-    rollout_path: Option<std::path::PathBuf>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let target_provider = target_provider
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let result = match target_provider {
-        Some(provider) => codex_session_history::move_thread_to_provider(
-            None,
-            thread_id.as_str(),
-            rollout_path,
-            if provider.eq_ignore_ascii_case("ai-gateway") {
-                "MochiPort"
-            } else {
-                provider
-            },
-        ),
-        None => {
-            codex_session_history::move_thread_to_ai_gateway(None, thread_id.as_str(), rollout_path)
-        }
-    };
-    match result {
-        Ok(report) => (
-            StatusCode::OK,
-            Json(json!({ "ok": true, "report": report })),
-        ),
-        Err(err) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": err.to_string() })),
-        ),
-    }
-}
-
 pub(super) async fn repair_codex_app_gui_environment(
     State(state): State<SharedState>,
 ) -> impl IntoResponse {
@@ -951,7 +878,7 @@ pub(super) async fn repair_codex_app_gui_environment(
     };
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
-    let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url, true);
+    let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url);
     if !status.config_ok || !status.auth_ok {
         return (
             StatusCode::BAD_REQUEST,
@@ -1095,11 +1022,7 @@ pub(super) async fn codex_app_status_snapshot(
     state: &SharedState,
 ) -> codex_app_config::CodexAppConfigStatus {
     let config = state.config.lock().await.clone();
-    codex_app_config::inspect_codex_app_config_for_mode(
-        None,
-        &config.remote_control_base_url(),
-        true,
-    )
+    codex_app_config::inspect_codex_app_config_for_mode(None, &config.remote_control_base_url())
 }
 
 #[cfg(test)]

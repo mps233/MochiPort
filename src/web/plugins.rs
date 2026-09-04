@@ -29,6 +29,8 @@ const MAX_FEATURED_PLUGINS: usize = 8;
 const OPENAI_BUNDLED_MARKETPLACE: &str = "openai-bundled";
 const OPENAI_CURATED_MARKETPLACE: &str = "openai-curated";
 const OPENAI_CURATED_REMOTE_MARKETPLACE: &str = "openai-curated-remote";
+// These prefixes identify IDs emitted by older MochiPort builds. Keep them
+// strictly as read-side aliases so new catalog responses use upstream IDs.
 const LEGACY_CODEXHUB_CURATED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-local-";
 const LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
 const LOCAL_BUNDLED_REMOTE_ID_PREFIX: &str = "local~openai-bundled~";
@@ -225,11 +227,7 @@ fn load_local_curated_remote_plugins() -> Result<Vec<Value>, String> {
         .iter()
         .filter(|plugin| !curated_plugin_requires_remote_backend(plugin))
         .filter_map(|plugin| {
-            local_marketplace_plugin_to_remote(
-                plugin,
-                OPENAI_CURATED_REMOTE_MARKETPLACE,
-                LEGACY_CODEXHUB_CURATED_REMOTE_ID_PREFIX,
-            )
+            local_marketplace_plugin_to_remote(plugin, OPENAI_CURATED_REMOTE_MARKETPLACE)
         })
         .collect())
 }
@@ -256,14 +254,10 @@ fn load_installed_remote_plugins() -> Vec<Value> {
     installed_plugin_config_ids()
         .into_iter()
         .filter_map(|plugin_id| {
-            let plugin = if plugin_id.ends_with("@openai-curated")
-                || plugin_id.ends_with(&format!("@{OPENAI_CURATED_REMOTE_MARKETPLACE}"))
-            {
-                let plugin_name = plugin_id.split('@').next().unwrap_or_default();
-                find_local_curated_remote_plugin(plugin_name).ok().flatten()
-            } else {
-                None
-            }?;
+            let plugin_name = curated_plugin_name_from_installed_id(&plugin_id)?;
+            let plugin = find_local_curated_remote_plugin(plugin_name)
+                .ok()
+                .flatten()?;
 
             Some(installed_plugin_item(plugin))
         })
@@ -305,7 +299,24 @@ fn installed_plugin_config_ids() -> Vec<String> {
 fn find_local_curated_remote_plugin(plugin_id: &str) -> Result<Option<Value>, String> {
     Ok(load_local_curated_remote_plugins()?
         .into_iter()
-        .find(|plugin| plugin_matches_id(plugin, plugin_id, OPENAI_CURATED_REMOTE_MARKETPLACE)))
+        .find(|plugin| curated_plugin_matches_id(plugin, plugin_id)))
+}
+
+fn curated_plugin_name_from_installed_id(plugin_id: &str) -> Option<&str> {
+    plugin_id
+        .strip_prefix(LEGACY_CODEXHUB_CURATED_REMOTE_ID_PREFIX)
+        .or_else(|| plugin_id.strip_suffix("@openai-curated"))
+        .or_else(|| plugin_id.strip_suffix("@openai-curated-remote"))
+        .filter(|name| !name.is_empty())
+}
+
+fn curated_plugin_matches_id(plugin: &Value, plugin_id: &str) -> bool {
+    let plugin_id = plugin_id
+        .strip_prefix(LEGACY_CODEXHUB_CURATED_REMOTE_ID_PREFIX)
+        .or_else(|| plugin_id.strip_suffix("@openai-curated"))
+        .or_else(|| plugin_id.strip_suffix("@openai-curated-remote"))
+        .unwrap_or(plugin_id);
+    plugin_matches_id(plugin, plugin_id, OPENAI_CURATED_REMOTE_MARKETPLACE)
 }
 
 fn find_local_bundled_compat_plugin(plugin_id: &str) -> Result<Option<Value>, String> {
@@ -339,12 +350,11 @@ fn find_local_bundled_compat_plugin(plugin_id: &str) -> Result<Option<Value>, St
         .iter()
         .find(|plugin| plugin.get("name").and_then(Value::as_str) == Some(plugin_name.as_str()))
         .and_then(|plugin| {
-            let remote_id = bundled_compat_remote_id(plugin_id, &plugin_name);
+            let remote_id = local_bundled_remote_id(&plugin_name);
             let plugin = local_marketplace_plugin_to_remote_with_id(
                 plugin,
                 OPENAI_BUNDLED_MARKETPLACE,
-                Some(remote_id.as_str()),
-                LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX,
+                &remote_id,
             )?;
             Some(with_local_bundled_skills(plugin, &plugin_name))
         }))
@@ -367,13 +377,8 @@ fn bundled_plugin_name_from_compat_id(plugin_id: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
-fn bundled_compat_remote_id(plugin_id: &str, plugin_name: &str) -> String {
-    if plugin_id.starts_with(LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX)
-        || plugin_id.starts_with(LOCAL_BUNDLED_REMOTE_ID_PREFIX)
-    {
-        return plugin_id.to_string();
-    }
-    format!("{LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX}{plugin_name}")
+fn local_bundled_remote_id(plugin_name: &str) -> String {
+    format!("{LOCAL_BUNDLED_REMOTE_ID_PREFIX}{plugin_name}")
 }
 
 fn read_local_bundled_skill(plugin_name: &str, skill_name: &str) -> Result<Option<String>, String> {
@@ -620,24 +625,18 @@ fn recommended_plugin_item(plugin: &Value) -> Option<Value> {
     }))
 }
 
-fn local_marketplace_plugin_to_remote(
-    plugin: &Value,
-    marketplace_name: &str,
-    id_prefix: &str,
-) -> Option<Value> {
-    local_marketplace_plugin_to_remote_with_id(plugin, marketplace_name, None, id_prefix)
+fn local_marketplace_plugin_to_remote(plugin: &Value, marketplace_name: &str) -> Option<Value> {
+    let name = plugin.get("name")?.as_str()?;
+    let remote_id = format!("{name}@{marketplace_name}");
+    local_marketplace_plugin_to_remote_with_id(plugin, marketplace_name, &remote_id)
 }
 
 fn local_marketplace_plugin_to_remote_with_id(
     plugin: &Value,
     marketplace_name: &str,
-    remote_id: Option<&str>,
-    id_prefix: &str,
+    remote_id: &str,
 ) -> Option<Value> {
     let name = plugin.get("name")?.as_str()?;
-    let remote_id = remote_id
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{id_prefix}{name}"));
     let interface = plugin.get("interface");
     let display_name = interface
         .and_then(|item| item.get("displayName").or_else(|| item.get("display_name")))
@@ -968,6 +967,65 @@ mod tests {
         assert!(featured.iter().any(|name| name == "remotion"));
         assert!(featured.iter().any(|name| name == "aardvark-tool"));
         assert!(featured.len() <= MAX_FEATURED_PLUGINS);
+    }
+
+    #[test]
+    fn curated_remote_ids_use_marketplace_suffix() {
+        let plugin = json!({ "name": "github" });
+        let converted =
+            local_marketplace_plugin_to_remote(&plugin, OPENAI_CURATED_REMOTE_MARKETPLACE)
+                .expect("convert curated plugin");
+
+        assert_eq!(
+            converted.get("id").and_then(Value::as_str),
+            Some("github@openai-curated-remote")
+        );
+        assert!(
+            !converted
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .starts_with("plugins~codexhub-")
+        );
+    }
+
+    #[test]
+    fn curated_remote_lookup_accepts_legacy_ids() {
+        let plugin = local_marketplace_plugin_to_remote(
+            &json!({ "name": "github" }),
+            OPENAI_CURATED_REMOTE_MARKETPLACE,
+        )
+        .expect("convert curated plugin");
+
+        assert!(curated_plugin_matches_id(
+            &plugin,
+            "github@openai-curated-remote"
+        ));
+        assert!(curated_plugin_matches_id(&plugin, "github@openai-curated"));
+        assert!(curated_plugin_matches_id(
+            &plugin,
+            "plugins~codexhub-local-github"
+        ));
+        assert_eq!(
+            curated_plugin_name_from_installed_id("plugins~codexhub-local-github"),
+            Some("github")
+        );
+    }
+
+    #[test]
+    fn bundled_remote_ids_use_local_marketplace_prefix() {
+        assert_eq!(
+            local_bundled_remote_id("computer-use"),
+            "local~openai-bundled~computer-use"
+        );
+        assert_eq!(
+            bundled_plugin_name_from_compat_id("local~openai-bundled~computer-use"),
+            Some("computer-use".to_string())
+        );
+        assert_eq!(
+            bundled_plugin_name_from_compat_id("plugins~codexhub-bundled-computer-use"),
+            Some("computer-use".to_string())
+        );
     }
 
     #[test]

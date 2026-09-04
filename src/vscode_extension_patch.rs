@@ -13,8 +13,10 @@ const APP_SERVER_SUBCOMMAND: &str = "app-server";
 const ANALYTICS_FLAG: &str = "--analytics-default-enabled";
 const REMOTE_CONTROL_FLAG: &str = "--remote-control";
 const APP_SERVER_LAUNCH_SCAN_BYTES: usize = 2048;
-const BACKUP_SUFFIX: &str = ".bak-codexhub";
-const STATE_SUFFIX: &str = ".codexhub-state.json";
+const BACKUP_SUFFIX: &str = ".bak-mochiport";
+const STATE_SUFFIX: &str = ".mochiport-state.json";
+const LEGACY_BACKUP_SUFFIX: &str = ".bak-codexhub";
+const LEGACY_STATE_SUFFIX: &str = ".codexhub-state.json";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,7 +127,10 @@ fn find_array_end(source: &str, array_start: usize, scan_end: usize) -> Option<u
     None
 }
 
-pub fn enable_remote_control() -> Result<VsCodeExtensionPatchReport> {
+/// Inspects the installed extension without modifying it. An extension that
+/// already launches its app-server with `--remote-control` uses its own
+/// supported capability and never needs a MochiPort patch.
+pub fn inspect_remote_control() -> Result<VsCodeExtensionPatchReport> {
     let Some(install) = find_latest_codex_extension()? else {
         return Ok(VsCodeExtensionPatchReport {
             extension_dir: None,
@@ -135,10 +140,84 @@ pub fn enable_remote_control() -> Result<VsCodeExtensionPatchReport> {
             message: "没有找到 OpenAI Codex VS Code 插件安装目录。".to_string(),
         });
     };
+    inspect_remote_control_install(install)
+}
 
+fn inspect_remote_control_install(install: ExtensionInstall) -> Result<VsCodeExtensionPatchReport> {
     let extension_js = install.extension_js;
-    let backup_path = backup_path(&extension_js);
-    let state_path = state_path(&extension_js);
+    let managed_backup = managed_backup_path(&extension_js);
+    let managed_state = managed_state_path(&extension_js);
+    let source = fs::read_to_string(&extension_js)
+        .with_context(|| format!("failed to read {}", extension_js.display()))?;
+
+    let Some(patched) = patch_remote_control_source(&source)? else {
+        return Ok(VsCodeExtensionPatchReport {
+            extension_dir: Some(install.dir),
+            extension_js: Some(extension_js),
+            backup_path: None,
+            action: "unsupported".to_string(),
+            message: "当前 VS Code Codex 插件未暴露可识别的远程控制启动能力。".to_string(),
+        });
+    };
+    if patched == source {
+        let managed_patch = managed_backup.is_some() || managed_state.is_some();
+        let reported_backup = managed_backup.or_else(|| {
+            managed_state.as_ref().map(|path| {
+                if *path == legacy_state_path(&extension_js) {
+                    legacy_backup_path(&extension_js)
+                } else {
+                    backup_path(&extension_js)
+                }
+            })
+        });
+        return Ok(VsCodeExtensionPatchReport {
+            extension_dir: Some(install.dir),
+            extension_js: Some(extension_js),
+            backup_path: reported_backup,
+            action: if managed_patch {
+                "legacy_fallback_installed".to_string()
+            } else {
+                "official_supported".to_string()
+            },
+            message: if managed_patch {
+                "VS Code Codex 插件包含 --remote-control；检测到旧版 MochiPort 补丁记录。"
+                    .to_string()
+            } else {
+                "VS Code Codex 插件已原生支持 --remote-control。".to_string()
+            },
+        });
+    }
+
+    Ok(VsCodeExtensionPatchReport {
+        extension_dir: Some(install.dir),
+        extension_js: Some(extension_js),
+        backup_path: None,
+        action: "legacy_fallback_required".to_string(),
+        message: "当前 VS Code Codex 插件未原生支持 --remote-control；只有显式确认后才可使用旧版兼容补丁。".to_string(),
+    })
+}
+
+/// Applies the source rewrite only after an explicit user command. Normal
+/// daemon start and shutdown paths must call `inspect_remote_control` instead.
+pub fn enable_legacy_patch_fallback() -> Result<VsCodeExtensionPatchReport> {
+    let Some(install) = find_latest_codex_extension()? else {
+        return Ok(VsCodeExtensionPatchReport {
+            extension_dir: None,
+            extension_js: None,
+            backup_path: None,
+            action: "not_found".to_string(),
+            message: "没有找到 OpenAI Codex VS Code 插件安装目录。".to_string(),
+        });
+    };
+    enable_legacy_patch_fallback_for_install(install)
+}
+
+fn enable_legacy_patch_fallback_for_install(
+    install: ExtensionInstall,
+) -> Result<VsCodeExtensionPatchReport> {
+    let extension_js = install.extension_js;
+    let new_backup_path = backup_path(&extension_js);
+    let new_state_path = state_path(&extension_js);
     let source = fs::read_to_string(&extension_js)
         .with_context(|| format!("failed to read {}", extension_js.display()))?;
 
@@ -149,51 +228,61 @@ pub fn enable_remote_control() -> Result<VsCodeExtensionPatchReport> {
         ));
     };
     if patched == source {
-        let managed_patch = backup_path.exists();
-        if managed_patch {
-            ensure_state_for_existing_patch(&extension_js, &backup_path, &state_path, &source)?;
+        let managed_backup = managed_backup_path(&extension_js);
+        if let Some(backup_path) = managed_backup.as_ref()
+            && managed_state_path(&extension_js).is_none()
+        {
+            ensure_state_for_existing_patch(&extension_js, backup_path, &new_state_path, &source)?;
         }
         return Ok(VsCodeExtensionPatchReport {
             extension_dir: Some(install.dir),
             extension_js: Some(extension_js),
-            backup_path: managed_patch.then_some(backup_path),
-            action: if managed_patch {
+            backup_path: managed_backup.clone(),
+            action: if managed_backup.is_some() {
                 "already_patched".to_string()
             } else {
-                "already_supported".to_string()
+                "official_supported".to_string()
             },
-            message: if managed_patch {
-                "VS Code Codex 插件已经带有 --remote-control。".to_string()
+            message: if managed_backup.is_some() {
+                "VS Code Codex 插件已存在 MochiPort 兼容补丁。".to_string()
             } else {
-                "VS Code Codex 插件已包含 --remote-control，未创建还原备份。".to_string()
+                "VS Code Codex 插件已原生支持 --remote-control，未写入补丁。".to_string()
             },
         });
     }
 
-    if !backup_path.exists() {
-        fs::copy(&extension_js, &backup_path).with_context(|| {
+    if !new_backup_path.exists() {
+        fs::copy(&extension_js, &new_backup_path).with_context(|| {
             format!(
                 "failed to backup {} to {}",
                 extension_js.display(),
-                backup_path.display()
+                new_backup_path.display()
             )
         })?;
     }
 
     fs::write(&extension_js, &patched)
         .with_context(|| format!("failed to write {}", extension_js.display()))?;
-    write_patch_state(&extension_js, &backup_path, &source, &patched, &state_path)?;
+    write_patch_state(
+        &extension_js,
+        &new_backup_path,
+        &source,
+        &patched,
+        &new_state_path,
+    )?;
 
     Ok(VsCodeExtensionPatchReport {
         extension_dir: Some(install.dir),
         extension_js: Some(extension_js),
-        backup_path: Some(backup_path),
+        backup_path: Some(new_backup_path),
         action: "patched".to_string(),
         message: "已为 VS Code Codex 插件启动参数加入 --remote-control。".to_string(),
     })
 }
 
-pub fn restore_remote_control() -> Result<VsCodeExtensionPatchReport> {
+/// Restores a patch created by `enable_legacy_patch_fallback`. This is an
+/// explicit maintenance action, never a daemon lifecycle hook.
+pub fn restore_legacy_patch_fallback() -> Result<VsCodeExtensionPatchReport> {
     let Some(install) = find_latest_codex_extension()? else {
         return Ok(VsCodeExtensionPatchReport {
             extension_dir: None,
@@ -203,30 +292,38 @@ pub fn restore_remote_control() -> Result<VsCodeExtensionPatchReport> {
             message: "没有找到 OpenAI Codex VS Code 插件安装目录。".to_string(),
         });
     };
+    restore_legacy_patch_fallback_for_install(install)
+}
 
+fn restore_legacy_patch_fallback_for_install(
+    install: ExtensionInstall,
+) -> Result<VsCodeExtensionPatchReport> {
     let extension_js = install.extension_js;
-    let backup_path = backup_path(&extension_js);
-    let state_path = state_path(&extension_js);
-    if !backup_path.exists() {
+    let managed_state_path = managed_state_path(&extension_js);
+    let state = managed_state_path
+        .as_deref()
+        .and_then(|path| read_patch_state(path).ok());
+    let current_backup_path = backup_path(&extension_js);
+    let managed_backup_path = managed_backup_path(&extension_js);
+    let Some(managed_backup_path) = managed_backup_path else {
         return Ok(VsCodeExtensionPatchReport {
             extension_dir: Some(install.dir),
             extension_js: Some(extension_js),
-            backup_path: Some(backup_path),
+            backup_path: Some(current_backup_path),
             action: "no_backup".to_string(),
             message: "没有找到 MochiPort 创建的插件备份，未还原。".to_string(),
         });
-    }
+    };
 
     let current = fs::read_to_string(&extension_js)
         .with_context(|| format!("failed to read {}", extension_js.display()))?;
-    let state = read_patch_state(&state_path).ok();
     if let Some(state) = state.as_ref()
         && state.patched_sha256 != sha256_hex(current.as_bytes())
     {
         return Ok(VsCodeExtensionPatchReport {
             extension_dir: Some(install.dir),
             extension_js: Some(extension_js),
-            backup_path: Some(backup_path),
+            backup_path: Some(managed_backup_path),
             action: "skipped_modified".to_string(),
             message: "VS Code 插件文件已被用户或插件更新修改，未自动还原。".to_string(),
         });
@@ -238,25 +335,27 @@ pub fn restore_remote_control() -> Result<VsCodeExtensionPatchReport> {
         return Ok(VsCodeExtensionPatchReport {
             extension_dir: Some(install.dir),
             extension_js: Some(extension_js),
-            backup_path: Some(backup_path),
+            backup_path: Some(managed_backup_path),
             action: "skipped_unmanaged".to_string(),
             message: "当前插件文件不像 MochiPort 写入的版本，未自动还原。".to_string(),
         });
     }
 
-    fs::copy(&backup_path, &extension_js).with_context(|| {
+    fs::copy(&managed_backup_path, &extension_js).with_context(|| {
         format!(
             "failed to restore {} from {}",
             extension_js.display(),
-            backup_path.display()
+            managed_backup_path.display()
         )
     })?;
-    let _ = fs::remove_file(&state_path);
+    for path in [state_path(&extension_js), legacy_state_path(&extension_js)] {
+        let _ = fs::remove_file(path);
+    }
 
     Ok(VsCodeExtensionPatchReport {
         extension_dir: Some(install.dir),
         extension_js: Some(extension_js),
-        backup_path: Some(backup_path),
+        backup_path: Some(managed_backup_path),
         action: "restored".to_string(),
         message: "已还原 VS Code Codex 插件原始启动方式。".to_string(),
     })
@@ -350,25 +449,50 @@ fn version_key(version: &str) -> Vec<u64> {
 }
 
 fn backup_path(extension_js: &Path) -> PathBuf {
-    extension_js.with_file_name(format!(
-        "{}{}",
-        extension_js
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("extension.js"),
-        BACKUP_SUFFIX
-    ))
+    backup_path_for_suffix(extension_js, BACKUP_SUFFIX)
 }
 
 fn state_path(extension_js: &Path) -> PathBuf {
+    state_path_for_suffix(extension_js, STATE_SUFFIX)
+}
+
+fn legacy_backup_path(extension_js: &Path) -> PathBuf {
+    backup_path_for_suffix(extension_js, LEGACY_BACKUP_SUFFIX)
+}
+
+fn legacy_state_path(extension_js: &Path) -> PathBuf {
+    state_path_for_suffix(extension_js, LEGACY_STATE_SUFFIX)
+}
+
+fn backup_path_for_suffix(extension_js: &Path, suffix: &str) -> PathBuf {
+    path_with_suffix(extension_js, suffix)
+}
+
+fn state_path_for_suffix(extension_js: &Path, suffix: &str) -> PathBuf {
+    path_with_suffix(extension_js, suffix)
+}
+
+fn path_with_suffix(extension_js: &Path, suffix: &str) -> PathBuf {
     extension_js.with_file_name(format!(
         "{}{}",
         extension_js
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("extension.js"),
-        STATE_SUFFIX
+        suffix
     ))
+}
+
+fn managed_backup_path(extension_js: &Path) -> Option<PathBuf> {
+    [backup_path(extension_js), legacy_backup_path(extension_js)]
+        .into_iter()
+        .find(|path| path.exists())
+}
+
+fn managed_state_path(extension_js: &Path) -> Option<PathBuf> {
+    [state_path(extension_js), legacy_state_path(extension_js)]
+        .into_iter()
+        .find(|path| path.exists())
 }
 
 fn ensure_state_for_existing_patch(
@@ -418,7 +542,28 @@ fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{REMOTE_CONTROL_FLAG, patch_remote_control_source};
+    use std::{fs, path::PathBuf, time::SystemTime};
+
+    use tempfile::tempdir;
+
+    use super::{
+        BACKUP_SUFFIX, ExtensionInstall, LEGACY_BACKUP_SUFFIX, LEGACY_STATE_SUFFIX,
+        REMOTE_CONTROL_FLAG, STATE_SUFFIX, enable_legacy_patch_fallback_for_install,
+        inspect_remote_control_install, legacy_backup_path, legacy_state_path,
+        patch_remote_control_source, restore_legacy_patch_fallback_for_install, sha256_hex,
+        state_path, write_patch_state,
+    };
+
+    const SOURCE: &str = r#"this.logger.info("Spawning codex app-server"),e=Cde(this.extensionUri,["app-server","--analytics-default-enabled"] )"#;
+
+    fn test_install(extension_js: PathBuf, dir: PathBuf) -> ExtensionInstall {
+        ExtensionInstall {
+            dir,
+            extension_js,
+            version_key: vec![1],
+            modified: SystemTime::UNIX_EPOCH,
+        }
+    }
 
     #[test]
     fn patches_current_26_707_launch_arguments() {
@@ -502,5 +647,128 @@ mod tests {
             patch_remote_control_source(source).expect("source transformation should succeed");
 
         assert!(transformed.is_none());
+    }
+
+    #[test]
+    fn new_fallback_writes_mochiport_artifacts() {
+        let temporary = tempdir().expect("temporary directory");
+        let extension_js = temporary.path().join("extension.js");
+        fs::write(&extension_js, SOURCE).expect("write extension source");
+
+        let report = enable_legacy_patch_fallback_for_install(test_install(
+            extension_js.clone(),
+            temporary.path().to_path_buf(),
+        ))
+        .expect("enable fallback");
+
+        let backup = extension_js.with_file_name(format!("extension.js{BACKUP_SUFFIX}"));
+        let state = extension_js.with_file_name(format!("extension.js{STATE_SUFFIX}"));
+        let old_backup = extension_js.with_file_name(format!("extension.js{LEGACY_BACKUP_SUFFIX}"));
+        let old_state = extension_js.with_file_name(format!("extension.js{LEGACY_STATE_SUFFIX}"));
+
+        assert_eq!(report.action, "patched");
+        assert_eq!(report.backup_path, Some(backup.clone()));
+        assert!(backup.exists());
+        assert!(state.exists());
+        assert!(!old_backup.exists());
+        assert!(!old_state.exists());
+        assert!(
+            fs::read_to_string(&extension_js)
+                .expect("read patched source")
+                .contains(REMOTE_CONTROL_FLAG)
+        );
+    }
+
+    #[test]
+    fn inspect_recognizes_legacy_codexhub_artifacts() {
+        let temporary = tempdir().expect("temporary directory");
+        let extension_js = temporary.path().join("extension.js");
+        let patched = patch_remote_control_source(SOURCE)
+            .expect("source transformation should succeed")
+            .expect("supported launch site");
+        fs::write(&extension_js, &patched).expect("write patched source");
+
+        let backup = legacy_backup_path(&extension_js);
+        fs::write(&backup, SOURCE).expect("write legacy backup");
+        let state = legacy_state_path(&extension_js);
+        write_patch_state(&extension_js, &backup, SOURCE, &patched, &state)
+            .expect("write legacy state");
+
+        let report = inspect_remote_control_install(test_install(
+            extension_js,
+            temporary.path().to_path_buf(),
+        ))
+        .expect("inspect fallback");
+
+        assert_eq!(report.action, "legacy_fallback_installed");
+        assert_eq!(report.backup_path, Some(backup));
+    }
+
+    #[test]
+    fn restore_uses_legacy_codexhub_backup_and_state() {
+        let temporary = tempdir().expect("temporary directory");
+        let extension_js = temporary.path().join("extension.js");
+        let patched = patch_remote_control_source(SOURCE)
+            .expect("source transformation should succeed")
+            .expect("supported launch site");
+        fs::write(&extension_js, &patched).expect("write patched source");
+
+        let backup = legacy_backup_path(&extension_js);
+        fs::write(&backup, SOURCE).expect("write legacy backup");
+        let state = legacy_state_path(&extension_js);
+        write_patch_state(&extension_js, &backup, SOURCE, &patched, &state)
+            .expect("write legacy state");
+
+        let report = restore_legacy_patch_fallback_for_install(test_install(
+            extension_js.clone(),
+            temporary.path().to_path_buf(),
+        ))
+        .expect("restore fallback");
+
+        assert_eq!(report.action, "restored");
+        assert_eq!(report.backup_path, Some(backup.clone()));
+        assert_eq!(
+            fs::read_to_string(&extension_js).expect("read restored source"),
+            SOURCE
+        );
+        assert!(backup.exists());
+        assert!(!state.exists());
+        assert!(!state_path(&extension_js).exists());
+        assert_eq!(
+            sha256_hex(SOURCE.as_bytes()),
+            sha256_hex(&fs::read(&extension_js).expect("read restored source bytes"))
+        );
+    }
+
+    #[test]
+    fn restore_prefers_mochiport_backup_when_both_artifacts_exist() {
+        let temporary = tempdir().expect("temporary directory");
+        let extension_js = temporary.path().join("extension.js");
+        let patched = patch_remote_control_source(SOURCE)
+            .expect("source transformation should succeed")
+            .expect("supported launch site");
+        fs::write(&extension_js, &patched).expect("write patched source");
+
+        let new_backup = extension_js.with_file_name(format!("extension.js{BACKUP_SUFFIX}"));
+        let old_backup = legacy_backup_path(&extension_js);
+        fs::write(&new_backup, SOURCE).expect("write MochiPort backup");
+        fs::write(&old_backup, "stale CodexHub backup").expect("write legacy backup");
+        let state = state_path(&extension_js);
+        write_patch_state(&extension_js, &new_backup, SOURCE, &patched, &state)
+            .expect("write MochiPort state");
+
+        let report = restore_legacy_patch_fallback_for_install(test_install(
+            extension_js.clone(),
+            temporary.path().to_path_buf(),
+        ))
+        .expect("restore fallback");
+
+        assert_eq!(report.action, "restored");
+        assert_eq!(report.backup_path, Some(new_backup));
+        assert_eq!(
+            fs::read_to_string(&extension_js).expect("read restored source"),
+            SOURCE
+        );
+        assert!(old_backup.exists());
     }
 }

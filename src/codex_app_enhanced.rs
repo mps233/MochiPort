@@ -35,7 +35,9 @@ const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const PROCESS_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const APP_LAUNCH_COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
-const ENHANCED_SCRIPT_VERSION: u64 = 21;
+const ENHANCED_SCRIPT_VERSION: u64 = 22;
+const CAPABILITY_ADAPTER_ID: &str = "codex-renderer";
+const CAPABILITY_ADAPTER_VERSION: u64 = 1;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Default)]
@@ -99,6 +101,10 @@ pub struct EnhancedLaunchReport {
     pub i18n_layer_source: Option<String>,
     pub i18n_layer_supported: bool,
     pub official_base_available: bool,
+    pub capability_adapter_id: String,
+    pub capability_adapter_version: u64,
+    pub capabilities: Vec<String>,
+    pub missing_capabilities: Vec<String>,
     pub compatibility_adapters: Vec<String>,
     pub compatibility_failure: Option<String>,
     pub store_source: Option<String>,
@@ -106,7 +112,6 @@ pub struct EnhancedLaunchReport {
     pub routes_mounted: bool,
     pub renderer_ready_ms: Option<u64>,
     pub plugin_catalog_bridge_installed: bool,
-    pub plugin_catalog_dispatch_patched: bool,
     pub plugin_catalog_responses_adapted: u64,
     pub plugin_catalog_cache_refresh_attempted: bool,
     pub plugin_catalog_cache_refreshed: bool,
@@ -832,7 +837,7 @@ async fn launch_and_inject_pending(
     ));
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} early_attach_applied={} early_attach_target_id={} early_attach_elapsed_ms={} early_attach_fallback={} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} local_initialize_installed={} local_initialize_active={} local_initialize_url={} local_initialize_error={} local_base_available={} routes_mounted={} renderer_ready_ms={} plugin_catalog_bridge_installed={} plugin_catalog_dispatch_patched={} plugin_catalog_responses_adapted={} plugin_catalog_cache_refresh_attempted={} plugin_catalog_cache_refreshed={} plugin_catalog_cache_refresh_error={} bootstrap_intercepted={} bootstrap_source={} model_config_id={} model_config_source={} model_config_supported={} i18n_layer_id={} i18n_layer_source={} i18n_layer_supported={} official_base_available={} compatibility_adapters={} compatibility_failure={} store_source={} script_attempts={}",
+        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} early_attach_applied={} early_attach_target_id={} early_attach_elapsed_ms={} early_attach_fallback={} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} local_initialize_installed={} local_initialize_active={} local_initialize_url={} local_initialize_error={} local_base_available={} routes_mounted={} renderer_ready_ms={} plugin_catalog_bridge_installed={} plugin_catalog_responses_adapted={} plugin_catalog_cache_refresh_attempted={} plugin_catalog_cache_refreshed={} plugin_catalog_cache_refresh_error={} bootstrap_intercepted={} bootstrap_source={} model_config_id={} model_config_source={} model_config_supported={} i18n_layer_id={} i18n_layer_source={} i18n_layer_supported={} official_base_available={} capability_adapter={}:{} capabilities={} missing_capabilities={} compatibility_adapters={} compatibility_failure={} store_source={} script_attempts={}",
         early_attach.applied,
         early_attach.target_id.as_deref().unwrap_or("none"),
         early_attach
@@ -854,7 +859,6 @@ async fn launch_and_inject_pending(
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
         status.plugin_catalog_bridge_installed,
-        status.plugin_catalog_dispatch_patched,
         status.plugin_catalog_responses_adapted,
         status.plugin_catalog_cache_refresh_attempted,
         status.plugin_catalog_cache_refreshed,
@@ -871,6 +875,10 @@ async fn launch_and_inject_pending(
         status.i18n_layer_source.as_deref().unwrap_or("none"),
         status.i18n_layer_supported,
         status.official_base_available,
+        status.capability_adapter_id,
+        status.capability_adapter_version,
+        status.capabilities.join(","),
+        status.missing_capabilities.join(","),
         status.compatibility_adapters.join(","),
         status.compatibility_failure.as_deref().unwrap_or("none"),
         status.store_source.as_deref().unwrap_or("none"),
@@ -905,6 +913,10 @@ async fn launch_and_inject_pending(
         i18n_layer_source: status.i18n_layer_source,
         i18n_layer_supported: status.i18n_layer_supported,
         official_base_available: status.official_base_available,
+        capability_adapter_id: status.capability_adapter_id,
+        capability_adapter_version: status.capability_adapter_version,
+        capabilities: status.capabilities,
+        missing_capabilities: status.missing_capabilities,
         compatibility_adapters: status.compatibility_adapters,
         compatibility_failure: status.compatibility_failure,
         store_source: status.store_source,
@@ -912,7 +924,6 @@ async fn launch_and_inject_pending(
         routes_mounted: status.routes_mounted,
         renderer_ready_ms: status.renderer_ready_ms,
         plugin_catalog_bridge_installed: status.plugin_catalog_bridge_installed,
-        plugin_catalog_dispatch_patched: status.plugin_catalog_dispatch_patched,
         plugin_catalog_responses_adapted: status.plugin_catalog_responses_adapted,
         plugin_catalog_cache_refresh_attempted: status.plugin_catalog_cache_refresh_attempted,
         plugin_catalog_cache_refreshed: status.plugin_catalog_cache_refreshed,
@@ -1583,6 +1594,10 @@ struct InjectedStatus {
     i18n_layer_source: Option<String>,
     i18n_layer_supported: bool,
     official_base_available: bool,
+    capability_adapter_id: String,
+    capability_adapter_version: u64,
+    capabilities: Vec<String>,
+    missing_capabilities: Vec<String>,
     compatibility_adapters: Vec<String>,
     compatibility_failure: Option<String>,
     store_source: Option<String>,
@@ -1590,7 +1605,6 @@ struct InjectedStatus {
     routes_mounted: bool,
     renderer_ready_ms: Option<u64>,
     plugin_catalog_bridge_installed: bool,
-    plugin_catalog_dispatch_patched: bool,
     plugin_catalog_responses_adapted: u64,
     plugin_catalog_cache_refresh_attempted: bool,
     plugin_catalog_cache_refreshed: bool,
@@ -1721,13 +1735,26 @@ fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String])
         && status.model_config_supported
         && status.i18n_layer_supported
         && status.plugin_catalog_bridge_installed
-        && status.plugin_catalog_dispatch_patched
-        && !status.compatibility_adapters.is_empty()
+        && status.capability_adapter_id == CAPABILITY_ADAPTER_ID
+        && status.capability_adapter_version == CAPABILITY_ADAPTER_VERSION
+        && status.missing_capabilities.is_empty()
+        && status
+            .capabilities
+            .iter()
+            .any(|capability| capability == "statsig-client-v1")
+        && status
+            .capabilities
+            .iter()
+            .any(|capability| capability == "statsig-schema-v1")
+        && status
+            .capabilities
+            .iter()
+            .any(|capability| capability == "plugin-catalog-events-v1")
 }
 
 fn injected_status_detail(status: &InjectedStatus) -> String {
     format!(
-        "script={} attempts={} store={} official_base={} local_base={} local_initialize={}:{} local_initialize_error={} model={}:{} i18n={}:{} gates={}/{} plugin_bridge={} plugin_dispatch={} plugin_responses={} plugin_cache={}:{} plugin_cache_error={} adapters={} failure={}",
+        "script={} attempts={} store={} official_base={} local_base={} local_initialize={}:{} local_initialize_error={} model={}:{} i18n={}:{} gates={}/{} plugin_bridge={} plugin_responses={} plugin_cache={}:{} plugin_cache_error={} adapter={}:{} capabilities={} missing={} adapters={} failure={}",
         status
             .script_version
             .map(|value| value.to_string())
@@ -1746,7 +1773,6 @@ fn injected_status_detail(status: &InjectedStatus) -> String {
         status.key_gates_enabled,
         SUPPORTED_FEATURE_GATES.len(),
         status.plugin_catalog_bridge_installed,
-        status.plugin_catalog_dispatch_patched,
         status.plugin_catalog_responses_adapted,
         status.plugin_catalog_cache_refresh_attempted,
         status.plugin_catalog_cache_refreshed,
@@ -1754,6 +1780,10 @@ fn injected_status_detail(status: &InjectedStatus) -> String {
             .plugin_catalog_cache_refresh_error
             .as_deref()
             .unwrap_or("none"),
+        status.capability_adapter_id,
+        status.capability_adapter_version,
+        status.capabilities.join(","),
+        status.missing_capabilities.join(","),
         status.compatibility_adapters.join(","),
         status.compatibility_failure.as_deref().unwrap_or("none")
     )
@@ -1804,6 +1834,10 @@ async fn inspect_injected_status_on_socket(
             i18nLayerSource: enhanced?.i18nLayerSource ?? null,
             i18nLayerSupported: Boolean(enhanced?.i18nLayerSupported),
             officialBaseAvailable: Boolean(enhanced?.officialBaseAvailable),
+            capabilityAdapterId: enhanced?.capabilityAdapter?.id ?? "",
+            capabilityAdapterVersion: Number(enhanced?.capabilityAdapter?.version ?? 0),
+            capabilities: enhanced?.capabilityProbe?.capabilities ?? [],
+            missingCapabilities: enhanced?.capabilityProbe?.missing ?? [],
             compatibilityAdapters: enhanced?.compatibilityAdapters ?? [],
             compatibilityFailure: enhanced?.compatibilityFailure ?? null,
             storeSource: client?._store?.getSource?.() ?? null,
@@ -1812,9 +1846,6 @@ async fn inspect_injected_status_on_socket(
             rendererReadyMs: window.__CODEXHUB_ENHANCED_MODE__?.routesMountedAtMs ?? null,
             pluginCatalogBridgeInstalled: Boolean(
               window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogBridgeInstalled
-            ),
-            pluginCatalogDispatchPatched: Boolean(
-              window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogDispatchPatched
             ),
             pluginCatalogResponsesAdapted: Number(
               window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogResponsesAdapted ?? 0
@@ -1856,10 +1887,26 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     local_initialize_url.set_fragment(None);
     let local_initialize_url = serde_json::to_string(local_initialize_url.as_str())?;
     let script_version = ENHANCED_SCRIPT_VERSION;
+    let capability_adapter_id = serde_json::to_string(CAPABILITY_ADAPTER_ID)?;
+    let capability_adapter_version = CAPABILITY_ADAPTER_VERSION;
     Ok(format!(
         r#"(() => {{
   const MARKER = "__CODEXHUB_ENHANCED_MODE__";
   const SCRIPT_VERSION = {script_version};
+  const CAPABILITY_ADAPTER = Object.freeze({{
+    id: {capability_adapter_id},
+    version: {capability_adapter_version},
+    statsigGlobal: "__STATSIG__",
+    requiredCapabilities: Object.freeze([
+      "statsig-client-v1",
+      "statsig-schema-v1",
+      "plugin-catalog-events-v1",
+    ]),
+    events: Object.freeze({{
+      request: "codex-message-from-view",
+      response: "message",
+    }}),
+  }});
   const MODELS = {models};
   const SUPPORTED_GATES = {gates};
   const LEGACY_CODEXHUB_GATES = {legacy_gates};
@@ -1867,7 +1914,6 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
   const existing = window[MARKER];
   if (existing?.installed && existing.version === SCRIPT_VERSION) {{
       existing.update?.(MODELS);
-      existing.installPluginCatalogDispatchPatch?.();
       existing.refreshPluginCatalogCache?.();
       return;
   }}
@@ -1903,13 +1949,14 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     i18nLayerSupported: false,
     officialBaseAvailable: false,
     officialBaseCheckedAtMs: 0,
+    capabilityAdapter: CAPABILITY_ADAPTER,
+    capabilityProbe: {{ capabilities: [], missing: [...CAPABILITY_ADAPTER.requiredCapabilities] }},
     compatibilityAdapters: [],
     compatibilityFailure: null,
     i18nReactCacheInvalidated: 0,
     routesMounted: false,
     routesMountedAtMs: null,
     pluginCatalogBridgeInstalled: false,
-    pluginCatalogDispatchPatched: false,
     pluginCatalogResponsesAdapted: 0,
     pluginCatalogRequestIds: new Set(),
     pluginCatalogError: null,
@@ -1922,6 +1969,14 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     pluginDirectoryLinkError: null,
   }};
   window[MARKER] = state;
+
+  const recordCapability = (name) => {{
+    if (!state.capabilityProbe.capabilities.includes(name)) {{
+      state.capabilityProbe.capabilities.push(name);
+    }}
+    state.capabilityProbe.missing = CAPABILITY_ADAPTER.requiredCapabilities
+      .filter((required) => !state.capabilityProbe.capabilities.includes(required));
+  }};
 
   const isObject = (value) => value !== null
     && typeof value === "object"
@@ -1970,6 +2025,9 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
       state.i18nLayerId = DEFAULT_I18N_LAYER_ID;
       state.i18nLayerSource = "fallback-present";
       state.i18nLayerSupported = true;
+    }}
+    if (state.modelConfigSupported && state.i18nLayerSupported) {{
+      recordCapability("statsig-schema-v1");
     }}
   }};
   const compatibilityReady = () => (state.officialBaseAvailable || state.localBaseAvailable)
@@ -2307,10 +2365,16 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
   }};
 
   const installClientPatches = (client) => {{
+    if (!client || typeof client !== "object"
+      || typeof client.getDynamicConfig !== "function"
+      || typeof client.getLayer !== "function"
+      || typeof client.checkGate !== "function") return false;
+    recordCapability("statsig-client-v1");
     installLocalInitializePatch(client);
     installPublicApiOverlay(client);
     installStorePatch(client);
     installFastInitializePatch(client);
+    return true;
   }};
 
   const clientsForStatsigRoot = (statsig) => {{
@@ -2331,16 +2395,8 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
   }};
 
   const findStatsigClients = () => {{
-    const roots = [];
-    const addRoot = (root) => {{
-      if (root && typeof root === "object" && !roots.includes(root)) roots.push(root);
-    }};
-    addRoot(window.__STATSIG__);
-    for (const name of Object.getOwnPropertyNames(window)) {{
-      if (!name.toLowerCase().includes("statsig")) continue;
-      try {{ addRoot(window[name]); }} catch {{}}
-    }}
-    return roots.flatMap(clientsForStatsigRoot)
+    const root = window[CAPABILITY_ADAPTER.statsigGlobal];
+    return clientsForStatsigRoot(root)
       .filter((client, index, all) => all.indexOf(client) === index);
   }};
 
@@ -2639,33 +2695,6 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     return adapted;
   }};
 
-  const installPluginCatalogDispatchPatch = () => {{
-    const originalKey = "__CODEXHUB_PLUGIN_ORIGINAL_DISPATCH_EVENT__";
-    try {{
-      if (typeof window[originalKey] !== "function") {{
-        window[originalKey] = window.dispatchEvent;
-      }}
-      const originalDispatchEvent = window[originalKey];
-      window.dispatchEvent = function codexHubPluginDispatchEvent(event) {{
-        try {{
-          if (event?.type === "codex-message-from-view") {{
-            trackPluginCatalogRequest(event.detail);
-          }} else if (event?.type === "message") {{
-            adaptPluginCatalogResponseData(event.data);
-          }}
-        }} catch (error) {{
-          state.pluginCatalogError = String(error?.stack ?? error);
-        }}
-        return originalDispatchEvent.call(this, event);
-      }};
-      window.__CODEXHUB_PLUGIN_DISPATCH_VERSION__ = SCRIPT_VERSION;
-      state.pluginCatalogDispatchPatched = true;
-    }} catch (error) {{
-      state.pluginCatalogDispatchPatched = false;
-      state.pluginCatalogError = String(error?.stack ?? error);
-    }}
-  }};
-
   const findReactQueryClient = () => {{
     const elements = [document.body, ...document.querySelectorAll("button,[role='main'],main")];
     for (const element of elements) {{
@@ -2717,10 +2746,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     }}
   }};
 
-  installPluginCatalogDispatchPatch();
-  state.installPluginCatalogDispatchPatch = installPluginCatalogDispatchPatch;
-
-  window.addEventListener("message", (event) => {{
+  window.addEventListener(CAPABILITY_ADAPTER.events.response, (event) => {{
     try {{
       adaptPluginCatalogResponseData(event?.data);
     }} catch (error) {{
@@ -2728,7 +2754,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     }}
   }}, true);
 
-  window.addEventListener("codex-message-from-view", (event) => {{
+  window.addEventListener(CAPABILITY_ADAPTER.events.request, (event) => {{
     const message = event?.detail;
     trackPluginCatalogRequest(message);
     if (message?.type === "ready") {{
@@ -2751,6 +2777,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     }}
   }});
   state.pluginCatalogBridgeInstalled = true;
+  recordCapability("plugin-catalog-events-v1");
   state.refreshPluginCatalogCache = refreshPluginCatalogCache;
   queueMicrotask(refreshPluginCatalogCache);
 
@@ -3660,7 +3687,11 @@ mod tests {
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 21"));
+        assert!(script.contains(&format!("SCRIPT_VERSION = {ENHANCED_SCRIPT_VERSION}")));
+        assert!(script.contains("CAPABILITY_ADAPTER"));
+        assert!(script.contains("codex-renderer"));
+        assert!(script.contains("plugin-catalog-events-v1"));
+        assert!(script.contains("recordCapability"));
         assert!(script.contains("state.pluginCatalogCacheRefreshAttempts < 240"));
         assert!(script.contains("state.pluginCatalogCacheRefreshAttempts < 80 ? 25 : 250"));
         assert!(script.contains("PLUGIN_DIRECTORY_LINK_ID"));
@@ -3739,20 +3770,16 @@ mod tests {
         assert!(script.contains("adaptLocalCuratedPluginCatalog"));
         assert!(script.contains("typeof marketplace.path !== \"string\""));
         assert!(script.contains("marketplace.name = LOCAL_CURATED_RENDERER_ALIAS"));
-        assert!(script.contains("installPluginCatalogDispatchPatch"));
-        assert!(script.contains("existing.installPluginCatalogDispatchPatch?.()"));
-        assert!(script.contains("codexHubPluginDispatchEvent"));
-        assert!(script.contains("adaptPluginCatalogResponseData(event.data)"));
+        assert!(script.contains("adaptPluginCatalogResponseData(event?.data)"));
         assert!(script.contains("findReactQueryClient"));
         assert!(script.contains("queryClient.invalidateQueries"));
         assert!(script.contains("queryKey: [\"plugins\"]"));
         assert!(script.contains("refetchType: \"active\""));
         assert!(script.contains("state.refreshPluginCatalogCache = refreshPluginCatalogCache"));
-        assert!(script.contains(
-            "state.installPluginCatalogDispatchPatch = installPluginCatalogDispatchPatch"
-        ));
         assert!(script.contains("state.pluginCatalogBridgeInstalled = true"));
-        assert!(script.contains("state.pluginCatalogDispatchPatched = true"));
+        assert!(script.contains("window[CAPABILITY_ADAPTER.statsigGlobal]"));
+        assert!(!script.contains("window.dispatchEvent ="));
+        assert!(!script.contains("codexHubPluginDispatchEvent"));
         assert!(script.contains("state.pluginCatalogResponsesAdapted += 1"));
         assert!(!script.contains("LOCAL_CURATED_MARKETPLACE = \"openai-curated-remote\""));
         assert!(script.contains("routesMountedAtMs"));
@@ -3988,6 +4015,14 @@ mod tests {
             i18n_layer_source: Some("schema".into()),
             i18n_layer_supported: true,
             official_base_available: true,
+            capability_adapter_id: CAPABILITY_ADAPTER_ID.to_string(),
+            capability_adapter_version: CAPABILITY_ADAPTER_VERSION,
+            capabilities: vec![
+                "statsig-client-v1".to_string(),
+                "statsig-schema-v1".to_string(),
+                "plugin-catalog-events-v1".to_string(),
+            ],
+            missing_capabilities: Vec::new(),
             compatibility_adapters: vec!["statsig-store".into()],
             compatibility_failure: None,
             store_source: Some("Bootstrap".into()),
@@ -3995,7 +4030,6 @@ mod tests {
             routes_mounted: false,
             renderer_ready_ms: None,
             plugin_catalog_bridge_installed: true,
-            plugin_catalog_dispatch_patched: true,
             plugin_catalog_responses_adapted: 0,
             plugin_catalog_cache_refresh_attempted: true,
             plugin_catalog_cache_refreshed: true,
@@ -4020,10 +4054,7 @@ mod tests {
         status.plugin_catalog_bridge_installed = false;
         assert!(!injected_status_is_ready(&status, &expected_models));
         status.plugin_catalog_bridge_installed = true;
-        status.plugin_catalog_dispatch_patched = false;
-        assert!(!injected_status_is_ready(&status, &expected_models));
-        status.plugin_catalog_dispatch_patched = true;
-        status.compatibility_adapters.clear();
+        status.missing_capabilities = vec!["plugin-catalog-events-v1".to_string()];
         assert!(!injected_status_is_ready(&status, &expected_models));
     }
 
@@ -4054,6 +4085,10 @@ mod tests {
             i18n_layer_source: None,
             i18n_layer_supported: false,
             official_base_available: false,
+            capability_adapter_id: CAPABILITY_ADAPTER_ID.to_string(),
+            capability_adapter_version: CAPABILITY_ADAPTER_VERSION,
+            capabilities: Vec::new(),
+            missing_capabilities: vec!["statsig-client-v1".to_string()],
             compatibility_adapters: Vec::new(),
             compatibility_failure: Some("unsupported Statsig schema".into()),
             store_source: Some("NoValues".into()),
@@ -4061,7 +4096,6 @@ mod tests {
             routes_mounted: false,
             renderer_ready_ms: None,
             plugin_catalog_bridge_installed: false,
-            plugin_catalog_dispatch_patched: false,
             plugin_catalog_responses_adapted: 0,
             plugin_catalog_cache_refresh_attempted: false,
             plugin_catalog_cache_refreshed: false,
@@ -4125,7 +4159,13 @@ mod tests {
         assert!(report.model_config_supported);
         assert!(report.i18n_layer_supported);
         assert!(report.plugin_catalog_bridge_installed);
-        assert!(report.plugin_catalog_dispatch_patched);
+        assert!(report.missing_capabilities.is_empty());
+        assert!(
+            report
+                .capabilities
+                .iter()
+                .any(|value| value == "statsig-client-v1")
+        );
         assert!(!report.compatibility_adapters.is_empty());
         assert!(report.compatibility_failure.is_none());
         assert_eq!(report.model_config_id.as_deref(), Some("107580212"));
@@ -4141,6 +4181,6 @@ mod tests {
         assert!(repeated.i18n_enabled);
         assert!(repeated.official_base_available || repeated.local_base_available);
         assert!(repeated.plugin_catalog_bridge_installed);
-        assert!(repeated.plugin_catalog_dispatch_patched);
+        assert!(repeated.missing_capabilities.is_empty());
     }
 }

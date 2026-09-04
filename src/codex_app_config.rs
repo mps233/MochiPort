@@ -23,6 +23,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 #[cfg(target_os = "windows")]
 use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
+#[cfg(not(test))]
+use crate::storage_migration;
 use crate::{chain_log, config::LocalConnectionMode};
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
@@ -58,9 +60,6 @@ const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
 const CODEX_CONNECTOR_DIRECTORY_CACHE_DIR: &str = "cache/codex_app_directory";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
-const LEGACY_CODEXHUB_HOME_ENV: &str = "CODEXHUB_HOME";
-const LEGACY_THREADRELAY_HOME_ENV: &str = "THREADRELAY_HOME";
-const MOCHIPORT_HOME_ENV: &str = "MOCHIPORT_HOME";
 const OPENAI_BUNDLED_MARKETPLACE_NAME: &str = "openai-bundled";
 const OPENAI_CURATED_MARKETPLACE_NAME: &str = "openai-curated";
 const LEGACY_CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
@@ -83,7 +82,8 @@ const MANAGED_BACKUP_MANIFEST: &str = "manifest.json";
 const MANAGED_BACKUP_AUTH: &str = "auth.json";
 const PROXY_ENVIRONMENT_BACKUP_VERSION: u32 = 1;
 const PROXY_ENVIRONMENT_BACKUP_FILE: &str = "proxy-environment.json";
-const CODEX_CONNECTION_MODE_FILE: &str = ".threadrelay-codex-connection-mode.json";
+const CODEX_CONNECTION_MODE_FILE: &str = ".mochiport-codex-connection-mode.json";
+const LEGACY_CODEX_CONNECTION_MODE_FILE: &str = ".threadrelay-codex-connection-mode.json";
 
 #[derive(Debug, Clone)]
 pub struct ConfigureCodexAppOptions {
@@ -177,7 +177,7 @@ pub struct CodexAppConfigStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodexProviderMode {
-    #[serde(rename = "threadrelay")]
+    #[serde(rename = "mochiport", alias = "threadrelay")]
     MochiPort,
     DirectApi,
     Unknown,
@@ -401,7 +401,7 @@ pub fn inspect_codex_app_config(
     codex_home: Option<PathBuf>,
     backend_url: &str,
 ) -> CodexAppConfigStatus {
-    inspect_codex_app_config_for_mode(codex_home, backend_url, true)
+    inspect_codex_app_config_for_mode(codex_home, backend_url)
 }
 
 pub fn prepare_codex_app_config_recovery_snapshot(
@@ -426,7 +426,6 @@ pub fn prepare_codex_app_config_recovery_snapshot(
 pub fn inspect_codex_app_config_for_mode(
     codex_home: Option<PathBuf>,
     backend_url: &str,
-    _legacy_mode: bool,
 ) -> CodexAppConfigStatus {
     let codex_home = codex_home.unwrap_or_else(default_codex_home);
     let config_path = codex_home.join("config.toml");
@@ -556,134 +555,6 @@ pub fn switch_codex_app_to_direct_api_mode(
         removed_local_provider,
         gui_api_base,
     })
-}
-
-/// Used by daemon startup. This is intentionally read-only: it must never
-/// modify Codex files or environment variables while direct API mode is active.
-pub fn should_preserve_direct_api_mode(codex_home: Option<PathBuf>, backend_url: &str) -> bool {
-    let codex_home = codex_home.unwrap_or_else(default_codex_home);
-    let config_path = codex_home.join("config.toml");
-    let active_provider = parse_existing_config_toml(&config_path)
-        .ok()
-        .and_then(|doc| {
-            doc.get("model_provider")
-                .and_then(|item| item.as_str())
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        });
-    inspect_provider_mode(
-        &codex_home,
-        &config_path,
-        backend_url,
-        active_provider.as_deref(),
-    ) == CodexProviderMode::DirectApi
-}
-
-/// Migrate the takeover state written by pre-CC-Switch-style builds.
-///
-/// This is intentionally limited to an active MochiPort provider. A user's
-/// direct-api configuration must never cause the daemon to rewrite its provider
-/// or `auth.json`. The migration is safe to run at daemon startup and preserves
-/// Codex-owned OAuth/API-key records.
-pub fn migrate_legacy_codex_takeover(
-    codex_home: Option<PathBuf>,
-    backend_url: &str,
-) -> Result<bool> {
-    let codex_home = codex_home.unwrap_or_else(default_codex_home);
-    let config_path = codex_home.join("config.toml");
-    let Ok(mut doc) = parse_existing_config_toml_for_update(&config_path) else {
-        return Ok(false);
-    };
-    let renamed_legacy_provider = migrate_legacy_mochiport_provider_name(&mut doc);
-    let active_provider = doc
-        .get("model_provider")
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let managed_names = mochiport_local_provider_names(&doc, backend_url);
-    let active_provider = active_provider.map(str::to_string);
-    if !active_provider
-        .as_deref()
-        .is_some_and(|provider| managed_names.contains(provider))
-    {
-        return Ok(false);
-    }
-
-    let mut migrated = renamed_legacy_provider;
-    let mut config_changed = renamed_legacy_provider;
-    let connection_mode = inspect_connection_mode(&config_path, backend_url);
-    let expected_chatgpt_base_url = codex_connection_url(backend_url, connection_mode);
-    let chatgpt_base_url_matches = doc
-        .get("chatgpt_base_url")
-        .and_then(|item| item.as_str())
-        .map(str::trim)
-        .is_some_and(|value| backend_urls_equivalent(value, &expected_chatgpt_base_url));
-    if !chatgpt_base_url_matches {
-        doc["chatgpt_base_url"] = toml_edit::value(&expected_chatgpt_base_url);
-        config_changed = true;
-    }
-    let auth_path = codex_home.join("auth.json");
-    if let Some(account_id) = read_codex_auth_account_id(&auth_path) {
-        upsert_official_remote_control_enrollment(&codex_home, backend_url, &account_id)?;
-        enable_app_server_daemon_remote_control(&codex_home)?;
-        migrated = true;
-    }
-    if active_provider.as_deref() == Some(AI_GATEWAY_PROVIDER_NAME) {
-        let expected_base_url = ai_gateway_base_url_from_backend_url(backend_url);
-        let provider = provider_table_mut(&mut doc, AI_GATEWAY_PROVIDER_NAME);
-        let had_legacy_auth = provider
-            .get("requires_openai_auth")
-            .and_then(|item| item.as_bool())
-            != Some(true)
-            || provider.get("experimental_bearer_token").is_some()
-            || provider.get("auth").is_some()
-            || provider.get("env_key").is_some()
-            || provider.get("env_key_instructions").is_some()
-            || provider_http_header_value(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER).is_some()
-            || provider
-                .get("supports_standalone_web_search")
-                .and_then(|item| item.as_bool())
-                != Some(true);
-        if had_legacy_auth {
-            provider["name"] = toml_edit::value(AI_GATEWAY_PROVIDER_NAME);
-            provider["base_url"] = toml_edit::value(expected_base_url);
-            provider["wire_api"] = toml_edit::value("responses");
-            provider["requires_openai_auth"] = toml_edit::value(true);
-            provider["supports_standalone_web_search"] = toml_edit::value(true);
-            provider.remove("experimental_bearer_token");
-            provider.remove("auth");
-            provider.remove("env_key");
-            provider.remove("env_key_instructions");
-            remove_provider_http_header(provider, OPENAI_ACTOR_AUTHORIZATION_HEADER);
-            config_changed = true;
-        }
-    }
-
-    if config_changed {
-        backup_existing(&config_path)?;
-        let raw = normalize_config_toml_order(&doc.to_string());
-        write_file_atomically(&config_path, raw.as_bytes())?;
-        migrated = true;
-        chain_log::write_line(format!(
-            "[codex_app_config] event=legacy_takeover_config_repaired path={}",
-            config_path.display()
-        ));
-    }
-
-    if !auth_path.exists() {
-        return Ok(migrated);
-    }
-    let raw = std::fs::read_to_string(&auth_path)
-        .with_context(|| format!("failed to read Codex auth {}", auth_path.display()))?;
-    let auth = serde_json::from_str::<serde_json::Value>(&raw)
-        .with_context(|| format!("failed to parse Codex auth {}", auth_path.display()))?;
-    if !is_mochiport_managed_auth_json(&auth) {
-        return Ok(migrated);
-    }
-
-    preserve_codex_auth(&codex_home, &auth_path)?;
-    Ok(true)
 }
 
 #[cfg(test)]
@@ -2577,6 +2448,10 @@ fn provider_mode_marker_path(codex_home: &Path) -> PathBuf {
     codex_home.join(CODEX_CONNECTION_MODE_FILE)
 }
 
+fn legacy_provider_mode_marker_path(codex_home: &Path) -> PathBuf {
+    codex_home.join(LEGACY_CODEX_CONNECTION_MODE_FILE)
+}
+
 fn write_provider_mode(codex_home: &Path, mode: CodexProviderMode) -> Result<()> {
     let path = provider_mode_marker_path(codex_home);
     let raw = serde_json::to_vec_pretty(&json!({ "mode": mode }))?;
@@ -2587,20 +2462,33 @@ fn write_provider_mode(codex_home: &Path, mode: CodexProviderMode) -> Result<()>
 }
 
 fn remove_provider_mode_marker(codex_home: &Path) -> Result<()> {
-    match std::fs::remove_file(provider_mode_marker_path(codex_home)) {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err.into()),
+    for path in [
+        provider_mode_marker_path(codex_home),
+        legacy_provider_mode_marker_path(codex_home),
+    ] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
     }
+    Ok(())
 }
 
 fn read_provider_mode_marker(codex_home: &Path) -> Option<CodexProviderMode> {
-    let raw = std::fs::read_to_string(provider_mode_marker_path(codex_home)).ok()?;
-    serde_json::from_str::<serde_json::Value>(&raw)
-        .ok()?
-        .get("mode")
-        .cloned()
-        .and_then(|value| serde_json::from_value(value).ok())
+    [
+        provider_mode_marker_path(codex_home),
+        legacy_provider_mode_marker_path(codex_home),
+    ]
+    .into_iter()
+    .find_map(|path| {
+        let raw = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()?
+            .get("mode")
+            .cloned()
+            .and_then(|value| serde_json::from_value(value).ok())
+    })
 }
 
 fn inspect_provider_mode(
@@ -3630,60 +3518,16 @@ fn codex_home_backup_id(codex_home: &Path) -> String {
     hex::encode(&digest[..16])
 }
 
-fn mochiport_app_support_dir() -> PathBuf {
-    if let Some(base) = std::env::var_os(MOCHIPORT_HOME_ENV).map(PathBuf::from) {
-        return base;
-    }
-    if let Some(base) = std::env::var_os(LEGACY_THREADRELAY_HOME_ENV).map(PathBuf::from) {
-        return base;
-    }
-    if let Some(base) = std::env::var_os(LEGACY_CODEXHUB_HOME_ENV).map(PathBuf::from) {
-        return base;
-    }
-    platform_mochiport_app_support_dir()
-}
-
 #[cfg(test)]
-fn platform_mochiport_app_support_dir() -> PathBuf {
-    std::env::temp_dir().join("mochiport-managed-backups-tests")
-}
-
-#[cfg(all(target_os = "windows", not(test)))]
-fn platform_mochiport_app_support_dir() -> PathBuf {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("APPDATA"))
+fn mochiport_app_support_dir() -> PathBuf {
+    std::env::var_os("MOCHIPORT_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    prefer_existing_legacy_app_dir(
-        base.join("MochiPort"),
-        &[base.join("ThreadRelay"), base.join("CodexHub")],
-    )
-}
-
-#[cfg(all(not(target_os = "windows"), not(test)))]
-fn platform_mochiport_app_support_dir() -> PathBuf {
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support"))
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    prefer_existing_legacy_app_dir(
-        base.join("MochiPort"),
-        &[base.join("ThreadRelay"), base.join("CodexHub")],
-    )
+        .unwrap_or_else(|| std::env::temp_dir().join("mochiport-managed-backups-tests"))
 }
 
 #[cfg(not(test))]
-fn prefer_existing_legacy_app_dir(new_dir: PathBuf, legacy_dirs: &[PathBuf]) -> PathBuf {
-    if new_dir.join("config.toml").exists() {
-        return new_dir;
-    }
-    legacy_dirs
-        .iter()
-        .find(|dir| dir.join("config.toml").exists())
-        .cloned()
-        .unwrap_or(new_dir)
+fn mochiport_app_support_dir() -> PathBuf {
+    storage_migration::current_storage_home()
 }
 
 fn is_mochiport_managed_auth_file(path: &Path) -> Result<bool> {
@@ -4429,220 +4273,6 @@ http_headers = { x-openai-actor-authorization = "codexhub-local" }
         );
 
         let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
-        let _ = std::fs::remove_dir_all(codex_home);
-    }
-
-    #[test]
-    fn migrate_legacy_codex_takeover_restores_official_auth_and_repairs_provider() {
-        let codex_home = unique_temp_dir();
-        let config_path = codex_home.join("config.toml");
-        let auth_path = codex_home.join("auth.json");
-        std::fs::write(
-            &config_path,
-            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
-model_provider = "ai-gateway"
-
-[model_providers.ai-gateway]
-name = "ai-gateway"
-base_url = "http://localhost:3847/ai-gateway/v1"
-wire_api = "responses"
-requires_openai_auth = false
-experimental_bearer_token = "dummy-token"
-http_headers = { x-existing = "keep", x-openai-actor-authorization = "codexhub-local" }
-"#,
-        )
-        .expect("write legacy gateway config");
-        write_auth_json(&auth_path).expect("write placeholder auth");
-
-        let official_auth = official_chatgpt_auth_json(
-            "acct_official",
-            "user_official",
-            "official@example.test",
-            "plus",
-            false,
-        );
-        write_managed_auth_backup(&codex_home, &official_auth);
-
-        assert!(
-            migrate_legacy_codex_takeover(
-                Some(codex_home.clone()),
-                "http://127.0.0.1:3847/backend-api",
-            )
-            .expect("migrate takeover")
-        );
-        assert_eq!(
-            std::fs::read_to_string(&auth_path).expect("read restored auth"),
-            official_auth
-        );
-        let config = std::fs::read_to_string(&config_path).expect("read migrated config");
-        assert!(config.contains("model_provider = \"MochiPort\""));
-        assert!(config.contains("[model_providers.MochiPort]"));
-        assert!(!config.contains("[model_providers.ai-gateway]"));
-        assert!(config.contains("requires_openai_auth = true"));
-        assert!(config.contains("supports_standalone_web_search = true"));
-        assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
-        assert!(!config.contains("experimental_bearer_token"));
-        assert!(!config.contains(OPENAI_ACTOR_AUTHORIZATION_HEADER));
-        assert!(config.contains("x-existing = \"keep\""));
-
-        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
-        let _ = std::fs::remove_dir_all(codex_home);
-    }
-
-    #[test]
-    fn migrate_legacy_codex_takeover_removes_placeholder_without_backup() {
-        let codex_home = unique_temp_dir();
-        let config_path = codex_home.join("config.toml");
-        let auth_path = codex_home.join("auth.json");
-        std::fs::write(
-            &config_path,
-            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
-model_provider = "ai-gateway"
-
-[model_providers.ai-gateway]
-name = "ai-gateway"
-base_url = "http://127.0.0.1:3847/ai-gateway/v1"
-wire_api = "responses"
-requires_openai_auth = true
-supports_standalone_web_search = true
-experimental_bearer_token = "dummy-token"
-"#,
-        )
-        .expect("write gateway config");
-        write_auth_json(&auth_path).expect("write placeholder auth");
-        let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
-
-        assert!(
-            migrate_legacy_codex_takeover(
-                Some(codex_home.clone()),
-                "http://127.0.0.1:3847/backend-api",
-            )
-            .expect("migrate takeover")
-        );
-        assert!(!auth_path.exists());
-        let config = std::fs::read_to_string(&config_path).expect("read migrated config");
-        assert!(!config.contains("experimental_bearer_token"));
-
-        let _ = std::fs::remove_dir_all(codex_home);
-    }
-
-    #[test]
-    fn migrate_legacy_codex_takeover_repairs_remote_control_enrollment() {
-        let codex_home = unique_temp_dir();
-        let installation_id = "33333333-3333-4333-8333-333333333333";
-        let backend_url = "http://127.0.0.1:3847/backend-api";
-        let websocket_url = "ws://127.0.0.1:3847/backend-api/wham/remote/control/server";
-        std::fs::write(codex_home.join("installation_id"), installation_id)
-            .expect("write installation id");
-        std::fs::write(
-            codex_home.join("config.toml"),
-            r#"chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
-model_provider = "ai-gateway"
-
-[model_providers.ai-gateway]
-name = "ai-gateway"
-base_url = "http://127.0.0.1:3847/ai-gateway/v1"
-wire_api = "responses"
-requires_openai_auth = true
-supports_standalone_web_search = true
-"#,
-        )
-        .expect("write config");
-        std::fs::write(
-            codex_home.join("auth.json"),
-            official_chatgpt_auth_json(
-                "acct_official",
-                "user_official",
-                "official@example.test",
-                "plus",
-                false,
-            ),
-        )
-        .expect("write auth");
-        create_remote_control_enrollment_state_db(&codex_home);
-        let connection =
-            Connection::open(codex_home.join(CODEX_APP_STATE_DB)).expect("open state db");
-        connection
-            .execute(
-                r#"
-                INSERT INTO remote_control_enrollments (
-                    websocket_url, account_id, app_server_client_name, server_id,
-                    environment_id, server_name, updated_at, remote_control_enabled
-                ) VALUES (?1, ?2, '', ?3, ?4, ?5, ?6, 1)
-                "#,
-                params![
-                    websocket_url,
-                    "acct_official",
-                    "legacy-server",
-                    "legacy-environment",
-                    CODEX_APP_REMOTE_CONTROL_SERVER_NAME,
-                    1_i64,
-                ],
-            )
-            .expect("insert legacy enrollment");
-        drop(connection);
-
-        assert!(
-            migrate_legacy_codex_takeover(Some(codex_home.clone()), backend_url)
-                .expect("migrate takeover")
-        );
-
-        let connection =
-            Connection::open(codex_home.join(CODEX_APP_STATE_DB)).expect("reopen state db");
-        let row = connection
-            .query_row(
-                "SELECT app_server_client_name, server_id, environment_id FROM remote_control_enrollments",
-                [],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .expect("read migrated enrollment");
-        assert_eq!(row.0, CODEX_APP_REMOTE_CONTROL_CLIENT_NAME);
-        assert_eq!(row.1, test_stable_id("srv", installation_id));
-        assert_eq!(row.2, test_stable_id("env", installation_id));
-
-        let _ = std::fs::remove_dir_all(codex_home);
-    }
-
-    #[test]
-    fn migrate_legacy_codex_takeover_ignores_direct_provider() {
-        let codex_home = unique_temp_dir();
-        let config_path = codex_home.join("config.toml");
-        let auth_path = codex_home.join("auth.json");
-        let config = r#"model_provider = "custom"
-
-[model_providers.custom]
-name = "custom"
-base_url = "https://api.example.invalid/v1"
-wire_api = "responses"
-requires_openai_auth = true
-experimental_bearer_token = "third-party-key"
-"#;
-        std::fs::write(&config_path, config).expect("write direct config");
-        write_auth_json(&auth_path).expect("write placeholder fixture");
-        let auth_before = std::fs::read_to_string(&auth_path).expect("read auth fixture");
-
-        assert!(
-            !migrate_legacy_codex_takeover(
-                Some(codex_home.clone()),
-                "http://127.0.0.1:3847/backend-api",
-            )
-            .expect("skip direct provider")
-        );
-        assert_eq!(
-            std::fs::read_to_string(&config_path).expect("read direct config"),
-            config
-        );
-        assert_eq!(
-            std::fs::read_to_string(&auth_path).expect("read preserved auth fixture"),
-            auth_before
-        );
-
         let _ = std::fs::remove_dir_all(codex_home);
     }
 
@@ -6144,22 +5774,6 @@ base_url = "https://api.example.invalid"
         }
     }
 
-    fn write_managed_auth_backup(codex_home: &Path, auth: &str) {
-        let backup = managed_backup_paths(codex_home);
-        std::fs::create_dir_all(&backup.dir).expect("create managed backup dir");
-        let manifest = ManagedCodexAppBackupManifest {
-            version: MANAGED_BACKUP_VERSION,
-            created_at_ms: 1,
-            codex_home: codex_home.to_path_buf(),
-            config_existed: true,
-            auth_existed: true,
-            original_model_provider: Some("custom".to_string()),
-        };
-        let raw = serde_json::to_string_pretty(&manifest).expect("serialize manifest");
-        std::fs::write(&backup.manifest_path, format!("{raw}\n")).expect("write managed manifest");
-        std::fs::write(&backup.auth_path, auth).expect("write managed auth backup");
-    }
-
     #[cfg(target_os = "macos")]
     struct GuiEnvironmentTestGuard {
         _lock: MutexGuard<'static, ()>,
@@ -6542,6 +6156,36 @@ base_url = "https://api.example.invalid"
     }
 
     #[test]
+    fn provider_mode_marker_writes_mochiport_and_reads_legacy_marker() {
+        let codex_home = unique_temp_dir();
+        std::fs::write(
+            legacy_provider_mode_marker_path(&codex_home),
+            r#"{"mode":"threadrelay"}"#,
+        )
+        .expect("write legacy marker");
+        assert_eq!(
+            read_provider_mode_marker(&codex_home),
+            Some(CodexProviderMode::MochiPort)
+        );
+
+        write_provider_mode(&codex_home, CodexProviderMode::MochiPort)
+            .expect("write current marker");
+        let current = std::fs::read_to_string(provider_mode_marker_path(&codex_home))
+            .expect("read current marker");
+        assert!(current.contains(r#""mode": "mochiport""#));
+        assert!(!current.contains("threadrelay"));
+        assert_eq!(
+            read_provider_mode_marker(&codex_home),
+            Some(CodexProviderMode::MochiPort)
+        );
+
+        remove_provider_mode_marker(&codex_home).expect("remove markers");
+        assert!(!provider_mode_marker_path(&codex_home).exists());
+        assert!(!legacy_provider_mode_marker_path(&codex_home).exists());
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
     fn switch_to_direct_api_mode_keeps_external_provider_and_auth() {
         let codex_home = unique_temp_dir();
         std::fs::create_dir_all(&codex_home).expect("create codex home");
@@ -6585,7 +6229,6 @@ experimental_bearer_token = "direct-key"
             inspect_codex_app_config_for_mode(
                 Some(codex_home.clone()),
                 "http://127.0.0.1:3847/backend-api",
-                true
             )
             .provider_mode,
             CodexProviderMode::DirectApi
