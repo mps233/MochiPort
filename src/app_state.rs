@@ -312,6 +312,13 @@ pub enum RemoteControlSourceKind {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteControlStaleReasonCode {
+    InitializeTimeout,
+    PongTimeout,
+}
+
 pub struct PendingRemoteRequest {
     pub connection_epoch: u64,
     pub method: String,

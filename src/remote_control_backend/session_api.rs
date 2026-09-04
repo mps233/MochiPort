@@ -191,7 +191,7 @@ async fn request_once_with_timeout_for_client_inner(
         .ok_or_else(|| anyhow!("daemon lifecycle is draining; retry after restart"))?;
     let requested_client_key = normalize_remote_client_key(client_key);
     let mut client_key = {
-        let mut remote = state.remote_control.inner.lock().await;
+        let remote = state.remote_control.inner.lock().await;
         if let Some(connection_epoch) = target_connection_epoch {
             resolve_remote_client_key_for_connection_locked(
                 &remote,
@@ -199,7 +199,7 @@ async fn request_once_with_timeout_for_client_inner(
                 &requested_client_key,
             )
         } else {
-            resolve_remote_client_key_locked(&mut remote, &requested_client_key)
+            resolve_remote_client_key_locked(&remote, &requested_client_key)
         }
     };
     if wait_for_recovery {
@@ -231,7 +231,7 @@ async fn request_once_with_timeout_for_client_inner(
             }
             connection_epoch
         } else {
-            connection_epoch_for_client_key_locked(&mut remote, &client_key).ok_or_else(|| {
+            connection_epoch_for_client_key_locked(&remote, &client_key).ok_or_else(|| {
                 anyhow!("remote-control websocket is not connected for client_key={client_key}")
             })?
         };
@@ -248,7 +248,7 @@ async fn request_once_with_timeout_for_client_inner(
         }
         let stale_reason =
             remote_control_connection_stale_reason_locked(&remote, connection_epoch, now_ms());
-        if let Some(reason) = stale_reason {
+        if let Some((_, reason)) = stale_reason {
             if let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch)
             {
                 connection.last_error = Some(reason.clone());
@@ -620,28 +620,6 @@ pub async fn update_thread_settings_for_client(
     request_for_client(state, client_key, "thread/settings/update", params).await
 }
 
-/// Update an existing thread's model, optionally changing its reasoning
-/// effort at the same time.
-#[allow(dead_code)]
-pub async fn update_thread_model_for_client(
-    state: &SharedState,
-    client_key: &str,
-    thread_id: &str,
-    model: &str,
-    effort: Option<&str>,
-) -> Result<Value> {
-    let model = model.trim();
-    if model.is_empty() {
-        return Err(anyhow!("thread model must not be empty"));
-    }
-    let patch = ThreadSettingsPatch {
-        model: ThreadSettingsPatchValue::Set(model.to_string()),
-        effort: optional_thread_settings_patch_value(effort),
-        ..Default::default()
-    };
-    update_thread_settings_for_client(state, client_key, thread_id, &patch).await
-}
-
 fn thread_settings_update_params(thread_id: &str, patch: &ThreadSettingsPatch) -> Result<Value> {
     if patch.is_empty() {
         return Err(anyhow!(
@@ -655,14 +633,6 @@ fn thread_settings_update_params(thread_id: &str, patch: &ThreadSettingsPatch) -
     append_thread_settings_patch_value(&mut params, "effort", &patch.effort)?;
     append_thread_settings_patch_value(&mut params, "serviceTier", &patch.service_tier)?;
     Ok(params)
-}
-
-#[allow(dead_code)]
-fn optional_thread_settings_patch_value(value: Option<&str>) -> ThreadSettingsPatchValue {
-    match non_empty(value) {
-        Some(value) => ThreadSettingsPatchValue::Set(value.to_string()),
-        None => ThreadSettingsPatchValue::Unchanged,
-    }
 }
 
 fn append_thread_settings_patch_value(
@@ -1010,31 +980,6 @@ pub async fn resume_thread_for_client_with_path(
     let response = request_for_client(state, client_key, "thread/resume", params).await?;
     mark_thread_active_for_client(state, Some(client_key), thread_id).await;
     Ok(response)
-}
-
-/// Resume a thread on the websocket that delivered its discovery event.
-///
-/// Automatic Telegram Topic creation must not move a newly-created binding to
-/// another Codex client if the source connection changes while Telegram is
-/// creating the Topic. Unlike the normal route-based helper, this variant
-/// fails when the requested connection is gone instead of falling back to the
-/// currently active connection.
-pub async fn resume_thread_for_client_on_connection(
-    state: &SharedState,
-    connection_epoch: u64,
-    client_key: &str,
-    thread_id: &str,
-    exclude_turns: bool,
-) -> Result<Value> {
-    resume_thread_for_client_on_connection_with_path(
-        state,
-        connection_epoch,
-        client_key,
-        thread_id,
-        None,
-        exclude_turns,
-    )
-    .await
 }
 
 /// Resume a thread on a fixed websocket, optionally using the rollout path

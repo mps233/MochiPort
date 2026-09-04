@@ -37,9 +37,9 @@ use super::server_work::{RemoteServerWorkItem, run_remote_server_work_queue};
 use super::{
     OutboundWsMessage, PROTOCOL_VERSION, REMOTE_CONTROL_APP_PING_INTERVAL,
     REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY, REMOTE_CONTROL_SOURCE_HINT_TTL_MS,
-    REMOTE_CONTROL_STALE_CHECK_INTERVAL, REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
-    ensure_remote_control_client_initialized, header_str, log_remote_control_entry_headers,
-    next_remote_subscribe_cursor, stable_id,
+    REMOTE_CONTROL_STALE_CHECK_INTERVAL, REMOTE_CONTROL_TIMER_JITTER_FRACTION,
+    REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL, ensure_remote_control_client_initialized, header_str,
+    log_remote_control_entry_headers, next_remote_subscribe_cursor, stable_id,
 };
 
 pub(super) async fn websocket(
@@ -261,26 +261,36 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     let reader_state = state.clone();
     let reader_outbound_tx = outbound_tx.clone();
     let mut reader_task = tokio::spawn(async move {
-        let mut ws_ping_interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
-            REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
-        );
-        ws_ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut app_ping_interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + REMOTE_CONTROL_APP_PING_INTERVAL,
-            REMOTE_CONTROL_APP_PING_INTERVAL,
-        );
-        app_ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut next_ws_ping_at = tokio::time::Instant::now()
+            + crate::timing::jittered(
+                REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
+                REMOTE_CONTROL_TIMER_JITTER_FRACTION,
+            );
+        let mut next_app_ping_at = tokio::time::Instant::now()
+            + crate::timing::jittered(
+                REMOTE_CONTROL_APP_PING_INTERVAL,
+                REMOTE_CONTROL_TIMER_JITTER_FRACTION,
+            );
         let mut stale_check_interval = tokio::time::interval(REMOTE_CONTROL_STALE_CHECK_INTERVAL);
         stale_check_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut chunks = ServerChunkMap::new();
         loop {
             tokio::select! {
-                    _ = ws_ping_interval.tick() => {
+                    _ = tokio::time::sleep_until(next_ws_ping_at) => {
+                        next_ws_ping_at = tokio::time::Instant::now()
+                            + crate::timing::jittered(
+                                REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
+                                REMOTE_CONTROL_TIMER_JITTER_FRACTION,
+                            );
                         mark_remote_ws_ping(&reader_state, connection_epoch).await;
                         send_ws_control_ping(&reader_state, connection_epoch).await?;
                     }
-                    _ = app_ping_interval.tick() => {
+                    _ = tokio::time::sleep_until(next_app_ping_at) => {
+                        next_app_ping_at = tokio::time::Instant::now()
+                            + crate::timing::jittered(
+                                REMOTE_CONTROL_APP_PING_INTERVAL,
+                                REMOTE_CONTROL_TIMER_JITTER_FRACTION,
+                            );
                         let targets = remote_app_ping_targets(&reader_state, connection_epoch).await;
                         for (client_key, client_id, stream_id) in targets {
                             mark_remote_app_ping(&reader_state, connection_epoch, &client_key).await;
@@ -290,7 +300,9 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                         }
                     }
                     _ = stale_check_interval.tick() => {
-                        if let Some(reason) = remote_control_stale_reason(&reader_state, connection_epoch).await {
+                        if let Some((_, reason)) =
+                            remote_control_stale_reason(&reader_state, connection_epoch).await
+                        {
                             reader_state
                                 .push_event("warn", "remote_control_heartbeat_timeout", reason.clone())
                                 .await;

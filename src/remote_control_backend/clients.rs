@@ -20,10 +20,9 @@ use crate::{
 
 use super::client_state::active_connection_mut_locked;
 use super::{
-    LEGACY_FEISHU_BRIDGE_CLIENT_ID, LEGACY_FEISHU_BRIDGE_ENV_ID,
-    LEGACY_FEISHU_BRIDGE_INSTALLATION_ID, MOCHIPORT_BRIDGE_CLIENT_ID, MOCHIPORT_BRIDGE_ENV_ID,
-    MOCHIPORT_BRIDGE_INSTALLATION_ID, RemoteControlStatusResponse, format_rfc3339_utc,
-    status_snapshot, unix_now_u64,
+    LEGACY_FEISHU_BRIDGE_CLIENT_ID, LEGACY_FEISHU_BRIDGE_ENV_ID, MOCHIPORT_BRIDGE_CLIENT_ID,
+    MOCHIPORT_BRIDGE_ENV_ID, MOCHIPORT_BRIDGE_INSTALLATION_ID, RemoteControlStatusResponse,
+    format_rfc3339_utc, status_snapshot, unix_now_u64,
 };
 
 const MOCHIPORT_REMOTE_DISPLAY_NAME: &str = "MochiPort";
@@ -182,14 +181,6 @@ fn is_bridge_environment_id(environment_id: &str) -> bool {
     matches!(
         environment_id,
         MOCHIPORT_BRIDGE_ENV_ID | LEGACY_FEISHU_BRIDGE_ENV_ID
-    )
-}
-
-#[allow(dead_code)]
-fn is_bridge_installation_id(installation_id: &str) -> bool {
-    matches!(
-        installation_id,
-        MOCHIPORT_BRIDGE_INSTALLATION_ID | LEGACY_FEISHU_BRIDGE_INSTALLATION_ID
     )
 }
 
@@ -411,13 +402,9 @@ mod tests {
     }
 
     #[test]
-    fn legacy_environment_and_installation_ids_remain_accepted() {
+    fn legacy_environment_ids_remain_accepted() {
         assert!(is_bridge_environment_id(LEGACY_FEISHU_BRIDGE_ENV_ID));
         assert!(is_bridge_environment_id(MOCHIPORT_BRIDGE_ENV_ID));
-        assert!(is_bridge_installation_id(
-            LEGACY_FEISHU_BRIDGE_INSTALLATION_ID
-        ));
-        assert!(is_bridge_installation_id(MOCHIPORT_BRIDGE_INSTALLATION_ID));
     }
 
     #[test]
@@ -441,6 +428,7 @@ mod tests {
             last_error: None,
             healthy: true,
             stale: false,
+            stale_reason_code: None,
             connected_at_ms: None,
             last_ws_inbound_at_ms: None,
             last_ws_ping_at_ms: None,

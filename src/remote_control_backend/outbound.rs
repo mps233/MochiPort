@@ -276,8 +276,8 @@ pub(super) async fn send_envelope_on_connection(
 
 async fn send_envelopes(state: &SharedState, envelopes: Vec<Value>) -> Result<()> {
     let connection_epoch = {
-        let mut remote = state.remote_control.inner.lock().await;
-        active_connection_epoch_locked(&mut remote)
+        let remote = state.remote_control.inner.lock().await;
+        active_connection_epoch_locked(&remote)
             .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?
     };
     send_envelopes_on_connection(state, connection_epoch, envelopes).await

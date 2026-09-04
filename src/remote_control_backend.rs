@@ -13,7 +13,8 @@ use serde_json::{Value, json};
 
 use crate::{
     app_state::{
-        RemoteControlInner, RemoteControlRecentEvent, RemoteControlServerConnection, SharedState,
+        RemoteControlInner, RemoteControlRecentEvent, RemoteControlServerConnection,
+        RemoteControlStaleReasonCode, SharedState,
     },
     chain_log,
     codex::CodexNotification,
@@ -65,12 +66,11 @@ pub use session_api::{
     ThreadSettingsPatch, ThreadSettingsPatchValue, ThreadStartOptions, clear_thread_for_client,
     clear_turn_for_client, config_read_for_client, current_thread_for_client,
     interrupt_turn_for_client, model_list_for_client, resume_thread_for_client,
-    resume_thread_for_client_on_connection, resume_thread_for_client_on_connection_with_path,
-    resume_thread_for_client_with_path, session_history_threads,
-    session_history_threads_for_client_on_connection, session_history_threads_with_connection,
-    set_thread_name_for_client, start_thread_for_client, start_turn_for_client,
-    steer_turn_for_client, thread_list_for_client, thread_loaded_list_for_client,
-    update_thread_model_for_client, update_thread_settings_for_client,
+    resume_thread_for_client_on_connection_with_path, resume_thread_for_client_with_path,
+    session_history_threads, session_history_threads_for_client_on_connection,
+    session_history_threads_with_connection, set_thread_name_for_client, start_thread_for_client,
+    start_turn_for_client, steer_turn_for_client, thread_list_for_client,
+    thread_loaded_list_for_client, update_thread_settings_for_client,
 };
 pub use status::{RemoteControlStatusResponse, status_snapshot};
 use utils::*;
@@ -84,6 +84,7 @@ const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const REMOTE_DISCOVERY_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL: Duration = Duration::from_secs(10);
 const REMOTE_CONTROL_APP_PING_INTERVAL: Duration = Duration::from_secs(10);
+const REMOTE_CONTROL_TIMER_JITTER_FRACTION: f64 = 0.2;
 const REMOTE_CONTROL_PONG_TIMEOUT: Duration = Duration::from_secs(60);
 const REMOTE_CONTROL_STALE_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const REMOTE_CONTROL_REINITIALIZE_RETRY_TIMEOUT: Duration = REMOTE_REQUEST_TIMEOUT;
@@ -99,10 +100,8 @@ const MOCHIPORT_BRIDGE_ENV_ID: &str = "env_mochiport_bridge";
 const MOCHIPORT_BRIDGE_INSTALLATION_ID: &str = "mochiport-bridge";
 const LEGACY_FEISHU_BRIDGE_CLIENT_ID: &str = "codexhub-feishu";
 const LEGACY_FEISHU_BRIDGE_ENV_ID: &str = "env_codexhub_feishu_bridge";
-const LEGACY_FEISHU_BRIDGE_INSTALLATION_ID: &str = "codexhub-feishu-bridge";
 const DEFAULT_REMOTE_CLIENT_KEY: &str = "default";
 
-#[allow(dead_code)]
 pub fn default_remote_client_key() -> &'static str {
     DEFAULT_REMOTE_CLIENT_KEY
 }
@@ -473,7 +472,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<RemoteControlStatu
 pub(super) fn remote_control_stale_reason_locked(
     remote: &RemoteControlInner,
     now_ms: u128,
-) -> Option<String> {
+) -> Option<(RemoteControlStaleReasonCode, String)> {
     active_connection_locked(remote)
         .and_then(|connection| remote_control_server_connection_stale_reason(connection, now_ms))
 }
@@ -482,7 +481,7 @@ pub(super) fn remote_control_connection_stale_reason_locked(
     remote: &RemoteControlInner,
     connection_epoch: u64,
     now_ms: u128,
-) -> Option<String> {
+) -> Option<(RemoteControlStaleReasonCode, String)> {
     connection_for_epoch_locked(remote, connection_epoch)
         .and_then(|connection| remote_control_server_connection_stale_reason(connection, now_ms))
 }
@@ -490,7 +489,7 @@ pub(super) fn remote_control_connection_stale_reason_locked(
 fn remote_control_server_connection_stale_reason(
     connection: &RemoteControlServerConnection,
     now_ms: u128,
-) -> Option<String> {
+) -> Option<(RemoteControlStaleReasonCode, String)> {
     remote_control_liveness_stale_reason(
         connection.connected,
         connection_initialized(connection),
@@ -514,7 +513,7 @@ fn remote_control_liveness_stale_reason(
     last_pong_at_ms: Option<u128>,
     connected_at_ms: Option<u128>,
     now_ms: u128,
-) -> Option<String> {
+) -> Option<(RemoteControlStaleReasonCode, String)> {
     if !connected {
         return None;
     }
@@ -523,9 +522,12 @@ fn remote_control_liveness_stale_reason(
         && initialize_started_at_ms
             .is_some_and(|started_at_ms| now_ms.saturating_sub(started_at_ms) >= timeout_ms)
     {
-        return Some(format!(
-            "remote-control initialize timed out after {}s",
-            REMOTE_CONTROL_PONG_TIMEOUT.as_secs()
+        return Some((
+            RemoteControlStaleReasonCode::InitializeTimeout,
+            format!(
+                "remote-control initialize timed out after {}s",
+                REMOTE_CONTROL_PONG_TIMEOUT.as_secs()
+            ),
         ));
     }
     if let Some(last_ping_at_ms) = last_ping_at_ms {
@@ -535,9 +537,12 @@ fn remote_control_liveness_stale_reason(
         if last_ping_at_ms > last_pong_or_connect_at_ms
             && now_ms.saturating_sub(last_pong_or_connect_at_ms) >= timeout_ms
         {
-            return Some(format!(
-                "websocket pong timed out after {}s",
-                REMOTE_CONTROL_PONG_TIMEOUT.as_secs()
+            return Some((
+                RemoteControlStaleReasonCode::PongTimeout,
+                format!(
+                    "websocket pong timed out after {}s",
+                    REMOTE_CONTROL_PONG_TIMEOUT.as_secs()
+                ),
             ));
         }
     }

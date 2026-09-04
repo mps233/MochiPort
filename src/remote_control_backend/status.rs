@@ -1,7 +1,7 @@
 use serde::Serialize;
 
 use crate::{
-    app_state::{RemoteControlSourceKind, SharedState},
+    app_state::{RemoteControlSourceKind, RemoteControlStaleReasonCode, SharedState},
     types::now_ms,
 };
 
@@ -31,6 +31,7 @@ pub struct RemoteControlStatusResponse {
     pub last_error: Option<String>,
     pub healthy: bool,
     pub stale: bool,
+    pub stale_reason_code: Option<RemoteControlStaleReasonCode>,
     pub connected_at_ms: Option<u128>,
     pub last_ws_inbound_at_ms: Option<u128>,
     pub last_ws_ping_at_ms: Option<u128>,
@@ -65,7 +66,9 @@ pub struct RemoteControlConnectionStatusResponse {
 pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse {
     let mut remote = state.remote_control.inner.lock().await;
     prune_inactive_remote_connections_locked(&mut remote);
-    let stale = remote_control_stale_reason_locked(&remote, now_ms()).is_some();
+    let stale_reason = remote_control_stale_reason_locked(&remote, now_ms());
+    let stale = stale_reason.is_some();
+    let stale_reason_code = stale_reason.map(|(code, _)| code);
     let active_connection_id = select_active_connection_id_locked(&remote);
     let active_connection = active_connection_locked(&remote);
     let active_source_kind = active_connection.map(|connection| connection.source_kind);
@@ -142,6 +145,7 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
         last_error: active_connection.and_then(|connection| connection.last_error.clone()),
         healthy,
         stale,
+        stale_reason_code,
         connected_at_ms: active_connection.and_then(|connection| connection.connected_at_ms),
         last_ws_inbound_at_ms: active_connection
             .and_then(|connection| connection.last_ws_inbound_at_ms),

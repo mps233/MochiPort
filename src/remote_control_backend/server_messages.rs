@@ -145,7 +145,8 @@ pub(super) async fn observe_app_server_message(
         let request_key = request_id_key(id);
         let pending = {
             let mut remote = state.remote_control.inner.lock().await;
-            let pending = client_key
+
+            client_key
                 .as_ref()
                 .and_then(|client_key| {
                     client_state_mut_for_connection_locked(
@@ -154,8 +155,7 @@ pub(super) async fn observe_app_server_message(
                         client_key,
                     )
                 })
-                .and_then(|client| client.pending.remove(&request_key));
-            pending
+                .and_then(|client| client.pending.remove(&request_key))
         };
         let client_method = pending.as_ref().map(|pending| pending.method.clone());
         let client_thread_id = pending
@@ -311,16 +311,16 @@ pub(super) async fn observe_app_server_message(
                         .map(str::to_string)
                 });
                 let mut remote = state.remote_control.inner.lock().await;
-                if let Some(client_key) = client_key.as_deref() {
-                    if let Some(client) = client_state_mut_for_connection_locked(
+                if let Some(client_key) = client_key.as_deref()
+                    && let Some(client) = client_state_mut_for_connection_locked(
                         &mut remote,
                         connection_epoch,
                         client_key,
-                    ) {
-                        client.current_turn_id = Some(turn_id.to_string());
-                        if let Some(thread_id) = thread_id.clone() {
-                            client.current_thread_id = Some(thread_id);
-                        }
+                    )
+                {
+                    client.current_turn_id = Some(turn_id.to_string());
+                    if let Some(thread_id) = thread_id.clone() {
+                        client.current_thread_id = Some(thread_id);
                     }
                 }
             }
@@ -356,16 +356,16 @@ pub(super) async fn observe_app_server_message(
                 {
                     connection.last_error = None;
                 }
-                if let Some(client_key) = client_key.as_deref() {
-                    if let Some(client) = client_state_mut_for_connection_locked(
+                if let Some(client_key) = client_key.as_deref()
+                    && let Some(client) = client_state_mut_for_connection_locked(
                         &mut remote,
                         connection_epoch,
                         client_key,
-                    ) {
-                        client.initialized = true;
-                        client.last_app_pong_status = Some("active".to_string());
-                        client.recovery_started_at_ms = None;
-                    }
+                    )
+                {
+                    client.initialized = true;
+                    client.last_app_pong_status = Some("active".to_string());
+                    client.recovery_started_at_ms = None;
                 }
             }
             state
@@ -468,18 +468,18 @@ pub(super) async fn observe_app_server_message(
             };
             if should_track {
                 let mut remote = state.remote_control.inner.lock().await;
-                if let Some(client_key) = client_key.as_deref() {
-                    if let Some(client) = client_state_mut_for_connection_locked(
+                if let Some(client_key) = client_key.as_deref()
+                    && let Some(client) = client_state_mut_for_connection_locked(
                         &mut remote,
                         connection_epoch,
                         client_key,
-                    ) {
-                        if let Some(thread_id) = thread_id.clone() {
-                            client.current_thread_id = Some(thread_id);
-                        }
-                        if let Some(turn_id) = turn_id.clone() {
-                            client.current_turn_id = Some(turn_id);
-                        }
+                    )
+                {
+                    if let Some(thread_id) = thread_id.clone() {
+                        client.current_thread_id = Some(thread_id);
+                    }
+                    if let Some(turn_id) = turn_id.clone() {
+                        client.current_turn_id = Some(turn_id);
                     }
                 }
             }
@@ -487,31 +487,31 @@ pub(super) async fn observe_app_server_message(
             let thread_id = params.as_ref().and_then(thread_id_from_payload);
             // The IM event router owns RuntimeState cleanup so it can flush platform progress first.
             let mut remote = state.remote_control.inner.lock().await;
-            if let Some(client_key) = client_key.as_deref() {
-                if let Some(client) = client_state_mut_for_connection_locked(
+            if let Some(client_key) = client_key.as_deref()
+                && let Some(client) = client_state_mut_for_connection_locked(
                     &mut remote,
                     connection_epoch,
                     client_key,
-                ) && (thread_id.is_none()
+                )
+                && (thread_id.is_none()
                     || client.current_thread_id.as_deref() == thread_id.as_deref())
-                {
-                    client.current_turn_id = None;
-                }
+            {
+                client.current_turn_id = None;
             }
         } else if method == "thread/closed"
             && let Some(thread_id) = params.as_ref().and_then(thread_id_from_payload)
         {
             let mut remote = state.remote_control.inner.lock().await;
-            if let Some(client_key) = client_key.as_deref() {
-                if let Some(client) = client_state_mut_for_connection_locked(
+            if let Some(client_key) = client_key.as_deref()
+                && let Some(client) = client_state_mut_for_connection_locked(
                     &mut remote,
                     connection_epoch,
                     client_key,
-                ) && client.current_thread_id.as_deref() == Some(thread_id.as_str())
-                {
-                    client.current_thread_id = None;
-                    client.current_turn_id = None;
-                }
+                )
+                && client.current_thread_id.as_deref() == Some(thread_id.as_str())
+            {
+                client.current_thread_id = None;
+                client.current_turn_id = None;
             }
         }
         state

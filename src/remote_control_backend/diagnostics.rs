@@ -18,7 +18,7 @@ use super::recovery::start_remote_control_client_recovery;
 use super::server_envelopes::{server_ack_cursor_key, server_event_kind};
 use super::{
     REMOTE_CONTROL_DIAGNOSTIC_WINDOW_MS, REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY,
-    remote_control_connection_stale_reason_locked,
+    RemoteControlStaleReasonCode, remote_control_connection_stale_reason_locked,
 };
 
 pub(super) async fn observe_stale_server_envelope(
@@ -184,8 +184,8 @@ pub(super) async fn record_remote_app_pong(
         };
         client.last_app_pong_at_ms = Some(now);
         client.last_app_pong_status = Some(normalized_status.clone());
-        let should_reinitialize = normalized_status == "unknown" && client.initialized;
-        should_reinitialize
+
+        normalized_status == "unknown" && client.initialized
     })
 }
 
@@ -490,7 +490,7 @@ async fn log_remote_control_unknown_context(
 pub(super) async fn remote_control_stale_reason(
     state: &SharedState,
     connection_epoch: u64,
-) -> Option<String> {
+) -> Option<(RemoteControlStaleReasonCode, String)> {
     let remote = state.remote_control.inner.lock().await;
     remote_control_connection_stale_reason_locked(&remote, connection_epoch, now_ms())
 }

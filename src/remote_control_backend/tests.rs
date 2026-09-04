@@ -818,7 +818,7 @@ fn virtual_remote_client_routes_through_active_connection() {
         .expect("active test connection");
 
     assert_eq!(
-        connection_epoch_for_client_key_locked(&mut remote, "wechat:bot:user-1"),
+        connection_epoch_for_client_key_locked(&remote, "wechat:bot:user-1"),
         Some(11)
     );
 }
@@ -1853,13 +1853,13 @@ async fn initialize_remote_clients_for_connection_does_not_share_pending_initial
             .iter()
             .all(|connection| connection.initialized && connection.healthy)
     );
-    let mut remote = state.remote_control.inner.lock().await;
+    let remote = state.remote_control.inner.lock().await;
     assert_eq!(
-        connection_epoch_for_client_key_locked(&mut remote, "default:codex_app"),
+        connection_epoch_for_client_key_locked(&remote, "default:codex_app"),
         Some(11)
     );
     assert_eq!(
-        connection_epoch_for_client_key_locked(&mut remote, "default:vscode"),
+        connection_epoch_for_client_key_locked(&remote, "default:vscode"),
         Some(12)
     );
     assert_eq!(
@@ -2504,11 +2504,12 @@ async fn resume_for_new_client_on_connection_waits_for_initialize_response() {
     let request_state = state.clone();
     let request_client_key = route_client_key.clone();
     let request = tokio::spawn(async move {
-        resume_thread_for_client_on_connection(
+        resume_thread_for_client_on_connection_with_path(
             &request_state,
             20,
             &request_client_key,
             "thread-new",
+            None,
             true,
         )
         .await
@@ -2625,11 +2626,12 @@ async fn resume_for_new_client_on_connection_does_not_fallback_after_disconnect(
     let request_state = state.clone();
     let request_client_key = route_client_key.clone();
     let request = tokio::spawn(async move {
-        resume_thread_for_client_on_connection(
+        resume_thread_for_client_on_connection_with_path(
             &request_state,
             20,
             &request_client_key,
             "thread-disconnected",
+            None,
             true,
         )
         .await
