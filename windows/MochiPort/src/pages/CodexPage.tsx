@@ -21,7 +21,6 @@ import {
 import { useState } from "react";
 import { Button, Card, InlineError, Modal, SectionHeading, SettingsRow, StatusPill, Switch } from "../components/ui";
 import { useAppModel } from "../state/AppModel";
-import { providerTypeLabel } from "../utils/format";
 
 function CheckRow({ ok, title, detail }: { ok: boolean; title: string; detail: string }) {
   return (

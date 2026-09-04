@@ -2,11 +2,9 @@ import {
   Bell,
   Clipboard,
   CircleAlert,
-  Download,
   ExternalLink,
   FolderOpen,
   Gauge,
-  Globe2,
   Info,
   KeyRound,
   Network,
@@ -14,11 +12,10 @@ import {
   Settings as SettingsIcon,
   ShieldCheck,
   Stethoscope,
-  SunMoon,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
-import { Button, Card, Field, InlineError, Modal, SectionHeading, SegmentedControl, Select, SettingsRow, StatusPill, Switch } from "../components/ui";
+import { Button, Card, Field, InlineError, Modal, SectionHeading, Select, SettingsRow, StatusPill, Switch } from "../components/ui";
 import {
   autostartEnabled,
   ensureNotificationPermission,
@@ -29,7 +26,6 @@ import {
 } from "../native/windowsIntegration";
 import { useAppModel } from "../state/AppModel";
 import { useUpdateState } from "../state/useUpdateNotifications";
-import { formatDateTime } from "../utils/format";
 import {
   customMessageDrafts,
   customizableNotificationEvents,

@@ -70,16 +70,6 @@ export const isHealthResponse: Validator<HealthResponse> = (value): value is Hea
   && isInteger(value.apiMajor)
   && isBoolean(value.ready);
 
-export interface LogDirectoryResponse {
-  directory: string;
-  instanceId: string;
-}
-
-export const isLogDirectoryResponse: Validator<LogDirectoryResponse> =
-  (value): value is LogDirectoryResponse => isObject(value)
-    && isString(value.directory)
-    && isString(value.instanceId);
-
 export const isDashboard: Validator<Dashboard> = (value): value is Dashboard => {
   if (!isObject(value) || !hasServiceIdentity(value.service)) return false;
   if (!isBoolean(value.bridgeRunning)

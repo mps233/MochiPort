@@ -25,7 +25,6 @@ import {
   isIMAccountsResponse,
   isLifecycle,
   isLifecycleCredentialMutationResponse,
-  isLogDirectoryResponse,
   isOkResponse,
   isProviderTemplatesResponse,
   isRequestLogDetailResponse,
@@ -329,7 +328,6 @@ export const api = {
   },
   dashboard: () => request("api/v1/manage/dashboard", isDashboard),
   lifecycle: () => request("api/v1/manage/lifecycle", isLifecycle),
-  logDirectory: () => request("api/v1/manage/log-directory", isLogDirectoryResponse),
   codexStatus: () => request("api/v1/manage/codex/status", isCodexStatus),
   codexModelCatalog: async () => {
     const response = await request("api/v1/manage/codex/models/catalog", isCodexModelCatalogResponse);
@@ -458,5 +456,3 @@ export const api = {
     await invoke("set_close_behavior", { behavior });
   },
 };
-
-export type { GatewayProvider };
