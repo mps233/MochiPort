@@ -1,8 +1,8 @@
 ﻿# Remote-Control 多端优先路由设计
 
-更新时间：2026-06-07
+更新时间：2026-09-04
 
-本文记录 `mochiport` 支持 Codex App、VS Code 插件、Codex CLI/TUI 同时接入 remote-control backend 的设计。当前目标不是广播，也不是每个 IM 会话手动选择执行端，而是让多个 Codex app-server 可以共存，并把 IM 请求自动发送给最高优先级的可用执行端。
+状态：已实现。本文记录 `mochiport` 支持 Codex App、VS Code 插件、Codex CLI/TUI 同时接入 remote-control backend 的连接表与优先级路由设计。目标不是广播，也不是每个 IM 会话手动选择执行端，而是让多个 Codex app-server 可以共存，并把 IM 请求自动发送给最高优先级的可用执行端。
 
 ## 1. 问题背景
 
@@ -19,7 +19,7 @@ Codex App、VS Code 插件、Codex CLI/TUI 都可能启动各自的 Codex app-se
 
 WebSocket 握手 header 的 `user-agent` 通常为空，`x-codex-name` 是机器名，不能区分来源。可靠来源在 `initialize` 响应的 `result.userAgent` 中。
 
-当前实现是单连接模型：
+早期实现是单连接模型：
 
 - `remote.outbound_tx` 只有一个
 - `remote.connection_epoch` 只有一个
@@ -32,12 +32,14 @@ WebSocket 握手 header 的 `user-agent` 通常为空，`x-codex-name` 是机器
 - `remote_control_disconnected reason=websocket closed` 快速增长
 - Codex 侧可能报 `Incoming line queue overflow`
 
+当前实现改为连接表模型（见第 4 节）：每个 WebSocket 连接拥有独立的连接级状态，互不覆盖；v0.5.6 起连接状态完全按连接隔离，不再维护全局汇总的 legacy 字段。
+
 ## 2. 目标
 
-第一版目标：
+目标（均已达成）：
 
 1. Codex App、VS Code、CLI/TUI 可以同时连接到 `mochiport`。
-2. 连接之间不互相覆盖，不因为某个连接断开把全局 remote-control 标为断开。
+2. 连接之间不互相覆盖，不因为某个连接断开把 remote-control 整体标为断开。
 3. IM 请求只发送给一个执行端，不做广播。
 4. 自动选择最高优先级且已初始化的执行端：
    - Codex App
@@ -49,7 +51,7 @@ WebSocket 握手 header 的 `user-agent` 通常为空，`x-codex-name` 是机器
 非目标：
 
 1. 不把一条 IM 消息同时发送给多个 app-server。
-2. 不在第一版支持每个 IM 会话手动选择不同执行端。
+2. 不支持每个 IM 会话手动选择不同执行端。
 3. 不实现跨 app-server 事件合并或广播去重。
 4. 不复制官方完整多 controller/client tracker 体系。
 
@@ -73,17 +75,18 @@ Codex App > VS Code > CLI/TUI > Unknown
 
 ## 4. 数据结构
 
-新增连接级状态：
+连接级状态（`src/app_state.rs` 中的 `RemoteControlServerConnection`）：
 
 ```rust
 RemoteControlServerConnection {
     connection_id: String,
     connection_epoch: u64,
+    default_client_key: String,
     connected: bool,
-    initialized: bool,
     source_kind: RemoteControlSourceKind,
     user_agent: Option<String>,
     server_id: Option<String>,
+    environment_id: Option<String>,
     server_name: Option<String>,
     installation_id: Option<String>,
     account_id: Option<String>,
@@ -93,20 +96,21 @@ RemoteControlServerConnection {
     last_ws_inbound_at_ms: Option<u128>,
     last_ws_ping_at_ms: Option<u128>,
     last_ws_pong_at_ms: Option<u128>,
+    last_error: Option<String>,
     clients: HashMap<String, RemoteControlClientState>,
+    server_ack_cursors: HashMap<String, (u64, Option<usize>)>,
     stream_diagnostics: HashMap<String, RemoteControlStreamDiagnostics>,
 }
 ```
 
-`RemoteControlInner` 保留 legacy 汇总字段用于兼容旧 API/GUI，但真实发送与接收状态以 `connections` 为准：
+`RemoteControlInner` 只保留连接表与授权/事件等全局簿记，不再有 `active_connection_id`、全局 `outbound_tx`、全局 `connected` 等 legacy 汇总字段：
 
 ```rust
 connections: HashMap<String, RemoteControlServerConnection>
-active_connection_id: Option<String>
 next_connection_epoch: u64
 ```
 
-`active_connection_id` 不是“唯一连接”，只是当前按优先级选出的执行端。
+"当前执行端"不落盘为字段，而是按需由 `select_active_connection_id_locked` 在每次发送/查询时从 `connections` 里现算（见第 6 节），避免连接增减时出现汇总字段与连接表不一致的问题。
 
 ## 5. 来源识别
 
@@ -129,23 +133,22 @@ contains("WindowsTerminal") 或 CLI 形态 -> cli
 其它 -> unknown
 ```
 
-更新来源后重新计算 `active_connection_id`。
+更新来源后，下一次选择执行端时会按新优先级现算 active connection。
 
 ## 6. 请求发送
 
-新增选择函数：
+选择函数（`src/remote_control_backend/client_state.rs`）：
 
 ```rust
-select_active_connection_locked(remote) -> Option<String>
+select_active_connection_id_locked(remote) -> Option<String>
 ```
 
-选择条件：
+实现为一次 `max_by_key`，键为四元组，依次比较：
 
-1. `connected == true`
-2. `outbound_tx.is_some()`
-3. default client initialized
-4. source priority 最大
-5. 同优先级时选择最近连接或最近活跃连接
+1. `connected == true` 且 `outbound_tx.is_some()`（过滤条件）
+2. default client 已初始化（`connection_initialized`）
+3. 来源优先级：`codex_app(40) > vscode(30) > cli(20) > unknown(10)`
+4. 最近活跃时间（`last_ws_inbound_at_ms`，缺省回退 `connected_at_ms`）；再相同则取更大的 `connection_epoch`
 
 请求发送流程：
 
@@ -173,21 +176,14 @@ server envelope in
 1. 只标记该 `connection_id` 为 disconnected。
 2. 清理该连接的 `outbound_tx`。
 3. 保留其它连接。
-4. 重新选择 `active_connection_id`。
+4. 后续请求重新按优先级选择 active connection。
 5. 如果没有任何可用连接，汇总状态才显示 disconnected。
 
-不允许旧连接关闭时执行：
-
-```rust
-remote.connected = false;
-remote.outbound_tx = None;
-```
-
-除非它是最后一个连接。
+早期全局状态会随任一连接关闭被整体置断（等效于执行 `remote.connected = false; remote.outbound_tx = None;`），这正是连接风暴的放大器；连接表模型下不存在这些全局字段，单连接断开不再影响其它连接。
 
 ## 8. 状态 API/GUI
 
-`/api/remote-control/status` 继续保留 legacy 字段，但新增：
+`/api/remote-control/status` 顶层仍输出汇总字段（`connected`、`clientId`、`streamId`、`serverId` 等），但它们在响应时从 active connection 现算派生，不再是独立保存的状态；同时输出连接列表：
 
 ```json
 {
@@ -197,11 +193,13 @@ remote.outbound_tx = None;
   "connections": [
     {
       "id": "...",
+      "connectionEpoch": 3,
       "sourceKind": "codex_app",
       "userAgent": "Codex Desktop/...",
       "connected": true,
       "initialized": true,
-      "healthy": true
+      "healthy": true,
+      "lastError": null
     }
   ]
 }
@@ -213,23 +211,11 @@ GUI 使用新增字段显示：
 - 已连接端列表
 - 连接异常时显示最近错误和来源
 
-## 9. 实施顺序
+## 9. 实施状态
 
-第一阶段：
+连接表、来源识别、优先级选择、按连接隔离的状态 API 与 GUI 展示均已落地。v0.5.6 移除了旧实现遗留的全局汇总字段与同步逻辑（`sync_legacy_from_active_connection_locked`），状态展示统一从 `connections` 派生。
 
-1. 添加连接级结构和来源枚举。
-2. WebSocket open 时创建 connection，不覆盖其它连接。
-3. WebSocket close 时只关闭当前 connection。
-4. initialize result 更新 connection `user_agent/source_kind`。
-5. 请求发送选择最高优先级 connection。
-
-第二阶段：
-
-1. status API 输出连接列表。
-2. GUI 显示当前执行端和多端连接状态。
-3. 清理连接风暴诊断日志，保留关键来源日志。
-
-第三阶段：
+后续可选项（未实施）：
 
 1. 根据真实测试结果决定是否支持手动 pin 执行端。
 2. 根据需要再扩展 IM 会话级 route 绑定。

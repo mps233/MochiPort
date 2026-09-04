@@ -1,6 +1,8 @@
 ﻿# IM Remote-Control Stream 隔离方案
 
-更新时间：2026-06-09
+更新时间：2026-09-04
+
+状态：已实现。
 
 ## 背景
 
@@ -12,7 +14,9 @@ Codex remote-control 官方实现支持多个独立逻辑 client。隔离键是�
 
 `client_id` 可以相同，只要 `stream_id` 不同，Codex app-server 侧就会创建不同的 remote-control connection。官方源码里 `ClientTracker` 使用 `HashMap<(ClientId, StreamId), ClientState>`，并有测试覆盖“同一个 client_id 使用新 stream_id 会打开新 connection”。
 
-当前 `mochiport` 已有 `RemoteControlInner.clients: HashMap<String, RemoteControlClientState>`，非 default `client_key` 会派生独立 `stream_id`。问题是 IM 层很多入口仍然走 `default_remote_client_key()`，导致飞书、微信、Telegram 会共享同一条 remote-control stream。一条链路的 pending reset、reinitialize、recovery 可能影响另一条 IM 链路。
+早期 `mochiport` 只有 `RemoteControlInner.clients: HashMap<String, RemoteControlClientState>`，非 default `client_key` 会派生独立 `stream_id`，但 IM 层很多入口走 `default_remote_client_key()`，导致飞书、微信、Telegram 会共享同一条 remote-control stream，一条链路的 pending reset、reinitialize、recovery 可能影响另一条 IM 链路。
+
+现在每个 IM route 都携带确定性 `remote_client_key`（见下文 Key 规则与请求路径），上述共享问题已消除。v0.5.6 起 remote-control 连接状态进一步按连接隔离，client state 归属各自的 `RemoteControlServerConnection`。
 
 ## 目标
 
@@ -31,10 +35,10 @@ Codex remote-control 官方实现支持多个独立逻辑 client。隔离键是�
 
 ## Key 规则
 
-每个 IM route 基于 platform、account_id、chat_id 生成稳定 key：
+每个 IM route 基于 platform、account_id、chat_id 生成稳定 key（`RouteTarget::deterministic_remote_client_key_for`，`src/im_runtime.rs`）：
 
 ```text
-im:<platform>:<sha256(platform:account_id:chat_id)[0..16]>
+im:<platform>:<sha256(platform:account_id:chat_id) 前 8 字节的 16 位 hex>
 ```
 
 示例：
@@ -97,11 +101,12 @@ IM route 创建时必须带上确定性 `remote_client_key`。后续 thread/turn
 
 `default_remote_client_key()` 只保留给非 IM 或状态展示场景，不作为 IM thread/turn 的正常路径。
 
-## 实施步骤
+## 实施状态
 
-1. 在 `RouteTarget` 上实现确定性 remote-client-key helper。
-2. `route_for_message()` 和 `route_from_conversation_key()` 创建 route 时直接携带 key。
-3. `create_and_bind_thread()`、`resume_and_bind_thread()` 改用 route key。
-4. `start_turn_for_route()`、approval response 改用 route key。
-5. thread list、thread create defaults、form options 改用 route key。
-6. 增加测试验证不同 IM conversation 生成不同 key。
+已全部落地：
+
+1. `RouteTarget` 携带确定性 remote-client-key（`with_deterministic_remote_client_key`）。
+2. `route_for_message()` / `route_from_conversation_key()` 创建 route 时直接携带 key。
+3. thread 创建/恢复绑定、turn 发送、approval response、thread list 与配置读取均使用 route key（`src/im/core/routing.rs`）。
+4. recovery 恢复订阅只针对对应 `remote_client_key`。
+5. 测试覆盖不同 IM conversation 生成不同 key。
