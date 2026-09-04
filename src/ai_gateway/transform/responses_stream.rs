@@ -21,8 +21,9 @@ use crate::ai_gateway::tool_names::{ToolCallKind, ToolCallTarget, ToolNameMap};
 pub struct ChatSseToResponsesSse<S> {
     inner: S,
     state: ResponsesStreamState,
-    /// 上游 SSE 未完成的行缓冲。
-    line_buf: String,
+    /// 上游 SSE 未完成的行缓冲。保存原始字节，UTF-8 字符可以安全地跨越
+    /// 上游网络分块。
+    line_buf: Vec<u8>,
     /// 已生成的输出事件队列。
     output_queue: VecDeque<Bytes>,
 }
@@ -37,7 +38,7 @@ impl<S> ChatSseToResponsesSse<S> {
         Self {
             inner,
             state: ResponsesStreamState::new(model, tool_name_map),
-            line_buf: String::new(),
+            line_buf: Vec::new(),
             output_queue: VecDeque::new(),
         }
     }
@@ -62,15 +63,17 @@ where
         loop {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
-                    let text = String::from_utf8_lossy(&chunk);
-                    this.line_buf.push_str(&text);
+                    this.line_buf.extend_from_slice(&chunk);
 
-                    // 按行处理 SSE
-                    while let Some(pos) = this.line_buf.find('\n') {
-                        let line = this.line_buf[..pos].trim_end_matches('\r').to_string();
-                        this.line_buf = this.line_buf[pos + 1..].to_string();
+                    // 按行处理 SSE。行缓冲按字节切分，完整的行必然以合法
+                    // UTF-8 结尾（多字节字符的续字节不可能是 b'\n'），此时
+                    // 再解码才不会破坏跨块的中文字符。
+                    while let Some(pos) = this.line_buf.iter().position(|byte| *byte == b'\n') {
+                        let consumed: Vec<u8> = this.line_buf.drain(..=pos).collect();
+                        let line = String::from_utf8_lossy(&consumed[..consumed.len() - 1]);
+                        let line = line.trim_end_matches('\r');
 
-                        if let Some(data) = sse_data_value(&line) {
+                        if let Some(data) = sse_data_value(line) {
                             if data.trim() == "[DONE]" {
                                 // 生成结束事件
                                 this.state.handle_done(&mut this.output_queue);
@@ -1054,6 +1057,38 @@ mod tests {
         assert!(types.contains(&"response.output_text.delta"));
         assert!(types.contains(&"response.completed"));
         assert_eq!(events[0].1["response"]["id"], "chatcmpl_abc");
+    }
+
+    #[tokio::test]
+    async fn stream_adapter_preserves_utf8_split_across_chunks() {
+        let payload = format!(
+            "data: {}\n\n",
+            json!({
+                "id": "chatcmpl_utf8",
+                "model": "deepseek-v4-flash",
+                "created": 1700000000,
+                "choices": [{"index": 0, "delta": {"content": "你好，世界 🌏"}}]
+            })
+        );
+        let split_at = payload.find('你').expect("unicode payload") + 1;
+        let bytes = payload.as_bytes();
+        let input = stream::iter(vec![
+            Ok::<_, std::io::Error>(Bytes::copy_from_slice(&bytes[..split_at])),
+            Ok(Bytes::copy_from_slice(&bytes[split_at..])),
+        ]);
+
+        let mut converted = ChatSseToResponsesSse::new(input, "deepseek-v4-flash".to_string());
+        let mut queue = VecDeque::new();
+        while let Some(chunk) = converted.next().await {
+            queue.push_back(chunk.unwrap());
+        }
+
+        let events = parse_events(&queue);
+        let delta = events
+            .iter()
+            .find(|(event_type, _)| event_type == "response.output_text.delta")
+            .expect("text delta event");
+        assert_eq!(delta.1["delta"], "你好，世界 🌏");
     }
 
     fn assert_codex_active_item_invariants(events: &[(String, Value)]) {

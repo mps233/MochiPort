@@ -91,7 +91,7 @@ impl GatewayContext {
             .or_else(|| session_id.clone())
             .or_else(|| thread_id.clone())
             .or_else(|| metadata_session_id.clone())
-            .unwrap_or_else(|| format!("codexhub:{}", uuid::Uuid::new_v4()));
+            .unwrap_or_else(|| format!("mochiport:{}", uuid::Uuid::new_v4()));
 
         let upstream_headers = collect_upstream_headers(headers);
 
@@ -236,7 +236,7 @@ mod tests {
     fn test_fallback_generates_uuid() {
         let headers = HeaderMap::new();
         let ctx = GatewayContext::extract(&headers, None);
-        assert!(ctx.prompt_cache_key.starts_with("codexhub:"));
+        assert!(ctx.prompt_cache_key.starts_with("mochiport:"));
     }
 
     #[test]

@@ -2069,7 +2069,7 @@ fn raw_sse_first_content_token_ignores_message_start_and_ping() {
         "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
     );
     assert!(
-        !raw_sse_has_first_content_token(prelude),
+        !raw_sse_has_first_content_token(prelude.as_bytes()),
         "prelude frames must not count as first token"
     );
 
@@ -2077,7 +2077,7 @@ fn raw_sse_first_content_token_ignores_message_start_and_ping() {
         "{prelude}event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":\"hi\"}}}}\n\n"
     );
     assert!(
-        raw_sse_has_first_content_token(&with_delta),
+        raw_sse_has_first_content_token(with_delta.as_bytes()),
         "first content_block_delta marks time-to-first-token"
     );
 }
@@ -2467,6 +2467,32 @@ fn filters_glm_private_web_search_text_from_response() {
     let encoded = serde_json::to_string(&converted).unwrap();
     assert!(!encoded.contains("web_search_prime"));
     assert!(!encoded.contains("web_search_prime_result_summary"));
+}
+
+#[tokio::test]
+async fn stream_preserves_utf8_split_across_chunks() {
+    let payload = "event: content_block_delta\n\
+                   data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"你好，世界 🌏\"}}\n\n";
+    let split_at = payload.find('你').expect("unicode payload") + 1;
+    let bytes = payload.as_bytes();
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::copy_from_slice(&bytes[..split_at])),
+        Ok(Bytes::copy_from_slice(&bytes[split_at..])),
+    ]);
+
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+
+    let delta = events
+        .iter()
+        .find(|(event, _)| event == "response.output_text.delta")
+        .expect("text delta event");
+    assert_eq!(delta.1["delta"], "你好，世界 🌏");
 }
 
 #[tokio::test]

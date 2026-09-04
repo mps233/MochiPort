@@ -22,6 +22,8 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::config::AppConfig;
+#[cfg(not(test))]
+use crate::storage_migration;
 
 const DB_FILE_NAME: &str = "ai-gateway-request-logs.sqlite";
 const WRITE_QUEUE_CAPACITY: usize = 256;
@@ -241,7 +243,7 @@ impl RequestLogStore {
         let (write_tx, write_rx) = sync_channel(WRITE_QUEUE_CAPACITY);
         let writer_path = db_path.clone();
         if let Err(err) = std::thread::Builder::new()
-            .name("codexhub-request-log-writer".to_string())
+            .name("mochiport-request-log-writer".to_string())
             .spawn(move || request_log_writer_loop(writer_path, writer_conn, write_rx))
         {
             warn!(error = %err, "failed to start AI Gateway request log writer");
@@ -524,8 +526,9 @@ pub fn database_path(config: &AppConfig) -> PathBuf {
     }
 
     #[cfg(not(test))]
-    if let Some(dir) = app_data_dir() {
-        return dir.join(DB_FILE_NAME);
+    {
+        let _ = config;
+        return storage_migration::current_storage_home().join(DB_FILE_NAME);
     }
 
     #[allow(unreachable_code)]
@@ -587,53 +590,6 @@ fn legacy_database_path(config: &AppConfig) -> PathBuf {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
         .join(DB_FILE_NAME)
-}
-
-#[cfg(not(test))]
-fn app_data_dir() -> Option<PathBuf> {
-    if let Some(base) = std::env::var_os("MOCHIPORT_HOME").map(PathBuf::from) {
-        return Some(base);
-    }
-    if let Some(base) = std::env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
-        return Some(base);
-    }
-    if let Some(base) = std::env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
-        return Some(base);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .or_else(|| std::env::var_os("APPDATA"))
-            .map(PathBuf::from)?;
-        Some(prefer_existing_legacy_app_dir(
-            base.join("MochiPort"),
-            &[base.join("ThreadRelay"), base.join("CodexHub")],
-        ))
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let base = std::env::var_os("HOME")
-            .map(PathBuf::from)?
-            .join("Library/Application Support");
-        Some(prefer_existing_legacy_app_dir(
-            base.join("MochiPort"),
-            &[base.join("ThreadRelay"), base.join("CodexHub")],
-        ))
-    }
-}
-
-#[cfg(not(test))]
-fn prefer_existing_legacy_app_dir(new_dir: PathBuf, legacy_dirs: &[PathBuf]) -> PathBuf {
-    if new_dir.join("config.toml").exists() {
-        return new_dir;
-    }
-    legacy_dirs
-        .iter()
-        .find(|dir| dir.join("config.toml").exists())
-        .cloned()
-        .unwrap_or(new_dir)
 }
 
 fn paths_equivalent(left: &Path, right: &Path) -> bool {
@@ -1552,7 +1508,7 @@ impl<S> UpstreamSseCaptureStream<S> {
 
         let mut text = String::from_utf8_lossy(&self.captured).to_string();
         if self.truncated {
-            text.push_str("\n\n: [codexhub] upstream SSE log truncated\n");
+            text.push_str("\n\n: [mochiport] upstream SSE log truncated\n");
         }
         let update = RequestLogUpdate {
             upstream_response_sse: Some(text),
@@ -2166,10 +2122,8 @@ mod tests {
 
     #[test]
     fn database_path_follows_state_path_in_tests() {
-        let config = AppConfig {
-            state_path: std::env::temp_dir().join("codexhub-test-state.json"),
-            ..AppConfig::default()
-        };
+        let mut config = AppConfig::default();
+        config.state_path = std::env::temp_dir().join("codexhub-test-state.json");
 
         assert_eq!(
             database_path(&config),

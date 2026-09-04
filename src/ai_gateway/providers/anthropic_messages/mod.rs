@@ -468,15 +468,17 @@ async fn stream_anthropic_round(
     envelope.ensure_started(tx).await?;
     envelope.begin_round();
 
-    // Accumulate the raw Anthropic SSE for post-round inspection.
-    let raw = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    // Accumulate the raw Anthropic SSE for post-round inspection. The buffer
+    // keeps raw bytes so UTF-8 characters may safely span upstream network
+    // chunks; it is decoded once when the round completes.
+    let raw = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let raw_for_stream = raw.clone();
     let byte_stream = upstream_resp
         .bytes_stream()
         .map(move |result| match result {
             Ok(chunk) => {
                 if let Ok(mut guard) = raw_for_stream.lock() {
-                    guard.push_str(&String::from_utf8_lossy(&chunk));
+                    guard.extend_from_slice(&chunk);
                 }
                 Ok(chunk)
             }
@@ -514,11 +516,11 @@ async fn stream_anthropic_round(
         }
     }
 
-    save_internal_upstream_sse(
-        log_context,
-        &raw.lock().map(|g| g.clone()).unwrap_or_default(),
-    );
-    let raw_sse = raw.lock().map(|g| g.clone()).unwrap_or_default();
+    let raw_sse = raw
+        .lock()
+        .map(|g| String::from_utf8_lossy(&g).into_owned())
+        .unwrap_or_default();
+    save_internal_upstream_sse(log_context, &raw_sse);
     Ok(raw_sse)
 }
 
@@ -758,7 +760,8 @@ async fn read_sse_to_string(
     record_ttft: bool,
 ) -> Result<String, GatewayError> {
     let mut stream = response.bytes_stream();
-    let mut raw = String::new();
+    // 累积原始字节，UTF-8 字符可以安全地跨越上游网络分块；流结束后整体解码。
+    let mut raw: Vec<u8> = Vec::new();
     let mut ttft_recorded = false;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| {
@@ -767,7 +770,7 @@ async fn read_sse_to_string(
                 format!("read upstream stream: {e}"),
             )
         })?;
-        raw.push_str(&String::from_utf8_lossy(&chunk));
+        raw.extend_from_slice(&chunk);
         // The gateway buffers this internal Anthropic stream before replaying a
         // synthetic Responses SSE, so ResponsesSseLogStream never sees a real
         // delta event and cannot compute TTFT. Capture it here from the first
@@ -785,6 +788,7 @@ async fn read_sse_to_string(
             ttft_recorded = true;
         }
     }
+    let raw = String::from_utf8_lossy(&raw).into_owned();
     save_internal_upstream_sse(log_context, &raw);
     Ok(raw)
 }
@@ -792,10 +796,16 @@ async fn read_sse_to_string(
 /// Returns true once the accumulated raw Anthropic SSE contains the first token
 /// of model output. Anthropic streams `message_start` and `ping` frames before
 /// any real content, so those do not count. The first `content_block_delta`
-/// (text, thinking, or tool input) marks time-to-first-token.
-fn raw_sse_has_first_content_token(raw: &str) -> bool {
-    raw.contains("\"type\":\"content_block_delta\"")
-        || raw.contains("\"type\": \"content_block_delta\"")
+/// (text, thinking, or tool input) marks time-to-first-token. Both markers are
+/// pure ASCII, so matching them against raw bytes is equivalent to matching the
+/// decoded text and lets the buffer stay bytes until the stream ends.
+fn raw_sse_has_first_content_token(raw: &[u8]) -> bool {
+    [
+        &b"\"type\":\"content_block_delta\""[..],
+        &b"\"type\": \"content_block_delta\""[..],
+    ]
+    .iter()
+    .any(|marker| raw.windows(marker.len()).any(|window| window == *marker))
 }
 
 fn response_from_response_object(
@@ -1292,12 +1302,12 @@ fn save_internal_upstream_sse(log_context: &Option<RequestLogContext>, raw_sse: 
     let mut text = if existing.is_empty() {
         raw_sse.to_string()
     } else {
-        format!("{existing}\n\n: [codexhub] internal anthropic SSE segment\n\n{raw_sse}")
+        format!("{existing}\n\n: [mochiport] internal anthropic SSE segment\n\n{raw_sse}")
     };
     const INTERNAL_UPSTREAM_SSE_LOG_LIMIT_BYTES: usize = 512 * 1024;
     if text.len() > INTERNAL_UPSTREAM_SSE_LOG_LIMIT_BYTES {
         text.truncate(INTERNAL_UPSTREAM_SSE_LOG_LIMIT_BYTES);
-        text.push_str("\n\n: [codexhub] upstream SSE log truncated\n");
+        text.push_str("\n\n: [mochiport] upstream SSE log truncated\n");
     }
     let update = RequestLogUpdate {
         upstream_response_sse: Some(text),

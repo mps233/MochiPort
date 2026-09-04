@@ -15,7 +15,9 @@ use crate::ai_gateway::tool_names::ToolNameMap;
 pub(super) struct AnthropicSseToResponsesSse<S> {
     inner: S,
     state: AnthropicStreamState,
-    line_buf: String,
+    /// 未完成的行缓冲。保存原始字节，UTF-8 字符可以安全地跨越上游网络
+    /// 分块（多字节字符的续字节不可能是 b'\n'）。
+    line_buf: Vec<u8>,
     event_name: Option<String>,
     data_lines: Vec<String>,
     output_queue: VecDeque<Bytes>,
@@ -31,7 +33,7 @@ impl<S> AnthropicSseToResponsesSse<S> {
         Self {
             inner,
             state: AnthropicStreamState::new(model, tool_name_map, profile),
-            line_buf: String::new(),
+            line_buf: Vec::new(),
             event_name: None,
             data_lines: Vec::new(),
             output_queue: VecDeque::new(),
@@ -91,12 +93,11 @@ where
         loop {
             match Pin::new(&mut this.inner).poll_next(cx) {
                 Poll::Ready(Some(Ok(chunk))) => {
-                    let text = String::from_utf8_lossy(&chunk);
-                    this.line_buf.push_str(&text);
-                    while let Some(pos) = this.line_buf.find('\n') {
-                        let line = this.line_buf[..pos].trim_end_matches('\r').to_string();
-                        this.line_buf = this.line_buf[pos + 1..].to_string();
-                        this.process_sse_line(&line);
+                    this.line_buf.extend_from_slice(&chunk);
+                    while let Some(pos) = this.line_buf.iter().position(|byte| *byte == b'\n') {
+                        let consumed: Vec<u8> = this.line_buf.drain(..=pos).collect();
+                        let line = String::from_utf8_lossy(&consumed[..consumed.len() - 1]);
+                        this.process_sse_line(line.trim_end_matches('\r'));
                     }
                     if let Some(bytes) = this.output_queue.pop_front() {
                         return Poll::Ready(Some(Ok(bytes)));
@@ -107,7 +108,8 @@ where
                 }
                 Poll::Ready(None) => {
                     if !this.line_buf.is_empty() {
-                        let line = std::mem::take(&mut this.line_buf);
+                        let line_bytes = std::mem::take(&mut this.line_buf);
+                        let line = String::from_utf8_lossy(&line_bytes);
                         this.process_sse_line(line.trim_end_matches('\r'));
                     }
                     this.flush_sse_event();
