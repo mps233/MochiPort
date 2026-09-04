@@ -51,26 +51,26 @@ pub async fn start_bridge(state: SharedState) {
     let feishu_accounts = config
         .feishu_accounts
         .iter()
+        .filter(|&account| account.is_active())
         .cloned()
-        .filter(|account| account.is_active())
         .collect::<Vec<_>>();
     let telegram_accounts = config
         .telegram_accounts
         .iter()
+        .filter(|&account| account.is_active())
         .cloned()
-        .filter(|account| account.is_active())
         .collect::<Vec<_>>();
     let wechat_accounts = config
         .wechat_accounts
         .iter()
+        .filter(|&account| account.is_active())
         .cloned()
-        .filter(|account| account.is_active())
         .collect::<Vec<_>>();
     let wecom_accounts = config
         .wecom_accounts
         .iter()
+        .filter(|&account| account.is_active())
         .cloned()
-        .filter(|account| account.is_active())
         .collect::<Vec<_>>();
     if feishu_accounts.is_empty()
         && telegram_accounts.is_empty()
@@ -216,7 +216,11 @@ pub async fn start_bridge(state: SharedState) {
                             .await;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(crate::timing::jittered(
+                    std::time::Duration::from_secs(5),
+                    0.2,
+                ))
+                .await;
             }
         });
     }
@@ -271,7 +275,11 @@ pub async fn start_bridge(state: SharedState) {
                             .await;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(crate::timing::jittered(
+                    std::time::Duration::from_secs(5),
+                    0.2,
+                ))
+                .await;
             }
         });
     }
@@ -323,7 +331,11 @@ pub async fn start_bridge(state: SharedState) {
                             .await;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(crate::timing::jittered(
+                    std::time::Duration::from_secs(5),
+                    0.2,
+                ))
+                .await;
             }
         });
     }
@@ -368,7 +380,11 @@ pub async fn start_bridge(state: SharedState) {
                             .await;
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tokio::time::sleep(crate::timing::jittered(
+                    std::time::Duration::from_secs(5),
+                    0.2,
+                ))
+                .await;
             }
         });
     }

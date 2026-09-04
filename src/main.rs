@@ -30,6 +30,7 @@ mod outbound_http;
 mod remote_control_backend;
 mod storage_migration;
 mod store;
+mod timing;
 mod types;
 mod version;
 mod vscode_extension_patch;

@@ -39,6 +39,7 @@ const TELEGRAM_LONG_POLL_TIMEOUT_SECONDS: u32 = 25;
 const TELEGRAM_STARTUP_PROBE_RETRY_SECONDS: u64 = 5;
 const TELEGRAM_CONFLICT_BACKOFF_SECONDS: u64 = 35;
 const TELEGRAM_GENERIC_RETRY_SECONDS: u64 = 5;
+const TELEGRAM_RETRY_JITTER_FRACTION: f64 = 0.2;
 const TELEGRAM_TOPIC_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(300);
 const TELEGRAM_TOPIC_STATE_GRACE: Duration = Duration::from_secs(300);
 const TELEGRAM_TOPIC_DELETE_MAX_ATTEMPTS: usize = 6;
@@ -3177,7 +3178,8 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
                 return;
             }
             Err(err) => {
-                let delay = retry_delay_seconds(&err, TELEGRAM_STARTUP_PROBE_RETRY_SECONDS);
+                let (delay, jitterable) =
+                    retry_delay_seconds(&err, TELEGRAM_STARTUP_PROBE_RETRY_SECONDS);
                 set_polling_state(
                     state,
                     &api.settings().account_id(),
@@ -3193,14 +3195,14 @@ async fn claim_polling_slot(state: &SharedState, api: &TelegramApi, offset: &mut
                         format!("retry_in={delay}s err={err}"),
                     )
                     .await;
-                sleep(Duration::from_secs(delay)).await;
+                sleep_retry_delay(delay, jitterable).await;
             }
         }
     }
 }
 
 async fn handle_polling_error(state: &SharedState, account_id: &str, err: &anyhow::Error) {
-    let delay = retry_delay_seconds(err, TELEGRAM_GENERIC_RETRY_SECONDS);
+    let (delay, jitterable) = retry_delay_seconds(err, TELEGRAM_GENERIC_RETRY_SECONDS);
     let kind = err
         .downcast_ref::<TelegramApiError>()
         .filter(|api_error| api_error.is_conflict())
@@ -3210,19 +3212,29 @@ async fn handle_polling_error(state: &SharedState, account_id: &str, err: &anyho
     state
         .push_event("warn", kind, format!("retry_in={delay}s err={err}"))
         .await;
-    sleep(Duration::from_secs(delay)).await;
+    sleep_retry_delay(delay, jitterable).await;
 }
 
-fn retry_delay_seconds(err: &anyhow::Error, default_delay: u64) -> u64 {
+fn retry_delay_seconds(err: &anyhow::Error, default_delay: u64) -> (u64, bool) {
     if let Some(api_error) = err.downcast_ref::<TelegramApiError>() {
         if api_error.is_conflict() {
-            return TELEGRAM_CONFLICT_BACKOFF_SECONDS;
+            return (TELEGRAM_CONFLICT_BACKOFF_SECONDS, true);
         }
         if let Some(retry_after) = api_error.retry_after {
-            return retry_after.max(1);
+            // Server-mandated wait; jitter must not shorten it.
+            return (retry_after.max(1), false);
         }
     }
-    default_delay
+    (default_delay, true)
+}
+
+async fn sleep_retry_delay(seconds: u64, jitterable: bool) {
+    let duration = if jitterable {
+        crate::timing::jittered(Duration::from_secs(seconds), TELEGRAM_RETRY_JITTER_FRACTION)
+    } else {
+        Duration::from_secs(seconds)
+    };
+    sleep(duration).await;
 }
 
 fn inbound_from_message(
