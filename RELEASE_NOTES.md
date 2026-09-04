@@ -13,7 +13,7 @@
 
 ## 客户端与发布
 
-- macOS 正式 App 与内置 daemon 升级至 `0.5.6`，UI build 为 `480`，daemon build 为 `480`。
+- macOS 正式 App 与内置 daemon 升级至 `0.5.6`，UI build 为 `486`，daemon build 为 `486`。
 - 更新 macOS 发布工作流，移除已废弃 GUI supervisor 的签名步骤。
 
 ## 验证
