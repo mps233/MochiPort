@@ -893,14 +893,6 @@ pub(crate) async fn send_turn_reply(
                                 ),
                             )
                             .await;
-                        if is_final_answer {
-                            crate::safe_relaunch::on_telegram_turn_completed_sent(
-                                state,
-                                thread_id,
-                                effective_turn_id.as_deref(),
-                            )
-                            .await;
-                        }
                     }
                     Err(err) => {
                         state

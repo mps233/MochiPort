@@ -7,15 +7,13 @@
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     sync::OnceLock,
-    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use axum::{
     Json,
@@ -34,11 +32,17 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::{app_state::SharedState, daemon_process::DaemonIdentity, types::now_ms, version};
+use crate::{
+    app_state::SharedState,
+    daemon_process::{DAEMON_SERVICE_NAME, DaemonIdentity},
+    storage_migration,
+    types::now_ms,
+    version,
+};
 
 pub const API_MAJOR: u16 = 1;
-const CONTROL_FILE_NAME: &str = "threadrelay-control.json";
-const CONTROL_LOCK_FILE_NAME: &str = "threadrelay-control.lock";
+const CONTROL_FILE_NAME: &str = "mochiport-control.json";
+const CONTROL_LOCK_FILE_NAME: &str = "mochiport-control.lock";
 const ACTIVE_DAEMON_FILE_NAME: &str = "mochiport-active-daemon.json";
 const MANAGEMENT_LEASE_DURATION_MS: u64 = 30_000;
 const CREDENTIAL_ROTATION_REASON_TAKEOVER: &str = "trustedTakeover";
@@ -235,33 +239,6 @@ pub struct LifecycleControlRequest {
     pub lease_generation: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifecycleUpdateRequest {
-    pub installation_id: String,
-    pub daemon_instance_id: String,
-    pub lease_generation: u64,
-    pub candidate_path: PathBuf,
-    pub expected_version: String,
-    pub expected_build: u64,
-    pub expected_sha256: String,
-}
-
-#[derive(Debug, Clone)]
-struct LifecycleUpdateCandidate {
-    path: PathBuf,
-    version: String,
-    build: u64,
-    sha256: String,
-}
-
-#[derive(Debug)]
-struct LifecycleRuntimeSwitch {
-    current_path: PathBuf,
-    activated_target: PathBuf,
-    previous_target: Option<PathBuf>,
-}
-
 #[derive(Debug, Clone, Copy)]
 enum LeaseOperation {
     Claim,
@@ -281,7 +258,6 @@ pub(crate) enum LifecycleShutdownResult {
     AlreadyInProgress,
     ProtectedWork(LifecycleProtectedWorkItems),
     LeaseRejected(LeaseError),
-    UpdateRejected(LeaseError),
     NotRunning,
 }
 
@@ -296,7 +272,7 @@ pub(crate) async fn request_shutdown_with_drain(
     event_message: &'static str,
 ) -> LifecycleShutdownResult {
     let _lifecycle_control = state.lifecycle_control.lock().await;
-    request_shutdown_with_drain_inner(state, force, event_message, None, None, None).await
+    request_shutdown_with_drain_inner(state, force, event_message, None, None).await
 }
 
 pub(crate) async fn request_restart_with_drain(
@@ -324,35 +300,6 @@ pub(crate) async fn request_restart_with_drain(
         event_message,
         Some(installation_id.to_string()),
         lease_generation,
-        None,
-    )
-    .await
-}
-
-async fn request_update_with_drain(
-    state: &SharedState,
-    event_message: &'static str,
-    installation_id: &str,
-    lease_generation: u64,
-    candidate: LifecycleUpdateCandidate,
-) -> LifecycleShutdownResult {
-    let _lifecycle_control = state.lifecycle_control.lock().await;
-    let lease_lock =
-        acquire_validated_lifecycle_lease_lock(state, installation_id, Some(lease_generation))
-            .await;
-    match lease_lock {
-        Ok(lock) => {
-            let _ = FileExt::unlock(&lock);
-        }
-        Err(error) => return LifecycleShutdownResult::LeaseRejected(error),
-    }
-    request_shutdown_with_drain_inner(
-        state,
-        false,
-        event_message,
-        Some(installation_id.to_string()),
-        Some(lease_generation),
-        Some(candidate),
     )
     .await
 }
@@ -363,7 +310,6 @@ async fn request_shutdown_with_drain_inner(
     event_message: &'static str,
     lease_installation_id: Option<String>,
     lease_generation: Option<u64>,
-    update_candidate: Option<LifecycleUpdateCandidate>,
 ) -> LifecycleShutdownResult {
     if !state.lifecycle_admission.begin_draining() {
         return LifecycleShutdownResult::AlreadyInProgress;
@@ -404,106 +350,6 @@ async fn request_shutdown_with_drain_inner(
         None
     };
 
-    if let Some(candidate) = update_candidate {
-        let config_path = state.config_path.clone();
-        let candidate_for_validation = candidate.clone();
-        let validation = tokio::task::spawn_blocking(move || {
-            validate_lifecycle_update_candidate(&config_path, candidate_for_validation)
-        })
-        .await;
-        let candidate = match validation {
-            Ok(Ok(candidate)) => candidate,
-            Ok(Err(error)) => {
-                if let Some(lock) = lifecycle_lock.as_ref() {
-                    let _ = FileExt::unlock(lock);
-                }
-                cancel_draining_and_restore_bridge(state).await;
-                return LifecycleShutdownResult::UpdateRejected(error);
-            }
-            Err(_) => {
-                if let Some(lock) = lifecycle_lock.as_ref() {
-                    let _ = FileExt::unlock(lock);
-                }
-                cancel_draining_and_restore_bridge(state).await;
-                return LifecycleShutdownResult::UpdateRejected(LeaseError::internal(
-                    "后台服务候选版本校验任务失败。",
-                ));
-            }
-        };
-
-        // Keep the shutdown sender locked across the filesystem commit. Once
-        // the symlink is visible, no competing lifecycle request can consume
-        // the sender before this request commits the shutdown.
-        let mut shutdown_tx = state.shutdown_tx.lock().await;
-        let sender_ready = shutdown_tx
-            .as_ref()
-            .is_some_and(|sender| !sender.is_closed());
-        if !sender_ready {
-            if let Some(lock) = lifecycle_lock.as_ref() {
-                let _ = FileExt::unlock(lock);
-            }
-            cancel_draining_and_restore_bridge(state).await;
-            return LifecycleShutdownResult::NotRunning;
-        }
-
-        let config_path = state.config_path.clone();
-        let switch_candidate = candidate.clone();
-        let switched = tokio::task::spawn_blocking(move || {
-            switch_current_runtime(&config_path, &switch_candidate)
-        })
-        .await;
-        let runtime_switch = match switched {
-            Ok(Ok(runtime_switch)) => runtime_switch,
-            Ok(Err(error)) => {
-                if let Some(lock) = lifecycle_lock.as_ref() {
-                    let _ = FileExt::unlock(lock);
-                }
-                drop(shutdown_tx);
-                cancel_draining_and_restore_bridge(state).await;
-                return LifecycleShutdownResult::UpdateRejected(error);
-            }
-            Err(_) => {
-                if let Some(lock) = lifecycle_lock.as_ref() {
-                    let _ = FileExt::unlock(lock);
-                }
-                drop(shutdown_tx);
-                cancel_draining_and_restore_bridge(state).await;
-                return LifecycleShutdownResult::UpdateRejected(LeaseError::internal(
-                    "后台服务版本切换任务失败。",
-                ));
-            }
-        };
-
-        let shutdown_sent = shutdown_tx
-            .take()
-            .is_some_and(|sender| sender.send(()).is_ok());
-        drop(shutdown_tx);
-        if shutdown_sent {
-            state.lifecycle_admission.commit_shutdown();
-            if let Some(lock) = lifecycle_lock.as_ref() {
-                let _ = FileExt::unlock(lock);
-            }
-            return LifecycleShutdownResult::Accepted;
-        }
-
-        // The sender was checked while locked, so this is only reachable when
-        // the daemon's main receiver disappeared concurrently. Restore the
-        // pre-commit link before reporting failure; this is transaction cleanup,
-        // not an automatic rollback of a daemon that was ever launched.
-        let restore =
-            tokio::task::spawn_blocking(move || restore_current_runtime(runtime_switch)).await;
-        if let Some(lock) = lifecycle_lock.as_ref() {
-            let _ = FileExt::unlock(lock);
-        }
-        cancel_draining_and_restore_bridge(state).await;
-        return match restore {
-            Ok(Ok(())) => LifecycleShutdownResult::NotRunning,
-            _ => LifecycleShutdownResult::UpdateRejected(LeaseError::internal(
-                "后台服务未运行，且无法撤销尚未启动的版本切换。",
-            )),
-        };
-    }
-
     // Keep the validated lease lock across the shutdown signal and the local
     // admission commit. The await only acquires the in-process shutdown
     // sender mutex; holding this Send file handle here fences lease takeover
@@ -527,349 +373,6 @@ async fn cancel_draining_and_restore_bridge(state: &SharedState) {
     if state.lifecycle_admission.cancel_draining() {
         let _ = crate::web::start_bridge_if_ready(state, "lifecycle drain cancelled").await;
     }
-}
-
-fn normalized_update_version(value: &str) -> Result<String, LeaseError> {
-    let valid = !value.is_empty()
-        && value.len() <= 128
-        && value.trim() == value
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
-        && value
-            .as_bytes()
-            .first()
-            .is_some_and(u8::is_ascii_alphanumeric)
-        && value
-            .as_bytes()
-            .last()
-            .is_some_and(u8::is_ascii_alphanumeric);
-    if !valid {
-        return Err(LeaseError::bad_request("后台服务候选版本号无效。"));
-    }
-    Ok(value.to_string())
-}
-
-fn normalized_update_sha256(value: &str) -> Result<String, LeaseError> {
-    let normalized = value.to_ascii_lowercase();
-    if value.len() != 64
-        || value.trim() != value
-        || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(LeaseError::bad_request("后台服务候选 SHA-256 无效。"));
-    }
-    Ok(normalized)
-}
-
-fn daemon_version_output(output: &[u8]) -> Option<(String, u64)> {
-    let output = std::str::from_utf8(output).ok()?.trim();
-    let payload = output
-        .strip_prefix("mochiport ")
-        .or_else(|| output.strip_prefix("threadrelay "))?;
-    let (version, build) = payload.rsplit_once(" (build ")?;
-    let build = build.strip_suffix(')')?.parse().ok()?;
-    if version.is_empty() || version.contains(char::is_whitespace) {
-        return None;
-    }
-    Some((version.to_string(), build))
-}
-
-#[cfg(unix)]
-fn probe_daemon_version(path: &Path) -> Result<(String, u64), LeaseError> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| LeaseError::bad_request("后台服务候选路径无效。"))?;
-    let output_path = parent.join(format!(".version.{}.tmp", Uuid::new_v4().simple()));
-    let result = (|| {
-        let mut options = OpenOptions::new();
-        options.create_new(true).read(true).write(true).mode(0o600);
-        let mut output_file = options
-            .open(&output_path)
-            .map_err(|_| LeaseError::internal("无法准备后台服务版本探针。"))?;
-        let stdout = output_file
-            .try_clone()
-            .map_err(|_| LeaseError::internal("无法准备后台服务版本探针。"))?;
-        let mut child = Command::new(path)
-            .arg("--version")
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|_| LeaseError::bad_request("无法读取后台服务候选版本。"))?;
-        let deadline = Instant::now() + Duration::from_secs(5);
-        let status = loop {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|_| LeaseError::bad_request("无法读取后台服务候选版本。"))?
-            {
-                break status;
-            }
-            if Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(LeaseError::bad_request("后台服务候选版本探针超时。"));
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-        if !status.success() {
-            return Err(LeaseError::bad_request("后台服务候选版本输出无效。"));
-        }
-        output_file
-            .rewind()
-            .map_err(|_| LeaseError::bad_request("后台服务候选版本输出无效。"))?;
-        let mut output = Vec::new();
-        output_file
-            .take(4097)
-            .read_to_end(&mut output)
-            .map_err(|_| LeaseError::bad_request("后台服务候选版本输出无效。"))?;
-        if output.len() > 4096 {
-            return Err(LeaseError::bad_request("后台服务候选版本输出无效。"));
-        }
-        daemon_version_output(&output)
-            .ok_or_else(|| LeaseError::bad_request("后台服务候选版本输出无效。"))
-    })();
-    let _ = fs::remove_file(output_path);
-    result
-}
-
-#[cfg(unix)]
-fn validate_lifecycle_update_candidate(
-    config_path: &Path,
-    mut candidate: LifecycleUpdateCandidate,
-) -> Result<LifecycleUpdateCandidate, LeaseError> {
-    candidate.version = normalized_update_version(&candidate.version)?;
-    candidate.sha256 = normalized_update_sha256(&candidate.sha256)?;
-    if candidate.build == 0 {
-        return Err(LeaseError::bad_request("后台服务候选构建号无效。"));
-    }
-    if version::build_number().is_some_and(|current| candidate.build <= current) {
-        return Err(LeaseError::conflict("后台服务候选构建号不是更新版本。"));
-    }
-
-    let data_directory = config_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| LeaseError::bad_request("后台服务配置目录无效。"))?;
-    let runtime_root = data_directory.join("runtimes");
-    let build_directory = runtime_root.join(candidate.build.to_string());
-    let expected_path = build_directory.join("mochiport-daemon");
-    if !candidate.path.is_absolute() || candidate.path != expected_path {
-        return Err(LeaseError::bad_request(
-            "后台服务候选文件不在受管版本目录中。",
-        ));
-    }
-
-    let data_metadata = fs::metadata(data_directory)
-        .map_err(|_| LeaseError::bad_request("后台服务配置目录不可用。"))?;
-    let expected_uid = data_metadata.uid();
-    for directory in [&runtime_root, &build_directory] {
-        let metadata = fs::symlink_metadata(directory)
-            .map_err(|_| LeaseError::bad_request("后台服务候选版本目录不可用。"))?;
-        if !metadata.file_type().is_dir()
-            || metadata.file_type().is_symlink()
-            || metadata.uid() != expected_uid
-            || metadata.mode() & 0o022 != 0
-        {
-            return Err(LeaseError::bad_request("后台服务候选版本目录权限不安全。"));
-        }
-    }
-
-    let metadata = fs::symlink_metadata(&candidate.path)
-        .map_err(|_| LeaseError::bad_request("后台服务候选文件不可用。"))?;
-    if !metadata.file_type().is_file()
-        || metadata.file_type().is_symlink()
-        || metadata.uid() != expected_uid
-        || metadata.mode() & 0o777 != 0o755
-        || metadata.nlink() != 1
-        || metadata.len() == 0
-    {
-        return Err(LeaseError::bad_request(
-            "后台服务候选文件类型或权限不安全。",
-        ));
-    }
-
-    let digest = sha256_regular_file(&candidate.path, &metadata)?;
-    if digest != candidate.sha256 {
-        return Err(LeaseError::conflict("后台服务候选 SHA-256 不匹配。"));
-    }
-
-    let (actual_version, actual_build) = probe_daemon_version(&candidate.path)?;
-    if actual_version != candidate.version || actual_build != candidate.build {
-        return Err(LeaseError::conflict("后台服务候选版本或构建号不匹配。"));
-    }
-
-    // Re-read after executing `--version` so a path replacement during the
-    // probe cannot be committed under the digest validated above.
-    let final_metadata = fs::symlink_metadata(&candidate.path)
-        .map_err(|_| LeaseError::conflict("后台服务候选文件在校验期间发生变化。"))?;
-    if final_metadata.dev() != metadata.dev()
-        || final_metadata.ino() != metadata.ino()
-        || final_metadata.mode() != metadata.mode()
-        || final_metadata.len() != metadata.len()
-        || sha256_regular_file(&candidate.path, &final_metadata)? != candidate.sha256
-    {
-        return Err(LeaseError::conflict("后台服务候选文件在校验期间发生变化。"));
-    }
-    Ok(candidate)
-}
-
-#[cfg(not(unix))]
-fn validate_lifecycle_update_candidate(
-    _config_path: &Path,
-    _candidate: LifecycleUpdateCandidate,
-) -> Result<LifecycleUpdateCandidate, LeaseError> {
-    Err(LeaseError {
-        status: StatusCode::NOT_IMPLEMENTED,
-        message: "当前平台不支持独立更新后台服务。".to_string(),
-    })
-}
-
-#[cfg(unix)]
-fn sha256_regular_file(path: &Path, expected: &fs::Metadata) -> Result<String, LeaseError> {
-    let mut file =
-        File::open(path).map_err(|_| LeaseError::bad_request("后台服务候选文件不可读。"))?;
-    let opened = file
-        .metadata()
-        .map_err(|_| LeaseError::bad_request("后台服务候选文件不可读。"))?;
-    if !opened.is_file() || opened.dev() != expected.dev() || opened.ino() != expected.ino() {
-        return Err(LeaseError::conflict("后台服务候选文件在校验期间发生变化。"));
-    }
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|_| LeaseError::bad_request("后台服务候选文件不可读。"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode(hasher.finalize()))
-}
-
-#[cfg(unix)]
-fn safe_current_target(path: &Path) -> bool {
-    path.components().count() == 1
-        && path.to_str().is_some_and(|value| {
-            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
-        })
-}
-
-#[cfg(unix)]
-fn replace_runtime_symlink(current_path: &Path, target: &Path) -> Result<(), LeaseError> {
-    use std::os::unix::fs::symlink;
-
-    let runtime_root = current_path
-        .parent()
-        .ok_or_else(|| LeaseError::internal("后台服务运行目录无效。"))?;
-    let temporary = runtime_root.join(format!(".current.{}.tmp", Uuid::new_v4().simple()));
-    let result = (|| {
-        symlink(target, &temporary)
-            .map_err(|_| LeaseError::internal("无法准备后台服务版本链接。"))?;
-        fs::rename(&temporary, current_path)
-            .map_err(|_| LeaseError::internal("无法切换后台服务运行版本。"))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-#[cfg(unix)]
-fn restore_runtime_symlink_target(
-    current_path: &Path,
-    previous_target: Option<&Path>,
-) -> Result<(), LeaseError> {
-    if let Some(previous_target) = previous_target {
-        replace_runtime_symlink(current_path, previous_target)?;
-    } else {
-        fs::remove_file(current_path)
-            .map_err(|_| LeaseError::internal("无法撤销后台服务版本链接。"))?;
-    }
-    let runtime_root = current_path
-        .parent()
-        .ok_or_else(|| LeaseError::internal("后台服务运行目录无效。"))?;
-    sync_parent_directory(runtime_root)
-        .map_err(|_| LeaseError::internal("无法同步后台服务运行目录。"))
-}
-
-#[cfg(unix)]
-fn switch_current_runtime(
-    config_path: &Path,
-    candidate: &LifecycleUpdateCandidate,
-) -> Result<LifecycleRuntimeSwitch, LeaseError> {
-    let runtime_root = config_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .ok_or_else(|| LeaseError::internal("后台服务配置目录无效。"))?
-        .join("runtimes");
-    let current_path = runtime_root.join("current");
-    let previous_target = match fs::symlink_metadata(&current_path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            let target = fs::read_link(&current_path)
-                .map_err(|_| LeaseError::internal("无法读取当前后台服务版本。"))?;
-            if !safe_current_target(&target) {
-                return Err(LeaseError::conflict("当前后台服务版本链接不受信任。"));
-            }
-            Some(target)
-        }
-        Ok(_) => {
-            return Err(LeaseError::conflict(
-                "后台服务 current 路径不是受管符号链接。",
-            ));
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => return Err(LeaseError::internal("无法读取当前后台服务版本。")),
-    };
-    let activated_target = PathBuf::from(candidate.build.to_string());
-    replace_runtime_symlink(&current_path, &activated_target)?;
-    if sync_parent_directory(&runtime_root).is_err() {
-        let restored = restore_runtime_symlink_target(&current_path, previous_target.as_deref());
-        return Err(if restored.is_ok() {
-            LeaseError::internal("无法同步后台服务运行目录。")
-        } else {
-            LeaseError::internal("后台服务版本链接提交失败且无法撤销。")
-        });
-    }
-    Ok(LifecycleRuntimeSwitch {
-        current_path,
-        activated_target,
-        previous_target,
-    })
-}
-
-#[cfg(not(unix))]
-fn switch_current_runtime(
-    _config_path: &Path,
-    _candidate: &LifecycleUpdateCandidate,
-) -> Result<LifecycleRuntimeSwitch, LeaseError> {
-    Err(LeaseError {
-        status: StatusCode::NOT_IMPLEMENTED,
-        message: "当前平台不支持独立更新后台服务。".to_string(),
-    })
-}
-
-#[cfg(unix)]
-fn restore_current_runtime(runtime_switch: LifecycleRuntimeSwitch) -> Result<(), LeaseError> {
-    let current_target = fs::read_link(&runtime_switch.current_path)
-        .map_err(|_| LeaseError::internal("无法核对后台服务版本链接。"))?;
-    if current_target != runtime_switch.activated_target {
-        return Err(LeaseError::conflict("后台服务版本链接已被其他操作修改。"));
-    }
-    restore_runtime_symlink_target(
-        &runtime_switch.current_path,
-        runtime_switch.previous_target.as_deref(),
-    )
-}
-
-#[cfg(not(unix))]
-fn restore_current_runtime(_runtime_switch: LifecycleRuntimeSwitch) -> Result<(), LeaseError> {
-    Err(LeaseError {
-        status: StatusCode::NOT_IMPLEMENTED,
-        message: "当前平台不支持独立更新后台服务。".to_string(),
-    })
 }
 
 impl LeaseError {
@@ -947,32 +450,7 @@ pub fn management_token(config_path: &Path) -> Result<String, AuthError> {
 }
 
 pub fn active_daemon_locator_path() -> Result<PathBuf, AuthError> {
-    #[cfg(target_os = "windows")]
-    let base = std::env::var_os("LOCALAPPDATA")
-        .or_else(|| std::env::var_os("APPDATA"))
-        .map(PathBuf::from);
-
-    #[cfg(target_os = "macos")]
-    let base = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support"));
-
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    let base = std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|home| home.join(".local/state"))
-        });
-
-    base.map(|base| base.join("MochiPort").join(ACTIVE_DAEMON_FILE_NAME))
-        .ok_or_else(|| {
-            AuthError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "user data directory is unavailable",
-            ))
-        })
+    Ok(storage_migration::current_storage_home().join(ACTIVE_DAEMON_FILE_NAME))
 }
 
 pub fn publish_active_daemon_locator(
@@ -1051,7 +529,7 @@ impl Drop for ActiveDaemonLocatorGuard {
 
 pub async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse {
-        service: "threadrelay",
+        service: DAEMON_SERVICE_NAME,
         api_major: API_MAJOR,
         ready: true,
     })
@@ -1218,95 +696,6 @@ pub async fn restart_lifecycle(
         )
             .into_response(),
         LifecycleShutdownResult::LeaseRejected(error) => lease_error_response(error),
-        LifecycleShutdownResult::UpdateRejected(error) => lease_error_response(error),
-    }
-}
-
-pub async fn update_lifecycle(
-    State(state): State<SharedState>,
-    Json(request): Json<LifecycleUpdateRequest>,
-) -> Response {
-    let installation_id = match normalized_installation_id(&request.installation_id) {
-        Ok(value) => value,
-        Err(error) => return lease_error_response(error),
-    };
-    if request.daemon_instance_id.trim() != state.daemon_identity.instance_id {
-        return lease_error_response(LeaseError::conflict("后台服务实例已变化，请刷新后重试。"));
-    }
-
-    let requested_candidate = LifecycleUpdateCandidate {
-        path: request.candidate_path,
-        version: request.expected_version,
-        build: request.expected_build,
-        sha256: request.expected_sha256,
-    };
-    let config_path = state.config_path.clone();
-    let candidate = match tokio::task::spawn_blocking(move || {
-        validate_lifecycle_update_candidate(&config_path, requested_candidate)
-    })
-    .await
-    {
-        Ok(Ok(candidate)) => candidate,
-        Ok(Err(error)) => return lease_error_response(error),
-        Err(_) => {
-            return lease_error_response(LeaseError::internal("后台服务候选版本校验任务失败。"));
-        }
-    };
-
-    let target_version = candidate.version.clone();
-    let target_build = candidate.build;
-    match request_update_with_drain(
-        &state,
-        "lifecycle daemon update requested",
-        &installation_id,
-        request.lease_generation,
-        candidate,
-    )
-    .await
-    {
-        LifecycleShutdownResult::Accepted => (
-            StatusCode::OK,
-            Json(json!({
-                "ok": true,
-                "state": "restarting",
-                "targetVersion": target_version,
-                "targetBuild": target_build,
-            })),
-        )
-            .into_response(),
-        LifecycleShutdownResult::NotRunning => (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "ok": false,
-                "state": "not_running",
-                "error": "后台服务关闭通道不可用，未提交更新。",
-            })),
-        )
-            .into_response(),
-        LifecycleShutdownResult::AlreadyInProgress => (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "ok": false,
-                "state": "draining",
-                "error": "后台服务正在关闭或重启，请稍后重试。",
-            })),
-        )
-            .into_response(),
-        LifecycleShutdownResult::ProtectedWork(protected_work_items) => (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "ok": false,
-                "state": "active",
-                "error": format!(
-                    "后台服务仍有 {} 项受保护任务，已取消更新。",
-                    protected_work_items.total
-                ),
-                "protectedWorkItems": protected_work_items,
-            })),
-        )
-            .into_response(),
-        LifecycleShutdownResult::LeaseRejected(error)
-        | LifecycleShutdownResult::UpdateRejected(error) => lease_error_response(error),
     }
 }
 
@@ -1369,20 +758,12 @@ pub async fn lifecycle_snapshot(state: &SharedState) -> LifecycleResponse {
     let enhanced_launches = state.enhanced_launch_operations.protected_work_count();
     let remote_control_requests = {
         let remote = state.remote_control.inner.lock().await;
-        if remote.connections.is_empty() {
-            remote
-                .clients
-                .values()
-                .map(|client| client.pending.len())
-                .sum()
-        } else {
-            remote
-                .connections
-                .values()
-                .flat_map(|connection| connection.clients.values())
-                .map(|client| client.pending.len())
-                .sum()
-        }
+        remote
+            .connections
+            .values()
+            .flat_map(|connection| connection.clients.values())
+            .map(|client| client.pending.len())
+            .sum()
     };
     let total = ai_gateway_requests
         .saturating_add(codex_turns)
@@ -2287,7 +1668,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(response).expect("serialize health response"),
             json!({
-                "service": "threadrelay",
+                "service": "mochiport",
                 "apiMajor": 1,
                 "ready": true,
             })
@@ -2356,7 +1737,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("config.toml");
         let identity = DaemonIdentity {
-            service: "threadrelay".to_string(),
+            service: "mochiport".to_string(),
             pid: 42,
             instance_id: "daemon-instance".to_string(),
             started_at_ms: 123,
@@ -2460,7 +1841,7 @@ mod tests {
         assert_eq!(legacy.extra["futureField"], json!({ "kept": true }));
 
         let identity = DaemonIdentity {
-            service: "threadrelay".to_string(),
+            service: "mochiport".to_string(),
             pid: 42,
             instance_id: "daemon-instance".to_string(),
             started_at_ms: 123,
@@ -2560,7 +1941,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("config.toml");
         let identity = DaemonIdentity {
-            service: "threadrelay".to_string(),
+            service: "mochiport".to_string(),
             pid: 42,
             instance_id: "daemon-instance".to_string(),
             started_at_ms: 123,
@@ -2633,7 +2014,7 @@ mod tests {
         let temp = tempdir().expect("tempdir");
         let config_path = temp.path().join("config.toml");
         let identity = DaemonIdentity {
-            service: "threadrelay".to_string(),
+            service: "mochiport".to_string(),
             pid: 42,
             instance_id: "daemon-instance".to_string(),
             started_at_ms: 123,
@@ -2733,7 +2114,7 @@ mod tests {
         assert!(tokens.iter().all(|token| token == &tokens[0]));
 
         let identity = DaemonIdentity {
-            service: "threadrelay".to_string(),
+            service: "mochiport".to_string(),
             pid: 42,
             instance_id: "daemon-instance".to_string(),
             started_at_ms: 123,
@@ -2818,7 +2199,7 @@ mod tests {
         let locator_path = temp.path().join(ACTIVE_DAEMON_FILE_NAME);
         let config_path = temp.path().join("custom-domain/config.toml");
         let identity = DaemonIdentity {
-            service: "threadrelay".to_string(),
+            service: "mochiport".to_string(),
             pid: 42,
             instance_id: "active-instance".to_string(),
             started_at_ms: 123,
@@ -2836,7 +2217,7 @@ mod tests {
         assert_eq!(
             locator,
             ActiveDaemonLocator {
-                service: "threadrelay".to_string(),
+                service: "mochiport".to_string(),
                 api_major: API_MAJOR,
                 instance_id: "active-instance".to_string(),
                 pid: 42,

@@ -9,19 +9,13 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::types::now_ms;
+use crate::{storage_migration, types::now_ms};
 
 pub const DAEMON_INSTANCE_ENV: &str = "MOCHIPORT_DAEMON_INSTANCE_ID";
-const LEGACY_THREADRELAY_DAEMON_INSTANCE_ENV: &str = "THREADRELAY_DAEMON_INSTANCE_ID";
-const LEGACY_CODEXHUB_DAEMON_INSTANCE_ENV: &str = "CODEXHUB_DAEMON_INSTANCE_ID";
-// Keep the GUI PID variable stable because relaunch helpers may outlive the
-// executable that spawned them during an in-place upgrade.
-pub const LEGACY_CODEXHUB_GUI_PID_ENV: &str = "CODEXHUB_GUI_PID";
-// Keep the management protocol service value stable across the product rename.
-// The executable and user-facing product are MochiPort; existing clients still
-// identify the local daemon through the `threadrelay` service contract.
-pub const DAEMON_SERVICE_NAME: &str = "threadrelay";
-const LEGACY_CODEXHUB_DAEMON_SERVICE_NAME: &str = "codexhub";
+pub const DAEMON_SERVICE_NAME: &str = "mochiport";
+
+const CURRENT_LOCK_FILE_NAME: &str = "mochiport-daemon.lock";
+const CURRENT_METADATA_FILE_NAME: &str = "mochiport-daemon.json";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -35,8 +29,6 @@ pub struct DaemonIdentity {
 impl DaemonIdentity {
     pub fn new() -> Self {
         let instance_id = std::env::var(DAEMON_INSTANCE_ENV)
-            .or_else(|_| std::env::var(LEGACY_THREADRELAY_DAEMON_INSTANCE_ENV))
-            .or_else(|_| std::env::var(LEGACY_CODEXHUB_DAEMON_INSTANCE_ENV))
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
@@ -47,14 +39,6 @@ impl DaemonIdentity {
             instance_id,
             started_at_ms: now_ms().min(u64::MAX as u128) as u64,
         }
-    }
-
-    pub fn is_mochiport_compatible(&self) -> bool {
-        matches!(
-            self.service.as_str(),
-            DAEMON_SERVICE_NAME | LEGACY_CODEXHUB_DAEMON_SERVICE_NAME
-        ) && self.pid > 0
-            && !self.instance_id.trim().is_empty()
     }
 }
 
@@ -67,38 +51,72 @@ pub struct DaemonMetadata {
     pub config_path: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ActiveLegacyDaemon {
+    pub lock_path: PathBuf,
+    pub metadata: Option<DaemonMetadata>,
+}
+
+#[derive(Debug)]
 pub struct DaemonInstanceLock {
-    files: Vec<File>,
+    file: File,
     metadata_path: PathBuf,
 }
 
 impl DaemonInstanceLock {
+    /// Acquires the singleton lock under the current MochiPort home, regardless
+    /// of a user-supplied config path. Historical locations are inspected
+    /// read-only only to avoid a second daemon during migration.
     pub fn acquire(config_path: &Path, identity: &DaemonIdentity) -> Result<Self> {
-        let path = daemon_lock_path(config_path);
-        if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create daemon lock directory `{}`",
-                    parent.display()
-                )
-            })?;
+        let storage_home = storage_migration::current_storage_home();
+        let legacy_homes = storage_migration::legacy_standard_storage_homes();
+        Self::acquire_at(config_path, identity, &storage_home, &legacy_homes)
+    }
+
+    fn acquire_at(
+        config_path: &Path,
+        identity: &DaemonIdentity,
+        storage_home: &Path,
+        legacy_homes: &[PathBuf],
+    ) -> Result<Self> {
+        std::fs::create_dir_all(storage_home).with_context(|| {
+            format!(
+                "failed to create MochiPort daemon directory `{}`",
+                storage_home.display()
+            )
+        })?;
+
+        let lock_path = daemon_lock_path(storage_home);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open daemon lock `{}`", lock_path.display()))?;
+        if let Err(error) = FileExt::try_lock_exclusive(&file) {
+            let owner = read_daemon_metadata_at(storage_home)
+                .map(|metadata| {
+                    format!(
+                        "pid={} instance_id={}",
+                        metadata.identity.pid, metadata.identity.instance_id
+                    )
+                })
+                .unwrap_or_else(|| "owner=unknown".to_string());
+            return Err(anyhow!(
+                "another MochiPort daemon holds `{}` ({owner}): {error}",
+                lock_path.display()
+            ));
         }
-        // Hold both legacy locks so an older build cannot start beside MochiPort.
-        let mut files = Vec::with_capacity(3);
-        for lock_path in [
-            legacy_codexhub_daemon_lock_path(config_path),
-            legacy_threadrelay_daemon_lock_path(config_path),
-            path.clone(),
-        ] {
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .read(true)
-                .write(true)
-                .open(&lock_path)
-                .with_context(|| format!("failed to open daemon lock `{}`", lock_path.display()))?;
-            if let Err(err) = FileExt::try_lock_exclusive(&file) {
-                let owner = read_daemon_metadata(config_path)
+
+        for legacy_home in legacy_homes {
+            if same_path(legacy_home, storage_home) {
+                continue;
+            }
+            if let Some(active) = active_legacy_daemon_at(legacy_home)? {
+                let owner = active
+                    .metadata
+                    .as_ref()
                     .map(|metadata| {
                         format!(
                             "pid={} instance_id={}",
@@ -106,12 +124,12 @@ impl DaemonInstanceLock {
                         )
                     })
                     .unwrap_or_else(|| "owner=unknown".to_string());
+                let _ = FileExt::unlock(&file);
                 return Err(anyhow!(
-                    "another MochiPort, ThreadRelay, or CodexHub daemon holds `{}` ({owner}): {err}",
-                    lock_path.display()
+                    "legacy daemon holds `{}` ({owner}); run `mochiport migrate-storage` after it is stopped",
+                    active.lock_path.display()
                 ));
             }
-            files.push(file);
         }
 
         let metadata = DaemonMetadata {
@@ -121,23 +139,10 @@ impl DaemonInstanceLock {
                 .unwrap_or_default(),
             config_path: config_path.display().to_string(),
         };
-        let metadata_path = daemon_metadata_path(config_path);
-        let mut metadata_file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&metadata_path)
-            .with_context(|| {
-                format!(
-                    "failed to open daemon metadata `{}`",
-                    metadata_path.display()
-                )
-            })?;
-        serde_json::to_writer(&mut metadata_file, &metadata)?;
-        metadata_file.write_all(b"\n")?;
-        metadata_file.sync_data()?;
+        let metadata_path = daemon_metadata_path(storage_home);
+        write_daemon_metadata(&metadata_path, &metadata)?;
         Ok(Self {
-            files,
+            file,
             metadata_path,
         })
     }
@@ -146,101 +151,119 @@ impl DaemonInstanceLock {
 impl Drop for DaemonInstanceLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.metadata_path);
-        for file in &self.files {
-            let _ = FileExt::unlock(file);
-        }
+        let _ = FileExt::unlock(&self.file);
     }
 }
 
-pub fn daemon_lock_path(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("mochiport-daemon.lock")
+pub fn daemon_lock_path(storage_home: &Path) -> PathBuf {
+    storage_home.join(CURRENT_LOCK_FILE_NAME)
 }
 
-pub fn daemon_metadata_path(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("mochiport-daemon.json")
+pub fn daemon_metadata_path(storage_home: &Path) -> PathBuf {
+    storage_home.join(CURRENT_METADATA_FILE_NAME)
 }
 
-pub fn read_daemon_metadata(config_path: &Path) -> Option<DaemonMetadata> {
-    daemon_file_pairs(config_path)
-        .into_iter()
-        .find_map(|(lock_path, metadata_path)| {
-            let bytes = std::fs::read(metadata_path)
-                .or_else(|_| std::fs::read(lock_path))
-                .ok()?;
-            serde_json::from_slice(&bytes).ok()
-        })
+pub fn current_daemon_is_active_at(storage_home: &Path) -> Result<bool> {
+    lock_is_held(&daemon_lock_path(storage_home))
 }
 
-pub fn read_active_daemon_metadata(config_path: &Path) -> Option<DaemonMetadata> {
-    for (lock_path, metadata_path) in daemon_file_pairs(config_path) {
-        let Ok(bytes) = std::fs::read(metadata_path).or_else(|_| std::fs::read(&lock_path)) else {
+/// Performs a read-only inspection of historical lock files. It never creates,
+/// truncates, or acquires an exclusive legacy lock.
+pub fn active_legacy_daemon_at(storage_home: &Path) -> Result<Option<ActiveLegacyDaemon>> {
+    for (lock_path, metadata_path) in legacy_daemon_file_pairs(storage_home) {
+        if !lock_path.exists() {
             continue;
-        };
-        let Ok(metadata) = serde_json::from_slice::<DaemonMetadata>(&bytes) else {
-            continue;
-        };
-        let Ok(lock_file) = OpenOptions::new().read(true).write(true).open(lock_path) else {
-            continue;
-        };
-        match FileExt::try_lock_exclusive(&lock_file) {
-            Ok(()) => {
-                let _ = FileExt::unlock(&lock_file);
-            }
-            Err(_) => return Some(metadata),
+        }
+        if lock_is_held(&lock_path)? {
+            let metadata = std::fs::read(metadata_path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<DaemonMetadata>(&bytes).ok());
+            return Ok(Some(ActiveLegacyDaemon {
+                lock_path,
+                metadata,
+            }));
         }
     }
-    None
+    Ok(None)
 }
 
-fn legacy_codexhub_daemon_lock_path(config_path: &Path) -> PathBuf {
-    config_directory(config_path).join("codexhub-daemon.lock")
+fn read_daemon_metadata_at(storage_home: &Path) -> Option<DaemonMetadata> {
+    std::fs::read(daemon_metadata_path(storage_home))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
 
-fn legacy_threadrelay_daemon_lock_path(config_path: &Path) -> PathBuf {
-    config_directory(config_path).join("threadrelay-daemon.lock")
+#[cfg(test)]
+fn read_active_daemon_metadata_at(storage_home: &Path) -> Option<DaemonMetadata> {
+    current_daemon_is_active_at(storage_home)
+        .ok()
+        .filter(|active| *active)
+        .and_then(|_| read_daemon_metadata_at(storage_home))
 }
 
-fn legacy_threadrelay_daemon_metadata_path(config_path: &Path) -> PathBuf {
-    config_directory(config_path).join("threadrelay-daemon.json")
-}
-
-fn legacy_codexhub_daemon_metadata_path(config_path: &Path) -> PathBuf {
-    config_directory(config_path).join("codexhub-daemon.json")
-}
-
-fn config_directory(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."))
-}
-
-fn daemon_file_pairs(config_path: &Path) -> [(PathBuf, PathBuf); 3] {
+fn legacy_daemon_file_pairs(storage_home: &Path) -> [(PathBuf, PathBuf); 3] {
     [
         (
-            daemon_lock_path(config_path),
-            daemon_metadata_path(config_path),
+            storage_home.join("threadrelay-daemon.lock"),
+            storage_home.join("threadrelay-daemon.json"),
         ),
         (
-            legacy_threadrelay_daemon_lock_path(config_path),
-            legacy_threadrelay_daemon_metadata_path(config_path),
+            storage_home.join("codexhub-daemon.lock"),
+            storage_home.join("codexhub-daemon.json"),
         ),
         (
-            legacy_codexhub_daemon_lock_path(config_path),
-            legacy_codexhub_daemon_metadata_path(config_path),
+            storage_home.join(CURRENT_LOCK_FILE_NAME),
+            storage_home.join(CURRENT_METADATA_FILE_NAME),
         ),
     ]
+}
+
+fn lock_is_held(lock_path: &Path) -> Result<bool> {
+    if !lock_path.exists() {
+        return Ok(false);
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .open(lock_path)
+        .with_context(|| format!("failed to inspect daemon lock `{}`", lock_path.display()))?;
+    match FileExt::try_lock_shared(&file) {
+        Ok(()) => {
+            let _ = FileExt::unlock(&file);
+            Ok(false)
+        }
+        Err(_) => Ok(true),
+    }
+}
+
+fn write_daemon_metadata(path: &Path, metadata: &DaemonMetadata) -> Result<()> {
+    let parent = path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| anyhow!("daemon metadata has no parent"))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("failed to open daemon metadata `{}`", path.display()))?;
+    serde_json::to_writer(&mut file, metadata)?;
+    file.write_all(b"\n")?;
+    file.sync_data()?;
+    #[cfg(unix)]
+    {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .with_context(|| format!("failed to sync daemon directory `{}`", parent.display()))?;
+    }
+    #[cfg(not(unix))]
+    let _ = parent;
+    Ok(())
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
+    let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 #[cfg(test)]
@@ -248,109 +271,90 @@ mod tests {
     use super::*;
 
     #[test]
-    fn daemon_lock_path_follows_config_directory() {
-        let config = PathBuf::from("root").join("config.toml");
+    fn daemon_identity_uses_only_mochiport_service() {
+        let identity = DaemonIdentity::new();
+        assert_eq!(identity.service, "mochiport");
+        assert!(identity.pid > 0);
+        assert!(!identity.instance_id.trim().is_empty());
+    }
+
+    #[test]
+    fn daemon_lock_is_fixed_to_mochiport_storage_home() {
+        let home = PathBuf::from("root").join("MochiPort");
         assert_eq!(
-            daemon_lock_path(&config),
-            PathBuf::from("root").join("mochiport-daemon.lock")
+            daemon_lock_path(&home),
+            PathBuf::from("root").join("MochiPort/mochiport-daemon.lock")
         );
         assert_eq!(
-            daemon_metadata_path(&config),
-            PathBuf::from("root").join("mochiport-daemon.json")
-        );
-        assert_eq!(
-            legacy_codexhub_daemon_lock_path(&config),
-            PathBuf::from("root").join("codexhub-daemon.lock")
+            daemon_metadata_path(&home),
+            PathBuf::from("root").join("MochiPort/mochiport-daemon.json")
         );
     }
 
     #[test]
-    fn daemon_identity_accepts_current_and_legacy_services() {
-        let mut identity = DaemonIdentity::new();
-        assert!(identity.is_mochiport_compatible());
-        identity.service = DAEMON_SERVICE_NAME.to_string();
-        assert!(identity.is_mochiport_compatible());
-        identity.service = LEGACY_CODEXHUB_DAEMON_SERVICE_NAME.to_string();
-        assert!(identity.is_mochiport_compatible());
-        identity.service = "other".to_string();
-        assert!(!identity.is_mochiport_compatible());
-    }
-
-    #[test]
-    fn daemon_metadata_is_readable_while_lock_is_held() {
-        let root = std::env::temp_dir().join(format!("mochiport-lock-test-{}", Uuid::new_v4()));
-        let config_path = root.join("config.toml");
-        std::fs::create_dir_all(&root).expect("create temp directory");
+    fn daemon_metadata_is_readable_while_current_lock_is_held() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let storage_home = temporary.path().join("MochiPort");
+        let config_path = temporary.path().join("custom-config.toml");
         let identity = DaemonIdentity::new();
 
         let daemon_lock =
-            DaemonInstanceLock::acquire(&config_path, &identity).expect("acquire daemon lock");
+            DaemonInstanceLock::acquire_at(&config_path, &identity, &storage_home, &[])
+                .expect("acquire daemon lock");
         let metadata_bytes =
-            std::fs::read(daemon_metadata_path(&config_path)).expect("read daemon metadata file");
+            std::fs::read(daemon_metadata_path(&storage_home)).expect("read daemon metadata");
         let metadata: DaemonMetadata =
             serde_json::from_slice(&metadata_bytes).expect("parse daemon metadata");
         assert_eq!(metadata.identity.pid, identity.pid);
-        assert_eq!(metadata.identity.instance_id, identity.instance_id);
-        let active_metadata =
-            read_active_daemon_metadata(&config_path).expect("read active daemon metadata");
-        assert_eq!(active_metadata.identity.instance_id, identity.instance_id);
+        assert_eq!(metadata.config_path, config_path.display().to_string());
+        assert_eq!(
+            read_active_daemon_metadata_at(&storage_home)
+                .expect("read active daemon metadata")
+                .identity
+                .instance_id,
+            identity.instance_id
+        );
 
-        let second_identity = DaemonIdentity::new();
-        let error = DaemonInstanceLock::acquire(&config_path, &second_identity)
-            .err()
-            .expect("second lock should fail")
-            .to_string();
-        assert!(error.contains(&format!("pid={}", identity.pid)));
-        assert!(error.contains(&format!("instance_id={}", identity.instance_id)));
+        let error = DaemonInstanceLock::acquire_at(
+            &config_path,
+            &DaemonIdentity::new(),
+            &storage_home,
+            &[],
+        )
+        .expect_err("second lock must fail")
+        .to_string();
+        assert!(error.contains("another MochiPort daemon"));
 
         drop(daemon_lock);
-        assert!(!daemon_metadata_path(&config_path).exists());
-
-        std::fs::write(daemon_metadata_path(&config_path), metadata_bytes)
-            .expect("write stale daemon metadata");
-        assert!(read_daemon_metadata(&config_path).is_some());
-        assert!(read_active_daemon_metadata(&config_path).is_none());
-        let _ = std::fs::remove_dir_all(root);
+        assert!(!daemon_metadata_path(&storage_home).exists());
     }
 
     #[test]
-    fn active_legacy_daemon_metadata_remains_visible() {
-        let root =
-            std::env::temp_dir().join(format!("threadrelay-legacy-lock-test-{}", Uuid::new_v4()));
-        let config_path = root.join("config.toml");
-        std::fs::create_dir_all(&root).expect("create temp directory");
-        let identity = DaemonIdentity {
-            service: LEGACY_CODEXHUB_DAEMON_SERVICE_NAME.to_string(),
-            pid: std::process::id(),
-            instance_id: Uuid::new_v4().to_string(),
-            started_at_ms: 1,
-        };
-        let metadata = DaemonMetadata {
-            identity: identity.clone(),
-            executable: "codexhub".to_string(),
-            config_path: config_path.display().to_string(),
-        };
-        let legacy_lock_path = legacy_codexhub_daemon_lock_path(&config_path);
+    fn active_legacy_lock_blocks_new_daemon_without_creating_legacy_locks() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let storage_home = temporary.path().join("MochiPort");
+        let legacy_home = temporary.path().join("ThreadRelay");
+        std::fs::create_dir_all(&legacy_home).expect("create legacy directory");
+        let legacy_lock_path = legacy_home.join("threadrelay-daemon.lock");
         let legacy_lock = OpenOptions::new()
             .create(true)
-            .truncate(false)
             .read(true)
             .write(true)
             .open(&legacy_lock_path)
             .expect("open legacy lock");
-        FileExt::try_lock_exclusive(&legacy_lock).expect("lock legacy daemon file");
-        std::fs::write(
-            legacy_codexhub_daemon_metadata_path(&config_path),
-            serde_json::to_vec(&metadata).unwrap(),
+        FileExt::try_lock_exclusive(&legacy_lock).expect("lock legacy daemon");
+
+        let error = DaemonInstanceLock::acquire_at(
+            &temporary.path().join("config.toml"),
+            &DaemonIdentity::new(),
+            &storage_home,
+            std::slice::from_ref(&legacy_home),
         )
-        .expect("write legacy metadata");
+        .expect_err("legacy daemon must block current daemon")
+        .to_string();
+        assert!(error.contains("legacy daemon holds"));
+        assert!(!storage_home.join("threadrelay-daemon.lock").exists());
 
-        let active = read_active_daemon_metadata(&config_path).expect("find legacy daemon");
-        assert_eq!(active.identity.instance_id, identity.instance_id);
-        assert!(DaemonInstanceLock::acquire(&config_path, &DaemonIdentity::new()).is_err());
-
-        FileExt::unlock(&legacy_lock).unwrap();
-        drop(legacy_lock);
-        let _ = std::fs::remove_dir_all(root);
+        let _ = FileExt::unlock(&legacy_lock);
     }
 }

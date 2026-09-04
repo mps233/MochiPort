@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::Write,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -37,16 +38,22 @@ pub struct AppConfig {
     #[serde(default)]
     pub state_path: PathBuf,
     pub logging: LoggingConfig,
-    pub feishu: FeishuConfig,
-    pub telegram: TelegramConfig,
-    pub wechat: WechatConfig,
-    pub wecom: WecomConfig,
+    #[serde(default, rename = "feishu", skip_serializing)]
+    legacy_feishu: FeishuConfig,
+    #[serde(default, rename = "telegram", skip_serializing)]
+    legacy_telegram: TelegramConfig,
+    #[serde(default, rename = "wechat", skip_serializing)]
+    legacy_wechat: WechatConfig,
+    #[serde(default, rename = "wecom", skip_serializing)]
+    legacy_wecom: WecomConfig,
     pub feishu_accounts: Vec<FeishuConfig>,
     pub telegram_accounts: Vec<TelegramConfig>,
     pub wechat_accounts: Vec<WechatConfig>,
     pub wecom_accounts: Vec<WecomConfig>,
     pub bridge: BridgeConfig,
     pub ai_gateway: crate::ai_gateway::config::AiGatewayConfig,
+    #[serde(skip)]
+    pending_v2_save: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,7 +80,7 @@ pub struct OutboundProxyConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FeishuConfig {
     pub enabled: bool,
@@ -86,7 +93,7 @@ pub struct FeishuConfig {
     pub allowed_chat_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TelegramConfig {
     pub enabled: bool,
@@ -101,7 +108,7 @@ pub struct TelegramConfig {
     pub project_groups: Vec<TelegramProjectGroupConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TelegramProjectGroupConfig {
     pub chat_id: String,
@@ -109,7 +116,7 @@ pub struct TelegramProjectGroupConfig {
     pub cwd: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WechatConfig {
     pub enabled: bool,
@@ -122,7 +129,7 @@ pub struct WechatConfig {
     pub allowed_user_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct WecomConfig {
     pub enabled: bool,
@@ -161,16 +168,17 @@ impl Default for AppConfig {
             theme: None,
             state_path: PathBuf::from("mochiport-state.json"),
             logging: LoggingConfig::default(),
-            feishu: FeishuConfig::default(),
-            telegram: TelegramConfig::default(),
-            wechat: WechatConfig::default(),
-            wecom: WecomConfig::default(),
+            legacy_feishu: FeishuConfig::default(),
+            legacy_telegram: TelegramConfig::default(),
+            legacy_wechat: WechatConfig::default(),
+            legacy_wecom: WecomConfig::default(),
             feishu_accounts: Vec::new(),
             telegram_accounts: Vec::new(),
             wechat_accounts: Vec::new(),
             wecom_accounts: Vec::new(),
             bridge: BridgeConfig::default(),
             ai_gateway: crate::ai_gateway::config::AiGatewayConfig::default(),
+            pending_v2_save: false,
         }
     }
 }
@@ -262,7 +270,7 @@ impl AppConfig {
             changed = true;
         }
 
-        if self.migrate_legacy_im_accounts() {
+        if self.migrate_legacy_im_accounts() || std::mem::take(&mut self.pending_v2_save) {
             changed = true;
         }
 
@@ -311,7 +319,19 @@ impl AppConfig {
         }
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("failed to parse config {}", path.display()))
+        let legacy_fields_present = toml::from_str::<toml::Value>(&raw)
+            .ok()
+            .and_then(|value| value.as_table().cloned())
+            .is_some_and(|table| {
+                ["feishu", "telegram", "wechat", "wecom"]
+                    .iter()
+                    .any(|key| table.contains_key(*key))
+            });
+        let mut config: Self = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config {}", path.display()))?;
+        let migrated = config.migrate_legacy_im_accounts();
+        config.pending_v2_save = legacy_fields_present || migrated;
+        Ok(config)
     }
 
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
@@ -338,13 +358,11 @@ impl AppConfig {
         Ok(())
     }
 
-    pub fn migrate_legacy_im_accounts(&mut self) -> bool {
+    fn migrate_legacy_im_accounts(&mut self) -> bool {
         let mut changed = false;
-        if self.feishu_accounts.is_empty() && self.feishu.is_configured() {
-            let mut account = self.feishu.clone();
+        if self.feishu_accounts.is_empty() && self.legacy_feishu != FeishuConfig::default() {
+            let mut account = self.legacy_feishu.clone();
             if account.account_id.trim().is_empty() {
-                // Must stay identical to effective_feishu_accounts; see the
-                // comment there before changing this priority order.
                 account.account_id = non_empty(&self.bridge.account_id)
                     .or_else(|| non_empty(&account.app_id))
                     .unwrap_or_else(|| "default".to_string());
@@ -352,123 +370,102 @@ impl AppConfig {
             self.feishu_accounts.push(account);
             changed = true;
         }
-        if self.telegram_accounts.is_empty() && self.telegram.is_configured() {
-            let mut account = self.telegram.clone();
+        if self.telegram_accounts.is_empty() && self.legacy_telegram != TelegramConfig::default() {
+            let mut account = self.legacy_telegram.clone();
             if account.account_id.trim().is_empty() {
                 account.account_id = "telegram".to_string();
             }
             self.telegram_accounts.push(account);
             changed = true;
         }
-        if self.wechat_accounts.is_empty() && self.wechat.is_configured() {
-            let mut account = self.wechat.clone();
+        if self.wechat_accounts.is_empty() && self.legacy_wechat != WechatConfig::default() {
+            let mut account = self.legacy_wechat.clone();
             if account.account_id.trim().is_empty() {
                 account.account_id = "wechat".to_string();
             }
             self.wechat_accounts.push(account);
             changed = true;
         }
-        if self.wecom_accounts.is_empty() && self.wecom.is_configured() {
-            let mut account = self.wecom.clone();
+        if self.wecom_accounts.is_empty() && self.legacy_wecom != WecomConfig::default() {
+            let mut account = self.legacy_wecom.clone();
             if account.account_id.trim().is_empty() {
                 account.account_id = "wecom".to_string();
             }
             self.wecom_accounts.push(account);
             changed = true;
         }
+        self.legacy_feishu = FeishuConfig::default();
+        self.legacy_telegram = TelegramConfig::default();
+        self.legacy_wechat = WechatConfig::default();
+        self.legacy_wecom = WecomConfig::default();
+        changed |= self.normalize_im_account_ids();
         changed
     }
 
-    pub fn effective_feishu_accounts(&self) -> Vec<FeishuConfig> {
-        effective_accounts(&self.feishu_accounts, &self.feishu, |account| {
-            account.is_configured()
-        })
-        .into_iter()
-        .map(|mut account| {
-            if account.account_id.trim().is_empty() {
-                // Must stay identical to migrate_legacy_im_accounts: the id
-                // shown and accepted by management routes before migration has
-                // to survive migration, otherwise toggling or deleting a
-                // legacy singleton dead-ends on a 404.
-                account.account_id = non_empty(&self.bridge.account_id)
+    /// Keep the account identity used by configuration, management APIs, and
+    /// the running bridge identical. Older array-shaped configurations could
+    /// leave an empty or padded `accountId`; that value is especially
+    /// dangerous because the API clients have platform fallbacks while the
+    /// registry uses the raw string as its map key.
+    fn normalize_im_account_ids(&mut self) -> bool {
+        let feishu_fallback = non_empty(&self.bridge.account_id);
+        let mut changed = false;
+        changed |= normalize_account_ids(
+            &mut self.feishu_accounts,
+            |account| {
+                feishu_fallback
+                    .clone()
                     .or_else(|| non_empty(&account.app_id))
-                    .unwrap_or_else(|| "default".to_string());
-            }
-            account
-        })
-        .collect()
+                    .unwrap_or_else(|| "default".to_string())
+            },
+            |account| account.account_id.as_str(),
+            |account, value| account.account_id = value,
+        );
+        changed |= normalize_account_ids(
+            &mut self.telegram_accounts,
+            |_| "telegram".to_string(),
+            |account| account.account_id.as_str(),
+            |account, value| account.account_id = value,
+        );
+        changed |= normalize_account_ids(
+            &mut self.wechat_accounts,
+            |_| "wechat".to_string(),
+            |account| account.account_id.as_str(),
+            |account, value| account.account_id = value,
+        );
+        changed |= normalize_account_ids(
+            &mut self.wecom_accounts,
+            |_| "wecom".to_string(),
+            |account| account.account_id.as_str(),
+            |account, value| account.account_id = value,
+        );
+        changed
     }
 
     pub fn feishu_account(&self, account_id: &str) -> Option<FeishuConfig> {
-        find_account(&self.effective_feishu_accounts(), account_id, |account| {
+        find_account(&self.feishu_accounts, account_id, |account| {
             account.account_id.as_str()
         })
-    }
-
-    pub fn effective_telegram_accounts(&self) -> Vec<TelegramConfig> {
-        effective_accounts(&self.telegram_accounts, &self.telegram, |account| {
-            account.is_configured()
-        })
-        .into_iter()
-        .map(|mut account| {
-            if account.account_id.trim().is_empty() {
-                account.account_id = "telegram".to_string();
-            }
-            account
-        })
-        .collect()
     }
 
     pub fn telegram_account(&self, account_id: &str) -> Option<TelegramConfig> {
-        find_account(&self.effective_telegram_accounts(), account_id, |account| {
+        find_account(&self.telegram_accounts, account_id, |account| {
             account.account_id.as_str()
         })
-    }
-
-    pub fn effective_wechat_accounts(&self) -> Vec<WechatConfig> {
-        effective_accounts(&self.wechat_accounts, &self.wechat, |account| {
-            account.is_configured()
-        })
-        .into_iter()
-        .map(|mut account| {
-            if account.account_id.trim().is_empty() {
-                account.account_id = "wechat".to_string();
-            }
-            account
-        })
-        .collect()
     }
 
     pub fn wechat_account(&self, account_id: &str) -> Option<WechatConfig> {
-        find_account(&self.effective_wechat_accounts(), account_id, |account| {
+        find_account(&self.wechat_accounts, account_id, |account| {
             account.account_id.as_str()
         })
-    }
-
-    pub fn effective_wecom_accounts(&self) -> Vec<WecomConfig> {
-        effective_accounts(&self.wecom_accounts, &self.wecom, |account| {
-            account.is_configured()
-        })
-        .into_iter()
-        .map(|mut account| {
-            if account.account_id.trim().is_empty() {
-                account.account_id = "wecom".to_string();
-            }
-            account
-        })
-        .collect()
     }
 
     pub fn wecom_account(&self, account_id: &str) -> Option<WecomConfig> {
-        find_account(&self.effective_wecom_accounts(), account_id, |account| {
+        find_account(&self.wecom_accounts, account_id, |account| {
             account.account_id.as_str()
         })
     }
 
-    /// Check an account through the effective (legacy-compatible) view
-    /// without mutating the configuration. Management mutations use this
-    /// before migrating legacy singleton fields so rejected requests remain
-    /// side-effect free.
     pub fn has_im_account(&self, platform: &str, account_id: &str) -> bool {
         let account_id = account_id.trim();
         if account_id.is_empty() {
@@ -476,19 +473,19 @@ impl AppConfig {
         }
         match ImPlatformKind::from_key(platform) {
             Some(ImPlatformKind::Feishu) => self
-                .effective_feishu_accounts()
+                .feishu_accounts
                 .iter()
                 .any(|account| account.account_id.trim() == account_id),
             Some(ImPlatformKind::Telegram) => self
-                .effective_telegram_accounts()
+                .telegram_accounts
                 .iter()
                 .any(|account| account.account_id.trim() == account_id),
             Some(ImPlatformKind::Wechat) => self
-                .effective_wechat_accounts()
+                .wechat_accounts
                 .iter()
                 .any(|account| account.account_id.trim() == account_id),
             Some(ImPlatformKind::Wecom) => self
-                .effective_wecom_accounts()
+                .wecom_accounts
                 .iter()
                 .any(|account| account.account_id.trim() == account_id),
             _ => false,
@@ -602,25 +599,13 @@ impl AppConfig {
         if account_id.is_empty() || chat_id.is_empty() {
             return TelegramChatAllowResult::AccountNotFound;
         }
-        self.migrate_legacy_im_accounts();
         let Some(account) = self.telegram_accounts.iter_mut().find(|account| {
             account.account_id.trim() == account_id
                 || (account.account_id.trim().is_empty() && account_id == "telegram")
         }) else {
-            if self.telegram.account_id.trim() == account_id
-                || (self.telegram.account_id.trim().is_empty() && account_id == "telegram")
-            {
-                return ensure_telegram_chat_id_on_account(&mut self.telegram, chat_id);
-            }
             return TelegramChatAllowResult::AccountNotFound;
         };
-        let result = ensure_telegram_chat_id_on_account(account, chat_id);
-        if self.telegram.account_id.trim() == account_id
-            || (self.telegram.account_id.trim().is_empty() && account_id == "telegram")
-        {
-            self.telegram.allowed_chat_ids = account.allowed_chat_ids.clone();
-        }
-        result
+        ensure_telegram_chat_id_on_account(account, chat_id)
     }
 }
 
@@ -704,20 +689,6 @@ impl WecomConfig {
     }
 }
 
-fn effective_accounts<T: Clone>(
-    accounts: &[T],
-    legacy: &T,
-    configured: impl Fn(&T) -> bool,
-) -> Vec<T> {
-    if !accounts.is_empty() {
-        accounts.to_vec()
-    } else if configured(legacy) {
-        vec![legacy.clone()]
-    } else {
-        Vec::new()
-    }
-}
-
 fn upsert_account<T>(accounts: &mut Vec<T>, account: T, account_id: impl Fn(&T) -> &str) {
     let id = account_id(&account).trim().to_string();
     if let Some(existing) = accounts
@@ -774,9 +745,56 @@ fn non_empty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+fn normalize_account_ids<T>(
+    accounts: &mut [T],
+    fallback: impl Fn(&T) -> String,
+    get_account_id: impl Fn(&T) -> &str,
+    set_account_id: impl Fn(&mut T, String),
+) -> bool {
+    // Reserve every explicit ID first. This prevents an earlier generated
+    // fallback from colliding with an explicit ID that appears later in the
+    // file.
+    let mut used = accounts
+        .iter()
+        .filter_map(|account| non_empty(get_account_id(account)))
+        .collect::<HashSet<_>>();
+    let mut changed = false;
+    for account in accounts.iter_mut() {
+        let raw = get_account_id(account).to_string();
+        let trimmed = raw.trim().to_string();
+        let normalized = if trimmed.is_empty() {
+            let candidate = fallback(account);
+            unique_account_id(candidate, &used)
+        } else {
+            trimmed
+        };
+        if raw != normalized {
+            set_account_id(account, normalized.clone());
+            changed = true;
+        }
+        used.insert(normalized);
+    }
+    changed
+}
+
+fn unique_account_id(candidate: String, used: &HashSet<String>) -> String {
+    if !used.contains(&candidate) {
+        return candidate;
+    }
+    for suffix in 2.. {
+        let next = format!("{candidate}-{suffix}");
+        if !used.contains(&next) {
+            return next;
+        }
+    }
+    unreachable!("account id suffix search is bounded by the address space")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AppConfig, OutboundProxyMode, TelegramChatAllowResult, TelegramConfig};
+    use super::{
+        AppConfig, FeishuConfig, OutboundProxyMode, TelegramChatAllowResult, TelegramConfig,
+    };
 
     #[test]
     fn save_atomically_replaces_an_existing_config() {
@@ -849,7 +867,7 @@ mod tests {
 
     #[test]
     fn telegram_project_groups_round_trip_through_toml() {
-        let config: AppConfig = toml::from_str(
+        let mut config: AppConfig = toml::from_str(
             r#"
                 [telegram]
                 botToken = "token"
@@ -859,8 +877,11 @@ mod tests {
             "#,
         )
         .expect("project group config");
+        assert!(config.migrate_legacy_im_accounts());
         let group = config
-            .telegram
+            .telegram_accounts
+            .first()
+            .expect("migrated telegram account")
             .project_group_for_chat(" -100 ")
             .expect("configured project group");
         assert_eq!(group.project_name, "MochiPort");
@@ -869,14 +890,19 @@ mod tests {
 
     #[test]
     fn telegram_legacy_default_account_can_bind_first_chat() {
-        let mut config = AppConfig::default();
-        config.telegram.bot_token = "token".to_string();
+        let mut config: AppConfig = toml::from_str(
+            r#"
+                [telegram]
+                botToken = "token"
+            "#,
+        )
+        .expect("legacy telegram config");
+        assert!(config.migrate_legacy_im_accounts());
 
         assert_eq!(
             config.ensure_telegram_allowed_chat_id("telegram", "123"),
             TelegramChatAllowResult::Bound
         );
-        assert_eq!(config.telegram.allowed_chat_ids, vec!["123".to_string()]);
         assert_eq!(
             config.telegram_accounts[0].allowed_chat_ids,
             vec!["123".to_string()]
@@ -885,9 +911,14 @@ mod tests {
 
     #[test]
     fn wecom_legacy_account_migrates_and_is_resolved() {
-        let mut config = AppConfig::default();
-        config.wecom.bot_id = "bot-1".to_string();
-        config.wecom.secret = "secret-1".to_string();
+        let mut config: AppConfig = toml::from_str(
+            r#"
+                [wecom]
+                botId = "bot-1"
+                secret = "secret-1"
+            "#,
+        )
+        .expect("legacy wecom config");
         assert!(config.migrate_legacy_im_accounts());
         let account = config.wecom_account("wecom").expect("wecom account");
         assert_eq!(account.bot_id, "bot-1");
@@ -895,20 +926,152 @@ mod tests {
     }
 
     #[test]
-    fn feishu_legacy_account_keeps_the_same_id_before_and_after_migration() {
-        let mut config = AppConfig::default();
-        config.feishu.app_id = "cli-app".to_string();
-        config.feishu.app_secret = "secret".to_string();
-        config.bridge.account_id = "legacy-bridge".to_string();
+    fn feishu_legacy_account_keeps_the_same_id_after_migration() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+                [feishu]
+                appId = "cli-app"
+                appSecret = "secret"
 
-        let effective = config.effective_feishu_accounts();
-        assert_eq!(effective.len(), 1);
-        assert_eq!(effective[0].account_id, "legacy-bridge");
-        assert!(config.has_im_account(" FEISHU ", "legacy-bridge"));
-
+                [bridge]
+                accountId = "legacy-bridge"
+            "#,
+        )
+        .expect("legacy feishu config");
         assert!(config.migrate_legacy_im_accounts());
         assert!(config.has_im_account("feishu", "legacy-bridge"));
         assert!(config.set_im_account_enabled("feishu", "legacy-bridge", false));
         assert!(config.remove_im_account("feishu", "legacy-bridge"));
+    }
+
+    #[test]
+    fn legacy_singletons_are_deserialize_only_and_migrate_once() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+                [telegram]
+                botToken = "legacy-token"
+            "#,
+        )
+        .expect("legacy config");
+
+        assert!(config.migrate_legacy_im_accounts());
+        assert!(!config.migrate_legacy_im_accounts());
+        assert_eq!(config.telegram_accounts.len(), 1);
+        let serialized = toml::to_string(&config).expect("serialize v2 config");
+        assert!(!serialized.contains("[telegram]"));
+        assert!(serialized.contains("[[telegramAccounts]]"));
+    }
+
+    #[test]
+    fn array_account_ids_are_normalized_before_runtime_use() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+                [bridge]
+                accountId = "bridge-account"
+
+                [[feishuAccounts]]
+                accountId = "  "
+                appId = "cli-first"
+                appSecret = "secret-first"
+
+                [[feishuAccounts]]
+                accountId = ""
+                appId = "cli-second"
+                appSecret = "secret-second"
+
+                [[telegramAccounts]]
+                accountId = "  "
+                botToken = "token-first"
+
+                [[telegramAccounts]]
+                accountId = ""
+                botToken = "token-second"
+
+                [[wechatAccounts]]
+                accountId = "  "
+                botToken = "wechat-token"
+
+                [[wecomAccounts]]
+                accountId = ""
+                botId = "wecom-bot"
+                secret = "wecom-secret"
+            "#,
+        )
+        .expect("array account config");
+
+        assert!(config.apply_platform_defaults());
+        assert_eq!(
+            config
+                .feishu_accounts
+                .iter()
+                .map(|account| account.account_id.as_str())
+                .collect::<Vec<_>>(),
+            ["bridge-account", "bridge-account-2"]
+        );
+        assert_eq!(
+            config
+                .telegram_accounts
+                .iter()
+                .map(|account| account.account_id.as_str())
+                .collect::<Vec<_>>(),
+            ["telegram", "telegram-2"]
+        );
+        assert_eq!(config.wechat_accounts[0].account_id, "wechat");
+        assert_eq!(config.wecom_accounts[0].account_id, "wecom");
+        assert!(!config.apply_platform_defaults());
+    }
+
+    #[test]
+    fn generated_account_ids_skip_later_explicit_ids() {
+        let mut config: AppConfig = toml::from_str(
+            r#"
+                [[telegramAccounts]]
+                accountId = ""
+                botToken = "token-first"
+
+                [[telegramAccounts]]
+                accountId = "telegram"
+                botToken = "token-second"
+            "#,
+        )
+        .expect("array account config");
+
+        assert!(config.apply_platform_defaults());
+        assert_eq!(config.telegram_accounts[0].account_id, "telegram-2");
+        assert_eq!(config.telegram_accounts[1].account_id, "telegram");
+    }
+
+    #[test]
+    fn normalized_array_account_ids_are_persisted_on_startup() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join("config.toml");
+        let mut source = AppConfig::default();
+        source.bridge.account_id.clear();
+        source.feishu_accounts = vec![FeishuConfig {
+            account_id: String::new(),
+            app_id: "feishu-app".to_string(),
+            app_secret: "feishu-secret".to_string(),
+            ..FeishuConfig::default()
+        }];
+        source.telegram_accounts = vec![TelegramConfig {
+            account_id: "  ".to_string(),
+            bot_token: "telegram-token".to_string(),
+            ..TelegramConfig::default()
+        }];
+        source.save(&path).expect("save source config");
+        let mut loaded = AppConfig::load_or_default(&path).expect("load config");
+
+        assert_eq!(loaded.feishu_accounts[0].account_id, "feishu-app");
+        assert_eq!(loaded.telegram_accounts[0].account_id, "telegram");
+        assert!(loaded.apply_platform_defaults());
+        loaded.save(&path).expect("persist normalized config");
+
+        let persisted = std::fs::read_to_string(&path).expect("read persisted config");
+        assert!(persisted.contains("accountId = \"feishu-app\""));
+        assert!(persisted.contains("accountId = \"telegram\""));
+        let mut reloaded = AppConfig::load_or_default(&path).expect("reload config");
+        assert_eq!(reloaded.feishu_accounts[0].account_id, "feishu-app");
+        assert_eq!(reloaded.telegram_accounts[0].account_id, "telegram");
+        assert!(!reloaded.apply_platform_defaults());
     }
 }

@@ -21,7 +21,6 @@ mod cli;
 mod codex;
 mod codex_app_config;
 mod codex_app_enhanced;
-mod codex_session_history;
 mod config;
 mod daemon_process;
 mod im;
@@ -29,7 +28,7 @@ mod im_runtime;
 mod manage_api;
 mod outbound_http;
 mod remote_control_backend;
-mod safe_relaunch;
+mod storage_migration;
 mod store;
 mod types;
 mod version;
@@ -37,7 +36,6 @@ mod vscode_extension_patch;
 mod web;
 
 use std::{
-    env,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::{Path, PathBuf},
     time::Duration,
@@ -69,37 +67,29 @@ fn main() -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    if let Command::SafeRelaunchHelper {
-        bundle_path,
-        expected_bundle_identifier,
-        expected_version,
-        expected_build,
-        daemon_pid,
-        daemon_instance_id,
-        old_executable_path,
-        gui_pid,
-        bind_addr,
-        log_path,
-        config_path,
-        start_delay_ms,
-        shutdown_mode,
-    } = &cli.command
-    {
-        return safe_relaunch::run_helper(safe_relaunch::SafeRelaunchHelperArgs {
-            bundle_path: bundle_path.clone(),
-            expected_bundle_identifier: expected_bundle_identifier.clone(),
-            expected_version: expected_version.clone(),
-            expected_build: expected_build.clone(),
-            daemon_pid: *daemon_pid,
-            daemon_instance_id: daemon_instance_id.clone(),
-            old_executable_path: old_executable_path.clone(),
-            gui_pid: *gui_pid,
-            bind_addr: *bind_addr,
-            log_path: log_path.clone(),
-            config_path: config_path.clone(),
-            start_delay_ms: *start_delay_ms,
-            shutdown_mode: *shutdown_mode,
-        });
+    if let Command::MigrateStorage { source } = &cli.command {
+        if cli.config_path.is_some() {
+            anyhow::bail!(
+                "--config is not accepted by migrate-storage; set MOCHIPORT_HOME to choose the destination storage directory"
+            );
+        }
+        let report = storage_migration::migrate_storage(source.clone())?;
+        if report.migrated {
+            println!(
+                "MochiPort storage migrated atomically from {} to {}",
+                report.source_directory.display(),
+                report.destination_directory.display()
+            );
+            println!("Migration manifest: {}", report.manifest_path.display());
+        } else {
+            println!(
+                "MochiPort storage was already migrated from {} to {}",
+                report.source_directory.display(),
+                report.destination_directory.display()
+            );
+            println!("Migration manifest: {}", report.manifest_path.display());
+        }
+        return Ok(());
     }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -127,6 +117,22 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
         Command::On => set_bridge_enabled(&config_path, true).await,
         Command::Off => set_bridge_enabled(&config_path, false).await,
         Command::Status => print_status(&config).await,
+        Command::InspectVsCodeRemoteControl => {
+            print_vscode_remote_control_report(vscode_extension_patch::inspect_remote_control()?);
+            Ok(())
+        }
+        Command::EnableVsCodeLegacyPatch => {
+            print_vscode_remote_control_report(
+                vscode_extension_patch::enable_legacy_patch_fallback()?,
+            );
+            Ok(())
+        }
+        Command::RestoreVsCodeLegacyPatch => {
+            print_vscode_remote_control_report(
+                vscode_extension_patch::restore_legacy_patch_fallback()?,
+            );
+            Ok(())
+        }
         Command::ConfigureCodexApp {
             codex_home,
             provider_name,
@@ -184,8 +190,8 @@ async fn async_main(cli: Cli) -> anyhow::Result<()> {
             );
             Ok(())
         }
-        Command::SafeRelaunchHelper { .. } => {
-            unreachable!("safe relaunch helper is handled before runtime creation")
+        Command::MigrateStorage { .. } => {
+            unreachable!("storage migration is handled before runtime creation")
         }
         Command::Version => unreachable!("version command is handled before runtime creation"),
     }
@@ -228,52 +234,22 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             format!("path={}", chain_log_path.display()),
         )
         .await;
-    // Finish desktop environment cleanup before publishing the service locator
-    // or declaring the listener ready. Normal takeover uses config.toml only;
-    // stale global API overrides can redirect Codex's login flow to MochiPort.
+    // Daemon startup must not mutate Codex-owned files. Explicit management
+    // operations remain responsible for setup, repair, and legacy migration.
     if desktop_integration_enabled {
         let backend_url = state.config.lock().await.remote_control_base_url();
-        let environment_state = state.clone();
-        tracing::info!(target: "mochiport::startup", "starting Codex App environment synchronization");
-        let mutation = environment_state.codex_app_mutations.lock().await;
+        tracing::info!(target: "mochiport::startup", "inspecting Codex App environment without mutation");
         let result = tokio::task::spawn_blocking(move || {
-            tracing::info!(target: "mochiport::startup", "Codex App environment synchronization entered blocking worker");
-            let preserve_direct_api_mode =
-                codex_app_config::should_preserve_direct_api_mode(None, &backend_url);
-            let takeover_migration = if preserve_direct_api_mode {
-                Ok(false)
-            } else {
-                codex_app_config::migrate_legacy_codex_takeover(None, &backend_url)
-            };
-            let gui_api_base = if preserve_direct_api_mode {
-                codex_app_config::inspect_gui_api_base_url(&backend_url)
-            } else {
-                codex_app_config::cleanup_gui_environment(&backend_url)
-            };
-            let proxy_cleanup = if preserve_direct_api_mode {
-                Ok(())
-            } else {
-                codex_app_config::cleanup_legacy_app_server_proxy_environment()
-            };
-            (
-                gui_api_base,
-                proxy_cleanup,
-                preserve_direct_api_mode,
-                takeover_migration,
-            )
+            codex_app_config::inspect_gui_api_base_url(&backend_url)
         })
         .await;
-        drop(mutation);
 
         match result {
-            Ok((gui_api_base, proxy_cleanup, preserve_direct_api_mode, takeover_migration)) => {
+            Ok(gui_api_base) => {
                 tracing::info!(
                     target: "mochiport::startup",
                     configured = gui_api_base.configured,
-                    proxy_cleanup_ok = proxy_cleanup.is_ok(),
-                    preserve_direct_api_mode,
-                    takeover_migration = ?takeover_migration,
-                    "Codex App environment synchronization finished"
+                    "Codex App environment inspection finished"
                 );
                 state
                     .push_event(
@@ -285,35 +261,6 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
                             gui_api_base.value.as_deref().unwrap_or_default(),
                             gui_api_base.error.as_deref().unwrap_or_default()
                         ),
-                    )
-                    .await;
-                state
-                    .push_event(
-                        if proxy_cleanup.is_ok() {
-                            "info"
-                        } else {
-                            "warn"
-                        },
-                        "codex_app_server_proxy_environment_cleanup_checked",
-                        match proxy_cleanup {
-                            Ok(()) => "cleaned=true".to_string(),
-                            Err(error) => format!("cleaned=false error={error}"),
-                        },
-                    )
-                    .await;
-                state
-                    .push_event(
-                        if takeover_migration.is_err() {
-                            "warn"
-                        } else {
-                            "info"
-                        },
-                        "codex_app_takeover_migration_checked",
-                        match takeover_migration {
-                            Ok(true) => "migrated=true".to_string(),
-                            Ok(false) => "migrated=false".to_string(),
-                            Err(error) => format!("migrated=false error={error}"),
-                        },
                     )
                     .await;
             }
@@ -416,26 +363,6 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         }
     }
     primary_result?;
-    if desktop_integration_enabled {
-        match vscode_extension_patch::restore_remote_control() {
-            Ok(report) => {
-                tracing::info!(
-                    target: "mochiport::vscode_extension_patch",
-                    action = %report.action,
-                    extension_js = %report.extension_js.as_ref().map(|path| path.display().to_string()).unwrap_or_default(),
-                    message = %report.message,
-                    "VS Code Codex extension restore finished"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target: "mochiport::vscode_extension_patch",
-                    error = %err,
-                    "VS Code Codex extension restore failed"
-                );
-            }
-        }
-    }
     Ok(())
 }
 
@@ -470,39 +397,8 @@ async fn serve_http(
 
 async fn run_daemon_startup_tasks(
     state: crate::app_state::SharedState,
-    desktop_integration_enabled: bool,
+    _desktop_integration_enabled: bool,
 ) {
-    if desktop_integration_enabled {
-        match vscode_extension_patch::enable_remote_control() {
-            Ok(report) => {
-                state
-                    .push_event(
-                        "info",
-                        "vscode_codex_extension_patch",
-                        format!(
-                            "action={} extension_js={} message={}",
-                            report.action,
-                            report
-                                .extension_js
-                                .as_ref()
-                                .map(|path| path.display().to_string())
-                                .unwrap_or_default(),
-                            report.message
-                        ),
-                    )
-                    .await;
-            }
-            Err(err) => {
-                state
-                    .push_event(
-                        "warn",
-                        "vscode_codex_extension_patch_failed",
-                        err.to_string(),
-                    )
-                    .await;
-            }
-        }
-    }
     if state.config.lock().await.bridge.enabled {
         web::start_bridge_if_ready(&state, "bridge start requested during daemon startup").await;
     } else {
@@ -517,147 +413,8 @@ fn environment_switch_enabled(value: Option<&std::ffi::OsStr>) -> bool {
 }
 
 fn config_path_from_cli(path: Option<PathBuf>) -> PathBuf {
-    if let Some(path) = path {
-        return absolutize(path);
-    }
-
-    let mochiport_home_is_set = env::var_os("MOCHIPORT_HOME").is_some();
-    let legacy_home_is_set =
-        env::var_os("THREADRELAY_HOME").is_some() || env::var_os("CODEXHUB_HOME").is_some();
-    let mochiport_repo_config_is_set = env::var_os("MOCHIPORT_USE_REPO_CONFIG").is_some();
-    let legacy_repo_config_is_set = env::var_os("THREADRELAY_USE_REPO_CONFIG").is_some()
-        || env::var_os("CODEXHUB_USE_REPO_CONFIG").is_some();
-    if mochiport_home_is_set
-        || (!mochiport_repo_config_is_set && !legacy_repo_config_is_set && legacy_home_is_set)
-    {
-        return app_support_config_path();
-    }
-
-    if let Some(path) = adjacent_config_from_current_exe() {
-        return path;
-    }
-
-    if !mochiport_repo_config_is_set && !legacy_repo_config_is_set {
-        return app_support_config_path();
-    }
-
-    inferred_repo_config_from_target_exe()
-        .or_else(|| {
-            std::env::current_dir()
-                .ok()
-                .map(|cwd| cwd.join("config.toml"))
-                .filter(|path| path.exists())
-        })
-        .unwrap_or_else(|| absolutize(PathBuf::from("config.toml")))
-}
-
-fn app_support_config_path() -> PathBuf {
-    if let Some(base) = env::var_os("MOCHIPORT_HOME").map(PathBuf::from) {
-        return base.join("config.toml");
-    }
-    if let Some(base) = env::var_os("THREADRELAY_HOME").map(PathBuf::from) {
-        return base.join("config.toml");
-    }
-    if let Some(base) = env::var_os("CODEXHUB_HOME").map(PathBuf::from) {
-        return base.join("config.toml");
-    }
-    platform_app_support_config_path()
-}
-
-#[cfg(target_os = "windows")]
-fn platform_app_support_config_path() -> PathBuf {
-    let base = env::var_os("LOCALAPPDATA")
-        .or_else(|| env::var_os("APPDATA"))
-        .map(PathBuf::from)
-        .or_else(|| env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let new_path = base.join("MochiPort").join("config.toml");
-    let legacy_macos_path = env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
-    let mut legacy_paths = vec![
-        base.join("ThreadRelay").join("config.toml"),
-        base.join("CodexHub").join("config.toml"),
-    ];
-    legacy_paths.extend(legacy_macos_path);
-    prefer_existing_legacy_config(new_path, &legacy_paths)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn platform_app_support_config_path() -> PathBuf {
-    let base = env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support"))
-        .or_else(|| env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    prefer_existing_legacy_config(
-        base.join("MochiPort").join("config.toml"),
-        &[
-            base.join("ThreadRelay").join("config.toml"),
-            base.join("CodexHub").join("config.toml"),
-        ],
-    )
-}
-
-fn prefer_existing_legacy_config(new_path: PathBuf, legacy_paths: &[PathBuf]) -> PathBuf {
-    if new_path.exists() {
-        return new_path;
-    }
-    legacy_paths
-        .iter()
-        .find(|path| path.exists())
-        .cloned()
-        .unwrap_or(new_path)
-}
-
-fn inferred_repo_config_from_target_exe() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let profile_dir = exe.parent()?;
-    let target_dir = profile_dir.parent()?;
-    if target_dir.file_name().and_then(|value| value.to_str()) != Some("target") {
-        return None;
-    }
-    let profile = profile_dir.file_name().and_then(|value| value.to_str())?;
-    if profile != "debug" && profile != "release" {
-        return None;
-    }
-    let config = target_dir.parent()?.join("config.toml");
-    config.exists().then_some(config)
-}
-
-fn adjacent_config_from_current_exe() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(|parent| parent.join("config.toml")))
-        .filter(|path| path.exists())
-        .filter(|path| {
-            // Only use the exe-adjacent config when its directory is actually
-            // writable. Installed builds under protected locations such as
-            // Installed builds may ship a default `config.toml` next to
-            // the exe, but the directory is read-only for normal-privilege
-            // processes, so saving config there fails. In that case fall through
-            // to the per-user app-support path instead.
-            path.parent()
-                .map(config_directory_is_writable)
-                .unwrap_or(false)
-        })
-}
-
-/// Returns true when a config file can be created/replaced inside `dir`.
-fn config_directory_is_writable(dir: &Path) -> bool {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|value| value.as_nanos())
-        .unwrap_or(0);
-    let probe = dir.join(format!(".mochiport-write-probe-{nanos}"));
-    match std::fs::File::create(&probe) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&probe);
-            true
-        }
-        Err(_) => false,
-    }
+    path.map(absolutize)
+        .unwrap_or_else(storage_migration::current_config_path)
 }
 
 fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
@@ -694,10 +451,8 @@ fn log_dir_from_config(config: &AppConfig) -> PathBuf {
 }
 
 async fn set_bridge_enabled(config_path: &Path, enabled: bool) -> anyhow::Result<()> {
-    let mut config = AppConfig::load_or_default(&config_path.to_path_buf())?;
-    config.bridge.enabled = enabled;
-    config.save(&config_path.to_path_buf())?;
-    let _ = notify_daemon_bridge(&config, enabled).await;
+    let config = AppConfig::load_or_default(&config_path.to_path_buf())?;
+    notify_daemon_bridge(config_path, &config, enabled).await?;
     println!(
         "MochiPort Feishu bridge {}",
         if enabled { "enabled" } else { "disabled" }
@@ -750,14 +505,36 @@ async fn print_status(config: &AppConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn notify_daemon_bridge(config: &AppConfig, enabled: bool) -> anyhow::Result<()> {
+async fn notify_daemon_bridge(
+    config_path: &Path,
+    config: &AppConfig,
+    enabled: bool,
+) -> anyhow::Result<()> {
     let action = if enabled { "start" } else { "stop" };
-    let url = format!("http://{}/api/bridge/{action}", config.bind);
-    local_daemon_http_client()?
+    let token = manage_api::management_token(config_path)
+        .context("failed to load local management credential for bridge control")?;
+    let url = format!("http://{}/api/v1/manage/bridge/{action}", config.bind);
+    let response = local_daemon_http_client()?
         .post(url)
+        .bearer_auth(token)
         .timeout(Duration::from_millis(700))
         .send()
-        .await?;
+        .await
+        .context("bridge management request failed")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(512)
+            .collect::<String>();
+        if detail.trim().is_empty() {
+            anyhow::bail!("bridge management API returned {status}");
+        }
+        anyhow::bail!("bridge management API returned {status}: {detail}");
+    }
     Ok(())
 }
 
@@ -781,6 +558,17 @@ fn local_daemon_http_client() -> anyhow::Result<reqwest::Client> {
         .context("failed to build local daemon HTTP client")
 }
 
+fn print_vscode_remote_control_report(report: vscode_extension_patch::VsCodeExtensionPatchReport) {
+    println!("VS Code remote-control: {}", report.action);
+    println!("  {}", report.message);
+    if let Some(path) = report.extension_js {
+        println!("  extension: {}", path.display());
+    }
+    if let Some(path) = report.backup_path {
+        println!("  backup: {}", path.display());
+    }
+}
+
 fn absolutize(path: PathBuf) -> PathBuf {
     if path.is_absolute() {
         path
@@ -794,42 +582,6 @@ fn absolutize(path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn app_support_path_uses_legacy_config_until_new_config_exists() {
-        let root = std::env::temp_dir().join(format!(
-            "mochiport-config-path-test-{}-{}",
-            std::process::id(),
-            crate::types::now_ms()
-        ));
-        let new_path = root.join("MochiPort/config.toml");
-        let legacy_path = root.join("ThreadRelay/config.toml");
-
-        assert_eq!(
-            prefer_existing_legacy_config(new_path.clone(), std::slice::from_ref(&legacy_path)),
-            new_path
-        );
-
-        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        std::fs::write(&legacy_path, "").unwrap();
-
-        assert_eq!(
-            prefer_existing_legacy_config(new_path.clone(), std::slice::from_ref(&legacy_path)),
-            legacy_path
-        );
-
-        std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
-        std::fs::write(&new_path, "").unwrap();
-        assert_eq!(
-            prefer_existing_legacy_config(
-                new_path.clone(),
-                &[root.join("ThreadRelay/config.toml")]
-            ),
-            new_path
-        );
-
-        let _ = std::fs::remove_dir_all(root);
-    }
 
     #[test]
     fn compatible_loopback_addr_pairs_ipv4_and_ipv6_localhost() {
