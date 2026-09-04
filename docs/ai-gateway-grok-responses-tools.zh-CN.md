@@ -319,7 +319,6 @@ Grok Build 参考：
 
 相关文档：
 
-- [`ai-gateway-grok-build-protocol-conversion-reference.zh-CN.md`](ai-gateway-grok-build-protocol-conversion-reference.zh-CN.md)
 - [`ai-gateway-responses-lite-web-search.zh-CN.md`](ai-gateway-responses-lite-web-search.zh-CN.md)
 - [xAI Web Search 官方文档](https://docs.x.ai/developers/tools/web-search)
 

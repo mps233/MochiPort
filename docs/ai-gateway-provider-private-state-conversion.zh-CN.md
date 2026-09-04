@@ -7,7 +7,6 @@
 相关文档：
 
 - [`ai-gateway-encrypted-content-scope.zh-CN.md`](ai-gateway-encrypted-content-scope.zh-CN.md)：marker、渠道指纹和迁移策略的简明说明。
-- [`ai-gateway-compact-v2-portable-summary.zh-CN.md`](ai-gateway-compact-v2-portable-summary.zh-CN.md)：Compact V2 opaque blob、统一文本摘要和跨 Provider 迁移的备选设计，当前暂不实施。
 - [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md)：Anthropic Messages adapter 的整体设计。
 - [`ai-gateway-provider-adapter-design.zh-CN.md`](ai-gateway-provider-adapter-design.zh-CN.md)：Provider adapter 与 Gateway IR 的总体约束。
 
@@ -36,7 +35,7 @@ Codex 只看到一个 OpenAI Responses 入口，但 MochiPort 后面可能连接
 
 - Anthropic web search 结果中的私有 `encrypted_content`。
 - API Key、OAuth token 等身份凭证。
-- Codex Responses compaction blob 的业务语义；该部分由 [`ai-gateway-compact-v2-portable-summary.zh-CN.md`](ai-gateway-compact-v2-portable-summary.zh-CN.md) 单独约束。
+- Codex Responses compaction blob 的业务语义。
 
 ## 2. Codex 侧统一表示
 
