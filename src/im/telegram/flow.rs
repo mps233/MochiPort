@@ -418,9 +418,9 @@ pub(crate) async fn handle_inbound(
         .await;
 
     let config = state.config.lock().await.clone();
-    let telegram_config = config
-        .telegram_account(&message.account_id)
-        .unwrap_or_else(|| config.telegram.clone());
+    let Some(telegram_config) = config.telegram_account(&message.account_id) else {
+        return Ok(());
+    };
     let api = TelegramApi::new(TelegramSettings::from_app_config(&telegram_config));
     let adapter = TelegramAdapter::new(api.clone());
     let trimmed = message.text.trim();

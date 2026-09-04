@@ -49,23 +49,27 @@ type TelegramInboundWorkers = Arc<Mutex<HashMap<String, TelegramInboundWorker>>>
 pub async fn start_bridge(state: SharedState) {
     let config = state.config.lock().await.clone();
     let feishu_accounts = config
-        .effective_feishu_accounts()
-        .into_iter()
+        .feishu_accounts
+        .iter()
+        .cloned()
         .filter(|account| account.is_active())
         .collect::<Vec<_>>();
     let telegram_accounts = config
-        .effective_telegram_accounts()
-        .into_iter()
+        .telegram_accounts
+        .iter()
+        .cloned()
         .filter(|account| account.is_active())
         .collect::<Vec<_>>();
     let wechat_accounts = config
-        .effective_wechat_accounts()
-        .into_iter()
+        .wechat_accounts
+        .iter()
+        .cloned()
         .filter(|account| account.is_active())
         .collect::<Vec<_>>();
     let wecom_accounts = config
-        .effective_wecom_accounts()
-        .into_iter()
+        .wecom_accounts
+        .iter()
+        .cloned()
         .filter(|account| account.is_active())
         .collect::<Vec<_>>();
     if feishu_accounts.is_empty()

@@ -111,7 +111,7 @@ pub(crate) async fn auto_create_topic_for_codex_thread_for_generation(
     } else {
         remote_client_key.trim().to_string()
     };
-    let Some((thread_cwd, thread_title)) = started_thread_metadata(
+    let Some((thread_cwd, thread_title, rollout_path)) = started_thread_metadata(
         state,
         &remote_client_key,
         connection_epoch,
@@ -295,6 +295,7 @@ pub(crate) async fn auto_create_topic_for_codex_thread_for_generation(
         state,
         &route.remote_client_key,
         &thread_id,
+        rollout_path.as_deref(),
         generation,
         connection_epoch,
     )
@@ -473,11 +474,13 @@ async fn resume_auto_topic_thread(
     state: &SharedState,
     remote_client_key: &str,
     thread_id: &str,
+    rollout_path: Option<&str>,
     generation: u64,
     connection_epoch: Option<u64>,
 ) -> Result<Value> {
     let remote_client_key = remote_client_key.to_string();
     let thread_id_for_resume = thread_id.to_string();
+    let rollout_path = rollout_path.map(str::to_string);
     retry_auto_topic_resume(
         state,
         thread_id,
@@ -487,23 +490,26 @@ async fn resume_auto_topic_thread(
             let state = state.clone();
             let remote_client_key = remote_client_key.clone();
             let thread_id = thread_id_for_resume.clone();
+            let rollout_path = rollout_path.clone();
             async move {
                 match connection_epoch {
                     Some(connection_epoch) => {
-                        remote_control_backend::resume_thread_for_client_on_connection(
+                        remote_control_backend::resume_thread_for_client_on_connection_with_path(
                             &state,
                             connection_epoch,
                             &remote_client_key,
                             &thread_id,
+                            rollout_path.as_deref(),
                             true,
                         )
                         .await
                     }
                     None => {
-                        remote_control_backend::resume_thread_for_client(
+                        remote_control_backend::resume_thread_for_client_with_path(
                             &state,
                             &remote_client_key,
                             &thread_id,
+                            rollout_path.as_deref(),
                             true,
                         )
                         .await
@@ -575,7 +581,7 @@ async fn find_auto_topic_target(
     api_registry: &ImApiRegistry,
     thread_cwd: &str,
 ) -> Option<AutoTopicTarget> {
-    let accounts = state.config.lock().await.effective_telegram_accounts();
+    let accounts = state.config.lock().await.telegram_accounts.clone();
     let mut matches = Vec::new();
     for account in accounts.into_iter().filter(|account| account.is_active()) {
         let account_id = account.account_id.trim().to_string();
@@ -639,12 +645,13 @@ async fn started_thread_metadata(
     connection_epoch: Option<u64>,
     params: &Value,
     thread_id: &str,
-) -> Option<(String, String)> {
+) -> Option<(String, String, Option<String>)> {
     let thread_value = params.get("thread").unwrap_or(params);
     let mut cwd = started_thread_field(params, thread_value, &["cwd", "workingDirectory"]);
     let mut title = started_thread_field(params, thread_value, &["name", "title", "threadName"]);
+    let mut rollout_path = started_thread_path_field(params, thread_value);
 
-    if cwd.is_none() || title.is_none() {
+    if cwd.is_none() || title.is_none() || rollout_path.is_none() {
         let history = match connection_epoch {
             Some(connection_epoch) => {
                 remote_control_backend::session_history_threads_for_client_on_connection(
@@ -710,11 +717,12 @@ async fn started_thread_metadata(
             });
             title =
                 title.or_else(|| Some(summarize_thread_title(thread, im_text_for_state(state))));
+            rollout_path = rollout_path.or_else(|| thread_rollout_path(thread));
         }
     }
 
     let title = title.unwrap_or_else(|| "未命名会话".to_string());
-    Some((cwd.unwrap_or_default(), title))
+    Some((cwd.unwrap_or_default(), title, rollout_path))
 }
 
 fn started_thread_id(params: &Value) -> Option<String> {
@@ -740,6 +748,37 @@ fn started_thread_field(params: &Value, thread: &Value, keys: &[&str]) -> Option
             .filter(|value| !value.is_empty())
             .map(str::to_string)
     })
+}
+
+fn started_thread_path_field(params: &Value, thread: &Value) -> Option<String> {
+    ["path", "rolloutPath", "rollout_path"]
+        .iter()
+        .find_map(|key| {
+            thread
+                .get(*key)
+                .or_else(|| params.get(*key))
+                .and_then(thread_path_value)
+        })
+}
+
+fn thread_rollout_path(thread: &Value) -> Option<String> {
+    ["path", "rolloutPath", "rollout_path"]
+        .iter()
+        .find_map(|key| thread.get(*key).and_then(thread_path_value))
+}
+
+fn thread_path_value(value: &Value) -> Option<String> {
+    if let Some(path) = value.as_str() {
+        let path = path.trim();
+        return (!path.is_empty()).then(|| path.to_string());
+    }
+    if let Some(values) = value.as_array() {
+        return values.iter().find_map(thread_path_value);
+    }
+    let object = value.as_object()?;
+    ["path", "value", "text", "uri"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(thread_path_value))
 }
 
 fn cwd_is_within_project(thread_cwd: &str, project_cwd: &str) -> bool {

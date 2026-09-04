@@ -1109,14 +1109,6 @@ async fn send_telegram_text(
                     ),
                 )
                 .await;
-            if is_safe_relaunch_delivery(message) {
-                crate::safe_relaunch::on_telegram_turn_completed_sent(
-                    state,
-                    &message.thread_id,
-                    message.turn_id.as_deref(),
-                )
-                .await;
-            }
             true
         }
         Err(err) => {
@@ -1263,12 +1255,6 @@ fn telegram_text_presentation(message: &ImOutboundMessage) -> TelegramTextPresen
         (_, Some("contextCompaction")) => TelegramTextPresentation::ContextCompaction,
         _ => TelegramTextPresentation::Plain,
     }
-}
-
-fn is_safe_relaunch_delivery(message: &ImOutboundMessage) -> bool {
-    message.route.platform == ImPlatformKind::Telegram
-        && message.kind == ImOutboundKind::TurnReply
-        && message.item_type.as_deref() == Some("agentMessage")
 }
 
 fn log_outbound_message(event: &str, message: &ImOutboundMessage, text: Option<&str>) {
@@ -1572,7 +1558,7 @@ fn is_deleted_telegram_topic_error(error: &str) -> bool {
 }
 
 #[cfg(test)]
-mod safe_relaunch_tests {
+mod outbound_delivery_tests {
     use super::*;
 
     fn message(kind: ImOutboundKind, item_type: &str) -> ImOutboundMessage {
@@ -1591,22 +1577,6 @@ mod safe_relaunch_tests {
             kind,
             payload: ImOutboundPayload::Text("done".to_string()),
         }
-    }
-
-    #[test]
-    fn only_final_agent_message_delivery_triggers_safe_relaunch() {
-        assert!(is_safe_relaunch_delivery(&message(
-            ImOutboundKind::TurnReply,
-            "agentMessage"
-        )));
-        assert!(!is_safe_relaunch_delivery(&message(
-            ImOutboundKind::TurnReply,
-            "turnFailed"
-        )));
-        assert!(!is_safe_relaunch_delivery(&message(
-            ImOutboundKind::Item,
-            "agentMessage"
-        )));
     }
 
     #[test]

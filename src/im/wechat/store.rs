@@ -5,8 +5,9 @@ use crate::{app_state::SharedState, types::now_ms};
 pub(crate) async fn local_bot_tokens(state: &SharedState) -> Vec<String> {
     let config = state.config.lock().await;
     config
-        .effective_wechat_accounts()
-        .into_iter()
+        .wechat_accounts
+        .iter()
+        .cloned()
         .flat_map(|account| {
             account
                 .bot_token

@@ -105,7 +105,6 @@ pub(super) async fn set_im_channel_enabled(
                 for account in &mut config.feishu_accounts {
                     account.enabled = request.enabled;
                 }
-                config.feishu.enabled = request.enabled;
             }
             "telegram" => {
                 if request.enabled && !telegram_configured(&config) {
@@ -117,7 +116,6 @@ pub(super) async fn set_im_channel_enabled(
                 for account in &mut config.telegram_accounts {
                     account.enabled = request.enabled;
                 }
-                config.telegram.enabled = request.enabled;
             }
             "wechat" => {
                 if request.enabled && !wechat_configured(&config) {
@@ -129,7 +127,6 @@ pub(super) async fn set_im_channel_enabled(
                 for account in &mut config.wechat_accounts {
                     account.enabled = request.enabled;
                 }
-                config.wechat.enabled = request.enabled;
             }
             "wecom" => {
                 if request.enabled && !wecom_configured(&config) {
@@ -141,7 +138,6 @@ pub(super) async fn set_im_channel_enabled(
                 for account in &mut config.wecom_accounts {
                     account.enabled = request.enabled;
                 }
-                config.wecom.enabled = request.enabled;
             }
             _ => {
                 return (
@@ -283,8 +279,9 @@ pub(super) async fn manage_telegram_project_groups(
     let config = state.config.lock().await.clone();
     Json(TelegramProjectGroupsResponse {
         accounts: config
-            .effective_telegram_accounts()
-            .into_iter()
+            .telegram_accounts
+            .iter()
+            .cloned()
             .map(|account| TelegramProjectGroupAccount {
                 account_id: account.account_id,
                 project_groups: account.project_groups,
@@ -334,7 +331,6 @@ pub(super) async fn update_telegram_project_groups(
     }
 
     let mut config = state.config.lock().await;
-    config.migrate_legacy_im_accounts();
     let Some(account) = config
         .telegram_accounts
         .iter_mut()
@@ -346,9 +342,6 @@ pub(super) async fn update_telegram_project_groups(
         );
     };
     account.project_groups = project_groups.clone();
-    if config.telegram.account_id.trim() == account_id {
-        config.telegram.project_groups = project_groups.clone();
-    }
     if let Err(err) = config.save(&state.config_path) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -417,23 +410,24 @@ pub(super) async fn sync_telegram_topics(
     let _sync_guard = sync_gate.lock().await;
     let generation = state.runtime.lock().await.bridge_generation;
 
-    let raw_threads = match remote_control_backend::session_history_threads(
-        &state,
-        remote_control_backend::default_remote_client_key(),
-        PAGE_LIMIT,
-        MAX_PAGES,
-        false,
-    )
-    .await
-    {
-        Ok(threads) => threads,
-        Err(err) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({ "ok": false, "error": err.to_string() })),
-            );
-        }
-    };
+    let (history_connection_epoch, raw_threads) =
+        match remote_control_backend::session_history_threads_with_connection(
+            &state,
+            remote_control_backend::default_remote_client_key(),
+            PAGE_LIMIT,
+            MAX_PAGES,
+            false,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "ok": false, "error": err.to_string() })),
+                );
+            }
+        };
     let history_total = raw_threads.len();
     let mut raw_threads = raw_threads
         .into_iter()
@@ -477,6 +471,7 @@ pub(super) async fn sync_telegram_topics(
             .map(str::to_string)
             .unwrap_or_else(|| summarize_thread_title(&raw_thread, text));
         let topic_name = truncate_telegram_topic_name(&title);
+        let rollout_path = thread_rollout_path(&raw_thread);
         if !state
             .observe_telegram_thread_started(&thread_id, generation)
             .await
@@ -565,6 +560,26 @@ pub(super) async fn sync_telegram_topics(
                 .telegram_topic_binding_states
                 .get(conversation_key)
                 .cloned();
+            // A persisted binding whose last synchronized name is already the
+            // requested name is a sufficient no-op for manual import. Calling
+            // editForumTopic just to probe every unchanged topic quickly
+            // exhausts Telegram's mutation rate limit during batch sync. The
+            // periodic reconciliation pass still probes bindings when it
+            // needs to detect externally deleted topics.
+            if expected_binding.as_ref().is_some_and(|binding| {
+                manual_telegram_topic_name_is_confirmed(binding, &topic_name)
+            }) && manual_telegram_topic_edit_is_current(
+                &state,
+                conversation_key,
+                &thread_id,
+                expected_binding.as_ref(),
+                &topic_name,
+            )
+            .await
+            {
+                current_topic_alive = true;
+                continue;
+            }
             let edit_result = run_telegram_topic_mutation_while(
                 &state,
                 &account_id,
@@ -702,6 +717,32 @@ pub(super) async fn sync_telegram_topics(
             continue;
         }
 
+        // Validate that the session can actually be resumed before creating a
+        // Telegram Topic.  `thread/list` may include state-db rows whose
+        // rollout has disappeared; creating the Topic first would leave an
+        // orphan that is immediately deleted after `thread/resume` fails.
+        let history_client_key = remote_control_backend::default_remote_client_key();
+        if let Err(err) = remote_control_backend::resume_thread_for_client_on_connection_with_path(
+            &state,
+            history_connection_epoch,
+            history_client_key,
+            &thread_id,
+            rollout_path.as_deref(),
+            true,
+        )
+        .await
+        {
+            failed += 1;
+            items.push(TelegramTopicSyncItem {
+                thread_id,
+                title,
+                status: "failed".to_string(),
+                topic_id: None,
+                error: Some(format!("会话无法恢复，未创建 Topic：{err}")),
+            });
+            continue;
+        }
+
         let create_result = run_telegram_topic_mutation_while(
             &state,
             &account_id,
@@ -808,7 +849,13 @@ pub(super) async fn sync_telegram_topics(
             transferred_private_bindings.push((conversation_key.clone(), private_route.clone()));
         }
         if private_transfer_error.is_some() {
-            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
+            restore_private_bindings(
+                &state,
+                &thread_id,
+                &transferred_private_bindings,
+                rollout_path.as_deref(),
+            )
+            .await;
             continue;
         }
 
@@ -822,7 +869,13 @@ pub(super) async fn sync_telegram_topics(
                 anyhow::anyhow!("会话状态在绑定 Topic 前已变化"),
             )
             .await;
-            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
+            restore_private_bindings(
+                &state,
+                &thread_id,
+                &transferred_private_bindings,
+                rollout_path.as_deref(),
+            )
+            .await;
             items.push(TelegramTopicSyncItem {
                 thread_id,
                 title,
@@ -843,10 +896,12 @@ pub(super) async fn sync_telegram_topics(
         }
         .with_deterministic_remote_client_key();
 
-        if let Err(err) = remote_control_backend::resume_thread_for_client(
+        if let Err(err) = remote_control_backend::resume_thread_for_client_on_connection_with_path(
             &state,
+            history_connection_epoch,
             &route.remote_client_key,
             &thread_id,
+            rollout_path.as_deref(),
             true,
         )
         .await
@@ -854,7 +909,13 @@ pub(super) async fn sync_telegram_topics(
             failed += 1;
             let error =
                 cleanup_created_topic(&state, &api, &chat_id, topic.message_thread_id, err).await;
-            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
+            restore_private_bindings(
+                &state,
+                &thread_id,
+                &transferred_private_bindings,
+                rollout_path.as_deref(),
+            )
+            .await;
             items.push(TelegramTopicSyncItem {
                 thread_id: thread_id.clone(),
                 title: title.clone(),
@@ -875,7 +936,13 @@ pub(super) async fn sync_telegram_topics(
                 anyhow::anyhow!("会话状态在订阅期间已变化"),
             )
             .await;
-            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
+            restore_private_bindings(
+                &state,
+                &thread_id,
+                &transferred_private_bindings,
+                rollout_path.as_deref(),
+            )
+            .await;
             items.push(TelegramTopicSyncItem {
                 thread_id,
                 title,
@@ -899,7 +966,13 @@ pub(super) async fn sync_telegram_topics(
             failed += 1;
             let error =
                 cleanup_created_topic(&state, &api, &chat_id, topic.message_thread_id, err).await;
-            restore_private_bindings(&state, &thread_id, &transferred_private_bindings).await;
+            restore_private_bindings(
+                &state,
+                &thread_id,
+                &transferred_private_bindings,
+                rollout_path.as_deref(),
+            )
+            .await;
             items.push(TelegramTopicSyncItem {
                 thread_id,
                 title,
@@ -1092,6 +1165,16 @@ fn manual_telegram_topic_title_matches(
     codex_title.is_empty() || truncate_telegram_topic_name(codex_title) == topic_name
 }
 
+fn manual_telegram_topic_name_is_confirmed(
+    binding: &crate::store::TelegramTopicBindingState,
+    topic_name: &str,
+) -> bool {
+    let topic_name = topic_name.trim();
+    !topic_name.is_empty()
+        && binding.topic_name.trim() == topic_name
+        && binding.last_synced_topic_name.trim() == topic_name
+}
+
 async fn cleanup_created_topic(
     state: &SharedState,
     api: &TelegramApi,
@@ -1114,12 +1197,14 @@ async fn restore_private_bindings(
     state: &SharedState,
     thread_id: &str,
     bindings: &[(String, RouteTarget)],
+    rollout_path: Option<&str>,
 ) {
     for (conversation_key, route) in bindings {
-        if remote_control_backend::resume_thread_for_client(
+        if remote_control_backend::resume_thread_for_client_with_path(
             state,
             &route.remote_client_key,
             thread_id,
+            rollout_path,
             true,
         )
         .await
@@ -1143,6 +1228,26 @@ async fn restore_private_bindings(
                 .await;
         }
     }
+}
+
+fn thread_rollout_path(thread: &serde_json::Value) -> Option<String> {
+    ["path", "rolloutPath", "rollout_path"]
+        .iter()
+        .find_map(|key| session_path_value(thread.get(*key)?))
+}
+
+fn session_path_value(value: &serde_json::Value) -> Option<String> {
+    if let Some(path) = value.as_str() {
+        let path = path.trim();
+        return (!path.is_empty()).then(|| path.to_string());
+    }
+    if let Some(values) = value.as_array() {
+        return values.iter().find_map(session_path_value);
+    }
+    let object = value.as_object()?;
+    ["path", "value", "text", "uri"]
+        .iter()
+        .find_map(|key| object.get(*key).and_then(session_path_value))
 }
 
 fn thread_belongs_to_project(thread: &serde_json::Value, project_cwd: &str) -> bool {
@@ -1241,8 +1346,6 @@ pub(super) async fn set_im_account_enabled(
     }
     let should_run = {
         let mut config = state.config.lock().await;
-        // Check the effective view before migration so a failed request does
-        // not leave a legacy singleton copied into the in-memory account list.
         if !config.has_im_account(&platform, &account_id) {
             return (
                 StatusCode::NOT_FOUND,
@@ -1250,14 +1353,12 @@ pub(super) async fn set_im_account_enabled(
             );
         }
         let previous_config = config.clone();
-        config.migrate_legacy_im_accounts();
         if !config.set_im_account_enabled(&platform, &account_id, request.enabled) {
             return (
                 StatusCode::NOT_FOUND,
                 Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
             );
         }
-        set_legacy_im_account_enabled(&mut config, &platform, &account_id, request.enabled);
         config.bridge.enabled = im_bridge_configured(&config);
         if let Err(err) = config.save(&state.config_path) {
             *config = previous_config;
@@ -1313,8 +1414,6 @@ pub(super) async fn delete_im_account(
     }
     let should_run = {
         let mut config = state.config.lock().await;
-        // Avoid migration and legacy cleanup for a request that cannot remove
-        // an account. This keeps a failed delete side-effect free.
         if !config.has_im_account(&platform, &account_id) {
             return (
                 StatusCode::NOT_FOUND,
@@ -1322,7 +1421,6 @@ pub(super) async fn delete_im_account(
             );
         }
         let previous_config = config.clone();
-        config.migrate_legacy_im_accounts();
         let removed = config.remove_im_account(&platform, &account_id);
         if !removed {
             return (
@@ -1330,7 +1428,6 @@ pub(super) async fn delete_im_account(
                 Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
             );
         }
-        clear_legacy_im_account(&mut config, &platform, &account_id);
         config.bridge.enabled = im_bridge_configured(&config);
         if let Err(err) = config.save(&state.config_path) {
             *config = previous_config;
@@ -1484,56 +1581,56 @@ pub(super) async fn start_bridge_task(
 
 pub(super) fn feishu_configured(config: &AppConfig) -> bool {
     config
-        .effective_feishu_accounts()
+        .feishu_accounts
         .iter()
         .any(|account| account.is_configured())
 }
 
 pub(super) fn telegram_configured(config: &AppConfig) -> bool {
     config
-        .effective_telegram_accounts()
+        .telegram_accounts
         .iter()
         .any(|account| account.is_configured())
 }
 
 pub(super) fn wechat_configured(config: &AppConfig) -> bool {
     config
-        .effective_wechat_accounts()
+        .wechat_accounts
         .iter()
         .any(|account| account.is_configured())
 }
 
 pub(super) fn wecom_configured(config: &AppConfig) -> bool {
     config
-        .effective_wecom_accounts()
+        .wecom_accounts
         .iter()
         .any(|account| account.is_configured())
 }
 
 fn feishu_active(config: &AppConfig) -> bool {
     config
-        .effective_feishu_accounts()
+        .feishu_accounts
         .iter()
         .any(|account| account.is_active())
 }
 
 fn telegram_active(config: &AppConfig) -> bool {
     config
-        .effective_telegram_accounts()
+        .telegram_accounts
         .iter()
         .any(|account| account.is_active())
 }
 
 fn wechat_active(config: &AppConfig) -> bool {
     config
-        .effective_wechat_accounts()
+        .wechat_accounts
         .iter()
         .any(|account| account.is_active())
 }
 
 fn wecom_active(config: &AppConfig) -> bool {
     config
-        .effective_wecom_accounts()
+        .wecom_accounts
         .iter()
         .any(|account| account.is_active())
 }
@@ -1597,8 +1694,9 @@ impl Drop for ProfileRefreshReset {
 
 fn profile_accounts(config: &AppConfig) -> Vec<(ImPlatformKind, String, ProfileAccount)> {
     config
-        .effective_feishu_accounts()
-        .into_iter()
+        .feishu_accounts
+        .iter()
+        .cloned()
         .map(|account| {
             (
                 ImPlatformKind::Feishu,
@@ -1606,18 +1704,13 @@ fn profile_accounts(config: &AppConfig) -> Vec<(ImPlatformKind, String, ProfileA
                 ProfileAccount::Feishu(account),
             )
         })
-        .chain(
-            config
-                .effective_telegram_accounts()
-                .into_iter()
-                .map(|account| {
-                    (
-                        ImPlatformKind::Telegram,
-                        account.account_id.clone(),
-                        ProfileAccount::Telegram(account),
-                    )
-                }),
-        )
+        .chain(config.telegram_accounts.iter().cloned().map(|account| {
+            (
+                ImPlatformKind::Telegram,
+                account.account_id.clone(),
+                ProfileAccount::Telegram(account),
+            )
+        }))
         .collect::<Vec<_>>()
 }
 
@@ -1746,7 +1839,7 @@ fn im_account_items(
 ) -> Vec<ImAccountItem> {
     let profiles = state.im_account_profiles.try_lock().ok();
     let mut accounts = Vec::new();
-    for account in config.effective_feishu_accounts() {
+    for account in &config.feishu_accounts {
         accounts.push(im_account_item(
             profiles.as_deref(),
             ImPlatformKind::Feishu,
@@ -1760,7 +1853,7 @@ fn im_account_items(
             runtime,
         ));
     }
-    for account in config.effective_telegram_accounts() {
+    for account in &config.telegram_accounts {
         accounts.push(im_account_item(
             profiles.as_deref(),
             ImPlatformKind::Telegram,
@@ -1772,7 +1865,7 @@ fn im_account_items(
             runtime,
         ));
     }
-    for account in config.effective_wechat_accounts() {
+    for account in &config.wechat_accounts {
         accounts.push(im_account_item(
             profiles.as_deref(),
             ImPlatformKind::Wechat,
@@ -1784,7 +1877,7 @@ fn im_account_items(
             runtime,
         ));
     }
-    for account in config.effective_wecom_accounts() {
+    for account in &config.wecom_accounts {
         accounts.push(im_account_item(
             profiles.as_deref(),
             ImPlatformKind::Wecom,
@@ -1830,63 +1923,8 @@ fn im_account_item(
     }
 }
 
-fn set_legacy_im_account_enabled(
-    config: &mut AppConfig,
-    platform: &str,
-    account_id: &str,
-    enabled: bool,
-) {
-    if !legacy_im_account_matches(config, platform, account_id) {
-        return;
-    }
-    match platform {
-        "feishu" => config.feishu.enabled = enabled,
-        "telegram" => config.telegram.enabled = enabled,
-        "wechat" => config.wechat.enabled = enabled,
-        "wecom" => config.wecom.enabled = enabled,
-        _ => {}
-    }
-}
-
 fn is_supported_im_platform(platform: &str) -> bool {
     im_platform_from_key(platform).is_some()
-}
-
-fn clear_legacy_im_account(config: &mut AppConfig, platform: &str, account_id: &str) {
-    if !legacy_im_account_matches(config, platform, account_id) {
-        return;
-    }
-    match platform {
-        "feishu" => config.feishu = Default::default(),
-        "telegram" => config.telegram = Default::default(),
-        "wechat" => config.wechat = Default::default(),
-        "wecom" => config.wecom = Default::default(),
-        _ => {}
-    }
-}
-
-fn legacy_im_account_matches(config: &AppConfig, platform: &str, account_id: &str) -> bool {
-    match platform {
-        "feishu" => {
-            config.feishu.account_id.trim() == account_id
-                || (config.feishu.account_id.trim().is_empty()
-                    && (config.feishu.app_id.trim() == account_id
-                        || config.bridge.account_id.trim() == account_id))
-        }
-        "telegram" => {
-            config.telegram.account_id.trim() == account_id
-                || (config.telegram.account_id.trim().is_empty() && account_id == "telegram")
-        }
-        "wechat" => {
-            config.wechat.account_id.trim() == account_id
-                || (config.wechat.account_id.trim().is_empty() && account_id == "wechat")
-        }
-        "wecom" => {
-            config.wecom.account_id.trim() == account_id
-                || (config.wecom.account_id.trim().is_empty() && account_id == "wecom")
-        }
-        _ => false,
-    }
 }
 
 async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_id: &str) {
@@ -1972,7 +2010,7 @@ pub(super) struct FeishuBotStatus {
 
 pub(super) async fn feishu_bot_status(State(state): State<SharedState>) -> Json<FeishuBotStatus> {
     let config = state.config.lock().await.clone();
-    let account = config.effective_feishu_accounts().into_iter().next();
+    let account = config.feishu_accounts.first().cloned();
     let app_id = account
         .as_ref()
         .and_then(|account| non_empty_string(&account.app_id));
@@ -2045,7 +2083,7 @@ pub(super) async fn telegram_bot_status(
 ) -> Json<TelegramBotStatus> {
     let config = state.config.lock().await.clone();
     let telegram = state.telegram.lock().await.clone();
-    let account = config.effective_telegram_accounts().into_iter().next();
+    let account = config.telegram_accounts.first().cloned();
     let configured = account
         .as_ref()
         .is_some_and(|account| account.is_configured());
@@ -2202,7 +2240,6 @@ async fn persist_telegram_account(
     {
         let mut config = state.config.lock().await;
         let previous_config = config.clone();
-        config.migrate_legacy_im_accounts();
         if let Some(existing) = config
             .telegram_accounts
             .iter()
@@ -2217,11 +2254,6 @@ async fn persist_telegram_account(
                 || account.bot_token.trim() != token
         });
         config.upsert_telegram_account(telegram_config.clone());
-        if !config.telegram.is_configured()
-            || config.telegram.account_id.trim() == telegram_config.account_id
-        {
-            config.telegram = telegram_config.clone();
-        }
         config.bridge.enabled = true;
         if let Err(err) = config.save(&state.config_path) {
             *config = previous_config;
@@ -2305,7 +2337,7 @@ pub(super) struct WechatBotStatus {
 pub(super) async fn wechat_bot_status(State(state): State<SharedState>) -> Json<WechatBotStatus> {
     let config = state.config.lock().await.clone();
     let wechat = state.wechat.lock().await.clone();
-    let account = config.effective_wechat_accounts().into_iter().next();
+    let account = config.wechat_accounts.first().cloned();
     Json(WechatBotStatus {
         configured: account
             .as_ref()
@@ -2353,7 +2385,7 @@ pub(super) struct WecomBotStatus {
 
 pub(super) async fn wecom_bot_status(State(state): State<SharedState>) -> Json<WecomBotStatus> {
     let config = state.config.lock().await.clone();
-    let account = config.effective_wecom_accounts().into_iter().next();
+    let account = config.wecom_accounts.first().cloned();
     let runtime = account.as_ref().and_then(|account| {
         let key = im_account_key(ImPlatformKind::Wecom, &account.account_id);
         state
@@ -2492,23 +2524,26 @@ mod tests {
     }
 
     #[test]
-    fn legacy_im_account_match_is_shared_by_toggle_and_clear() {
-        let mut config = AppConfig::default();
-        config.feishu.app_id = "app_42".to_string();
-        config.feishu.enabled = true;
-
-        assert!(legacy_im_account_matches(&config, "feishu", "app_42"));
-        set_legacy_im_account_enabled(&mut config, "feishu", "app_42", false);
-        assert!(!config.feishu.enabled);
-
-        config.feishu.enabled = true;
-        clear_legacy_im_account(&mut config, "feishu", "app_42");
-        assert!(!config.feishu.is_configured());
-
-        config.feishu.app_id = "app_42".to_string();
-        config.feishu.enabled = true;
-        set_legacy_im_account_enabled(&mut config, "feishu", "other", false);
-        assert!(config.feishu.enabled);
+    fn unchanged_confirmed_topic_name_is_a_manual_sync_noop() {
+        let binding = crate::store::TelegramTopicBindingState {
+            topic_name: "Same title".to_string(),
+            last_synced_topic_name: "Same title".to_string(),
+            ..Default::default()
+        };
+        assert!(manual_telegram_topic_name_is_confirmed(
+            &binding,
+            "Same title"
+        ));
+        assert!(!manual_telegram_topic_name_is_confirmed(
+            &binding,
+            "Renamed title"
+        ));
+        let mut unconfirmed = binding.clone();
+        unconfirmed.last_synced_topic_name.clear();
+        assert!(!manual_telegram_topic_name_is_confirmed(
+            &unconfirmed,
+            "Same title"
+        ));
     }
 
     #[tokio::test]
@@ -2518,7 +2553,6 @@ mod tests {
         let existing = telegram_account("tg_42", "old-token", true, &["100", "200"]);
         let mut config = AppConfig::default();
         config.state_path = temp_dir.path().join("state.json");
-        config.telegram = existing.clone();
         config.telegram_accounts = vec![existing];
         config.bridge.enabled = true;
         let state = state_with_config_path(config_path.clone(), config);
@@ -2532,8 +2566,6 @@ mod tests {
 
         assert_eq!(replacement.allowed_chat_ids, ["100", "200"]);
         let in_memory = state.config.lock().await.clone();
-        assert_eq!(in_memory.telegram.allowed_chat_ids, ["100", "200"]);
-        assert_eq!(in_memory.telegram.bot_token, "new-token");
         assert_eq!(in_memory.telegram_accounts.len(), 1);
         assert_eq!(
             in_memory.telegram_accounts[0].allowed_chat_ids,
@@ -2555,7 +2587,6 @@ mod tests {
         let existing = telegram_account("tg_42", "old-token", false, &["100"]);
         let mut config = AppConfig::default();
         config.state_path = temp_dir.path().join("state.json");
-        config.telegram = existing.clone();
         config.telegram_accounts = vec![existing];
         config.bridge.enabled = false;
         let state = state_with_config_path(unwritable_config_path, config);
@@ -2566,9 +2597,6 @@ mod tests {
         assert!(result.is_err());
         let config = state.config.lock().await;
         assert!(!config.bridge.enabled);
-        assert!(!config.telegram.enabled);
-        assert_eq!(config.telegram.bot_token, "old-token");
-        assert_eq!(config.telegram.allowed_chat_ids, ["100"]);
         assert_eq!(config.telegram_accounts.len(), 1);
         assert!(!config.telegram_accounts[0].enabled);
         assert_eq!(config.telegram_accounts[0].bot_token, "old-token");
@@ -2583,7 +2611,6 @@ mod tests {
         let existing = telegram_account("tg_42", "token", true, &["100"]);
         let mut config = AppConfig::default();
         config.state_path = temp_dir.path().join("state.json");
-        config.telegram = existing.clone();
         config.telegram_accounts = vec![existing];
         config.bridge.enabled = true;
         let state = state_with_config_path(unwritable_config_path, config);
@@ -2602,7 +2629,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let config = state.config.lock().await;
         assert!(config.bridge.enabled);
-        assert!(config.telegram.enabled);
         assert!(config.telegram_accounts[0].enabled);
     }
 
@@ -2614,7 +2640,6 @@ mod tests {
         let existing = telegram_account("tg_42", "token", true, &["100"]);
         let mut config = AppConfig::default();
         config.state_path = temp_dir.path().join("state.json");
-        config.telegram = existing.clone();
         config.telegram_accounts = vec![existing];
         config.bridge.enabled = true;
         let state = state_with_config_path(unwritable_config_path, config);
@@ -2632,8 +2657,6 @@ mod tests {
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         let config = state.config.lock().await;
         assert!(config.bridge.enabled);
-        assert!(config.telegram.is_configured());
-        assert_eq!(config.telegram.account_id, "tg_42");
         assert_eq!(config.telegram_accounts.len(), 1);
         assert_eq!(config.telegram_accounts[0].account_id, "tg_42");
     }

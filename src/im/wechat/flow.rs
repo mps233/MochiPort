@@ -62,9 +62,9 @@ pub(crate) async fn handle_inbound(
         .await;
 
     let config = state.config.lock().await.clone();
-    let wechat_config = config
-        .wechat_account(&message.account_id)
-        .unwrap_or_else(|| config.wechat.clone());
+    let Some(wechat_config) = config.wechat_account(&message.account_id) else {
+        return Ok(());
+    };
     let settings = WechatSettings::from_app_config(&wechat_config);
     let api = WechatApi::new(settings);
     let adapter = WechatAdapter::new(api);
@@ -1621,11 +1621,7 @@ async fn handle_thread_list_text_reply(
         }
         _ => {}
     }
-    let Some(index) = command
-        .strip_prefix("/codexhub-thread-")
-        .or_else(|| command.strip_prefix('/'))
-        .and_then(|value| value.parse::<usize>().ok())
-    else {
+    let Some(index) = thread_selection_index(command) else {
         return Ok(false);
     };
     let Some(thread_id) = request
@@ -1778,6 +1774,15 @@ fn numeric_command_index(command: &str) -> Option<usize> {
         .and_then(|value| value.checked_sub(1))
 }
 
+fn thread_selection_index(command: &str) -> Option<usize> {
+    command
+        .strip_prefix("/thread-")
+        .or_else(|| command.strip_prefix("/codexhub-thread-"))
+        .or_else(|| command.strip_prefix('/'))
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
 fn thread_routing_request_rank(request_id: &str) -> u64 {
     request_id
         .rsplit('-')
@@ -1895,16 +1900,16 @@ fn menu_command(text: &str) -> Option<String> {
 fn wecom_card_command(text: &str) -> Option<String> {
     let text = text.trim();
     match text {
-        "创建新会话" | "Create new session" => Some("/codexhub-new".to_string()),
-        "恢复历史会话" | "Restore history session" => Some("/codexhub-history".to_string()),
-        "下一页" | "Next" => Some("/codexhub-next".to_string()),
-        "返回" | "Back" => Some("/codexhub-back".to_string()),
+        "创建新会话" | "Create new session" => Some("/1".to_string()),
+        "恢复历史会话" | "Restore history session" => Some("/2".to_string()),
+        "下一页" | "Next" => Some("/next".to_string()),
+        "返回" | "Back" => Some("/back".to_string()),
         _ => text
             .strip_prefix("选择会话 ")
             .or_else(|| text.strip_prefix("Select session "))
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
-            .map(|value| format!("/codexhub-thread-{value}")),
+            .map(|value| format!("/thread-{value}")),
     }
 }
 
@@ -1923,7 +1928,7 @@ fn truncate_line(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{command, menu_command, wecom_card_command};
+    use super::{command, menu_command, thread_selection_index, wecom_card_command};
 
     #[test]
     fn command_keeps_bare_numbers_as_user_text() {
@@ -1946,14 +1951,19 @@ mod tests {
     }
 
     #[test]
-    fn wecom_card_command_hides_internal_slash_commands() {
-        assert_eq!(
-            wecom_card_command("恢复历史会话"),
-            Some("/codexhub-history".to_string())
-        );
+    fn wecom_card_command_uses_neutral_commands() {
+        assert_eq!(wecom_card_command("恢复历史会话"), Some("/2".to_string()));
         assert_eq!(
             wecom_card_command("选择会话 2"),
-            Some("/codexhub-thread-2".to_string())
+            Some("/thread-2".to_string())
         );
+    }
+
+    #[test]
+    fn thread_selection_accepts_neutral_numeric_and_legacy_commands() {
+        assert_eq!(thread_selection_index("/thread-2"), Some(2));
+        assert_eq!(thread_selection_index("/codexhub-thread-3"), Some(3));
+        assert_eq!(thread_selection_index("/4"), Some(4));
+        assert_eq!(thread_selection_index("/thread-0"), None);
     }
 }

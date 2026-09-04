@@ -33,7 +33,8 @@ struct FeishuOnboardStartResponse {
 pub(super) async fn feishu_onboard_start(State(state): State<SharedState>) -> impl IntoResponse {
     let settings = {
         let config = state.config.lock().await;
-        FeishuSettings::from_app_config(&config.feishu)
+        let account = config.feishu_accounts.first().cloned().unwrap_or_default();
+        FeishuSettings::from_app_config(&account)
     };
     let api = FeishuApi::new(settings);
     match api.start_app_registration().await {
@@ -102,7 +103,8 @@ async fn poll_feishu_registration(
 ) -> Result<FeishuPollOutcome, (StatusCode, Json<serde_json::Value>)> {
     let settings = {
         let config = state.config.lock().await;
-        FeishuSettings::from_app_config(&config.feishu)
+        let account = config.feishu_accounts.first().cloned().unwrap_or_default();
+        FeishuSettings::from_app_config(&account)
     };
     let api = FeishuApi::new(settings);
     let result = api
@@ -156,7 +158,6 @@ async fn persist_feishu_registration(
     let feishu_config = {
         let mut config = state.config.lock().await;
         let previous_config = config.clone();
-        config.migrate_legacy_im_accounts();
         config.feishu_accounts.retain(|account| {
             account.account_id.trim() == app_id || account.app_id.trim() != app_id
         });
@@ -175,9 +176,6 @@ async fn persist_feishu_registration(
         }
         config.upsert_feishu_account(account.clone());
         let saved_account = account.clone();
-        if !config.feishu.is_configured() || config.feishu.app_id == app_id {
-            config.feishu = account;
-        }
         config.bridge.enabled = true;
         if let Err(err) = config.save(&state.config_path) {
             *config = previous_config;
@@ -203,9 +201,6 @@ async fn persist_feishu_registration(
         if let Some(mut account) = config.feishu_account(app_id) {
             account.display_name = name;
             config.upsert_feishu_account(account.clone());
-            if config.feishu.app_id == app_id {
-                config.feishu = account;
-            }
             if config.save(&state.config_path).is_err() {
                 *config = previous_config;
             }
@@ -485,7 +480,6 @@ async fn persist_wechat_onboard_account(
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let mut config = state.config.lock().await;
     let previous_config = config.clone();
-    config.migrate_legacy_im_accounts();
     let token = bot_token.trim().to_string();
     config.wechat_accounts.retain(|account| {
         account.account_id.trim() == account_id || account.bot_token.trim() != token
@@ -503,9 +497,6 @@ async fn persist_wechat_onboard_account(
         account.allowed_user_ids.push(user_id.to_string());
     }
     config.upsert_wechat_account(account.clone());
-    if !config.wechat.is_configured() || config.wechat.account_id == account_id {
-        config.wechat = account;
-    }
     config.bridge.enabled = true;
     if let Err(err) = config.save(&state.config_path) {
         *config = previous_config;
@@ -525,7 +516,6 @@ async fn persist_wecom_onboard_account(
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     let mut config = state.config.lock().await;
     let previous_config = config.clone();
-    config.migrate_legacy_im_accounts();
     let mut account = config.wecom_account(account_id).unwrap_or_default();
     account.enabled = true;
     account.account_id = account_id.to_string();
@@ -535,9 +525,6 @@ async fn persist_wecom_onboard_account(
         account.display_name = "企业微信机器人".to_string();
     }
     config.upsert_wecom_account(account.clone());
-    if !config.wecom.is_configured() || config.wecom.account_id == account_id {
-        config.wecom = account;
-    }
     config.bridge.enabled = true;
     if let Err(err) = config.save(&state.config_path) {
         *config = previous_config;
@@ -583,7 +570,8 @@ pub(super) async fn wechat_onboard_start(State(state): State<SharedState>) -> im
         return superseded_start_response();
     }
     let config = state.config.lock().await.clone();
-    let api = WechatApi::new(WechatSettings::from_app_config(&config.wechat));
+    let account = config.wechat_accounts.first().cloned().unwrap_or_default();
+    let api = WechatApi::new(WechatSettings::from_app_config(&account));
     let local_tokens = wechat_store::local_bot_tokens(&state).await;
     match api.start_qr_login(&local_tokens).await {
         Ok(payload) => {
@@ -665,7 +653,8 @@ pub(super) async fn wechat_onboard_poll(
     }
 
     let config = state.config.lock().await.clone();
-    let api = WechatApi::new(WechatSettings::from_app_config(&config.wechat));
+    let current_account = config.wechat_accounts.first().cloned().unwrap_or_default();
+    let api = WechatApi::new(WechatSettings::from_app_config(&current_account));
     let result = match api
         .poll_qr_status(
             &session.current_api_base_url,
@@ -724,10 +713,11 @@ pub(super) async fn wechat_onboard_poll(
             .clone()
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| {
-                if config.wechat.account_id.trim().is_empty() {
+                let account_id = current_account.account_id.trim();
+                if account_id.is_empty() {
                     "wechat".to_string()
                 } else {
-                    config.wechat.account_id.clone()
+                    account_id.to_string()
                 }
             });
         let base_url = result
@@ -1194,7 +1184,6 @@ mod tests {
         assert!(result.is_err());
         let config = state.config.lock().await;
         assert!(config.feishu_accounts.is_empty());
-        assert!(!config.feishu.is_configured());
         assert!(!config.bridge.enabled);
     }
 
@@ -1214,7 +1203,6 @@ mod tests {
         assert!(result.is_err());
         let config = state.config.lock().await;
         assert!(config.wechat_accounts.is_empty());
-        assert!(!config.wechat.is_configured());
         assert!(!config.bridge.enabled);
     }
 
@@ -1228,7 +1216,6 @@ mod tests {
         assert!(result.is_err());
         let config = state.config.lock().await;
         assert!(config.wecom_accounts.is_empty());
-        assert!(!config.wecom.is_configured());
         assert!(!config.bridge.enabled);
     }
 }

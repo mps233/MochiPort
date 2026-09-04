@@ -33,6 +33,8 @@ const MESSAGE_STATE_FINISH: i64 = 2;
 const MESSAGE_ITEM_TYPE_TEXT: i64 = 1;
 const MESSAGE_ITEM_TYPE_IMAGE: i64 = 2;
 const WECHAT_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
+const WECHAT_TEXT_CLIENT_ID_PREFIX: &str = "mochiport-wechat";
+const WECHAT_IMAGE_CLIENT_ID_PREFIX: &str = "mochiport-wechat-image";
 
 static WECHAT_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -144,7 +146,7 @@ impl WechatApi {
         if !self.is_configured() {
             return Err(anyhow!("wechat bot_token is empty"));
         }
-        let client_id = next_client_id("codexhub-wechat");
+        let client_id = next_client_id(WECHAT_TEXT_CLIENT_ID_PREFIX);
         let mut msg = json!({
             "from_user_id": "",
             "to_user_id": to_user_id,
@@ -279,7 +281,7 @@ impl WechatApi {
         context_token: &str,
         uploaded: &UploadedImage,
     ) -> Result<String> {
-        let client_id = next_client_id("codexhub-wechat-image");
+        let client_id = next_client_id(WECHAT_IMAGE_CLIENT_ID_PREFIX);
         let msg = ImageMessage {
             from_user_id: "",
             to_user_id,
@@ -730,5 +732,14 @@ mod tests {
         .to_string();
         assert!(err.contains("ret_minus_2"));
         assert!(err.contains("ret=-2"));
+    }
+
+    #[test]
+    fn generated_client_ids_use_mochiport_namespaces() {
+        let text_client_id = next_client_id(WECHAT_TEXT_CLIENT_ID_PREFIX);
+        let image_client_id = next_client_id(WECHAT_IMAGE_CLIENT_ID_PREFIX);
+
+        assert!(text_client_id.starts_with("mochiport-wechat-"));
+        assert!(image_client_id.starts_with("mochiport-wechat-image-"));
     }
 }
