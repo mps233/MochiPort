@@ -81,19 +81,17 @@ final class SingleInstanceGuard: @unchecked Sendable {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         fileManager: FileManager = .default
     ) -> URL {
-        for key in ["MOCHIPORT_GUI_LOCK_PATH", "THREADRELAY_GUI_LOCK_PATH"] {
-            if let override = environment[key], !override.isEmpty {
-                return URL(fileURLWithPath: override)
-            }
+        if let override = environment["MOCHIPORT_GUI_LOCK_PATH"], !override.isEmpty {
+            return URL(fileURLWithPath: override)
         }
 
         let home = environment["HOME"]
             .map { URL(fileURLWithPath: $0, isDirectory: true) }
             ?? fileManager.homeDirectoryForCurrentUser
-        let identifier = (bundleIdentifier ?? "io.github.mps233.threadrelay")
+        let identifier = (bundleIdentifier ?? "io.github.mps233.mochiport")
             .replacingOccurrences(of: "/", with: "-")
         return home
-            .appendingPathComponent("Library/Application Support/ThreadRelay", isDirectory: true)
+            .appendingPathComponent("Library/Application Support/MochiPort", isDirectory: true)
             .appendingPathComponent("\(identifier).gui.lock")
     }
 }
@@ -107,26 +105,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             instanceGuard = try SingleInstanceGuard.acquire(
                 lockURL: SingleInstanceGuard.defaultLockURL()
             )
-            do {
-                try GUIRecoveryLauncher().startIfNeeded()
-                clearNormalExitMarker()
-            } catch {
-                NSLog("MochiPort GUI 自动恢复注册失败：%@", error.localizedDescription)
-                // Keep the previous marker until launchd registration succeeds;
-                // otherwise a manual launch during a transient launchctl error
-                // could disable recovery for the next crash. Retry once while
-                // the app is already running.
-                Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(2))
-                    guard let self else { return }
-                    do {
-                        try GUIRecoveryLauncher().startIfNeeded()
-                        clearNormalExitMarker()
-                    } catch {
-                        NSLog("MochiPort GUI 自动恢复重试失败：%@", error.localizedDescription)
-                    }
-                }
-            }
         } catch SingleInstanceError.alreadyRunning {
             activateExistingInstance()
             Darwin.exit(73)
@@ -149,52 +127,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         UserDefaults.standard.string(forKey: "closeBehavior") == "quitGUI"
     }
 
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        do {
-            let configuration = try GUIRecoveryConfiguration.current()
-            let markerDirectory = configuration.dataDirectoryURL
-            try FileManager.default.createDirectory(
-                at: markerDirectory,
-                withIntermediateDirectories: true
-            )
-            let markerURL = markerDirectory.appendingPathComponent("gui-normal-exit.marker")
-            // The marker must not suppress recovery after an app update. The
-            // supervisor compares this value with the active bundle's
-            // CFBundleVersion before honoring a normal quit. Data.atomic also
-            // prevents a partially-written build number from being accepted.
-            try Data(currentBuildIdentifier().utf8).write(to: markerURL, options: .atomic)
-        } catch {
-            NSLog("MochiPort GUI 正常退出标记写入失败：%@", error.localizedDescription)
-        }
-        return .terminateNow
-    }
-
-    private func currentBuildIdentifier() -> String {
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
-        let trimmed = build?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmed.isEmpty ? "unknown" : trimmed
-    }
-
-    private func clearNormalExitMarker() {
-        do {
-            let configuration = try GUIRecoveryConfiguration.current()
-            let markerURL = configuration.dataDirectoryURL
-                .appendingPathComponent("gui-normal-exit.marker")
-            try FileManager.default.removeItem(at: markerURL)
-        } catch CocoaError.fileNoSuchFile {
-            // A marker is only present after a normal quit; there is nothing
-            // to clear on the first launch or after an unexpected exit.
-        } catch {
-            NSLog("MochiPort 旧的正常退出标记清理失败：%@", error.localizedDescription)
-        }
-    }
-
     private func activateExistingInstance() {
         guard let bundleIdentifier = Bundle.main.bundleIdentifier else { return }
         let currentPID = ProcessInfo.processInfo.processIdentifier
         let existing = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             .first { $0.processIdentifier != currentPID }
-        existing?.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        existing?.activate(options: [.activateAllWindows])
     }
 }
 
@@ -220,10 +158,8 @@ struct MochiPortApp: App {
     private static func fixtureStatusFromEnvironment() -> ServiceStatus? {
         let environment = ProcessInfo.processInfo.environment
         let fixture = environment["MOCHIPORT_PREVIEW_FIXTURE"]
-            ?? environment["THREADRELAY_PREVIEW_FIXTURE"]
         switch fixture {
         case "available": return .available
-        case "bridge": return .bridgeAvailable
         case "unavailable": return .unavailable("预览：后台服务已离线")
         default: return nil
         }
@@ -405,7 +341,6 @@ private struct MenuBarStatusLabel: View {
         switch status {
         case .checking: .secondary
         case .available: .green
-        case .bridgeAvailable: .orange
         case .unavailable: .red
         }
     }
@@ -414,7 +349,6 @@ private struct MenuBarStatusLabel: View {
         switch status {
         case .checking: "连接中"
         case .available: "在线"
-        case .bridgeAvailable: "兼容"
         case .unavailable: "离线"
         }
     }

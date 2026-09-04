@@ -24,7 +24,6 @@
 		A10000000000000000000013 /* ProviderLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000013 /* ProviderLogos */; };
 		A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000014 /* GatewayQuotaDock.swift */; };
 		A10000000000000000000015 /* ClientLogos in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000015 /* ClientLogos */; };
-		A10000000000000000000016 /* DaemonUpdateInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000016 /* DaemonUpdateInstaller.swift */; };
 		A10000000000000000000017 /* UpdateCheckerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000017 /* UpdateCheckerTests.swift */; };
 		A10000000000000000000018 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000018 /* AppIcon.icon */; };
 		B100000000000000000000 /* AIGlassUpdateChecker.swift in Sources */ = {isa = PBXBuildFile; fileRef = B200000000000000000000 /* AIGlassUpdateChecker.swift */; };
@@ -81,7 +80,6 @@
 		A20000000000000000000013 /* ProviderLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ProviderLogos; sourceTree = "<group>"; };
 		A20000000000000000000014 /* GatewayQuotaDock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayQuotaDock.swift; sourceTree = "<group>"; };
 		A20000000000000000000015 /* ClientLogos */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources/ClientLogos; sourceTree = "<group>"; };
-		A20000000000000000000016 /* DaemonUpdateInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DaemonUpdateInstaller.swift; sourceTree = "<group>"; };
 		A20000000000000000000017 /* UpdateCheckerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateCheckerTests.swift; sourceTree = "<group>"; };
 		A20000000000000000000018 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = ../../packaging/macos/AppIcon.icon; sourceTree = SOURCE_ROOT; };
 		B200000000000000000000 /* AIGlassUpdateChecker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MochiPortMac/AIGlassCore/AIGlassUpdateChecker.swift; sourceTree = "<group>"; };
@@ -160,7 +158,6 @@
 				A20000000000000000000011 /* UpdateChecker.swift */,
 				A20000000000000000000012 /* ProviderBranding.swift */,
 				A20000000000000000000014 /* GatewayQuotaDock.swift */,
-				A20000000000000000000016 /* DaemonUpdateInstaller.swift */,
 				A20000000000000000000013 /* ProviderLogos */,
 				A20000000000000000000015 /* ClientLogos */,
 				B200000000000000000022 /* TokenCompanionAnimator.swift */,
@@ -301,7 +298,6 @@
 				A10000000000000000000011 /* UpdateChecker.swift in Sources */,
 				A10000000000000000000012 /* ProviderBranding.swift in Sources */,
 				A10000000000000000000014 /* GatewayQuotaDock.swift in Sources */,
-				A10000000000000000000016 /* DaemonUpdateInstaller.swift in Sources */,
 				B100000000000000000000 /* AIGlassUpdateChecker.swift in Sources */ ,
 				B100000000000000000003 /* BriefingEngine.swift in Sources */ ,
 				B100000000000000000006 /* CodexLogParser.swift in Sources */ ,

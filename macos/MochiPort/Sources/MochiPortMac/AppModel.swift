@@ -7,10 +7,17 @@ struct ActionFeedback: Equatable, Identifiable {
     let message: String
 }
 
-/// Result of a batch session move; failed sessions stay selected in the UI.
-struct SessionBatchMoveResult: Equatable {
-    let movedIds: [String]
-    let failedIds: [String]
+private enum DaemonStartupError: LocalizedError, Equatable {
+    case readinessTimedOut(attempts: Int, serviceWasAlreadyRunning: Bool)
+
+    var errorDescription: String? {
+        switch self {
+        case .readinessTimedOut(_, true):
+            return "后台服务进程仍在运行，但健康检查未通过。为避免中断正在进行的工作，MochiPort 未自动重启它。"
+        case let .readinessTimedOut(attempts, false):
+            return "已尝试启动后台服务 \(attempts) 次，但服务未在预期时间内就绪。请查看诊断后重试。"
+        }
+    }
 }
 
 /// Immutable lease values captured when a destructive management confirmation
@@ -25,29 +32,10 @@ struct DaemonManagementConfirmation: Equatable, Sendable {
     let managementTokenGeneration: Int64
 }
 
-struct DaemonUpdateConfirmation: Equatable, Identifiable, Sendable {
-    let candidate: PreparedDaemonUpdate
-    let daemon: DaemonManagementConfirmation
-    let protectedWorkItemCount: Int
-
-    var id: String {
-        "\(daemon.daemonInstanceId):\(daemon.leaseGeneration):\(candidate.build)"
-    }
-}
-
 enum ComponentUpdateCheckState: Equatable, Sendable {
     case idle
     case checking
     case checked
-    case failed(String)
-}
-
-enum DaemonUpdateOperationState: Equatable, Sendable {
-    case idle
-    case downloading(version: String, build: Int)
-    case ready(version: String, build: Int)
-    case activating(version: String, build: Int)
-    case completed(version: String, build: Int)
     case failed(String)
 }
 
@@ -59,12 +47,8 @@ enum UnifiedUpdateState: Equatable, Sendable {
     case upToDate
     case failed(String)
     case ui(UpdateComponentRelease)
-    case daemon(UpdateComponentRelease, compatibility: DaemonUpdateCompatibility?)
-    case both(
-        ui: UpdateComponentRelease,
-        daemon: UpdateComponentRelease,
-        compatibility: DaemonUpdateCompatibility?
-    )
+    case daemon(UpdateComponentRelease)
+    case both(ui: UpdateComponentRelease, daemon: UpdateComponentRelease)
 }
 
 @MainActor
@@ -115,34 +99,34 @@ final class AppModel: ObservableObject {
     @Published private(set) var managementCredentialRotationInProgress = false
     @Published private(set) var daemonManagementFeedback: String?
     @Published var daemonRecoveryError: String?
-    @Published private(set) var availableUpdate: AvailableUpdate?
     @Published private(set) var availableUIUpdate: UpdateComponentRelease?
     @Published private(set) var availableDaemonUpdate: UpdateComponentRelease?
-    @Published private(set) var daemonUpdateCompatibility: DaemonUpdateCompatibility?
     @Published private(set) var updateCheckState: ComponentUpdateCheckState = .idle
-    @Published private(set) var daemonUpdateOperation: DaemonUpdateOperationState = .idle
-    @Published private(set) var preparedDaemonUpdate: PreparedDaemonUpdate?
     @Published var unifiedUpdateNoticeDismissed = false
 
     private let apiClient: APIClient
     private let daemonLauncher: any DaemonLaunching
     private let fixtureStatus: ServiceStatus?
     private let guiBuildLoader: @Sendable () -> String?
+    private let embeddedDaemonBuildLoader: @Sendable () -> String?
     private let guiVersionLoader: @Sendable () -> String
     private let updateManifestLoader: @Sendable (String) async throws -> UpdateManifest
-    private let daemonUpdateInstaller: any DaemonUpdateInstalling
     private let daemonReplacementAttemptLimit: Int
     private let daemonReplacementPollDelay: Duration
     private let daemonReplacementStableProbeCount: Int
     private let codexEnhancedOperationPollDelay: Duration
     private let codexEnhancedOperationRecoveryPollDelay: Duration
+    private let automaticDaemonStartupAttemptLimit: Int
+    private let daemonStartupReadinessAttemptLimit: Int
+    private let daemonStartupReadinessPollDelay: Duration
+    private let automaticDaemonStartupRetryDelay: Duration
     private var refreshInFlight = false
-    private var launchAttempted = false
+    private var automaticDaemonStartupAttempts = 0
+    private var lastAutomaticDaemonStartupError: Error?
     private var startupRefreshStarted = false
     private var refreshTask: Task<Void, Never>?
     private var autoRefreshStarted = false
     private var windowVisible = true
-    private var lifecycleCapabilityUnavailable = false
     private var sectionLoadGenerations: [AppSection: Int] = [:]
     private var sectionActivityCounts: [AppSection: Int] = [:]
     private var requestLogDataGeneration = 0
@@ -182,48 +166,74 @@ final class AppModel: ObservableObject {
     /// differ. An older daemon without `runtime.buildNumber` is unknown, not
     /// a mismatch, so it remains usable while the backend is upgraded.
     nonisolated static func buildNumbersMismatch(
+        expectedDaemonBuild: String?,
+        daemonBuild: Int?
+    ) -> Bool {
+        guard let expectedDaemonBuild,
+              let expectedDaemonBuildNumber = Int(expectedDaemonBuild),
+              expectedDaemonBuildNumber > 0,
+              String(expectedDaemonBuildNumber) == expectedDaemonBuild,
+              let daemonBuild
+        else { return false }
+        return expectedDaemonBuildNumber != daemonBuild
+    }
+
+    /// Compatibility helper for existing call sites that compare a GUI build
+    /// with a daemon build. New daemon handoff code must use the explicit
+    /// `expectedDaemonBuild` spelling above.
+    nonisolated static func buildNumbersMismatch(
         guiBuild: String?,
         daemonBuild: Int?
     ) -> Bool {
-        guard let guiBuild,
-              let guiBuildNumber = Int(guiBuild),
-              let daemonBuild
-        else { return false }
-        return guiBuildNumber != daemonBuild
+        buildNumbersMismatch(expectedDaemonBuild: guiBuild, daemonBuild: daemonBuild)
     }
 
-    /// A newer GUI may prepare its helper without replacing a daemon that is
-    /// still serving work. Downgrades are never automatic.
+    /// A newer GUI can coordinate a safe daemon handoff after installation.
+    nonisolated static func daemonRequiresUpgrade(
+        expectedDaemonBuild: String?,
+        daemonBuild: Int?
+    ) -> Bool {
+        guard let expectedDaemonBuild,
+              let expectedDaemonBuildNumber = Int(expectedDaemonBuild),
+              expectedDaemonBuildNumber > 0,
+              String(expectedDaemonBuildNumber) == expectedDaemonBuild,
+              let daemonBuild
+        else { return false }
+        return expectedDaemonBuildNumber > daemonBuild
+    }
+
+    /// Compatibility helper for existing call sites that compare a GUI build
+    /// with a daemon build. New daemon handoff code must use the explicit
+    /// `expectedDaemonBuild` spelling above.
     nonisolated static func daemonRequiresUpgrade(
         guiBuild: String?,
         daemonBuild: Int?
     ) -> Bool {
-        guard let guiBuild,
-              let guiBuildNumber = Int(guiBuild),
-              let daemonBuild
-        else { return false }
-        return guiBuildNumber > daemonBuild
+        daemonRequiresUpgrade(expectedDaemonBuild: guiBuild, daemonBuild: daemonBuild)
     }
 
     var daemonBuildMismatch: Bool {
         guard let daemonBuild = lifecycle?.runtime.buildNumber else { return false }
-        return Self.buildNumbersMismatch(guiBuild: guiBuildLoader(), daemonBuild: daemonBuild)
+        return Self.buildNumbersMismatch(
+            expectedDaemonBuild: embeddedDaemonBuildLoader(),
+            daemonBuild: daemonBuild
+        )
     }
 
     var daemonUpgradePending: Bool {
         guard let lifecycle,
-              let guiBuild = guiBuildLoader()
+              let embeddedDaemonBuild = embeddedDaemonBuildLoader()
         else { return false }
         return Self.daemonRequiresUpgrade(
-            guiBuild: guiBuild,
+            expectedDaemonBuild: embeddedDaemonBuild,
             daemonBuild: lifecycle.runtime.buildNumber
         )
     }
 
     var daemonUpgradeDetail: String {
-        Self.daemonUpgradeDetailText(
-            guiBuild: guiBuildLoader(),
-            daemonBuild: lifecycle?.runtime.buildNumber
+        Self.embeddedDaemonUpgradeDetailText(
+            daemonBuild: embeddedDaemonBuildLoader(),
+            runningDaemonBuild: lifecycle?.runtime.buildNumber
         )
     }
 
@@ -232,18 +242,11 @@ final class AppModel: ObservableObject {
     var unifiedUpdateState: UnifiedUpdateState {
         switch (availableUIUpdate, availableDaemonUpdate) {
         case let (.some(ui), .some(daemon)):
-            return .both(
-                ui: ui,
-                daemon: daemon,
-                compatibility: daemonUpdateCompatibility
-            )
+            return .both(ui: ui, daemon: daemon)
         case let (.some(ui), .none):
             return .ui(ui)
         case let (.none, .some(daemon)):
-            return .daemon(
-                daemon,
-                compatibility: daemonUpdateCompatibility
-            )
+            return .daemon(daemon)
         case (.none, .none):
             switch updateCheckState {
             case .checking:
@@ -266,52 +269,6 @@ final class AppModel: ObservableObject {
         guiBuildLoader().flatMap(Int.init)
     }
 
-    var daemonUpdateCompatibilityDescription: String? {
-        guard let compatibility = daemonUpdateCompatibility else { return nil }
-        switch compatibility {
-        case .compatible:
-            return "与当前 MochiPort 兼容"
-        case .requiresLifecycleAPI:
-            return "当前后台服务版本过旧，请先手动安装新版 MochiPort"
-        case let .requiresUIUpdate(minimumVersion, minimumBuild):
-            let version = minimumVersion.map { "版本 \($0)" }
-            let build = minimumBuild.map { "构建 \($0)" }
-            let requirement = [version, build].compactMap { $0 }.joined(separator: "、")
-            return requirement.isEmpty
-                ? "需要先更新 MochiPort"
-                : "需要先更新 MochiPort 至 \(requirement)"
-        case let .unsupportedAPIMajor(required):
-            return "需要管理 API \(required)，当前 MochiPort 不支持"
-        }
-    }
-
-    var canPrepareDaemonUpdate: Bool {
-        guard availableDaemonUpdate != nil,
-              daemonUpdateCompatibility == .compatible,
-              !daemonTransitionInProgress
-        else { return false }
-        switch daemonUpdateOperation {
-        case .downloading, .activating:
-            return false
-        default:
-            return true
-        }
-    }
-
-    var daemonUpdateConfirmation: DaemonUpdateConfirmation? {
-        guard let preparedDaemonUpdate,
-              ownsDaemonLease,
-              !daemonTransitionInProgress,
-              let lifecycle,
-              let daemon = daemonManagementConfirmation(for: lifecycle)
-        else { return nil }
-        return DaemonUpdateConfirmation(
-            candidate: preparedDaemonUpdate,
-            daemon: daemon,
-            protectedWorkItemCount: lifecycle.protectedWorkItems.total
-        )
-    }
-
     nonisolated static func daemonUpgradeDetailText(
         guiBuild: String?,
         daemonBuild: Int?
@@ -326,7 +283,24 @@ final class AppModel: ObservableObject {
         if daemonBuild == guiBuildNumber {
             return "版本一致"
         }
-        return "界面构建 \(guiBuildNumber) 高于后台 \(daemonBuild)，需要手动更新后台服务"
+        return "界面构建 \(guiBuildNumber) 高于后台 \(daemonBuild)，安装新版 MochiPort 后会自动安全切换"
+    }
+
+    nonisolated static func embeddedDaemonUpgradeDetailText(
+        daemonBuild: String?,
+        runningDaemonBuild: Int?
+    ) -> String {
+        guard let daemonBuild,
+              let expectedBuild = Int(daemonBuild),
+              let runningDaemonBuild
+        else { return "内置后台版本未知" }
+        if runningDaemonBuild > expectedBuild {
+            return "运行中的后台构建 \(runningDaemonBuild) 高于内置构建 \(expectedBuild)，不会自动降级"
+        }
+        if runningDaemonBuild == expectedBuild {
+            return "后台版本一致"
+        }
+        return "内置后台构建 \(expectedBuild) 高于运行中的后台 \(runningDaemonBuild)，将自动安全切换"
     }
 
     var ownsDaemonLease: Bool {
@@ -436,6 +410,18 @@ final class AppModel: ObservableObject {
         guiBuildLoader: @escaping @Sendable () -> String? = {
             Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
         },
+        embeddedDaemonBuildLoader: @escaping @Sendable () -> String? = {
+            let value = Bundle.main.object(forInfoDictionaryKey: "MochiPortDaemonBuild")
+                ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion")
+            if let string = value as? String {
+                let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            if let number = value as? NSNumber {
+                return number.stringValue
+            }
+            return nil
+        },
         guiVersionLoader: @escaping @Sendable () -> String = {
             Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
                 ?? "0.0.0"
@@ -443,25 +429,32 @@ final class AppModel: ObservableObject {
         updateManifestLoader: @escaping @Sendable (String) async throws -> UpdateManifest = {
             try await UpdateChecker.fetchLatestManifest(currentVersion: $0)
         },
-        daemonUpdateInstaller: any DaemonUpdateInstalling = DaemonUpdateInstaller(),
         daemonReplacementAttemptLimit: Int = 80,
         daemonReplacementPollDelay: Duration = .milliseconds(250),
         daemonReplacementStableProbeCount: Int = 3,
         codexEnhancedOperationPollDelay: Duration = .milliseconds(400),
-        codexEnhancedOperationRecoveryPollDelay: Duration = .seconds(2)
+        codexEnhancedOperationRecoveryPollDelay: Duration = .seconds(2),
+        automaticDaemonStartupAttemptLimit: Int = 2,
+        daemonStartupReadinessAttemptLimit: Int = 30,
+        daemonStartupReadinessPollDelay: Duration = .milliseconds(250),
+        automaticDaemonStartupRetryDelay: Duration = .seconds(1)
     ) {
         self.apiClient = apiClient
         self.daemonLauncher = daemonLauncher
         self.fixtureStatus = fixtureStatus
         self.guiBuildLoader = guiBuildLoader
+        self.embeddedDaemonBuildLoader = embeddedDaemonBuildLoader
         self.guiVersionLoader = guiVersionLoader
         self.updateManifestLoader = updateManifestLoader
-        self.daemonUpdateInstaller = daemonUpdateInstaller
         self.daemonReplacementAttemptLimit = max(1, daemonReplacementAttemptLimit)
         self.daemonReplacementPollDelay = daemonReplacementPollDelay
         self.daemonReplacementStableProbeCount = max(1, daemonReplacementStableProbeCount)
         self.codexEnhancedOperationPollDelay = codexEnhancedOperationPollDelay
         self.codexEnhancedOperationRecoveryPollDelay = codexEnhancedOperationRecoveryPollDelay
+        self.automaticDaemonStartupAttemptLimit = max(1, automaticDaemonStartupAttemptLimit)
+        self.daemonStartupReadinessAttemptLimit = max(1, daemonStartupReadinessAttemptLimit)
+        self.daemonStartupReadinessPollDelay = daemonStartupReadinessPollDelay
+        self.automaticDaemonStartupRetryDelay = automaticDaemonStartupRetryDelay
         self.installationId = Self.loadInstallationID()
     }
 
@@ -556,36 +549,100 @@ final class AppModel: ObservableObject {
 
     private func probeOrStartDaemon() async -> Result<ServiceProbe, Error> {
         do {
-            return .success(try await apiClient.probe())
+            let probe = try await apiClient.probe()
+            resetAutomaticDaemonStartupAttempts()
+            return .success(probe)
         } catch let error as APIClientError {
             return .failure(error)
-        } catch let error as URLError where error.code == .cannotConnectToHost {
-            guard !launchAttempted else { return .failure(error) }
-            launchAttempted = true
-            do {
-                try await daemonLauncher.startIfNeeded()
-                dashboardState = .starting
-                serviceStatus = .checking
-                await waitForDaemonReadiness()
-                return .success(try await apiClient.probe())
-            } catch let launchError {
-                return .failure(launchError)
-            }
         } catch {
-            return .failure(error)
+            guard isDaemonTransportUnavailable(error) else {
+                return .failure(error)
+            }
+            let remainingAttempts = automaticDaemonStartupAttemptLimit
+                - automaticDaemonStartupAttempts
+            guard remainingAttempts > 0 else {
+                return .failure(lastAutomaticDaemonStartupError ?? error)
+            }
+            do {
+                let probe = try await startDaemonAndWait(
+                    attemptLimit: remainingAttempts,
+                    countsTowardAutomaticLimit: true
+                )
+                resetAutomaticDaemonStartupAttempts()
+                return .success(probe)
+            } catch {
+                lastAutomaticDaemonStartupError = error
+                return .failure(error)
+            }
         }
     }
 
-    private func waitForDaemonReadiness() async {
-        for attempt in 0..<30 {
-            if let probe = try? await apiClient.probe(),
-               case let .versioned(health) = probe,
-               health.ready {
-                return
+    private func startDaemonAndWait(
+        attemptLimit: Int,
+        countsTowardAutomaticLimit: Bool
+    ) async throws -> ServiceProbe {
+        var lastOutcome: DaemonLaunchOutcome?
+        for attempt in 0..<max(1, attemptLimit) {
+            if countsTowardAutomaticLimit {
+                automaticDaemonStartupAttempts += 1
             }
-            guard attempt < 29 else { return }
-            try? await Task.sleep(for: .milliseconds(250))
+            lastOutcome = try await daemonLauncher.startIfNeeded()
+            dashboardState = dashboard == nil ? .starting : dashboardState
+            serviceStatus = .checking
+            if let probe = try await waitForDaemonReadiness() {
+                return probe
+            }
+            // A live process may be finishing startup or be unhealthy.  Do
+            // not reinterpret its failed health check as permission to issue
+            // a second launch command.
+            if lastOutcome == .alreadyRunning {
+                break
+            }
+            guard attempt + 1 < max(1, attemptLimit) else { break }
+            try await Task.sleep(for: automaticDaemonStartupRetryDelay)
         }
+        throw DaemonStartupError.readinessTimedOut(
+            attempts: max(1, attemptLimit),
+            serviceWasAlreadyRunning: lastOutcome == .alreadyRunning
+        )
+    }
+
+    private func waitForDaemonReadiness() async throws -> ServiceProbe? {
+        for attempt in 0..<daemonStartupReadinessAttemptLimit {
+            try Task.checkCancellation()
+            do {
+                let probe = try await apiClient.probe()
+                try Task.checkCancellation()
+                if case let .versioned(health) = probe, health.ready {
+                    return probe
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch let error as URLError where error.code == .cancelled {
+                throw CancellationError()
+            } catch {
+                try Task.checkCancellation()
+            }
+            guard attempt + 1 < daemonStartupReadinessAttemptLimit else { break }
+            try await Task.sleep(for: daemonStartupReadinessPollDelay)
+        }
+        try Task.checkCancellation()
+        return nil
+    }
+
+    private func isDaemonTransportUnavailable(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet, .timedOut:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func resetAutomaticDaemonStartupAttempts() {
+        automaticDaemonStartupAttempts = 0
+        lastAutomaticDaemonStartupError = nil
     }
 
     private func loadServiceStatus(probe: ServiceProbe) async {
@@ -603,34 +660,46 @@ final class AppModel: ObservableObject {
                 guard transitionGeneration == daemonTransitionGeneration else { return }
                 dashboard = loadedDashboard
                 let loadedLifecycle: ManageLifecycle?
-                let lifecycleUnavailable: Bool
                 do {
                     loadedLifecycle = try await apiClient.lifecycle()
-                    lifecycleUnavailable = false
                 } catch let error as APIClientError where error == .featureUnavailable {
                     loadedLifecycle = nil
-                    lifecycleUnavailable = true
                 } catch {
                     loadedLifecycle = nil
-                    lifecycleUnavailable = false
                 }
                 guard transitionGeneration == daemonTransitionGeneration,
                       lifecycleObservationIsCurrent(observationGeneration)
                 else { return }
                 lifecycle = loadedLifecycle
-                lifecycleCapabilityUnavailable = lifecycleUnavailable
                 if daemonTransitionInProgress {
                     stopLifecycleLeaseHeartbeat()
                 } else {
                     await reconcileLifecycleLease()
+                    _ = await coordinateDaemonUpgradeIfNeeded()
+                    guard transitionGeneration == daemonTransitionGeneration,
+                          lifecycleObservationIsCurrent(observationGeneration),
+                          !daemonTransitionInProgress
+                    else { return }
                 }
                 settings = try? await apiClient.settings()
+                guard transitionGeneration == daemonTransitionGeneration,
+                      lifecycleObservationIsCurrent(observationGeneration),
+                      !daemonTransitionInProgress
+                else { return }
                 // Account details were added after the first versioned
                 // dashboard. Keep the dashboard usable when an older daemon
                 // is still running, but expose the missing capability instead
                 // of presenting it as an empty account list.
                 await loadIMAccounts()
+                guard transitionGeneration == daemonTransitionGeneration,
+                      lifecycleObservationIsCurrent(observationGeneration),
+                      !daemonTransitionInProgress
+                else { return }
                 await loadTelegramProjectGroups()
+                guard transitionGeneration == daemonTransitionGeneration,
+                      lifecycleObservationIsCurrent(observationGeneration),
+                      !daemonTransitionInProgress
+                else { return }
                 dashboardState = .loaded
             } catch let error as APIClientError {
                 guard lifecycleObservationIsCurrent(observationGeneration) else { return }
@@ -645,18 +714,6 @@ final class AppModel: ObservableObject {
             } catch {
                 dashboardState = dashboard == nil ? .unavailable : .stale
             }
-        case .legacy:
-            serviceStatus = .bridgeAvailable
-            dashboard = nil
-            lifecycleCapabilityUnavailable = false
-            if lifecycleObservationIsCurrent(observationGeneration) {
-                lifecycle = nil
-            }
-            stopLifecycleLeaseHeartbeat()
-            imAccounts = []
-            imAccountsAvailability = .needsUpdate
-            clearManagementPages()
-            dashboardState = .legacy
         }
     }
 
@@ -683,6 +740,135 @@ final class AppModel: ObservableObject {
         resetRequestLogPagination(clearLogs: true)
         requestLogDetail = nil
         sectionErrors = [:]
+    }
+
+    /// Treat an embedded-daemon/runtime version mismatch as one coordinated
+    /// lifecycle transaction. The daemon owns the safety decision through its
+    /// lease and drain API; launchd is reloaded only after that request is
+    /// accepted.
+    @discardableResult
+    private func coordinateDaemonUpgradeIfNeeded() async -> Bool {
+        guard fixtureStatus == nil,
+              !daemonTransitionInProgress,
+              daemonUpgradePending,
+              let observedLifecycle = lifecycle,
+              let embeddedDaemonBuild = embeddedDaemonBuildLoader()
+        else {
+            return false
+        }
+
+        guard observedLifecycle.protectedWorkItems.total == 0 else {
+            managementOperationError = "内置后台构建 \(embeddedDaemonBuild) 高于运行中的构建 \(observedLifecycle.runtime.buildNumber.map(String.init) ?? "未知")，但后台仍有 \(observedLifecycle.protectedWorkItems.total) 项受保护任务，已暂缓自动切换。"
+            return false
+        }
+        guard ownsDaemonLease,
+              observedLifecycle.management.leaseGeneration != nil
+        else {
+            managementOperationError = "内置后台构建 \(embeddedDaemonBuild) 高于当前后台版本，但当前界面没有有效的后台管理租约，未自动切换。"
+            return false
+        }
+        guard let expectedBuild = Int(embeddedDaemonBuild), expectedBuild > 0 else {
+            managementOperationError = "内置后台构建号无效（\(embeddedDaemonBuild)），未自动切换后台服务。"
+            return false
+        }
+
+        daemonTransitionInProgress = true
+        daemonTransitionGeneration &+= 1
+        lifecycleObservationGeneration &+= 1
+        stopLifecycleLeaseHeartbeat()
+        defer {
+            daemonTransitionInProgress = false
+            if ownsDaemonLease {
+                startLifecycleLeaseHeartbeat()
+            }
+        }
+
+        let previousInstanceId = observedLifecycle.service.instanceId
+        dashboardState = .starting
+        serviceStatus = .checking
+        actionFeedback = ActionFeedback(message: "正在将后台服务切换到最新版本")
+        managementOperationError = nil
+
+        var activatedPreparation: DaemonRuntimeUpgradePlan?
+        do {
+            let preparation = try await daemonLauncher.prepareRuntimeUpgrade()
+            guard preparation.targetBuildIdentifier == embeddedDaemonBuild,
+                  let preparationBuild = Int(preparation.targetBuildIdentifier),
+                  preparationBuild == expectedBuild
+            else {
+                throw APIClientError.operationFailed(
+                    "准备的后台构建 \(preparation.targetBuildIdentifier) 与内置构建 \(embeddedDaemonBuild) 不一致，已取消切换。"
+                )
+            }
+            guard preparation.requiresActivation,
+                  let observedBuild = observedLifecycle.runtime.buildNumber,
+                  preparation.previousBuildIdentifier == String(observedBuild)
+            else {
+                throw APIClientError.operationFailed(
+                    "后台运行版本在准备期间发生变化，请刷新后重试。"
+                )
+            }
+            guard lifecycle?.service.instanceId == observedLifecycle.service.instanceId,
+                  lifecycle?.service.pid == observedLifecycle.service.pid,
+                  lifecycle?.service.startedAtMs == observedLifecycle.service.startedAtMs,
+                  lifecycle?.management.installationId == installationId,
+                  lifecycle?.management.leaseGeneration
+                    == observedLifecycle.management.leaseGeneration
+            else {
+                throw APIClientError.operationFailed("后台服务状态在版本切换前发生变化，请刷新后重试。")
+            }
+            try await requestLifecycleRestart(observedLifecycle)
+            let activation = try await daemonLauncher.activateRuntimeUpgrade(preparation)
+            guard case .activated = activation else {
+                throw APIClientError.operationFailed("后台运行版本在切换前发生变化，请刷新后重试。")
+            }
+            activatedPreparation = preparation
+
+            guard let replacement = try await waitForDaemonReplacement(
+                previousInstanceId: previousInstanceId,
+                expectedBuild: expectedBuild
+            ) else {
+                throw APIClientError.operationFailed("新版本后台服务未在预期时间内就绪。")
+            }
+            guard let reclaimed = try await claimLifecycleForRecoveryWait(replacement) else {
+                throw APIClientError.operationFailed("新版本后台服务已就绪，但当前界面未能重新取得管理权。")
+            }
+            lifecycle = reclaimed
+            clearCachedDaemonIdentity()
+            dashboard = try? await apiClient.dashboard()
+            settings = try? await apiClient.settings()
+            actionFeedback = ActionFeedback(message: "后台服务已自动切换到最新版本")
+            markDaemonReachable()
+            return true
+        } catch {
+            if let preparation = activatedPreparation {
+                do {
+                    try await daemonLauncher.rollbackRuntimeUpgrade(preparation)
+                    guard let previousBuild = preparation.previousBuildIdentifier,
+                          let previousBuildNumber = Int(previousBuild),
+                          let replacement = try await waitForDaemonReplacement(
+                              previousInstanceId: previousInstanceId,
+                              expectedBuild: previousBuildNumber
+                          ),
+                          let reclaimed = try await claimLifecycleForRecoveryWait(replacement)
+                    else {
+                        throw APIClientError.operationFailed("旧版本后台服务未能恢复并通过身份校验。")
+                    }
+                    lifecycle = reclaimed
+                    clearCachedDaemonIdentity()
+                    dashboard = try? await apiClient.dashboard()
+                    settings = try? await apiClient.settings()
+                    markDaemonReachable()
+                    managementOperationError = "后台服务新版本未就绪，已自动回滚到构建 \(preparation.previousBuildIdentifier ?? "未知")。"
+                } catch {
+                    managementOperationError = "后台服务版本切换失败，且自动回滚未完成：\(userFacingMessage(for: error))"
+                }
+            } else {
+                managementOperationError = "后台服务版本切换失败：\(userFacingMessage(for: error))"
+            }
+            actionFeedback = nil
+            return false
+        }
     }
 
     private func clearSectionData(_ section: AppSection) {
@@ -1535,61 +1721,6 @@ final class AppModel: ObservableObject {
     }
 
     @discardableResult
-    func moveCodexSession(_ session: ManageCodexSession, to provider: String?) async -> Bool {
-        await performManagementAction(section: .sessions) {
-            _ = try await self.apiClient.moveCodexSession(
-                threadId: session.id,
-                targetProvider: provider
-            )
-            try await self.requireSectionRefresh(.sessions)
-            return "已移动 1 个会话"
-        }
-    }
-
-    /// Moves each session in order and reports a partial-failure summary.
-    /// Successful ids are returned so the view can deselect them while
-    /// keeping failed ones selected.
-    func moveCodexSessions(ids: [String], to provider: String?) async -> SessionBatchMoveResult {
-        guard fixtureStatus == nil, !ids.isEmpty else {
-            return SessionBatchMoveResult(movedIds: [], failedIds: [])
-        }
-        guard sectionActivityCounts[.sessions, default: 0] == 0 else {
-            return SessionBatchMoveResult(movedIds: [], failedIds: ids)
-        }
-        beginSectionActivity(.sessions)
-        defer { endSectionActivity(.sessions) }
-        managementOperationError = nil
-
-        var movedIds: [String] = []
-        var failedIds: [String] = []
-        var firstErrorMessage: String?
-        for id in ids {
-            do {
-                _ = try await apiClient.moveCodexSession(threadId: id, targetProvider: provider)
-                movedIds.append(id)
-            } catch {
-                failedIds.append(id)
-                if firstErrorMessage == nil {
-                    firstErrorMessage = userFacingMessage(for: error)
-                }
-            }
-        }
-        _ = await loadSection(.sessions, force: true)
-        if failedIds.isEmpty {
-            sectionErrors[.sessions] = nil
-            actionFeedback = ActionFeedback(message: "已移动 \(movedIds.count) 个会话")
-        } else {
-            var message = "移动完成：成功 \(movedIds.count) 条、失败 \(failedIds.count) 条。"
-            if let firstErrorMessage {
-                message += firstErrorMessage
-            }
-            managementOperationError = message
-            sectionErrors[.sessions] = message
-        }
-        return SessionBatchMoveResult(movedIds: movedIds, failedIds: failedIds)
-    }
-
-    @discardableResult
     func saveGatewaySettings(
         enabled: Bool,
         filterImageGenerationTool: Bool,
@@ -1962,11 +2093,11 @@ final class AppModel: ObservableObject {
         defer { daemonRecoveryInProgress = false }
         daemonRecoveryError = nil
         do {
-            try await daemonLauncher.startIfNeeded()
-            launchAttempted = true
-            dashboardState = dashboard == nil ? .starting : dashboardState
-            serviceStatus = .checking
-            await waitForDaemonReadiness()
+            _ = try await startDaemonAndWait(
+                attemptLimit: 1,
+                countsTowardAutomaticLimit: false
+            )
+            resetAutomaticDaemonStartupAttempts()
             await refresh()
             if serviceStatus == .available {
                 actionFeedback = ActionFeedback(message: "本地服务已启动")
@@ -2355,162 +2486,22 @@ final class AppModel: ObservableObject {
             build: currentUIBuild
         ) ? manifest.ui : nil
 
-        let daemonResult: (UpdateComponentRelease?, DaemonUpdateCompatibility?)
-        if let lifecycle {
-            let updates = manifest.availableUpdates(
-                currentUIVersion: currentUIVersion,
-                currentUIBuild: currentUIBuild,
-                currentDaemonVersion: lifecycle.runtime.productVersion,
-                currentDaemonBuild: lifecycle.runtime.buildNumber,
-                supportedDaemonAPIMajor: lifecycle.service.apiMajor
-            )
-            daemonResult = (updates.daemon, updates.daemonCompatibility)
-        } else if lifecycleCapabilityUnavailable, let daemon = manifest.daemon {
-            daemonResult = (daemon, .requiresLifecycleAPI)
-        } else {
-            daemonResult = (nil, nil)
+        let daemonUpdate = lifecycle.flatMap { lifecycle in
+            manifest.daemon.flatMap { release in
+                release.isNewer(
+                    thanVersion: lifecycle.runtime.productVersion,
+                    build: lifecycle.runtime.buildNumber
+                ) ? release : nil
+            }
         }
 
         availableUIUpdate = uiUpdate
-        availableDaemonUpdate = daemonResult.0
-        daemonUpdateCompatibility = daemonResult.1
-        availableUpdate = uiUpdate.flatMap { release in
-            release.validatedReleaseURL.map {
-                AvailableUpdate(version: release.version, url: $0)
-            }
-        }
+        availableDaemonUpdate = daemonUpdate
 
         if previousUIVersion != uiUpdate?.version
-            || previousDaemonBuild != daemonResult.0?.build
+            || previousDaemonBuild != daemonUpdate?.build
         {
             unifiedUpdateNoticeDismissed = false
-        }
-        if let preparedDaemonUpdate,
-           preparedDaemonUpdate.build != daemonResult.0?.build
-        {
-            self.preparedDaemonUpdate = nil
-            daemonUpdateOperation = .idle
-        }
-    }
-
-    func prepareDaemonUpdate() async {
-        guard canPrepareDaemonUpdate,
-              let release = availableDaemonUpdate,
-              let build = release.build
-        else {
-            daemonUpdateOperation = .failed(
-                daemonUpdateCompatibilityDescription ?? "当前没有可安装的后台服务更新。"
-            )
-            return
-        }
-        daemonUpdateOperation = .downloading(version: release.version, build: build)
-        do {
-            let candidate = try await daemonUpdateInstaller.prepare(release: release)
-            guard availableDaemonUpdate?.build == candidate.build else {
-                throw APIClientError.operationFailed("更新清单已经变化，请重新检查更新。")
-            }
-            preparedDaemonUpdate = candidate
-            daemonUpdateOperation = .ready(
-                version: candidate.version,
-                build: candidate.build
-            )
-        } catch {
-            preparedDaemonUpdate = nil
-            daemonUpdateOperation = .failed(userFacingMessage(for: error))
-        }
-    }
-
-    func activateDaemonUpdate(confirming confirmation: DaemonUpdateConfirmation) async {
-        guard fixtureStatus == nil,
-              !daemonTransitionInProgress,
-              confirmation == daemonUpdateConfirmation,
-              let lifecycle,
-              lifecycleMatchesConfirmation(lifecycle, confirmation.daemon)
-        else {
-            daemonUpdateOperation = .failed("后台服务状态已变化，请刷新后重新确认。")
-            return
-        }
-
-        daemonTransitionInProgress = true
-        daemonTransitionGeneration &+= 1
-        stopLifecycleLeaseHeartbeat()
-        let candidate = confirmation.candidate
-        daemonUpdateOperation = .activating(version: candidate.version, build: candidate.build)
-        managementOperationError = nil
-        actionFeedback = ActionFeedback(message: "正在安全更新后台服务")
-        dashboardState = .starting
-        serviceStatus = .checking
-
-        var migrationPlan: DaemonLaunchMigrationPlan?
-        var updateAccepted = false
-        defer {
-            daemonTransitionInProgress = false
-            if ownsDaemonLease { startLifecycleLeaseHeartbeat() }
-        }
-
-        do {
-            guard let leaseGeneration = lifecycle.management.leaseGeneration else {
-                throw APIClientError.operationFailed("后台服务管理租约已失效。")
-            }
-            _ = try await verifiedDaemonIdentity(for: lifecycle, forceRefresh: true)
-            migrationPlan = try await daemonUpdateInstaller.prepareLaunchAgentMigration(
-                lifecycle: lifecycle,
-                candidate: candidate
-            )
-            let response = try await apiClient.updateLifecycle(
-                installationId: installationId,
-                daemonInstanceId: lifecycle.service.instanceId,
-                leaseGeneration: leaseGeneration,
-                candidate: candidate
-            )
-            guard response.ok,
-                  response.state == "restarting",
-                  response.version == candidate.version,
-                  response.build == candidate.build
-            else {
-                throw APIClientError.operationFailed("后台服务没有确认更新请求。")
-            }
-            updateAccepted = true
-            if let migrationPlan {
-                try await daemonUpdateInstaller.completeLaunchAgentMigration(
-                    migrationPlan,
-                    previousPID: lifecycle.service.pid
-                )
-            }
-            guard let replacement = try await waitForDaemonReplacement(
-                previousInstanceId: lifecycle.service.instanceId,
-                expectedBuild: candidate.build,
-                expectedExecutable: candidate.executableURL.path
-            ) else {
-                throw APIClientError.operationFailed(
-                    "新版后台服务未能在预期时间内恢复，请检查启动配置。"
-                )
-            }
-            self.lifecycle = try await reclaimLifecycle(replacement)
-            markDaemonReachable()
-            availableDaemonUpdate = nil
-            daemonUpdateCompatibility = nil
-            preparedDaemonUpdate = nil
-            daemonUpdateOperation = .completed(
-                version: candidate.version,
-                build: candidate.build
-            )
-            actionFeedback = ActionFeedback(message: "后台服务已更新至 \(candidate.version)")
-        } catch {
-            if let migrationPlan {
-                if updateAccepted {
-                    await daemonUpdateInstaller.recoverLaunchAgentMigration(
-                        migrationPlan,
-                        previousPID: lifecycle.service.pid
-                    )
-                } else {
-                    await daemonUpdateInstaller.cancelLaunchAgentMigration(migrationPlan)
-                }
-            }
-            actionFeedback = nil
-            let message = userFacingMessage(for: error)
-            daemonUpdateOperation = .failed(message)
-            managementOperationError = message
         }
     }
 
@@ -2948,7 +2939,7 @@ final class AppModel: ObservableObject {
         guard status == .available else { return nil }
         return ManageDashboard(
             service: ManageDashboard.Service(
-                service: "threadrelay",
+                service: "mochiport",
                 apiMajor: 1,
                 ready: true,
                 instanceId: "preview-instance",
@@ -2979,7 +2970,7 @@ final class AppModel: ObservableObject {
         guard status == .available else { return nil }
         return ManageLifecycle(
             service: .init(
-                service: "threadrelay",
+                service: "mochiport",
                 apiMajor: 1,
                 ready: true,
                 instanceId: "preview-instance",
@@ -3079,7 +3070,6 @@ final class AppModel: ObservableObject {
     private func fixtureDashboardState(for status: ServiceStatus) -> DashboardState {
         switch status {
         case .available: .loaded
-        case .bridgeAvailable: .legacy
         case .unavailable: .offline
         case .checking: .loading
         }
@@ -3096,11 +3086,9 @@ final class AppModel: ObservableObject {
         if let apiError = error as? APIClientError {
             return apiError.localizedDescription
         }
-        if error is DaemonUpdateInstallerError,
-           let localized = error as? any LocalizedError,
-           let description = localized.errorDescription,
-           !description.isEmpty
-        {
+        if let localizedError = error as? LocalizedError,
+           let description = localizedError.errorDescription,
+           !description.isEmpty {
             return description
         }
         return "本地服务不可用。"
@@ -3118,7 +3106,6 @@ enum DashboardState: Equatable {
     case refreshing
     case starting
     case loaded
-    case legacy
     case unauthorized
     case unavailable
     case offline
@@ -3137,7 +3124,6 @@ enum DashboardState: Equatable {
         case .refreshing: "正在刷新"
         case .starting: "正在启动"
         case .loaded: "已加载"
-        case .legacy: "兼容模式"
         case .unauthorized: "需要授权"
         case .unavailable: "不可用"
         case .offline: "离线"
@@ -3157,14 +3143,12 @@ enum MessagingAccountsAvailability: Equatable {
 enum ServiceStatus: Equatable {
     case checking
     case available
-    case bridgeAvailable
     case unavailable(String)
 
     var title: String {
         switch self {
         case .checking: "检查中"
         case .available: "运行正常"
-        case .bridgeAvailable: "兼容服务"
         case .unavailable: "不可用"
         }
     }
@@ -3173,7 +3157,6 @@ enum ServiceStatus: Equatable {
         switch self {
         case .checking: "正在连接本地服务"
         case .available: "本地服务已就绪"
-        case .bridgeAvailable: "请更新服务以启用版本化管理 API"
         case let .unavailable(message): message
         }
     }
@@ -3182,7 +3165,6 @@ enum ServiceStatus: Equatable {
         switch self {
         case .checking: "arrow.2.circlepath"
         case .available: "checkmark.circle.fill"
-        case .bridgeAvailable: "arrow.triangle.2.circlepath.circle.fill"
         case .unavailable: "exclamationmark.triangle.fill"
         }
     }
@@ -3191,7 +3173,6 @@ enum ServiceStatus: Equatable {
         switch self {
         case .checking: .secondary
         case .available: .positive
-        case .bridgeAvailable: .caution
         case .unavailable: .negative
         }
     }

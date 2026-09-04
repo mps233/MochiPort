@@ -209,7 +209,6 @@ struct ConnectionTopologyView: View {
 
     private var unavailableDetail: String {
         switch model.dashboardState {
-        case .legacy: "需要更新"
         case .unauthorized: "需要授权"
         case .unavailable, .offline: "不可用"
         case .stale: "上次状态"

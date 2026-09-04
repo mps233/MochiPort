@@ -20,7 +20,6 @@ struct SettingsView: View {
     @State private var releaseNotes = ""
     @State private var latestReleaseURL: URL?
     @State private var confirmsRestart = false
-    @State private var daemonUpdateConfirmation: DaemonUpdateConfirmation?
     @State private var daemonTakeoverConfirmation: DaemonManagementConfirmation?
     @State private var credentialRotationConfirmation: DaemonManagementConfirmation?
 
@@ -58,31 +57,6 @@ struct SettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("MochiPort 会先确认没有进行中的受保护任务，再请求后台服务安全重启。")
-        }
-        .confirmationDialog(
-            "更新后台服务？",
-            isPresented: Binding(
-                get: { daemonUpdateConfirmation != nil },
-                set: { if !$0 { daemonUpdateConfirmation = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("更新后台服务", role: .destructive) {
-                guard let confirmation = daemonUpdateConfirmation else { return }
-                daemonUpdateConfirmation = nil
-                Task { await model.activateDaemonUpdate(confirming: confirmation) }
-            }
-            Button("取消", role: .cancel) {}
-        } message: {
-            if let confirmation = daemonUpdateConfirmation {
-                Text(
-                    "将后台服务更新至 \(confirmation.candidate.version)（构建 \(confirmation.candidate.build)）。"
-                        + " MochiPort 会先等待受保护任务完成，再切换版本并安全退出后台服务。"
-                        + (confirmation.protectedWorkItemCount == 0
-                            ? " 当前没有受保护任务。"
-                            : " 当前有 \(confirmation.protectedWorkItemCount) 项受保护任务。")
-                )
-            }
         }
         .confirmationDialog(
             "接管后台服务？",
@@ -359,12 +333,7 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                UnifiedUpdateEntry(
-                    context: .settings,
-                    onConfirmDaemon: {
-                        daemonUpdateConfirmation = model.daemonUpdateConfirmation
-                    }
-                )
+                UnifiedUpdateEntry(context: .settings)
 
                 DisclosureGroup("组件版本详情") {
                     componentVersionRow(
@@ -377,25 +346,6 @@ struct SettingsView: View {
                         current: daemonCurrentVersion,
                         update: daemonUpdateText
                     )
-                    if let compatibility = model.daemonUpdateCompatibilityDescription {
-                        Label(
-                            compatibility,
-                            systemImage: model.daemonUpdateCompatibility == .compatible
-                                ? "checkmark.circle"
-                                : "exclamationmark.triangle"
-                        )
-                        .font(.caption)
-                        .foregroundStyle(
-                            model.daemonUpdateCompatibility == .compatible
-                                ? Color.secondary
-                                : Color.orange
-                        )
-                    }
-                    if case let .failed(message) = model.daemonUpdateOperation {
-                        Label(message, systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                    }
                 }
                 if !releaseNotes.isEmpty {
                     DisclosureGroup("发布说明") {
@@ -418,7 +368,7 @@ struct SettingsView: View {
                         openURL(url)
                     }
                 }
-                Text("MochiPort 会统一展示更新；界面和后台服务仍独立发布。后台服务只有在你明确确认后，才会在受保护任务排空后切换版本。")
+                Text("MochiPort 会统一展示更新；安装新版界面后，内置后台服务会在启动时检查租约和受保护任务，再自动安全切换。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

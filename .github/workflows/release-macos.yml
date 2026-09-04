@@ -262,9 +262,6 @@ jobs:
             "$DAEMON"
           ditto "$DAEMON" "$APP/Contents/Helpers/mochiport-daemon"
           codesign --force --timestamp --options runtime \
-            --sign "$APPLE_CODESIGN_IDENTITY" \
-            "$APP/Contents/Helpers/mochiport-gui-supervisor"
-          codesign --force --timestamp --options runtime \
             --entitlements "$ENTITLEMENTS" \
             --sign "$APPLE_CODESIGN_IDENTITY" \
             "$APP"

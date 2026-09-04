@@ -323,7 +323,7 @@ private struct CodexStatusFormRow: View {
         status.providerMode == nil || status.providerMode == "unknown"
     }
     private var gatewayUnavailable: Bool {
-        status.providerMode == "threadrelay" && gatewayEnabled == false
+        (status.providerMode == "mochiport" || status.providerMode == "threadrelay") && gatewayEnabled == false
     }
     private var remoteControlReady: Bool {
         return !status.remoteControlSupported || status.remoteControlConfigured
@@ -399,7 +399,7 @@ private struct CodexRequestPathRow: View {
     @State private var togglePending = false
 
     private var isDirectApi: Bool { mode == "direct-api" }
-    private var isMochiPort: Bool { mode == "threadrelay" }
+    private var isMochiPort: Bool { mode == "mochiport" || mode == "threadrelay" }
     private var isKnownMode: Bool { isDirectApi || isMochiPort }
     private var gatewayReady: Bool {
         isMochiPort && gatewayEnabled != false

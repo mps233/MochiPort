@@ -3,46 +3,38 @@ import Darwin
 import Foundation
 
 enum MochiPortStorage {
-    static let homeEnvironmentKeys = ["MOCHIPORT_HOME", "THREADRELAY_HOME", "CODEXHUB_HOME"]
-    static let applicationSupportDirectoryNames = ["MochiPort", "ThreadRelay", "CodexHub"]
+    static func currentDirectory(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        applicationSupport: URL,
+        fileManager: FileManager = .default
+    ) -> URL? {
+        if let path = environment["MOCHIPORT_HOME"], !path.isEmpty {
+            return URL(fileURLWithPath: path, isDirectory: true)
+        }
+
+        let directory = applicationSupport.appendingPathComponent(
+            "MochiPort",
+            isDirectory: true
+        )
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(atPath: directory.path, isDirectory: &isDirectory),
+              isDirectory.boolValue
+        else {
+            return nil
+        }
+        return directory
+    }
 
     static func dataDirectory(
         environment: [String: String] = ProcessInfo.processInfo.environment,
         applicationSupport: URL,
         fileManager: FileManager = .default
     ) -> URL {
-        for key in homeEnvironmentKeys {
-            if let path = environment[key], !path.isEmpty {
-                return URL(fileURLWithPath: path, isDirectory: true)
-            }
-        }
-
-        let defaults = applicationSupportDirectoryNames.map {
-            applicationSupport.appendingPathComponent($0, isDirectory: true)
-        }
-        return defaults.first {
-            fileManager.fileExists(atPath: $0.appendingPathComponent("config.toml").path)
-        } ?? defaults[0]
-    }
-
-    static func candidateDirectories(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        applicationSupport: URL?
-    ) -> [URL] {
-        var candidates = homeEnvironmentKeys.compactMap { key -> URL? in
-            guard let path = environment[key], !path.isEmpty else { return nil }
-            return URL(fileURLWithPath: path, isDirectory: true)
-        }
-        if let applicationSupport {
-            candidates.append(contentsOf: applicationSupportDirectoryNames.map {
-                applicationSupport.appendingPathComponent($0, isDirectory: true)
-            })
-        }
-
-        var seen = Set<String>()
-        return candidates.filter {
-            seen.insert($0.standardizedFileURL.path).inserted
-        }
+        currentDirectory(
+            environment: environment,
+            applicationSupport: applicationSupport,
+            fileManager: fileManager
+        ) ?? applicationSupport.appendingPathComponent("MochiPort", isDirectory: true)
     }
 }
 
@@ -55,14 +47,17 @@ enum DaemonLaunchError: LocalizedError, Equatable {
     case runtimeStageFailed
     case runtimeNotExecutable
     case runtimeVersionMismatch(expected: String, actual: String?)
-    case guiExecutableMissing
-    case guiExecutableNotExecutable
-    case guiSupervisorMissing
-    case guiSupervisorNotExecutable
+    case runtimeContentsMismatch(buildIdentifier: String)
+    case currentRuntimeInvalid
     case launchAgentDirectoryUnavailable
     case launchAgentWriteFailed
     case loadedAgentMismatch(expected: String, actual: String?)
     case loadedAgentUntrusted(String?)
+    case upgradeUnavailable
+    case upgradePreparationStale(expected: String?, actual: String?)
+    case daemonStillRunning
+    case runtimeActivationFailed
+    case runtimeRollbackFailed
     case launchctlFailed(String)
 
     var errorDescription: String? {
@@ -83,14 +78,10 @@ enum DaemonLaunchError: LocalizedError, Equatable {
             return "准备好的后台服务不可执行。"
         case let .runtimeVersionMismatch(expected, actual):
             return "后台服务构建不匹配（应为 \(expected)，实际为 \(actual ?? "未知")）。"
-        case .guiExecutableMissing:
-            return "应用内未找到 MochiPort 界面程序。请重新安装 MochiPort。"
-        case .guiExecutableNotExecutable:
-            return "应用内的 MochiPort 界面程序不可执行。请重新安装 MochiPort。"
-        case .guiSupervisorMissing:
-            return "应用内未找到 MochiPort 自动恢复服务。请重新安装 MochiPort。"
-        case .guiSupervisorNotExecutable:
-            return "应用内的 MochiPort 自动恢复服务不可执行。请重新安装 MochiPort。"
+        case let .runtimeContentsMismatch(buildIdentifier):
+            return "后台服务构建 \(buildIdentifier) 的文件内容与应用内版本不一致。请使用新的构建号重新安装，应用不会覆盖正在使用的同构建运行版本。"
+        case .currentRuntimeInvalid:
+            return "现有后台服务运行版本无效。请在合适的时间手动修复或重新安装 MochiPort；应用不会自动替换它。"
         case .launchAgentDirectoryUnavailable:
             return "无法访问当前用户的后台服务目录。"
         case .launchAgentWriteFailed:
@@ -101,6 +92,18 @@ enum DaemonLaunchError: LocalizedError, Equatable {
         case let .loadedAgentUntrusted(actual):
             let detail = actual.map { "（\($0)）" } ?? ""
             return "当前后台进程无法确认为 MochiPort 管理的运行版本\(detail)，已取消操作。"
+        case .upgradeUnavailable:
+            return "当前后台服务不支持自动版本切换。"
+        case let .upgradePreparationStale(expected, actual):
+            let expectedDescription = expected ?? "未知"
+            let actualDescription = actual ?? "未知"
+            return "后台服务版本在切换前发生变化（准备时为 \(expectedDescription)，当前为 \(actualDescription)），已取消操作。"
+        case .daemonStillRunning:
+            return "后台服务仍在运行，必须先完成安全排空后才能切换版本。"
+        case .runtimeActivationFailed:
+            return "无法切换后台服务运行版本。"
+        case .runtimeRollbackFailed:
+            return "后台服务版本切换失败，且旧版本恢复失败，请立即检查后台服务状态。"
         case let .launchctlFailed(detail):
             return detail.isEmpty ? "无法启动后台服务。" : "无法启动后台服务：\(detail)"
         }
@@ -108,13 +111,12 @@ enum DaemonLaunchError: LocalizedError, Equatable {
 }
 
 struct DaemonLaunchConfiguration: Equatable {
-    static let label = "io.github.mps233.threadrelay.daemon"
+    static let label = "io.github.mps233.mochiport.daemon"
     fileprivate static let skipDesktopIntegrationEnvironments = [
         "MOCHIPORT_SKIP_DESKTOP_INTEGRATION",
-        "THREADRELAY_SKIP_DESKTOP_INTEGRATION",
     ]
 #if DEBUG
-    private static let testLabelPrefix = "io.github.mps233.threadrelay.tests."
+    private static let testLabelPrefix = "io.github.mps233.mochiport.tests."
 #endif
 
     let launchdLabel: String
@@ -248,10 +250,7 @@ struct DaemonLaunchConfiguration: Equatable {
         let helpers = bundleURL
             .appendingPathComponent("Contents", isDirectory: true)
             .appendingPathComponent("Helpers", isDirectory: true)
-        let mochiPortHelper = helpers.appendingPathComponent("mochiport-daemon")
-        let embeddedHelper = fileManager.fileExists(atPath: mochiPortHelper.path)
-            ? mochiPortHelper
-            : helpers.appendingPathComponent("threadrelay-daemon")
+        let embeddedHelper = helpers.appendingPathComponent("mochiport-daemon")
 
         return Self(
             helperURL: embeddedHelper,
@@ -279,17 +278,40 @@ struct DaemonLaunchConfiguration: Equatable {
     func resolvedBuildIdentifier() throws -> String {
         guard let buildIdentifier else { return "dev" }
         let trimmed = buildIdentifier.trimmingCharacters(in: .whitespacesAndNewlines)
-        let allowed = CharacterSet(
-            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
-        )
-        guard !trimmed.isEmpty,
-              trimmed != ".",
-              trimmed != "..",
-              trimmed.rangeOfCharacter(from: allowed.inverted) == nil
+        guard Self.isSafeRuntimeBuildIdentifier(trimmed)
         else {
             throw DaemonLaunchError.runtimeBuildIdentifierInvalid(buildIdentifier)
         }
         return trimmed
+    }
+
+    func activeRuntimeBuildIdentifier(fileManager: FileManager = .default) throws -> String {
+        let active = configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+            .appendingPathComponent("current", isDirectory: true)
+        var info = stat()
+        guard Darwin.lstat(active.path, &info) == 0,
+              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK)
+        else {
+            throw DaemonLaunchError.currentRuntimeInvalid
+        }
+        guard let target = try? fileManager.destinationOfSymbolicLink(atPath: active.path),
+              Self.isSafeRuntimeBuildIdentifier(target)
+        else {
+            throw DaemonLaunchError.currentRuntimeInvalid
+        }
+        return target
+    }
+
+    static func isSafeRuntimeBuildIdentifier(_ value: String) -> Bool {
+        let allowed = CharacterSet(
+            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        )
+        return !value.isEmpty
+            && value != "."
+            && value != ".."
+            && value.rangeOfCharacter(from: allowed.inverted) == nil
     }
 
     func stagedHelperURL() throws -> URL {
@@ -310,15 +332,13 @@ struct DaemonLaunchConfiguration: Equatable {
     }
 
     func propertyListData() throws -> Data {
-        let resolvedBuildIdentifier = try resolvedBuildIdentifier()
+        let activeBuildIdentifier = try activeRuntimeBuildIdentifier()
         let activeHelperURL = activeHelperURL()
         var environment: [String: String] = [
             "HOME": homeURL.path,
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "MOCHIPORT_HOME": configURL.deletingLastPathComponent().path,
-            "THREADRELAY_HOME": configURL.deletingLastPathComponent().path,
-            "MOCHIPORT_BUNDLE_BUILD": resolvedBuildIdentifier,
-            "THREADRELAY_BUNDLE_BUILD": resolvedBuildIdentifier,
+            "MOCHIPORT_BUNDLE_BUILD": activeBuildIdentifier,
         ]
         if let value = desktopIntegrationEnvironmentValue {
             for key in Self.skipDesktopIntegrationEnvironments {
@@ -349,86 +369,64 @@ struct DaemonLaunchConfiguration: Equatable {
     }
 }
 
-struct GUIRecoveryConfiguration: Equatable {
-    static let label = "io.github.mps233.threadrelay.gui"
-
-    let executableURL: URL
-    let supervisorURL: URL
-    let launchAgentURL: URL
-    let logURL: URL
-    let homeURL: URL
-    let dataDirectoryURL: URL
-    let buildIdentifier: String?
-
-    static func current(
-        bundleURL: URL = Bundle.main.bundleURL,
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        fileManager: FileManager = .default
-    ) throws -> Self {
-        let daemon = try DaemonLaunchConfiguration.current(
-            bundleURL: bundleURL,
-            environment: environment,
-            fileManager: fileManager
-        )
-        let contents = bundleURL.appendingPathComponent("Contents", isDirectory: true)
-        let helpers = contents.appendingPathComponent("Helpers", isDirectory: true)
-        let mochiPortSupervisor = helpers.appendingPathComponent("mochiport-gui-supervisor")
-        let supervisor = fileManager.fileExists(atPath: mochiPortSupervisor.path)
-            ? mochiPortSupervisor
-            : helpers.appendingPathComponent("threadrelay-gui-supervisor")
-        return Self(
-            executableURL: contents.appendingPathComponent("MacOS/MochiPort"),
-            supervisorURL: supervisor,
-            launchAgentURL: daemon.launchAgentURL
-                .deletingLastPathComponent()
-                .appendingPathComponent("\(label).plist"),
-            logURL: daemon.logURL
-                .deletingLastPathComponent()
-                .appendingPathComponent("mochiport-gui-launchd.log"),
-            homeURL: daemon.homeURL,
-            dataDirectoryURL: daemon.configURL.deletingLastPathComponent(),
-            buildIdentifier: daemon.buildIdentifier
-        )
-    }
-
-    func propertyListData() throws -> Data {
-        var environment: [String: String] = [
-            "HOME": homeURL.path,
-            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-            "MOCHIPORT_HOME": dataDirectoryURL.path,
-            "THREADRELAY_HOME": dataDirectoryURL.path,
-        ]
-        if let buildIdentifier {
-            environment["MOCHIPORT_BUNDLE_BUILD"] = buildIdentifier
-            environment["THREADRELAY_BUNDLE_BUILD"] = buildIdentifier
-        }
-        let propertyList: [String: Any] = [
-            "Label": Self.label,
-            "ProgramArguments": [supervisorURL.path],
-            "EnvironmentVariables": environment,
-            "RunAtLoad": true,
-            "KeepAlive": ["SuccessfulExit": false],
-            "ProcessType": "Interactive",
-            "ThrottleInterval": 5,
-            "StandardOutPath": logURL.path,
-            "StandardErrorPath": logURL.path,
-        ]
-        return try PropertyListSerialization.data(
-            fromPropertyList: propertyList,
-            format: .xml,
-            options: 0
-        )
-    }
-}
-
 struct CommandResult: Equatable {
     let exitCode: Int32
     let output: String
 }
 
+enum DaemonLaunchOutcome: Equatable, Sendable {
+    /// A verified LaunchAgent already owns a running daemon.  Callers must
+    /// wait for its health endpoint rather than interrupting it.
+    case alreadyRunning
+    /// No LaunchAgent was registered, so the current helper was installed and
+    /// handed to launchd for the first time.
+    case bootstrapped
+    /// A verified LaunchAgent was registered but had no running daemon.  This
+    /// uses launchctl kickstart without -k and never replaces its runtime.
+    case resumedStoppedService
+}
+
+/// A staged daemon helper that is ready to become the launchd runtime after
+/// the caller has completed its own lifecycle drain. Staging never changes
+/// the active `current` symlink or the loaded LaunchAgent.
+struct DaemonUpgradePreparation: Equatable, Sendable {
+    let targetBuildIdentifier: String
+    let previousBuildIdentifier: String?
+    let previousLaunchAgentData: Data?
+
+    init(
+        targetBuildIdentifier: String,
+        previousBuildIdentifier: String?,
+        previousLaunchAgentData: Data? = nil
+    ) {
+        self.targetBuildIdentifier = targetBuildIdentifier
+        self.previousBuildIdentifier = previousBuildIdentifier
+        self.previousLaunchAgentData = previousLaunchAgentData
+    }
+
+    var requiresActivation: Bool {
+        previousBuildIdentifier != targetBuildIdentifier
+    }
+}
+
+enum DaemonUpgradeOutcome: Equatable, Sendable {
+    case alreadyCurrent(buildIdentifier: String)
+    case activated(previousBuildIdentifier: String?, buildIdentifier: String)
+}
+
+/// Stable name for the coordinated GUI/daemon handoff API. Keep the original
+/// preparation spelling as a source-compatible alias for existing callers.
+typealias DaemonRuntimeUpgradePlan = DaemonUpgradePreparation
+
 protocol DaemonLaunching: Sendable {
-    func startIfNeeded() async throws
+    func startIfNeeded() async throws -> DaemonLaunchOutcome
     func verifiedDaemonIdentity(for lifecycle: ManageLifecycle) async throws -> ManageDaemonIdentity
+    func prepareDaemonUpgradeIfNeeded() async throws -> DaemonUpgradePreparation
+    func activateDaemonUpgrade(_ preparation: DaemonUpgradePreparation) async throws -> DaemonUpgradeOutcome
+    func rollbackDaemonUpgrade(_ preparation: DaemonUpgradePreparation) async throws
+    func prepareRuntimeUpgrade() async throws -> DaemonRuntimeUpgradePlan
+    func activateRuntimeUpgrade(_ plan: DaemonRuntimeUpgradePlan) async throws -> DaemonUpgradeOutcome
+    func rollbackRuntimeUpgrade(_ plan: DaemonRuntimeUpgradePlan) async throws
 }
 
 extension DaemonLaunching {
@@ -440,6 +438,37 @@ extension DaemonLaunching {
             executableSha256: lifecycle.executableSha256 ?? "",
             bind: lifecycle.bind
         )
+    }
+
+    func prepareDaemonUpgradeIfNeeded() async throws -> DaemonUpgradePreparation {
+        throw DaemonLaunchError.upgradeUnavailable
+    }
+
+    func activateDaemonUpgrade(
+        _ preparation: DaemonUpgradePreparation
+    ) async throws -> DaemonUpgradeOutcome {
+        throw DaemonLaunchError.upgradeUnavailable
+    }
+
+    func rollbackDaemonUpgrade(
+        _ preparation: DaemonUpgradePreparation
+    ) async throws {
+        _ = preparation
+        throw DaemonLaunchError.upgradeUnavailable
+    }
+
+    func prepareRuntimeUpgrade() async throws -> DaemonRuntimeUpgradePlan {
+        try await prepareDaemonUpgradeIfNeeded()
+    }
+
+    func activateRuntimeUpgrade(
+        _ plan: DaemonRuntimeUpgradePlan
+    ) async throws -> DaemonUpgradeOutcome {
+        try await activateDaemonUpgrade(plan)
+    }
+
+    func rollbackRuntimeUpgrade(_ plan: DaemonRuntimeUpgradePlan) async throws {
+        try await rollbackDaemonUpgrade(plan)
     }
 }
 
@@ -462,16 +491,93 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         self.activeDaemonLocatorLoader = activeDaemonLocatorLoader
     }
 
-    func startIfNeeded() async throws {
+    func startIfNeeded() async throws -> DaemonLaunchOutcome {
         let configurationLoader = configurationLoader
         let commandRunner = commandRunner
-        try await Task.detached(priority: .userInitiated) {
+        return try await Task.detached(priority: .userInitiated) {
             let configuration = try configurationLoader()
-            try Self.installAndStart(
+            return try Self.installAndStart(
                 configuration: configuration,
                 commandRunner: commandRunner
             )
         }.value
+    }
+
+    /// Stage the helper embedded in the current GUI bundle without changing
+    /// the active runtime or the loaded LaunchAgent. Callers should perform
+    /// the daemon's lifecycle drain before invoking activation.
+    func prepareDaemonUpgradeIfNeeded() async throws -> DaemonUpgradePreparation {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        return try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            return try Self.prepareDaemonUpgrade(
+                configuration: configuration,
+                fileManager: .default,
+                commandRunner: commandRunner
+            )
+        }.value
+    }
+
+    /// Atomically publish a previously staged helper and reload its LaunchAgent.
+    /// Callers must have received an accepted lifecycle drain first. The
+    /// reload uses bootout/bootstrap so launchd picks up the new plist and
+    /// never relies on kickstart -k.
+    func activateDaemonUpgrade(
+        _ preparation: DaemonUpgradePreparation
+    ) async throws -> DaemonUpgradeOutcome {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        return try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            return try Self.activateDaemonUpgrade(
+                preparation,
+                configuration: configuration,
+                fileManager: .default,
+                commandRunner: commandRunner
+            )
+        }.value
+    }
+
+    func rollbackDaemonUpgrade(
+        _ preparation: DaemonUpgradePreparation
+    ) async throws {
+        let configurationLoader = configurationLoader
+        let commandRunner = commandRunner
+        try await Task.detached(priority: .userInitiated) {
+            let configuration = try configurationLoader()
+            try Self.rollbackDaemonUpgrade(
+                preparation,
+                configuration: configuration,
+                fileManager: .default,
+                commandRunner: commandRunner
+            )
+        }.value
+    }
+
+    func prepareRuntimeUpgrade() async throws -> DaemonRuntimeUpgradePlan {
+        try await prepareDaemonUpgradeIfNeeded()
+    }
+
+    func activateRuntimeUpgrade(
+        _ plan: DaemonRuntimeUpgradePlan
+    ) async throws -> DaemonUpgradeOutcome {
+        try await activateDaemonUpgrade(plan)
+    }
+
+    func rollbackRuntimeUpgrade(_ plan: DaemonRuntimeUpgradePlan) async throws {
+        try await rollbackDaemonUpgrade(plan)
+    }
+
+    /// Convenience for callers that have already completed the daemon drain.
+    /// The two-step methods remain available when a caller needs to stage while
+    /// the old process is still serving work.
+    func upgradeDaemonIfNeeded() async throws -> DaemonUpgradeOutcome {
+        let preparation = try await prepareDaemonUpgradeIfNeeded()
+        guard preparation.requiresActivation else {
+            return .alreadyCurrent(buildIdentifier: preparation.targetBuildIdentifier)
+        }
+        return try await activateDaemonUpgrade(preparation)
     }
 
     func verifiedDaemonIdentity(for lifecycle: ManageLifecycle) async throws -> ManageDaemonIdentity {
@@ -492,6 +598,586 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         }.value
     }
 
+    private static func prepareDaemonUpgrade(
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws -> DaemonUpgradePreparation {
+        let embeddedBuild = try configuration.resolvedBuildIdentifier()
+        let previousBuild = try currentRuntimeBuildIdentifierOrNil(
+            configuration: configuration,
+            fileManager: fileManager
+        )
+        // A runtime installed by a newer daemon-only package is authoritative;
+        // opening an older GUI must never silently downgrade it. Unknown or
+        // non-numeric identifiers are preserved fail-closed for the same
+        // reason: a lexical comparison could accidentally select a downgrade.
+        if let previousBuild,
+           previousBuild != embeddedBuild,
+           (!isNumericBuild(previousBuild)
+               || !isNumericBuild(embeddedBuild)
+               || Int(previousBuild)! > Int(embeddedBuild)!)
+        {
+            return DaemonUpgradePreparation(
+                targetBuildIdentifier: previousBuild,
+                previousBuildIdentifier: previousBuild
+            )
+        }
+
+        // A successful rollback needs a runnable old runtime. Verify it
+        // before staging or asking the serving daemon to drain.
+        if let previousBuild {
+            try validateRuntimeBuild(
+                at: configuration.activeHelperURL(),
+                expectedBuild: previousBuild,
+                fileManager: fileManager,
+                commandRunner: commandRunner
+            )
+        }
+
+        try stageEmbeddedRuntime(
+            configuration: configuration,
+            expectedBuild: embeddedBuild,
+            fileManager: fileManager,
+            commandRunner: commandRunner
+        )
+
+        let previousLaunchAgentData: Data?
+        if fileManager.fileExists(atPath: configuration.launchAgentURL.path) {
+            do {
+                previousLaunchAgentData = try Data(contentsOf: configuration.launchAgentURL)
+            } catch {
+                throw DaemonLaunchError.launchAgentWriteFailed
+            }
+        } else {
+            previousLaunchAgentData = nil
+        }
+
+        return DaemonUpgradePreparation(
+            targetBuildIdentifier: embeddedBuild,
+            previousBuildIdentifier: previousBuild,
+            previousLaunchAgentData: previousLaunchAgentData
+        )
+    }
+
+    private static func activateDaemonUpgrade(
+        _ preparation: DaemonUpgradePreparation,
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws -> DaemonUpgradeOutcome {
+        let targetBuild = try configuration.resolvedBuildIdentifier()
+        guard targetBuild == preparation.targetBuildIdentifier else {
+            throw DaemonLaunchError.upgradePreparationStale(
+                expected: preparation.targetBuildIdentifier,
+                actual: targetBuild
+            )
+        }
+
+        let currentBuild = try currentRuntimeBuildIdentifierOrNil(
+            configuration: configuration,
+            fileManager: fileManager
+        )
+        guard currentBuild == preparation.previousBuildIdentifier else {
+            throw DaemonLaunchError.upgradePreparationStale(
+                expected: preparation.previousBuildIdentifier,
+                actual: currentBuild
+            )
+        }
+        guard preparation.requiresActivation else {
+            return .alreadyCurrent(buildIdentifier: preparation.targetBuildIdentifier)
+        }
+
+        try validateRuntimeBuild(
+            at: configuration.configURL
+                .deletingLastPathComponent()
+                .appendingPathComponent("runtimes", isDirectory: true)
+                .appendingPathComponent(preparation.targetBuildIdentifier, isDirectory: true)
+                .appendingPathComponent(configuration.helperURL.lastPathComponent),
+            expectedBuild: preparation.targetBuildIdentifier,
+            fileManager: fileManager,
+            commandRunner: commandRunner
+        )
+
+        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+        let printResult = try commandRunner(
+            launchctl,
+            ["print", configuration.launchdServiceTarget]
+        )
+        let serviceLoaded: Bool
+        if printResult.exitCode == 0 {
+            guard loadedAgentMatches(output: printResult.output, configuration: configuration) else {
+                throw DaemonLaunchError.loadedAgentMismatch(
+                    expected: configuration.activeHelperURL().path,
+                    actual: loadedProgram(from: printResult.output)
+                )
+            }
+            switch launchdServiceState(from: printResult.output) {
+            case .running:
+                // The caller has already received an accepted drain response.
+                // Keep the job loaded and let bootout stop the draining process
+                // before bootstrap starts the staged runtime.
+                serviceLoaded = true
+            case .stopped:
+                serviceLoaded = true
+            case .unknown:
+                throw DaemonLaunchError.launchctlFailed("无法确认已登记后台服务的运行状态。")
+            }
+        } else {
+            guard explicitlyReportsMissingService(
+                printResult,
+                serviceTarget: configuration.launchdServiceTarget
+            ) else {
+                throw DaemonLaunchError.launchctlFailed(lastLine(of: printResult.output))
+            }
+            serviceLoaded = false
+        }
+
+        let previousLaunchAgentData = preparation.previousLaunchAgentData
+        var activeRuntimePublished = false
+        var serviceBootoutAttempted = false
+        var serviceBootstrapAttempted = false
+        do {
+            try replaceActiveRuntime(
+                configuration: configuration,
+                buildIdentifier: preparation.targetBuildIdentifier,
+                fileManager: fileManager
+            )
+            activeRuntimePublished = true
+
+            try writeLaunchAgent(configuration, fileManager: fileManager)
+
+            if serviceLoaded {
+                serviceBootoutAttempted = true
+                let bootout = try commandRunner(
+                    launchctl,
+                    ["bootout", configuration.launchdServiceTarget]
+                )
+                guard bootout.exitCode == 0 else {
+                    throw DaemonLaunchError.launchctlFailed(lastLine(of: bootout.output))
+                }
+            }
+
+            serviceBootstrapAttempted = true
+            let bootstrap = try commandRunner(
+                launchctl,
+                ["bootstrap", "gui/\(getuid())", configuration.launchAgentURL.path]
+            )
+            guard bootstrap.exitCode == 0 else {
+                throw DaemonLaunchError.launchctlFailed(lastLine(of: bootstrap.output))
+            }
+
+            return .activated(
+                previousBuildIdentifier: preparation.previousBuildIdentifier,
+                buildIdentifier: preparation.targetBuildIdentifier
+            )
+        } catch {
+            let originalError = (error as? DaemonLaunchError)
+                ?? DaemonLaunchError.runtimeActivationFailed
+            do {
+                if activeRuntimePublished {
+                    try replaceActiveRuntime(
+                        configuration: configuration,
+                        buildIdentifier: preparation.previousBuildIdentifier,
+                        fileManager: fileManager
+                    )
+                }
+                try restoreLaunchAgent(
+                    at: configuration.launchAgentURL,
+                    data: previousLaunchAgentData,
+                    fileManager: fileManager
+                )
+
+                if serviceBootoutAttempted || serviceBootstrapAttempted {
+                    // A failed bootout/bootstrap can still have changed the
+                    // job. Inspect launchd after restoring the old runtime
+                    // and plist, then either preserve the verified old job
+                    // or replace the partial new one.
+                    try restoreLaunchdServiceIfNeeded(
+                        configuration: configuration,
+                        launchctl: launchctl,
+                        commandRunner: commandRunner
+                    )
+                }
+            } catch {
+                throw DaemonLaunchError.runtimeRollbackFailed
+            }
+            throw originalError
+        }
+    }
+
+    private static func rollbackDaemonUpgrade(
+        _ preparation: DaemonUpgradePreparation,
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        guard preparation.previousBuildIdentifier != nil else {
+            throw DaemonLaunchError.runtimeRollbackFailed
+        }
+        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
+        let target = configuration.launchdServiceTarget
+        let printResult = try commandRunner(launchctl, ["print", target])
+        if printResult.exitCode == 0 {
+            let bootout = try commandRunner(launchctl, ["bootout", target])
+            guard bootout.exitCode == 0 else {
+                // launchctl may report failure after it has already removed
+                // the job. Only continue when a second observation confirms
+                // that no job remains to run the new runtime.
+                let afterBootout = try commandRunner(launchctl, ["print", target])
+                guard afterBootout.exitCode != 0,
+                      explicitlyReportsMissingService(
+                          afterBootout,
+                          serviceTarget: target
+                      )
+                else {
+                    throw DaemonLaunchError.runtimeRollbackFailed
+                }
+                // The partial bootout did remove the new job, so it is safe
+                // to publish and bootstrap the verified old runtime below.
+                return try restoreDaemonUpgradeAfterBootout(
+                    preparation,
+                    configuration: configuration,
+                    fileManager: fileManager,
+                    launchctl: launchctl,
+                    commandRunner: commandRunner
+                )
+            }
+        } else {
+            guard explicitlyReportsMissingService(printResult, serviceTarget: target) else {
+                throw DaemonLaunchError.runtimeRollbackFailed
+            }
+        }
+        try restoreDaemonUpgradeAfterBootout(
+            preparation,
+            configuration: configuration,
+            fileManager: fileManager,
+            launchctl: launchctl,
+            commandRunner: commandRunner
+        )
+    }
+
+    private static func restoreDaemonUpgradeAfterBootout(
+        _ preparation: DaemonUpgradePreparation,
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager,
+        launchctl: URL,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        guard let previousBuild = preparation.previousBuildIdentifier else {
+            throw DaemonLaunchError.runtimeRollbackFailed
+        }
+        try replaceActiveRuntime(
+            configuration: configuration,
+            buildIdentifier: previousBuild,
+            fileManager: fileManager
+        )
+        try restoreLaunchAgent(
+            at: configuration.launchAgentURL,
+            data: preparation.previousLaunchAgentData,
+            fileManager: fileManager
+        )
+        guard preparation.previousLaunchAgentData != nil else { return }
+        try bootstrapRestoredLaunchAgent(
+            configuration: configuration,
+            launchctl: launchctl,
+            commandRunner: commandRunner
+        )
+    }
+
+    private static func bootstrapRestoredLaunchAgent(
+        configuration: DaemonLaunchConfiguration,
+        launchctl: URL,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        let bootstrap = try commandRunner(
+            launchctl,
+            ["bootstrap", "gui/\(getuid())", configuration.launchAgentURL.path]
+        )
+        guard bootstrap.exitCode == 0 else {
+            throw DaemonLaunchError.runtimeRollbackFailed
+        }
+    }
+
+    private static func restoreLaunchdServiceIfNeeded(
+        configuration: DaemonLaunchConfiguration,
+        launchctl: URL,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        let printResult = try commandRunner(
+            launchctl,
+            ["print", configuration.launchdServiceTarget]
+        )
+        if printResult.exitCode == 0 {
+            if !loadedAgentMatches(output: printResult.output, configuration: configuration) {
+                let bootout = try commandRunner(
+                    launchctl,
+                    ["bootout", configuration.launchdServiceTarget]
+                )
+                guard bootout.exitCode == 0 else {
+                    throw DaemonLaunchError.runtimeRollbackFailed
+                }
+                try bootstrapRestoredLaunchAgent(
+                    configuration: configuration,
+                    launchctl: launchctl,
+                    commandRunner: commandRunner
+                )
+            }
+            return
+        }
+        guard explicitlyReportsMissingService(
+            printResult,
+            serviceTarget: configuration.launchdServiceTarget
+        ) else {
+            throw DaemonLaunchError.runtimeRollbackFailed
+        }
+        try bootstrapRestoredLaunchAgent(
+            configuration: configuration,
+            launchctl: launchctl,
+            commandRunner: commandRunner
+        )
+    }
+
+    private static func stageEmbeddedRuntime(
+        configuration: DaemonLaunchConfiguration,
+        expectedBuild: String,
+        fileManager: FileManager,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        var isDirectory: ObjCBool = false
+        guard fileManager.fileExists(
+            atPath: configuration.helperURL.path,
+            isDirectory: &isDirectory
+        ), !isDirectory.boolValue else {
+            throw DaemonLaunchError.helperMissing
+        }
+        guard fileManager.isExecutableFile(atPath: configuration.helperURL.path) else {
+            throw DaemonLaunchError.helperNotExecutable
+        }
+
+        let destination = configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+            .appendingPathComponent(expectedBuild, isDirectory: true)
+            .appendingPathComponent(configuration.helperURL.lastPathComponent)
+        let runtimeDirectory = destination.deletingLastPathComponent()
+        do {
+            try fileManager.createDirectory(
+                at: runtimeDirectory,
+                withIntermediateDirectories: true
+            )
+        } catch {
+            throw DaemonLaunchError.runtimeDirectoryUnavailable
+        }
+
+        if fileManager.fileExists(atPath: destination.path) {
+            do {
+                try validateRuntimeBuild(
+                    at: destination,
+                    expectedBuild: expectedBuild,
+                    fileManager: fileManager,
+                    commandRunner: commandRunner
+                )
+                guard try helpersHaveMatchingContents(
+                    configuration.helperURL,
+                    destination
+                ) else {
+                    throw DaemonLaunchError.runtimeContentsMismatch(
+                        buildIdentifier: expectedBuild
+                    )
+                }
+                return
+            } catch let error as DaemonLaunchError {
+                throw error
+            } catch {
+                throw DaemonLaunchError.runtimeStageFailed
+            }
+        }
+
+        let temporary = runtimeDirectory.appendingPathComponent(
+            ".mochiport-daemon-upgrade.\(UUID().uuidString).tmp"
+        )
+        defer { try? fileManager.removeItem(at: temporary) }
+        do {
+            try fileManager.copyItem(at: configuration.helperURL, to: temporary)
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: temporary.path
+            )
+        } catch {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
+        try validateRuntimePermissions(at: temporary, fileManager: fileManager)
+        let versionResult: CommandResult
+        do {
+            versionResult = try commandRunner(temporary, ["--version"])
+        } catch {
+            throw DaemonLaunchError.runtimeVersionMismatch(
+                expected: expectedBuild,
+                actual: nil
+            )
+        }
+        let actualBuild = daemonBuildIdentifier(fromVersionOutput: versionResult.output)
+        guard versionResult.exitCode == 0, actualBuild == expectedBuild else {
+            throw DaemonLaunchError.runtimeVersionMismatch(
+                expected: expectedBuild,
+                actual: actualBuild
+            )
+        }
+        let renameResult = temporary.path.withCString { temporaryPath in
+            destination.path.withCString { destinationPath in
+                Darwin.rename(temporaryPath, destinationPath)
+            }
+        }
+        guard renameResult == 0 else {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
+        try validateRuntimePermissions(at: destination, fileManager: fileManager)
+    }
+
+    private static func validateRuntimeBuild(
+        at helperURL: URL,
+        expectedBuild: String,
+        fileManager: FileManager,
+        commandRunner: @Sendable (URL, [String]) throws -> CommandResult
+    ) throws {
+        do {
+            try validateRuntimePermissions(at: helperURL, fileManager: fileManager)
+        } catch {
+            throw DaemonLaunchError.currentRuntimeInvalid
+        }
+        let versionResult: CommandResult
+        do {
+            versionResult = try commandRunner(helperURL, ["--version"])
+        } catch {
+            throw DaemonLaunchError.currentRuntimeInvalid
+        }
+        let actualBuild = daemonBuildIdentifier(fromVersionOutput: versionResult.output)
+        guard versionResult.exitCode == 0, actualBuild == expectedBuild else {
+            throw DaemonLaunchError.currentRuntimeInvalid
+        }
+    }
+
+    private static func helpersHaveMatchingContents(
+        _ embeddedHelper: URL,
+        _ runtimeHelper: URL
+    ) throws -> Bool {
+        do {
+            let embedded = try Data(contentsOf: embeddedHelper, options: .mappedIfSafe)
+            let runtime = try Data(contentsOf: runtimeHelper, options: .mappedIfSafe)
+            return SHA256.hash(data: embedded) == SHA256.hash(data: runtime)
+        } catch {
+            throw DaemonLaunchError.runtimeStageFailed
+        }
+    }
+
+    private static func currentRuntimeBuildIdentifierOrNil(
+        configuration: DaemonLaunchConfiguration,
+        fileManager: FileManager
+    ) throws -> String? {
+        let active = configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+            .appendingPathComponent("current", isDirectory: true)
+        var info = stat()
+        guard Darwin.lstat(active.path, &info) == 0 else {
+            guard errno == ENOENT else { throw DaemonLaunchError.currentRuntimeInvalid }
+            return nil
+        }
+        guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK) else {
+            throw DaemonLaunchError.currentRuntimeInvalid
+        }
+        guard let target = try? fileManager.destinationOfSymbolicLink(atPath: active.path),
+              DaemonLaunchConfiguration.isSafeRuntimeBuildIdentifier(target)
+        else {
+            throw DaemonLaunchError.currentRuntimeInvalid
+        }
+        return target
+    }
+
+    private static func replaceActiveRuntime(
+        configuration: DaemonLaunchConfiguration,
+        buildIdentifier: String?,
+        fileManager: FileManager
+    ) throws {
+        let runtimes = configuration.configURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("runtimes", isDirectory: true)
+        let active = runtimes.appendingPathComponent("current", isDirectory: true)
+        do {
+            try fileManager.createDirectory(at: runtimes, withIntermediateDirectories: true)
+            if let buildIdentifier {
+                guard DaemonLaunchConfiguration.isSafeRuntimeBuildIdentifier(buildIdentifier) else {
+                    throw DaemonLaunchError.runtimeActivationFailed
+                }
+                let temporary = runtimes.appendingPathComponent(
+                    ".current-upgrade.\(UUID().uuidString)",
+                    isDirectory: true
+                )
+                defer { try? fileManager.removeItem(at: temporary) }
+                let linkResult = buildIdentifier.withCString { destinationPath in
+                    temporary.path.withCString { linkPath in
+                        Darwin.symlink(destinationPath, linkPath)
+                    }
+                }
+                guard linkResult == 0 else {
+                    throw DaemonLaunchError.runtimeActivationFailed
+                }
+                var info = stat()
+                if Darwin.lstat(active.path, &info) == 0,
+                   info.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK)
+                {
+                    throw DaemonLaunchError.runtimeActivationFailed
+                }
+                let renameResult = temporary.path.withCString { temporaryPath in
+                    active.path.withCString { activePath in
+                        Darwin.rename(temporaryPath, activePath)
+                    }
+                }
+                guard renameResult == 0 else {
+                    throw DaemonLaunchError.runtimeActivationFailed
+                }
+            } else {
+                var info = stat()
+                if Darwin.lstat(active.path, &info) == 0 {
+                    guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK) else {
+                        throw DaemonLaunchError.runtimeActivationFailed
+                    }
+                    try fileManager.removeItem(at: active)
+                } else {
+                    guard errno == ENOENT else {
+                        throw DaemonLaunchError.runtimeActivationFailed
+                    }
+                }
+            }
+        } catch let error as DaemonLaunchError {
+            throw error
+        } catch {
+            throw DaemonLaunchError.runtimeActivationFailed
+        }
+    }
+
+    private static func restoreLaunchAgent(
+        at url: URL,
+        data: Data?,
+        fileManager: FileManager
+    ) throws {
+        do {
+            if let data {
+                try data.write(to: url, options: .atomic)
+            } else if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
+        } catch {
+            throw DaemonLaunchError.runtimeRollbackFailed
+        }
+    }
+
+    private static func isNumericBuild(_ value: String) -> Bool {
+        guard let build = Int(value), build > 0 else { return false }
+        return String(build) == value
+    }
+
     private static func verifyDaemonIdentity(
         _ lifecycle: ManageLifecycle,
         configuration: DaemonLaunchConfiguration,
@@ -499,13 +1185,13 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         commandRunner: @Sendable (URL, [String]) throws -> CommandResult,
         fileManager: FileManager = .default
     ) throws -> ManageDaemonIdentity {
-        guard lifecycle.service.service == "threadrelay",
+        guard lifecycle.service.service == "mochiport",
               lifecycle.service.apiMajor == 1,
               let expectedPID = Int32(exactly: lifecycle.service.pid),
               expectedPID > 0,
               lifecycle.service.startedAtMs >= 0,
               pathsMatch(lifecycle.configPath, configuration.configURL.path),
-              locator.service == "threadrelay",
+              locator.service == "mochiport",
               locator.apiMajor == 1,
               locator.instanceId == lifecycle.service.instanceId,
               locator.pid == lifecycle.service.pid,
@@ -525,7 +1211,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             executableURL,
             configuration: configuration,
             fileManager: fileManager
-        ) else {
+        ), pathsMatch(lifecycle.executable, configuration.activeHelperURL().path) else {
             throw DaemonLaunchError.loadedAgentUntrusted(lifecycle.executable)
         }
 
@@ -575,15 +1261,59 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
     private static func installAndStart(
         configuration: DaemonLaunchConfiguration,
         commandRunner: @Sendable (URL, [String]) throws -> CommandResult
-    ) throws {
-        _ = try configuration.resolvedBuildIdentifier()
+    ) throws -> DaemonLaunchOutcome {
         let launchctl = URL(fileURLWithPath: "/bin/launchctl")
         let printResult = try commandRunner(
             launchctl,
             ["print", configuration.launchdServiceTarget]
         )
-        guard printResult.exitCode != 0 else {
-            return
+        if printResult.exitCode == 0 {
+            guard loadedAgentMatches(output: printResult.output, configuration: configuration) else {
+                throw DaemonLaunchError.loadedAgentMismatch(
+                    expected: configuration.activeHelperURL().path,
+                    actual: loadedProgram(from: printResult.output)
+                )
+            }
+
+            switch launchdServiceState(from: printResult.output) {
+            case .running:
+                // Health may still be converging, but a running daemon must
+                // never be restarted just because the GUI cannot reach it yet.
+                return .alreadyRunning
+            case .stopped:
+                guard loadedPID(from: printResult.output) == nil else {
+                    throw DaemonLaunchError.launchctlFailed("无法确认已登记后台服务的运行状态。")
+                }
+                guard let activeBuild = try currentRuntimeBuildIdentifierOrNil(
+                    configuration: configuration,
+                    fileManager: .default
+                ) else {
+                    throw DaemonLaunchError.currentRuntimeInvalid
+                }
+                try validateRuntimeBuild(
+                    at: configuration.activeHelperURL(),
+                    expectedBuild: activeBuild,
+                    fileManager: .default,
+                    commandRunner: commandRunner
+                )
+                let result = try commandRunner(
+                    launchctl,
+                    ["kickstart", configuration.launchdServiceTarget]
+                )
+                guard result.exitCode == 0 else {
+                    throw DaemonLaunchError.launchctlFailed(lastLine(of: result.output))
+                }
+                return .resumedStoppedService
+            case .unknown:
+                throw DaemonLaunchError.launchctlFailed("无法确认已登记后台服务的运行状态。")
+            }
+        }
+
+        guard explicitlyReportsMissingService(
+            printResult,
+            serviceTarget: configuration.launchdServiceTarget
+        ) else {
+            throw DaemonLaunchError.launchctlFailed(lastLine(of: printResult.output))
         }
 
         let fileManager = FileManager.default
@@ -600,6 +1330,49 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         guard result.exitCode == 0 else {
             throw DaemonLaunchError.launchctlFailed(lastLine(of: result.output))
         }
+        return .bootstrapped
+    }
+
+    private enum LaunchdServiceState {
+        case running
+        case stopped
+        case unknown
+    }
+
+    private static func launchdServiceState(from output: String) -> LaunchdServiceState {
+        guard let state = output
+            .split(whereSeparator: \.isNewline)
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { $0.hasPrefix("state = ") })
+            .map({ String($0.dropFirst("state = ".count)).lowercased() })
+        else {
+            return .unknown
+        }
+        switch state {
+        case "running":
+            return .running
+        case "waiting", "exited", "throttled", "not running":
+            return .stopped
+        default:
+            return .unknown
+        }
+    }
+
+    /// `launchctl print` uses a non-zero exit code both for an absent job and
+    /// for permission/system errors.  Only the canonical not-found response
+    /// is safe to treat as a first-install opportunity.
+    private static func explicitlyReportsMissingService(
+        _ result: CommandResult,
+        serviceTarget: String
+    ) -> Bool {
+        guard result.exitCode != 0 else { return false }
+        let output = result.output.lowercased()
+        let target = serviceTarget.lowercased()
+        let label = target.split(separator: "/").last.map(String.init) ?? target
+        return (
+            output.contains("could not find service \"\(target)\"")
+                || output.contains("could not find service \"\(label)\"")
+        ) && output.contains("in domain")
     }
 
     private static func stageRuntime(
@@ -607,15 +1380,15 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         fileManager: FileManager,
         commandRunner: @Sendable (URL, [String]) throws -> CommandResult
     ) throws {
-        let expectedBuild = try configuration.resolvedBuildIdentifier()
         if try preserveExistingActiveRuntime(
             configuration: configuration,
-            expectedBuild: expectedBuild,
             fileManager: fileManager,
             commandRunner: commandRunner
         ) {
             return
         }
+
+        let expectedBuild = try configuration.resolvedBuildIdentifier()
 
         var isDirectory: ObjCBool = false
         guard fileManager.fileExists(
@@ -682,17 +1455,14 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         try validateRuntimePermissions(at: destination, fileManager: fileManager)
         try activateRuntime(
             configuration: configuration,
-            buildIdentifier: expectedBuild,
-            fileManager: fileManager
+            buildIdentifier: expectedBuild
         )
     }
 
-    /// Keep a daemon installed by an independent daemon update. A later UI
-    /// launch must not copy its older embedded helper over a newer active
-    /// runtime merely because launchd is currently stopped.
+    /// A valid current runtime is authoritative. GUI launches may start it,
+    /// but must never replace it based on the embedded helper's build.
     private static func preserveExistingActiveRuntime(
         configuration: DaemonLaunchConfiguration,
-        expectedBuild: String,
         fileManager: FileManager,
         commandRunner: @Sendable (URL, [String]) throws -> CommandResult
     ) throws -> Bool {
@@ -702,132 +1472,63 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         let active = runtimes.appendingPathComponent("current", isDirectory: true)
         var info = stat()
         guard Darwin.lstat(active.path, &info) == 0 else {
-            guard errno == ENOENT else { throw DaemonLaunchError.runtimeStageFailed }
+            guard errno == ENOENT else { throw DaemonLaunchError.currentRuntimeInvalid }
             return false
         }
         guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFLNK) else {
-            throw DaemonLaunchError.runtimeStageFailed
+            throw DaemonLaunchError.currentRuntimeInvalid
         }
 
         let target: String
         do {
             target = try fileManager.destinationOfSymbolicLink(atPath: active.path)
         } catch {
-            throw DaemonLaunchError.runtimeStageFailed
+            throw DaemonLaunchError.currentRuntimeInvalid
         }
-        guard isSafeRuntimeBuildIdentifier(target) else {
-            throw DaemonLaunchError.runtimeStageFailed
+        guard DaemonLaunchConfiguration.isSafeRuntimeBuildIdentifier(target) else {
+            throw DaemonLaunchError.currentRuntimeInvalid
         }
 
         let helper = active.appendingPathComponent(configuration.helperURL.lastPathComponent)
-        try validateRuntimePermissions(at: helper, fileManager: fileManager)
+        do {
+            try validateRuntimePermissions(at: helper, fileManager: fileManager)
+        } catch {
+            throw DaemonLaunchError.currentRuntimeInvalid
+        }
         let versionResult: CommandResult
         do {
             versionResult = try commandRunner(helper, ["--version"])
         } catch {
-            throw DaemonLaunchError.runtimeVersionMismatch(expected: target, actual: nil)
+            throw DaemonLaunchError.currentRuntimeInvalid
         }
         let actualBuild = daemonBuildIdentifier(fromVersionOutput: versionResult.output)
-        guard versionResult.exitCode == 0 else {
-            throw DaemonLaunchError.runtimeVersionMismatch(
-                expected: target,
-                actual: actualBuild
-            )
-        }
-
-        if actualBuild != target {
-            // The service was already confirmed absent before this method was
-            // reached. A previous interrupted package can leave `current`
-            // pointing at a directory whose helper reports an older build.
-            // Re-stage only when the observed helper is not newer than this
-            // bundle; never replace an unknown or newer runtime on launch.
-            guard canRestageInconsistentActiveRuntime(
-                actualBuild: actualBuild,
-                targetBuild: target,
-                expectedBuild: expectedBuild
-            ) else {
-                throw DaemonLaunchError.runtimeVersionMismatch(
-                    expected: target,
-                    actual: actualBuild
-                )
-            }
-            return false
-        }
-
-        if target == expectedBuild {
-            return true
-        }
-        if let targetNumber = Int(target),
-           let expectedNumber = Int(expectedBuild),
-           targetNumber > expectedNumber
-        {
-            return true
-        }
-        return false
-    }
-
-    private static func canRestageInconsistentActiveRuntime(
-        actualBuild: String?,
-        targetBuild: String,
-        expectedBuild: String
-    ) -> Bool {
-        guard let actualBuild else { return false }
-        guard let actualNumber = Int(actualBuild),
-              let targetNumber = Int(targetBuild),
-              let expectedNumber = Int(expectedBuild)
+        guard versionResult.exitCode == 0, actualBuild == target
         else {
-            return false
-        }
-        return targetNumber <= expectedNumber && actualNumber < expectedNumber
-    }
-
-    private static func isSafeRuntimeBuildIdentifier(_ value: String) -> Bool {
-        let allowed = CharacterSet(
-            charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
-        )
-        guard !value.isEmpty,
-              value != ".",
-              value != "..",
-              value.rangeOfCharacter(from: allowed.inverted) == nil
-        else {
-            return false
+            throw DaemonLaunchError.currentRuntimeInvalid
         }
         return true
     }
 
     private static func activateRuntime(
         configuration: DaemonLaunchConfiguration,
-        buildIdentifier: String,
-        fileManager: FileManager
+        buildIdentifier: String
     ) throws {
         let runtimes = configuration.configURL
             .deletingLastPathComponent()
             .appendingPathComponent("runtimes", isDirectory: true)
         let active = runtimes.appendingPathComponent("current", isDirectory: true)
-        let temporary = runtimes.appendingPathComponent(
-            ".current.\(UUID().uuidString)",
-            isDirectory: true
-        )
-        defer { try? fileManager.removeItem(at: temporary) }
         do {
-            var info = stat()
-            if Darwin.lstat(active.path, &info) == 0,
-               info.st_mode & mode_t(S_IFMT) != mode_t(S_IFLNK)
-            {
-                throw DaemonLaunchError.runtimeStageFailed
-            }
             let linkResult = buildIdentifier.withCString { destinationPath in
-                temporary.path.withCString { linkPath in
+                active.path.withCString { linkPath in
                     Darwin.symlink(destinationPath, linkPath)
                 }
             }
-            guard linkResult == 0 else { throw DaemonLaunchError.runtimeStageFailed }
-            let result = temporary.path.withCString { temporaryPath in
-                active.path.withCString { activePath in
-                    Darwin.rename(temporaryPath, activePath)
+            guard linkResult == 0 else {
+                if errno == EEXIST {
+                    throw DaemonLaunchError.currentRuntimeInvalid
                 }
+                throw DaemonLaunchError.runtimeStageFailed
             }
-            guard result == 0 else { throw DaemonLaunchError.runtimeStageFailed }
         } catch let error as DaemonLaunchError {
             throw error
         } catch {
@@ -856,7 +1557,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
 
     private static func daemonBuildIdentifier(fromVersionOutput output: String) -> String? {
         let line = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard line.hasPrefix("mochiport ") || line.hasPrefix("threadrelay "),
+        guard line.hasPrefix("mochiport "),
               let buildStart = line.range(of: "(build "),
               line.hasSuffix(")")
         else { return nil }
@@ -872,16 +1573,13 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         let lines = output.split(whereSeparator: \.isNewline).map {
             $0.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard let expectedBuild = try? configuration.resolvedBuildIdentifier(),
+        guard let expectedBuild = try? configuration.activeRuntimeBuildIdentifier(),
               loadedProgram(from: output) == configuration.activeHelperURL().path,
               loadedHomeMatches(output, dataDirectory: configuration.configURL.deletingLastPathComponent()),
+              loadedEnvironmentValue(from: output, key: "MOCHIPORT_BUNDLE_BUILD") == expectedBuild,
               loadedEnvironmentValue(
                   from: output,
-                  keys: ["MOCHIPORT_BUNDLE_BUILD", "THREADRELAY_BUNDLE_BUILD"]
-              ) == expectedBuild,
-              loadedEnvironmentValue(
-                  from: output,
-                  keys: DaemonLaunchConfiguration.skipDesktopIntegrationEnvironments
+                  key: "MOCHIPORT_SKIP_DESKTOP_INTEGRATION"
               ) == configuration.desktopIntegrationEnvironmentValue,
               let argumentsStart = lines.firstIndex(where: { $0 == "arguments = {" }),
               let argumentsEnd = lines[(argumentsStart + 1)...].firstIndex(of: "}")
@@ -910,7 +1608,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             .appendingPathComponent("runtimes", isDirectory: true)
             .standardizedFileURL
             .resolvingSymlinksInPath()
-        guard ["mochiport-daemon", "threadrelay-daemon"].contains(resolvedProgram.lastPathComponent),
+        guard resolvedProgram.lastPathComponent == "mochiport-daemon",
               resolvedProgram.deletingLastPathComponent().deletingLastPathComponent() == runtimeRoot
         else {
             return false
@@ -965,9 +1663,7 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
     }
 
     private static func isKnownControlFile(_ path: String, dataDirectory: URL) -> Bool {
-        ["mochiport-control.json", "threadrelay-control.json"].contains {
-            pathsMatch(path, dataDirectory.appendingPathComponent($0).path)
-        }
+        pathsMatch(path, dataDirectory.appendingPathComponent("mochiport-control.json").path)
     }
 
     private static func loadedProgram(from output: String) -> String? {
@@ -1017,16 +1713,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             .first
     }
 
-    private static func loadedEnvironmentValue(from output: String, keys: [String]) -> String? {
-        keys.lazy
-            .compactMap { loadedEnvironmentValue(from: output, key: $0) }
-            .first
-    }
-
     private static func loadedHomeMatches(_ output: String, dataDirectory: URL) -> Bool {
-        ["MOCHIPORT_HOME", "THREADRELAY_HOME", "CODEXHUB_HOME"].contains {
-            loadedEnvironmentValue(from: output, key: $0) == dataDirectory.path
-        }
+        loadedEnvironmentValue(from: output, key: "MOCHIPORT_HOME") == dataDirectory.path
     }
 
     private static func writeLaunchAgent(
@@ -1050,215 +1738,8 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
             if (try? Data(contentsOf: configuration.launchAgentURL)) != data {
                 try data.write(to: configuration.launchAgentURL, options: .atomic)
             }
-        } catch {
-            throw DaemonLaunchError.launchAgentWriteFailed
-        }
-    }
-
-    private static func runCommand(_ executable: URL, _ arguments: [String]) throws -> CommandResult {
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.standardOutput = output
-        process.standardError = output
-        try process.run()
-        process.waitUntilExit()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        return CommandResult(
-            exitCode: process.terminationStatus,
-            output: String(decoding: data, as: UTF8.self)
-        )
-    }
-
-    private static func unquote(_ value: String) -> String {
-        guard value.count >= 2, value.first == "\"", value.last == "\"" else {
-            return value
-        }
-        return String(value.dropFirst().dropLast())
-    }
-
-    private static func lastLine(of output: String) -> String {
-        output
-            .split(whereSeparator: \.isNewline)
-            .last
-            .map(String.init) ?? ""
-    }
-}
-
-struct GUIRecoveryLauncher: @unchecked Sendable {
-    private let configurationLoader: @Sendable () throws -> GUIRecoveryConfiguration
-    private let commandRunner: @Sendable (URL, [String]) throws -> CommandResult
-
-    init(
-        configurationLoader: @escaping @Sendable () throws -> GUIRecoveryConfiguration = {
-            try .current()
-        },
-        commandRunner: @escaping @Sendable (URL, [String]) throws -> CommandResult = Self.runCommand
-    ) {
-        self.configurationLoader = configurationLoader
-        self.commandRunner = commandRunner
-    }
-
-    func startIfNeeded() throws {
-        let configuration = try configurationLoader()
-        let fileManager = FileManager.default
-        var isDirectory: ObjCBool = false
-        guard fileManager.fileExists(
-            atPath: configuration.executableURL.path,
-            isDirectory: &isDirectory
-        ), !isDirectory.boolValue else {
-            throw DaemonLaunchError.guiExecutableMissing
-        }
-        guard fileManager.isExecutableFile(atPath: configuration.executableURL.path) else {
-            throw DaemonLaunchError.guiExecutableNotExecutable
-        }
-        var supervisorIsDirectory: ObjCBool = false
-        guard fileManager.fileExists(
-            atPath: configuration.supervisorURL.path,
-            isDirectory: &supervisorIsDirectory
-        ), !supervisorIsDirectory.boolValue else {
-            throw DaemonLaunchError.guiSupervisorMissing
-        }
-        guard fileManager.isExecutableFile(atPath: configuration.supervisorURL.path) else {
-            throw DaemonLaunchError.guiSupervisorNotExecutable
-        }
-
-        let launchctl = URL(fileURLWithPath: "/bin/launchctl")
-        let domain = "gui/\(getuid())"
-        let serviceTarget = "\(domain)/\(GUIRecoveryConfiguration.label)"
-        let printResult = try commandRunner(launchctl, ["print", serviceTarget])
-
-        if printResult.exitCode == 0 {
-            guard Self.loadedAgentHasSameIdentity(
-                output: printResult.output,
-                configuration: configuration
-            ) else {
-                let loadedProgram = Self.loadedProgram(from: printResult.output)
-                if loadedProgram != configuration.supervisorURL.path {
-                    throw DaemonLaunchError.loadedAgentMismatch(
-                        expected: configuration.supervisorURL.path,
-                        actual: loadedProgram
-                    )
-                }
-                throw DaemonLaunchError.loadedAgentUntrusted(loadedProgram)
-            }
-
-            try Self.writeLaunchAgent(configuration, fileManager: fileManager)
-            if printResult.output.contains("state = running") {
-                return
-            }
-            let kickstart = try commandRunner(launchctl, ["kickstart", serviceTarget])
-            guard kickstart.exitCode == 0 else {
-                throw DaemonLaunchError.launchctlFailed(Self.lastLine(of: kickstart.output))
-            }
-            return
-        }
-
-        try Self.writeLaunchAgent(configuration, fileManager: fileManager)
-        let result = try commandRunner(
-            launchctl,
-            ["bootstrap", domain, configuration.launchAgentURL.path]
-        )
-        guard result.exitCode == 0 else {
-            throw DaemonLaunchError.launchctlFailed(Self.lastLine(of: result.output))
-        }
-    }
-
-    private static func loadedAgentHasSameIdentity(
-        output: String,
-        configuration: GUIRecoveryConfiguration
-    ) -> Bool {
-        let lines = output.split(whereSeparator: \.isNewline).map {
-            $0.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        guard let program = lines
-            .first(where: { $0.hasPrefix("program = ") })
-            .map({ String($0.dropFirst("program = ".count)) })
-            .map(unquote),
-            isCompatibleSupervisorProgram(program, expected: configuration.supervisorURL),
-            loadedEnvironmentValue(from: output, key: "HOME") == configuration.homeURL.path,
-            loadedEnvironmentValue(from: output, key: "THREADRELAY_HOME")
-            == configuration.dataDirectoryURL.path,
-            let argumentsStart = lines.firstIndex(where: { $0 == "arguments = {" }),
-            let argumentsEnd = lines[(argumentsStart + 1)...].firstIndex(of: "}")
-        else {
-            return false
-        }
-        let arguments = lines[(argumentsStart + 1)..<argumentsEnd]
-            .filter { !$0.isEmpty }
-            .map(unquote)
-        return arguments.count == 1
-            && isCompatibleSupervisorProgram(arguments[0], expected: configuration.supervisorURL)
-    }
-
-    private static func isCompatibleSupervisorProgram(
-        _ program: String,
-        expected: URL
-    ) -> Bool {
-        if program == expected.path { return true }
-        let url = URL(fileURLWithPath: program).standardizedFileURL
-        guard ["threadrelay-gui-supervisor", "mochiport-gui-supervisor"].contains(url.lastPathComponent) else {
-            return false
-        }
-        let appURL = url
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        let expectedAppURL = expected.standardizedFileURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        return ["ThreadRelay.app", "MochiPort.app"].contains(appURL.lastPathComponent)
-            && appURL.deletingLastPathComponent() == expectedAppURL.deletingLastPathComponent()
-    }
-
-    private static func loadedProgram(from output: String) -> String? {
-        output
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .first(where: { $0.hasPrefix("program = ") })
-            .map { String($0.dropFirst("program = ".count)) }
-            .map(unquote)
-    }
-
-    private static func loadedEnvironmentValue(from output: String, key: String) -> String? {
-        output
-            .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .compactMap { line -> String? in
-                let separator = line.contains("=>") ? "=>" : "="
-                guard let range = line.range(of: separator) else { return nil }
-                let name = line[..<range.lowerBound].trimmingCharacters(in: .whitespacesAndNewlines)
-                guard name == key else { return nil }
-                return unquote(
-                    line[range.upperBound...].trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-            }
-            .first
-    }
-
-    private static func writeLaunchAgent(
-        _ configuration: GUIRecoveryConfiguration,
-        fileManager: FileManager
-    ) throws {
-        do {
-            try fileManager.createDirectory(
-                at: configuration.launchAgentURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            try fileManager.createDirectory(
-                at: configuration.logURL.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-        } catch {
-            throw DaemonLaunchError.launchAgentDirectoryUnavailable
-        }
-        do {
-            let data = try configuration.propertyListData()
-            if (try? Data(contentsOf: configuration.launchAgentURL)) != data {
-                try data.write(to: configuration.launchAgentURL, options: .atomic)
-            }
+        } catch let error as DaemonLaunchError {
+            throw error
         } catch {
             throw DaemonLaunchError.launchAgentWriteFailed
         }

@@ -1,98 +1,29 @@
 import Foundation
 
-enum UpdateComponent: String, Codable, Equatable, Sendable {
-    case ui
-    case daemon
-}
-
-/// A downloadable artifact declared by the platform update manifest.
-struct UpdateAsset: Decodable, Equatable, Sendable {
-    let assetType: String?
-    let url: URL
-    let sha256: String?
-    let size: Int64?
-    let signed: Bool?
-    let notarized: Bool?
-
-    private enum CodingKeys: String, CodingKey {
-        case assetType = "type"
-        case url
-        case sha256
-        case size
-        case signed
-        case notarized
-    }
-
-    /// Update payloads must remain within this repository's release assets.
-    var validatedDownloadURL: URL? {
-        guard url.scheme == "https",
-              url.host?.lowercased() == "github.com",
-              url.path.lowercased().hasPrefix("/mps233/mochiport/releases/download/")
-        else {
-            return nil
-        }
-        return url
-    }
-
-    /// A digest is optional for legacy manifests. When supplied, it must be a
-    /// complete SHA-256 value before an installer may use it.
-    var normalizedSHA256: String? {
-        guard let sha256 else { return nil }
-        let normalized = sha256.lowercased()
-        guard normalized.count == 64,
-              normalized.unicodeScalars.allSatisfy({
-                  (48...57).contains($0.value) || (97...102).contains($0.value)
-              })
-        else {
-            return nil
-        }
-        return normalized
-    }
-}
-
-/// Metadata for one independently versioned MochiPort component.
+/// Metadata for one independently versioned MochiPort component. Update
+/// manifests only inform the UI; installation stays on the release page.
 struct UpdateComponentRelease: Decodable, Equatable, Sendable {
     let version: String
     let build: Int?
     let releaseURL: URL?
     let notes: String?
-    let assets: [String: UpdateAsset]
-
-    /// Daemon-only compatibility metadata. These fields stay nil for UI
-    /// releases and for manifests produced before component updates existed.
-    let apiMajor: Int?
-    let minimumUIVersion: String?
-    let minimumUIBuild: Int?
-
     private enum CodingKeys: String, CodingKey {
         case version
         case build
         case releaseURL = "releaseUrl"
         case notes
-        case assets
-        case apiMajor
-        case minimumUIVersion
-        case minimumUIBuild
     }
 
     init(
         version: String,
         build: Int?,
         releaseURL: URL?,
-        notes: String?,
-        assets: [String: UpdateAsset],
-        apiMajor: Int? = nil,
-        minimumUIVersion: String? = nil,
-        minimumUIBuild: Int? = nil
+        notes: String?
     ) {
         self.version = version
         self.build = build
         self.releaseURL = releaseURL
         self.notes = notes
-        self.assets = assets
-        self.apiMajor = apiMajor
-        self.minimumUIVersion = minimumUIVersion
-        self.minimumUIBuild = minimumUIBuild
     }
 
     var validatedReleaseURL: URL? {
@@ -136,7 +67,6 @@ struct UpdateManifest: Decodable, Equatable, Sendable {
         case build
         case releaseURL = "releaseUrl"
         case notes
-        case assets
     }
 
     init(from decoder: Decoder) throws {
@@ -168,11 +98,7 @@ struct UpdateManifest: Decodable, Equatable, Sendable {
                 version: try container.decode(String.self, forKey: .version),
                 build: try container.decodeIfPresent(Int.self, forKey: .build),
                 releaseURL: try container.decodeIfPresent(URL.self, forKey: .releaseURL),
-                notes: try container.decodeIfPresent(String.self, forKey: .notes),
-                assets: try container.decodeIfPresent(
-                    [String: UpdateAsset].self,
-                    forKey: .assets
-                ) ?? [:]
+                notes: try container.decodeIfPresent(String.self, forKey: .notes)
             )
             self.daemon = nil
         }
@@ -186,14 +112,13 @@ struct UpdateManifest: Decodable, Equatable, Sendable {
             version: release.tagName,
             build: nil,
             releaseURL: release.validatedURL,
-            notes: release.body,
-            assets: [:]
+            notes: release.body
         )
         daemon = nil
     }
 
     private func validate(container: KeyedDecodingContainer<CodingKeys>) throws {
-        try validate(ui, component: .ui, container: container)
+        try validate(ui, key: .ui, container: container)
         if let daemon {
             guard schemaVersion == Self.currentSchemaVersion else {
                 throw DecodingError.dataCorruptedError(
@@ -202,128 +127,41 @@ struct UpdateManifest: Decodable, Equatable, Sendable {
                     debugDescription: "Daemon metadata requires schema version 2"
                 )
             }
-            guard daemon.build != nil, daemon.apiMajor != nil else {
+            guard daemon.build != nil else {
                 throw DecodingError.dataCorruptedError(
                     forKey: .daemon,
                     in: container,
-                    debugDescription: "Daemon metadata requires build and apiMajor"
+                    debugDescription: "Daemon metadata requires a build"
                 )
             }
-            try validate(daemon, component: .daemon, container: container)
+            try validate(daemon, key: .daemon, container: container)
         }
     }
 
     private func validate(
         _ release: UpdateComponentRelease,
-        component: UpdateComponent,
+        key: CodingKeys,
         container: KeyedDecodingContainer<CodingKeys>
     ) throws {
         guard !release.version.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               versionComparison(release.version, "0") != nil
         else {
             throw DecodingError.dataCorruptedError(
-                forKey: component == .ui ? .ui : .daemon,
+                forKey: key,
                 in: container,
-                debugDescription: "\(component.rawValue) has an invalid version"
+                debugDescription: "\(key.stringValue) has an invalid version"
             )
         }
         if let build = release.build, build < 0 {
             throw DecodingError.dataCorruptedError(
-                forKey: component == .ui ? .ui : .daemon,
+                forKey: key,
                 in: container,
-                debugDescription: "\(component.rawValue) has an invalid build"
-            )
-        }
-        if let apiMajor = release.apiMajor, apiMajor < 1 {
-            throw DecodingError.dataCorruptedError(
-                forKey: component == .ui ? .ui : .daemon,
-                in: container,
-                debugDescription: "\(component.rawValue) has an invalid apiMajor"
+                debugDescription: "\(key.stringValue) has an invalid build"
             )
         }
         if release.releaseURL != nil, release.validatedReleaseURL == nil {
             throw URLError(.unsupportedURL)
         }
-        for asset in release.assets.values {
-            guard asset.validatedDownloadURL != nil else {
-                throw URLError(.unsupportedURL)
-            }
-            if asset.sha256 != nil, asset.normalizedSHA256 == nil {
-                throw DecodingError.dataCorruptedError(
-                    forKey: component == .ui ? .ui : .daemon,
-                    in: container,
-                    debugDescription: "\(component.rawValue) contains an invalid SHA-256 digest"
-                )
-            }
-        }
-    }
-}
-
-enum DaemonUpdateCompatibility: Equatable, Sendable {
-    case compatible
-    /// The running daemon is too old to expose the authenticated lifecycle
-    /// contract required for an in-place daemon update. The UI can surface
-    /// the candidate, but must not attempt to switch or restart it.
-    case requiresLifecycleAPI
-    case requiresUIUpdate(minimumVersion: String?, minimumBuild: Int?)
-    case unsupportedAPIMajor(required: Int)
-}
-
-struct AvailableComponentUpdates: Equatable, Sendable {
-    let ui: UpdateComponentRelease?
-    let daemon: UpdateComponentRelease?
-    let daemonCompatibility: DaemonUpdateCompatibility?
-}
-
-extension UpdateManifest {
-    func availableUpdates(
-        currentUIVersion: String,
-        currentUIBuild: Int?,
-        currentDaemonVersion: String,
-        currentDaemonBuild: Int?,
-        supportedDaemonAPIMajor: Int
-    ) -> AvailableComponentUpdates {
-        let uiUpdate = ui.isNewer(thanVersion: currentUIVersion, build: currentUIBuild) ? ui : nil
-        let daemonUpdate = daemon.flatMap {
-            $0.isNewer(thanVersion: currentDaemonVersion, build: currentDaemonBuild) ? $0 : nil
-        }
-        return AvailableComponentUpdates(
-            ui: uiUpdate,
-            daemon: daemonUpdate,
-            daemonCompatibility: daemonUpdate.map {
-                $0.compatibility(
-                    currentUIVersion: currentUIVersion,
-                    currentUIBuild: currentUIBuild,
-                    supportedAPIMajor: supportedDaemonAPIMajor
-                )
-            }
-        )
-    }
-}
-
-extension UpdateComponentRelease {
-    func compatibility(
-        currentUIVersion: String,
-        currentUIBuild: Int?,
-        supportedAPIMajor: Int
-    ) -> DaemonUpdateCompatibility {
-        if let apiMajor, apiMajor != supportedAPIMajor {
-            return .unsupportedAPIMajor(required: apiMajor)
-        }
-        let versionTooOld = minimumUIVersion.map {
-            isNewerVersion($0, than: currentUIVersion)
-        } ?? false
-        let buildTooOld = minimumUIBuild.map { minimumBuild in
-            guard let currentUIBuild else { return true }
-            return currentUIBuild < minimumBuild
-        } ?? false
-        if versionTooOld || buildTooOld {
-            return .requiresUIUpdate(
-                minimumVersion: minimumUIVersion,
-                minimumBuild: minimumUIBuild
-            )
-        }
-        return .compatible
     }
 }
 
@@ -391,7 +229,7 @@ enum UpdateChecker {
 
     /// Prefers the component manifest and falls back to the existing GitHub
     /// Releases API. The fallback intentionally exposes only a UI release;
-    /// daemon updates require signed component metadata from schema version 2.
+    /// daemon release information is shown only when the manifest provides it.
     static func fetchLatestManifest(
         session: URLSession = .shared,
         currentVersion: String

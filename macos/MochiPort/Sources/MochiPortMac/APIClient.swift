@@ -594,20 +594,6 @@ struct ManageLifecycleCredentialMutationResponse: Decodable, Equatable, Sendable
     let managementTokenGeneration: Int64
 }
 
-struct ManageLifecycleUpdateResponse: Decodable, Equatable, Sendable {
-    let ok: Bool
-    let state: String
-    let version: String
-    let build: Int
-
-    private enum CodingKeys: String, CodingKey {
-        case ok
-        case state
-        case version = "targetVersion"
-        case build = "targetBuild"
-    }
-}
-
 struct ManageLifecycle: Decodable, Equatable, Sendable {
     struct Service: Decodable, Equatable, Sendable {
         let service: String
@@ -945,7 +931,7 @@ enum ManagementCredentialStore {
     static func loadLocator(from path: URL) -> ActiveDaemonLocator? {
         guard let data = try? Data(contentsOf: path),
               let locator = try? JSONDecoder().decode(ActiveDaemonLocator.self, from: data),
-              locator.service == "threadrelay",
+              locator.service == "mochiport",
               locator.apiMajor == 1,
               !locator.instanceId.isEmpty,
               locator.pid > 0,
@@ -1012,14 +998,10 @@ enum ManagementCredentialStore {
             in: .userDomainMask
         ).first
     ) -> [URL] {
-        MochiPortStorage.candidateDirectories(
+        currentStorageDirectory(
             environment: environment,
             applicationSupport: applicationSupport
-        ).flatMap { directory in
-            ["mochiport-active-daemon.json", "threadrelay-active-daemon.json"].map {
-                directory.appendingPathComponent($0)
-            }
-        }
+        ).map { [$0.appendingPathComponent("mochiport-active-daemon.json")] } ?? []
     }
 
     static func candidatePaths(
@@ -1029,14 +1011,20 @@ enum ManagementCredentialStore {
             in: .userDomainMask
         ).first
     ) -> [URL] {
-        MochiPortStorage.candidateDirectories(
+        currentStorageDirectory(
             environment: environment,
             applicationSupport: applicationSupport
-        ).flatMap { directory in
-            ["mochiport-control.json", "threadrelay-control.json"].map {
-                directory.appendingPathComponent($0)
-            }
+        ).map { [$0.appendingPathComponent("mochiport-control.json")] } ?? []
+    }
+
+    private static func currentStorageDirectory(
+        environment: [String: String],
+        applicationSupport: URL?
+    ) -> URL? {
+        if let configuredHome = environment["MOCHIPORT_HOME"], !configuredHome.isEmpty {
+            return URL(fileURLWithPath: configuredHome, isDirectory: true)
         }
+        return applicationSupport?.appendingPathComponent("MochiPort", isDirectory: true)
     }
 
     private static func isValid(_ token: String) -> Bool {
@@ -1054,13 +1042,8 @@ enum ManagementCredentialStore {
     }
 }
 
-private struct LegacyStatusResponse: Codable {
-    let service: String
-}
-
 enum ServiceProbe: Equatable {
     case versioned(HealthResponse)
-    case legacy
 }
 
 enum APIClientError: LocalizedError, Equatable {
@@ -1129,9 +1112,6 @@ struct APIClient: Sendable {
             throw APIClientError.invalidResponse
         }
 
-        if httpResponse.statusCode == 404 {
-            return try await legacyProbe(baseURL: baseURL)
-        }
         guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
 
         let health: HealthResponse
@@ -1140,7 +1120,7 @@ struct APIClient: Sendable {
         } catch {
             throw APIClientError.invalidResponse
         }
-        guard health.service == "threadrelay" else {
+        guard health.service == "mochiport" else {
             throw APIClientError.incompatibleService
         }
         guard health.apiMajor == 1 else {
@@ -1347,28 +1327,6 @@ struct APIClient: Sendable {
                 force: force,
                 leaseGeneration: leaseGeneration
             )
-        )
-    }
-
-    func updateLifecycle(
-        installationId: String,
-        daemonInstanceId: String,
-        leaseGeneration: Int64,
-        candidate: PreparedDaemonUpdate
-    ) async throws -> ManageLifecycleUpdateResponse {
-        try await performManagePOST(
-            path: "api/v1/manage/lifecycle/update",
-            body: LifecycleUpdateRequest(
-                installationId: installationId,
-                daemonInstanceId: daemonInstanceId,
-                leaseGeneration: leaseGeneration,
-                candidatePath: candidate.executableURL.path,
-                expectedVersion: candidate.version,
-                expectedBuild: candidate.build,
-                expectedSha256: candidate.sha256
-            ),
-            timeout: 30,
-            exposeServerError: true
         )
     }
 
@@ -1615,19 +1573,6 @@ struct APIClient: Sendable {
 
     func codexSessions() async throws -> ManageCodexSessionsResponse {
         try await performManageGET(path: "api/v1/manage/sessions", timeout: 20)
-    }
-
-    func moveCodexSession(
-        threadId: String,
-        targetProvider: String?
-    ) async throws -> ManageActionResponse {
-        try await performManagePOST(
-            path: "api/v1/manage/sessions/provider",
-            body: MoveCodexSessionRequest(
-                threadId: threadId,
-                targetProvider: targetProvider
-            )
-        )
     }
 
     func gateway() async throws -> ManageGateway {
@@ -1916,11 +1861,6 @@ struct APIClient: Sendable {
         let sessionKey: String
     }
 
-    private struct MoveCodexSessionRequest: Encodable {
-        let threadId: String
-        let targetProvider: String?
-    }
-
     private struct UpdateGatewayRequest: Encodable {
         let enabled: Bool
         let filterImageGenerationTool: Bool
@@ -2016,16 +1956,6 @@ struct APIClient: Sendable {
         let leaseGeneration: Int64?
     }
 
-    private struct LifecycleUpdateRequest: Encodable {
-        let installationId: String
-        let daemonInstanceId: String
-        let leaseGeneration: Int64
-        let candidatePath: String
-        let expectedVersion: String
-        let expectedBuild: Int
-        let expectedSha256: String
-    }
-
     private struct EnhancedLaunchOperationRequest: Encodable {
         let requestId: String
     }
@@ -2048,7 +1978,7 @@ struct APIClient: Sendable {
         guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
         do {
             let dashboard = try JSONDecoder().decode(ManageDashboard.self, from: data)
-            guard dashboard.service.service == "threadrelay" else {
+            guard dashboard.service.service == "mochiport" else {
                 throw APIClientError.incompatibleService
             }
             guard dashboard.service.apiMajor == 1 else {
@@ -2100,7 +2030,7 @@ struct APIClient: Sendable {
         guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
         do {
             let lifecycle = try JSONDecoder().decode(ManageLifecycle.self, from: data)
-            guard lifecycle.service.service == "threadrelay" else {
+            guard lifecycle.service.service == "mochiport" else {
                 throw APIClientError.incompatibleService
             }
             guard lifecycle.service.apiMajor == 1 else {
@@ -2134,7 +2064,7 @@ struct APIClient: Sendable {
         guard httpResponse.statusCode == 200 else { throw APIClientError.invalidResponse }
         do {
             let accounts = try JSONDecoder().decode(ManageIMAccountsResponse.self, from: data)
-            guard accounts.service.service == "threadrelay" else {
+            guard accounts.service.service == "mochiport" else {
                 throw APIClientError.incompatibleService
             }
             guard accounts.service.apiMajor == 1 else {
@@ -2311,7 +2241,7 @@ struct APIClient: Sendable {
         }
         guard response.statusCode == 200,
               let status = try? JSONDecoder().decode(ManageDashboard.Service.self, from: data),
-              status.service == "threadrelay",
+              status.service == "mochiport",
               status.apiMajor == 1
         else {
             throw APIClientError.invalidResponse
@@ -2403,29 +2333,6 @@ struct APIClient: Sendable {
         return try await session.data(for: request)
     }
 
-    private func legacyProbe(baseURL: URL) async throws -> ServiceProbe {
-        let url = baseURL.appending(path: "api/status")
-        var request = URLRequest(url: url)
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.timeoutInterval = 3
-        let (data, response) = try await session.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse,
-              httpResponse.statusCode == 200
-        else {
-            throw APIClientError.invalidResponse
-        }
-
-        let status: LegacyStatusResponse
-        do {
-            status = try JSONDecoder().decode(LegacyStatusResponse.self, from: data)
-        } catch {
-            throw APIClientError.invalidResponse
-        }
-        guard status.service == "threadrelay" || status.service == "codexhub" else {
-            throw APIClientError.incompatibleService
-        }
-        return .legacy
-    }
 }
 
 private extension ManageLogDirectory {

@@ -61,9 +61,13 @@ MOCHIPORT_UI_VERSION=0.5.4 MOCHIPORT_UI_BUILD_NUMBER=457 \
 For daemon-affecting changes, the default handoff builds and assembles the
 formal App immediately. Use one build number for both daemon architectures and
 an independently selected UI version/build; the assembly script rejects a
-daemon mismatch. This updates
-`outputs/MochiPort.app`, but never replaces or restarts the daemon that is
-already running. The complete handoff rule is in
+daemon mismatch. After the formal App starts, it compares its embedded daemon
+build with the running runtime and performs one protected handoff only when it
+holds the management lease and the daemon has no protected work. The handoff
+stages the helper, drains the old daemon, atomically changes the runtime, then
+verifies the replacement instance, build, readiness, identity, and recovered
+lease. It rolls back on any failed verification and never force-kills or
+interferes with an untrusted daemon. The complete handoff rule is in
 [`docs/mochiport-change-handoff.zh-CN.md`](../../docs/mochiport-change-handoff.zh-CN.md).
 
 ```sh

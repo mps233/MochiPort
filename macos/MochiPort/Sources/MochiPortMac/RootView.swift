@@ -295,8 +295,6 @@ private struct OverviewView: View {
                 {
                     UnifiedUpdateEntry(
                         context: .overview,
-                        onOpenSettings: onOpenSettings,
-                        onConfirmDaemon: onOpenSettings,
                         onDismiss: { model.unifiedUpdateNoticeDismissed = true }
                     )
                 }
@@ -687,26 +685,20 @@ enum UnifiedUpdateEntryContext {
 }
 
 /// Shared update entry used by the overview banner and the detailed Settings
-/// pane. The component actions stay separate because daemon updates require a
-/// protected-work confirmation while UI updates open the release download.
+/// pane. Installing a newer GUI bundle also carries the matching daemon; the
+/// next launch performs the protected-work and lease checks before switching.
 struct UnifiedUpdateEntry: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.openURL) private var openURL
 
     let context: UnifiedUpdateEntryContext
-    let onOpenSettings: () -> Void
-    let onConfirmDaemon: () -> Void
     let onDismiss: (() -> Void)?
 
     init(
         context: UnifiedUpdateEntryContext,
-        onOpenSettings: @escaping () -> Void = {},
-        onConfirmDaemon: @escaping () -> Void = {},
         onDismiss: (() -> Void)? = nil
     ) {
         self.context = context
-        self.onOpenSettings = onOpenSettings
-        self.onConfirmDaemon = onConfirmDaemon
         self.onDismiss = onDismiss
     }
 
@@ -738,10 +730,10 @@ struct UnifiedUpdateEntry: View {
             return message
         case let .ui(update):
             return "界面版本 \(update.version) 可下载"
-        case let .daemon(update, compatibility):
-            return daemonSubtitle(update: update, compatibility: compatibility)
-        case let .both(ui, daemon, compatibility):
-            let daemonText = daemonSubtitle(update: daemon, compatibility: compatibility)
+        case let .daemon(update):
+            return daemonSubtitle(update: update)
+        case let .both(ui, daemon):
+            let daemonText = daemonSubtitle(update: daemon)
             return "界面 \(ui.version) · 后台服务 \(daemon.version) · \(daemonText)"
         }
     }
@@ -760,8 +752,6 @@ struct UnifiedUpdateEntry: View {
         switch state {
         case .failed: .red
         case .upToDate: .green
-        case .daemon where model.daemonUpdateCompatibility != .compatible: .orange
-        case .both where model.daemonUpdateCompatibility != .compatible: .orange
         default: .blue
         }
     }
@@ -836,9 +826,9 @@ struct UnifiedUpdateEntry: View {
                 updateActionRow(
                     label: "后台服务",
                     version: update.version,
-                    buttonTitle: daemonActionTitle,
-                    action: daemonAction,
-                    disabled: daemonActionDisabled
+                    buttonTitle: "查看发布页",
+                    action: { openReleasePage(for: update) },
+                    disabled: update.validatedReleaseURL == nil
                 )
             }
         }
@@ -867,74 +857,14 @@ struct UnifiedUpdateEntry: View {
         }
     }
 
-    private var daemonActionTitle: String {
-        guard model.daemonUpdateCompatibility == .compatible else {
-            return model.availableDaemonUpdate?.validatedReleaseURL == nil
-                ? "需手动安装"
-                : "查看安装说明"
-        }
-        switch model.daemonUpdateOperation {
-        case .downloading: return "准备中…"
-        case .ready: return context == .overview ? "去设置确认" : "确认更新"
-        case .activating: return "更新中…"
-        case .completed: return "已完成"
-        default: return "准备后台更新"
-        }
-    }
-
-    private var daemonActionDisabled: Bool {
-        guard model.daemonUpdateCompatibility == .compatible else {
-            return model.availableDaemonUpdate?.validatedReleaseURL == nil
-        }
-        switch model.daemonUpdateOperation {
-        case .downloading, .activating, .completed:
-            return true
-        case .ready:
-            return context == .overview
-                ? false
-                : model.daemonUpdateConfirmation == nil
-        default:
-            return !model.canPrepareDaemonUpdate
-        }
-    }
-
-    private var daemonAction: () -> Void {
-        guard model.daemonUpdateCompatibility == .compatible else {
-            return {
-                if let update = model.availableDaemonUpdate {
-                    openReleasePage(for: update)
-                }
-            }
-        }
-        switch model.daemonUpdateOperation {
-        case .ready:
-            return context == .overview
-                ? onOpenSettings
-                : onConfirmDaemon
-        default:
-            return { Task { await model.prepareDaemonUpdate() } }
-        }
-    }
-
     private func openReleasePage(for update: UpdateComponentRelease) {
         guard let url = update.validatedReleaseURL else { return }
         openURL(url)
     }
 
-    private func daemonSubtitle(
-        update: UpdateComponentRelease,
-        compatibility: DaemonUpdateCompatibility?
-    ) -> String {
-        guard compatibility == .compatible else {
-            return "需要手动安装一次新版 MochiPort"
-        }
-        if case .ready = model.daemonUpdateOperation {
-            return "后台服务已准备好，确认后会安全切换"
-        }
-        if case .completed = model.daemonUpdateOperation {
-            return "后台服务已更新"
-        }
-        return "后台服务更新会在受保护任务排空后安全切换"
+    private func daemonSubtitle(update: UpdateComponentRelease) -> String {
+        let build = update.build.map { "（构建 \($0)）" } ?? ""
+        return "后台服务 \(update.version)\(build) 随新版 MochiPort 安装；启动后会自动安全切换"
     }
 }
 
@@ -963,7 +893,6 @@ private struct OverviewStatusToolbarButton: View {
         switch dashboardState {
         case .stale: "上次状态"
         case .offline, .unavailable: "不可用"
-        case .legacy: "需更新"
         default: "检查中"
         }
     }
@@ -989,7 +918,6 @@ private struct OverviewStatusToolbarButton: View {
         switch status {
         case .checking: "arrow.clockwise"
         case .available: "server.rack"
-        case .bridgeAvailable: "server.rack"
         case .unavailable: "exclamationmark.triangle"
         }
     }
@@ -1082,7 +1010,6 @@ private struct OverviewSignalStrip: View {
         switch dashboardState {
         case .stale: "上次状态"
         case .offline, .unavailable: "不可用"
-        case .legacy: "需更新"
         default: "检查中"
         }
     }

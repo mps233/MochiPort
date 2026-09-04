@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+LC_ALL=C
+export LC_ALL
+MAX_BUILD=9223372036854775807
+
 if [ "$#" -ne 4 ]; then
   echo "usage: $0 BUILD XCODE_APP DAEMON_BINARY OUTPUT_APP" >&2
   exit 2
@@ -10,18 +14,27 @@ BUILD=$1
 XCODE_APP=$2
 DAEMON_BINARY=$3
 OUTPUT_APP=$4
-GUI_SUPERVISOR=packaging/macos/mochiport-gui-supervisor
 THIRD_PARTY_LICENSE_GENERATOR=packaging/generate-third-party-licenses.py
 LUCIDE_LICENSE=packaging/brand/LICENSE.lucide-icons
 PROVIDER_LICENSE=packaging/brand/providers/LICENSE.lobehub-icons
 PROVIDER_SOURCES=packaging/brand/providers/SOURCES.md
 
-case "$BUILD" in
-  ''|0|*[!0-9]*)
-    echo "build must be a positive integer" >&2
+validate_build() {
+  value=$1
+  case "$value" in
+    ''|0|0[0-9]*|*[!0-9]*)
+      echo "build must be a canonical positive 64-bit integer: $value" >&2
+      exit 2
+      ;;
+  esac
+  if [ "${#value}" -gt 19 ] \
+    || { [ "${#value}" -eq 19 ] && [ "$value" \> "$MAX_BUILD" ]; }; then
+    echo "build must be a canonical positive 64-bit integer: $value" >&2
     exit 2
-    ;;
-esac
+  fi
+}
+
+validate_build "$BUILD"
 
 if [ ! -d "$XCODE_APP" ] || [ ! -x "$XCODE_APP/Contents/MacOS/MochiPort" ]; then
   echo "Xcode app bundle is unavailable" >&2
@@ -29,10 +42,6 @@ if [ ! -d "$XCODE_APP" ] || [ ! -x "$XCODE_APP/Contents/MacOS/MochiPort" ]; then
 fi
 if [ ! -x "$DAEMON_BINARY" ]; then
   echo "daemon binary is unavailable" >&2
-  exit 1
-fi
-if [ ! -f "$GUI_SUPERVISOR" ]; then
-  echo "GUI supervisor script is unavailable" >&2
   exit 1
 fi
 for RESOURCE in "$THIRD_PARTY_LICENSE_GENERATOR" LICENSE NOTICE \
@@ -89,19 +98,26 @@ esac
 
 DAEMON_VERSION=$("$DAEMON_BINARY" --version 2>/dev/null || true)
 case "$DAEMON_VERSION" in
-  mochiport\ *|threadrelay\ *) ;;
+  mochiport\ *) ;;
   *)
     echo "daemon binary does not identify as MochiPort" >&2
     exit 1
     ;;
 esac
-DAEMON_BUILD=$(printf '%s\n' "$DAEMON_VERSION" | sed -n 's/.*(build \([^)]*\)).*/\1/p')
-if [ -z "$DAEMON_BUILD" ] || [ "$DAEMON_BUILD" != "$BUILD" ]; then
+DAEMON_BUILD=$(printf '%s\n' "$DAEMON_VERSION" \
+  | sed -n 's/^mochiport [^ ]* (build \([0-9][0-9]*\))$/\1/p')
+if [ -z "$DAEMON_BUILD" ]; then
   echo "daemon build mismatch: expected $BUILD, got ${DAEMON_BUILD:-unknown}" >&2
   exit 1
 fi
+validate_build "$DAEMON_BUILD"
+if [ "$DAEMON_BUILD" != "$BUILD" ]; then
+  echo "daemon build mismatch: expected $BUILD, got $DAEMON_BUILD" >&2
+  exit 1
+fi
 
-DAEMON_PRODUCT_VERSION=$(printf '%s\n' "$DAEMON_VERSION" | sed -n 's/^[^ ]* \([^ ]*\) (build .*/\1/p')
+DAEMON_PRODUCT_VERSION=$(printf '%s\n' "$DAEMON_VERSION" \
+  | sed -n 's/^mochiport \([^ ]*\) (build [0-9][0-9]*)$/\1/p')
 if [ -z "$DAEMON_PRODUCT_VERSION" ]; then
   echo "daemon product version is unavailable" >&2
   exit 1
@@ -157,8 +173,6 @@ mkdir -p "$STAGED_APP/Contents/Helpers"
 mkdir -p "$STAGED_APP/Contents/Resources/brand/providers"
 cp "$DAEMON_BINARY" "$STAGED_APP/Contents/Helpers/mochiport-daemon"
 chmod 755 "$STAGED_APP/Contents/Helpers/mochiport-daemon"
-cp "$GUI_SUPERVISOR" "$STAGED_APP/Contents/Helpers/mochiport-gui-supervisor"
-chmod 755 "$STAGED_APP/Contents/Helpers/mochiport-gui-supervisor"
 python3 "$THIRD_PARTY_LICENSE_GENERATOR" \
   "$STAGED_APP/Contents/Resources/THIRD_PARTY_LICENSES.txt"
 cp LICENSE NOTICE "$STAGED_APP/Contents/Resources/"
