@@ -113,18 +113,6 @@ public final class CodexCollector {
         }
     }
 
-    /// Rebuild the durable Codex history from every readable session log.
-    /// The caller only clears the database after this method has proven that
-    /// enumeration and all file reads completed, so a transient partial scan
-    /// leaves the previous history untouched.
-    @discardableResult
-    public func rebuildHistoricalStats(into statsStore: DailyStatsStore) -> Bool {
-        guard let rows = Self.historicalRows(roots: roots) else { return false }
-        return statsStore.rebuildCodexStats(
-            rows: rows,
-            databaseBackupURL: statsStore.defaultRebuildBackupURL())
-    }
-
     /// Runs without the collector's main-actor isolation so a large profile
     /// cannot freeze the GUI during the one-time migration.
     public nonisolated static func historicalRows(root: URL) -> [DailyStatsRow]? {

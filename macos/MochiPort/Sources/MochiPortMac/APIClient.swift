@@ -57,14 +57,12 @@ struct ManageTelegramProjectGroupsMutationResponse: Codable, Equatable, ManageMu
     let ok: Bool
     let accountId: String
     let projectGroups: [ManageTelegramProjectGroup]
-    let restartRequired: Bool
 }
 
 struct ManageTelegramTopicSyncItem: Codable, Equatable, Identifiable {
     let threadId: String
     let title: String
     let status: String
-    let topicId: Int64?
     let error: String?
 
     var id: String { threadId }
@@ -176,7 +174,6 @@ struct ManageCodexStatus: Decodable, Equatable {
     let imageGenerationEnabled: Bool
     let connectionMode: String
     let providerMode: String?
-    let providerModeMessage: String?
     let activeProvider: String?
 }
 

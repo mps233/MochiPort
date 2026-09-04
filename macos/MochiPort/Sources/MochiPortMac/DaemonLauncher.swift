@@ -569,17 +569,6 @@ struct DaemonLauncher: DaemonLaunching, @unchecked Sendable {
         try await rollbackDaemonUpgrade(plan)
     }
 
-    /// Convenience for callers that have already completed the daemon drain.
-    /// The two-step methods remain available when a caller needs to stage while
-    /// the old process is still serving work.
-    func upgradeDaemonIfNeeded() async throws -> DaemonUpgradeOutcome {
-        let preparation = try await prepareDaemonUpgradeIfNeeded()
-        guard preparation.requiresActivation else {
-            return .alreadyCurrent(buildIdentifier: preparation.targetBuildIdentifier)
-        }
-        return try await activateDaemonUpgrade(preparation)
-    }
-
     func verifiedDaemonIdentity(for lifecycle: ManageLifecycle) async throws -> ManageDaemonIdentity {
         let configurationLoader = configurationLoader
         let activeDaemonLocatorLoader = activeDaemonLocatorLoader

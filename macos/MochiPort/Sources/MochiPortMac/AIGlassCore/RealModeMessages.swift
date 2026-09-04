@@ -171,23 +171,6 @@ public enum CustomizableEvent: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// 미리보기용 대표 HUDEvent.Kind (associated value는 샘플 서비스/시간대).
-    public var sampleKind: HUDEvent.Kind {
-        switch self {
-        case .limitThreshold: return .limitThreshold(.codex, 90)
-        case .depletionRisk: return .depletionRisk(.codex)
-        case .windowReset: return .windowReset(.codex)
-        case .burnSpike: return .burnSpike
-        case .comeback: return .comeback
-        case .milestone: return .milestone
-        case .record: return .record
-        case .update: return .update
-        case .briefingMorning: return .briefing(.morning)
-        case .briefingLunch: return .briefing(.lunch)
-        case .briefingEvening: return .briefing(.evening)
-        }
-    }
-
     /// 편집기 seed·미리보기에 쓰는 기본 제목. 변수를 활용하는 이벤트는 플레이스홀더를 그대로 노출해
     /// (예: "{AGENT} 한도 임박") 사용자가 변수 사용법을 보고 수정하기 좋게 한다 — 실제 발화 시 치환됨.
     public var sampleDefaultTitle: String {
@@ -203,54 +186,6 @@ public enum CustomizableEvent: String, CaseIterable, Identifiable, Sendable {
         case .briefingMorning: return "昨日使用摘要"
         case .briefingLunch: return "今日进度"
         case .briefingEvening: return "今日使用总结"
-        }
-    }
-
-    /// 미리보기 부제 (실제 발화 시 정보성 문구의 예시).
-    public var sampleSubtitle: String {
-        switch self {
-        case .limitThreshold: return "5h 窗口 90% · 2h 15m 后重置"
-        case .depletionRisk: return "照这个速度，1h 30m 后耗尽 5h 额度"
-        case .windowReset: return "上一会话：1.2M tokens"
-        case .burnSpike: return "正在以平时 3.2 倍的速度消耗"
-        case .comeback: return "离开 3h 12m 后继续工作"
-        case .milestone: return "今日累计 263M tokens"
-        case .record: return "此前纪录 380M"
-        case .update: return "v0.14.0 · 点击摘要面板的下载按钮"
-        case .briefingMorning: return "昨日：1.2M tokens · 约 $8.40"
-        case .briefingLunch: return "照这个进度，午夜前约 2.4M（约 $16）"
-        case .briefingEvening: return "今日：1.8M tokens · 约 $12 · Codex 占比 100%"
-        }
-    }
-
-    /// 미리보기 치환 컨텍스트 (대표 샘플 값).
-    public var sampleContext: MessageContext {
-        switch self {
-        case .limitThreshold: return MessageContext(agent: "Codex", usage: 90, reset: "2h 15m")
-        case .depletionRisk: return MessageContext(agent: "Codex")
-        case .windowReset: return MessageContext(agent: "Codex")
-        case .burnSpike: return .empty
-        case .comeback: return .empty
-        case .milestone: return MessageContext(tokens: 263_000_000)
-        case .record: return MessageContext(tokens: 412_000_000)
-        case .update: return .empty
-        case .briefingMorning: return MessageContext(tokens: 1_200_000)
-        case .briefingLunch: return MessageContext(tokens: 800_000)
-        case .briefingEvening: return MessageContext(tokens: 1_800_000)
-        }
-    }
-
-    /// 이 이벤트에서 의미 있게 채워지는 권장 플레이스홀더(UI 힌트용). 나머지를 써도 차단하진 않음.
-    public var recommendedVariables: [String] {
-        switch self {
-        case .limitThreshold: return ["{AGENT}", "{USAGE}", "{RESET}"]
-        case .depletionRisk: return ["{AGENT}"]
-        case .windowReset: return ["{AGENT}"]
-        case .burnSpike: return []
-        case .comeback: return []
-        case .milestone, .record: return ["{TOKENS}"]
-        case .update: return []
-        case .briefingMorning, .briefingLunch, .briefingEvening: return ["{TOKENS}"]
         }
     }
 }

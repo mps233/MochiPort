@@ -2,8 +2,8 @@ import Foundation
 
 /// 文件级增量 JSONL 读取器。
 ///
-/// `newLines` 保留旧的同步 API；生产采集路径使用 `nextBatch`，每次只把
-/// 有界的一批完整记录交给调用方，并在调用方确认处理后提交 offset。
+/// 生产采集路径使用 `nextBatch`，每次只把有界的一批完整记录交给调用方，
+/// 并在调用方确认处理后提交 offset。
 public final class IncrementalLineReader: @unchecked Sendable {
     /// A bounded chunk of complete JSONL records.
     public struct Batch: Sendable {
@@ -131,35 +131,6 @@ public final class IncrementalLineReader: @unchecked Sendable {
         if persistOffset, reachedEOF {
             persistOffsetsLocked()
         }
-    }
-
-    /// Compatibility API. It now uses bounded reads internally, so it no
-    /// longer creates a `readToEnd` buffer plus a second split array.
-    public func newLines(of url: URL, persistOffset: Bool = true) -> [String] {
-        var result: [String] = []
-        while let batch = nextBatchSynchronously(of: url, persistOffset: persistOffset) {
-            result.append(contentsOf: batch.lines.map { String(decoding: $0, as: UTF8.self) })
-            commit(
-                of: url,
-                offset: batch.nextOffset,
-                persistOffset: persistOffset,
-                reachedEOF: batch.reachedEOF)
-            if batch.reachedEOF { break }
-        }
-        return result
-    }
-
-    /// Seeds offsets after a background scan has consumed complete files.
-    /// Keeping this operation on the owning actor avoids re-reading the same
-    /// historical bytes on the next timer tick.
-    public func prime(offsets: [String: UInt64]) {
-        lock.lock()
-        defer { lock.unlock() }
-        for (path, offset) in offsets {
-            self.offsets[path] = offset
-            volatileKeys.remove(path)
-        }
-        persistOffsetsLocked()
     }
 
     /// Starts a deliberate rehydration pass at byte zero without overwriting

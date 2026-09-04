@@ -588,37 +588,6 @@ public final class DailyStatsStore {
         return sums.map { (day: $0.key, tokens: $0.value) }.sorted { $0.day < $1.day }
     }
 
-    /// project별 reported-total 합계 (내림차순). 빈 프로젝트 문자열은 제외. 최근 `days`일.
-    public func projectBreakdown(days: Int, now: Date, calendar: Calendar = .current,
-                                 source: String? = nil) -> [(project: String, tokens: Int)] {
-        let cutoff = cutoffDayString(days: days, now: now, calendar: calendar)
-        let sql = """
-        SELECT project, SUM(usage_total)
-        FROM daily_stats WHERE day >= ? AND service = 'codex' AND project <> ''
-          AND (? IS NULL OR source = ?)
-        GROUP BY project
-        """
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, cutoff, -1, Self.SQLITE_TRANSIENT)
-        if let source {
-            sqlite3_bind_text(stmt, 2, source, -1, Self.SQLITE_TRANSIENT)
-            sqlite3_bind_text(stmt, 3, source, -1, Self.SQLITE_TRANSIENT)
-        } else {
-            sqlite3_bind_null(stmt, 2)
-            sqlite3_bind_null(stmt, 3)
-        }
-
-        var result: [(project: String, tokens: Int)] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            guard let projC = sqlite3_column_text(stmt, 0) else { continue }
-            let project = String(cString: projC)
-            let tokens = Int(sqlite3_column_int64(stmt, 1))
-            result.append((project: project, tokens: tokens))
-        }
-        return result.sorted { $0.tokens > $1.tokens }
-    }
 
     /// 최근 `days`일의 추정 비용 합계(USD). model 컬럼 기준으로 CostEstimator 단가를 적용한다.
     public func totalCost(days: Int, now: Date, calendar: Calendar = .current,

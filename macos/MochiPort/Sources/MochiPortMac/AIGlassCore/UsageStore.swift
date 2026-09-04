@@ -10,8 +10,6 @@ public final class UsageStore {
     private var dedupEventIndexes: [String: Int] = [:]
     /// 분 단위 토큰 합계 캐시 (key = epoch초 / 60). burn rate 계산용. 서비스별로 분리.
     private var minuteBuckets: [ServiceID: [Int: Int]] = [:]
-    /// 分钟级请求数缓存，用于最近活动占比计算。
-    private var requestBuckets: [ServiceID: [Int: Int]] = [:]
     /// 서비스별 가장 최근 이벤트 timestamp 캐시 — approxFullReset이 events 전체 스캔 없이 사용 (30fps 호출 대비).
     private var lastEventTimestamp: [ServiceID: Date] = [:]
 
@@ -89,7 +87,6 @@ public final class UsageStore {
             // Burn rate/activity tracks request tokens. Cache reads are kept
             // on the event, but are not repeatedly counted as new usage.
             minuteBuckets[event.service, default: [:]][minute, default: 0] += event.requestTokens
-            requestBuckets[event.service, default: [:]][minute, default: 0] += 1
             // 서비스별 최신 timestamp 캐시 갱신 (approxFullReset용)
             if let prev = lastEventTimestamp[event.service] {
                 if event.timestamp > prev { lastEventTimestamp[event.service] = event.timestamp }
@@ -108,9 +105,6 @@ public final class UsageStore {
                 let cutoffMinute = Int(newest.timeIntervalSince1970) / 60 - 48 * 60
                 for svc in minuteBuckets.keys {
                     minuteBuckets[svc] = minuteBuckets[svc]!.filter { $0.key > cutoffMinute }
-                }
-                for svc in requestBuckets.keys {
-                    requestBuckets[svc] = requestBuckets[svc]!.filter { $0.key > cutoffMinute }
                 }
             }
 
@@ -150,18 +144,9 @@ public final class UsageStore {
                 minuteBuckets[existing.service]?.removeValue(forKey: oldMinute)
             }
         }
-        if let value = requestBuckets[existing.service]?[oldMinute] {
-            if value > 1 {
-                requestBuckets[existing.service]?[oldMinute] = value - 1
-            } else {
-                requestBuckets[existing.service]?.removeValue(forKey: oldMinute)
-            }
-        }
-
         events[index] = replacement
         minuteBuckets[replacement.service, default: [:]][newMinute, default: 0]
             += replacement.requestTokens
-        requestBuckets[replacement.service, default: [:]][newMinute, default: 0] += 1
 
         for service in Set([existing.service, replacement.service]) {
             lastEventTimestamp[service] = events
@@ -217,25 +202,11 @@ public final class UsageStore {
         }
     }
 
-    public func modelBreakdown(days: Int, now: Date, calendar: Calendar = .current) -> [(model: String, tokens: Int)] {
-        let cutoff = calendar.date(byAdding: .day, value: -days, to: now)!
-        var byModel: [String: Int] = [:]
-        for e in events where e.timestamp >= cutoff {
-            byModel[e.model, default: 0] += e.requestTokens
-        }
-        return byModel.map { (model: $0.key, tokens: $0.value) }.sorted { $0.tokens > $1.tokens }
-    }
-
     public func todayTokens(now: Date, calendar: Calendar = .current) -> Int {
         let start = calendar.startOfDay(for: now)
         return events.filter { $0.timestamp >= start }.reduce(0) { $0 + $1.requestTokens }
     }
 
-    public func todayRequests(now: Date, calendar: Calendar = .current) -> Int {
-        let start = calendar.startOfDay(for: now)
-        let tokenReqs = events.filter { $0.timestamp >= start }.count
-        return tokenReqs
-    }
 
     /// 전 서비스 합산 tokens/min (기존 시그니처 유지).
     public func tokensPerMinute(windowMinutes: Int, now: Date) -> Double {
@@ -260,62 +231,6 @@ public final class UsageStore {
             total += svcBuckets[minute] ?? 0
         }
         return Double(total) / Double(windowMinutes)
-    }
-
-    /// 최근 windowMinutes 내 서비스별 토큰 비중 (합 1.0). 활동 없으면 빈 dict.
-    public func recentShare(windowMinutes: Int = 3, now: Date) -> [ServiceID: Double] {
-        guard windowMinutes > 0 else { return [:] }
-        let nowMinute = Int(now.timeIntervalSince1970) / 60
-        var totals: [ServiceID: Int] = [:]
-        for (svc, svcBuckets) in minuteBuckets {
-            var sum = 0
-            for minute in (nowMinute - windowMinutes + 1)...nowMinute {
-                sum += svcBuckets[minute] ?? 0
-            }
-            if sum > 0 { totals[svc] = sum }
-        }
-        let grand = totals.values.reduce(0, +)
-        guard grand > 0 else { return [:] }
-        return totals.mapValues { Double($0) / Double(grand) }
-    }
-
-    /// 最近 windowMinutes 内各服务的请求活动占比；没有 token 的 CLI 也可纳入统计。
-    public func recentActivityShare(windowMinutes: Int = 3, now: Date) -> [ServiceID: Double] {
-        let totals = recentRequestTotals(windowMinutes: windowMinutes, now: now)
-        let grand = totals.values.reduce(0, +)
-        guard grand > 0 else { return [:] }
-        return totals.mapValues { Double($0) / Double(grand) }
-    }
-
-    /// 根据最近请求数计算活动强度，供菜单栏活动指标使用。
-    public func requestActivityLevel(windowMinutes: Int = 3, now: Date) -> Double {
-        let count = recentRequestTotals(windowMinutes: windowMinutes, now: now).values.reduce(0, +)
-        guard windowMinutes > 0, count > 0 else { return 0 }
-        return min(1.0, Double(count) / Double(windowMinutes))
-    }
-
-    private func recentRequestTotals(windowMinutes: Int, now: Date) -> [ServiceID: Int] {
-        guard windowMinutes > 0 else { return [:] }
-        let nowMinute = Int(now.timeIntervalSince1970) / 60
-        let range = (nowMinute - windowMinutes + 1)...nowMinute
-        var totals: [ServiceID: Int] = [:]
-        for (svc, buckets) in requestBuckets {
-            var count = 0
-            for minute in range { count += buckets[minute] ?? 0 }
-            if count > 0 { totals[svc, default: 0] += count }
-        }
-        return totals
-    }
-
-    /// project별 토큰 합계 (내림차순). project == nil 이벤트는 제외.
-    public func projectBreakdown(days: Int, now: Date, calendar: Calendar = .current) -> [(project: String, tokens: Int)] {
-        let cutoff = calendar.date(byAdding: .day, value: -days, to: now)!
-        var byProject: [String: Int] = [:]
-        for e in events where e.timestamp >= cutoff {
-            guard let proj = e.project else { continue }
-            byProject[proj, default: 0] += e.requestTokens
-        }
-        return byProject.map { (project: $0.key, tokens: $0.value) }.sorted { $0.tokens > $1.tokens }
     }
 
     /// project별·서비스별 토큰 합계 (total 내림차순). project == nil 이벤트는 제외.
@@ -407,11 +322,6 @@ public final class UsageStore {
         return Double(active.values.reduce(0, +)) / Double(active.count)
     }
 
-    /// 펄스 웨이브 진폭 (0...1). 100k tokens/min에서 최대.
-    /// 3분 창: 30fps 파형의 jitter와 반응성 균형
-    public func activityLevel(now: Date) -> Double {
-        min(1.0, tokensPerMinute(windowMinutes: 3, now: now) / 100_000.0)
-    }
 
     /// 서비스의 가장 최근 이벤트 시각 + 윈도우 길이로 근사 리셋 시각을 반환한다.
     /// - session5h: 마지막 이벤트 + 300분
