@@ -5,7 +5,7 @@
 //! 模板是纯静态数据，不包含任何用户配置或密钥；「自定义」不在此列，
 //! 由客户端本地兜底。
 
-use super::config::{ProviderConfig, ProviderType};
+use super::config::ProviderType;
 
 /// 单个内置服务商模板。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,34 +25,6 @@ pub struct ProviderTemplate {
     /// 默认模型列表。
     pub models: &'static [&'static str],
 }
-
-impl ProviderTemplate {
-    /// 生成可直接进入编辑器/保存流程的 [`ProviderConfig`] 草稿：
-    /// 无 API key，weight/timeout 等沿用默认值。
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn to_provider_config(&self) -> ProviderConfig {
-        ProviderConfig {
-            name: self.id.to_string(),
-            provider_type: self.provider_type.clone(),
-            compatibility: self.compatibility.map(str::to_string),
-            base_url: self.base_url.to_string(),
-            models_url: self.models_url.map(str::to_string),
-            models: self.models.iter().map(|model| model.to_string()).collect(),
-            ..ProviderConfig::default()
-        }
-    }
-}
-
-/// 自定义 Chat Completions 保持可编辑兼容，但不作为推荐的新建入口展示。
-static CHAT_COMPATIBLE_TEMPLATE: ProviderTemplate = ProviderTemplate {
-    id: "chat-compatible",
-    display_name: "Chat Completions (other providers)",
-    provider_type: ProviderType::ChatCompletions,
-    compatibility: None,
-    base_url: "",
-    models_url: None,
-    models: &[],
-};
 
 /// 面向新建流程展示的内置服务商模板。
 static PROVIDER_TEMPLATES: [ProviderTemplate; 5] = [
@@ -108,22 +80,7 @@ pub fn provider_templates() -> &'static [ProviderTemplate] {
     &PROVIDER_TEMPLATES
 }
 
-/// 按协议类型取官方默认模板；`AnthropicMessages` 返回 Anthropic 官方模板，
-/// GLM 等兼容厂商使用 [`glm_template`] 之类的专属模板。
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn default_template_for(provider_type: &ProviderType) -> &'static ProviderTemplate {
-    let id = match provider_type {
-        ProviderType::OpenAiResponses => "openai",
-        ProviderType::GrokResponses => "grok",
-        ProviderType::ChatCompletions => return &CHAT_COMPATIBLE_TEMPLATE,
-        ProviderType::DeepSeekResponses => "deepseek-responses",
-        ProviderType::AnthropicMessages => "anthropic",
-    };
-    template_by_id(id)
-}
-
 /// 智谱 GLM 模板（Anthropic Messages 协议 + `glm_anthropic` 兼容 profile）。
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn glm_template() -> &'static ProviderTemplate {
     template_by_id("glm")
 }
@@ -157,42 +114,12 @@ mod tests {
     }
 
     #[test]
-    fn chat_compatible_template_remains_available_but_is_not_recommended() {
-        let template = default_template_for(&ProviderType::ChatCompletions);
-        assert_eq!(template.id, "chat-compatible");
-        assert!(template.base_url.is_empty());
+    fn chat_completions_type_is_not_recommended_in_builtin_templates() {
+        // 自定义 Chat Completions 由客户端本地兜底，不进入内置模板推荐列表。
         assert!(
             provider_templates()
                 .iter()
                 .all(|candidate| candidate.provider_type != ProviderType::ChatCompletions)
-        );
-    }
-
-    #[test]
-    fn every_provider_type_maps_to_its_legacy_gui_default_template() {
-        assert_eq!(
-            default_template_for(&ProviderType::OpenAiResponses).id,
-            "openai"
-        );
-        assert_eq!(
-            default_template_for(&ProviderType::GrokResponses).id,
-            "grok"
-        );
-        assert_eq!(
-            default_template_for(&ProviderType::ChatCompletions).id,
-            "chat-compatible"
-        );
-        assert_eq!(
-            default_template_for(&ProviderType::DeepSeekResponses).id,
-            "deepseek-responses"
-        );
-        assert_eq!(
-            default_template_for(&ProviderType::AnthropicMessages).id,
-            "anthropic"
-        );
-        assert_eq!(
-            default_template_for(&ProviderType::AnthropicMessages).compatibility,
-            Some("anthropic")
         );
     }
 
@@ -206,21 +133,5 @@ mod tests {
             template.models_url,
             Some("https://open.bigmodel.cn/api/paas/v4/models")
         );
-    }
-
-    #[test]
-    fn to_provider_config_produces_secretless_draft_with_defaults() {
-        let provider = default_template_for(&ProviderType::DeepSeekResponses).to_provider_config();
-        assert_eq!(provider.name, "deepseek-responses");
-        assert_eq!(provider.provider_type, ProviderType::DeepSeekResponses);
-        assert_eq!(provider.base_url, "https://api.deepseek.com/v1");
-        assert_eq!(provider.models, vec!["deepseek-v4-pro".to_string()]);
-        assert!(provider.api_key.is_empty());
-        assert!(provider.model_aliases.is_empty());
-
-        let defaults = ProviderConfig::default();
-        assert_eq!(provider.enabled, defaults.enabled);
-        assert_eq!(provider.weight, defaults.weight);
-        assert_eq!(provider.timeout_secs, defaults.timeout_secs);
     }
 }

@@ -60,7 +60,7 @@ pub fn current_config_path() -> PathBuf {
 pub fn legacy_storage_candidates() -> Vec<PathBuf> {
     let mut candidates = LEGACY_HOME_ENV_KEYS
         .iter()
-        .filter_map(|key| env::var_os(key))
+        .filter_map(env::var_os)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .map(absolutize)
@@ -539,6 +539,7 @@ impl StorageMigrationLock {
         let path = parent.join(STORAGE_MIGRATION_LOCK_FILE_NAME);
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)
@@ -651,6 +652,7 @@ mod tests {
         let lock_path = source.join("threadrelay-daemon.lock");
         let lock = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)

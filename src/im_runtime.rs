@@ -213,17 +213,12 @@ pub struct TelegramThreadSettingsDraft {
     pub speed: Option<TelegramThreadSettingsSpeed>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum TelegramThreadSettingsPatchValue {
+    #[default]
     Unchanged,
     Set(String),
     Clear,
-}
-
-impl Default for TelegramThreadSettingsPatchValue {
-    fn default() -> Self {
-        Self::Unchanged
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

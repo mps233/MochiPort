@@ -2138,7 +2138,7 @@ fn thread_settings_selected_model(
         .draft
         .model
         .as_deref()
-        .or_else(|| match &request.observed.model {
+        .or(match &request.observed.model {
             crate::im_runtime::ObservedSetting::Known(Some(model)) => Some(model.as_str()),
             _ => None,
         })?;
@@ -2155,15 +2155,14 @@ fn thread_settings_compatibility(
             crate::im_runtime::ObservedSetting::Known(Some(current)) if current == model
         )
     });
-    let selected_effort =
-        request
-            .draft
-            .effort
-            .as_deref()
-            .or_else(|| match &request.observed.effort {
-                crate::im_runtime::ObservedSetting::Known(Some(effort)) => Some(effort.as_str()),
-                _ => None,
-            });
+    let selected_effort = request
+        .draft
+        .effort
+        .as_deref()
+        .or(match &request.observed.effort {
+            crate::im_runtime::ObservedSetting::Known(Some(effort)) => Some(effort.as_str()),
+            _ => None,
+        });
     let selected_fast = matches!(request.draft.speed, Some(TelegramThreadSettingsSpeed::Fast))
         || (request.draft.speed.is_none()
             && matches!(

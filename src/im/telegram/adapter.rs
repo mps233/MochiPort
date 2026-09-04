@@ -1887,15 +1887,17 @@ fn thread_settings_effort_html(request: &TelegramModelSwitchRequestState, text: 
 }
 
 fn thread_settings_speed_html(request: &TelegramModelSwitchRequestState, text: ImText) -> String {
-    let unavailable = thread_settings_selected_model(request)
-        .is_none_or(|choice| !choice.supports_fast)
-        .then(|| {
-            format!(
-                "\n{}",
-                telegram_html_escape(text.telegram_thread_settings_fast_unavailable())
-            )
-        })
-        .unwrap_or_default();
+    let unavailable =
+        if thread_settings_selected_model(request).is_none_or(|choice| !choice.supports_fast) {
+            {
+                format!(
+                    "\n{}",
+                    telegram_html_escape(text.telegram_thread_settings_fast_unavailable())
+                )
+            }
+        } else {
+            Default::default()
+        };
     format!(
         "<b>{}</b>{}",
         telegram_html_escape(text.telegram_thread_settings_choose_speed()),
@@ -1910,7 +1912,7 @@ fn thread_settings_selected_model(
         .draft
         .model
         .as_deref()
-        .or_else(|| match &request.observed.model {
+        .or(match &request.observed.model {
             ObservedSetting::Known(Some(model)) => Some(model.as_str()),
             _ => None,
         })?;
