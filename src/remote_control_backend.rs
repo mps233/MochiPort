@@ -65,11 +65,12 @@ pub use session_api::{
     ThreadSettingsPatch, ThreadSettingsPatchValue, ThreadStartOptions, clear_thread_for_client,
     clear_turn_for_client, config_read_for_client, current_thread_for_client,
     interrupt_turn_for_client, model_list_for_client, resume_thread_for_client,
-    resume_thread_for_client_on_connection, session_history_threads,
-    session_history_threads_for_client_on_connection, set_thread_name_for_client,
-    start_thread_for_client, start_turn_for_client, steer_turn_for_client, thread_list_for_client,
-    thread_loaded_list_for_client, update_thread_model_for_client,
-    update_thread_settings_for_client,
+    resume_thread_for_client_on_connection, resume_thread_for_client_on_connection_with_path,
+    resume_thread_for_client_with_path, session_history_threads,
+    session_history_threads_for_client_on_connection, session_history_threads_with_connection,
+    set_thread_name_for_client, start_thread_for_client, start_turn_for_client,
+    steer_turn_for_client, thread_list_for_client, thread_loaded_list_for_client,
+    update_thread_model_for_client, update_thread_settings_for_client,
 };
 pub use status::{RemoteControlStatusResponse, status_snapshot};
 use utils::*;
@@ -93,9 +94,12 @@ const REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY: usize = 4096;
 const REMOTE_CONTROL_RECENT_EVENT_LIMIT: usize = 96;
 const REMOTE_CONTROL_DIAGNOSTIC_WINDOW_MS: u128 = 10_000;
 const REMOTE_CONTROL_SOURCE_HINT_TTL_MS: u128 = 30_000;
-const FEISHU_BRIDGE_CLIENT_ID: &str = "codexhub-feishu";
-const FEISHU_BRIDGE_ENV_ID: &str = "env_codexhub_feishu_bridge";
-const FEISHU_BRIDGE_INSTALLATION_ID: &str = "codexhub-feishu-bridge";
+const MOCHIPORT_BRIDGE_CLIENT_ID: &str = "mochiport-bridge";
+const MOCHIPORT_BRIDGE_ENV_ID: &str = "env_mochiport_bridge";
+const MOCHIPORT_BRIDGE_INSTALLATION_ID: &str = "mochiport-bridge";
+const LEGACY_FEISHU_BRIDGE_CLIENT_ID: &str = "codexhub-feishu";
+const LEGACY_FEISHU_BRIDGE_ENV_ID: &str = "env_codexhub_feishu_bridge";
+const LEGACY_FEISHU_BRIDGE_INSTALLATION_ID: &str = "codexhub-feishu-bridge";
 const DEFAULT_REMOTE_CLIENT_KEY: &str = "default";
 
 #[allow(dead_code)]
@@ -470,15 +474,8 @@ pub(super) fn remote_control_stale_reason_locked(
     remote: &RemoteControlInner,
     now_ms: u128,
 ) -> Option<String> {
-    remote_control_liveness_stale_reason(
-        remote.connected,
-        remote.initialized,
-        remote.last_initialize_sent_at_ms.or(remote.connected_at_ms),
-        remote.last_ws_ping_at_ms,
-        remote.last_ws_pong_at_ms,
-        remote.connected_at_ms,
-        now_ms,
-    )
+    active_connection_locked(remote)
+        .and_then(|connection| remote_control_server_connection_stale_reason(connection, now_ms))
 }
 
 pub(super) fn remote_control_connection_stale_reason_locked(
@@ -486,15 +483,7 @@ pub(super) fn remote_control_connection_stale_reason_locked(
     connection_epoch: u64,
     now_ms: u128,
 ) -> Option<String> {
-    if remote.connections.is_empty() {
-        return (remote.connection_epoch == connection_epoch)
-            .then(|| remote_control_stale_reason_locked(remote, now_ms))
-            .flatten();
-    }
-    remote
-        .connections
-        .values()
-        .find(|connection| connection.connection_epoch == connection_epoch)
+    connection_for_epoch_locked(remote, connection_epoch)
         .and_then(|connection| remote_control_server_connection_stale_reason(connection, now_ms))
 }
 
@@ -504,8 +493,12 @@ fn remote_control_server_connection_stale_reason(
 ) -> Option<String> {
     remote_control_liveness_stale_reason(
         connection.connected,
-        connection.initialized,
-        connection.connected_at_ms,
+        connection_initialized(connection),
+        connection
+            .clients
+            .get(&connection.default_client_key)
+            .and_then(|client| client.last_initialize_sent_at_ms)
+            .or(connection.connected_at_ms),
         connection.last_ws_ping_at_ms,
         connection.last_ws_pong_at_ms,
         connection.connected_at_ms,
@@ -649,35 +642,20 @@ async fn ensure_remote_control_client_initialized(
         if !connection_exists_locked(&remote, connection_epoch) {
             false
         } else {
-            let has_connection_map = !remote.connections.is_empty();
-            let connection_initialized = if remote.connections.is_empty() {
-                false
-            } else {
-                {
-                    remote
-                        .connections
-                        .values()
-                        .find(|connection| connection.connection_epoch == connection_epoch)
-                        .is_some_and(|connection| connection.initialized)
-                }
-            };
-            let client = ensure_client_state_locked(&mut remote, &client_key);
+            let client = ensure_client_state_for_connection_locked(
+                &mut remote,
+                connection_epoch,
+                &client_key,
+            )
+            .expect("connected remote-control connection should exist");
             let client_initializing = client.pending.values().any(|pending| {
                 pending.method == "initialize" && pending.connection_epoch == connection_epoch
             });
-            let should_skip_initialize = client_initializing
-                || if !has_connection_map {
-                    client.initialized
-                } else {
-                    client.initialized && connection_initialized
-                };
+            let should_skip_initialize = client_initializing || client.initialized;
             if should_skip_initialize {
                 false
             } else {
                 client.last_app_pong_status = None;
-                if is_legacy_default_client_key(&client_key) {
-                    sync_default_client_legacy_locked(&mut remote);
-                }
                 true
             }
         }
@@ -691,14 +669,9 @@ async fn ensure_remote_control_client_initialized(
 async fn ensure_remote_control_client_ready(state: &SharedState, client_key: &str) -> Result<()> {
     let requested_client_key = normalize_remote_client_key(client_key);
     let (connection_epoch, resolved_client_key) = {
-        let mut remote = state.remote_control.inner.lock().await;
-        if !remote.connected {
-            return Err(anyhow!(
-                "Codex app-server remote-control 尚未连接。请在项目目录运行 codex，确认它已经连接到 MochiPort 的 /backend-api。"
-            ));
-        }
+        let remote = state.remote_control.inner.lock().await;
         let connection_epoch = connection_epoch_for_client_key_locked(
-            &mut remote,
+            &remote,
             &requested_client_key,
         )
         .ok_or_else(|| {
@@ -725,7 +698,9 @@ async fn replay_pending_requests(
     let client_key = normalize_remote_client_key(client_key);
     let pending = {
         let remote = state.remote_control.inner.lock().await;
-        let Some(client) = remote.clients.get(&client_key) else {
+        let Some(client) =
+            client_state_for_connection_locked(&remote, connection_epoch, &client_key)
+        else {
             return Ok(());
         };
         if !connection_exists_locked(&remote, connection_epoch) || !client.initialized {
@@ -758,11 +733,13 @@ async fn replay_pending_requests(
 
 async fn next_remote_subscribe_cursor(state: &SharedState) -> String {
     let cursor = format!(
-        "codexhub:{}",
+        "mochiport:{}",
         REMOTE_SUBSCRIBE_CURSOR_ID.fetch_add(1, Ordering::Relaxed)
     );
     let mut remote = state.remote_control.inner.lock().await;
-    remote.subscribe_cursor = Some(cursor.clone());
+    if let Some(connection) = active_connection_mut_locked(&mut remote) {
+        connection.subscribe_cursor = Some(cursor.clone());
+    }
     cursor
 }
 

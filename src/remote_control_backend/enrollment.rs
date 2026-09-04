@@ -13,14 +13,15 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     app_state::{
-        AuthorizedRemoteControlClient, RemoteControlSourceHint, RemoteControlSourceKind,
-        SharedState,
+        AuthorizedRemoteControlClient, RemoteControlInner, RemoteControlSourceHint,
+        RemoteControlSourceKind, SharedState,
     },
     chain_log,
     types::now_ms,
 };
 
 use super::auth_tokens::jwt_payload;
+use super::client_state::connection_for_epoch_mut_locked;
 use super::{
     format_rfc3339_utc, header_str, log_remote_control_entry_headers, source_kind_from_user_agent,
     stable_base64url_32, stable_id, unix_now_u64,
@@ -417,14 +418,17 @@ pub(super) async fn enroll(
     let environment_id = stable_id("env", &installation_id);
     let expires_at = iso8601_after(Duration::from_secs(24 * 60 * 60));
     let remote_control_token = local_remote_control_server_token(&headers, &server_id);
+    let account_id = header_str(&headers, "chatgpt-account-id");
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.server_id = Some(server_id.clone());
-        remote.environment_id = Some(environment_id.clone());
-        remote.server_name = request.name.clone();
-        remote.installation_id = Some(installation_id.clone());
-        remote.account_id = header_str(&headers, "chatgpt-account-id");
-        remote.last_error = None;
+        update_live_connection_metadata(
+            &mut remote,
+            &installation_id,
+            &server_id,
+            &environment_id,
+            request.name.as_deref(),
+            account_id.as_deref(),
+        );
     }
     state
         .push_event(
@@ -486,13 +490,17 @@ pub(super) async fn refresh(
     let environment_id = stable_id("env", &installation_id);
     let expires_at = iso8601_after(Duration::from_secs(24 * 60 * 60));
     let remote_control_token = local_remote_control_server_token(&headers, &server_id);
+    let account_id = header_str(&headers, "chatgpt-account-id");
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.server_id = Some(server_id.clone());
-        remote.environment_id = Some(environment_id.clone());
-        remote.installation_id = Some(installation_id.clone());
-        remote.account_id =
-            header_str(&headers, "chatgpt-account-id").or(remote.account_id.clone());
+        update_live_connection_metadata(
+            &mut remote,
+            &installation_id,
+            &server_id,
+            &environment_id,
+            None,
+            account_id.as_deref(),
+        );
         if let Some(user_agent) = header_str(&headers, "user-agent") {
             let source_kind = source_kind_from_user_agent(&user_agent);
             if source_kind != RemoteControlSourceKind::Unknown {
@@ -506,7 +514,6 @@ pub(super) async fn refresh(
                 );
             }
         }
-        remote.last_error = None;
     }
     state
         .push_event(
@@ -524,6 +531,46 @@ pub(super) async fn refresh(
             "expires_at": expires_at,
         })),
     )
+}
+
+/// Apply enrollment metadata to matching live websocket connections.
+///
+/// Enrollment can happen before the websocket is opened, so there is no
+/// connection state to update in that case. The websocket handshake carries
+/// the same metadata and remains the source of truth for a future connection.
+fn update_live_connection_metadata(
+    remote: &mut RemoteControlInner,
+    installation_id: &str,
+    server_id: &str,
+    environment_id: &str,
+    server_name: Option<&str>,
+    account_id: Option<&str>,
+) {
+    let matching_epochs = remote
+        .connections
+        .values()
+        .filter(|connection| {
+            connection.server_id.as_deref() == Some(server_id)
+                || (installation_id != "unknown-installation"
+                    && connection.installation_id.as_deref() == Some(installation_id))
+        })
+        .map(|connection| connection.connection_epoch)
+        .collect::<Vec<_>>();
+
+    for connection_epoch in matching_epochs {
+        let Some(connection) = connection_for_epoch_mut_locked(remote, connection_epoch) else {
+            continue;
+        };
+        connection.server_id = Some(server_id.to_string());
+        connection.environment_id = Some(environment_id.to_string());
+        if let Some(server_name) = server_name {
+            connection.server_name = Some(server_name.to_string());
+        }
+        if let Some(account_id) = account_id {
+            connection.account_id = Some(account_id.to_string());
+        }
+        connection.last_error = None;
+    }
 }
 
 fn remote_control_finish_identity_summary(request: &RemoteControlClientFinishRequest) -> String {

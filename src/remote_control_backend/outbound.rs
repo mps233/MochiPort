@@ -1,4 +1,4 @@
-﻿use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 use tracing::info;
 
@@ -8,13 +8,12 @@ use crate::{
     types::now_ms,
 };
 
+use super::client_state::normalize_remote_client_key;
 use super::client_state::{
-    active_connection_epoch_locked, outbound_tx_for_connection_epoch_locked,
-    remote_client_key_for_stream_on_connection_locked, resolve_remote_client_key_locked,
-};
-use super::client_state::{
-    ensure_client_state_locked, is_legacy_default_client_key, normalize_remote_client_key,
-    sync_default_client_legacy_locked,
+    active_connection_epoch_locked, client_state_mut_for_connection_locked,
+    ensure_client_state_for_connection_locked, outbound_tx_for_connection_epoch_locked,
+    remote_client_key_for_stream_on_connection_locked,
+    resolve_remote_client_key_for_connection_locked,
 };
 use super::log_format::{client_envelope_recent_kind, message_summary};
 use super::protocol::{build_client_ack_envelope, build_client_message_envelopes};
@@ -62,12 +61,11 @@ pub(super) async fn send_response_for_stream(
                 "remote-control response target is not registered: client_id={client_id} stream_id={stream_id}"
             ));
         };
-        let client = ensure_client_state_locked(&mut remote, &client_key);
+        let client =
+            ensure_client_state_for_connection_locked(&mut remote, connection_epoch, &client_key)
+                .ok_or_else(|| anyhow!("remote-control connection disappeared"))?;
         let seq_id = client.next_seq_id;
         client.next_seq_id = client.next_seq_id.saturating_add(1);
-        if is_legacy_default_client_key(&client_key) {
-            sync_default_client_legacy_locked(&mut remote);
-        }
         seq_id
     };
     let cursor = next_remote_subscribe_cursor(state).await;
@@ -112,7 +110,9 @@ pub(super) async fn send_initialize_for_client_on_connection(
     let (client_id, stream_id, seq_id, envelopes) = {
         let (tx, _rx) = tokio::sync::oneshot::channel();
         let mut remote = state.remote_control.inner.lock().await;
-        let client = ensure_client_state_locked(&mut remote, &client_key);
+        let client =
+            ensure_client_state_for_connection_locked(&mut remote, connection_epoch, &client_key)
+                .ok_or_else(|| anyhow!("remote-control connection disappeared"))?;
         client.last_initialize_sent_at_ms = Some(now_ms());
         let seq_id = client.next_seq_id;
         client.next_seq_id = client.next_seq_id.saturating_add(1);
@@ -138,9 +138,6 @@ pub(super) async fn send_initialize_for_client_on_connection(
                 envelopes: envelopes.clone(),
             },
         );
-        if is_legacy_default_client_key(&client_key) {
-            sync_default_client_legacy_locked(&mut remote);
-        }
         (client_id, stream_id, seq_id, envelopes)
     };
     chain_log::write_line(format!(
@@ -149,11 +146,10 @@ pub(super) async fn send_initialize_for_client_on_connection(
     ));
     if let Err(err) = send_envelopes_on_connection(state, connection_epoch, envelopes).await {
         let mut remote = state.remote_control.inner.lock().await;
-        if let Some(client) = remote.clients.get_mut(&client_key) {
+        if let Some(client) =
+            client_state_mut_for_connection_locked(&mut remote, connection_epoch, &client_key)
+        {
             client.pending.remove(&request_key);
-        }
-        if is_legacy_default_client_key(&client_key) {
-            sync_default_client_legacy_locked(&mut remote);
         }
         return Err(err);
     }
@@ -178,12 +174,11 @@ pub(super) async fn send_initialized_for_stream(
                 "remote-control initialized target is not registered: client_id={client_id} stream_id={stream_id}"
             ));
         };
-        let client = ensure_client_state_locked(&mut remote, &client_key);
+        let client =
+            ensure_client_state_for_connection_locked(&mut remote, connection_epoch, &client_key)
+                .ok_or_else(|| anyhow!("remote-control connection disappeared"))?;
         let seq_id = client.next_seq_id;
         client.next_seq_id = client.next_seq_id.saturating_add(1);
-        if is_legacy_default_client_key(&client_key) {
-            sync_default_client_legacy_locked(&mut remote);
-        }
         seq_id
     };
     let cursor = next_remote_subscribe_cursor(state).await;
@@ -391,16 +386,18 @@ async fn next_client_envelope_parts(
 ) -> Result<(String, String, u64)> {
     let requested_client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
-    if !remote.connected {
-        return Err(anyhow!("remote-control websocket is not connected"));
-    }
-    let client_key = resolve_remote_client_key_locked(&mut remote, &requested_client_key);
-    let client = ensure_client_state_locked(&mut remote, &client_key);
+    let connection_epoch = active_connection_epoch_locked(&remote)
+        .ok_or_else(|| anyhow!("remote-control websocket is not connected"))?;
+    let client_key = resolve_remote_client_key_for_connection_locked(
+        &remote,
+        connection_epoch,
+        &requested_client_key,
+    );
+    let client =
+        ensure_client_state_for_connection_locked(&mut remote, connection_epoch, &client_key)
+            .ok_or_else(|| anyhow!("remote-control connection disappeared"))?;
     let seq_id = client.next_seq_id;
     client.next_seq_id = client.next_seq_id.saturating_add(1);
     let parts = (client.client_id.clone(), client.stream_id.clone(), seq_id);
-    if is_legacy_default_client_key(&client_key) {
-        sync_default_client_legacy_locked(&mut remote);
-    }
     Ok(parts)
 }

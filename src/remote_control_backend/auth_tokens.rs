@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use serde_json::{Value, json};
 
+use super::client_state::active_connection_locked;
 use crate::app_state::SharedState;
 
 pub(super) async fn local_chatgpt_auth_tokens_response(state: &SharedState) -> Result<Value> {
@@ -34,7 +35,10 @@ pub(super) async fn local_chatgpt_auth_tokens_response(state: &SharedState) -> R
                 .inner
                 .try_lock()
                 .ok()
-                .and_then(|remote| remote.account_id.clone())
+                .and_then(|remote| {
+                    active_connection_locked(&remote)
+                        .and_then(|connection| connection.account_id.clone())
+                })
         })
         .unwrap_or_else(|| "acct_codexhub_local".to_string());
     let plan_type = auth

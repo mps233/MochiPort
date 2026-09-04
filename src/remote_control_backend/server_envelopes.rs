@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use crate::{app_state::SharedState, chain_log, types::now_ms};
 
 use super::OutboundWsMessage;
+use super::client_state::{connection_for_epoch_locked, connection_for_epoch_mut_locked};
 use super::diagnostics::{
     is_current_remote_stream, observe_command_output_delta_received,
     observe_server_envelope_window, observe_stale_server_envelope, record_remote_app_pong,
@@ -406,14 +407,17 @@ async fn mark_server_envelope_acked(
     segment_id: Option<usize>,
 ) {
     let mut remote = state.remote_control.inner.lock().await;
+    let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch) else {
+        return;
+    };
     let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
     let next = (seq_id, segment_id);
-    let should_update = remote
+    let should_update = connection
         .server_ack_cursors
         .get(&key)
         .is_none_or(|current| ack_cursor_gt(next, *current));
     if should_update {
-        remote.server_ack_cursors.insert(key, next);
+        connection.server_ack_cursors.insert(key, next);
     }
 }
 
@@ -427,9 +431,8 @@ async fn is_duplicate_server_envelope(
 ) -> bool {
     let remote = state.remote_control.inner.lock().await;
     let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
-    remote
-        .server_ack_cursors
-        .get(&key)
+    connection_for_epoch_locked(&remote, connection_epoch)
+        .and_then(|connection| connection.server_ack_cursors.get(&key))
         .is_some_and(|current| !ack_cursor_gt((seq_id, segment_id), *current))
 }
 

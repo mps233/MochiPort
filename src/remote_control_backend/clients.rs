@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use axum::{
     Json,
     extract::{
@@ -16,9 +18,12 @@ use crate::{
     chain_log,
 };
 
+use super::client_state::active_connection_mut_locked;
 use super::{
-    FEISHU_BRIDGE_CLIENT_ID, FEISHU_BRIDGE_ENV_ID, FEISHU_BRIDGE_INSTALLATION_ID,
-    RemoteControlStatusResponse, format_rfc3339_utc, status_snapshot, unix_now_u64,
+    LEGACY_FEISHU_BRIDGE_CLIENT_ID, LEGACY_FEISHU_BRIDGE_ENV_ID,
+    LEGACY_FEISHU_BRIDGE_INSTALLATION_ID, MOCHIPORT_BRIDGE_CLIENT_ID, MOCHIPORT_BRIDGE_ENV_ID,
+    MOCHIPORT_BRIDGE_INSTALLATION_ID, RemoteControlStatusResponse, format_rfc3339_utc,
+    status_snapshot, unix_now_u64,
 };
 
 const MOCHIPORT_REMOTE_DISPLAY_NAME: &str = "MochiPort";
@@ -52,19 +57,25 @@ pub(super) async fn remote_control_clients(State(state): State<SharedState>) -> 
         .values()
         .map(remote_control_client_item)
         .collect::<Vec<_>>();
-    let feishu_revoked = remote.revoked_clients.contains(FEISHU_BRIDGE_CLIENT_ID);
+    let bridge_revoked = bridge_client_revoked(&remote.revoked_clients);
     drop(remote);
 
     let config = state.config.lock().await.clone();
+    let feishu_configured = config
+        .feishu_accounts
+        .iter()
+        .any(|account| account.is_configured());
     if config.bridge.enabled
-        && !config.feishu.app_id.trim().is_empty()
-        && !feishu_revoked
+        && feishu_configured
+        && !bridge_revoked
         && !items.iter().any(|item| {
-            item.get("client_id").and_then(Value::as_str) == Some(FEISHU_BRIDGE_CLIENT_ID)
+            item.get("client_id")
+                .and_then(Value::as_str)
+                .is_some_and(is_bridge_client_id)
         })
     {
         let ws = state.feishu_ws.lock().await.clone();
-        items.push(feishu_bridge_client_item(ws.connected));
+        items.push(mochiport_bridge_client_item(ws.connected));
     }
     items.sort_by(|left, right| {
         left.get("display_name")
@@ -79,11 +90,11 @@ pub(super) async fn remote_control_clients(State(state): State<SharedState>) -> 
     });
     let aliases = items.clone();
     chain_log::write_line(format!(
-        "[remote_control] event=clients_list count={} bridge_enabled={} feishu_configured={} feishu_revoked={}",
+        "[remote_control] event=clients_list count={} bridge_enabled={} feishu_configured={} bridge_revoked={}",
         items.len(),
         config.bridge.enabled,
-        !config.feishu.app_id.trim().is_empty(),
-        feishu_revoked
+        feishu_configured,
+        bridge_revoked
     ));
     Json(json!({
         "items": items,
@@ -99,8 +110,12 @@ pub(super) async fn delete_remote_control_client(
 ) -> StatusCode {
     let mut remote = state.remote_control.inner.lock().await;
     remote.authorized_clients.remove(&client_id);
-    if client_id == FEISHU_BRIDGE_CLIENT_ID {
-        remote.revoked_clients.insert(client_id);
+    if is_bridge_client_id(&client_id) {
+        remote.authorized_clients.remove(MOCHIPORT_BRIDGE_CLIENT_ID);
+        remote
+            .authorized_clients
+            .remove(LEGACY_FEISHU_BRIDGE_CLIENT_ID);
+        revoke_bridge_client(&mut remote.revoked_clients, &client_id);
     }
     StatusCode::NO_CONTENT
 }
@@ -126,16 +141,56 @@ pub(super) async fn rename_remote_control_environment(
     if let Some(name) = request.name.map(|name| name.trim().to_string())
         && !name.is_empty()
     {
-        state.remote_control.inner.lock().await.server_name = Some(name);
+        let mut remote = state.remote_control.inner.lock().await;
+        if let Some(connection) = active_connection_mut_locked(&mut remote) {
+            connection.server_name = Some(name);
+        }
     }
     let snapshot = status_snapshot(&state).await;
     Json(remote_control_environment_item(&snapshot))
 }
 
 pub(super) async fn delete_remote_control_environment(
-    AxumPath(_env_id): AxumPath<String>,
+    AxumPath(env_id): AxumPath<String>,
 ) -> StatusCode {
+    // Keep accepting both the current and legacy environment route IDs. The
+    // local environment is not actually removable, so this remains a no-op.
+    let _known_bridge_environment = is_bridge_environment_id(&env_id);
     StatusCode::NO_CONTENT
+}
+
+fn is_bridge_client_id(client_id: &str) -> bool {
+    matches!(
+        client_id,
+        MOCHIPORT_BRIDGE_CLIENT_ID | LEGACY_FEISHU_BRIDGE_CLIENT_ID
+    )
+}
+
+fn bridge_client_revoked(revoked_clients: &HashSet<String>) -> bool {
+    revoked_clients.contains(MOCHIPORT_BRIDGE_CLIENT_ID)
+        || revoked_clients.contains(LEGACY_FEISHU_BRIDGE_CLIENT_ID)
+}
+
+fn revoke_bridge_client(revoked_clients: &mut HashSet<String>, client_id: &str) {
+    if is_bridge_client_id(client_id) {
+        revoked_clients.insert(MOCHIPORT_BRIDGE_CLIENT_ID.to_string());
+        revoked_clients.insert(LEGACY_FEISHU_BRIDGE_CLIENT_ID.to_string());
+    }
+}
+
+fn is_bridge_environment_id(environment_id: &str) -> bool {
+    matches!(
+        environment_id,
+        MOCHIPORT_BRIDGE_ENV_ID | LEGACY_FEISHU_BRIDGE_ENV_ID
+    )
+}
+
+#[allow(dead_code)]
+fn is_bridge_installation_id(installation_id: &str) -> bool {
+    matches!(
+        installation_id,
+        MOCHIPORT_BRIDGE_INSTALLATION_ID | LEGACY_FEISHU_BRIDGE_INSTALLATION_ID
+    )
 }
 
 fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Value {
@@ -146,11 +201,11 @@ fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Va
         .unwrap_or_else(|| MOCHIPORT_REMOTE_DISPLAY_NAME.to_string());
 
     json!({
-        "id": FEISHU_BRIDGE_ENV_ID,
-        "hostId": FEISHU_BRIDGE_ENV_ID,
-        "host_id": FEISHU_BRIDGE_ENV_ID,
-        "envId": FEISHU_BRIDGE_ENV_ID,
-        "env_id": FEISHU_BRIDGE_ENV_ID,
+        "id": MOCHIPORT_BRIDGE_ENV_ID,
+        "hostId": MOCHIPORT_BRIDGE_ENV_ID,
+        "host_id": MOCHIPORT_BRIDGE_ENV_ID,
+        "envId": MOCHIPORT_BRIDGE_ENV_ID,
+        "env_id": MOCHIPORT_BRIDGE_ENV_ID,
         "displayName": host_name,
         "display_name": host_name,
         "hostName": host_name,
@@ -167,8 +222,8 @@ fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Va
         "arch": local_arch(),
         "appServerVersion": env!("CARGO_PKG_VERSION"),
         "app_server_version": env!("CARGO_PKG_VERSION"),
-        "installationId": FEISHU_BRIDGE_INSTALLATION_ID,
-        "installation_id": FEISHU_BRIDGE_INSTALLATION_ID,
+        "installationId": MOCHIPORT_BRIDGE_INSTALLATION_ID,
+        "installation_id": MOCHIPORT_BRIDGE_INSTALLATION_ID,
         "autoConnect": true,
         "auto_connect": true,
         "lastSeenAt": Value::Null,
@@ -192,9 +247,9 @@ fn remote_control_client_item(client: &AuthorizedRemoteControlClient) -> Value {
     })
 }
 
-fn feishu_bridge_client_item(connected: bool) -> Value {
+fn mochiport_bridge_client_item(connected: bool) -> Value {
     remote_control_client_json(RemoteControlClientJson {
-        client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
+        client_id: MOCHIPORT_BRIDGE_CLIENT_ID.to_string(),
         account_user_id: "user_codexhub_local__acct_codexhub_local".to_string(),
         display_name: MOCHIPORT_REMOTE_DISPLAY_NAME.to_string(),
         device_model: local_device_model(),
@@ -317,8 +372,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn feishu_bridge_client_uses_mochiport_display_name() {
-        let client = feishu_bridge_client_item(true);
+    fn mochiport_bridge_client_uses_mochiport_identity() {
+        let client = mochiport_bridge_client_item(true);
+
+        assert_eq!(client["client_id"], MOCHIPORT_BRIDGE_CLIENT_ID);
 
         for key in [
             "display_name",
@@ -333,6 +390,37 @@ mod tests {
     }
 
     #[test]
+    fn legacy_bridge_revocation_hides_current_virtual_client() {
+        let revoked = [LEGACY_FEISHU_BRIDGE_CLIENT_ID.to_string()]
+            .into_iter()
+            .collect();
+
+        assert!(bridge_client_revoked(&revoked));
+        assert!(is_bridge_client_id(LEGACY_FEISHU_BRIDGE_CLIENT_ID));
+        assert!(is_bridge_client_id(MOCHIPORT_BRIDGE_CLIENT_ID));
+    }
+
+    #[test]
+    fn deleting_legacy_bridge_client_revokes_current_id() {
+        let mut revoked = HashSet::new();
+
+        revoke_bridge_client(&mut revoked, LEGACY_FEISHU_BRIDGE_CLIENT_ID);
+
+        assert!(revoked.contains(MOCHIPORT_BRIDGE_CLIENT_ID));
+        assert!(revoked.contains(LEGACY_FEISHU_BRIDGE_CLIENT_ID));
+    }
+
+    #[test]
+    fn legacy_environment_and_installation_ids_remain_accepted() {
+        assert!(is_bridge_environment_id(LEGACY_FEISHU_BRIDGE_ENV_ID));
+        assert!(is_bridge_environment_id(MOCHIPORT_BRIDGE_ENV_ID));
+        assert!(is_bridge_installation_id(
+            LEGACY_FEISHU_BRIDGE_INSTALLATION_ID
+        ));
+        assert!(is_bridge_installation_id(MOCHIPORT_BRIDGE_INSTALLATION_ID));
+    }
+
+    #[test]
     fn remote_control_environment_fallback_uses_mochiport_display_name() {
         let environment = remote_control_environment_item(&RemoteControlStatusResponse {
             connected: true,
@@ -341,7 +429,7 @@ mod tests {
             active_source_kind: None,
             active_user_agent: None,
             connections: Vec::new(),
-            client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
+            client_id: MOCHIPORT_BRIDGE_CLIENT_ID.to_string(),
             stream_id: Some("stream-test".to_string()),
             server_id: None,
             environment_id: None,

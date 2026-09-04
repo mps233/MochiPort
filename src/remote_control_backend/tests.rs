@@ -10,7 +10,7 @@ use super::server_messages::{
 };
 use super::*;
 use crate::{
-    app_state::{AppState, PendingRemoteRequest},
+    app_state::{AppState, PendingRemoteRequest, RemoteControlClientState},
     config::AppConfig,
     im_runtime::RouteTarget,
     store::PersistedState,
@@ -29,41 +29,43 @@ fn test_state() -> SharedState {
 }
 
 fn remote_inner_for_test(stream_id: &str) -> RemoteControlInner {
-    RemoteControlInner {
+    let mut remote = RemoteControlInner {
         connections: HashMap::new(),
-        active_connection_id: None,
         next_connection_epoch: 0,
         pending_source_hints_by_installation: HashMap::new(),
-        connected: false,
-        initialized: false,
-        client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
-        stream_id: stream_id.to_string(),
-        server_id: None,
-        environment_id: None,
-        server_name: None,
-        installation_id: None,
-        account_id: None,
-        current_thread_id: None,
-        current_turn_id: None,
-        last_error: None,
-        connected_at_ms: None,
-        last_ws_inbound_at_ms: None,
-        last_ws_ping_at_ms: None,
-        last_ws_pong_at_ms: None,
-        last_app_ping_at_ms: None,
-        last_app_pong_at_ms: None,
-        last_app_pong_status: None,
-        last_initialize_sent_at_ms: None,
-        subscribe_cursor: None,
-        server_ack_cursors: HashMap::new(),
-        outbound_tx: None,
-        connection_epoch: 0,
-        clients: HashMap::new(),
         authorized_clients: HashMap::new(),
         revoked_clients: std::collections::HashSet::new(),
-        stream_diagnostics: HashMap::new(),
         recent_events: std::collections::VecDeque::new(),
-    }
+    };
+    let connection = test_connection(
+        "default",
+        1,
+        true,
+        false,
+        crate::app_state::RemoteControlSourceKind::Unknown,
+        None,
+    );
+    remote
+        .connections
+        .insert(connection.connection_id.clone(), connection);
+    let default_client_key = default_client_key_for_connection_locked(&remote, 1);
+    let client = ensure_client_state_for_connection_locked(&mut remote, 1, &default_client_key)
+        .expect("test connection should exist");
+    client.stream_id = stream_id.to_string();
+    remote
+}
+
+fn insert_test_connection(
+    remote: &mut RemoteControlInner,
+    id: &str,
+    connection_epoch: u64,
+    source_kind: crate::app_state::RemoteControlSourceKind,
+    outbound_tx: Option<tokio::sync::mpsc::UnboundedSender<OutboundWsMessage>>,
+) {
+    remote.connections.insert(
+        id.to_string(),
+        test_connection(id, connection_epoch, true, false, source_kind, outbound_tx),
+    );
 }
 
 fn test_connection(
@@ -74,12 +76,31 @@ fn test_connection(
     source_kind: crate::app_state::RemoteControlSourceKind,
     outbound_tx: Option<tokio::sync::mpsc::UnboundedSender<OutboundWsMessage>>,
 ) -> crate::app_state::RemoteControlServerConnection {
+    let default_client_key = source_default_client_key(source_kind);
+    let mut clients = HashMap::new();
+    clients.insert(
+        default_client_key.clone(),
+        RemoteControlClientState {
+            client_id: MOCHIPORT_BRIDGE_CLIENT_ID.to_string(),
+            stream_id: "stream-root".to_string(),
+            initialized,
+            next_seq_id: 1,
+            pending: HashMap::new(),
+            current_thread_id: None,
+            current_turn_id: None,
+            last_app_ping_at_ms: None,
+            last_app_pong_at_ms: None,
+            last_app_pong_status: None,
+            last_initialize_sent_at_ms: None,
+            recovery_attempt: 0,
+            recovery_started_at_ms: None,
+        },
+    );
     crate::app_state::RemoteControlServerConnection {
         connection_id: id.to_string(),
         connection_epoch,
-        default_client_key: source_default_client_key(source_kind),
+        default_client_key,
         connected,
-        initialized,
         source_kind,
         user_agent: None,
         server_id: None,
@@ -94,9 +115,38 @@ fn test_connection(
         last_ws_ping_at_ms: None,
         last_ws_pong_at_ms: None,
         last_error: None,
-        clients: HashMap::new(),
+        clients,
+        server_ack_cursors: HashMap::new(),
         stream_diagnostics: HashMap::new(),
     }
+}
+
+#[tokio::test]
+async fn subscribe_cursors_use_mochiport_namespace() {
+    let cursor = next_remote_subscribe_cursor(&test_state()).await;
+
+    assert!(cursor.starts_with("mochiport:"));
+    assert!(cursor["mochiport:".len()..].parse::<u64>().is_ok());
+}
+
+#[test]
+fn source_kind_from_user_agent_recognizes_current_and_legacy_cli_names() {
+    assert_eq!(
+        source_kind_from_user_agent("mochiport/0.137.0 (macOS; arm64)"),
+        crate::app_state::RemoteControlSourceKind::Cli
+    );
+    assert_eq!(
+        source_kind_from_user_agent("codexhub/0.3.3 (macOS; arm64)"),
+        crate::app_state::RemoteControlSourceKind::Cli
+    );
+    assert_eq!(
+        source_kind_from_user_agent("Codex Desktop/0.137.0"),
+        crate::app_state::RemoteControlSourceKind::CodexApp
+    );
+    assert_eq!(
+        source_kind_from_user_agent("codex_vscode/0.137.0"),
+        crate::app_state::RemoteControlSourceKind::Vscode
+    );
 }
 
 fn test_server_message_envelope(
@@ -193,16 +243,27 @@ async fn setup_connected_default_client(
     let (outbound_tx, outbound_rx) = tokio::sync::mpsc::unbounded_channel();
     let (client_id, stream_id, connection_epoch) = {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.connected = true;
-        remote.connection_epoch = 7;
-        remote.outbound_tx = Some(outbound_tx.clone());
-        remote.stream_id = "stream-test".to_string();
-        let client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
+        let connection_epoch = 7;
+        insert_test_connection(
+            &mut remote,
+            "default",
+            connection_epoch,
+            crate::app_state::RemoteControlSourceKind::Unknown,
+            Some(outbound_tx.clone()),
+        );
+        let default_client_key =
+            default_client_key_for_connection_locked(&remote, connection_epoch);
+        let client = ensure_client_state_for_connection_locked(
+            &mut remote,
+            connection_epoch,
+            &default_client_key,
+        )
+        .expect("test connection should exist");
+        client.stream_id = "stream-test".to_string();
         client.initialized = true;
         let client_id = client.client_id.clone();
         let stream_id = client.stream_id.clone();
-        sync_default_client_legacy_locked(&mut remote);
-        (client_id, stream_id, remote.connection_epoch)
+        (client_id, stream_id, connection_epoch)
     };
     (
         outbound_tx,
@@ -225,17 +286,16 @@ async fn system_error_status_keeps_im_turn_until_terminal_notification() {
             .await
             .mark_turn_started("thread-1", "turn-1");
         let mut remote = state.remote_control.inner.lock().await;
-        let client = remote
-            .clients
-            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
-            .expect("default client");
+        let client =
+            client_state_mut_for_connection_locked(&mut remote, 7, DEFAULT_REMOTE_CLIENT_KEY)
+                .expect("default client");
         client.current_thread_id = Some("thread-1".to_string());
         client.current_turn_id = Some("turn-1".to_string());
-        sync_default_client_legacy_locked(&mut remote);
     }
 
     observe_thread_status_changed(
         &state,
+        7,
         Some(DEFAULT_REMOTE_CLIENT_KEY),
         "thread-1",
         "systemError",
@@ -254,9 +314,7 @@ async fn system_error_status_keeps_im_turn_until_terminal_notification() {
             .terminal_status_fallback_matches("thread-1", "turn-1")
     );
     let remote = state.remote_control.inner.lock().await;
-    let client = remote
-        .clients
-        .get(DEFAULT_REMOTE_CLIENT_KEY)
+    let client = client_state_for_connection_locked(&remote, 7, DEFAULT_REMOTE_CLIENT_KEY)
         .expect("default client");
     assert_eq!(client.current_turn_id, None);
 }
@@ -273,17 +331,19 @@ async fn terminal_server_notification_cancels_shared_status_fallback_before_im_d
             .await
             .mark_turn_started("thread-1", "turn-1");
         let mut remote = state.remote_control.inner.lock().await;
-        let client = remote
-            .clients
-            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
-            .expect("default client");
+        let client = client_state_mut_for_connection_locked(
+            &mut remote,
+            connection_epoch,
+            DEFAULT_REMOTE_CLIENT_KEY,
+        )
+        .expect("default client");
         client.current_thread_id = Some("thread-1".to_string());
         client.current_turn_id = Some("turn-1".to_string());
-        sync_default_client_legacy_locked(&mut remote);
     }
 
     observe_thread_status_changed(
         &state,
+        connection_epoch,
         Some(DEFAULT_REMOTE_CLIENT_KEY),
         "thread-1",
         "systemError",
@@ -329,17 +389,16 @@ async fn repeated_terminal_status_does_not_replace_or_duplicate_fallback_latch()
             .await
             .mark_turn_started("thread-1", "turn-1");
         let mut remote = state.remote_control.inner.lock().await;
-        let client = remote
-            .clients
-            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
-            .expect("default client");
+        let client =
+            client_state_mut_for_connection_locked(&mut remote, 7, DEFAULT_REMOTE_CLIENT_KEY)
+                .expect("default client");
         client.current_thread_id = Some("thread-1".to_string());
         client.current_turn_id = Some("turn-1".to_string());
-        sync_default_client_legacy_locked(&mut remote);
     }
 
     observe_thread_status_changed(
         &state,
+        7,
         Some(DEFAULT_REMOTE_CLIENT_KEY),
         "thread-1",
         "systemError",
@@ -357,6 +416,7 @@ async fn repeated_terminal_status_does_not_replace_or_duplicate_fallback_latch()
     // status notification must not create another timer or replace the token.
     observe_thread_status_changed(
         &state,
+        7,
         Some(DEFAULT_REMOTE_CLIENT_KEY),
         "thread-1",
         "systemError",
@@ -489,27 +549,39 @@ fn recovery_retry_policy_does_not_replay_non_idempotent_requests() {
 }
 
 #[test]
-fn virtual_remote_clients_share_enrolled_client_id_and_use_distinct_streams() {
+fn virtual_remote_clients_share_mochiport_bridge_client_id_and_use_distinct_streams() {
     let mut remote = remote_inner_for_test("default-stream");
 
-    let feishu = ensure_client_state_locked(&mut remote, "feishu:default:chat-1");
+    let feishu = ensure_client_state_for_connection_locked(&mut remote, 1, "feishu:default:chat-1")
+        .expect("test connection");
     let feishu_client_id = feishu.client_id.clone();
     let feishu_stream_id = feishu.stream_id.clone();
-    let wechat = ensure_client_state_locked(&mut remote, "wechat:bot:user-1");
+    let wechat = ensure_client_state_for_connection_locked(&mut remote, 1, "wechat:bot:user-1")
+        .expect("test connection");
     let wechat_client_id = wechat.client_id.clone();
     let wechat_stream_id = wechat.stream_id.clone();
 
-    assert_eq!(feishu_client_id, FEISHU_BRIDGE_CLIENT_ID);
-    assert_eq!(wechat_client_id, FEISHU_BRIDGE_CLIENT_ID);
+    assert_eq!(feishu_client_id, MOCHIPORT_BRIDGE_CLIENT_ID);
+    assert_eq!(wechat_client_id, MOCHIPORT_BRIDGE_CLIENT_ID);
     assert_ne!(feishu_stream_id, wechat_stream_id);
     assert_eq!(
-        remote_client_key_for_stream_locked(&remote, &feishu_client_id, &feishu_stream_id)
-            .as_deref(),
+        remote_client_key_for_stream_on_connection_locked(
+            &remote,
+            1,
+            &feishu_client_id,
+            &feishu_stream_id,
+        )
+        .as_deref(),
         Some("feishu:default:chat-1")
     );
     assert_eq!(
-        remote_client_key_for_stream_locked(&remote, &wechat_client_id, &wechat_stream_id)
-            .as_deref(),
+        remote_client_key_for_stream_on_connection_locked(
+            &remote,
+            1,
+            &wechat_client_id,
+            &wechat_stream_id,
+        )
+        .as_deref(),
         Some("wechat:bot:user-1")
     );
 }
@@ -536,10 +608,12 @@ fn virtual_remote_client_stream_is_namespaced_by_connection_stream() {
     let mut first = remote_inner_for_test("default-stream-1");
     let mut second = remote_inner_for_test("default-stream-2");
     let client_key = "wechat:bot:user-1";
-    let first_stream = ensure_client_state_locked(&mut first, client_key)
+    let first_stream = ensure_client_state_for_connection_locked(&mut first, 1, client_key)
+        .expect("first test connection")
         .stream_id
         .clone();
-    let second_stream = ensure_client_state_locked(&mut second, client_key)
+    let second_stream = ensure_client_state_for_connection_locked(&mut second, 1, client_key)
+        .expect("second test connection")
         .stream_id
         .clone();
 
@@ -548,42 +622,14 @@ fn virtual_remote_client_stream_is_namespaced_by_connection_stream() {
 
 #[test]
 fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests() {
-    let mut remote = RemoteControlInner {
-        connections: HashMap::new(),
-        active_connection_id: None,
-        next_connection_epoch: 0,
-        pending_source_hints_by_installation: HashMap::new(),
-        connected: false,
-        initialized: false,
-        client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
-        stream_id: "default-stream".to_string(),
-        server_id: None,
-        environment_id: None,
-        server_name: None,
-        installation_id: None,
-        account_id: None,
-        current_thread_id: None,
-        current_turn_id: None,
-        last_error: None,
-        connected_at_ms: None,
-        last_ws_inbound_at_ms: None,
-        last_ws_ping_at_ms: None,
-        last_ws_pong_at_ms: None,
-        last_app_ping_at_ms: None,
-        last_app_pong_at_ms: None,
-        last_app_pong_status: None,
-        last_initialize_sent_at_ms: None,
-        subscribe_cursor: None,
-        server_ack_cursors: HashMap::new(),
-        outbound_tx: None,
-        connection_epoch: 0,
-        clients: HashMap::new(),
-        authorized_clients: HashMap::new(),
-        revoked_clients: std::collections::HashSet::new(),
-        stream_diagnostics: HashMap::new(),
-        recent_events: std::collections::VecDeque::new(),
-    };
-    let client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
+    let mut remote = remote_inner_for_test("default-stream");
+    let connection_epoch = 1;
+    let client = client_state_mut_for_connection_locked(
+        &mut remote,
+        connection_epoch,
+        DEFAULT_REMOTE_CLIENT_KEY,
+    )
+    .expect("default client");
     client.initialized = true;
     client.last_app_ping_at_ms = Some(10);
     client.last_app_pong_at_ms = Some(11);
@@ -593,7 +639,7 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
     client.pending.insert(
         "1".to_string(),
         PendingRemoteRequest {
-            connection_epoch: 0,
+            connection_epoch,
             method: "initialize".to_string(),
             thread_id: None,
             track_thread_active: false,
@@ -607,7 +653,7 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
     client.pending.insert(
         "2".to_string(),
         PendingRemoteRequest {
-            connection_epoch: 0,
+            connection_epoch,
             method: "thread/list".to_string(),
             thread_id: None,
             track_thread_active: true,
@@ -618,11 +664,10 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
         },
     );
 
-    let ack_keys = reset_remote_clients_for_connection_locked(&mut remote, 0);
-    let client = remote
-        .clients
-        .get(DEFAULT_REMOTE_CLIENT_KEY)
-        .expect("default client");
+    let ack_keys = reset_remote_clients_for_connection_locked(&mut remote, connection_epoch);
+    let client =
+        client_state_for_connection_locked(&remote, connection_epoch, DEFAULT_REMOTE_CLIENT_KEY)
+            .expect("default client");
 
     assert_eq!(ack_keys.len(), 1);
     assert!(!client.initialized);
@@ -637,13 +682,41 @@ fn connection_reset_removes_stale_initialize_state_but_keeps_replayable_requests
 #[test]
 fn connection_cleanup_removes_only_initialize_for_closed_epoch() {
     let mut remote = remote_inner_for_test("stream-root");
-    let client = ensure_client_state_locked(&mut remote, "default:unknown");
+    remote.connections.clear();
+    remote.connections.insert(
+        "first".to_string(),
+        test_connection(
+            "first",
+            11,
+            true,
+            false,
+            crate::app_state::RemoteControlSourceKind::Unknown,
+            None,
+        ),
+    );
+    remote.connections.insert(
+        "second".to_string(),
+        test_connection(
+            "second",
+            12,
+            true,
+            false,
+            crate::app_state::RemoteControlSourceKind::Unknown,
+            None,
+        ),
+    );
     for (request_id, connection_epoch, method) in [
         ("1", 11, "initialize"),
         ("2", 12, "initialize"),
         ("3", 11, "thread/list"),
     ] {
         let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let client = client_state_mut_for_connection_locked(
+            &mut remote,
+            connection_epoch,
+            "default:unknown",
+        )
+        .expect("default client");
         client.pending.insert(
             request_id.to_string(),
             PendingRemoteRequest {
@@ -663,10 +736,13 @@ fn connection_cleanup_removes_only_initialize_for_closed_epoch() {
         remove_pending_initialize_for_connection_locked(&mut remote, 11),
         1
     );
-    let client = remote.clients.get("default:unknown").expect("client");
+    let client =
+        client_state_for_connection_locked(&remote, 11, "default:unknown").expect("first client");
     assert!(!client.pending.contains_key("1"));
-    assert!(client.pending.contains_key("2"));
     assert!(client.pending.contains_key("3"));
+    let client =
+        client_state_for_connection_locked(&remote, 12, "default:unknown").expect("second client");
+    assert!(client.pending.contains_key("2"));
 }
 
 #[test]
@@ -694,8 +770,10 @@ fn source_migration_keeps_connection_client_when_target_key_exists() {
             None,
         ),
     );
-    ensure_client_state_locked(&mut remote, "default:codex_app");
-    let unknown_client = ensure_client_state_locked(&mut remote, "default:unknown");
+    ensure_client_state_for_connection_locked(&mut remote, 11, "default:codex_app");
+    let unknown_client =
+        ensure_client_state_for_connection_locked(&mut remote, 12, "default:unknown")
+            .expect("unknown connection client");
     let client_id = unknown_client.client_id.clone();
     let stream_id = unknown_client.stream_id.clone();
 
@@ -708,15 +786,16 @@ fn source_migration_keeps_connection_client_when_target_key_exists() {
         &stream_id,
     );
 
-    assert_eq!(resolved, "default:unknown");
-    assert!(remote.clients.contains_key("default:codex_app"));
-    assert!(remote.clients.contains_key("default:unknown"));
+    assert_eq!(resolved, "default:codex_app");
+    assert!(client_state_for_connection_locked(&remote, 11, "default:codex_app").is_some());
+    assert!(client_state_for_connection_locked(&remote, 12, "default:codex_app").is_some());
+    assert!(client_state_for_connection_locked(&remote, 12, "default:unknown").is_none());
     assert_eq!(
         remote
             .connections
             .get("unknown")
             .map(|connection| connection.default_client_key.as_str()),
-        Some("default:unknown")
+        Some("default:codex_app")
     );
 }
 
@@ -735,7 +814,8 @@ fn virtual_remote_client_routes_through_active_connection() {
             Some(outbound_tx),
         ),
     );
-    ensure_client_state_locked(&mut remote, "wechat:bot:user-1");
+    ensure_client_state_for_connection_locked(&mut remote, 11, "wechat:bot:user-1")
+        .expect("active test connection");
 
     assert_eq!(
         connection_epoch_for_client_key_locked(&mut remote, "wechat:bot:user-1"),
@@ -746,27 +826,17 @@ fn virtual_remote_client_routes_through_active_connection() {
 #[tokio::test]
 async fn record_remote_app_pong_unknown_requests_reinitialize_after_initialize() {
     let state = test_state();
-    {
-        let mut remote = state.remote_control.inner.lock().await;
-        remote.connection_epoch = 7;
-        remote.connected = true;
-        let client = ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
-        client.initialized = true;
-        let client_id = client.client_id.clone();
-        let stream_id = client.stream_id.clone();
-        sync_default_client_legacy_locked(&mut remote);
-        drop(remote);
-        assert!(
-            record_remote_app_pong(&state, 7, &client_id, &stream_id, "unknown")
-                .await
-                .expect("record pong")
-        );
-    }
+    let (_outbound_tx, _outbound_rx, client_id, stream_id, connection_epoch) =
+        setup_connected_default_client(&state).await;
+    assert!(
+        record_remote_app_pong(&state, connection_epoch, &client_id, &stream_id, "unknown")
+            .await
+            .expect("record pong")
+    );
     let remote = state.remote_control.inner.lock().await;
+    let default_client_key = default_client_key_for_connection_locked(&remote, connection_epoch);
     assert_eq!(
-        remote
-            .clients
-            .get(DEFAULT_REMOTE_CLIENT_KEY)
+        client_state_for_connection_locked(&remote, connection_epoch, &default_client_key)
             .and_then(|client| client.last_app_pong_status.as_deref()),
         Some("unknown")
     );
@@ -816,9 +886,8 @@ async fn unknown_reinitializes_same_stream_without_client_closed() {
     );
 
     let remote = state.remote_control.inner.lock().await;
-    let client = remote
-        .clients
-        .get(DEFAULT_REMOTE_CLIENT_KEY)
+    let default_client_key = default_client_key_for_connection_locked(&remote, connection_epoch);
+    let client = client_state_for_connection_locked(&remote, connection_epoch, &default_client_key)
         .expect("default client");
     assert_eq!(client.stream_id, stream_id);
     assert!(!client.initialized);
@@ -847,12 +916,15 @@ async fn unbound_thread_started_does_not_replace_bound_im_thread() {
     }
     {
         let mut remote = state.remote_control.inner.lock().await;
-        let client = remote
-            .clients
-            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
-            .expect("default client");
+        let default_client_key =
+            default_client_key_for_connection_locked(&remote, connection_epoch);
+        let client = client_state_mut_for_connection_locked(
+            &mut remote,
+            connection_epoch,
+            &default_client_key,
+        )
+        .expect("default client");
         client.current_thread_id = Some("thread-1".to_string());
-        sync_default_client_legacy_locked(&mut remote);
     }
 
     observe_app_server_message(
@@ -875,9 +947,8 @@ async fn unbound_thread_started_does_not_replace_bound_im_thread() {
     .await;
 
     let remote = state.remote_control.inner.lock().await;
-    let client = remote
-        .clients
-        .get(DEFAULT_REMOTE_CLIENT_KEY)
+    let default_client_key = default_client_key_for_connection_locked(&remote, connection_epoch);
+    let client = client_state_for_connection_locked(&remote, connection_epoch, &default_client_key)
         .expect("default client");
     assert_eq!(client.current_thread_id.as_deref(), Some("thread-1"));
     drop(remote);
@@ -888,7 +959,7 @@ async fn unbound_thread_started_does_not_replace_bound_im_thread() {
     assert_eq!(notification.method, "thread/started");
     assert_eq!(
         notification.remote_client_key.as_deref(),
-        Some(DEFAULT_REMOTE_CLIENT_KEY)
+        Some(default_client_key.as_str())
     );
     assert_eq!(notification.remote_connection_epoch, Some(connection_epoch));
 }
@@ -931,10 +1002,14 @@ async fn non_owner_thread_notification_is_not_forwarded_to_im() {
     let wechat_key = "im:wechat:other-chat";
     let (feishu_stream_id, wechat_stream_id) = {
         let mut remote = state.remote_control.inner.lock().await;
-        let feishu_client = ensure_client_state_locked(&mut remote, feishu_key);
+        let feishu_client =
+            ensure_client_state_for_connection_locked(&mut remote, connection_epoch, feishu_key)
+                .expect("test connection");
         feishu_client.initialized = true;
         let feishu_stream_id = feishu_client.stream_id.clone();
-        let wechat_client = ensure_client_state_locked(&mut remote, wechat_key);
+        let wechat_client =
+            ensure_client_state_for_connection_locked(&mut remote, connection_epoch, wechat_key)
+                .expect("test connection");
         wechat_client.initialized = true;
         let wechat_stream_id = wechat_client.stream_id.clone();
         (feishu_stream_id, wechat_stream_id)
@@ -1079,10 +1154,14 @@ async fn non_owner_thread_server_request_is_not_forwarded_to_im() {
     let wechat_key = "im:wechat:other-chat";
     let (feishu_stream_id, wechat_stream_id) = {
         let mut remote = state.remote_control.inner.lock().await;
-        let feishu_client = ensure_client_state_locked(&mut remote, feishu_key);
+        let feishu_client =
+            ensure_client_state_for_connection_locked(&mut remote, connection_epoch, feishu_key)
+                .expect("test connection");
         feishu_client.initialized = true;
         let feishu_stream_id = feishu_client.stream_id.clone();
-        let wechat_client = ensure_client_state_locked(&mut remote, wechat_key);
+        let wechat_client =
+            ensure_client_state_for_connection_locked(&mut remote, connection_epoch, wechat_key)
+                .expect("test connection");
         wechat_client.initialized = true;
         let wechat_stream_id = wechat_client.stream_id.clone();
         (feishu_stream_id, wechat_stream_id)
@@ -1155,13 +1234,16 @@ async fn recovery_resubscribes_bound_threads_without_changing_current_session() 
         setup_connected_default_client(&state).await;
     {
         let mut remote = state.remote_control.inner.lock().await;
-        let client = remote
-            .clients
-            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
-            .expect("default client");
+        let default_client_key =
+            default_client_key_for_connection_locked(&remote, connection_epoch);
+        let client = client_state_mut_for_connection_locked(
+            &mut remote,
+            connection_epoch,
+            &default_client_key,
+        )
+        .expect("default client");
         client.current_thread_id = Some("unbound-thread".to_string());
         client.current_turn_id = Some("unbound-turn".to_string());
-        sync_default_client_legacy_locked(&mut remote);
     }
     {
         let mut runtime = state.runtime.lock().await;
@@ -1250,9 +1332,8 @@ async fn recovery_resubscribes_bound_threads_without_changing_current_session() 
         .expect("resubscribe should succeed");
 
     let remote = state.remote_control.inner.lock().await;
-    let client = remote
-        .clients
-        .get(DEFAULT_REMOTE_CLIENT_KEY)
+    let default_client_key = default_client_key_for_connection_locked(&remote, connection_epoch);
+    let client = client_state_for_connection_locked(&remote, connection_epoch, &default_client_key)
         .expect("default client");
     assert_eq!(client.current_thread_id.as_deref(), Some("unbound-thread"));
     assert_eq!(client.current_turn_id.as_deref(), Some("unbound-turn"));
@@ -1277,18 +1358,31 @@ async fn initialize_remote_clients_for_connection_sends_default_and_bound_client
     let unbound_client_key = "im:telegram:stale-chat";
     let (connection_epoch, bound_stream_id, unbound_stream_id) = {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.connected = true;
-        remote.connection_epoch = 11;
-        remote.outbound_tx = Some(outbound_tx);
-        remote.stream_id = "stream-root".to_string();
-        ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
-        let bound_stream_id = ensure_client_state_locked(&mut remote, bound_client_key)
-            .stream_id
-            .clone();
-        let unbound_stream_id = ensure_client_state_locked(&mut remote, unbound_client_key)
-            .stream_id
-            .clone();
-        (remote.connection_epoch, bound_stream_id, unbound_stream_id)
+        let connection_epoch = 11;
+        insert_test_connection(
+            &mut remote,
+            "default",
+            connection_epoch,
+            crate::app_state::RemoteControlSourceKind::Unknown,
+            Some(outbound_tx),
+        );
+        let bound_stream_id = ensure_client_state_for_connection_locked(
+            &mut remote,
+            connection_epoch,
+            bound_client_key,
+        )
+        .expect("bound test client")
+        .stream_id
+        .clone();
+        let unbound_stream_id = ensure_client_state_for_connection_locked(
+            &mut remote,
+            connection_epoch,
+            unbound_client_key,
+        )
+        .expect("unbound test client")
+        .stream_id
+        .clone();
+        (connection_epoch, bound_stream_id, unbound_stream_id)
     };
     {
         let mut runtime = state.runtime.lock().await;
@@ -1340,12 +1434,15 @@ async fn initial_initialize_response_resubscribes_bound_thread_asynchronously_on
     let bound_client_key = "im:telegram:restart-chat";
     let bound_stream_id = {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.connected = true;
-        remote.connection_epoch = connection_epoch;
-        remote.outbound_tx = Some(outbound_tx);
-        remote.stream_id = "stream-root".to_string();
-        ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
-        ensure_client_state_locked(&mut remote, bound_client_key)
+        insert_test_connection(
+            &mut remote,
+            "default",
+            connection_epoch,
+            crate::app_state::RemoteControlSourceKind::Unknown,
+            Some(outbound_tx),
+        );
+        ensure_client_state_for_connection_locked(&mut remote, connection_epoch, bound_client_key)
+            .expect("bound test client")
             .stream_id
             .clone()
     };
@@ -1455,12 +1552,15 @@ async fn initialize_response_does_not_duplicate_running_recovery_resubscribe() {
     let bound_client_key = "im:telegram:recovering-chat";
     let bound_stream_id = {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.connected = true;
-        remote.connection_epoch = connection_epoch;
-        remote.outbound_tx = Some(outbound_tx);
-        remote.stream_id = "stream-root".to_string();
-        ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
-        ensure_client_state_locked(&mut remote, bound_client_key)
+        insert_test_connection(
+            &mut remote,
+            "default",
+            connection_epoch,
+            crate::app_state::RemoteControlSourceKind::Unknown,
+            Some(outbound_tx),
+        );
+        ensure_client_state_for_connection_locked(&mut remote, connection_epoch, bound_client_key)
+            .expect("bound test client")
             .stream_id
             .clone()
     };
@@ -1495,10 +1595,9 @@ async fn initialize_response_does_not_duplicate_running_recovery_resubscribe() {
     let initialize_request_id = initialize["message"]["id"].clone();
     {
         let mut remote = state.remote_control.inner.lock().await;
-        let client = remote
-            .clients
-            .get_mut(bound_client_key)
-            .expect("recovering client");
+        let client =
+            client_state_mut_for_connection_locked(&mut remote, connection_epoch, bound_client_key)
+                .expect("recovering client");
         client.recovery_attempt = 4;
         client.recovery_started_at_ms = Some(123);
     }
@@ -1522,9 +1621,7 @@ async fn initialize_response_does_not_duplicate_running_recovery_resubscribe() {
             .all(|envelope| envelope_message_method(envelope) != Some("thread/resume"))
     );
     let remote = state.remote_control.inner.lock().await;
-    let client = remote
-        .clients
-        .get(bound_client_key)
+    let client = client_state_for_connection_locked(&remote, connection_epoch, bound_client_key)
         .expect("recovering client");
     assert!(client.initialized);
     assert!(client.recovery_started_at_ms.is_none());
@@ -1540,12 +1637,15 @@ async fn initial_resubscribe_missing_rollout_clears_saved_binding() {
     let bound_client_key = "im:telegram:missing-chat";
     let bound_stream_id = {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.connected = true;
-        remote.connection_epoch = connection_epoch;
-        remote.outbound_tx = Some(outbound_tx);
-        remote.stream_id = "stream-root".to_string();
-        ensure_client_state_locked(&mut remote, DEFAULT_REMOTE_CLIENT_KEY);
-        ensure_client_state_locked(&mut remote, bound_client_key)
+        insert_test_connection(
+            &mut remote,
+            "default",
+            connection_epoch,
+            crate::app_state::RemoteControlSourceKind::Unknown,
+            Some(outbound_tx),
+        );
+        ensure_client_state_for_connection_locked(&mut remote, connection_epoch, bound_client_key)
+            .expect("bound test client")
             .stream_id
             .clone()
     };
@@ -1654,8 +1754,6 @@ async fn initialize_remote_clients_for_connection_does_not_share_pending_initial
     let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.connected = true;
-        remote.stream_id = "stream-root".to_string();
         remote.connections.insert(
             "first".to_string(),
             test_connection(
@@ -1766,25 +1864,33 @@ async fn initialize_remote_clients_for_connection_does_not_share_pending_initial
     );
     assert_eq!(
         resolve_remote_client_key_for_connection_locked(&remote, 11, "default:codex_app"),
-        "default:unknown"
+        "default:codex_app"
     );
     assert_eq!(
         resolve_remote_client_key_for_connection_locked(&remote, 12, "default:vscode"),
-        "default:unknown"
+        "default:vscode"
     );
-    assert_eq!(remote.clients.len(), 1);
-    assert!(
-        remote
-            .clients
-            .get("default:unknown")
-            .is_some_and(|client| client.pending.is_empty())
-    );
-    assert!(
+    assert_eq!(
         remote
             .connections
-            .values()
-            .all(|connection| connection.default_client_key == "default:unknown")
+            .get("first")
+            .map(|connection| connection.default_client_key.as_str()),
+        Some("default:codex_app")
     );
+    assert_eq!(
+        remote
+            .connections
+            .get("second")
+            .map(|connection| connection.default_client_key.as_str()),
+        Some("default:vscode")
+    );
+    assert!(remote.connections.values().all(|connection| {
+        connection.clients.len() == 1
+            && connection
+                .clients
+                .values()
+                .all(|client| client.pending.is_empty())
+    }));
 }
 
 #[test]
@@ -1849,28 +1955,19 @@ async fn initialized_notification_marks_connection_initialized() {
     let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
     let (client_id, stream_id, connection_epoch) = {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.connected = true;
-        remote.connection_epoch = 7;
-        remote.outbound_tx = Some(outbound_tx.clone());
-        remote.stream_id = "stream-root".to_string();
-        let connection_epoch = remote.connection_epoch;
-        let client_key =
-            source_default_client_key(crate::app_state::RemoteControlSourceKind::CodexApp);
-        let client = ensure_client_state_locked(&mut remote, &client_key);
+        let connection_epoch = 7;
+        insert_test_connection(
+            &mut remote,
+            "conn-codex",
+            connection_epoch,
+            crate::app_state::RemoteControlSourceKind::CodexApp,
+            Some(outbound_tx),
+        );
+        let client_key = default_client_key_for_connection_locked(&remote, connection_epoch);
+        let client = client_state_for_connection_locked(&remote, connection_epoch, &client_key)
+            .expect("codex client");
         let client_id = client.client_id.clone();
         let stream_id = client.stream_id.clone();
-        remote.connections.insert(
-            "conn-codex".to_string(),
-            test_connection(
-                "conn-codex",
-                connection_epoch,
-                true,
-                false,
-                crate::app_state::RemoteControlSourceKind::CodexApp,
-                Some(outbound_tx),
-            ),
-        );
-        sync_legacy_from_active_connection_locked(&mut remote);
         (client_id, stream_id, connection_epoch)
     };
 
@@ -1943,9 +2040,6 @@ fn inactive_remote_connections_are_not_retained_in_memory() {
 #[test]
 fn pruning_last_connection_clears_legacy_connected_state() {
     let mut remote = remote_inner_for_test("stream-root");
-    remote.connected = true;
-    remote.initialized = true;
-    remote.connection_epoch = 7;
     let id = "conn-closed";
     remote.connections.insert(
         id.to_string(),
@@ -1962,9 +2056,7 @@ fn pruning_last_connection_clears_legacy_connected_state() {
     prune_inactive_remote_connections_locked(&mut remote);
 
     assert!(remote.connections.is_empty());
-    assert!(!remote.connected);
-    assert!(!remote.initialized);
-    assert!(remote.outbound_tx.is_none());
+    assert!(active_connection_epoch_locked(&remote).is_none());
 }
 
 #[tokio::test]
@@ -2026,10 +2118,6 @@ async fn session_history_falls_back_to_another_connection_and_uses_all_root_sour
     let (ready_tx, mut ready_rx) = tokio::sync::mpsc::unbounded_channel();
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.stream_id = "stream-root".to_string();
-        for client_key in ["default:codex_app", "default:vscode"] {
-            ensure_client_state_locked(&mut remote, client_key).initialized = true;
-        }
         remote.connections.insert(
             "conn-codex-failed".to_string(),
             test_connection(
@@ -2052,12 +2140,18 @@ async fn session_history_falls_back_to_another_connection_and_uses_all_root_sour
                 Some(ready_tx),
             ),
         );
-        sync_legacy_from_active_connection_locked(&mut remote);
     }
 
     let request_state = state.clone();
     let request = tokio::spawn(async move {
-        session_history_threads(&request_state, DEFAULT_REMOTE_CLIENT_KEY, 100, 20, false).await
+        session_history_threads_with_connection(
+            &request_state,
+            DEFAULT_REMOTE_CLIENT_KEY,
+            100,
+            20,
+            false,
+        )
+        .await
     });
     let envelope = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
@@ -2075,7 +2169,7 @@ async fn session_history_falls_back_to_another_connection_and_uses_all_root_sour
         envelope["message"]["params"]["sourceKinds"],
         json!(["cli", "vscode", "appServer"])
     );
-    assert_eq!(envelope["message"]["params"]["useStateDbOnly"], true);
+    assert_eq!(envelope["message"]["params"]["useStateDbOnly"], false);
     assert_eq!(envelope["message"]["params"]["modelProviders"], json!([]));
     assert_eq!(envelope["message"]["params"]["limit"], 100);
 
@@ -2103,10 +2197,11 @@ async fn session_history_falls_back_to_another_connection_and_uses_all_root_sour
     )
     .await;
 
-    let threads = request
+    let (connection_epoch, threads) = request
         .await
         .expect("session history task")
         .expect("session history response");
+    assert_eq!(connection_epoch, 10);
     assert_eq!(threads, vec![json!({"id": "thread-1"})]);
 }
 
@@ -2122,15 +2217,6 @@ async fn session_history_for_client_on_connection_does_not_switch_connections() 
 
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.clients.clear();
-        let codex_client = ensure_client_state_locked(&mut remote, "default:codex_app");
-        codex_client.initialized = true;
-        codex_client.client_id = codex_client_id.to_string();
-        codex_client.stream_id = codex_stream_id.to_string();
-        let vscode_client = ensure_client_state_locked(&mut remote, "default:vscode");
-        vscode_client.initialized = true;
-        vscode_client.client_id = vscode_client_id.to_string();
-        vscode_client.stream_id = vscode_stream_id.to_string();
         remote.connections.insert(
             "conn-codex".to_string(),
             test_connection(
@@ -2153,7 +2239,18 @@ async fn session_history_for_client_on_connection_does_not_switch_connections() 
                 Some(vscode_tx),
             ),
         );
-        sync_legacy_from_active_connection_locked(&mut remote);
+        let codex_client =
+            ensure_client_state_for_connection_locked(&mut remote, 20, "default:codex_app")
+                .expect("codex client");
+        codex_client.initialized = true;
+        codex_client.client_id = codex_client_id.to_string();
+        codex_client.stream_id = codex_stream_id.to_string();
+        let vscode_client =
+            ensure_client_state_for_connection_locked(&mut remote, 10, "default:vscode")
+                .expect("vscode client");
+        vscode_client.initialized = true;
+        vscode_client.client_id = vscode_client_id.to_string();
+        vscode_client.stream_id = vscode_stream_id.to_string();
     }
 
     let request_state = state.clone();
@@ -2202,7 +2299,7 @@ async fn session_history_for_client_on_connection_does_not_switch_connections() 
 }
 
 #[tokio::test]
-async fn resume_for_client_on_connection_does_not_switch_connections() {
+async fn resume_for_client_on_connection_with_path_does_not_switch_connections() {
     let state = test_state();
     let (codex_tx, mut codex_rx) = tokio::sync::mpsc::unbounded_channel();
     let (vscode_tx, mut vscode_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2213,15 +2310,6 @@ async fn resume_for_client_on_connection_does_not_switch_connections() {
 
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.clients.clear();
-        let codex_client = ensure_client_state_locked(&mut remote, "default:codex_app");
-        codex_client.initialized = true;
-        codex_client.client_id = codex_client_id.to_string();
-        codex_client.stream_id = codex_stream_id.to_string();
-        let vscode_client = ensure_client_state_locked(&mut remote, "default:vscode");
-        vscode_client.initialized = true;
-        vscode_client.client_id = vscode_client_id.to_string();
-        vscode_client.stream_id = vscode_stream_id.to_string();
         remote.connections.insert(
             "conn-codex".to_string(),
             test_connection(
@@ -2244,16 +2332,28 @@ async fn resume_for_client_on_connection_does_not_switch_connections() {
                 Some(vscode_tx),
             ),
         );
-        sync_legacy_from_active_connection_locked(&mut remote);
+        let codex_client =
+            ensure_client_state_for_connection_locked(&mut remote, 20, "default:codex_app")
+                .expect("codex client");
+        codex_client.initialized = true;
+        codex_client.client_id = codex_client_id.to_string();
+        codex_client.stream_id = codex_stream_id.to_string();
+        let vscode_client =
+            ensure_client_state_for_connection_locked(&mut remote, 10, "default:vscode")
+                .expect("vscode client");
+        vscode_client.initialized = true;
+        vscode_client.client_id = vscode_client_id.to_string();
+        vscode_client.stream_id = vscode_stream_id.to_string();
     }
 
     let request_state = state.clone();
     let request = tokio::spawn(async move {
-        resume_thread_for_client_on_connection(
+        resume_thread_for_client_on_connection_with_path(
             &request_state,
             20,
-            "default:codex_app",
+            DEFAULT_REMOTE_CLIENT_KEY,
             "thread-from-codex",
+            Some("/tmp/rollout-thread-from-codex.jsonl"),
             true,
         )
         .await
@@ -2270,11 +2370,14 @@ async fn resume_for_client_on_connection_does_not_switch_connections() {
     .await
     .expect("thread/resume should use the requested connection");
     assert!(vscode_rx.try_recv().is_err());
+    assert_eq!(envelope["client_id"], codex_client_id);
+    assert_eq!(envelope["stream_id"], codex_stream_id);
     assert_eq!(
         envelope["message"]["params"],
         json!({
             "threadId": "thread-from-codex",
             "excludeTurns": true,
+            "path": "/tmp/rollout-thread-from-codex.jsonl",
         })
     );
 
@@ -2299,6 +2402,63 @@ async fn resume_for_client_on_connection_does_not_switch_connections() {
 }
 
 #[tokio::test]
+async fn fixed_connection_thread_mark_does_not_follow_new_active_connection() {
+    let state = test_state();
+    let (target_tx, _target_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (active_tx, _active_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        remote.connections.insert(
+            "conn-target".to_string(),
+            test_connection(
+                "conn-target",
+                20,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(target_tx),
+            ),
+        );
+        remote.connections.insert(
+            "conn-active".to_string(),
+            test_connection(
+                "conn-active",
+                10,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(active_tx),
+            ),
+        );
+        remote
+            .connections
+            .get_mut("conn-active")
+            .expect("active connection")
+            .last_ws_inbound_at_ms = Some(100);
+    }
+
+    session_api::mark_thread_active_for_client_on_connection(
+        &state,
+        20,
+        DEFAULT_REMOTE_CLIENT_KEY,
+        "thread-from-target",
+    )
+    .await;
+
+    let remote = state.remote_control.inner.lock().await;
+    assert_eq!(
+        client_state_for_connection_locked(&remote, 20, "default:codex_app")
+            .and_then(|client| client.current_thread_id.as_deref()),
+        Some("thread-from-target")
+    );
+    assert_eq!(
+        client_state_for_connection_locked(&remote, 10, "default:codex_app")
+            .and_then(|client| client.current_thread_id.as_deref()),
+        None
+    );
+}
+
+#[tokio::test]
 async fn resume_for_new_client_on_connection_waits_for_initialize_response() {
     let state = test_state();
     let (codex_tx, mut codex_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2311,9 +2471,6 @@ async fn resume_for_new_client_on_connection_waits_for_initialize_response() {
 
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.clients.clear();
-        ensure_client_state_locked(&mut remote, "default:codex_app").initialized = true;
-        ensure_client_state_locked(&mut remote, "default:vscode").initialized = true;
         remote.connections.insert(
             "conn-codex".to_string(),
             test_connection(
@@ -2336,8 +2493,12 @@ async fn resume_for_new_client_on_connection_waits_for_initialize_response() {
                 Some(vscode_tx),
             ),
         );
-        sync_legacy_from_active_connection_locked(&mut remote);
-        assert!(!remote.clients.contains_key(&route_client_key));
+        assert!(
+            remote
+                .connections
+                .values()
+                .all(|connection| { !connection.clients.contains_key(&route_client_key) })
+        );
     }
 
     let request_state = state.clone();
@@ -2415,9 +2576,7 @@ async fn resume_for_new_client_on_connection_waits_for_initialize_response() {
         .expect("thread resume response");
     assert_eq!(response, json!({"thread": {"id": "thread-new"}}));
     let remote = state.remote_control.inner.lock().await;
-    let route_client = remote
-        .clients
-        .get(&route_client_key)
+    let route_client = client_state_for_connection_locked(&remote, 20, &route_client_key)
         .expect("new Telegram route client");
     assert!(route_client.initialized);
     assert_eq!(
@@ -2439,9 +2598,6 @@ async fn resume_for_new_client_on_connection_does_not_fallback_after_disconnect(
 
     {
         let mut remote = state.remote_control.inner.lock().await;
-        remote.clients.clear();
-        ensure_client_state_locked(&mut remote, "default:codex_app").initialized = true;
-        ensure_client_state_locked(&mut remote, "default:vscode").initialized = true;
         remote.connections.insert(
             "conn-codex".to_string(),
             test_connection(
@@ -2464,7 +2620,6 @@ async fn resume_for_new_client_on_connection_does_not_fallback_after_disconnect(
                 Some(vscode_tx),
             ),
         );
-        sync_legacy_from_active_connection_locked(&mut remote);
     }
 
     let request_state = state.clone();
@@ -2484,7 +2639,6 @@ async fn resume_for_new_client_on_connection_does_not_fallback_after_disconnect(
     {
         let mut remote = state.remote_control.inner.lock().await;
         remote.connections.remove("conn-codex");
-        sync_legacy_from_active_connection_locked(&mut remote);
     }
 
     let error = tokio::time::timeout(Duration::from_secs(1), request)
@@ -2549,9 +2703,11 @@ async fn server_flood_fast_ack_does_not_wait_for_work_queue_drain() {
 
     let remote = state.remote_control.inner.lock().await;
     let key = server_ack_cursor_key(connection_epoch, &client_id, &stream_id);
-    assert_eq!(remote.server_ack_cursors.get(&key), Some(&(300, None)));
+    let connection =
+        connection_for_epoch_locked(&remote, connection_epoch).expect("test connection");
+    assert_eq!(connection.server_ack_cursors.get(&key), Some(&(300, None)));
     assert_eq!(
-        remote
+        connection
             .stream_diagnostics
             .get(&key)
             .map(|diagnostics| diagnostics.ack_count),
@@ -2567,6 +2723,7 @@ async fn reconnected_server_can_restart_sequence_for_same_stream() {
     let second_epoch = first_epoch + 1;
     {
         let mut remote = state.remote_control.inner.lock().await;
+        remote.connections.clear();
         remote.connections.insert(
             "first".to_string(),
             test_connection(
@@ -2589,6 +2746,18 @@ async fn reconnected_server_can_restart_sequence_for_same_stream() {
                 Some(outbound_tx.clone()),
             ),
         );
+        for connection_epoch in [first_epoch, second_epoch] {
+            let default_client_key =
+                default_client_key_for_connection_locked(&remote, connection_epoch);
+            let client = client_state_mut_for_connection_locked(
+                &mut remote,
+                connection_epoch,
+                &default_client_key,
+            )
+            .expect("reconnected test client");
+            client.client_id = client_id.clone();
+            client.stream_id = stream_id.clone();
+        }
     }
     let (server_work_tx, mut server_work_rx) = tokio::sync::mpsc::channel(4);
     let mut chunks = HashMap::new();
@@ -2631,13 +2800,15 @@ async fn reconnected_server_can_restart_sequence_for_same_stream() {
     );
     let remote = state.remote_control.inner.lock().await;
     assert_eq!(
-        remote
+        connection_for_epoch_locked(&remote, first_epoch)
+            .expect("first connection")
             .server_ack_cursors
             .get(&server_ack_cursor_key(first_epoch, &client_id, &stream_id)),
         Some(&(1, None))
     );
     assert_eq!(
-        remote
+        connection_for_epoch_locked(&remote, second_epoch)
+            .expect("second connection")
             .server_ack_cursors
             .get(&server_ack_cursor_key(second_epoch, &client_id, &stream_id)),
         Some(&(1, None))

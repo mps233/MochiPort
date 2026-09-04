@@ -6,8 +6,8 @@ use crate::{
 };
 
 use super::{
-    DEFAULT_REMOTE_CLIENT_KEY, prune_inactive_remote_connections_locked,
-    remote_control_stale_reason_locked, sync_legacy_from_active_connection_locked,
+    active_connection_locked, connection_initialized, prune_inactive_remote_connections_locked,
+    remote_control_stale_reason_locked, select_active_connection_id_locked,
 };
 
 #[derive(Debug, Serialize)]
@@ -65,19 +65,16 @@ pub struct RemoteControlConnectionStatusResponse {
 pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse {
     let mut remote = state.remote_control.inner.lock().await;
     prune_inactive_remote_connections_locked(&mut remote);
-    sync_legacy_from_active_connection_locked(&mut remote);
     let stale = remote_control_stale_reason_locked(&remote, now_ms()).is_some();
-    let active_connection = remote
-        .active_connection_id
-        .as_ref()
-        .and_then(|connection_id| remote.connections.get(connection_id));
+    let active_connection_id = select_active_connection_id_locked(&remote);
+    let active_connection = active_connection_locked(&remote);
     let active_source_kind = active_connection.map(|connection| connection.source_kind);
     let active_user_agent = active_connection.and_then(|connection| connection.user_agent.clone());
     let mut connection_values = remote.connections.values().collect::<Vec<_>>();
     connection_values.sort_by_key(|connection| {
         std::cmp::Reverse((
             connection.connected && connection.outbound_tx.is_some(),
-            connection.initialized,
+            connection_initialized(connection),
             connection
                 .last_ws_inbound_at_ms
                 .or(connection.connected_at_ms)
@@ -91,9 +88,9 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
             id: connection.connection_id.clone(),
             connection_epoch: connection.connection_epoch,
             connected: connection.connected,
-            initialized: connection.initialized,
+            initialized: connection_initialized(connection),
             healthy: connection.connected
-                && connection.initialized
+                && connection_initialized(connection)
                 && connection.outbound_tx.is_some(),
             source_kind: connection.source_kind,
             user_agent: connection.user_agent.clone(),
@@ -108,61 +105,48 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
             last_error: connection.last_error.clone(),
         })
         .collect::<Vec<_>>();
-    let active_client_key = active_connection
-        .map(|connection| connection.default_client_key.clone())
-        .unwrap_or_else(|| DEFAULT_REMOTE_CLIENT_KEY.to_string());
-    let default_client = remote.clients.get(&active_client_key);
-    let initialized = default_client
-        .map(|client| client.initialized)
-        .unwrap_or(remote.initialized);
+    let default_client = active_connection
+        .and_then(|connection| connection.clients.get(&connection.default_client_key));
+    let initialized = active_connection.is_some_and(connection_initialized);
     let client_id = default_client
         .map(|client| client.client_id.clone())
-        .unwrap_or_else(|| remote.client_id.clone());
-    let stream_id = default_client
-        .map(|client| client.stream_id.clone())
-        .unwrap_or_else(|| remote.stream_id.clone());
-    let current_thread_id = default_client
-        .and_then(|client| client.current_thread_id.clone())
-        .or_else(|| remote.current_thread_id.clone());
-    let current_turn_id = default_client
-        .and_then(|client| client.current_turn_id.clone())
-        .or_else(|| remote.current_turn_id.clone());
-    let last_app_ping_at_ms = default_client
-        .and_then(|client| client.last_app_ping_at_ms)
-        .or(remote.last_app_ping_at_ms);
-    let last_app_pong_at_ms = default_client
-        .and_then(|client| client.last_app_pong_at_ms)
-        .or(remote.last_app_pong_at_ms);
-    let last_app_pong_status = default_client
-        .and_then(|client| client.last_app_pong_status.clone())
-        .or_else(|| remote.last_app_pong_status.clone());
-    let last_initialize_sent_at_ms = default_client
-        .and_then(|client| client.last_initialize_sent_at_ms)
-        .or(remote.last_initialize_sent_at_ms);
-    let healthy = remote.connected && initialized && !stale;
+        .unwrap_or_default();
+    let stream_id = default_client.map(|client| client.stream_id.clone());
+    let current_thread_id = default_client.and_then(|client| client.current_thread_id.clone());
+    let current_turn_id = default_client.and_then(|client| client.current_turn_id.clone());
+    let last_app_ping_at_ms = default_client.and_then(|client| client.last_app_ping_at_ms);
+    let last_app_pong_at_ms = default_client.and_then(|client| client.last_app_pong_at_ms);
+    let last_app_pong_status =
+        default_client.and_then(|client| client.last_app_pong_status.clone());
+    let last_initialize_sent_at_ms =
+        default_client.and_then(|client| client.last_initialize_sent_at_ms);
+    let connected = active_connection.is_some_and(|connection| connection.connected);
+    let healthy = connected && initialized && !stale;
     RemoteControlStatusResponse {
-        connected: remote.connected,
+        connected,
         initialized,
-        active_connection_id: remote.active_connection_id.clone(),
+        active_connection_id,
         active_source_kind,
         active_user_agent,
         connections,
         client_id,
-        stream_id: (!stream_id.is_empty()).then_some(stream_id),
-        server_id: remote.server_id.clone(),
-        environment_id: remote.environment_id.clone(),
-        server_name: remote.server_name.clone(),
-        installation_id: remote.installation_id.clone(),
-        account_id: remote.account_id.clone(),
+        stream_id,
+        server_id: active_connection.and_then(|connection| connection.server_id.clone()),
+        environment_id: active_connection.and_then(|connection| connection.environment_id.clone()),
+        server_name: active_connection.and_then(|connection| connection.server_name.clone()),
+        installation_id: active_connection
+            .and_then(|connection| connection.installation_id.clone()),
+        account_id: active_connection.and_then(|connection| connection.account_id.clone()),
         current_thread_id,
         current_turn_id,
-        last_error: remote.last_error.clone(),
+        last_error: active_connection.and_then(|connection| connection.last_error.clone()),
         healthy,
         stale,
-        connected_at_ms: remote.connected_at_ms,
-        last_ws_inbound_at_ms: remote.last_ws_inbound_at_ms,
-        last_ws_ping_at_ms: remote.last_ws_ping_at_ms,
-        last_ws_pong_at_ms: remote.last_ws_pong_at_ms,
+        connected_at_ms: active_connection.and_then(|connection| connection.connected_at_ms),
+        last_ws_inbound_at_ms: active_connection
+            .and_then(|connection| connection.last_ws_inbound_at_ms),
+        last_ws_ping_at_ms: active_connection.and_then(|connection| connection.last_ws_ping_at_ms),
+        last_ws_pong_at_ms: active_connection.and_then(|connection| connection.last_ws_pong_at_ms),
         last_app_ping_at_ms,
         last_app_pong_at_ms,
         last_app_pong_status,

@@ -8,10 +8,9 @@ use crate::{
 };
 
 use super::client_state::{
-    connection_exists_locked, ensure_client_state_locked, is_legacy_default_client_key,
-    normalize_remote_client_key, outbound_tx_for_connection_epoch_locked,
-    remote_client_key_for_stream_locked, sync_default_client_legacy_locked,
-    sync_legacy_from_active_connection_locked,
+    connection_exists_locked, connection_for_epoch_locked, connection_for_epoch_mut_locked,
+    ensure_client_state_for_connection_locked, normalize_remote_client_key,
+    outbound_tx_for_connection_epoch_locked, remote_client_key_for_stream_on_connection_locked,
 };
 use super::log_format::{format_recent_event, format_stream_diagnostics, thread_id_from_payload};
 use super::protocol::IncomingServerEvent;
@@ -19,7 +18,7 @@ use super::recovery::start_remote_control_client_recovery;
 use super::server_envelopes::{server_ack_cursor_key, server_event_kind};
 use super::{
     REMOTE_CONTROL_DIAGNOSTIC_WINDOW_MS, REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY,
-    remote_control_stale_reason_locked,
+    remote_control_connection_stale_reason_locked,
 };
 
 pub(super) async fn observe_stale_server_envelope(
@@ -56,7 +55,13 @@ pub(super) async fn is_current_remote_stream(
 ) -> bool {
     let remote = state.remote_control.inner.lock().await;
     connection_exists_locked(&remote, connection_epoch)
-        && remote_client_key_for_stream_locked(&remote, client_id, stream_id).is_some()
+        && remote_client_key_for_stream_on_connection_locked(
+            &remote,
+            connection_epoch,
+            client_id,
+            stream_id,
+        )
+        .is_some()
 }
 
 async fn remote_stream_diagnostic_context(
@@ -69,10 +74,15 @@ async fn remote_stream_diagnostic_context(
     if !connection_exists_locked(&remote, connection_epoch) {
         return (None, String::new());
     }
-    let resolved_client_key = remote_client_key_for_stream_locked(&remote, client_id, stream_id);
-    let registered_streams = remote
-        .clients
-        .iter()
+    let resolved_client_key = remote_client_key_for_stream_on_connection_locked(
+        &remote,
+        connection_epoch,
+        client_id,
+        stream_id,
+    );
+    let registered_streams = connection_for_epoch_locked(&remote, connection_epoch)
+        .into_iter()
+        .flat_map(|connection| connection.clients.iter())
         .map(|(client_key, client)| {
             format!("{}:{}:{}", client_key, client.client_id, client.stream_id)
         })
@@ -83,45 +93,26 @@ async fn remote_stream_diagnostic_context(
 
 pub(super) async fn mark_remote_ws_inbound(state: &SharedState, connection_epoch: u64) {
     let mut remote = state.remote_control.inner.lock().await;
-    if let Some(connection) = remote
-        .connections
-        .values_mut()
-        .find(|connection| connection.connection_epoch == connection_epoch)
-    {
+    if let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch) {
         let now = now_ms();
         connection.last_ws_inbound_at_ms = Some(now);
-        remote.last_ws_inbound_at_ms = Some(now);
-        sync_legacy_from_active_connection_locked(&mut remote);
     }
 }
 
 pub(super) async fn mark_remote_ws_ping(state: &SharedState, connection_epoch: u64) {
     let mut remote = state.remote_control.inner.lock().await;
-    if let Some(connection) = remote
-        .connections
-        .values_mut()
-        .find(|connection| connection.connection_epoch == connection_epoch)
-    {
+    if let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch) {
         let now = now_ms();
         connection.last_ws_ping_at_ms = Some(now);
-        remote.last_ws_ping_at_ms = Some(now);
-        sync_legacy_from_active_connection_locked(&mut remote);
     }
 }
 
 pub(super) async fn mark_remote_ws_pong(state: &SharedState, connection_epoch: u64) {
     let mut remote = state.remote_control.inner.lock().await;
-    if let Some(connection) = remote
-        .connections
-        .values_mut()
-        .find(|connection| connection.connection_epoch == connection_epoch)
-    {
+    if let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch) {
         let now = now_ms();
         connection.last_ws_inbound_at_ms = Some(now);
         connection.last_ws_pong_at_ms = Some(now);
-        remote.last_ws_inbound_at_ms = Some(now);
-        remote.last_ws_pong_at_ms = Some(now);
-        sync_legacy_from_active_connection_locked(&mut remote);
     }
 }
 
@@ -132,13 +123,11 @@ pub(super) async fn mark_remote_app_ping(
 ) {
     let client_key = normalize_remote_client_key(client_key);
     let mut remote = state.remote_control.inner.lock().await;
-    if connection_exists_locked(&remote, connection_epoch) {
+    if let Some(client) =
+        ensure_client_state_for_connection_locked(&mut remote, connection_epoch, &client_key)
+    {
         let now = now_ms();
-        let client = ensure_client_state_locked(&mut remote, &client_key);
         client.last_app_ping_at_ms = Some(now);
-        if is_legacy_default_client_key(&client_key) {
-            sync_default_client_legacy_locked(&mut remote);
-        }
     }
 }
 
@@ -152,9 +141,9 @@ pub(super) async fn remote_app_ping_targets(
     {
         return Vec::new();
     }
-    remote
-        .clients
-        .iter()
+    connection_for_epoch_locked(&remote, connection_epoch)
+        .into_iter()
+        .flat_map(|connection| connection.clients.iter())
         .filter(|(_, client)| client.initialized)
         .map(|(client_key, client)| {
             (
@@ -179,18 +168,23 @@ pub(super) async fn record_remote_app_pong(
         if !connection_exists_locked(&remote, connection_epoch) {
             return Ok(false);
         }
-        let Some(client_key) = remote_client_key_for_stream_locked(&remote, client_id, stream_id)
-        else {
+        let Some(client_key) = remote_client_key_for_stream_on_connection_locked(
+            &remote,
+            connection_epoch,
+            client_id,
+            stream_id,
+        ) else {
             return Ok(false);
         };
         let now = now_ms();
-        let client = ensure_client_state_locked(&mut remote, &client_key);
+        let Some(client) =
+            ensure_client_state_for_connection_locked(&mut remote, connection_epoch, &client_key)
+        else {
+            return Ok(false);
+        };
         client.last_app_pong_at_ms = Some(now);
         client.last_app_pong_status = Some(normalized_status.clone());
         let should_reinitialize = normalized_status == "unknown" && client.initialized;
-        if is_legacy_default_client_key(&client_key) {
-            sync_default_client_legacy_locked(&mut remote);
-        }
         should_reinitialize
     })
 }
@@ -205,7 +199,12 @@ pub(in crate::remote_control_backend) async fn handle_remote_app_pong_after_ack(
 ) -> Result<()> {
     let client_key = {
         let remote = state.remote_control.inner.lock().await;
-        remote_client_key_for_stream_locked(&remote, client_id, stream_id)
+        remote_client_key_for_stream_on_connection_locked(
+            &remote,
+            connection_epoch,
+            client_id,
+            stream_id,
+        )
     };
     state
         .push_event(
@@ -273,11 +272,12 @@ pub(super) async fn observe_command_output_delta_received(
 
     let summary = {
         let mut remote = state.remote_control.inner.lock().await;
-        if !connection_exists_locked(&remote, connection_epoch) {
+        let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch)
+        else {
             return;
-        }
+        };
         let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
-        let diagnostics = remote.stream_diagnostics.entry(key).or_default();
+        let diagnostics = connection.stream_diagnostics.entry(key).or_default();
         observe_stream_window_event(
             diagnostics,
             now_ms(),
@@ -316,11 +316,11 @@ pub(super) async fn observe_server_envelope_window(
     received_at_ms: u128,
 ) {
     let mut remote = state.remote_control.inner.lock().await;
-    if !connection_exists_locked(&remote, connection_epoch) {
+    let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch) else {
         return;
-    }
+    };
     let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
-    let diagnostics = remote.stream_diagnostics.entry(key).or_default();
+    let diagnostics = connection.stream_diagnostics.entry(key).or_default();
     observe_stream_window_event(
         diagnostics,
         received_at_ms,
@@ -415,11 +415,12 @@ pub(super) async fn record_server_ack_diagnostics(
     let elapsed_ms = ack_at_ms.saturating_sub(received_at_ms);
     let should_log = {
         let mut remote = state.remote_control.inner.lock().await;
-        if !connection_exists_locked(&remote, connection_epoch) {
+        let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch)
+        else {
             return;
-        }
+        };
         let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
-        let diagnostics = remote.stream_diagnostics.entry(key).or_default();
+        let diagnostics = connection.stream_diagnostics.entry(key).or_default();
         observe_stream_window_event(diagnostics, ack_at_ms, seq_id, StreamWindowEvent::Ack);
         diagnostics.ack_count = diagnostics.ack_count.saturating_add(1);
         diagnostics.last_ack_elapsed_ms = Some(elapsed_ms);
@@ -446,16 +447,16 @@ async fn log_remote_control_unknown_context(
 ) {
     let (diagnostics, registered_streams, recent_events) = {
         let remote = state.remote_control.inner.lock().await;
-        if !connection_exists_locked(&remote, connection_epoch) {
+        let Some(connection) = connection_for_epoch_locked(&remote, connection_epoch) else {
             return;
-        }
+        };
         let key = server_ack_cursor_key(connection_epoch, client_id, stream_id);
-        let diagnostics = remote
+        let diagnostics = connection
             .stream_diagnostics
             .get(&key)
             .map(format_stream_diagnostics)
             .unwrap_or_else(|| "no_stream_diagnostics=true".to_string());
-        let registered_streams = remote
+        let registered_streams = connection
             .clients
             .iter()
             .map(|(client_key, client)| {
@@ -491,8 +492,5 @@ pub(super) async fn remote_control_stale_reason(
     connection_epoch: u64,
 ) -> Option<String> {
     let remote = state.remote_control.inner.lock().await;
-    if !connection_exists_locked(&remote, connection_epoch) {
-        return None;
-    }
-    remote_control_stale_reason_locked(&remote, now_ms())
+    remote_control_connection_stale_reason_locked(&remote, connection_epoch, now_ms())
 }

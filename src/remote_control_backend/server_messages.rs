@@ -10,10 +10,10 @@ use crate::{
 };
 
 use super::client_state::{
-    is_legacy_default_client_key, migrate_source_default_client_key_locked,
-    normalize_remote_client_key, remote_client_key_for_stream_on_connection_locked,
-    select_active_connection_id_locked, source_kind_from_user_agent,
-    sync_default_client_legacy_locked, sync_legacy_from_active_connection_locked,
+    client_state_mut_for_connection_locked, connection_for_epoch_mut_locked,
+    migrate_source_default_client_key_locked, normalize_remote_client_key,
+    remote_client_key_for_stream_on_connection_locked, select_active_connection_id_locked,
+    source_kind_from_user_agent,
 };
 use super::log_format::{
     json_preview, log_codex_to_remote_message, message_summary, thread_id_from_payload,
@@ -147,11 +147,14 @@ pub(super) async fn observe_app_server_message(
             let mut remote = state.remote_control.inner.lock().await;
             let pending = client_key
                 .as_ref()
-                .and_then(|client_key| remote.clients.get_mut(client_key))
+                .and_then(|client_key| {
+                    client_state_mut_for_connection_locked(
+                        &mut remote,
+                        connection_epoch,
+                        client_key,
+                    )
+                })
                 .and_then(|client| client.pending.remove(&request_key));
-            if client_key.as_deref() == Some(DEFAULT_REMOTE_CLIENT_KEY) {
-                sync_default_client_legacy_locked(&mut remote);
-            }
             pending
         };
         let client_method = pending.as_ref().map(|pending| pending.method.clone());
@@ -201,7 +204,6 @@ pub(super) async fn observe_app_server_message(
                         .values_mut()
                         .find(|connection| connection.connection_epoch == connection_epoch)
                     {
-                        connection.initialized = true;
                         if connection.user_agent.is_none() {
                             connection.user_agent = user_agent.clone();
                         }
@@ -224,19 +226,18 @@ pub(super) async fn observe_app_server_message(
                             stream_id,
                         );
                         initialized_client_key = Some(migrated_client_key.clone());
-                        if let Some(client) = remote.clients.get_mut(&migrated_client_key) {
+                        if let Some(client) = client_state_mut_for_connection_locked(
+                            &mut remote,
+                            connection_epoch,
+                            &migrated_client_key,
+                        ) {
                             let was_recovering = client.recovery_started_at_ms.is_some();
                             client.initialized = true;
                             client.last_app_pong_status = Some("active".to_string());
                             client.recovery_started_at_ms = None;
                             should_resubscribe_bound_threads = !was_recovering;
                         }
-                        if is_legacy_default_client_key(&migrated_client_key) {
-                            sync_default_client_legacy_locked(&mut remote);
-                        }
                     }
-                    remote.last_error = None;
-                    sync_legacy_from_active_connection_locked(&mut remote);
                 }
                 if let Err(err) =
                     send_initialized_for_stream(state, connection_epoch, client_id, stream_id).await
@@ -311,19 +312,15 @@ pub(super) async fn observe_app_server_message(
                 });
                 let mut remote = state.remote_control.inner.lock().await;
                 if let Some(client_key) = client_key.as_deref() {
-                    if let Some(client) = remote.clients.get_mut(client_key) {
+                    if let Some(client) = client_state_mut_for_connection_locked(
+                        &mut remote,
+                        connection_epoch,
+                        client_key,
+                    ) {
                         client.current_turn_id = Some(turn_id.to_string());
                         if let Some(thread_id) = thread_id.clone() {
                             client.current_thread_id = Some(thread_id);
                         }
-                    }
-                    if is_legacy_default_client_key(client_key) {
-                        sync_default_client_legacy_locked(&mut remote);
-                    }
-                } else {
-                    remote.current_turn_id = Some(turn_id.to_string());
-                    if let Some(thread_id) = thread_id {
-                        remote.current_thread_id = Some(thread_id);
                     }
                 }
             }
@@ -357,21 +354,19 @@ pub(super) async fn observe_app_server_message(
                     .values_mut()
                     .find(|connection| connection.connection_epoch == connection_epoch)
                 {
-                    connection.initialized = true;
                     connection.last_error = None;
                 }
                 if let Some(client_key) = client_key.as_deref() {
-                    if let Some(client) = remote.clients.get_mut(client_key) {
+                    if let Some(client) = client_state_mut_for_connection_locked(
+                        &mut remote,
+                        connection_epoch,
+                        client_key,
+                    ) {
                         client.initialized = true;
                         client.last_app_pong_status = Some("active".to_string());
                         client.recovery_started_at_ms = None;
                     }
-                    if is_legacy_default_client_key(client_key) {
-                        sync_default_client_legacy_locked(&mut remote);
-                    }
                 }
-                remote.last_error = None;
-                sync_legacy_from_active_connection_locked(&mut remote);
             }
             state
                 .push_event("info", "remote_control_initialized", "initialized")
@@ -427,7 +422,7 @@ pub(super) async fn observe_app_server_message(
             }
         }
         if method == "remoteControl/status/changed" {
-            observe_remote_control_status_changed(state, params.as_ref()).await;
+            observe_remote_control_status_changed(state, connection_epoch, params.as_ref()).await;
         }
         if method == "thread/started" {
             if let Some(thread_id) = params.as_ref().and_then(thread_id_from_payload) {
@@ -447,6 +442,7 @@ pub(super) async fn observe_app_server_message(
             {
                 observe_thread_status_changed(
                     state,
+                    connection_epoch,
                     client_key.as_deref(),
                     &thread_id,
                     &status_type,
@@ -473,23 +469,17 @@ pub(super) async fn observe_app_server_message(
             if should_track {
                 let mut remote = state.remote_control.inner.lock().await;
                 if let Some(client_key) = client_key.as_deref() {
-                    if let Some(client) = remote.clients.get_mut(client_key) {
+                    if let Some(client) = client_state_mut_for_connection_locked(
+                        &mut remote,
+                        connection_epoch,
+                        client_key,
+                    ) {
                         if let Some(thread_id) = thread_id.clone() {
                             client.current_thread_id = Some(thread_id);
                         }
                         if let Some(turn_id) = turn_id.clone() {
                             client.current_turn_id = Some(turn_id);
                         }
-                    }
-                    if is_legacy_default_client_key(client_key) {
-                        sync_default_client_legacy_locked(&mut remote);
-                    }
-                } else {
-                    if let Some(thread_id) = thread_id {
-                        remote.current_thread_id = Some(thread_id);
-                    }
-                    if let Some(turn_id) = turn_id {
-                        remote.current_turn_id = Some(turn_id);
                     }
                 }
             }
@@ -498,37 +488,30 @@ pub(super) async fn observe_app_server_message(
             // The IM event router owns RuntimeState cleanup so it can flush platform progress first.
             let mut remote = state.remote_control.inner.lock().await;
             if let Some(client_key) = client_key.as_deref() {
-                if let Some(client) = remote.clients.get_mut(client_key)
-                    && (thread_id.is_none()
-                        || client.current_thread_id.as_deref() == thread_id.as_deref())
+                if let Some(client) = client_state_mut_for_connection_locked(
+                    &mut remote,
+                    connection_epoch,
+                    client_key,
+                ) && (thread_id.is_none()
+                    || client.current_thread_id.as_deref() == thread_id.as_deref())
                 {
                     client.current_turn_id = None;
                 }
-                if is_legacy_default_client_key(client_key) {
-                    sync_default_client_legacy_locked(&mut remote);
-                }
-            } else if thread_id.is_none()
-                || remote.current_thread_id.as_deref() == thread_id.as_deref()
-            {
-                remote.current_turn_id = None;
             }
         } else if method == "thread/closed"
             && let Some(thread_id) = params.as_ref().and_then(thread_id_from_payload)
         {
             let mut remote = state.remote_control.inner.lock().await;
             if let Some(client_key) = client_key.as_deref() {
-                if let Some(client) = remote.clients.get_mut(client_key)
-                    && client.current_thread_id.as_deref() == Some(thread_id.as_str())
+                if let Some(client) = client_state_mut_for_connection_locked(
+                    &mut remote,
+                    connection_epoch,
+                    client_key,
+                ) && client.current_thread_id.as_deref() == Some(thread_id.as_str())
                 {
                     client.current_thread_id = None;
                     client.current_turn_id = None;
                 }
-                if is_legacy_default_client_key(client_key) {
-                    sync_default_client_legacy_locked(&mut remote);
-                }
-            } else if remote.current_thread_id.as_deref() == Some(thread_id.as_str()) {
-                remote.current_thread_id = None;
-                remote.current_turn_id = None;
             }
         }
         state
@@ -618,6 +601,7 @@ async fn telegram_thread_is_bound(state: &SharedState, thread_id: &str) -> bool 
 
 pub(super) async fn observe_thread_status_changed(
     state: &SharedState,
+    connection_epoch: u64,
     client_key: Option<&str>,
     thread_id: &str,
     status_type: &str,
@@ -629,21 +613,17 @@ pub(super) async fn observe_thread_status_changed(
     // turn/completed event.  Clearing it here would discard Telegram's
     // aggregate progress message before its final failure state can be sent.
     let normalized_client_key = client_key.map(normalize_remote_client_key);
-    let cleared_turn_id = {
+    let cleared_turn_id: Option<String> = {
         let mut remote = state.remote_control.inner.lock().await;
         if let Some(client_key) = normalized_client_key.as_deref() {
             let mut cleared_turn_id = None;
-            if let Some(client) = remote.clients.get_mut(client_key)
+            if let Some(client) =
+                client_state_mut_for_connection_locked(&mut remote, connection_epoch, client_key)
                 && client.current_thread_id.as_deref() == Some(thread_id)
             {
                 cleared_turn_id = client.current_turn_id.take();
             }
-            if is_legacy_default_client_key(client_key) {
-                sync_default_client_legacy_locked(&mut remote);
-            }
             cleared_turn_id
-        } else if remote.current_thread_id.as_deref() == Some(thread_id) {
-            remote.current_turn_id.take()
         } else {
             None
         }
@@ -702,24 +682,31 @@ pub(super) async fn observe_thread_status_changed(
     }
 }
 
-async fn observe_remote_control_status_changed(state: &SharedState, params: Option<&Value>) {
+async fn observe_remote_control_status_changed(
+    state: &SharedState,
+    connection_epoch: u64,
+    params: Option<&Value>,
+) {
     let Some(params) = params else {
         return;
     };
     let mut remote = state.remote_control.inner.lock().await;
+    let Some(connection) = connection_for_epoch_mut_locked(&mut remote, connection_epoch) else {
+        return;
+    };
     if let Some(server_name) = json_string(params, "serverName") {
-        remote.server_name = Some(server_name);
+        connection.server_name = Some(server_name);
     }
     if let Some(installation_id) = json_string(params, "installationId") {
-        remote.installation_id = Some(installation_id);
+        connection.installation_id = Some(installation_id);
     }
     if let Some(environment_id) = json_string(params, "environmentId") {
-        remote.environment_id = Some(environment_id);
+        connection.environment_id = Some(environment_id);
     }
     if let Some(status) = json_string(params, "status")
         && status == "connected"
     {
-        remote.last_error = None;
+        connection.last_error = None;
     }
 }
 
@@ -734,9 +721,6 @@ fn json_string(value: &Value, key: &str) -> Option<String> {
 
 async fn is_selected_active_connection_epoch(state: &SharedState, connection_epoch: u64) -> bool {
     let remote = state.remote_control.inner.lock().await;
-    if remote.connections.is_empty() {
-        return remote.connection_epoch == connection_epoch && remote.connected;
-    }
     let Some(active_connection_id) = select_active_connection_id_locked(&remote) else {
         return false;
     };

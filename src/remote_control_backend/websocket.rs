@@ -20,11 +20,11 @@ use crate::{
 };
 
 use super::client_state::{
-    connection_exists_locked, default_client_key_for_connection_locked, ensure_client_state_locked,
-    prune_inactive_remote_connections_locked, remove_pending_initialize_for_connection_locked,
+    connection_exists_locked, default_client_key_for_connection_locked,
+    ensure_client_state_for_connection_locked, prune_inactive_remote_connections_locked,
+    remove_pending_initialize_for_connection_locked,
     resolve_remote_client_key_for_connection_locked, source_default_client_key,
-    source_kind_from_user_agent, sync_default_client_legacy_locked,
-    sync_legacy_from_active_connection_locked,
+    source_kind_from_user_agent,
 };
 use super::diagnostics::{
     mark_remote_app_ping, mark_remote_ws_inbound, mark_remote_ws_ping, mark_remote_ws_pong,
@@ -32,16 +32,14 @@ use super::diagnostics::{
 };
 use super::outbound::{send_envelope_on_connection, send_ws_control_ping, send_ws_control_pong};
 use super::protocol::build_client_ping_envelope;
-use super::server_envelopes::{
-    ServerChunkMap, handle_server_envelope, server_connection_cursor_prefix,
-};
+use super::server_envelopes::{ServerChunkMap, handle_server_envelope};
 use super::server_work::{RemoteServerWorkItem, run_remote_server_work_queue};
 use super::{
     OutboundWsMessage, PROTOCOL_VERSION, REMOTE_CONTROL_APP_PING_INTERVAL,
     REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY, REMOTE_CONTROL_SOURCE_HINT_TTL_MS,
     REMOTE_CONTROL_STALE_CHECK_INTERVAL, REMOTE_CONTROL_WEBSOCKET_PING_INTERVAL,
     ensure_remote_control_client_initialized, header_str, log_remote_control_entry_headers,
-    next_remote_subscribe_cursor, stable_id, uuid_like,
+    next_remote_subscribe_cursor, stable_id,
 };
 
 pub(super) async fn websocket(
@@ -63,11 +61,6 @@ pub(super) async fn websocket(
         .on_upgrade(move |socket| async move {
             if let Err(err) = run_websocket(state.clone(), headers, socket).await {
                 let message = err.to_string();
-                {
-                    let mut remote = state.remote_control.inner.lock().await;
-                    remote.last_error = Some(message.clone());
-                    sync_legacy_from_active_connection_locked(&mut remote);
-                }
                 state
                     .push_event("error", "remote_control_ws_failed", message)
                     .await;
@@ -92,11 +85,8 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     let (connection_id, connection_epoch, client_id, stream_id, source_kind, source_user_agent) = {
         let mut remote = state.remote_control.inner.lock().await;
         let connected_at_ms = now_ms();
-        remote.connected = true;
-        remote.initialized = false;
         remote.next_connection_epoch = remote.next_connection_epoch.saturating_add(1);
-        remote.connection_epoch = remote.next_connection_epoch;
-        let connection_epoch = remote.connection_epoch;
+        let connection_epoch = remote.next_connection_epoch;
         let connection_id = stable_id(
             "conn",
             &format!(
@@ -107,21 +97,6 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 connection_epoch
             ),
         );
-        remote.outbound_tx = Some(outbound_tx.clone());
-        remote.server_id = server_id.clone().or(remote.server_id.clone());
-        remote.server_name = server_name.clone().or(remote.server_name.clone());
-        remote.installation_id = installation_id.clone().or(remote.installation_id.clone());
-        remote.account_id = account_id.clone().or(remote.account_id.clone());
-        remote.subscribe_cursor = subscribe_cursor.clone();
-        remote.last_error = None;
-        remote.connected_at_ms = Some(connected_at_ms);
-        remote.last_ws_inbound_at_ms = Some(connected_at_ms);
-        remote.last_ws_ping_at_ms = None;
-        remote.last_ws_pong_at_ms = None;
-        remote.last_app_ping_at_ms = None;
-        remote.last_app_pong_at_ms = None;
-        remote.last_app_pong_status = None;
-        remote.last_initialize_sent_at_ms = None;
         let source_hint = installation_id.as_ref().and_then(|installation_id| {
             remote
                 .pending_source_hints_by_installation
@@ -140,14 +115,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
             .as_ref()
             .and_then(|hint| hint.user_agent.clone())
             .or_else(|| user_agent.clone());
-        if remote.stream_id.is_empty() {
-            remote.stream_id = uuid_like();
-        }
         let default_client_key = source_default_client_key(source_kind);
-        let default_client = ensure_client_state_locked(&mut remote, &default_client_key);
-        let client_id = default_client.client_id.clone();
-        let stream_id = default_client.stream_id.clone();
-        let environment_id = remote.environment_id.clone();
         remote.connections.insert(
             connection_id.clone(),
             RemoteControlServerConnection {
@@ -155,11 +123,10 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 connection_epoch,
                 default_client_key,
                 connected: true,
-                initialized: false,
                 source_kind,
                 user_agent: source_user_agent.clone(),
                 server_id: server_id.clone(),
-                environment_id,
+                environment_id: None,
                 server_name: server_name.clone(),
                 installation_id: installation_id.clone(),
                 account_id: account_id.clone(),
@@ -171,11 +138,19 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 last_ws_pong_at_ms: None,
                 last_error: None,
                 clients: HashMap::new(),
+                server_ack_cursors: HashMap::new(),
                 stream_diagnostics: HashMap::new(),
             },
         );
+        let default_client = ensure_client_state_for_connection_locked(
+            &mut remote,
+            connection_epoch,
+            &source_default_client_key(source_kind),
+        )
+        .expect("newly inserted remote-control connection should exist");
+        let client_id = default_client.client_id.clone();
+        let stream_id = default_client.stream_id.clone();
         prune_inactive_remote_connections_locked(&mut remote);
-        sync_default_client_legacy_locked(&mut remote);
         (
             connection_id,
             connection_epoch,
@@ -228,7 +203,17 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     );
 
     let (mut writer, mut reader) = socket.split();
-    initialize_remote_clients_for_connection(&state, connection_epoch).await?;
+    if let Err(err) = initialize_remote_clients_for_connection(&state, connection_epoch).await {
+        let last_error = err.to_string();
+        cleanup_remote_control_connection(
+            &state,
+            &connection_id,
+            connection_epoch,
+            Some(last_error),
+        )
+        .await;
+        return Err(err);
+    }
     let (server_work_tx, server_work_rx) = tokio::sync::mpsc::channel::<RemoteServerWorkItem>(
         REMOTE_CONTROL_SERVER_WORK_QUEUE_CAPACITY,
     );
@@ -358,29 +343,8 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     writer_task.abort();
     reader_task.abort();
     server_work_task.abort();
-    {
-        let mut remote = state.remote_control.inner.lock().await;
-        let last_error = connection_result.as_ref().err().map(|err| err.to_string());
-        let removed_initialize_count =
-            remove_pending_initialize_for_connection_locked(&mut remote, connection_epoch);
-        if removed_initialize_count > 0 {
-            chain_log::write_line(format!(
-                "[remote_control] event=stale_initialize_cleanup connection_epoch={} removed_count={}",
-                connection_epoch, removed_initialize_count
-            ));
-        }
-        let cursor_prefix = server_connection_cursor_prefix(connection_epoch);
-        remote
-            .server_ack_cursors
-            .retain(|key, _| !key.starts_with(&cursor_prefix));
-        remote
-            .stream_diagnostics
-            .retain(|key, _| !key.starts_with(&cursor_prefix));
-        remote.connections.remove(&connection_id);
-        remote.last_error = last_error;
-        prune_inactive_remote_connections_locked(&mut remote);
-        sync_legacy_from_active_connection_locked(&mut remote);
-    }
+    let last_error = connection_result.as_ref().err().map(|err| err.to_string());
+    cleanup_remote_control_connection(&state, &connection_id, connection_epoch, last_error).await;
     state
         .push_event(
             "warn",
@@ -397,6 +361,28 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
         )
         .await;
     connection_result
+}
+
+async fn cleanup_remote_control_connection(
+    state: &SharedState,
+    connection_id: &str,
+    connection_epoch: u64,
+    last_error: Option<String>,
+) {
+    let mut remote = state.remote_control.inner.lock().await;
+    let removed_initialize_count =
+        remove_pending_initialize_for_connection_locked(&mut remote, connection_epoch);
+    if removed_initialize_count > 0 {
+        chain_log::write_line(format!(
+            "[remote_control] event=stale_initialize_cleanup connection_epoch={} removed_count={}",
+            connection_epoch, removed_initialize_count
+        ));
+    }
+    if let Some(connection) = remote.connections.get_mut(connection_id) {
+        connection.last_error = last_error;
+    }
+    remote.connections.remove(connection_id);
+    prune_inactive_remote_connections_locked(&mut remote);
 }
 
 pub(super) async fn initialize_remote_clients_for_connection(
@@ -438,4 +424,111 @@ pub(super) async fn initialize_remote_clients_for_connection(
         ensure_remote_control_client_initialized(state, connection_epoch, &client_key).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        app_state::{AppState, RemoteControlServerConnection, RemoteControlSourceKind},
+        config::AppConfig,
+    };
+
+    #[tokio::test]
+    async fn failed_initialization_cleanup_removes_registered_connection() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        config.state_path = temp.path().join("state.json");
+        let state = AppState::new(temp.path().join("config.toml"), config, None, None);
+        let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        {
+            let mut remote = state.remote_control.inner.lock().await;
+            remote.connections.insert(
+                "conn-failed".to_string(),
+                RemoteControlServerConnection {
+                    connection_id: "conn-failed".to_string(),
+                    connection_epoch: 42,
+                    default_client_key: "default:codex_app".to_string(),
+                    connected: true,
+                    source_kind: RemoteControlSourceKind::CodexApp,
+                    user_agent: None,
+                    server_id: None,
+                    environment_id: None,
+                    server_name: None,
+                    installation_id: None,
+                    account_id: None,
+                    subscribe_cursor: None,
+                    outbound_tx: Some(outbound_tx),
+                    connected_at_ms: Some(1),
+                    last_ws_inbound_at_ms: Some(1),
+                    last_ws_ping_at_ms: None,
+                    last_ws_pong_at_ms: None,
+                    last_error: None,
+                    clients: HashMap::new(),
+                    server_ack_cursors: HashMap::new(),
+                    stream_diagnostics: HashMap::new(),
+                },
+            );
+        }
+
+        cleanup_remote_control_connection(
+            &state,
+            "conn-failed",
+            42,
+            Some("initialization failed".to_string()),
+        )
+        .await;
+
+        let remote = state.remote_control.inner.lock().await;
+        assert!(!remote.connections.contains_key("conn-failed"));
+    }
+
+    #[tokio::test]
+    async fn websocket_initialization_failure_does_not_leave_connection_registered() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut config = AppConfig::default();
+        config.state_path = temp.path().join("state.json");
+        let state = AppState::new(temp.path().join("config.toml"), config, None, None);
+        assert!(state.lifecycle_admission.begin_draining());
+
+        let app = crate::remote_control_backend::router().with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test websocket server");
+        let address = listener
+            .local_addr()
+            .expect("test websocket server address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve test websocket server");
+        });
+
+        let (socket, _) = tokio_tungstenite::connect_async(format!(
+            "ws://{address}/api/wham/remote/control/server"
+        ))
+        .await
+        .expect("websocket handshake");
+        drop(socket);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                if state
+                    .remote_control
+                    .inner
+                    .lock()
+                    .await
+                    .connections
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("failed initialization should clean up the connection");
+        server.abort();
+    }
 }
