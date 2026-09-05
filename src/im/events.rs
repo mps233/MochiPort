@@ -843,6 +843,20 @@ pub(crate) async fn send_turn_reply(
                     &rendered,
                 );
                 let payload = if !is_final_answer {
+                    // 完整颗粒度：过程文本逐条独立发送，不折叠进评论聚合气泡。
+                    if telegram_granularity(state, route).await == TelegramReplyGranularity::Full
+                    {
+                        send_telegram_standalone_item(
+                            state,
+                            outbound_tx,
+                            thread_id,
+                            route,
+                            item_id,
+                            &rendered,
+                        )
+                        .await;
+                        return;
+                    }
                     let Some(turn_id) = effective_turn_id.as_deref() else {
                         return;
                     };
