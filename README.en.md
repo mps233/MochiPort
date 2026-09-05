@@ -23,7 +23,7 @@
 <p align="center">
   <a href="https://github.com/mps233/MochiPort/releases/latest"><img src="https://img.shields.io/github/v/release/mps233/MochiPort?display_name=tag&style=flat-square" alt="Latest release"></a>
   <a href="https://github.com/mps233/MochiPort/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mps233/MochiPort/ci.yml?branch=main&style=flat-square&label=CI" alt="CI status"></a>
-  <span> <code>v0.5.6</code></span>
+  <span> <code>v0.5.7</code></span>
 </p>
 
 MochiPort is a local-first agent session relay. It connects local Codex App, the Codex VS Code extension, and Codex CLI sessions to Telegram, Feishu, WeChat, and WeCom while providing session management and an AI Gateway.

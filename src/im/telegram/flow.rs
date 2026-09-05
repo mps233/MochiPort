@@ -3017,7 +3017,10 @@ async fn handle_telegram_reply_granularity_command(
             .await;
     }
     adapter
-        .send_text(&message.chat_id, &text.telegram_granularity_set(granularity))
+        .send_text(
+            &message.chat_id,
+            &text.telegram_granularity_set(granularity),
+        )
         .await?;
     Ok(())
 }

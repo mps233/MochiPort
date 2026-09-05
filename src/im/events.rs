@@ -844,8 +844,7 @@ pub(crate) async fn send_turn_reply(
                 );
                 let payload = if !is_final_answer {
                     // 完整颗粒度：过程文本逐条独立发送，不折叠进评论聚合气泡。
-                    if telegram_granularity(state, route).await == TelegramReplyGranularity::Full
-                    {
+                    if telegram_granularity(state, route).await == TelegramReplyGranularity::Full {
                         send_telegram_standalone_item(
                             state,
                             outbound_tx,
@@ -1576,7 +1575,11 @@ async fn schedule_terminal_status_fallback(
                 .flatten()
         };
         let deliver_progress = route.platform == ImPlatformKind::Telegram
-            && state.config.lock().await.telegram_reply_granularity(&route.account_id)
+            && state
+                .config
+                .lock()
+                .await
+                .telegram_reply_granularity(&route.account_id)
                 == TelegramReplyGranularity::Standard;
         if let Some(snapshot) = command_snapshot
             && deliver_progress
@@ -2493,9 +2496,7 @@ pub(crate) async fn handle_codex_notification_for_generation(
                             .await;
                         }
                         TelegramReplyGranularity::Full => {
-                            if let Some(diff) =
-                                telegram_progress::file_change_diff_summary(item)
-                            {
+                            if let Some(diff) = telegram_progress::file_change_diff_summary(item) {
                                 let text = im_text_for_state(&state);
                                 let rendered =
                                     telegram_progress::render_diff_standalone(&diff, text);

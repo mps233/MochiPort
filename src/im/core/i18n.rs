@@ -1,9 +1,7 @@
 use serde::Deserialize;
 
 use crate::{
-    app_state::SharedState,
-    config::TelegramReplyGranularity,
-    im_runtime::PendingApproval,
+    app_state::SharedState, config::TelegramReplyGranularity, im_runtime::PendingApproval,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2005,8 +2003,16 @@ mod tests {
         assert_eq!(
             zh_commands,
             vec![
-                "new", "sessions", "model", "status", "steer", "queue", "stop", "granularity",
-                "exit", "help"
+                "new",
+                "sessions",
+                "model",
+                "status",
+                "steer",
+                "queue",
+                "stop",
+                "granularity",
+                "exit",
+                "help"
             ]
         );
         assert!(zh.telegram_help().contains("/stop"));

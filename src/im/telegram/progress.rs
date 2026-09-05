@@ -1086,15 +1086,9 @@ pub(crate) fn render_plan_standalone(
 }
 
 /// 完整颗粒度下的独立文件变更消息：标题行 + 逐文件增删行。
-pub(crate) fn render_diff_standalone(
-    diff: &TelegramDiffSummary,
-    text: ImText,
-) -> String {
-    let mut lines = vec![text.telegram_diff_heading(
-        diff.file_count,
-        diff.additions,
-        diff.deletions,
-    )];
+pub(crate) fn render_diff_standalone(diff: &TelegramDiffSummary, text: ImText) -> String {
+    let mut lines =
+        vec![text.telegram_diff_heading(diff.file_count, diff.additions, diff.deletions)];
     for file in diff.files.iter().take(TELEGRAM_PLAN_RENDER_STEPS) {
         lines.push(format!(
             "`{}` · +{} −{}",

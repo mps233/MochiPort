@@ -119,8 +119,12 @@ impl TelegramReplyGranularity {
     /// 接受英文值与中文别名；Telegram 命令与管理 API 共用。
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "summary" | "quiet" | "摘要" | "摘要回复" => Some(TelegramReplyGranularity::Summary),
-            "standard" | "normal" | "标准" | "标准回复" => Some(TelegramReplyGranularity::Standard),
+            "summary" | "quiet" | "摘要" | "摘要回复" => {
+                Some(TelegramReplyGranularity::Summary)
+            }
+            "standard" | "normal" | "标准" | "标准回复" => {
+                Some(TelegramReplyGranularity::Standard)
+            }
             "full" | "all" | "完整" | "完整回复" => Some(TelegramReplyGranularity::Full),
             _ => None,
         }
@@ -900,7 +904,10 @@ mod tests {
             "botToken": "123:abc"
         }"#;
         let account: TelegramConfig = serde_json::from_str(payload).unwrap();
-        assert_eq!(account.reply_granularity, TelegramReplyGranularity::Standard);
+        assert_eq!(
+            account.reply_granularity,
+            TelegramReplyGranularity::Standard
+        );
     }
 
     #[test]
