@@ -169,6 +169,7 @@ mod tests {
             "gpt-5.6-luna",
             "grok-4.6",
             "gpt-5.5",
+            "gpt-6-astra",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "custom-model",
@@ -191,6 +192,7 @@ mod tests {
                 "gpt-5.6-luna",
                 "grok-4.6",
                 "gpt-5.5",
+                "gpt-6-astra",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash"
             ]
@@ -200,21 +202,21 @@ mod tests {
             response["models"][3]["comp_hash"],
             "codexhub-grok-summary-v1"
         );
-        assert_eq!(response["models"][5]["display_name"], "DeepSeek-V4-Pro");
-        assert_eq!(response["models"][5]["comp_hash"], "3000");
-        assert_eq!(response["models"][5]["apply_patch_tool_type"], "freeform");
-        assert_eq!(response["models"][5]["supports_search_tool"], true);
-        assert_eq!(
-            response["models"][5]["supports_image_detail_original"],
-            false
-        );
-        assert_eq!(response["models"][5]["input_modalities"], json!(["text"]));
+        assert_eq!(response["models"][6]["display_name"], "DeepSeek-V4-Pro");
+        assert_eq!(response["models"][6]["comp_hash"], "3000");
+        assert_eq!(response["models"][6]["apply_patch_tool_type"], "freeform");
+        assert_eq!(response["models"][6]["supports_search_tool"], true);
         assert_eq!(
             response["models"][6]["supports_image_detail_original"],
+            false
+        );
+        assert_eq!(response["models"][6]["input_modalities"], json!(["text"]));
+        assert_eq!(
+            response["models"][7]["supports_image_detail_original"],
             true
         );
         assert_eq!(
-            response["models"][6]["input_modalities"],
+            response["models"][7]["input_modalities"],
             json!(["text", "image"])
         );
     }
@@ -419,11 +421,12 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_6_models_use_current_official_capabilities() {
+    fn gpt_lite_models_use_current_official_capabilities() {
         for (slug, priority) in [
-            ("gpt-5.6-sol", 1),
-            ("gpt-5.6-terra", 2),
-            ("gpt-5.6-luna", 3),
+            ("gpt-6-astra", 1),
+            ("gpt-5.6-sol", 6),
+            ("gpt-5.6-terra", 7),
+            ("gpt-5.6-luna", 8),
         ] {
             let model = catalog_models()
                 .iter()
@@ -431,7 +434,7 @@ mod tests {
                 .expect("catalog model should exist");
 
             assert_eq!(model["context_window"], 272_000, "model {slug}");
-            assert_eq!(model["max_context_window"], 272_000, "model {slug}");
+            assert_eq!(model["max_context_window"], 872_000, "model {slug}");
             assert_eq!(model["use_responses_lite"], true, "model {slug}");
             assert_eq!(
                 model["supports_reasoning_summary_parameter"], true,
@@ -443,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn gpt_5_4_models_remain_visible_for_mochiport() {
+    fn gpt_5_5_remains_visible_and_older_models_are_removed() {
         let gpt_5_5 = catalog_models()
             .iter()
             .find(|model| model_slug(model) == Some("gpt-5.5"))
@@ -453,15 +456,11 @@ mod tests {
         assert_eq!(gpt_5_5.get("availability_nux"), Some(&Value::Null));
 
         for slug in ["gpt-5.4", "gpt-5.4-mini"] {
-            let model = catalog_models()
-                .iter()
-                .find(|model| model_slug(model) == Some(slug))
-                .expect("catalog model should exist");
-
-            assert_eq!(model["visibility"], "list", "model {slug}");
-            assert_eq!(model["include_skills_usage_instructions"], true);
-            assert_eq!(model["supports_reasoning_summary_parameter"], true);
-            assert_eq!(model.get("upgrade"), Some(&Value::Null), "model {slug}");
+            assert!(
+                !catalog_models()
+                    .iter()
+                    .any(|model| model_slug(model) == Some(slug))
+            );
         }
     }
 
@@ -473,13 +472,12 @@ mod tests {
             .map(|model| model.slug.as_str())
             .collect::<Vec<_>>();
         for expected in [
+            "gpt-6-astra",
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
             "grok-4.6",
             "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
         ] {
             assert!(
                 slugs.contains(&expected),
