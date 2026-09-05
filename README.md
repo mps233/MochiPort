@@ -75,7 +75,7 @@ MochiPort 会记住“哪个话题对应哪个会话”。Codex 会话被归档�
 <table>
   <tr>
     <td align="center"><strong>概览</strong><br><img src="docs/assets/product/mochiport-overview.png" alt="MochiPort 概览" width="480"></td>
-    <td align="center"><strong>Codex 接入</strong><br><img src="docs/assets/product/mochiport-codex-access.png" alt="MochiPort Codex 接入" width="480"></td>
+    <td align="center"><strong>Codex 接入</strong><br><img src="docs/assets/product/mochiport-codex-access.png" alt="MochiPort Codex 接入引导清单" width="480"></td>
   </tr>
   <tr>
     <td align="center"><strong>AI 网关</strong><br><img src="docs/assets/product/mochiport-ai-gateway.png" alt="MochiPort AI 网关" width="480"></td>
@@ -113,7 +113,7 @@ Codex 侧只看到 MochiPort 暴露的模型目录。未配置 AI Gateway 时，
 
 ### 3. 接入 Codex
 
-打开 **Codex 接入**，开启“连接 MochiPort”，再正常启动 Codex App 或 Codex VS Code 插件并开启 remote-control/“控制这台电脑”。remote-control 需要 ChatGPT 兼容的认证模式，仅 API key 认证无法启动；MochiPort 会写入本地连接配置。MochiPort 会通过本地连接读取会话，不需要复制或迁移会话文件。
+打开 **Codex 接入**，页面会按进度显示接入引导清单（连接 MochiPort → 选择模型服务 → 检查配置 → 登录 → 桌面控制 → 远程控制）：完成的步骤自动打勾，当前步骤给出操作入口，出现异常的步骤会给出原因和“自动修复”。开启“连接 MochiPort”后，正常启动 Codex App 或 Codex VS Code 插件并开启 remote-control/“控制这台电脑”。remote-control 需要 ChatGPT 兼容的认证模式，仅 API key 认证无法启动；MochiPort 会写入本地连接配置。MochiPort 会通过本地连接读取会话，不需要复制或迁移会话文件。
 
 如果使用 Codex CLI，保持 MochiPort 客户端或 daemon 运行，然后执行：
 
@@ -152,10 +152,27 @@ codex --remote ws://127.0.0.1:3849
 | `/steer <内容>` | 调整当前任务方向 |
 | `/queue <内容>` | 排到当前任务之后执行 |
 | `/stop` | 中断当前任务，保留会话 |
+| `/回复 <档位>` | 切换回复颗粒度（摘要 / 标准 / 完整，别名 `/granularity`） |
 | `/exit` | 退出会话并清空队列 |
 | `/help` | 查看帮助 |
 
 任务运行时直接发送普通文字也会调整当前任务；需要稍后执行的内容使用 `/queue`。
+
+### 回复颗粒度（Telegram）
+
+在 **消息渠道** 展开 Telegram 账号，点击参考卡选择转发详细程度；也可以在 Telegram 里发送 `/回复`（无参数查看当前档位，带参数直接切换）。设置即时生效，无需重启。
+
+| 档位 | 内容 |
+| --- | --- |
+| 摘要回复 | 只发过程文本（Codex 的说明文字）和最终结果；工具执行、文件修改、推理、计划、搜索全部静默 |
+| 标准回复（默认） | 现有行为：所有信息合并进一条聚合气泡，原地更新 |
+| 完整回复 | 所有信息逐条独立发送：每条命令执行、文件修改、推理、计划各自一条消息，不合并更新 |
+
+<p align="center">
+  <img src="docs/assets/product/mochiport-reply-granularity.png" alt="消息渠道页的回复颗粒度参考卡，三档各带 Telegram 消息效果预览" width="720">
+</p>
+
+错误通知和审批卡片不受颗粒度影响，任何档位都会照常送达。
 
 ## 安全边界
 

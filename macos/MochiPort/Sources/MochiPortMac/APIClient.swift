@@ -25,8 +25,61 @@ struct ManageIMAccount: Decodable, Equatable, Identifiable {
     let lastError: String?
     let lastEventAtMs: Int64?
     let lastInboundAtMs: Int64?
+    let replyGranularity: String?
 
     var id: String { "\(platform):\(accountId)" }
+
+    init(
+        platform: String,
+        accountId: String,
+        displayName: String? = nil,
+        avatarData: String? = nil,
+        enabled: Bool,
+        configured: Bool,
+        secretSet: Bool,
+        connecting: Bool = false,
+        polling: Bool = false,
+        connected: Bool = false,
+        lastError: String? = nil,
+        lastEventAtMs: Int64? = nil,
+        lastInboundAtMs: Int64? = nil,
+        replyGranularity: String? = nil
+    ) {
+        self.platform = platform
+        self.accountId = accountId
+        self.displayName = displayName
+        self.avatarData = avatarData
+        self.enabled = enabled
+        self.configured = configured
+        self.secretSet = secretSet
+        self.connecting = connecting
+        self.polling = polling
+        self.connected = connected
+        self.lastError = lastError
+        self.lastEventAtMs = lastEventAtMs
+        self.lastInboundAtMs = lastInboundAtMs
+        self.replyGranularity = replyGranularity
+    }
+
+    /// 不可变模型的原位更新助手；颗粒度切换后用响应值刷新本地列表。
+    func updatingReplyGranularity(_ value: String) -> ManageIMAccount {
+        ManageIMAccount(
+            platform: platform,
+            accountId: accountId,
+            displayName: displayName,
+            avatarData: avatarData,
+            enabled: enabled,
+            configured: configured,
+            secretSet: secretSet,
+            connecting: connecting,
+            polling: polling,
+            connected: connected,
+            lastError: lastError,
+            lastEventAtMs: lastEventAtMs,
+            lastInboundAtMs: lastInboundAtMs,
+            replyGranularity: value
+        )
+    }
 }
 
 struct ManageIMAccountsResponse: Decodable, Equatable {
@@ -1860,6 +1913,31 @@ struct APIClient: Sendable {
     private struct TelegramProjectGroupsRequest: Encodable {
         let accountId: String
         let projectGroups: [ManageTelegramProjectGroup]
+    }
+
+    private struct TelegramReplyGranularityRequest: Encodable {
+        let accountId: String
+        let granularity: String
+    }
+
+    struct ManageTelegramReplyGranularityResponse: Decodable, Equatable {
+        let ok: Bool
+        let accountId: String
+        let replyGranularity: String
+    }
+
+    func updateTelegramReplyGranularity(
+        accountId: String,
+        granularity: String
+    ) async throws -> ManageTelegramReplyGranularityResponse {
+        let response: ManageTelegramReplyGranularityResponse = try await performManagePOST(
+            path: "api/v1/manage/im/account/telegram/reply-granularity",
+            body: TelegramReplyGranularityRequest(accountId: accountId, granularity: granularity)
+        )
+        guard response.ok else {
+            throw APIClientError.operationFailed("后台服务未完成回复颗粒度设置。")
+        }
+        return response
     }
 
     private struct TelegramTopicSyncRequest: Encodable {

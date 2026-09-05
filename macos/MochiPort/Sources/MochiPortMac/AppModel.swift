@@ -2843,6 +2843,41 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setTelegramReplyGranularity(accountId: String, granularity: String) async {
+        if fixtureStatus != nil {
+            actionFeedback = ActionFeedback(message: "预览模式：已模拟切换回复颗粒度")
+            return
+        }
+        do {
+            let response = try await apiClient.updateTelegramReplyGranularity(
+                accountId: accountId,
+                granularity: granularity
+            )
+            accountOperationError = nil
+            actionFeedback = ActionFeedback(
+                message: "回复颗粒度已切换为\(Self.telegramGranularityTitle(response.replyGranularity))。"
+            )
+            if let index = imAccounts.firstIndex(
+                where: { $0.platform == "telegram" && $0.accountId == accountId }
+            ) {
+                imAccounts[index] = imAccounts[index].updatingReplyGranularity(
+                    response.replyGranularity
+                )
+            }
+        } catch {
+            accountOperationError = userFacingMessage(for: error)
+        }
+    }
+
+    static func telegramGranularityTitle(_ value: String) -> String {
+        switch value {
+        case "summary": "摘要回复"
+        case "standard": "标准回复"
+        case "full": "完整回复"
+        default: value
+        }
+    }
+
     @discardableResult
     func syncTelegramTopics(accountId: String, chatId: String) async -> Bool {
         if fixtureStatus != nil {

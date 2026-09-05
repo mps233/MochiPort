@@ -1,6 +1,10 @@
 use serde::Deserialize;
 
-use crate::{app_state::SharedState, im_runtime::PendingApproval};
+use crate::{
+    app_state::SharedState,
+    config::TelegramReplyGranularity,
+    im_runtime::PendingApproval,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum ImLocale {
@@ -536,6 +540,7 @@ impl ImText {
                 ("steer", "调整当前任务方向"),
                 ("queue", "排队下一条任务"),
                 ("stop", "中断当前任务"),
+                ("granularity", "切换回复详细程度"),
                 ("exit", "退出当前会话"),
                 ("help", "查看命令帮助"),
             ],
@@ -547,6 +552,7 @@ impl ImText {
                 ("steer", "Steer the current task"),
                 ("queue", "Queue the next task"),
                 ("stop", "Interrupt the current task"),
+                ("granularity", "Switch reply detail level"),
                 ("exit", "Exit the current session"),
                 ("help", "Show command help"),
             ],
@@ -555,8 +561,49 @@ impl ImText {
 
     pub(crate) fn telegram_help(self) -> &'static str {
         self.choose(
-            "Telegram 命令\n\n会话\n/new    创建新会话\n/sessions    恢复历史会话\n/model    管理当前会话的模型、推理强度和速度\n/status    查看连接、任务和队列状态\n/exit    退出当前会话\n\n任务\n/steer <内容>    调整当前任务方向\n/queue <内容>    当前任务完成后执行\n/stop    中断当前任务\n\n任务运行时直接发送普通文字，也会调整当前任务方向。\n\n/help    查看这份帮助\n\n兼容别名：/s = /stop，/q = /exit。审批和会话选择请按消息中的按钮或编号操作；会话设置仅使用按钮。",
-            "Telegram commands\n\nSessions\n/new    Create a new session\n/sessions    Resume a previous session\n/model    Manage model, reasoning, and speed for the current session\n/status    Show connection, task, and queue status\n/exit    Exit the current session\n\nTask\n/steer <text>    Steer the current task\n/queue <text>    Run after the current task\n/stop    Interrupt the current task\n\nOrdinary text sent while a task is running also steers the current task.\n\n/help    Show this help\n\nCompatibility aliases: /s = /stop, /q = /exit. Use the buttons or numbers shown in approval and session messages; session settings use buttons only.",
+            "Telegram 命令\n\n会话\n/new    创建新会话\n/sessions    恢复历史会话\n/model    管理当前会话的模型、推理强度和速度\n/status    查看连接、任务和队列状态\n/exit    退出当前会话\n\n任务\n/steer <内容>    调整当前任务方向\n/queue <内容>    当前任务完成后执行\n/stop    中断当前任务\n/回复 <档位>    切换回复详细程度（摘要 / 标准 / 完整）\n\n任务运行时直接发送普通文字，也会调整当前任务方向。\n\n/help    查看这份帮助\n\n兼容别名：/s = /stop，/q = /exit。审批和会话选择请按消息中的按钮或编号操作；会话设置仅使用按钮。",
+            "Telegram commands\n\nSessions\n/new    Create a new session\n/sessions    Resume a previous session\n/model    Manage model, reasoning, and speed for the current session\n/status    Show connection, task, and queue status\n/exit    Exit the current session\n\nTask\n/steer <text>    Steer the current task\n/queue <text>    Run after the current task\n/stop    Interrupt the current task\n/reply <mode>    Switch reply detail (summary / standard / full)\n\nOrdinary text sent while a task is running also steers the current task.\n\n/help    Show this help\n\nCompatibility aliases: /s = /stop, /q = /exit. Use the buttons or numbers shown in approval and session messages; session settings use buttons only.",
+        )
+    }
+
+    pub(crate) fn telegram_granularity_label(
+        self,
+        granularity: TelegramReplyGranularity,
+    ) -> &'static str {
+        match (granularity, self.locale) {
+            (TelegramReplyGranularity::Summary, ImLocale::ZhCn) => "摘要回复",
+            (TelegramReplyGranularity::Summary, ImLocale::EnUs) => "Summary reply",
+            (TelegramReplyGranularity::Standard, ImLocale::ZhCn) => "标准回复",
+            (TelegramReplyGranularity::Standard, ImLocale::EnUs) => "Standard reply",
+            (TelegramReplyGranularity::Full, ImLocale::ZhCn) => "完整回复",
+            (TelegramReplyGranularity::Full, ImLocale::EnUs) => "Full reply",
+        }
+    }
+
+    pub(crate) fn telegram_granularity_status(self, current: TelegramReplyGranularity) -> String {
+        let current_label = self.telegram_granularity_label(current);
+        match self.locale {
+            ImLocale::ZhCn => format!(
+                "当前回复颗粒度：{current_label}。\n\n用 /回复 <档位> 切换：\n• 摘要回复 —— 只发过程文本和最终结果\n• 标准回复 —— 所有信息合并进一条气泡更新\n• 完整回复 —— 所有信息逐条独立发送"
+            ),
+            ImLocale::EnUs => format!(
+                "Current reply granularity: {current_label}.\n\nUse /reply <mode> to switch:\n• Summary reply — process text and final result only\n• Standard reply — everything merged into one updating bubble\n• Full reply — every event as its own message"
+            ),
+        }
+    }
+
+    pub(crate) fn telegram_granularity_set(self, granularity: TelegramReplyGranularity) -> String {
+        let label = self.telegram_granularity_label(granularity);
+        match self.locale {
+            ImLocale::ZhCn => format!("回复颗粒度已切换为 {label}。"),
+            ImLocale::EnUs => format!("Reply granularity changed to {label}."),
+        }
+    }
+
+    pub(crate) fn telegram_granularity_unknown(self) -> &'static str {
+        self.choose(
+            "未找到回复颗粒度。可选：摘要回复 / 标准回复 / 完整回复。",
+            "Reply granularity not found. Options: summary / standard / full.",
         )
     }
 
@@ -1958,7 +2005,8 @@ mod tests {
         assert_eq!(
             zh_commands,
             vec![
-                "new", "sessions", "model", "status", "steer", "queue", "stop", "exit", "help"
+                "new", "sessions", "model", "status", "steer", "queue", "stop", "granularity",
+                "exit", "help"
             ]
         );
         assert!(zh.telegram_help().contains("/stop"));

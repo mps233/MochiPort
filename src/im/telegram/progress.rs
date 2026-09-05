@@ -14,7 +14,7 @@ use super::{collab_progress, rich_blocks};
 const TELEGRAM_COMMAND_PROGRESS_VISIBLE_STEPS: usize = 3;
 const TELEGRAM_COMMAND_PROGRESS_COMMAND_CHARS: usize = 180;
 const TELEGRAM_COMMAND_PROGRESS_RICH_COMMAND_CHARS: usize = 56;
-const TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS: usize = 480;
+pub(crate) const TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS: usize = 480;
 const TELEGRAM_COMMAND_PROGRESS_FAILURE_LINES: usize = 6;
 const TELEGRAM_COMMAND_PROGRESS_RETRY_ERROR_CHARS: usize = 600;
 const TELEGRAM_REASONING_RENDER_CHARS: usize = 720;
@@ -1047,40 +1047,66 @@ fn render_plan_progress(
     snapshot: &TelegramCommandProgressSnapshot,
     text: ImText,
 ) -> Option<String> {
-    if !has_plan_progress(snapshot) {
+    render_plan_standalone(snapshot.plan_explanation.as_deref(), &snapshot.plan, text)
+}
+
+/// 完整颗粒度下的独立计划消息：每次计划更新单独成条，不进聚合气泡。
+pub(crate) fn render_plan_standalone(
+    explanation: Option<&str>,
+    steps: &[TelegramPlanStep],
+    text: ImText,
+) -> Option<String> {
+    if explanation.is_none() && steps.is_empty() {
         return None;
     }
-    let mut sections = Vec::new();
-    if snapshot.plan_explanation.is_some() || !snapshot.plan.is_empty() {
-        let completed = snapshot
-            .plan
-            .iter()
-            .filter(|step| step.status == TelegramPlanStepStatus::Completed)
-            .count();
-        let total = snapshot.plan.len();
-        let mut lines = vec![text.telegram_plan_heading(completed, total)];
-        if let Some(explanation) = snapshot.plan_explanation.as_deref() {
-            lines.push(compact_text(explanation, TELEGRAM_PLAN_STEP_CHARS));
-        }
-        for step in snapshot.plan.iter().take(TELEGRAM_PLAN_RENDER_STEPS) {
-            let status = match step.status {
-                TelegramPlanStepStatus::Pending => "pending",
-                TelegramPlanStepStatus::InProgress => "in_progress",
-                TelegramPlanStepStatus::Completed => "completed",
-            };
-            lines.push(format!(
-                "{} · {}",
-                text.telegram_progress_status_label(status),
-                compact_text(&step.step, TELEGRAM_PLAN_STEP_CHARS)
-            ));
-        }
-        if snapshot.plan.len() > TELEGRAM_PLAN_RENDER_STEPS {
-            lines
-                .push(text.telegram_plan_omitted(snapshot.plan.len() - TELEGRAM_PLAN_RENDER_STEPS));
-        }
-        sections.push(lines.join("\n"));
+    let completed = steps
+        .iter()
+        .filter(|step| step.status == TelegramPlanStepStatus::Completed)
+        .count();
+    let mut lines = vec![text.telegram_plan_heading(completed, steps.len())];
+    if let Some(explanation) = explanation {
+        lines.push(compact_text(explanation, TELEGRAM_PLAN_STEP_CHARS));
     }
-    (!sections.is_empty()).then(|| sections.join("\n\n"))
+    for step in steps.iter().take(TELEGRAM_PLAN_RENDER_STEPS) {
+        let status = match step.status {
+            TelegramPlanStepStatus::Pending => "pending",
+            TelegramPlanStepStatus::InProgress => "in_progress",
+            TelegramPlanStepStatus::Completed => "completed",
+        };
+        lines.push(format!(
+            "{} · {}",
+            text.telegram_progress_status_label(status),
+            compact_text(&step.step, TELEGRAM_PLAN_STEP_CHARS)
+        ));
+    }
+    if steps.len() > TELEGRAM_PLAN_RENDER_STEPS {
+        lines.push(text.telegram_plan_omitted(steps.len() - TELEGRAM_PLAN_RENDER_STEPS));
+    }
+    Some(lines.join("\n"))
+}
+
+/// 完整颗粒度下的独立文件变更消息：标题行 + 逐文件增删行。
+pub(crate) fn render_diff_standalone(
+    diff: &TelegramDiffSummary,
+    text: ImText,
+) -> String {
+    let mut lines = vec![text.telegram_diff_heading(
+        diff.file_count,
+        diff.additions,
+        diff.deletions,
+    )];
+    for file in diff.files.iter().take(TELEGRAM_PLAN_RENDER_STEPS) {
+        lines.push(format!(
+            "`{}` · +{} −{}",
+            compact_text(&file.path, TELEGRAM_PLAN_STEP_CHARS),
+            file.additions,
+            file.deletions
+        ));
+    }
+    if diff.files.len() > TELEGRAM_PLAN_RENDER_STEPS {
+        lines.push(text.telegram_diff_omitted(diff.files.len() - TELEGRAM_PLAN_RENDER_STEPS));
+    }
+    lines.join("\n")
 }
 
 fn selected_entry_indices(entries: &[TelegramCommandProgressEntry]) -> Vec<usize> {
@@ -1131,7 +1157,7 @@ fn least_important_entry_position(
         .map(|(position, _)| position)
 }
 
-fn render_entry(
+pub(crate) fn render_entry(
     entry: &TelegramCommandProgressEntry,
     text: ImText,
     failure_output_chars: usize,

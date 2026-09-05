@@ -31,50 +31,88 @@ private extension View {
     ) -> some View {
         modifier(ManagementPageInsets(topPadding: topPadding))
     }
+
+    /// Codex 页卡片容器，与账号池页的玻璃卡面保持一致；玻璃材质不裁剪
+    /// 子视图，卡内整行底色必须靠 clipShape 收进圆角。
+    @ViewBuilder
+    func codexCardSurface() -> some View {
+        let shape = RoundedRectangle(
+            cornerRadius: MochiPortRadius.overlay,
+            style: .continuous
+        )
+
+        if #available(macOS 26.0, *) {
+            self
+                .glassEffect(.regular, in: shape)
+                .clipShape(shape)
+        } else {
+            self
+                .background(.regularMaterial, in: shape)
+                .clipShape(shape)
+                .overlay {
+                    shape.strokeBorder(
+                        Color.primary.opacity(0.11),
+                        lineWidth: 0.5
+                    )
+                }
+        }
+    }
 }
 
 struct CodexAccessView: View {
     @EnvironmentObject private var model: AppModel
     @State private var confirmsRestore = false
-    @State private var showsEnhancedDetails = false
+    @State private var showsSetupSteps = false
+    let onOpenGateway: () -> Void
 
     private var gatewayServiceEnabled: Bool? {
         model.gateway?.enabled ?? model.dashboard?.aiGatewayEnabled
     }
 
     var body: some View {
-        Form {
-            if let error = model.sectionErrors[.codex] {
-                InlineManagementError(
-                    message: error,
-                    retry: { Task { await model.loadSection(.codex, force: true) } }
-                )
-            }
+        ScrollView {
+            VStack(alignment: .leading, spacing: MochiPortPageLayout.sectionSpacing) {
+                if let error = model.sectionErrors[.codex] {
+                    InlineManagementError(
+                        message: error,
+                        retry: { Task { await model.loadSection(.codex, force: true) } }
+                    )
+                }
 
-            if let status = model.codexStatus {
-                Section("Codex") {
-                    CodexStatusFormRow(
+                if let status = model.codexStatus {
+                    let plan = CodexOnboardingSteps(
                         status: status,
                         gatewayEnabled: gatewayServiceEnabled
                     )
-                }
-                requestPathSection(status, gatewayEnabled: gatewayServiceEnabled)
-                providerSection(status)
-                environmentSection(status)
-                diagnosticsSection(status)
-                enhancedLaunchSection
-            } else if !model.isLoading(.codex), model.sectionErrors[.codex] == nil {
-                Section("Codex") {
+                    CodexProgressHeaderCard(plan: plan)
+                    CodexStepsCard(
+                        plan: plan,
+                        status: status,
+                        isUpdating: model.isLoading(.codex),
+                        setGatewayEnabled: { enabled in
+                            enabled
+                                ? await model.configureCodex()
+                                : await model.uninstallCodex()
+                        },
+                        repair: { Task { await model.repairCodex() } },
+                        onOpenGateway: onOpenGateway
+                    )
+                    launchCard(plan)
+                    advancedCard(status)
+                } else if !model.isLoading(.codex), model.sectionErrors[.codex] == nil {
                     ManagementEmptyState(
                         title: "还没连接 Codex",
                         message: "打开开关后，这里会显示连接状态。",
                         symbol: "app.badge.checkmark"
                     )
+                    .frame(maxWidth: .infinity)
+                    .codexCardSurface()
                 }
             }
+            .frame(maxWidth: MochiPortPageLayout.maxContentWidth, alignment: .leading)
+            .padding(.bottom, MochiPortPageLayout.bottomPadding)
         }
-        .formStyle(.grouped)
-        .scrollContentBackground(.hidden)
+        .scrollIndicators(.never)
         .managementPageInsets()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlay {
@@ -136,17 +174,6 @@ struct CodexAccessView: View {
             }
             ToolbarItemGroup(placement: .automatic) {
                 if let status = model.codexStatus {
-                    if status.providerMode != "direct-api" {
-                        Button {
-                            Task { await model.repairCodex() }
-                        } label: {
-                            Image(systemName: "wrench.and.screwdriver")
-                        }
-                        .disabled(!(status.configOk && status.authOk))
-                        .help("检查设置")
-                        .accessibilityLabel("检查设置")
-                    }
-
                     Button {
                         Task { await model.refreshCodexModels() }
                     } label: {
@@ -160,6 +187,10 @@ struct CodexAccessView: View {
                             Button(status.configured ? "重新连接" : "连接 Codex") {
                                 Task { await model.configureCodex() }
                             }
+                            Button("检查设置") {
+                                Task { await model.repairCodex() }
+                            }
+                            .disabled(!(status.configOk && status.authOk))
                             Divider()
                         } else {
                             Button("连接 MochiPort") {
@@ -182,27 +213,100 @@ struct CodexAccessView: View {
         }
     }
 
-    private func requestPathSection(
-        _ status: ManageCodexStatus,
-        gatewayEnabled: Bool?
-    ) -> some View {
-        return Section {
-            CodexRequestPathRow(
-                mode: status.providerMode,
-                gatewayEnabled: gatewayEnabled,
-                isUpdating: model.isLoading(.codex),
-                setGatewayEnabled: { enabled in
-                    enabled
-                        ? await model.configureCodex()
-                        : await model.uninstallCodex()
+    /// 全部步骤完成（或有启动任务/错误）时出现；启动入口同时保留在工具栏。
+    @ViewBuilder
+    private func launchCard(_ plan: CodexOnboardingSteps) -> some View {
+        if plan.allDone || model.codexEnhancedOperation != nil || model.codexEnhancedLaunchError != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                if let operation = model.codexEnhancedOperation {
+                    Text("启动 Codex")
+                        .font(.callout.weight(.semibold))
+                    EnhancedLaunchProgressRow(
+                        operation: operation,
+                        legacyFallback: model.codexEnhancedUsesLegacyFallback,
+                        error: model.codexEnhancedLaunchError,
+                        canCancel: model.canCancelCodexEnhancedLaunch,
+                        cancel: { Task { await model.cancelCodexEnhancedLaunch() } }
+                    )
+                } else if let error = model.codexEnhancedLaunchError {
+                    Text("启动 Codex")
+                        .font(.callout.weight(.semibold))
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("重新尝试") {
+                        Task { await model.beginCodexEnhancedLaunch() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .buttonBorderShape(.capsule)
+                    .controlSize(.small)
+                } else {
+                    HStack(spacing: 12) {
+                        Image(systemName: "party.popper.fill")
+                            .font(.system(size: 17, weight: .medium))
+                            .foregroundStyle(.green)
+                            .frame(width: 36, height: 36)
+                            .background(
+                                Color.green.opacity(0.12),
+                                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            )
+                            .accessibilityHidden(true)
+
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("全部就绪")
+                                .font(.callout.weight(.semibold))
+                            Text("启动 Codex App 即可开始使用。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 16)
+
+                        Button {
+                            Task { await model.beginCodexEnhancedLaunch() }
+                        } label: {
+                            Label("启动 Codex", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .buttonBorderShape(.capsule)
+                        .controlSize(.small)
+                    }
+
+                    DisclosureGroup(isExpanded: $showsSetupSteps) {
+                        VStack(alignment: .leading, spacing: 9) {
+                            EnhancedLaunchFeatureRow(
+                                symbol: "checkmark.seal",
+                                text: "启动前检查并保存设置，然后连接 MochiPort。"
+                            )
+                            EnhancedLaunchFeatureRow(
+                                symbol: "bolt",
+                                text: "启动后确认连接是否正常。"
+                            )
+                            EnhancedLaunchFeatureRow(
+                                symbol: "eye",
+                                text: "让自定义模型出现在 Codex 里。"
+                            )
+                            EnhancedLaunchFeatureRow(
+                                symbol: "puzzlepiece.extension",
+                                text: "兼容不同语言和安装方式。"
+                            )
+                        }
+                        .padding(.top, 6)
+                    } label: {
+                        Label("启动前会做什么", systemImage: "sparkles")
+                            .font(.callout)
+                    }
                 }
-            )
-        } header: {
-            Text("连接 Codex")
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .codexCardSurface()
+            .accessibilityIdentifier("codex.launch")
         }
     }
 
-    private func providerSection(_ status: ManageCodexStatus) -> some View {
+    private func advancedCard(_ status: ManageCodexStatus) -> some View {
         let activeProvider = status.providers.first { provider in
             provider.name == status.activeProvider
         }
@@ -210,42 +314,34 @@ struct CodexAccessView: View {
             provider.name != activeProvider?.name
         }
 
-        return Section {
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("高级")
+                .font(.callout.weight(.semibold))
+
             if let activeProvider {
                 CodexProviderRow(provider: activeProvider)
-            } else if status.providers.isEmpty {
-                Text("还没有模型服务。")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("还没有选择模型服务。")
-                    .foregroundStyle(.secondary)
             }
 
             if !otherProviders.isEmpty {
                 DisclosureGroup {
                     ForEach(otherProviders) { provider in
                         CodexProviderRow(provider: provider)
+                            .padding(.top, 8)
                     }
                 } label: {
                     HStack {
                         Text("其他已配置服务")
+                            .font(.callout)
                         Spacer()
                         Text("\(otherProviders.count) 个")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
             }
-        } header: {
-            Text("当前模型服务")
-        } footer: {
-            Text(otherProviders.isEmpty
-                ? "Codex 当前会使用这里的服务。"
-                : "Codex 当前使用上面的服务，其他服务不会参与请求。")
-        }
-    }
 
-    private func environmentSection(_ status: ManageCodexStatus) -> some View {
-        Section("本机设置") {
+            Divider().opacity(0.55)
+
             LabeledContent("Codex 文件夹") {
                 Text(status.codexHome)
                     .font(.caption.monospaced())
@@ -255,222 +351,397 @@ struct CodexAccessView: View {
                     .textSelection(.enabled)
             }
 
-            LabeledContent("图片功能") {
+            Divider().opacity(0.55)
+
+            LabeledContent("图片生成") {
                 Text(status.imageGenerationEnabled ? "已启用" : "未启用")
                     .foregroundStyle(.secondary)
             }
+            .help("Codex 会话中是否可以使用图片生成")
         }
-    }
-
-    private func diagnosticsSection(_ status: ManageCodexStatus) -> some View {
-        Section("检查设置") {
-            CodexDiagnosticList(status: status)
-                .padding(.top, 4)
-        }
-    }
-
-    @ViewBuilder
-    private var enhancedLaunchSection: some View {
-        Section("启动 Codex") {
-            if let operation = model.codexEnhancedOperation {
-                EnhancedLaunchProgressRow(
-                    operation: operation,
-                    legacyFallback: model.codexEnhancedUsesLegacyFallback,
-                    error: model.codexEnhancedLaunchError,
-                    canCancel: model.canCancelCodexEnhancedLaunch,
-                    cancel: { Task { await model.cancelCodexEnhancedLaunch() } }
-                )
-                .padding(.vertical, 4)
-            } else if let error = model.codexEnhancedLaunchError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            DisclosureGroup(isExpanded: $showsEnhancedDetails) {
-                VStack(alignment: .leading, spacing: 9) {
-                    EnhancedLaunchFeatureRow(
-                        symbol: "checkmark.seal",
-                        text: "启动前检查并保存设置，然后连接 MochiPort。"
-                    )
-                    EnhancedLaunchFeatureRow(
-                        symbol: "bolt",
-                        text: "启动后确认连接是否正常。"
-                    )
-                    EnhancedLaunchFeatureRow(
-                        symbol: "eye",
-                        text: "让自定义模型出现在 Codex 里。"
-                    )
-                    EnhancedLaunchFeatureRow(
-                        symbol: "puzzlepiece.extension",
-                        text: "兼容不同语言和安装方式。"
-                    )
-                }
-                .padding(.top, 4)
-            } label: {
-                Label("启动前会做什么", systemImage: "sparkles")
-            }
-        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .codexCardSurface()
+        .accessibilityIdentifier("codex.advanced")
     }
 
 }
 
-private struct CodexStatusFormRow: View {
-    let status: ManageCodexStatus
-    let gatewayEnabled: Bool?
-    private var isDirectApiMode: Bool { status.providerMode == "direct-api" }
-    private var isUnknownMode: Bool {
-        status.providerMode == nil || status.providerMode == "unknown"
+/// 把 Codex 接入状态映射为六步清单；步骤顺序即建议的处理顺序。
+/// 未接入（直连或未知模式）时 ②-⑥ 只作占位置灰，避免误导性绿勾。
+private struct CodexOnboardingSteps: Equatable {
+    enum StepState: Equatable {
+        case done(String)
+        case attention(String)
+        case pending(String)
+        case waiting
     }
-    private var gatewayUnavailable: Bool {
-        (status.providerMode == "mochiport" || status.providerMode == "threadrelay") && gatewayEnabled == false
+
+    struct Step: Identifiable, Equatable {
+        let id: Int
+        let title: String
+        let state: StepState
+
+        var isDone: Bool {
+            if case .done = state { return true }
+            return false
+        }
+        var isWaiting: Bool {
+            if case .waiting = state { return true }
+            return false
+        }
     }
-    private var remoteControlReady: Bool {
-        return !status.remoteControlSupported || status.remoteControlConfigured
+
+    let connected: Bool
+    let gatewayUnavailable: Bool
+    let isDirectApiMode: Bool
+    let isUnknownMode: Bool
+    let steps: [Step]
+
+    init(status: ManageCodexStatus, gatewayEnabled: Bool?) {
+        let isMochiPortMode =
+            status.providerMode == "mochiport" || status.providerMode == "threadrelay"
+        let connected = isMochiPortMode && gatewayEnabled != false
+        let gatewayUnavailable = isMochiPortMode && gatewayEnabled == false
+        let isDirectApiMode = status.providerMode == "direct-api"
+        let isUnknownMode = status.providerMode == nil || status.providerMode == "unknown"
+        let activeProvider = status.providers.first { $0.name == status.activeProvider }
+
+        var built = [
+            Step(
+                id: 1,
+                title: "连接 MochiPort",
+                state: {
+                    if connected { return .done("已连接，请求经本地服务转发") }
+                    if gatewayUnavailable { return .attention("MochiPort 本地服务已关闭") }
+                    if isDirectApiMode {
+                        return .pending("Codex 正在使用它原来的设置；打开开关即可接入")
+                    }
+                    return .pending("打开开关或点击连接，把 Codex 接到 MochiPort")
+                }()
+            )
+        ]
+
+        if connected {
+            built.append(
+                Step(
+                    id: 2,
+                    title: "选择模型服务",
+                    state: {
+                        if let activeProvider, status.providerOk { return .done(activeProvider.name) }
+                        if status.providers.isEmpty { return .attention("还没有可用的模型服务") }
+                        return .attention("还没有选择模型服务")
+                    }()
+                )
+            )
+            built.append(
+                Step(
+                    id: 3,
+                    title: "检查 Codex 配置",
+                    state: status.configOk
+                        ? .done("已找到 Codex 配置")
+                        : .attention(status.configError ?? "没有找到有效配置")
+                )
+            )
+            built.append(
+                Step(
+                    id: 4,
+                    title: "登录 Codex",
+                    state: status.authOk
+                        ? .done("已登录")
+                        : .attention(status.authError ?? "需要登录 Codex")
+                )
+            )
+            built.append(
+                Step(
+                    id: 5,
+                    title: "桌面控制",
+                    state: status.guiConfigured
+                        ? .done("可以管理 Codex App")
+                        : .attention(status.guiError ?? "需要修复")
+                )
+            )
+            built.append(
+                Step(
+                    id: 6,
+                    title: "远程控制",
+                    state: !status.remoteControlSupported
+                        ? .done("当前 Codex 版本不需要")
+                        : (status.remoteControlConfigured
+                            ? .done("已开启")
+                            : .attention(status.remoteControlError ?? "尚未开启"))
+                )
+            )
+        } else {
+            built.append(
+                contentsOf: ["选择模型服务", "检查 Codex 配置", "登录 Codex", "桌面控制", "远程控制"]
+                    .enumerated()
+                    .map { index, title in
+                        Step(id: index + 2, title: title, state: .waiting)
+                    }
+            )
+        }
+
+        self.connected = connected
+        self.gatewayUnavailable = gatewayUnavailable
+        self.isDirectApiMode = isDirectApiMode
+        self.isUnknownMode = isUnknownMode
+        steps = built
     }
-    private var needsAttention: Bool {
-        guard !isDirectApiMode else { return false }
-        return isUnknownMode || gatewayUnavailable || !status.configOk || !status.authOk || !status.providerOk
-            || !status.guiConfigured || !remoteControlReady
+
+    var doneCount: Int { steps.filter(\.isDone).count }
+    var allDone: Bool { steps.allSatisfy(\.isDone) }
+}
+
+/// 顶部进度头卡：全部完成显示绿色徽标，进行中显示剩余步数和进度条。
+private struct CodexProgressHeaderCard: View {
+    let plan: CodexOnboardingSteps
+
+    private var tint: Color {
+        plan.allDone ? .green : (plan.gatewayUnavailable ? .orange : .accentColor)
     }
+
+    private var symbolName: String {
+        plan.allDone
+            ? "checkmark.seal.fill"
+            : (plan.gatewayUnavailable
+                ? "exclamationmark.circle.fill"
+                : "chevron.left.forwardslash.chevron.right")
+    }
+
     private var title: String {
-        if isDirectApiMode { return "Codex 已准备好" }
-        if isUnknownMode { return "还没连接 Codex" }
-        if gatewayUnavailable { return "MochiPort 未开启" }
-        return needsAttention ? "还需要处理" : "Codex 已连接"
+        if plan.allDone { return "Codex 已连接" }
+        if plan.gatewayUnavailable { return "MochiPort 未开启" }
+        let missing = plan.steps.count - plan.doneCount
+        return missing == plan.steps.count ? "开始接入 Codex" : "还差 \(missing) 步完成接入"
     }
-    private var subtitle: String {
-        if isDirectApiMode {
-            return "正在使用 Codex 原来的设置。"
-        }
-        if isUnknownMode {
-            return "打开下面的开关即可连接。"
-        }
-        if gatewayUnavailable {
-            return "请打开 MochiPort。"
-        }
-        if needsAttention {
-            return "请检查下面的提示。"
-        }
-        return "已连接，可以使用。"
-    }
-    private var stateSymbol: String {
-        return needsAttention ? "exclamationmark.circle.fill" : "checkmark.circle.fill"
-    }
-    private var stateColor: Color {
-        return needsAttention ? .orange : .green
-    }
-    private var stateTitle: String {
-        if isDirectApiMode { return "原来的设置" }
-        if isUnknownMode { return "未连接" }
-        if gatewayUnavailable { return "未开启" }
-        return needsAttention ? "需处理" : "已连接"
+
+    private var subtitle: String? {
+        if plan.allDone { return "请求经 MochiPort 转发，可随时在下方关闭。" }
+        if plan.gatewayUnavailable { return "打开下方「连接 MochiPort」的开关即可恢复。" }
+        if plan.isDirectApiMode { return "Codex 正在使用它原来的设置。" }
+        if plan.isUnknownMode { return "完成下面的步骤，把 Codex 接到 MochiPort。" }
+        return nil
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.body.weight(.semibold))
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: symbolName)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(tint)
+                    .frame(width: 40, height: 40)
+                    .background(
+                        tint.opacity(0.12),
+                        in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+                    )
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.title3.weight(.semibold))
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 16)
+
+                Text("\(plan.doneCount)/\(plan.steps.count)")
+                    .font(.callout.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(plan.allDone ? Color.green : Color.secondary)
             }
 
-            Spacer(minLength: 16)
-
-            Label(stateTitle, systemImage: stateSymbol)
-                .font(.callout.weight(.medium))
-                .foregroundStyle(stateColor)
-                .fixedSize()
+            if !plan.allDone {
+                ProgressView(value: Double(plan.doneCount), total: Double(plan.steps.count))
+                    .tint(tint)
+            }
         }
-        .accessibilityElement(children: .combine)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .codexCardSurface()
+        .animation(.easeOut(duration: 0.2), value: plan)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("codex.progress-header")
     }
 }
 
-private struct CodexRequestPathRow: View {
-    let mode: String?
-    let gatewayEnabled: Bool?
+/// 六步接入清单：完成打勾、当前步骤给操作、失败给修复、未到的置灰。
+private struct CodexStepsCard: View {
+    let plan: CodexOnboardingSteps
+    let status: ManageCodexStatus
     let isUpdating: Bool
     let setGatewayEnabled: (Bool) async -> Bool
+    let repair: () -> Void
+    let onOpenGateway: () -> Void
 
     @State private var pendingEnabled: Bool?
     @State private var togglePending = false
 
-    private var isDirectApi: Bool { mode == "direct-api" }
-    private var isMochiPort: Bool { mode == "mochiport" || mode == "threadrelay" }
-    private var isKnownMode: Bool { isDirectApi || isMochiPort }
-    private var gatewayReady: Bool {
-        isMochiPort && gatewayEnabled != false
-    }
-    private var toggleValue: Bool {
-        pendingEnabled ?? gatewayReady
-    }
-    private var toggleDisabled: Bool {
-        isUpdating || togglePending || !isKnownMode
-    }
-    private var detail: String {
-        if isDirectApi {
-            return "已关闭，Codex 使用原来的设置。"
-        }
-        if isMochiPort, gatewayEnabled == false {
-            return "MochiPort 已关闭，打开开关即可使用。"
-        }
-        if isMochiPort {
-            return "Codex 已连接，可以使用。"
-        }
-        return "打开开关连接 Codex。"
-    }
+    private var isKnownMode: Bool { !plan.isUnknownMode }
+    private var toggleDisabled: Bool { isUpdating || togglePending || !isKnownMode }
 
     var body: some View {
-        HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("接入步骤")
+                .font(.callout.weight(.semibold))
+                .padding(.bottom, 4)
+
+            ForEach(plan.steps) { step in
+                row(step)
+                if step.id != plan.steps.count {
+                    Divider()
+                        .opacity(0.55)
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .codexCardSurface()
+        .animation(.easeOut(duration: 0.2), value: plan)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("codex.steps")
+        .onChange(of: status.providerMode) { _, _ in
+            pendingEnabled = nil
+            togglePending = false
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ step: CodexOnboardingSteps.Step) -> some View {
+        HStack(alignment: .center, spacing: 12) {
+            circle(step)
+
             VStack(alignment: .leading, spacing: 3) {
-                Text("使用 MochiPort")
-                    .font(.body.weight(.semibold))
-                Text(detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                Text(step.title)
+                    .font(step.isDone ? .callout : .callout.weight(.semibold))
+                    .foregroundStyle(step.isWaiting ? Color.secondary : Color.primary)
+
+                switch step.state {
+                case .attention(let detail):
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .pending(let detail):
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .done(let detail) where step.id == 1:
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .done, .waiting:
+                    EmptyView()
+                }
             }
 
             Spacer(minLength: 12)
 
+            trailing(step)
+        }
+        .padding(.vertical, 10)
+        .opacity(step.isWaiting ? 0.55 : 1)
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder
+    private func circle(_ step: CodexOnboardingSteps.Step) -> some View {
+        switch step.state {
+        case .done:
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(.green)
+                .frame(width: 26, height: 26)
+        case .attention:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(.orange)
+                .frame(width: 26, height: 26)
+        case .pending, .waiting:
+            ZStack {
+                Circle()
+                    .strokeBorder(
+                        step.isWaiting ? Color.secondary.opacity(0.35) : Color.accentColor,
+                        lineWidth: 1.5
+                    )
+                Text("\(step.id)")
+                    .font(.caption.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(step.isWaiting ? Color.secondary : Color.accentColor)
+            }
+            .frame(width: 26, height: 26)
+        }
+    }
+
+    @ViewBuilder
+    private func trailing(_ step: CodexOnboardingSteps.Step) -> some View {
+        switch step.id {
+        case 1:
             if isKnownMode {
-                Toggle("使用 MochiPort", isOn: Binding(
-                    get: { toggleValue },
-                    set: { newValue in
-                        guard !toggleDisabled, newValue != toggleValue else { return }
-                        pendingEnabled = newValue
-                        togglePending = true
-                        Task { @MainActor in
-                            _ = await setGatewayEnabled(newValue)
-                            pendingEnabled = nil
-                            togglePending = false
-                        }
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .accessibilityLabel("使用 MochiPort")
-                .help(toggleValue ? "关闭后恢复原来的设置" : "打开后连接 MochiPort")
-                .disabled(toggleDisabled)
+                mainToggle
             } else {
                 Button {
                     Task { _ = await setGatewayEnabled(true) }
                 } label: {
                     Label("连接", systemImage: "link.badge.plus")
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .buttonBorderShape(.capsule)
+                .controlSize(.small)
                 .disabled(isUpdating)
             }
+        default:
+            if case .done(let detail) = step.state {
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .multilineTextAlignment(.trailing)
+            } else if !step.isWaiting {
+                if step.id == 2 {
+                    Button(action: onOpenGateway) {
+                        Label("去选择", systemImage: "arrow.right.circle")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                } else {
+                    Button(action: repair) {
+                        Label("自动修复", systemImage: "wand.and.stars")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(isUpdating)
+                }
+            }
         }
-        .accessibilityElement(children: .contain)
-        .onChange(of: mode) { _, _ in
-            pendingEnabled = nil
-            togglePending = false
-        }
+    }
+
+    private var mainToggle: some View {
+        Toggle("使用 MochiPort", isOn: Binding(
+            get: { pendingEnabled ?? plan.connected },
+            set: { newValue in
+                guard !toggleDisabled, newValue != (pendingEnabled ?? plan.connected) else { return }
+                pendingEnabled = newValue
+                togglePending = true
+                Task { @MainActor in
+                    _ = await setGatewayEnabled(newValue)
+                    pendingEnabled = nil
+                    togglePending = false
+                }
+            }
+        ))
+        .labelsHidden()
+        .toggleStyle(.switch)
+        .controlSize(.small)
+        .accessibilityLabel("使用 MochiPort")
+        .help((pendingEnabled ?? plan.connected) ? "关闭后恢复原来的设置" : "打开后连接 MochiPort")
+        .disabled(toggleDisabled)
     }
 }
 
@@ -483,7 +754,7 @@ private struct CodexProviderRow: View {
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
-            Image(systemName: usesCodexLogin ? "person.crop.circle.badge.checkmark" : (provider.secretSet ? "key.fill" : "key.slash"))
+            Image(systemName: usesCodexLogin ? "person.badge.key" : (provider.secretSet ? "key.fill" : "key.slash"))
                 .foregroundStyle(usesCodexLogin || provider.secretSet ? Color.secondary : Color.orange)
                 .frame(width: 18)
 
@@ -511,80 +782,6 @@ private struct CodexProviderRow: View {
                 }
             }
         }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-private struct CodexDiagnosticList: View {
-    let status: ManageCodexStatus
-
-    private var isDirectApiMode: Bool { status.providerMode == "direct-api" }
-    private var remoteControlReady: Bool {
-        !status.remoteControlSupported || status.remoteControlConfigured
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            CodexDiagnosticRow(
-                title: "配置文件",
-                detail: status.configOk
-                    ? "已找到 Codex 配置"
-                    : (status.configError ?? "没有找到有效配置"),
-                ready: status.configOk
-            )
-            Divider()
-            CodexDiagnosticRow(
-                title: "登录状态",
-                detail: isDirectApiMode
-                    ? "直连时使用 Provider 的 API 认证"
-                    : (status.authOk ? "已登录" : (status.authError ?? "需要登录 Codex")),
-                ready: isDirectApiMode || status.authOk
-            )
-            Divider()
-            CodexDiagnosticRow(
-                title: "桌面控制",
-                detail: isDirectApiMode
-                    ? "直连时不参与请求"
-                    : (status.guiConfigured ? "可以管理 Codex App" : (status.guiError ?? "需要修复")),
-                ready: isDirectApiMode || status.guiConfigured
-            )
-            Divider()
-            CodexDiagnosticRow(
-                title: "远程控制",
-                detail: isDirectApiMode
-                    ? "直连时不需要"
-                    : (!status.remoteControlSupported
-                        ? "当前 Codex 版本不支持"
-                        : (status.remoteControlConfigured
-                            ? "已开启"
-                            : (status.remoteControlError ?? "尚未开启"))),
-                ready: isDirectApiMode || remoteControlReady
-            )
-        }
-    }
-}
-
-private struct CodexDiagnosticRow: View {
-    let title: String
-    let detail: String
-    let ready: Bool
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Image(systemName: ready ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(ready ? Color.green : Color.orange)
-                .frame(width: 16)
-            Text(title)
-                .font(.callout.weight(.medium))
-            Spacer(minLength: 12)
-            Text(detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.trailing)
-                .lineLimit(2)
-        }
-        .padding(.vertical, 7)
         .accessibilityElement(children: .combine)
     }
 }
@@ -941,8 +1138,9 @@ struct SessionsView: View {
                     }
                 }
             }
-            .listStyle(.inset(alternatesRowBackgrounds: true))
+            .listStyle(.plain)
             .scrollContentBackground(.hidden)
+            .padding(.horizontal, 8)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1102,7 +1300,7 @@ struct SessionsView: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .trailing)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 20)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
         .help("会话 ID：\(session.id)")
@@ -2925,8 +3123,9 @@ struct RequestLogsView: View {
                         }
                     }
                 }
-                .listStyle(.inset(alternatesRowBackgrounds: true))
+                .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .padding(.horizontal, 8)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             .opacity(activeDetailID == nil ? 1 : 0)
@@ -3269,7 +3468,7 @@ private struct RequestLogRow: View {
                 .foregroundStyle(.secondary)
                 .frame(width: 90, alignment: .trailing)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 20)
         .padding(.vertical, 6)
         .contentShape(Rectangle())
         .help("请求 ID：\(log.requestId)")

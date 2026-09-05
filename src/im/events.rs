@@ -7,6 +7,7 @@ use crate::{
     app_state::SharedState,
     chain_log,
     codex::{agent_message_is_final_answer, extract_agent_message_text, extract_turn_reply_text},
+    config::TelegramReplyGranularity,
     im::{
         core::{
             accounts::ImApiRegistry,
@@ -50,6 +51,47 @@ enum TelegramCommandTurn {
     Active(String),
     Missing,
     Stale { current: String, received: String },
+}
+
+/// 回复颗粒度的热查询；每次事件分发时读取，改配置即时生效。
+async fn telegram_granularity(
+    state: &SharedState,
+    route: &RouteTarget,
+) -> TelegramReplyGranularity {
+    state
+        .config
+        .lock()
+        .await
+        .telegram_reply_granularity(&route.account_id)
+}
+
+/// 完整颗粒度下的独立事件消息：每条事件单独成一条 Telegram 消息，不进聚合气泡。
+async fn send_telegram_standalone_item(
+    state: &SharedState,
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    route: &RouteTarget,
+    item_id: Option<&str>,
+    markdown: &str,
+) {
+    let rendered = text_renderer::render_agent_message_body(markdown);
+    if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
+        thread_id: thread_id.to_string(),
+        turn_id: None,
+        route: route.clone(),
+        item_id: item_id.map(str::to_string),
+        item_type: Some("item".to_string()),
+        kind: ImOutboundKind::Item,
+        payload: ImOutboundPayload::Text(rendered),
+    }) {
+        state
+            .push_event(
+                "error",
+                "telegram_standalone_item_enqueue_failed",
+                format!("thread={thread_id} chat={} err={err}", route.chat_id),
+            )
+            .await;
+    }
 }
 
 async fn telegram_command_turn(
@@ -1519,7 +1561,12 @@ async fn schedule_terminal_status_fallback(
                 })
                 .flatten()
         };
-        if let Some(snapshot) = command_snapshot {
+        let deliver_progress = route.platform == ImPlatformKind::Telegram
+            && state.config.lock().await.telegram_reply_granularity(&route.account_id)
+                == TelegramReplyGranularity::Standard;
+        if let Some(snapshot) = command_snapshot
+            && deliver_progress
+        {
             deliver_telegram_command_progress(&state, &api_registry, &thread_id, &route, snapshot)
                 .await;
         }
@@ -1874,15 +1921,39 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
-                update_telegram_plan_progress(
-                    &state,
-                    &api_registry,
-                    thread_id,
-                    &route,
-                    params,
-                    true,
-                )
-                .await;
+                match telegram_granularity(&state, &route).await {
+                    TelegramReplyGranularity::Summary => {}
+                    TelegramReplyGranularity::Standard => {
+                        update_telegram_plan_progress(
+                            &state,
+                            &api_registry,
+                            thread_id,
+                            &route,
+                            params,
+                            true,
+                        )
+                        .await;
+                    }
+                    TelegramReplyGranularity::Full => {
+                        let (explanation, plan) = telegram_progress::plan_from_params(params);
+                        let text = im_text_for_state(&state);
+                        if let Some(rendered) = telegram_progress::render_plan_standalone(
+                            explanation.as_deref(),
+                            &plan,
+                            text,
+                        ) {
+                            send_telegram_standalone_item(
+                                &state,
+                                &outbound_tx,
+                                thread_id,
+                                &route,
+                                None,
+                                &rendered,
+                            )
+                            .await;
+                        }
+                    }
+                }
             }
         }
         "turn/diff/updated" => {
@@ -1894,7 +1965,9 @@ pub(crate) async fn handle_codex_notification_for_generation(
             else {
                 return;
             };
-            if route.platform == ImPlatformKind::Telegram {
+            if route.platform == ImPlatformKind::Telegram
+                && telegram_granularity(&state, &route).await == TelegramReplyGranularity::Standard
+            {
                 update_telegram_diff_progress(&state, &api_registry, thread_id, &route, params)
                     .await;
             }
@@ -1925,7 +1998,10 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
-                if matches!(item_type, "commandExecution" | "mcpToolCall") {
+                if matches!(item_type, "commandExecution" | "mcpToolCall")
+                    && telegram_granularity(&state, &route).await
+                        == TelegramReplyGranularity::Standard
+                {
                     let _ = update_telegram_task_progress(
                         &state,
                         &api_registry,
@@ -2209,7 +2285,10 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
-                if matches!(item_type, "commandExecution" | "mcpToolCall") {
+                if matches!(item_type, "commandExecution" | "mcpToolCall")
+                    && telegram_granularity(&state, &route).await
+                        == TelegramReplyGranularity::Standard
+                {
                     let _ = update_telegram_task_progress(
                         &state,
                         &api_registry,
@@ -2282,76 +2361,188 @@ pub(crate) async fn handle_codex_notification_for_generation(
                 if route.platform == ImPlatformKind::Telegram
                     && telegram_collab_progress::is_collab_item_type(item_type)
                 {
-                    let _ = update_telegram_collab_progress(
-                        &state,
-                        &api_registry,
-                        thread_id,
-                        &route,
-                        params,
-                        item_id,
-                        item,
-                    )
-                    .await;
-                    return;
-                }
-                if route.platform == ImPlatformKind::Telegram && item_type == "webSearch" {
-                    update_telegram_web_search_progress(
-                        &state,
-                        &api_registry,
-                        thread_id,
-                        &route,
-                        params,
-                        item_id,
-                        item,
-                    )
-                    .await;
-                    return;
-                }
-                if route.platform == ImPlatformKind::Telegram && item_type == "reasoning" {
-                    update_telegram_reasoning_progress(
-                        &state,
-                        &api_registry,
-                        thread_id,
-                        &route,
-                        params,
-                        item_id,
-                        item,
-                    )
-                    .await;
-                    return;
-                }
-                if route.platform == ImPlatformKind::Telegram && item_type == "fileChange" {
-                    update_telegram_file_change_progress(
-                        &state,
-                        &api_registry,
-                        thread_id,
-                        &route,
-                        params,
-                        item,
-                    )
-                    .await;
-                    return;
-                }
-                if route.platform == ImPlatformKind::Telegram && item_type == "plan" {
-                    let (explanation, plan) = telegram_progress::plan_from_item(item);
-                    let turn_id = telegram_command_turn(&state, thread_id, params).await;
-                    if let TelegramCommandTurn::Active(turn_id) = turn_id {
-                        let snapshot = state.runtime.lock().await.update_telegram_plan(
-                            thread_id,
-                            &turn_id,
-                            explanation,
-                            plan,
-                            true,
-                        );
-                        if let Some(snapshot) = snapshot {
-                            deliver_telegram_command_progress(
+                    match telegram_granularity(&state, &route).await {
+                        TelegramReplyGranularity::Summary => {}
+                        TelegramReplyGranularity::Standard => {
+                            let _ = update_telegram_collab_progress(
                                 &state,
                                 &api_registry,
                                 thread_id,
                                 &route,
-                                snapshot,
+                                params,
+                                item_id,
+                                item,
                             )
                             .await;
+                        }
+                        TelegramReplyGranularity::Full => {
+                            let text = im_text_for_state(&state);
+                            let lines = telegram_collab_progress::render_collab_item_standalone(
+                                item,
+                                crate::types::now_ms(),
+                                text,
+                            );
+                            if !lines.is_empty() {
+                                send_telegram_standalone_item(
+                                    &state,
+                                    &outbound_tx,
+                                    thread_id,
+                                    &route,
+                                    Some(item_id),
+                                    &lines.join("\n\n"),
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    return;
+                }
+                if route.platform == ImPlatformKind::Telegram && item_type == "webSearch" {
+                    match telegram_granularity(&state, &route).await {
+                        TelegramReplyGranularity::Summary => {}
+                        TelegramReplyGranularity::Standard => {
+                            update_telegram_web_search_progress(
+                                &state,
+                                &api_registry,
+                                thread_id,
+                                &route,
+                                params,
+                                item_id,
+                                item,
+                            )
+                            .await;
+                        }
+                        TelegramReplyGranularity::Full => {
+                            if let Some(rendered) = telegram_search::render_web_search(item) {
+                                send_telegram_standalone_item(
+                                    &state,
+                                    &outbound_tx,
+                                    thread_id,
+                                    &route,
+                                    Some(item_id),
+                                    &rendered.fallback_markdown,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    return;
+                }
+                if route.platform == ImPlatformKind::Telegram && item_type == "reasoning" {
+                    match telegram_granularity(&state, &route).await {
+                        TelegramReplyGranularity::Summary => {}
+                        TelegramReplyGranularity::Standard => {
+                            update_telegram_reasoning_progress(
+                                &state,
+                                &api_registry,
+                                thread_id,
+                                &route,
+                                params,
+                                item_id,
+                                item,
+                            )
+                            .await;
+                        }
+                        TelegramReplyGranularity::Full => {
+                            if let Some(summary) =
+                                telegram_progress::reasoning_summary_from_item(item)
+                            {
+                                let text = im_text_for_state(&state);
+                                let rendered =
+                                    format!("{}\n{}", text.telegram_reasoning_heading(), summary);
+                                send_telegram_standalone_item(
+                                    &state,
+                                    &outbound_tx,
+                                    thread_id,
+                                    &route,
+                                    Some(item_id),
+                                    &rendered,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    return;
+                }
+                if route.platform == ImPlatformKind::Telegram && item_type == "fileChange" {
+                    match telegram_granularity(&state, &route).await {
+                        TelegramReplyGranularity::Summary => {}
+                        TelegramReplyGranularity::Standard => {
+                            update_telegram_file_change_progress(
+                                &state,
+                                &api_registry,
+                                thread_id,
+                                &route,
+                                params,
+                                item,
+                            )
+                            .await;
+                        }
+                        TelegramReplyGranularity::Full => {
+                            if let Some(diff) =
+                                telegram_progress::file_change_diff_summary(item)
+                            {
+                                let text = im_text_for_state(&state);
+                                let rendered =
+                                    telegram_progress::render_diff_standalone(&diff, text);
+                                send_telegram_standalone_item(
+                                    &state,
+                                    &outbound_tx,
+                                    thread_id,
+                                    &route,
+                                    Some(item_id),
+                                    &rendered,
+                                )
+                                .await;
+                            }
+                        }
+                    }
+                    return;
+                }
+                if route.platform == ImPlatformKind::Telegram && item_type == "plan" {
+                    match telegram_granularity(&state, &route).await {
+                        TelegramReplyGranularity::Summary => {}
+                        TelegramReplyGranularity::Standard => {
+                            let (explanation, plan) = telegram_progress::plan_from_item(item);
+                            let turn_id = telegram_command_turn(&state, thread_id, params).await;
+                            if let TelegramCommandTurn::Active(turn_id) = turn_id {
+                                let snapshot = state.runtime.lock().await.update_telegram_plan(
+                                    thread_id,
+                                    &turn_id,
+                                    explanation,
+                                    plan,
+                                    true,
+                                );
+                                if let Some(snapshot) = snapshot {
+                                    deliver_telegram_command_progress(
+                                        &state,
+                                        &api_registry,
+                                        thread_id,
+                                        &route,
+                                        snapshot,
+                                    )
+                                    .await;
+                                }
+                            }
+                        }
+                        TelegramReplyGranularity::Full => {
+                            let (explanation, plan) = telegram_progress::plan_from_item(item);
+                            let text = im_text_for_state(&state);
+                            if let Some(rendered) = telegram_progress::render_plan_standalone(
+                                explanation.as_deref(),
+                                &plan,
+                                text,
+                            ) {
+                                send_telegram_standalone_item(
+                                    &state,
+                                    &outbound_tx,
+                                    thread_id,
+                                    &route,
+                                    Some(item_id),
+                                    &rendered,
+                                )
+                                .await;
+                            }
                         }
                     }
                     return;
@@ -2362,17 +2553,39 @@ pub(crate) async fn handle_codex_notification_for_generation(
                     // Commands and MCP calls belong to the aggregate progress
                     // message. Keep late events from falling through to the
                     // ordinary item sender after the turn has been cleaned up.
-                    let _ = update_telegram_task_progress(
-                        &state,
-                        &api_registry,
-                        thread_id,
-                        &route,
-                        params,
-                        item_id,
-                        item,
-                        true,
-                    )
-                    .await;
+                    match telegram_granularity(&state, &route).await {
+                        TelegramReplyGranularity::Summary => {}
+                        TelegramReplyGranularity::Standard => {
+                            let _ = update_telegram_task_progress(
+                                &state,
+                                &api_registry,
+                                thread_id,
+                                &route,
+                                params,
+                                item_id,
+                                item,
+                                true,
+                            )
+                            .await;
+                        }
+                        TelegramReplyGranularity::Full => {
+                            let text = im_text_for_state(&state);
+                            let rendered = telegram_progress::render_entry(
+                                &telegram_progress::completed_entry(item_id, item),
+                                text,
+                                telegram_progress::TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS,
+                            );
+                            send_telegram_standalone_item(
+                                &state,
+                                &outbound_tx,
+                                thread_id,
+                                &route,
+                                Some(item_id),
+                                &rendered,
+                            )
+                            .await;
+                        }
+                    }
                     if item_type == "mcpToolCall"
                         && let Err(err) = queue_telegram_mcp_tool_images(
                             &state,

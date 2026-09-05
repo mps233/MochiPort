@@ -207,6 +207,10 @@ pub fn router(state: SharedState) -> Router {
                 .post(im_api::update_telegram_project_groups),
         )
         .route(
+            "/im/account/telegram/reply-granularity",
+            post(im_api::set_telegram_reply_granularity),
+        )
+        .route(
             "/im/account/telegram/sync-topics",
             post(im_api::sync_telegram_topics),
         )
@@ -2804,6 +2808,7 @@ mod tests {
                     "lastInboundAtMs",
                     "platform",
                     "polling",
+                    "replyGranularity",
                     "secretSet",
                 ],
             );

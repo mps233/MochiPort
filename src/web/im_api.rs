@@ -194,6 +194,7 @@ pub(super) struct ImAccountItem {
     last_error: Option<String>,
     last_event_at_ms: Option<u128>,
     last_inbound_at_ms: Option<u128>,
+    reply_granularity: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -356,6 +357,62 @@ pub(super) async fn update_telegram_project_groups(
             "accountId": account_id,
             "projectGroups": project_groups,
             "restartRequired": true,
+        })),
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetTelegramReplyGranularityRequest {
+    account_id: String,
+    granularity: String,
+}
+
+/// 更新 Telegram 账号的回复颗粒度；事件分发按 config 热读取，无需重启桥接。
+pub(super) async fn set_telegram_reply_granularity(
+    State(state): State<SharedState>,
+    Json(request): Json<SetTelegramReplyGranularityRequest>,
+) -> impl IntoResponse {
+    let account_id = request.account_id.trim().to_string();
+    if account_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "missing accountId" })),
+        );
+    }
+    let Some(granularity) = crate::config::TelegramReplyGranularity::parse(&request.granularity)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "unknown reply granularity" })),
+        );
+    };
+
+    let mut config = state.config.lock().await;
+    let Some(account) = config
+        .telegram_accounts
+        .iter_mut()
+        .find(|account| account.account_id.trim() == account_id)
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "ok": false, "error": IM_ACCOUNT_NOT_FOUND_ERROR })),
+        );
+    };
+    account.reply_granularity = granularity;
+    if let Err(err) = config.save(&state.config_path) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        );
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "ok": true,
+            "accountId": account_id,
+            "replyGranularity": granularity.as_str(),
         })),
     )
 }
@@ -1851,6 +1908,7 @@ fn im_account_items(
             account.is_configured(),
             account.is_configured(),
             runtime,
+            None,
         ));
     }
     for account in &config.telegram_accounts {
@@ -1863,6 +1921,7 @@ fn im_account_items(
             account.is_configured(),
             !account.bot_token.trim().is_empty(),
             runtime,
+            Some(account.reply_granularity.as_str().to_string()),
         ));
     }
     for account in &config.wechat_accounts {
@@ -1875,6 +1934,7 @@ fn im_account_items(
             account.is_configured(),
             !account.bot_token.trim().is_empty(),
             runtime,
+            None,
         ));
     }
     for account in &config.wecom_accounts {
@@ -1887,6 +1947,7 @@ fn im_account_items(
             account.is_configured(),
             !account.secret.trim().is_empty(),
             runtime,
+            None,
         ));
     }
     accounts
@@ -1901,6 +1962,7 @@ fn im_account_item(
     configured: bool,
     secret_set: bool,
     runtime: &HashMap<String, ImAccountRuntimeState>,
+    reply_granularity: Option<String>,
 ) -> ImAccountItem {
     let runtime = runtime.get(&im_account_key(platform, account_id));
     let avatar_data = profiles
@@ -1920,6 +1982,7 @@ fn im_account_item(
         last_error: runtime.and_then(|state| state.last_error.clone()),
         last_event_at_ms: runtime.and_then(|state| state.last_event_at_ms),
         last_inbound_at_ms: runtime.and_then(|state| state.last_inbound_at_ms),
+        reply_granularity,
     }
 }
 
@@ -2199,6 +2262,7 @@ async fn apply_telegram_token(
         mention_only,
         allowed_chat_ids: Vec::new(),
         project_groups: Vec::new(),
+        reply_granularity: crate::config::TelegramReplyGranularity::default(),
     };
     let api = TelegramApi::new(TelegramSettings::from_app_config(&telegram_config));
     let user = match tokio::time::timeout(std::time::Duration::from_secs(5), api.get_me()).await {
@@ -2452,6 +2516,7 @@ mod tests {
                 .map(|chat_id| (*chat_id).to_string())
                 .collect(),
             project_groups: Vec::new(),
+            reply_granularity: crate::config::TelegramReplyGranularity::default(),
         }
     }
 

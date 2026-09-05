@@ -182,14 +182,15 @@ For questions or feedback, open an issue in [MochiPort Issues](https://github.co
 Telegram shows the standard commands in the bot menu. `/s` and `/q` remain available as compatibility aliases.
 
 ```text
-/new       create a new session
-/sessions  resume a previous session
-/status    show connection, task, and queue status
-/steer     steer the current task
-/queue     run one message after the current task
-/stop      interrupt the current task (alias: /s)
-/exit      exit the current session (alias: /q)
-/help      show command help
+/new         create a new session
+/sessions    resume a previous session
+/status      show connection, task, and queue status
+/steer       steer the current task
+/queue       run one message after the current task
+/stop        interrupt the current task (alias: /s)
+/granularity switch reply detail level (alias: /回复)
+/exit        exit the current session (alias: /q)
+/help        show command help
 ```
 
 While a task is running, ordinary text is sent as a direction update; you can also use
@@ -200,6 +201,25 @@ task finishes.
 Use the buttons or numbers shown in approval and session messages.
 
 Approval prompts are updated after selection where the platform supports it.
+
+## Reply Granularity (Telegram)
+
+Open **Messaging Channels**, expand a Telegram account, and pick a reference card to
+choose how much detail is forwarded; you can also send `/granularity` (or `/回复`) in
+Telegram — with no arguments it shows the current level, with an argument it switches
+immediately. Changes take effect without restarting.
+
+| Level | Content |
+| --- | --- |
+| Summary reply | Process text (Codex's own commentary) and the final result only; tool runs, file changes, reasoning, plans, and searches are silenced |
+| Standard reply (default) | The existing behavior: everything merged into one aggregate bubble that updates in place |
+| Full reply | Everything as separate messages: each command run, file change, reasoning, and plan arrives as its own message |
+
+<p align="center">
+  <img src="docs/assets/product/mochiport-reply-granularity.png" alt="Reply granularity reference cards in the messaging channels page, with per-level Telegram message previews" width="720">
+</p>
+
+Error notices and approval cards ignore the granularity setting and are always delivered.
 
 ## Restore Codex Config
 

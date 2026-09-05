@@ -26,6 +26,39 @@ pub(crate) fn updates_for_item(item: &Value, now_ms: u128) -> Vec<TelegramCollab
     }
 }
 
+/// 完整颗粒度下的独立协作消息：把本次事件的每个更新渲染成一行。
+pub(crate) fn render_collab_item_standalone(
+    item: &Value,
+    now_ms: u128,
+    text: ImText,
+) -> Vec<String> {
+    updates_for_item(item, now_ms)
+        .into_iter()
+        .filter_map(|update| {
+            let status = update.status?;
+            let name = update
+                .name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or(&update.agent_id);
+            let mut line = format!(
+                "{} · `{}`",
+                text.telegram_progress_status_label(collab_progress_status_key(status)),
+                truncate_inline(name, TELEGRAM_COLLAB_NAME_CHARS)
+            );
+            if let Some(detail) = update
+                .detail
+                .as_deref()
+                .map(|detail| truncate_inline(detail, TELEGRAM_COLLAB_DETAIL_CHARS))
+            {
+                line.push_str("\n└ ");
+                line.push_str(&detail);
+            }
+            Some(line)
+        })
+        .collect()
+}
+
 pub(crate) fn render_collab_progress(
     snapshot: &TelegramCollabProgressSnapshot,
     text: ImText,

@@ -48,6 +48,7 @@ struct MessagingAccountSummary: Identifiable, Equatable {
     let lastError: String?
     let lastEventAt: Date?
     let lastInboundAt: Date?
+    let replyGranularity: String?
 
     var id: String { "\(platform.rawValue):\(accountID)" }
 
@@ -64,7 +65,8 @@ struct MessagingAccountSummary: Identifiable, Equatable {
         connected: Bool = false,
         lastError: String? = nil,
         lastEventAt: Date? = nil,
-        lastInboundAt: Date? = nil
+        lastInboundAt: Date? = nil,
+        replyGranularity: String? = nil
     ) {
         self.platform = platform
         self.accountID = accountID
@@ -79,6 +81,7 @@ struct MessagingAccountSummary: Identifiable, Equatable {
         self.lastError = lastError
         self.lastEventAt = lastEventAt
         self.lastInboundAt = lastInboundAt
+        self.replyGranularity = replyGranularity
     }
 
     init?(_ account: ManageIMAccount) {
@@ -98,7 +101,8 @@ struct MessagingAccountSummary: Identifiable, Equatable {
             connected: account.connected,
             lastError: account.lastError,
             lastEventAt: account.lastEventAtMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) },
-            lastInboundAt: account.lastInboundAtMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) }
+            lastInboundAt: account.lastInboundAtMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1_000) },
+            replyGranularity: account.replyGranularity
         )
     }
 
@@ -257,6 +261,7 @@ struct MessagingAccountsView: View {
     var onDelete: ((MessagingAccountSummary) -> Void)?
     var onSaveTelegramProjectGroups: ((String, [ManageTelegramProjectGroup]) async -> Bool)?
     var onSyncTelegramTopics: ((String, String) async -> Bool)?
+    var onReplyGranularity: ((MessagingAccountSummary, String) async -> Void)?
 
     @State private var searchText = ""
     @State private var filter: MessagingAccountFilter = .all
@@ -265,6 +270,7 @@ struct MessagingAccountsView: View {
     @State private var expandedIDs: Set<String> = []
     @State private var pendingDeletion: MessagingAccountSummary?
     @State private var hoveredAccountID: String?
+    @State private var hoveredProjectGroupRowID: String?
     @State private var projectGroupAccount: ManageTelegramProjectGroupAccount?
     @State private var editingProjectGroups: [ManageTelegramProjectGroup] = []
 
@@ -276,7 +282,8 @@ struct MessagingAccountsView: View {
         onToggle: ((MessagingAccountSummary, Bool) async -> Bool)? = nil,
         onDelete: ((MessagingAccountSummary) -> Void)? = nil,
         onSaveTelegramProjectGroups: ((String, [ManageTelegramProjectGroup]) async -> Bool)? = nil,
-        onSyncTelegramTopics: ((String, String) async -> Bool)? = nil
+        onSyncTelegramTopics: ((String, String) async -> Bool)? = nil,
+        onReplyGranularity: ((MessagingAccountSummary, String) async -> Void)? = nil
     ) {
         self.accounts = accounts
         self.telegramProjectGroupAccounts = telegramProjectGroupAccounts
@@ -286,6 +293,7 @@ struct MessagingAccountsView: View {
         self.onDelete = onDelete
         self.onSaveTelegramProjectGroups = onSaveTelegramProjectGroups
         self.onSyncTelegramTopics = onSyncTelegramTopics
+        self.onReplyGranularity = onReplyGranularity
     }
 
     var body: some View {
@@ -618,61 +626,403 @@ struct MessagingAccountsView: View {
     }
 
     private func accountDetails(_ account: MessagingAccountSummary) -> some View {
-        VStack(alignment: .leading, spacing: MochiPortSpacing.compact) {
-            HStack(spacing: 18) {
-                detailItem("配置", value: account.configured ? "完整" : "不完整")
-                detailItem("凭据", value: account.secretSet ? "已设置" : "未设置")
-                if account.polling {
-                    detailItem("轮询", value: "运行中")
+        VStack(alignment: .leading, spacing: 0) {
+            metricStrip(for: account)
+                .padding(.horizontal, 16)
+                .padding(.top, 13)
+                .padding(.bottom, 12)
+
+            if showsProjectGroupRow(account) {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 0.5)
+                projectGroupRow(for: account)
+                    .padding(.vertical, 8)
+            }
+
+            if account.platform == .telegram, onReplyGranularity != nil {
+                Rectangle()
+                    .fill(Color.primary.opacity(0.08))
+                    .frame(height: 0.5)
+                replyGranularitySection(for: account)
+                    .padding(.vertical, 10)
+            }
+
+            HStack {
+                Spacer(minLength: 0)
+                if onDelete != nil, availability == .available {
+                    Button {
+                        pendingDeletion = account
+                    } label: {
+                        Text("删除账号…")
+                            .font(.caption)
+                            .foregroundStyle(Color.red.opacity(0.75))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("删除账号")
+                    .help("删除该消息渠道账号")
                 }
             }
-            if let lastError = account.lastError?.trimmedNonEmpty {
-                Label(lastError, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if let lastInboundAt = account.lastInboundAt {
-                Text("最近收到消息：\(Text(lastInboundAt, style: .relative))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } else if let lastEventAt = account.lastEventAt {
-                Text("最近活动：\(Text(lastEventAt, style: .relative))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if account.platform == .telegram, onSaveTelegramProjectGroups != nil {
-                Button {
-                    let saved = telegramProjectGroupAccounts.first(where: { $0.accountId == account.accountID })
-                    editingProjectGroups = saved?.projectGroups ?? []
-                    projectGroupAccount = saved ?? ManageTelegramProjectGroupAccount(accountId: account.accountID, projectGroups: [])
-                } label: {
-                    Label("配置项目群", systemImage: "folder.badge.gearshape")
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-                .disabled(availability != .available)
-                .help("为 Telegram 机器人配置项目群")
-            }
-            if onDelete != nil, availability == .available {
-                Button("删除账号", role: .destructive) {
-                    pendingDeletion = account
-                }
-                .buttonStyle(.link)
-                .padding(.top, 2)
-            }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: MochiPortRadius.content, style: .continuous)
+                .fill(Color.primary.opacity(0.04))
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: MochiPortRadius.content, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 0.5)
+        }
         .transition(.opacity)
     }
 
-    private func detailItem(_ title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private struct GranularityOption: Identifiable {
+        let id: String
+        let title: String
+        let description: String
+    }
+
+    private enum GranularityBubbleKind {
+        case normal
+        case result
+        case ghost
+        case merged
+    }
+
+    /// 参考卡里的模拟气泡；ghost 表示该档位下会被静默的成分。
+    private func granularityBubbles(_ id: String) -> [(String, String, GranularityBubbleKind)] {
+        switch id {
+        case "summary":
+            [
+                ("text.bubble", "过程说明正文…", .normal),
+                ("gearshape", "运行 npm test ···（已静默）", .ghost),
+                ("doc.text", "修改 2 个文件（已静默）", .ghost),
+                ("checkmark.circle.fill", "任务完成 · 结果文本…", .result),
+            ]
+        case "standard":
+            [
+                ("text.bubble", "过程说明正文…", .normal),
+                ("gearshape", "⚙ 运行 npm test ✓\n📝 修改 2 个文件\n（合并进同一条气泡更新）", .merged),
+                ("checkmark.circle.fill", "任务完成 · 结果文本…", .result),
+            ]
+        default:
+            [
+                ("text.bubble", "过程说明正文…", .normal),
+                ("gearshape", "运行 npm test ··· ✓", .normal),
+                ("doc.text", "修改 2 个文件", .normal),
+                ("brain", "推理摘要…", .normal),
+                ("checkmark.circle.fill", "任务完成 · 结果文本…", .result),
+            ]
+        }
+    }
+
+    private static let granularityOptions: [GranularityOption] = [
+        GranularityOption(
+            id: "summary",
+            title: "摘要回复",
+            description: "只发过程文本和最终结果；工具执行、文件修改等一律静默。"
+        ),
+        GranularityOption(
+            id: "standard",
+            title: "标准回复",
+            description: "现有行为：所有信息合并进一条气泡原地更新。"
+        ),
+        GranularityOption(
+            id: "full",
+            title: "完整回复",
+            description: "所有信息逐条独立发送，不合并更新，适合完整围观。"
+        ),
+    ]
+
+    private func replyGranularitySection(for account: MessagingAccountSummary) -> some View {
+        let mutationsEnabled = availability == .available
+        let current = account.replyGranularity ?? "full"
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 6) {
+                Text("回复颗粒度")
+                    .font(.callout)
+                Text("点击卡片选择转发到 Telegram 的详细程度；也可以在 Telegram 里发送 /回复 切换")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            HStack(alignment: .top, spacing: 8) {
+                ForEach(Self.granularityOptions) { option in
+                    granularityCard(
+                        option,
+                        isSelected: current == option.id,
+                        isEnabled: mutationsEnabled,
+                        account: account
+                    )
+                }
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    private func granularityCard(
+        _ option: GranularityOption,
+        isSelected: Bool,
+        isEnabled: Bool,
+        account: MessagingAccountSummary
+    ) -> some View {
+        let shape = RoundedRectangle(cornerRadius: MochiPortRadius.content, style: .continuous)
+        let bubbles = granularityBubbles(option.id)
+        return Button {
+            guard isEnabled, !isSelected, let onReplyGranularity else { return }
+            Task { await onReplyGranularity(account, option.id) }
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 5) {
+                    Image(
+                        systemName: isSelected ? "checkmark.circle.fill" : "circle"
+                    )
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(
+                        isSelected ? Color.accentColor : Color.secondary.opacity(0.55)
+                    )
+                    Text(option.title)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(isSelected ? Color.primary : Color.primary.opacity(0.82))
+                    Spacer(minLength: 0)
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(Array(bubbles.enumerated()), id: \.offset) { _, bubble in
+                        granularityBubble(symbol: bubble.0, text: bubble.1, kind: bubble.2)
+                    }
+                }
+                .frame(height: 96, alignment: .top)
+                Text(option.description)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                isSelected ? Color.accentColor.opacity(0.09) : Color.primary.opacity(0.03),
+                in: shape
+            )
+            .overlay {
+                shape.strokeBorder(
+                    isSelected ? Color.accentColor : Color.primary.opacity(0.08),
+                    lineWidth: isSelected ? 1.5 : 0.5
+                )
+            }
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .opacity(isEnabled ? 1 : 0.55)
+        .accessibilityLabel("\(option.title)：\(option.description)")
+        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
+        .help(option.description)
+    }
+
+    private func granularityBubble(
+        symbol: String,
+        text: String,
+        kind: GranularityBubbleKind
+    ) -> some View {
+        let isGhost = kind == .ghost
+        let isResult = kind == .result
+        let isMerged = kind == .merged
+        return HStack(alignment: .top, spacing: 4) {
+            Image(systemName: symbol)
+                .font(.system(size: 7, weight: .semibold))
+                .foregroundStyle(
+                    isResult ? AnyShapeStyle(Color.green) : AnyShapeStyle(Color.secondary)
+                )
+                .padding(.top, 1)
+            Text(text)
+                .font(.system(size: 8))
+                .foregroundStyle(
+                    isResult
+                        ? AnyShapeStyle(Color.primary.opacity(0.78))
+                        : AnyShapeStyle(Color.secondary.opacity(isGhost ? 0.55 : 1))
+                )
+                .lineLimit(isMerged ? 4 : 1)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            isResult
+                ? AnyShapeStyle(Color.green.opacity(0.13))
+                : AnyShapeStyle(Color.primary.opacity(isGhost ? 0.02 : 0.07)),
+            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+        )
+        .opacity(isGhost ? 0.75 : 1)
+    }
+
+    private func metricStrip(for account: MessagingAccountSummary) -> some View {
+        HStack(alignment: .top, spacing: 0) {
+            metricCell(title: "配置", dot: account.configured ? .green : .orange, value: account.configured ? "完整" : "不完整")
+            metricDivider
+            metricCell(title: "凭据", dot: account.secretSet ? .green : .orange, value: account.secretSet ? "已设置" : "未设置")
+            metricDivider
+            metricCell(
+                title: "轮询",
+                dot: account.polling ? .green : Color.primary.opacity(0.25),
+                value: account.polling ? "运行中" : "未运行"
+            )
+            metricDivider
+            trailingMetricCell(for: account)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    private var metricDivider: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.08))
+            .frame(width: 0.5)
+            .padding(.horizontal, 14)
+    }
+
+    private func metricCell(title: String, dot: Color, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-            Text(value)
-                .font(.caption.weight(.medium))
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(dot)
+                    .frame(width: 5, height: 5)
+                Text(value)
+                    .font(.caption.weight(.semibold))
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    /// The fourth strip cell: a recent-activity readout, or the account's
+    /// last error when one is present — errors outrank activity.
+    private func trailingMetricCell(for account: MessagingAccountSummary) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let lastError = account.lastError?.trimmedNonEmpty {
+                Text("异常")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Label(lastError, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .help(lastError)
+            } else if let lastInboundAt = account.lastInboundAt {
+                Text("最近收到消息")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text(lastInboundAt, style: .relative)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            } else if let lastEventAt = account.lastEventAt {
+                Text("最近活动")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text(lastEventAt, style: .relative)
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("最近收到消息")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Text("—")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .combine)
+    }
+
+    private func showsProjectGroupRow(_ account: MessagingAccountSummary) -> Bool {
+        account.platform == .telegram && onSaveTelegramProjectGroups != nil
+    }
+
+    private func projectGroupRow(for account: MessagingAccountSummary) -> some View {
+        let count = telegramProjectGroupAccounts.first(where: { $0.accountId == account.accountID })?.projectGroups.count ?? 0
+        let isConfigured = count > 0
+        return Button {
+            openProjectGroups(for: account)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "folder.badge.gearshape")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(isConfigured ? Color.accentColor : Color.orange)
+                    .frame(width: 26, height: 26)
+                    .background(
+                        (isConfigured ? Color.accentColor : Color.orange).opacity(0.14),
+                        in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    )
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("项目群")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.primary)
+                    Text(isConfigured ? "一个群对应一个项目，自动创建并绑定 Topic" : "绑定 Telegram 群组到项目目录")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 12)
+
+                if isConfigured {
+                    Text("\(count) 个群")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 2)
+                        .background(Color.primary.opacity(0.08), in: Capsule())
+                } else {
+                    Text("未配置")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.orange)
+                }
+
+                Image(systemName: "chevron.right")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 7)
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .background {
+                if hoveredProjectGroupRowID == account.id {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(Color.primary.opacity(0.05))
+                }
+            }
+            .opacity(availability == .available ? 1 : 0.45)
+        }
+        .buttonStyle(.plain)
+        .disabled(availability != .available)
+        .onHover { hovering in
+            guard availability == .available else { return }
+            withAnimation(.easeInOut(duration: 0.12)) {
+                if hovering {
+                    hoveredProjectGroupRowID = account.id
+                } else if hoveredProjectGroupRowID == account.id {
+                    hoveredProjectGroupRowID = nil
+                }
+            }
+        }
+        .help("为 Telegram 机器人配置项目群")
+        .accessibilityLabel(isConfigured ? "项目群：已配置 \(count) 个" : "项目群：未配置")
+    }
+
+    private func openProjectGroups(for account: MessagingAccountSummary) {
+        let saved = telegramProjectGroupAccounts.first(where: { $0.accountId == account.accountID })
+        editingProjectGroups = saved?.projectGroups ?? []
+        projectGroupAccount = saved ?? ManageTelegramProjectGroupAccount(accountId: account.accountID, projectGroups: [])
     }
 
     private var filteredAccounts: [MessagingAccountSummary] {

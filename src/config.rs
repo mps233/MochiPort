@@ -93,6 +93,40 @@ pub struct FeishuConfig {
     pub allowed_chat_ids: Vec<String>,
 }
 
+/// Telegram 账号的回复颗粒度；档位按"消息包含哪些成分与形态"划分，
+/// 与 GUI 的「回复颗粒度」选择和 Telegram 内的 /回复 命令共享。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TelegramReplyGranularity {
+    /// 只发过程文本（助手说明）和最终结果；工具执行、文件修改等一律静默。
+    Summary,
+    /// 现有默认行为：所有信息合并进一条聚合气泡原地更新。
+    #[default]
+    Standard,
+    /// 所有信息逐条独立发送：每条工具执行、文件修改各自一条消息，不合并更新。
+    Full,
+}
+
+impl TelegramReplyGranularity {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TelegramReplyGranularity::Summary => "summary",
+            TelegramReplyGranularity::Standard => "standard",
+            TelegramReplyGranularity::Full => "full",
+        }
+    }
+
+    /// 接受英文值与中文别名；Telegram 命令与管理 API 共用。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "summary" | "quiet" | "摘要" | "摘要回复" => Some(TelegramReplyGranularity::Summary),
+            "standard" | "normal" | "标准" | "标准回复" => Some(TelegramReplyGranularity::Standard),
+            "full" | "all" | "完整" | "完整回复" => Some(TelegramReplyGranularity::Full),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct TelegramConfig {
@@ -106,6 +140,7 @@ pub struct TelegramConfig {
     #[serde(alias = "allowed_chat_ids")]
     pub allowed_chat_ids: Vec<String>,
     pub project_groups: Vec<TelegramProjectGroupConfig>,
+    pub reply_granularity: TelegramReplyGranularity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -208,6 +243,7 @@ impl Default for TelegramConfig {
             mention_only: false,
             allowed_chat_ids: Vec::new(),
             project_groups: Vec::new(),
+            reply_granularity: TelegramReplyGranularity::default(),
         }
     }
 }
@@ -319,15 +355,22 @@ impl AppConfig {
         }
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        let legacy_fields_present = toml::from_str::<toml::Value>(&raw)
-            .ok()
-            .and_then(|value| value.as_table().cloned())
-            .is_some_and(|table| {
-                ["feishu", "telegram", "wechat", "wecom"]
-                    .iter()
-                    .any(|key| table.contains_key(*key))
-            });
-        let mut config: Self = toml::from_str(&raw)
+        let mut document: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config {}", path.display()))?;
+        let legacy_fields_present = document.as_table().is_some_and(|table| {
+            ["feishu", "telegram", "wechat", "wecom"]
+                .iter()
+                .any(|key| table.contains_key(*key))
+        });
+        let skipped = take_unsupported_providers(&mut document);
+        if !skipped.is_empty() {
+            tracing::warn!(
+                count = skipped.len(),
+                "unsupported gateway channels skipped; original configuration retained on disk"
+            );
+        }
+        let mut config: Self = document
+            .try_into()
             .with_context(|| format!("failed to parse config {}", path.display()))?;
         let migrated = config.migrate_legacy_im_accounts();
         config.pending_v2_save = legacy_fields_present || migrated;
@@ -335,7 +378,23 @@ impl AppConfig {
     }
 
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
-        let raw = toml::to_string_pretty(self)?;
+        let mut document = toml::Value::try_from(self)?;
+        // The GUI only edits supported providers. Preserve unknown entries from
+        // disk when it saves, including fields introduced by a newer version.
+        if path.exists() {
+            let existing = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read config {}", path.display()))?;
+            let mut existing: toml::Value = toml::from_str(&existing)
+                .with_context(|| format!("failed to parse config {}", path.display()))?;
+            let unsupported = take_unsupported_providers(&mut existing);
+            if !unsupported.is_empty() {
+                document["aiGateway"]["providers"]
+                    .as_array_mut()
+                    .expect("serialized providers must be an array")
+                    .extend(unsupported);
+            }
+        }
+        let raw = toml::to_string_pretty(&document)?;
         let parent = path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
@@ -452,6 +511,15 @@ impl AppConfig {
         find_account(&self.telegram_accounts, account_id, |account| {
             account.account_id.as_str()
         })
+    }
+
+    /// 事件分发用的热查询：按账号返回回复颗粒度，未知账号回落到默认档。
+    pub fn telegram_reply_granularity(&self, account_id: &str) -> TelegramReplyGranularity {
+        self.telegram_accounts
+            .iter()
+            .find(|account| account.account_id == account_id)
+            .map(|account| account.reply_granularity)
+            .unwrap_or_default()
     }
 
     pub fn wechat_account(&self, account_id: &str) -> Option<WechatConfig> {
@@ -740,6 +808,33 @@ fn find_account<T: Clone>(
         .cloned()
 }
 
+fn take_unsupported_providers(document: &mut toml::Value) -> Vec<toml::Value> {
+    let Some(providers) = document
+        .get_mut("aiGateway")
+        .and_then(|gateway| gateway.get_mut("providers"))
+        .and_then(toml::Value::as_array_mut)
+    else {
+        return Vec::new();
+    };
+    let mut unsupported = Vec::new();
+    providers.retain(|provider| {
+        let unknown = provider
+            .get("providerType")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|kind| {
+                serde_json::from_value::<crate::ai_gateway::config::ProviderType>(
+                    serde_json::Value::String(kind.to_owned()),
+                )
+                .is_err()
+            });
+        if unknown {
+            unsupported.push(provider.clone());
+        }
+        !unknown
+    });
+    unsupported
+}
+
 fn non_empty(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
@@ -794,7 +889,88 @@ fn unique_account_id(candidate: String, used: &HashSet<String>) -> String {
 mod tests {
     use super::{
         AppConfig, FeishuConfig, OutboundProxyMode, TelegramChatAllowResult, TelegramConfig,
+        TelegramReplyGranularity,
     };
+
+    #[test]
+    fn telegram_account_without_granularity_defaults_to_full() {
+        let payload = r#"{
+            "enabled": true,
+            "accountId": "tg-1",
+            "botToken": "123:abc"
+        }"#;
+        let account: TelegramConfig = serde_json::from_str(payload).unwrap();
+        assert_eq!(account.reply_granularity, TelegramReplyGranularity::Standard);
+    }
+
+    #[test]
+    fn reply_granularity_parse_accepts_english_and_chinese_aliases() {
+        assert_eq!(
+            TelegramReplyGranularity::parse("summary"),
+            Some(TelegramReplyGranularity::Summary)
+        );
+        assert_eq!(
+            TelegramReplyGranularity::parse("标准回复"),
+            Some(TelegramReplyGranularity::Standard)
+        );
+        assert_eq!(
+            TelegramReplyGranularity::parse("完整回复"),
+            Some(TelegramReplyGranularity::Full)
+        );
+        assert_eq!(TelegramReplyGranularity::parse("nonsense"), None);
+    }
+
+    #[test]
+    fn unsupported_channels_survive_config_save_without_entering_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let raw = r#"
+[[aiGateway.providers]]
+name = "future"
+providerType = "gemini_generate_content"
+enabled = true
+apiKey = "test-key"
+models = ["gemini-test"]
+[aiGateway.providers.futureOptions]
+flag = true
+[[aiGateway.providers]]
+name = "working"
+providerType = "open_ai_responses"
+models = ["gpt-test"]
+"#;
+        std::fs::write(&path, raw).unwrap();
+        let original: toml::Value = toml::from_str(raw).unwrap();
+        let mut config = AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.ai_gateway.providers.len(), 1);
+        assert_eq!(config.ai_gateway.providers[0].name, "working");
+        assert!(config.ai_gateway.select_provider("gemini-test").is_none());
+        config.ai_gateway.providers[0].name = "edited".into();
+        for _ in 0..2 {
+            config.save(&path).unwrap();
+            let saved: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let providers = saved["aiGateway"]["providers"].as_array().unwrap();
+            assert_eq!(providers.len(), 2);
+            assert_eq!(providers[0]["name"].as_str(), Some("edited"));
+            assert_eq!(providers[1], original["aiGateway"]["providers"][0]);
+            config = AppConfig::load_or_default(&path).unwrap();
+            assert_eq!(config.ai_gateway.providers.len(), 1);
+        }
+    }
+
+    #[test]
+    fn unsupported_channels_do_not_hide_invalid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for raw in [
+            "[[aiGateway.providers]]\nproviderType = 123",
+            "[[aiGateway.providers]]\nproviderType = 'open_ai_responses'\nenabled = 'bad'",
+            "[[aiGateway.providers]]\nproviderType = 'gemini_generate_content'\ninvalid = [",
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert!(AppConfig::load_or_default(&path).is_err());
+        }
+    }
 
     #[test]
     fn save_atomically_replaces_an_existing_config() {

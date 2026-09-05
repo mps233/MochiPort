@@ -48,7 +48,7 @@ struct RootView: View {
                         }
                     )
                 case .codex:
-                    CodexAccessView()
+                    CodexAccessView(onOpenGateway: { model.selection = .gateway })
                 case .sessions:
                     SessionsView()
                 case .requestLogs:
@@ -74,6 +74,12 @@ struct RootView: View {
                         },
                         onSyncTelegramTopics: { accountId, chatId in
                             await model.syncTelegramTopics(accountId: accountId, chatId: chatId)
+                        },
+                        onReplyGranularity: { account, granularity in
+                            await model.setTelegramReplyGranularity(
+                                accountId: account.accountID,
+                                granularity: granularity
+                            )
                         }
                     )
                     .overlay(alignment: .bottom) {
