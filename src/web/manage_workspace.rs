@@ -933,7 +933,10 @@ pub(super) async fn set_sub2api_account_schedulable(
     Json(request): Json<SetSub2ApiAccountSchedulableRequest>,
 ) -> impl IntoResponse {
     if account_id <= 0 {
-        return operation_error(StatusCode::BAD_REQUEST, "accountId must be a positive integer");
+        return operation_error(
+            StatusCode::BAD_REQUEST,
+            "accountId must be a positive integer",
+        );
     }
 
     let admin = {

@@ -1538,10 +1538,16 @@ mod tests {
         .await;
         assert_eq!(response.status(), StatusCode::OK);
         let payload = response_json(response).await;
-        assert_eq!(payload, json!({ "ok": true, "accountId": 42, "schedulable": false }));
+        assert_eq!(
+            payload,
+            json!({ "ok": true, "accountId": 42, "schedulable": false })
+        );
         assert_eq!(
             seen.lock().expect("read schedulable mutation").as_ref(),
-            Some(&(ADMIN_KEY.to_string(), r#"{"schedulable":false}"#.to_string()))
+            Some(&(
+                ADMIN_KEY.to_string(),
+                r#"{"schedulable":false}"#.to_string()
+            ))
         );
     }
 

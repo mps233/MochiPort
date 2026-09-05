@@ -305,25 +305,22 @@ pub async fn set_account_schedulable(
     account_id: i64,
     schedulable: bool,
 ) -> Result<(), Sub2ApiAccountPoolError> {
-    tokio::time::timeout(
-        TOTAL_REQUEST_TIMEOUT,
-        async {
-            let root = provider_api_root(base_url);
-            let envelope: ApiEnvelope<Value> = send_json(
-                client
-                    .post(format!(
-                        "{root}/api/v1/admin/accounts/{account_id}/schedulable"
-                    ))
-                    .header("x-api-key", sensitive_header(admin_api_key)?)
-                    .json(&serde_json::json!({ "schedulable": schedulable })),
-            )
-            .await?;
-            if envelope.code != 0 {
-                return Err(classify_api_message(&envelope.message));
-            }
-            Ok(())
-        },
-    )
+    tokio::time::timeout(TOTAL_REQUEST_TIMEOUT, async {
+        let root = provider_api_root(base_url);
+        let envelope: ApiEnvelope<Value> = send_json(
+            client
+                .post(format!(
+                    "{root}/api/v1/admin/accounts/{account_id}/schedulable"
+                ))
+                .header("x-api-key", sensitive_header(admin_api_key)?)
+                .json(&serde_json::json!({ "schedulable": schedulable })),
+        )
+        .await?;
+        if envelope.code != 0 {
+            return Err(classify_api_message(&envelope.message));
+        }
+        Ok(())
+    })
     .await
     .map_err(|_| Sub2ApiAccountPoolError::TemporarilyUnavailable)?
 }
@@ -441,7 +438,9 @@ async fn fetch_account_pool_inner(
                     // to the official admin backup export: read upstream
                     // credentials once (in memory only) and probe each upstream
                     // directly.
-                    match probe_balances_via_export(client, base_url, admin_api_key, &accounts).await {
+                    match probe_balances_via_export(client, base_url, admin_api_key, &accounts)
+                        .await
+                    {
                         Ok(results) => Some(results),
                         Err(Sub2ApiAccountPoolError::Unsupported) => {
                             warnings.push("balance_export_unavailable");
@@ -464,7 +463,8 @@ async fn fetch_account_pool_inner(
             }
         }
     };
-    let (usage_results, site_names) = tokio::join!(usage_probe, probe_site_names(client, &accounts));
+    let (usage_results, site_names) =
+        tokio::join!(usage_probe, probe_site_names(client, &accounts));
 
     let normalized = accounts
         .into_iter()
@@ -695,7 +695,13 @@ fn cached_balance(root: &str, account_id: i64, now_ms: u64) -> Option<ProbeResul
     (now_ms.saturating_sub(entry.probed_at_ms) < ttl).then(|| entry.result.clone())
 }
 
-fn cache_insert_balance(root: &str, account_id: i64, ok: bool, probed_at_ms: u64, result: &ProbeResult) {
+fn cache_insert_balance(
+    root: &str,
+    account_id: i64,
+    ok: bool,
+    probed_at_ms: u64,
+    result: &ProbeResult,
+) {
     let mut cache = balance_cache().lock().expect("balance cache poisoned");
     cache.insert(
         (root.to_string(), account_id),
@@ -722,13 +728,15 @@ async fn probe_balances_via_export(
     let mut credentials = match_upstream_credentials(&export, accounts);
     let now_ms = unix_time_ms();
     let mut results = HashMap::new();
-    credentials.retain(|(id, credential)| match cached_balance(&credential.root, *id, now_ms) {
-        Some(cached) => {
-            results.insert(*id, cached);
-            false
-        }
-        None => true,
-    });
+    credentials.retain(
+        |(id, credential)| match cached_balance(&credential.root, *id, now_ms) {
+            Some(cached) => {
+                results.insert(*id, cached);
+                false
+            }
+            None => true,
+        },
+    );
     if !credentials.is_empty() {
         let live_ids: HashSet<i64> = accounts.iter().map(|account| account.id).collect();
         let mut probes = futures_util::stream::iter(credentials)
@@ -945,15 +953,13 @@ async fn one_api_balance_snapshot(
     )
     .await
     {
-        Ok(value) => finite_field(&value, "total_usage").map(|cents| cents / 100.0).unwrap_or(0.0),
+        Ok(value) => finite_field(&value, "total_usage")
+            .map(|cents| cents / 100.0)
+            .unwrap_or(0.0),
         Err(Sub2ApiAccountPoolError::Unsupported) => 0.0,
         Err(error) => return probe_error_snapshot(error),
     };
-    upstream_snapshot(
-        "ok",
-        "",
-        one_api_balance_data(hard_limit, Some(used_usd)),
-    )
+    upstream_snapshot("ok", "", one_api_balance_data(hard_limit, Some(used_usd)))
 }
 
 /// Pure derivation of One API balance fields: remaining in USD with the
@@ -1079,7 +1085,8 @@ struct CachedSiteName {
     probed_at_ms: u64,
 }
 
-static SITE_NAME_CACHE: OnceLock<Mutex<HashMap<SiteNameCacheKey, CachedSiteName>>> = OnceLock::new();
+static SITE_NAME_CACHE: OnceLock<Mutex<HashMap<SiteNameCacheKey, CachedSiteName>>> =
+    OnceLock::new();
 
 fn site_name_cache() -> &'static Mutex<HashMap<SiteNameCacheKey, CachedSiteName>> {
     SITE_NAME_CACHE.get_or_init(Mutex::default)
@@ -1131,9 +1138,10 @@ async fn probe_site_names(
 
     let mut probes = futures_util::stream::iter(pending)
         .map(|root| async move {
-            let name = tokio::time::timeout(SITE_NAME_PROBE_TIMEOUT, resolve_site_name(client, &root))
-                .await
-                .unwrap_or(None);
+            let name =
+                tokio::time::timeout(SITE_NAME_PROBE_TIMEOUT, resolve_site_name(client, &root))
+                    .await
+                    .unwrap_or(None);
             (root, name)
         })
         .buffer_unordered(SITE_NAME_PROBE_CONCURRENCY);
@@ -1210,7 +1218,12 @@ fn clean_site_name(raw: &str) -> Option<String> {
 /// Last resort: read the panel page title. Sub2API templates render
 /// "<custom name> - AI API Gateway"; keep the custom prefix when present.
 async fn fetch_html_site_title(client: &reqwest::Client, root: &str) -> Option<String> {
-    let response = client.get(root).header("Accept", "text/html").send().await.ok()?;
+    let response = client
+        .get(root)
+        .header("Accept", "text/html")
+        .send()
+        .await
+        .ok()?;
     if !response.status().is_success() {
         return None;
     }
@@ -2022,20 +2035,24 @@ mod tests {
 
     #[test]
     fn upstream_usage_snapshot_rejects_unknown_modes_and_missing_evidence() {
-        assert!(upstream_usage_snapshot(&serde_json::json!({
-            "remaining": 5,
-            "isValid": true,
-            "mode": "subscription",
-        }))
-        .is_none());
+        assert!(
+            upstream_usage_snapshot(&serde_json::json!({
+                "remaining": 5,
+                "isValid": true,
+                "mode": "subscription",
+            }))
+            .is_none()
+        );
         assert!(upstream_usage_snapshot(&serde_json::json!({ "remaining": 5 })).is_none());
         assert!(upstream_usage_snapshot(&serde_json::json!({ "mode": "unrestricted" })).is_none());
-        assert!(upstream_usage_snapshot(&serde_json::json!({
-            "remaining": -5,
-            "isValid": true,
-            "mode": "unrestricted",
-        }))
-        .is_none());
+        assert!(
+            upstream_usage_snapshot(&serde_json::json!({
+                "remaining": -5,
+                "isValid": true,
+                "mode": "unrestricted",
+            }))
+            .is_none()
+        );
     }
 
     #[test]
@@ -2229,7 +2246,10 @@ mod tests {
         assert_eq!(balance.plan_name.as_deref(), Some("sub"));
         // The upstream saw only its own bearer credential, never the admin key.
         assert_eq!(
-            seen_authorization.lock().expect("read upstream auth").as_str(),
+            seen_authorization
+                .lock()
+                .expect("read upstream auth")
+                .as_str(),
             format!("Bearer {UPSTREAM_KEY}")
         );
     }
@@ -2324,14 +2344,16 @@ mod tests {
         assert_eq!(balance.unit.as_deref(), Some("USD"));
     }
 
-
     #[test]
     fn clean_site_name_rejects_empty_template_and_oversized_names() {
         assert_eq!(
             clean_site_name("FastAI 模型"),
             Some("FastAI 模型".to_string())
         );
-        assert_eq!(clean_site_name("  AtlasAPI  "), Some("AtlasAPI".to_string()));
+        assert_eq!(
+            clean_site_name("  AtlasAPI  "),
+            Some("AtlasAPI".to_string())
+        );
         assert_eq!(clean_site_name(""), None);
         assert_eq!(clean_site_name("AI Gateway"), None);
         assert_eq!(clean_site_name("Sub2API"), None);
@@ -2349,13 +2371,19 @@ mod tests {
         let status = serde_json::json!({
             "data": { "system_name": "JuAI API" }
         });
-        assert_eq!(parse_status_site_name(&status), Some("JuAI API".to_string()));
+        assert_eq!(
+            parse_status_site_name(&status),
+            Some("JuAI API".to_string())
+        );
 
         assert_eq!(
             parse_public_site_name(&serde_json::json!({ "site_name": "Sub2API" })),
             None
         );
-        assert_eq!(parse_status_site_name(&serde_json::json!({ "data": {} })), None);
+        assert_eq!(
+            parse_status_site_name(&serde_json::json!({ "data": {} })),
+            None
+        );
     }
 
     #[tokio::test]
