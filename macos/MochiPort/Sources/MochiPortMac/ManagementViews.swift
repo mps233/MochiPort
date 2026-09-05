@@ -1002,6 +1002,19 @@ private enum SessionSourceState {
     }
 }
 
+/// Rounded band behind rows and headers of the management tables (sessions,
+/// request logs). Spans the List row's full content width so self-drawn
+/// stripes stay aligned with the system selection highlight.
+private struct ManagementTableBand: View {
+    var fill: Color
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
+            .fill(fill)
+            .padding(.vertical, 1)
+    }
+}
+
 struct SessionsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var query = ""
@@ -1123,10 +1136,14 @@ struct SessionsView: View {
                         .textCase(nil)
                         .listRowInsets(EdgeInsets())
                         .listRowSeparator(.hidden)
-                        .listRowBackground(Color(nsColor: .windowBackgroundColor))
 
                     ForEach(Array(tableSessions.enumerated()), id: \.element.id) { index, session in
                         sessionListRow(session)
+                            .background {
+                                if index.isMultiple(of: 2) {
+                                    ManagementTableBand(fill: Color.primary.opacity(0.05))
+                                }
+                            }
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
                             .contextMenu {
@@ -1259,8 +1276,11 @@ struct SessionsView: View {
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 20)
         .padding(.vertical, 5)
+        .background {
+            ManagementTableBand(fill: Color.primary.opacity(0.03))
+        }
     }
 
     private func sessionListRow(_ session: ManageCodexSession) -> some View {
@@ -3085,10 +3105,14 @@ struct RequestLogsView: View {
                             .textCase(nil)
                             .listRowInsets(EdgeInsets())
                             .listRowSeparator(.hidden)
-                            .listRowBackground(Color(nsColor: .windowBackgroundColor))
 
-                        ForEach(model.requestLogs) { log in
+                        ForEach(Array(model.requestLogs.enumerated()), id: \.element.id) { index, log in
                             RequestLogRow(log: log)
+                                .background {
+                                    if index.isMultiple(of: 2) {
+                                        ManagementTableBand(fill: Color.primary.opacity(0.05))
+                                    }
+                                }
                                 .tag(log.id)
                                 .listRowInsets(EdgeInsets())
                                 .listRowSeparator(.hidden)
@@ -3333,8 +3357,11 @@ struct RequestLogsView: View {
         }
         .font(.caption.weight(.semibold))
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 20)
         .padding(.vertical, 5)
+        .background {
+            ManagementTableBand(fill: Color.primary.opacity(0.03))
+        }
     }
 
     private var cleanupMenu: some View {
