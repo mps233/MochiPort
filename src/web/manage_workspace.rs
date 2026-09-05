@@ -198,6 +198,12 @@ pub(super) struct FetchSub2ApiAccountsRequest {
     force_billing_refresh: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct SetSub2ApiAccountSchedulableRequest {
+    schedulable: bool,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ManageSub2ApiAdminResponse {
@@ -916,6 +922,44 @@ pub(super) async fn fetch_sub2api_accounts(
         Ok(snapshot) => (
             StatusCode::OK,
             Json(json!({ "ok": true, "pool": snapshot })),
+        ),
+        Err(error) => operation_error(StatusCode::BAD_GATEWAY, error.to_string()),
+    }
+}
+
+pub(super) async fn set_sub2api_account_schedulable(
+    State(state): State<SharedState>,
+    Path(account_id): Path<i64>,
+    Json(request): Json<SetSub2ApiAccountSchedulableRequest>,
+) -> impl IntoResponse {
+    if account_id <= 0 {
+        return operation_error(StatusCode::BAD_REQUEST, "accountId must be a positive integer");
+    }
+
+    let admin = {
+        let config = state.config.lock().await;
+        config.ai_gateway.sub2api_admin.clone()
+    };
+    if !admin.is_configured() {
+        return operation_error(StatusCode::BAD_REQUEST, "尚未连接 Sub2API 账号池");
+    }
+
+    match sub2api_accounts::set_account_schedulable(
+        &crate::outbound_http::get_sensitive(),
+        &admin.base_url,
+        &admin.admin_api_key,
+        account_id,
+        request.schedulable,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({
+                "ok": true,
+                "accountId": account_id,
+                "schedulable": request.schedulable,
+            })),
         ),
         Err(error) => operation_error(StatusCode::BAD_GATEWAY, error.to_string()),
     }

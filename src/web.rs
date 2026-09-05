@@ -169,6 +169,10 @@ pub fn router(state: SharedState) -> Router {
             post(manage_workspace::fetch_sub2api_accounts),
         )
         .route(
+            "/gateway/sub2api/accounts/{account_id}/schedulable",
+            post(manage_workspace::set_sub2api_account_schedulable),
+        )
+        .route(
             "/gateway/provider-templates",
             get(manage_workspace::provider_templates),
         )
@@ -1387,6 +1391,11 @@ mod tests {
             ),
             (
                 Method::POST,
+                "/api/v1/manage/gateway/sub2api/accounts/42/schedulable",
+                Some(r#"{"schedulable":false}"#),
+            ),
+            (
+                Method::POST,
                 "/api/v1/manage/gateway/provider/recent-account",
                 Some(r#"{"providerName":"primary"}"#),
             ),
@@ -1482,6 +1491,57 @@ mod tests {
         assert_eq!(
             recorded_keys.lock().expect("read admin keys").as_slice(),
             [ADMIN_KEY]
+        );
+    }
+
+    #[tokio::test]
+    async fn manage_sub2api_schedulable_route_forwards_authenticated_mutation() {
+        use std::sync::{Arc, Mutex};
+
+        const ADMIN_KEY: &str = "schedulable-admin-key-must-not-leak";
+        let seen = Arc::new(Mutex::new(None::<(String, String)>));
+        let recorded = seen.clone();
+        let mock = Router::new().route(
+            "/api/v1/admin/accounts/42/schedulable",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                    let recorded = recorded.clone();
+                    async move {
+                        let key = headers
+                            .get("x-api-key")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        *recorded.lock().expect("record schedulable mutation") =
+                            Some((key, body.to_string()));
+                        Json(json!({ "code": 0, "message": "success", "data": {} }))
+                    }
+                },
+            ),
+        );
+        let address = spawn_mock_server(mock).await;
+        let mut config = AppConfig::default();
+        config.ai_gateway.sub2api_admin = Sub2ApiAdminConfig {
+            base_url: format!("http://{address}"),
+            admin_api_key: ADMIN_KEY.to_string(),
+        };
+        let (state, _temp, token) = management_state_with_config(config);
+        let app = router(state);
+
+        let response = request_response(
+            app,
+            Method::POST,
+            "/api/v1/manage/gateway/sub2api/accounts/42/schedulable",
+            Some(&token),
+            Some(r#"{"schedulable":false}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        assert_eq!(payload, json!({ "ok": true, "accountId": 42, "schedulable": false }));
+        assert_eq!(
+            seen.lock().expect("read schedulable mutation").as_ref(),
+            Some(&(ADMIN_KEY.to_string(), r#"{"schedulable":false}"#.to_string()))
         );
     }
 

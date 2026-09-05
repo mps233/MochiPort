@@ -1,4 +1,4 @@
-//! Read-only Sub2API administrator integration for account-pool metrics.
+//! Sub2API administrator integration for account-pool metrics and scheduling.
 //!
 //! The administrator key never leaves the daemon. Sub2API's regular account
 //! API keeps upstream credentials redacted; when the deployment supports it,
@@ -44,12 +44,29 @@ const BALANCE_CACHE_FAILURE_TTL_MS: u64 = 120_000;
 // One API style relays report an effectively unbounded hard limit when no
 // explicit quota is configured on the account.
 const ONE_API_UNLIMITED_HARD_LIMIT_USD: f64 = 100_000_000.0;
+// Site display names change essentially never; probe one request per unique
+// site root and trust a successful answer for a day.
+const SITE_NAME_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const SITE_NAME_PROBE_CONCURRENCY: usize = 8;
+const SITE_NAME_PROBE_BUDGET: Duration = Duration::from_secs(8);
+const SITE_NAME_SUCCESS_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+// A cold-start burst can transiently fail slow sites (budget cut, TLS under
+// load); retry soon so a first-fetch failure does not stick for an hour.
+const SITE_NAME_FAILURE_TTL_MS: u64 = 600_000;
+const SITE_NAME_MAX_LEN: usize = 64;
+// Some deployments pack their whole public config (model pricing, etc.) into
+// the settings endpoint; the probe only needs the site_name field.
+const SITE_NAME_RESPONSE_LIMIT: usize = 8 * 1024 * 1024;
+/// Template site names carry no identity: a deployment that has not
+/// customized its name is better labeled by its domain.
+const SITE_NAME_TEMPLATE_DEFAULTS: [&str; 3] = ["ai gateway", "sub2api", "ai api gateway"];
+const HTML_TITLE_TEMPLATE_SUFFIX: &str = "ai api gateway";
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 pub enum Sub2ApiAccountPoolError {
     #[error("Sub2API 管理密钥无效")]
     Unauthorized,
-    #[error("Sub2API 管理密钥没有账号读取权限")]
+    #[error("Sub2API 管理密钥没有账号管理权限")]
     Forbidden,
     #[error("当前 Sub2API 版本不支持账号池接口")]
     Unsupported,
@@ -79,6 +96,11 @@ pub struct AccountPoolAccount {
     /// query strings, and fragments are removed before it crosses the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub site_url: Option<String>,
+    /// Display name the upstream site reports for itself (Sub2API public
+    /// settings or an One API status endpoint). None when the site does not
+    /// expose one or only exposes a template default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub site_name: Option<String>,
     pub platform: String,
     pub account_type: String,
     pub status: String,
@@ -273,6 +295,39 @@ pub async fn fetch_recent_provider_account(
     .map_err(|_| Sub2ApiAccountPoolError::TemporarilyUnavailable)?
 }
 
+/// Toggle whether an upstream account participates in scheduling. This is the
+/// only write operation the Sub2API integration performs, and it mirrors the
+/// official admin endpoint the Sub2API panel itself uses.
+pub async fn set_account_schedulable(
+    client: &reqwest::Client,
+    base_url: &str,
+    admin_api_key: &str,
+    account_id: i64,
+    schedulable: bool,
+) -> Result<(), Sub2ApiAccountPoolError> {
+    tokio::time::timeout(
+        TOTAL_REQUEST_TIMEOUT,
+        async {
+            let root = provider_api_root(base_url);
+            let envelope: ApiEnvelope<Value> = send_json(
+                client
+                    .post(format!(
+                        "{root}/api/v1/admin/accounts/{account_id}/schedulable"
+                    ))
+                    .header("x-api-key", sensitive_header(admin_api_key)?)
+                    .json(&serde_json::json!({ "schedulable": schedulable })),
+            )
+            .await?;
+            if envelope.code != 0 {
+                return Err(classify_api_message(&envelope.message));
+            }
+            Ok(())
+        },
+    )
+    .await
+    .map_err(|_| Sub2ApiAccountPoolError::TemporarilyUnavailable)?
+}
+
 async fn fetch_recent_provider_account_inner(
     client: &reqwest::Client,
     base_url: &str,
@@ -364,46 +419,52 @@ async fn fetch_account_pool_inner(
         HashMap::new()
     };
 
-    let usage_results = if api_key_ids.is_empty() {
-        Some(HashMap::new())
-    } else {
-        match fetch_probe_batches(
-            client,
-            base_url,
-            admin_api_key,
-            "/api/v1/admin/accounts/upstream-usage-probe/batch",
-            &api_key_ids,
-        )
-        .await
-        {
-            Ok(results) => Some(probe_map(results)),
-            Err(Sub2ApiAccountPoolError::Unsupported) => {
-                // Stock Sub2API builds never expose the batch probe. Fall back
-                // to the official admin backup export: read upstream
-                // credentials once (in memory only) and probe each upstream
-                // directly.
-                match probe_balances_via_export(client, base_url, admin_api_key, &accounts).await {
-                    Ok(results) => Some(results),
-                    Err(Sub2ApiAccountPoolError::Unsupported) => {
-                        warnings.push("balance_export_unavailable");
-                        None
-                    }
-                    Err(Sub2ApiAccountPoolError::Forbidden) => {
-                        warnings.push("balance_export_forbidden");
-                        None
-                    }
-                    Err(_) => {
-                        warnings.push("usage_probe_failed");
-                        Some(HashMap::new())
+    // Balance probing and site-name discovery are independent fan-outs against
+    // the same upstreams; run them together so a cold cache keeps the whole
+    // pool request inside the client-visible budget.
+    let usage_probe = async {
+        if api_key_ids.is_empty() {
+            Some(HashMap::new())
+        } else {
+            match fetch_probe_batches(
+                client,
+                base_url,
+                admin_api_key,
+                "/api/v1/admin/accounts/upstream-usage-probe/batch",
+                &api_key_ids,
+            )
+            .await
+            {
+                Ok(results) => Some(probe_map(results)),
+                Err(Sub2ApiAccountPoolError::Unsupported) => {
+                    // Stock Sub2API builds never expose the batch probe. Fall back
+                    // to the official admin backup export: read upstream
+                    // credentials once (in memory only) and probe each upstream
+                    // directly.
+                    match probe_balances_via_export(client, base_url, admin_api_key, &accounts).await {
+                        Ok(results) => Some(results),
+                        Err(Sub2ApiAccountPoolError::Unsupported) => {
+                            warnings.push("balance_export_unavailable");
+                            None
+                        }
+                        Err(Sub2ApiAccountPoolError::Forbidden) => {
+                            warnings.push("balance_export_forbidden");
+                            None
+                        }
+                        Err(_) => {
+                            warnings.push("usage_probe_failed");
+                            Some(HashMap::new())
+                        }
                     }
                 }
-            }
-            Err(_) => {
-                warnings.push("usage_probe_failed");
-                Some(HashMap::new())
+                Err(_) => {
+                    warnings.push("usage_probe_failed");
+                    Some(HashMap::new())
+                }
             }
         }
     };
+    let (usage_results, site_names) = tokio::join!(usage_probe, probe_site_names(client, &accounts));
 
     let normalized = accounts
         .into_iter()
@@ -424,7 +485,13 @@ async fn fetch_account_pool_inner(
             let balance = usage_results
                 .as_ref()
                 .and_then(|results| results.get(&account.id));
-            normalize_account(account, billing.as_ref(), balance, usage_results.is_none())
+            normalize_account(
+                account,
+                billing.as_ref(),
+                balance,
+                usage_results.is_none(),
+                &site_names,
+            )
         })
         .collect();
 
@@ -513,6 +580,13 @@ async fn fetch_probe_batches(
 async fn send_json<T: DeserializeOwned>(
     request: reqwest::RequestBuilder,
 ) -> Result<T, Sub2ApiAccountPoolError> {
+    send_json_limited(request, RESPONSE_LIMIT).await
+}
+
+async fn send_json_limited<T: DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    response_limit: usize,
+) -> Result<T, Sub2ApiAccountPoolError> {
     let response = request
         .timeout(REQUEST_TIMEOUT)
         .send()
@@ -524,7 +598,7 @@ async fn send_json<T: DeserializeOwned>(
     }
     if response
         .content_length()
-        .is_some_and(|length| length > RESPONSE_LIMIT as u64)
+        .is_some_and(|length| length > response_limit as u64)
     {
         return Err(Sub2ApiAccountPoolError::InvalidResponse);
     }
@@ -535,7 +609,7 @@ async fn send_json<T: DeserializeOwned>(
         .await
         .map_err(|_| Sub2ApiAccountPoolError::TemporarilyUnavailable)?
     {
-        if body.len().saturating_add(chunk.len()) > RESPONSE_LIMIT {
+        if body.len().saturating_add(chunk.len()) > response_limit {
             return Err(Sub2ApiAccountPoolError::InvalidResponse);
         }
         body.extend_from_slice(&chunk);
@@ -998,6 +1072,166 @@ fn bearer_header(api_key: &str) -> Result<HeaderValue, Sub2ApiAccountPoolError> 
     Ok(header)
 }
 
+type SiteNameCacheKey = String;
+
+struct CachedSiteName {
+    name: Option<String>,
+    probed_at_ms: u64,
+}
+
+static SITE_NAME_CACHE: OnceLock<Mutex<HashMap<SiteNameCacheKey, CachedSiteName>>> = OnceLock::new();
+
+fn site_name_cache() -> &'static Mutex<HashMap<SiteNameCacheKey, CachedSiteName>> {
+    SITE_NAME_CACHE.get_or_init(Mutex::default)
+}
+
+fn cached_site_name(root: &str, now_ms: u64) -> Option<String> {
+    let cache = site_name_cache().lock().expect("site name cache poisoned");
+    let entry = cache.get(root)?;
+    let ttl = if entry.name.is_some() {
+        SITE_NAME_SUCCESS_TTL_MS
+    } else {
+        SITE_NAME_FAILURE_TTL_MS
+    };
+    (now_ms.saturating_sub(entry.probed_at_ms) < ttl)
+        .then(|| entry.name.clone())
+        .flatten()
+}
+
+/// Discover the display name each unique upstream site reports for itself.
+/// Site names are static in practice, so a successful probe is trusted for a
+/// day and a failed one retries after an hour, all per site root.
+async fn probe_site_names(
+    client: &reqwest::Client,
+    accounts: &[AdminAccount],
+) -> HashMap<String, String> {
+    let mut roots: Vec<String> = Vec::new();
+    for account in accounts {
+        if let Some(site_url) = sanitized_site_url(&account.credentials) {
+            let root = provider_api_root(&site_url);
+            if !root.is_empty() && !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+    let now_ms = unix_time_ms();
+    let mut names = HashMap::new();
+    let mut pending: Vec<String> = Vec::new();
+    for root in roots {
+        match cached_site_name(&root, now_ms) {
+            Some(name) => {
+                names.insert(root, name);
+            }
+            None => pending.push(root),
+        }
+    }
+    if pending.is_empty() {
+        return names;
+    }
+
+    let mut probes = futures_util::stream::iter(pending)
+        .map(|root| async move {
+            let name = tokio::time::timeout(SITE_NAME_PROBE_TIMEOUT, resolve_site_name(client, &root))
+                .await
+                .unwrap_or(None);
+            (root, name)
+        })
+        .buffer_unordered(SITE_NAME_PROBE_CONCURRENCY);
+    let _ = tokio::time::timeout(SITE_NAME_PROBE_BUDGET, async {
+        while let Some((root, name)) = probes.next().await {
+            let mut cache = site_name_cache().lock().expect("site name cache poisoned");
+            cache.insert(
+                root.clone(),
+                CachedSiteName {
+                    name: name.clone(),
+                    probed_at_ms: now_ms,
+                },
+            );
+            drop(cache);
+            if let Some(name) = name {
+                names.insert(root, name);
+            }
+        }
+    })
+    .await;
+    names
+}
+
+/// Resolve one site's self-reported display name: the Sub2API public settings
+/// first, then the One API status endpoint, then the panel HTML title. Names
+/// matching template defaults are treated as absent so the GUI keeps labeling
+/// those sites by their domain.
+async fn resolve_site_name(client: &reqwest::Client, root: &str) -> Option<String> {
+    if let Ok(envelope) = send_json_limited::<ApiEnvelope<Value>>(
+        client
+            .get(format!("{root}/api/v1/settings/public"))
+            .header("Accept", "application/json"),
+        SITE_NAME_RESPONSE_LIMIT,
+    )
+    .await
+        && envelope.code == 0
+        && let Some(name) = parse_public_site_name(&envelope.data)
+    {
+        return Some(name);
+    }
+    if let Ok(value) = send_json_limited::<Value>(
+        client
+            .get(format!("{root}/api/status"))
+            .header("Accept", "application/json"),
+        SITE_NAME_RESPONSE_LIMIT,
+    )
+    .await
+        && let Some(name) = parse_status_site_name(&value)
+    {
+        return Some(name);
+    }
+    fetch_html_site_title(client, root).await
+}
+
+fn parse_public_site_name(value: &Value) -> Option<String> {
+    clean_site_name(value.get("site_name")?.as_str()?)
+}
+
+fn parse_status_site_name(value: &Value) -> Option<String> {
+    clean_site_name(value.pointer("/data/system_name")?.as_str()?)
+}
+
+fn clean_site_name(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > SITE_NAME_MAX_LEN {
+        return None;
+    }
+    if SITE_NAME_TEMPLATE_DEFAULTS.contains(&name.to_lowercase().as_str()) {
+        return None;
+    }
+    Some(name.to_string())
+}
+
+/// Last resort: read the panel page title. Sub2API templates render
+/// "<custom name> - AI API Gateway"; keep the custom prefix when present.
+async fn fetch_html_site_title(client: &reqwest::Client, root: &str) -> Option<String> {
+    let response = client.get(root).header("Accept", "text/html").send().await.ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = response.bytes().await.ok()?;
+    if body.len() > SITE_NAME_RESPONSE_LIMIT {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&body);
+    let lowered = text.to_lowercase();
+    let start = lowered.find("<title>")? + "<title>".len();
+    let end = lowered[start..].find("</title>")? + start;
+    let title = text[start..end].trim();
+    if let Some(position) = title.rfind(" - ") {
+        let suffix = title[position + " - ".len()..].trim();
+        if suffix.eq_ignore_ascii_case(HTML_TITLE_TEMPLATE_SUFFIX) && position > 0 {
+            return clean_site_name(title[..position].trim());
+        }
+    }
+    clean_site_name(title)
+}
+
 /// RFC 3339 UTC stamp for balance observations, avoiding a time crate the
 /// same way the auth-file stamp in `codex_app_config` does.
 fn rfc3339_now() -> String {
@@ -1065,12 +1299,19 @@ fn normalize_account(
     billing_result: Option<&ProbeResult>,
     usage_result: Option<&ProbeResult>,
     usage_not_exposed: bool,
+    site_names: &HashMap<String, String>,
 ) -> AccountPoolAccount {
     let is_api_key = account.account_type.eq_ignore_ascii_case("apikey");
+    let site_url = sanitized_site_url(&account.credentials);
+    let site_name = site_url
+        .as_deref()
+        .map(provider_api_root)
+        .and_then(|root| site_names.get(&root).cloned());
     AccountPoolAccount {
         id: account.id,
         name: nonempty(account.name).unwrap_or_else(|| format!("账号 {}", account.id)),
-        site_url: sanitized_site_url(&account.credentials),
+        site_url,
+        site_name,
         platform: account.platform,
         account_type: account.account_type,
         status: account.status,
@@ -1275,7 +1516,7 @@ mod tests {
         Json, Router,
         extract::Query,
         http::{HeaderMap, StatusCode, header::LOCATION},
-        routing::get,
+        routing::{get, post},
     };
     use std::sync::{
         Arc, Mutex,
@@ -1293,6 +1534,49 @@ mod tests {
                 .expect("serve mock Sub2API endpoint");
         });
         address
+    }
+
+    #[tokio::test]
+    async fn set_account_schedulable_posts_admin_key_and_boolean_body() {
+        const ADMIN_KEY: &str = "admin-key-must-not-leak";
+        let seen = Arc::new(Mutex::new(None::<(String, bool)>));
+        let recorded = seen.clone();
+        let app = Router::new().route(
+            "/api/v1/admin/accounts/42/schedulable",
+            post(move |headers: HeaderMap, Json(body): Json<Value>| {
+                let recorded = recorded.clone();
+                async move {
+                    let key = headers
+                        .get("x-api-key")
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    let schedulable = body
+                        .get("schedulable")
+                        .and_then(Value::as_bool)
+                        .expect("schedulable body");
+                    *recorded.lock().expect("record schedulable request") =
+                        Some((key, schedulable));
+                    Json(serde_json::json!({ "code": 0, "message": "success", "data": {} }))
+                }
+            }),
+        );
+        let address = spawn_server(app).await;
+
+        set_account_schedulable(
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            ADMIN_KEY,
+            42,
+            false,
+        )
+        .await
+        .expect("set account schedulable");
+
+        assert_eq!(
+            seen.lock().expect("read schedulable request").as_ref(),
+            Some(&(ADMIN_KEY.to_string(), false))
+        );
     }
 
     #[test]
@@ -1325,7 +1609,7 @@ mod tests {
             error: String::new(),
         };
 
-        let normalized = normalize_account(account, Some(&billing), None, true);
+        let normalized = normalize_account(account, Some(&billing), None, true, &HashMap::new());
 
         assert_eq!(normalized.local_rate_multiplier, Some(1.0));
         assert_eq!(
@@ -2038,5 +2322,124 @@ mod tests {
         assert_eq!(balance.remaining, Some(15.0));
         assert!(!balance.unlimited);
         assert_eq!(balance.unit.as_deref(), Some("USD"));
+    }
+
+
+    #[test]
+    fn clean_site_name_rejects_empty_template_and_oversized_names() {
+        assert_eq!(
+            clean_site_name("FastAI 模型"),
+            Some("FastAI 模型".to_string())
+        );
+        assert_eq!(clean_site_name("  AtlasAPI  "), Some("AtlasAPI".to_string()));
+        assert_eq!(clean_site_name(""), None);
+        assert_eq!(clean_site_name("AI Gateway"), None);
+        assert_eq!(clean_site_name("Sub2API"), None);
+        assert_eq!(clean_site_name(&"长".repeat(SITE_NAME_MAX_LEN + 1)), None);
+    }
+
+    #[test]
+    fn site_name_parsers_read_both_public_protocols() {
+        let public = serde_json::json!({ "site_name": "FastAI 模型" });
+        assert_eq!(
+            parse_public_site_name(&public),
+            Some("FastAI 模型".to_string())
+        );
+
+        let status = serde_json::json!({
+            "data": { "system_name": "JuAI API" }
+        });
+        assert_eq!(parse_status_site_name(&status), Some("JuAI API".to_string()));
+
+        assert_eq!(
+            parse_public_site_name(&serde_json::json!({ "site_name": "Sub2API" })),
+            None
+        );
+        assert_eq!(parse_status_site_name(&serde_json::json!({ "data": {} })), None);
+    }
+
+    #[tokio::test]
+    async fn pool_accounts_carry_self_reported_site_names() {
+        let sub2api_style = Router::new().route(
+            "/api/v1/settings/public",
+            get(|| async {
+                Json(serde_json::json!({
+                    "code": 0,
+                    "message": "success",
+                    "data": { "site_name": "FastAI 模型" }
+                }))
+            }),
+        );
+        let sub2api_address = spawn_server(sub2api_style).await;
+
+        let one_api_style = Router::new()
+            .route(
+                "/api/v1/settings/public",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "message": "success",
+                        "data": { "site_name": "AI Gateway" }
+                    }))
+                }),
+            )
+            .route(
+                "/api/status",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "data": { "system_name": "AI Gateway" }
+                    }))
+                }),
+            );
+        let one_api_address = spawn_server(one_api_style).await;
+
+        let accounts = Router::new().route(
+            "/api/v1/admin/accounts",
+            get(move || {
+                let sub2api_url = format!("http://{sub2api_address}");
+                let one_api_url = format!("http://{one_api_address}");
+                async move {
+                    Json(serde_json::json!({
+                        "code": 0,
+                        "message": "success",
+                        "data": { "items": [
+                            {
+                                "id": 1,
+                                "name": "customized",
+                                "platform": "openai",
+                                "type": "apikey",
+                                "credentials": { "base_url": sub2api_url }
+                            },
+                            {
+                                "id": 2,
+                                "name": "template",
+                                "platform": "openai",
+                                "type": "apikey",
+                                "credentials": { "base_url": one_api_url }
+                            }
+                        ], "pages": 1 }
+                    }))
+                }
+            }),
+        );
+        let address = spawn_server(accounts).await;
+
+        let snapshot = fetch_account_pool(
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            "admin-key",
+            false,
+        )
+        .await
+        .expect("account pool fetch");
+
+        assert_eq!(snapshot.accounts.len(), 2);
+        assert_eq!(
+            snapshot.accounts[0].site_name.as_deref(),
+            Some("FastAI 模型")
+        );
+        // The second site only reports the template default, so no name is
+        // published and the GUI keeps labeling it by its domain.
+        assert_eq!(snapshot.accounts[1].site_name, None);
     }
 }
