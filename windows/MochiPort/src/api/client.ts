@@ -32,6 +32,7 @@ import {
   isSettings,
   isSettingsMutationResponse,
   isSub2ApiAdmin,
+  isSub2ApiAccountSchedulableResponse,
   isSub2ApiAdminMutationResponse,
   isSub2ApiPoolResponse,
   isTelegramProjectGroupsMutationResponse,
@@ -365,6 +366,13 @@ export const api = {
     );
     return response.pool;
   },
+  setSub2ApiAccountSchedulable: (accountId: number, schedulable: boolean) =>
+    request(
+      `api/v1/manage/gateway/sub2api/accounts/${accountId}/schedulable`,
+      isSub2ApiAccountSchedulableResponse,
+      "POST",
+      { schedulable },
+    ),
   requestLogs: (query = "") => request(`api/v1/manage/request-logs${query ? `?${query}` : ""}`, isRequestLogsResponse),
   requestLogDetail: (id: number) => request(`api/v1/manage/request-logs/${id}`, isRequestLogDetailResponse),
   clearRequestLogs: () => request("api/v1/manage/request-logs/clear", isActionResponse, "POST", {}),

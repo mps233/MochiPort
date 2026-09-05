@@ -475,6 +475,12 @@ struct ManageSub2ApiAdminMutationResponse: Decodable, Equatable, ManageMutationR
     let sub2api: ManageSub2ApiAdmin
 }
 
+struct ManageSub2ApiAccountSchedulableMutationResponse: Decodable, Equatable, ManageMutationResponse {
+    let ok: Bool
+    let accountId: Int64
+    let schedulable: Bool
+}
+
 struct ManageSub2ApiAccountPoolResponse: Decodable, Equatable, Sendable {
     struct Pool: Decodable, Equatable, Sendable {
         let source: String
@@ -508,6 +514,9 @@ struct ManageSub2ApiAccountPoolResponse: Decodable, Equatable, Sendable {
         let id: Int64
         let name: String
         let siteUrl: String?
+        /// The display name the upstream site reports for itself, when it
+        /// exposes one and it is not a template default.
+        let siteName: String?
         let platform: String
         let accountType: String
         let status: String
@@ -1804,6 +1813,24 @@ struct APIClient: Sendable {
         )
     }
 
+    func setSub2ApiAccountSchedulable(
+        accountID: Int64,
+        schedulable: Bool
+    ) async throws -> ManageSub2ApiAccountSchedulableMutationResponse {
+        let response: ManageSub2ApiAccountSchedulableMutationResponse = try await performManagePOST(
+            path: "api/v1/manage/gateway/sub2api/accounts/\(accountID)/schedulable",
+            body: Sub2ApiAccountSchedulableRequest(schedulable: schedulable),
+            timeout: 60
+        )
+        guard response.ok else {
+            throw APIClientError.operationFailed("后台服务未完成账号调度设置。")
+        }
+        guard response.accountId == accountID, response.schedulable == schedulable else {
+            throw APIClientError.invalidResponse
+        }
+        return response
+    }
+
     func fetchGatewayProviderRecentAccount(
         providerName: String
     ) async throws -> ManageProviderRecentAccountResponse {
@@ -1958,6 +1985,10 @@ struct APIClient: Sendable {
     }
 
     private struct EmptyRequestBody: Encodable {}
+
+    private struct Sub2ApiAccountSchedulableRequest: Encodable {
+        let schedulable: Bool
+    }
 
     private func fetchDashboard(
         baseURL: URL,

@@ -1,7 +1,14 @@
+import AppKit
 import SwiftUI
 
-/// 账号池页面：连接 Sub2API 管理接口，并只读展示账号、状态与上游余额。
-/// 池数据完全来自 daemon 的只读快照；本页不存储凭据，也不修改上游账号。
+/// 统计卡的快捷筛选；nil 表示显示全部账号。
+enum AccountPoolStatsFilter: Equatable {
+    case available
+    case attention
+}
+
+/// 账号池页面：连接 Sub2API 管理接口，展示账号状态与上游余额，
+/// 并允许切换每个账号是否参与调度。管理密钥仍只由 daemon 持有。
 struct AccountPoolView: View {
     @EnvironmentObject private var model: AppModel
 
@@ -11,6 +18,7 @@ struct AccountPoolView: View {
     @State private var sub2ApiSaving = false
     @State private var sub2ApiEditing = false
     @State private var confirmSub2ApiDisconnect = false
+    @State private var statsFilter: AccountPoolStatsFilter?
 
     private var configured: Bool { model.sub2ApiAdmin?.configured == true }
 
@@ -38,6 +46,24 @@ struct AccountPoolView: View {
                         pool: model.sub2ApiAccountPool,
                         isLoading: model.sub2ApiAccountPoolLoading,
                         loadError: model.sub2ApiAccountPoolError,
+                        filter: $statsFilter,
+                        mutationIDs: model.sub2ApiAccountPoolMutationIDs,
+                        onToggleSchedulable: { accountID, schedulable in
+                            Task {
+                                _ = await model.toggleSub2ApiAccountSchedulable(
+                                    accountID: accountID,
+                                    schedulable: schedulable
+                                )
+                            }
+                        },
+                        onToggleGroupSchedulable: { accountIDs, schedulable in
+                            for accountID in accountIDs {
+                                _ = await model.toggleSub2ApiAccountSchedulable(
+                                    accountID: accountID,
+                                    schedulable: schedulable
+                                )
+                            }
+                        },
                         onRetry: {
                             Task { await model.refreshSub2ApiAccountPool(forceBillingRefresh: true) }
                         }
@@ -271,7 +297,7 @@ private struct AccountPoolConnectionCard: View {
 
     private var statusDetail: String {
         if configured {
-            return "账号状态、倍率与上游余额展示在下方。"
+            return "账号状态、倍率与上游余额展示在下方，也可逐个切换调度。"
         }
         return "输入管理地址和 Admin API Key，连接后在这里查看账号与余额。"
     }
@@ -281,6 +307,10 @@ private struct AccountPoolContentSection: View {
     let pool: ManageSub2ApiAccountPoolResponse.Pool?
     let isLoading: Bool
     let loadError: String?
+    @Binding var filter: AccountPoolStatsFilter?
+    let mutationIDs: Set<Int64>
+    let onToggleSchedulable: (Int64, Bool) -> Void
+    let onToggleGroupSchedulable: ([Int64], Bool) async -> Void
     let onRetry: () -> Void
 
     var body: some View {
@@ -304,9 +334,18 @@ private struct AccountPoolContentSection: View {
                         .foregroundStyle(.orange)
                 }
 
-                AccountPoolStatsStrip(summary: sub2ApiPoolSummary(pool.accounts))
+                AccountPoolStatsStrip(
+                    summary: sub2ApiPoolSummary(pool.accounts),
+                    filter: $filter
+                )
 
-                AccountPoolAccountTable(accounts: pool.accounts)
+                AccountPoolAccountTable(
+                    accounts: pool.accounts,
+                    filter: filter,
+                    mutationIDs: mutationIDs,
+                    onToggleSchedulable: onToggleSchedulable,
+                    onToggleGroupSchedulable: onToggleGroupSchedulable
+                )
 
                 Text("更新于 \(sub2ApiFetchedTime(pool.fetchedAtMs))")
                     .font(.caption2)
@@ -364,6 +403,7 @@ private struct AccountPoolPlaceholder: View {
 
 private struct AccountPoolStatsStrip: View {
     let summary: Sub2ApiPoolSummary
+    @Binding var filter: AccountPoolStatsFilter?
 
     var body: some View {
         ViewThatFits(in: .horizontal) {
@@ -383,19 +423,28 @@ private struct AccountPoolStatsStrip: View {
             title: "账号",
             value: "\(summary.total)",
             symbol: "person.3.sequence",
-            tint: .secondary
+            tint: .secondary,
+            isSelected: filter == nil,
+            help: filter == nil ? "显示全部账号" : "点击显示全部账号",
+            action: { filter = nil }
         )
         AccountPoolStatsCell(
             title: "可用",
             value: "\(summary.available)",
             symbol: "checkmark.circle",
-            tint: availabilityTint
+            tint: availabilityTint,
+            isSelected: filter == .available,
+            help: "点击只看可用账号",
+            action: { toggleFilter(.available) }
         )
         AccountPoolStatsCell(
             title: "异常",
             value: "\(summary.attention)",
             symbol: "exclamationmark.triangle",
-            tint: summary.attention > 0 ? .red : .secondary
+            tint: summary.attention > 0 ? .red : .secondary,
+            isSelected: filter == .attention,
+            help: "点击只看异常账号",
+            action: { toggleFilter(.attention) }
         )
         AccountPoolStatsCell(
             title: "余额",
@@ -404,6 +453,10 @@ private struct AccountPoolStatsStrip: View {
             tint: .primary,
             isEmphasized: true
         )
+    }
+
+    private func toggleFilter(_ target: AccountPoolStatsFilter) {
+        filter = filter == target ? nil : target
     }
 
     private var availabilityTint: Color {
@@ -419,9 +472,13 @@ private struct AccountPoolStatsCell: View {
     let symbol: String
     let tint: Color
     var isEmphasized = false
+    var isSelected = false
+    var help: String?
+    var action: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 11) {
+        let shape = RoundedRectangle(cornerRadius: MochiPortRadius.overlay, style: .continuous)
+        let content = HStack(spacing: 11) {
             Image(systemName: symbol)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(isEmphasized ? Color.accentColor : tint)
@@ -447,8 +504,28 @@ private struct AccountPoolStatsCell: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
         .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
+
+        Group {
+            if let action {
+                Button(action: action) {
+                    content
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            } else {
+                content
+            }
+        }
         .accountPoolCardSurface()
+        .overlay {
+            if isSelected {
+                shape
+                    .strokeBorder(Color.accentColor.opacity(0.55), lineWidth: 1.5)
+            }
+        }
         .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(action == nil ? [] : .isButton)
+        .accessibilityHint(help ?? "")
     }
 }
 
@@ -457,6 +534,7 @@ private struct AccountPoolStatsCell: View {
 private struct AccountPoolAccountGroup: Identifiable {
     let key: String
     let siteUrl: String?
+    let siteName: String?
     var accounts: [ManageSub2ApiAccountPoolResponse.Account]
 
     var id: String { key }
@@ -465,6 +543,7 @@ private struct AccountPoolAccountGroup: Identifiable {
 private enum AccountPoolTableLayout {
     static let columnSpacing: CGFloat = 12
     static let statusWidth: CGFloat = 104
+    static let schedulableWidth: CGFloat = 72
     static let balanceWidth: CGFloat = 96
     static let horizontalPadding: CGFloat = 16
     static let nestedContentInset: CGFloat = 36
@@ -473,13 +552,29 @@ private enum AccountPoolTableLayout {
 
 private struct AccountPoolAccountTable: View {
     let accounts: [ManageSub2ApiAccountPoolResponse.Account]
+    let filter: AccountPoolStatsFilter?
+    let mutationIDs: Set<Int64>
+    let onToggleSchedulable: (Int64, Bool) -> Void
+    let onToggleGroupSchedulable: ([Int64], Bool) async -> Void
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("accountpool.expandedGroups") private var storedExpandedGroups: Data = Data()
     @State private var expandedGroupKeys: Set<String> = []
+
+    private var filteredAccounts: [ManageSub2ApiAccountPoolResponse.Account] {
+        switch filter {
+        case .available:
+            return accounts.filter { $0.schedulable && $0.status.lowercased() == "active" }
+        case .attention:
+            return accounts.filter { $0.status.lowercased() == "error" }
+        case nil:
+            return accounts
+        }
+    }
 
     private var groups: [AccountPoolAccountGroup] {
         var result: [AccountPoolAccountGroup] = []
         var indexByKey: [String: Int] = [:]
-        for account in accounts {
+        for account in filteredAccounts {
             let key = sub2ApiAccountGroupKey(account)
             if let index = indexByKey[key] {
                 result[index].accounts.append(account)
@@ -489,6 +584,7 @@ private struct AccountPoolAccountTable: View {
                     AccountPoolAccountGroup(
                         key: key,
                         siteUrl: account.siteUrl,
+                        siteName: account.siteName,
                         accounts: [account]
                     )
                 )
@@ -502,16 +598,20 @@ private struct AccountPoolAccountTable: View {
     }
 
     private func toggleGroup(_ key: String) {
-        let animation: Animation = reduceMotion
-            ? .easeOut(duration: 0.14)
-            : .easeInOut(duration: 0.2)
-        withAnimation(animation) {
+        withAnimation(
+            reduceMotion ? .easeOut(duration: 0.12) : .spring(response: 0.3, dampingFraction: 0.87)
+        ) {
             if expandedGroupKeys.contains(key) {
                 expandedGroupKeys.remove(key)
             } else {
                 expandedGroupKeys.insert(key)
             }
         }
+        persistExpandedGroups()
+    }
+
+    private func persistExpandedGroups() {
+        storedExpandedGroups = (try? JSONEncoder().encode(expandedGroupKeys)) ?? Data()
     }
 
     var body: some View {
@@ -521,6 +621,8 @@ private struct AccountPoolAccountTable: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text("状态")
                     .frame(width: AccountPoolTableLayout.statusWidth, alignment: .leading)
+                Text("调度")
+                    .frame(width: AccountPoolTableLayout.schedulableWidth, alignment: .leading)
                 Text("余额")
                     .frame(width: AccountPoolTableLayout.balanceWidth, alignment: .trailing)
             }
@@ -535,46 +637,38 @@ private struct AccountPoolAccountTable: View {
                     .opacity(0.65)
             }
 
+            if groups.isEmpty {
+                Text(
+                    filter == nil
+                        ? "账号池中还没有账号"
+                        : "没有匹配当前筛选的账号，点击上方统计卡恢复全部"
+                )
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 72, alignment: .center)
+            }
+
             ForEach(Array(groups.enumerated()), id: \.element.id) { index, group in
                 if group.accounts.count == 1, let account = group.accounts.first {
-                    AccountPoolAccountRow(account: account)
+                    AccountPoolAccountRow(
+                        account: account,
+                        mutationIDs: mutationIDs,
+                        onToggleSchedulable: onToggleSchedulable
+                    )
                 } else {
                     AccountPoolAccountGroupRow(
                         group: group,
                         isExpanded: expandedGroupKeys.contains(group.id),
-                        onToggle: { toggleGroup(group.id) }
+                        isTogglingBatch: isGroupToggling(group),
+                        onToggle: { toggleGroup(group.id) },
+                        onToggleGroupSchedulable: onToggleGroupSchedulable
                     )
-                    if expandedGroupKeys.contains(group.id) {
-                        VStack(spacing: 0) {
-                            ForEach(Array(group.accounts.enumerated()), id: \.element.id) { childIndex, account in
-                                AccountPoolAccountRow(
-                                    account: account,
-                                    nested: true
-                                )
-                                if childIndex < group.accounts.count - 1 {
-                                    Divider()
-                                        .opacity(0.55)
-                                        .padding(.leading, 52)
-                                        .padding(.trailing, AccountPoolTableLayout.horizontalPadding)
-                                }
-                            }
-                        }
-                        .background {
-                            ZStack(alignment: .leading) {
-                                Color.primary.opacity(0.012)
-                                Rectangle()
-                                    .fill(Color.accentColor.opacity(0.24))
-                                    .frame(width: 1)
-                                    .padding(.leading, AccountPoolTableLayout.routeGuideInset)
-                                    .padding(.vertical, 12)
-                            }
-                        }
-                        .transition(
-                            reduceMotion
-                                ? .opacity
-                                : .opacity.combined(with: .move(edge: .top))
-                        )
-                    }
+                    AccountPoolNestedRows(
+                        group: group,
+                        isExpanded: expandedGroupKeys.contains(group.id),
+                        mutationIDs: mutationIDs,
+                        onToggleSchedulable: onToggleSchedulable
+                    )
                 }
 
                 if index < groups.count - 1 {
@@ -585,17 +679,102 @@ private struct AccountPoolAccountTable: View {
             }
         }
         .accountPoolCardSurface()
+        .onAppear {
+            expandedGroupKeys = (try? JSONDecoder().decode(Set<String>.self, from: storedExpandedGroups)) ?? []
+        }
         .onChange(of: expandableGroupKeys) { _, keys in
             expandedGroupKeys.formIntersection(keys)
+            persistExpandedGroups()
         }
+    }
+
+    private func isGroupToggling(_ group: AccountPoolAccountGroup) -> Bool {
+        group.accounts.contains { mutationIDs.contains($0.id) }
+    }
+}
+
+/// 组行下方的子账号列表。内容常驻、高度在 0 与自然高度之间动画，
+/// 用裁剪形成平滑的手风琴揭示，避免整块内容从上方掉落的生硬过渡。
+private struct AccountPoolNestedRows: View {
+    let group: AccountPoolAccountGroup
+    let isExpanded: Bool
+    let mutationIDs: Set<Int64>
+    let onToggleSchedulable: (Int64, Bool) -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var naturalHeight: CGFloat = 0
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ForEach(Array(group.accounts.enumerated()), id: \.element.id) { childIndex, account in
+                AccountPoolAccountRow(
+                    account: account,
+                    nested: true,
+                    mutationIDs: mutationIDs,
+                    onToggleSchedulable: onToggleSchedulable
+                )
+                // 逐行轻微延迟淡入，展开时呈现自上而下的级联；收起时全部立即淡出。
+                .opacity(isExpanded ? 1 : 0)
+                .animation(
+                    reduceMotion
+                        ? nil
+                        : .spring(response: 0.3, dampingFraction: 0.87)
+                            .delay(isExpanded ? Double(childIndex) * 0.035 : 0),
+                    value: isExpanded
+                )
+                if childIndex < group.accounts.count - 1 {
+                    Divider()
+                        .opacity(0.4)
+                        .padding(.leading, 52)
+                        .padding(.trailing, AccountPoolTableLayout.horizontalPadding)
+                }
+            }
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .background {
+            ZStack(alignment: .leading) {
+                Color.primary.opacity(0.012)
+                Rectangle()
+                    .fill(Color.accentColor.opacity(0.24))
+                    .frame(width: 1)
+                    .padding(.leading, AccountPoolTableLayout.routeGuideInset)
+                    .padding(.vertical, 12)
+            }
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                naturalHeight = height
+            }
+        }
+        .frame(maxHeight: isExpanded ? naturalHeight : 0, alignment: .top)
+        .clipped()
+        .opacity(isExpanded ? 1 : 0)
+        .allowsHitTesting(isExpanded)
+        .accessibilityHidden(!isExpanded)
+        .animation(
+            reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.87),
+            value: isExpanded
+        )
     }
 }
 
 private struct AccountPoolAccountGroupRow: View {
     let group: AccountPoolAccountGroup
     let isExpanded: Bool
+    let isTogglingBatch: Bool
     let onToggle: () -> Void
+    let onToggleGroupSchedulable: ([Int64], Bool) async -> Void
     @State private var isHovering = false
+    @State private var isBatchToggling = false
+
+    private var groupTitle: String {
+        // 站点自报的名字优先；没有（或被 daemon 判定为模板默认名）时回退域名。
+        if let siteName = group.siteName?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !siteName.isEmpty
+        {
+            return siteName
+        }
+        return sub2ApiSiteLabel(group.siteUrl)
+    }
 
     private var availableCount: Int {
         group.accounts.count(where: { account in
@@ -618,14 +797,20 @@ private struct AccountPoolAccountGroupRow: View {
               balance.state == "available"
         else { return .secondary }
         if balance.accountValid == false { return .orange }
-        if let remaining = balance.remaining, remaining < 0 { return .red }
+        if let remaining = balance.remaining, remaining <= 0 { return .red }
         return .primary
     }
 
+    private var hasErrorAccount: Bool {
+        group.accounts.contains { $0.status.lowercased() == "error" }
+    }
+
     private var statusTint: Color {
+        // 红色只表示组内存在错误账号；其余按可用比例给中性/警示色。
+        if hasErrorAccount { return .red }
         if availableCount == group.accounts.count { return Theme.safeGreen }
-        if availableCount == 0 { return .red }
-        return .orange
+        if availableCount > 0 { return .orange }
+        return .secondary
     }
 
     private var statusText: String {
@@ -634,24 +819,43 @@ private struct AccountPoolAccountGroupRow: View {
             : "\(availableCount)/\(group.accounts.count) 可用"
     }
 
+    private var allChildrenSchedulable: Bool {
+        group.accounts.allSatisfy(\.schedulable)
+    }
+
+    private func toggleGroupSchedulable(_ newValue: Bool) {
+        guard !isBatchToggling else { return }
+        isBatchToggling = true
+        Task {
+            await onToggleGroupSchedulable(group.accounts.map(\.id), newValue)
+            await MainActor.run { isBatchToggling = false }
+        }
+    }
+
     var body: some View {
         Button(action: onToggle) {
             HStack(spacing: AccountPoolTableLayout.columnSpacing) {
                 HStack(spacing: 9) {
-                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    Image(systemName: "chevron.right")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(isHovering ? Color.accentColor : .secondary)
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
                         .frame(width: 24, height: 24)
                         .background(
-                            Color.accentColor.opacity(isHovering ? 0.12 : 0.065),
+                            Color.accentColor.opacity(
+                                isHovering ? 0.14 : (isExpanded ? 0.10 : 0.065)
+                            ),
                             in: RoundedRectangle(cornerRadius: 7, style: .continuous)
                         )
                         .accessibilityHidden(true)
 
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(sub2ApiSiteLabel(group.siteUrl))
-                            .font(.callout.weight(.semibold))
-                            .lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text(groupTitle)
+                                .font(.callout.weight(.semibold))
+                                .lineLimit(1)
+                            AccountPoolSiteLinkButton(siteUrl: group.siteUrl)
+                        }
                         Text("\(group.accounts.count) 个账号 · \(availableCount) 个可用")
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -663,6 +867,18 @@ private struct AccountPoolAccountGroupRow: View {
 
                 AccountPoolStatusCapsule(text: statusText, tint: statusTint)
                     .frame(width: AccountPoolTableLayout.statusWidth, alignment: .leading)
+
+                Toggle("批量调度", isOn: Binding(
+                    get: { allChildrenSchedulable },
+                    set: { toggleGroupSchedulable($0) }
+                ))
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .labelsHidden()
+                .disabled(isTogglingBatch || isBatchToggling)
+                .frame(width: AccountPoolTableLayout.schedulableWidth, alignment: .leading)
+                .help("批量切换该站点全部账号的调度")
+                .accessibilityLabel("\(groupTitle)批量调度")
 
                 AccountPoolBalanceValue(text: balanceSummaryText, tint: balanceTint)
                     .frame(width: AccountPoolTableLayout.balanceWidth, alignment: .trailing)
@@ -678,49 +894,121 @@ private struct AccountPoolAccountGroupRow: View {
         .animation(.easeOut(duration: 0.14), value: isHovering)
         .help(isExpanded ? "收起子账号" : "展开子账号")
         .accessibilityLabel(
-            "\(sub2ApiSiteLabel(group.siteUrl))，\(group.accounts.count) 个账号，\(availableCount) 个可用，余额 \(balanceSummaryText)"
+            "\(groupTitle)，\(group.accounts.count) 个账号，\(availableCount) 个可用，余额 \(balanceSummaryText)"
         )
         .accessibilityValue(isExpanded ? "子账号已展开" : "子账号已收起")
         .accessibilityHint("主账号汇总始终显示，仅切换下面的子账号列表")
     }
 }
 
+/// 在浏览器打开站点面板（去掉 /v1 等路径，面板通常在域名根路径）。
+private func accountPoolPanelURL(_ siteUrl: String?) -> URL? {
+    guard var components = URLComponents(string: siteUrl ?? ""),
+          let scheme = components.scheme?.lowercased(),
+          scheme == "http" || scheme == "https",
+          components.host != nil
+    else { return nil }
+    components.scheme = scheme
+    components.path = ""
+    components.query = nil
+    components.fragment = nil
+    return components.url
+}
+
+/// 行内的小地球按钮：点击在浏览器打开站点面板。
+private struct AccountPoolSiteLinkButton: View {
+    let siteUrl: String?
+    @State private var isHovering = false
+
+    var body: some View {
+        if let url = accountPoolPanelURL(siteUrl) {
+            Button {
+                NSWorkspace.shared.open(url)
+            } label: {
+                Image(systemName: "globe")
+                    .font(.caption)
+                    .frame(width: 20, height: 20)
+                    .foregroundStyle(isHovering ? Color.accentColor : Color.secondary)
+                    .background(
+                        Color.primary.opacity(isHovering ? 0.07 : 0),
+                        in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    )
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovering = $0 }
+            .help("在浏览器打开 \(url.host ?? "站点")")
+            .accessibilityLabel("打开站点面板")
+        }
+    }
+}
+
 private struct AccountPoolAccountRow: View {
     let account: ManageSub2ApiAccountPoolResponse.Account
     let nested: Bool
+    let mutationIDs: Set<Int64>
+    let onToggleSchedulable: (Int64, Bool) -> Void
     @State private var isHovering = false
 
     init(
         account: ManageSub2ApiAccountPoolResponse.Account,
-        nested: Bool = false
+        nested: Bool = false,
+        mutationIDs: Set<Int64> = [],
+        onToggleSchedulable: @escaping (Int64, Bool) -> Void = { _, _ in }
     ) {
         self.account = account
         self.nested = nested
+        self.mutationIDs = mutationIDs
+        self.onToggleSchedulable = onToggleSchedulable
     }
 
     private var accountTint: Color {
-        guard account.schedulable else { return .red }
+        // 红色只留给真正的错误；不可调度/停用是调度状态，用中性色。
+        guard account.schedulable else { return .secondary }
         switch account.status.lowercased() {
         case "active": return Theme.safeGreen
         case "cooldown": return .orange
-        default: return .red
+        case "error": return .red
+        case "inactive", "disabled": return .secondary
+        default: return account.status.isEmpty ? .secondary : .orange
         }
     }
 
     private var balanceTint: Color {
         guard account.upstreamBalance.state == "available" else { return .secondary }
         if account.upstreamBalance.accountValid == false { return .orange }
-        if let remaining = account.upstreamBalance.remaining, remaining < 0 { return .red }
+        if let remaining = account.upstreamBalance.remaining, remaining <= 0 { return .red }
         return .primary
+    }
+
+    /// 行标题与 Dock 统一：站点自报名优先。组内子账号行保留账号名——
+    /// 同一站点下靠账号名区分；标题换成站点名时，账号名挪进副标题。
+    private var accountTitle: String {
+        if !nested, let siteName = account.siteName?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !siteName.isEmpty
+        {
+            return siteName
+        }
+        return account.name
+    }
+
+    private var showsAccountNameInSubtitle: Bool {
+        accountTitle != account.name
     }
 
     var body: some View {
         HStack(spacing: AccountPoolTableLayout.columnSpacing) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(account.name)
-                    .font(.callout.weight(.medium))
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(accountTitle)
+                        .font(.callout.weight(.medium))
+                        .lineLimit(1)
+                    AccountPoolSiteLinkButton(siteUrl: account.siteUrl)
+                }
                 HStack(spacing: 5) {
+                    if showsAccountNameInSubtitle {
+                        Text(account.name)
+                        Text("·")
+                    }
                     Text(sub2ApiAccountKindText(account))
                     Text("·")
                     Text("倍率 \(sub2ApiMultiplierText(account.localRateMultiplier)) / 上游 \(sub2ApiUpstreamRateText(account.upstreamBilling))")
@@ -747,6 +1035,23 @@ private struct AccountPoolAccountRow: View {
             )
             .frame(width: AccountPoolTableLayout.statusWidth, alignment: .leading)
 
+            Toggle(
+                "\(account.name)调度",
+                isOn: Binding(
+                    get: { account.schedulable },
+                    set: { onToggleSchedulable(account.id, $0) }
+                )
+            )
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .disabled(mutationIDs.contains(account.id))
+            .frame(width: AccountPoolTableLayout.schedulableWidth, alignment: .leading)
+            .help(account.schedulable ? "暂停该账号参与调度" : "开启该账号参与调度")
+            .accessibilityLabel("\(account.name)调度")
+            .accessibilityValue(account.schedulable ? "已开启" : "已关闭")
+            .accessibilityHint("只修改是否参与调度，不会清除账号错误或冷却状态")
+
             AccountPoolBalanceValue(
                 text: sub2ApiBalanceText(account.upstreamBalance),
                 tint: balanceTint
@@ -770,9 +1075,9 @@ private struct AccountPoolAccountRow: View {
         }
         .onHover { isHovering = $0 }
         .animation(.easeOut(duration: 0.12), value: isHovering)
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(
-            "\(account.name)，\(sub2ApiAccountStatusText(account))，本地倍率 \(sub2ApiMultiplierText(account.localRateMultiplier))，上游倍率 \(sub2ApiUpstreamRateText(account.upstreamBilling))，余额 \(sub2ApiBalanceText(account.upstreamBalance))"
+            "\(accountTitle)（\(account.name)），\(sub2ApiAccountStatusText(account))，本地倍率 \(sub2ApiMultiplierText(account.localRateMultiplier))，上游倍率 \(sub2ApiUpstreamRateText(account.upstreamBilling))，余额 \(sub2ApiBalanceText(account.upstreamBalance))"
         )
     }
 }
@@ -828,15 +1133,15 @@ struct Sub2ApiPoolSummary: Equatable {
     let balanceText: String
 }
 
-/// 可用 = 可调度且状态 active；异常 = 不可调度或状态 error。
-/// 停用/冷却等中间态不计入异常，只在表格中展示。
+/// 可用 = 可调度且状态 active；异常 = 状态 error。
+/// 不可调度/停用/冷却属于调度状态而非错误，不计入异常，只在表格中展示。
 func sub2ApiPoolSummary(
     _ accounts: [ManageSub2ApiAccountPoolResponse.Account]
 ) -> Sub2ApiPoolSummary {
     Sub2ApiPoolSummary(
         total: accounts.count,
         available: accounts.count(where: { $0.schedulable && $0.status.lowercased() == "active" }),
-        attention: accounts.count(where: { !$0.schedulable || $0.status.lowercased() == "error" }),
+        attention: accounts.count(where: { $0.status.lowercased() == "error" }),
         balanceText: sub2ApiPoolBalanceSummaryText(accounts)
     )
 }
@@ -1065,10 +1370,15 @@ private extension View {
         )
 
         if #available(macOS 26.0, *) {
-            self.glassEffect(.regular, in: shape)
+            // 玻璃效果只把材质画进形状，不裁剪子视图；卡片内的整行底色
+            // （表头、悬停高亮）必须显式裁剪，否则会从圆角处穿出。
+            self
+                .glassEffect(.regular, in: shape)
+                .clipShape(shape)
         } else {
             self
                 .background(.regularMaterial, in: shape)
+                .clipShape(shape)
                 .overlay {
                     shape.strokeBorder(
                         Color.primary.opacity(0.11),

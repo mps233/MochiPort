@@ -35,7 +35,7 @@ MochiPort 还内置 AI Gateway：Codex 只连接一个本地入口，模型请�
 - 通过官方 remote-control 接入 Codex App、VS Code 插件和 Codex CLI；优先使用 VS Code 原生 remote-control。仍需兼容旧版插件时，可显式运行 `mochiport vscode-remote-control patch-fallback`，完成后用 `restore-fallback` 恢复；daemon 启动和停止不会自动修改插件，也不安装包装命令。
 - 在消息软件中创建、恢复和操作 Codex thread，接收进度并处理审批。
 - 在 macOS SwiftUI 或 Windows 客户端中管理模型服务、模型别名、路由、请求日志和消息渠道。
-- 查看 Sub2API 账号池的在线状态、倍率和最近命中账号；查询会调用上游用量探测，强制刷新还会调用 billing 探测，可能同步倍率并持久化快照；不会通过 MochiPort 执行账号的创建、删除或手动编辑。
+- 查看 Sub2API 账号池的在线状态、倍率和最近命中账号；查询会调用上游用量探测，强制刷新还会调用 billing 探测，可能同步倍率并持久化快照；可在账号池页面逐账号切换是否参与调度，但不会通过 MochiPort 创建、删除或手动编辑账号。
 
 ## Telegram 项目群和话题
 

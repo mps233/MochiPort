@@ -28,7 +28,7 @@ _Avoid_: Saved settings, global profile
 ## 账号池
 
 **账号池**:
-MochiPort 从 Sub2API 平台管理接口只读获取的账号集合；侧栏的“账号池”页面专指它。
+MochiPort 从 Sub2API 平台管理接口获取的账号集合；侧栏的“账号池”页面专指它。
 _Avoid_: 消息渠道账号、Codex 凭据、官方账号
 
 **池账号**:
@@ -36,7 +36,7 @@ _Avoid_: 消息渠道账号、Codex 凭据、官方账号
 _Avoid_: 渠道账号
 
 **可调度**:
-池账号在 Sub2API 平台上是否参与上游调用的标记；MochiPort 只读展示，不能修改。
+池账号在 Sub2API 平台上是否参与上游调用的持久标记；MochiPort 可在账号池页面逐账号切换它，但不会创建、删除或编辑账号，也不会清除错误或临时冷却状态。
 _Avoid_: 启用/禁用
 
 **连接配置**:

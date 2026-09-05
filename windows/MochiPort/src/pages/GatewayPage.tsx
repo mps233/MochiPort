@@ -636,7 +636,7 @@ function AccountPool({ onConfirmationChange }: { onConfirmationChange: (open: bo
   const accounts = model.sub2ApiPool?.accounts ?? [];
   return (
     <div className="account-pool-page">
-      <SectionHeading title="管理连接" description="连接 Sub2API 管理接口后，MochiPort 可读取账号余额、倍率和调度状态。" />
+      <SectionHeading title="管理连接" description="连接 Sub2API 管理接口后，MochiPort 可读取账号余额、倍率和调度状态，并切换账号是否参与调度。" />
       {editing ? (
         <Card className="pool-connect-card">
           <div className="pool-connect-card__icon"><Router size={22} /></div>
@@ -665,18 +665,19 @@ function AccountPool({ onConfirmationChange }: { onConfirmationChange: (open: bo
       <Card className="data-table-card">
         {accounts.length ? (
           <div className="data-table">
-            <div className="data-table__header pool-table-grid"><span>账号</span><span>状态</span><span>倍率</span><span>余额</span></div>
+            <div className="data-table__header pool-table-grid"><span>账号</span><span>状态</span><span>调度</span><span>倍率</span><span>余额</span></div>
             {accounts.map((account) => (
               <div className="data-table__row pool-table-grid" key={account.id}>
                 <div className="table-primary"><span className="account-platform-icon"><CircleDollarSign size={16} /></span><div><strong>{account.name}</strong><small>{account.platform} · {account.accountType}</small></div></div>
-                <StatusPill tone={account.schedulable ? "positive" : "warning"}>{account.schedulable ? "可调度" : account.status}</StatusPill>
+                <StatusPill tone={account.schedulable ? "positive" : "warning"}>{account.schedulable ? "可调度" : "暂停调度"}</StatusPill>
+                <div className="pool-schedule-cell"><Switch checked={account.schedulable} disabled={Boolean(model.busy[`sub2api-account:${account.id}`])} label={`${account.name}调度`} onChange={(checked) => void model.setSub2ApiAccountSchedulable(account.id, checked)} /></div>
                 <span className="mono-value">{account.upstreamBilling.effectiveRateMultiplier ?? account.localRateMultiplier ?? "—"}×</span>
                 <div className="balance-cell"><strong>{account.upstreamBalance.unlimited ? "不限额" : account.upstreamBalance.remaining != null ? account.upstreamBalance.remaining.toFixed(2) : "—"}</strong><small>{account.upstreamBalance.unit ?? ""}</small></div>
               </div>
             ))}
           </div>
         ) : (
-          <EmptyState icon={Router} title={model.sub2ApiAdmin?.configured ? "账号池暂时为空" : "连接后查看账号池"} description={model.sub2ApiAdmin?.configured ? "确认 Sub2API 中已有可用账号，然后刷新。" : "MochiPort 不会修改账号，只读取用于路由的状态。"} />
+          <EmptyState icon={Router} title={model.sub2ApiAdmin?.configured ? "账号池暂时为空" : "连接后查看账号池"} description={model.sub2ApiAdmin?.configured ? "确认 Sub2API 中已有可用账号，然后刷新。" : "MochiPort 不会创建、删除或编辑账号；连接后可切换账号是否参与调度。"} />
         )}
       </Card>
 

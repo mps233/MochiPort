@@ -23,8 +23,10 @@ async function fulfillJson(route: Route, body: unknown, status = 200) {
 interface Sub2ApiMockState {
   baseUrl: string;
   accountRequests: Array<Record<string, unknown>>;
+  schedulableRequests: Array<Record<string, unknown>>;
   recentAccountRequests: Array<Record<string, unknown>>;
   pool: Sub2ApiPool;
+  failSchedulableMutation?: boolean;
 }
 
 async function installManagementMock(page: Page, state: Sub2ApiMockState) {
@@ -52,6 +54,20 @@ async function installManagementMock(page: Page, state: Sub2ApiMockState) {
     if (path === "api/v1/manage/gateway/sub2api/accounts") {
       state.accountRequests.push(body ?? {});
       return fulfillJson(route, { ok: true, pool: { ...state.pool, fetchedAtMs: Date.now() } });
+    }
+    const schedulableMatch = path.match(/^api\/v1\/manage\/gateway\/sub2api\/accounts\/(\d+)\/schedulable$/);
+    if (schedulableMatch) {
+      state.schedulableRequests.push(body ?? {});
+      if (state.failSchedulableMutation) {
+        return fulfillJson(route, { error: "账号调度设置失败" }, 502);
+      }
+      const accountId = Number(schedulableMatch[1]);
+      const schedulable = body?.schedulable === true;
+      state.pool = {
+        ...state.pool,
+        accounts: state.pool.accounts.map((account) => account.id === accountId ? { ...account, schedulable } : account),
+      };
+      return fulfillJson(route, { ok: true, accountId, schedulable });
     }
     if (path === "api/v1/manage/gateway/provider/usage") {
       return fulfillJson(route, {
@@ -85,6 +101,7 @@ test("Sub2API pool uses its five-minute cache, force refresh body, warnings, and
   const state: Sub2ApiMockState = {
     baseUrl: "https://sub2api.example.com",
     accountRequests: [],
+    schedulableRequests: [],
     recentAccountRequests: [],
     pool: { ...structuredClone(fixtureSub2ApiPool), warnings: ["部分上游倍率仍在刷新"] },
   };
@@ -115,6 +132,51 @@ test("Sub2API pool uses its five-minute cache, force refresh body, warnings, and
   expect(state.recentAccountRequests.at(-1)).toEqual({ providerName: "OpenAI" });
 });
 
+test("Sub2API account schedule switch persists per-account state", async ({ page }) => {
+  const state: Sub2ApiMockState = {
+    baseUrl: "https://sub2api.example.com",
+    accountRequests: [],
+    schedulableRequests: [],
+    recentAccountRequests: [],
+    pool: structuredClone(fixtureSub2ApiPool),
+  };
+  await page.addInitScript(() => localStorage.setItem("mochiport.section", "gateway"));
+  await installManagementMock(page, state);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "账号池", exact: true }).click();
+
+  const scheduleSwitch = page.getByRole("switch", { name: "OpenAI 主账号调度" });
+  await expect(scheduleSwitch).toHaveAttribute("aria-checked", "true");
+  await scheduleSwitch.click();
+  await expect.poll(() => state.schedulableRequests.length).toBe(1);
+  expect(state.schedulableRequests[0]).toEqual({ schedulable: false });
+  await expect(scheduleSwitch).toHaveAttribute("aria-checked", "false");
+
+  await page.locator(".account-pool-page").getByRole("button", { name: "刷新", exact: true }).click();
+  await expect(scheduleSwitch).toHaveAttribute("aria-checked", "false");
+});
+
+test("Sub2API account schedule switch rolls back when the daemon rejects it", async ({ page }) => {
+  const state: Sub2ApiMockState = {
+    baseUrl: "https://sub2api.example.com",
+    accountRequests: [],
+    schedulableRequests: [],
+    recentAccountRequests: [],
+    pool: structuredClone(fixtureSub2ApiPool),
+    failSchedulableMutation: true,
+  };
+  await page.addInitScript(() => localStorage.setItem("mochiport.section", "gateway"));
+  await installManagementMock(page, state);
+  await page.goto("/");
+  await page.getByRole("tab", { name: "账号池", exact: true }).click();
+
+  const scheduleSwitch = page.getByRole("switch", { name: "OpenAI 主账号调度" });
+  await scheduleSwitch.click();
+  await expect.poll(() => state.schedulableRequests.length).toBe(1);
+  await expect(scheduleSwitch).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByText("账号调度设置失败", { exact: true }).first()).toBeVisible();
+});
+
 test("a late pool refresh cannot restore the previous connection's accounts", async ({ page }) => {
   const stalePool = structuredClone(fixtureSub2ApiPool);
   stalePool.accounts[0].name = "迟到的旧账号";
@@ -123,6 +185,7 @@ test("a late pool refresh cannot restore the previous connection's accounts", as
   const state: Sub2ApiMockState = {
     baseUrl: "https://old-sub2api.example.com",
     accountRequests: [],
+    schedulableRequests: [],
     recentAccountRequests: [],
     pool: structuredClone(fixtureSub2ApiPool),
   };

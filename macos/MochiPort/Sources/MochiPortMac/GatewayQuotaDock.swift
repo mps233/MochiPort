@@ -231,6 +231,23 @@ func gatewayQuotaSiteDisplayName(_ siteURL: String?) -> String? {
         ?? registrableLabels.last
 }
 
+/// Dock 的账号标题：站点自报名优先（daemon 已过滤模板默认名），
+/// 其次域名推断，最后账号名 / Provider 名。
+func gatewayQuotaAccountTitle(
+    recentAccount: ManageSub2ApiAccountPoolResponse.Account?,
+    fallbackName: String?
+) -> String {
+    if let siteName = recentAccount?.siteName?
+        .trimmingCharacters(in: .whitespacesAndNewlines), !siteName.isEmpty
+    {
+        return siteName
+    }
+    return gatewayQuotaSiteDisplayName(recentAccount?.siteUrl)
+        ?? recentAccount?.name
+        ?? fallbackName
+        ?? "AI Gateway"
+}
+
 struct GatewayQuotaDock: View {
     private static let fullProviderWidth: CGFloat = 160
     private static let compactProviderWidth: CGFloat = 116
@@ -427,10 +444,10 @@ struct GatewayQuotaDock: View {
     }
 
     private var accountTitle: String {
-        gatewayQuotaSiteDisplayName(recentAccount?.siteUrl)
-            ?? recentAccount?.name
-            ?? selectedProvider?.name
-            ?? "AI Gateway"
+        gatewayQuotaAccountTitle(
+            recentAccount: recentAccount,
+            fallbackName: selectedProvider?.name
+        )
     }
 
     private var accountSubtitle: String {
@@ -901,9 +918,10 @@ private struct GatewayQuotaDetailsPopover: View {
                     )
                     VStack(alignment: .leading, spacing: 2) {
                         Text(
-                            gatewayQuotaSiteDisplayName(recentAccount?.siteUrl)
-                                ?? recentAccount?.name
-                                ?? provider.name
+                            gatewayQuotaAccountTitle(
+                                recentAccount: recentAccount,
+                                fallbackName: provider.name
+                            )
                         )
                             .font(.headline)
                         Text(accountSubtitle(provider))

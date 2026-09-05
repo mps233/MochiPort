@@ -5147,6 +5147,7 @@ final class APIContractTests: XCTestCase {
                 id: 30,
                 name: "AtlasAPI",
                 siteUrl: "https://api.aixoras.com/v1",
+                siteName: nil,
                 platform: "openai",
                 accountType: "apikey",
                 status: "active",
@@ -5346,6 +5347,43 @@ final class APIContractTests: XCTestCase {
         XCTAssertEqual(response.pool.accounts[1].upstreamBilling.state, "unsupported")
         XCTAssertEqual(response.pool.warnings, ["usage_probe_not_exposed"])
         XCTAssertEqual(timeouts.values, ["60.0"])
+    }
+
+    func testSub2ApiAccountSchedulableMutationUsesExpectedRouteAndBody() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/v1/manage/gateway/sub2api/accounts/42/schedulable")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(Self.jsonBody(from: request)?["schedulable"] as? Bool, false)
+            XCTAssertEqual(request.timeoutInterval, 60)
+            return MockResponse(
+                statusCode: 200,
+                json: #"{"ok":true,"accountId":42,"schedulable":false}"#
+            )
+        }
+
+        let response = try await client.setSub2ApiAccountSchedulable(
+            accountID: 42,
+            schedulable: false
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertEqual(response.accountId, 42)
+        XCTAssertFalse(response.schedulable)
+    }
+
+    func testSub2ApiAccountPoolDecodesSelfReportedSiteName() throws {
+        let withName = Data(
+            #"{"ok":true,"pool":{"source":"sub2api_admin","fetchedAtMs":1786752000000,"accounts":[{"id":26,"name":"FastAI","siteUrl":"https://www.fastaitoken.com","siteName":"FastAI 模型","platform":"openai","accountType":"apikey","status":"active","schedulable":true,"upstreamBilling":{"state":"available","stale":false},"upstreamBalance":{"state":"not_exposed","unlimited":false}}]}}"#.utf8
+        )
+        let pool = try JSONDecoder().decode(ManageSub2ApiAccountPoolResponse.self, from: withName).pool
+        XCTAssertEqual(pool.accounts.first?.siteName, "FastAI 模型")
+
+        // 老版本 daemon / 旧模板名缺失该字段时按 nil 处理，GUI 回退域名推断。
+        let legacy = Data(
+            #"{"ok":true,"pool":{"source":"sub2api_admin","fetchedAtMs":1786752000000,"accounts":[{"id":1,"name":"legacy","platform":"openai","accountType":"apikey","status":"active","schedulable":false,"upstreamBilling":{"state":"not_exposed","stale":false},"upstreamBalance":{"state":"not_exposed","unlimited":false}}]}}"#.utf8
+        )
+        let legacyPool = try JSONDecoder().decode(ManageSub2ApiAccountPoolResponse.self, from: legacy).pool
+        XCTAssertNil(legacyPool.accounts.first?.siteName)
     }
 
     func testProviderRecentAccountUsesExpectedProtectedRoute() async throws {

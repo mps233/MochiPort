@@ -533,6 +533,19 @@ export const isSub2ApiAdminMutationResponse: Validator<Sub2ApiAdminMutationRespo
     && value.ok === true
     && isSub2ApiAdmin(value.sub2api);
 
+export interface Sub2ApiAccountSchedulableResponse {
+  ok: true;
+  accountId: number;
+  schedulable: boolean;
+}
+
+export const isSub2ApiAccountSchedulableResponse: Validator<Sub2ApiAccountSchedulableResponse> =
+  (value): value is Sub2ApiAccountSchedulableResponse => isObject(value)
+    && value.ok === true
+    && isInteger(value.accountId)
+    && value.accountId > 0
+    && isBoolean(value.schedulable);
+
 function isSub2ApiAccount(value: unknown): boolean {
   return isObject(value)
     && isInteger(value.id)

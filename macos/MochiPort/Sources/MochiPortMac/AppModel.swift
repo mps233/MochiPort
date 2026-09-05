@@ -81,6 +81,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var sub2ApiAccountPool: ManageSub2ApiAccountPoolResponse.Pool?
     @Published private(set) var sub2ApiAccountPoolLoading = false
     @Published private(set) var sub2ApiAccountPoolError: String?
+    @Published private(set) var sub2ApiAccountPoolMutationIDs: Set<Int64> = []
     @Published private(set) var settings: ManageSettings?
     @Published private(set) var requestLogs: [ManageRequestLog] = []
     @Published private(set) var requestLogFilters = RequestLogFilters()
@@ -148,6 +149,14 @@ final class AppModel: ObservableObject {
     private static let sub2ApiAccountPoolCacheLifetime: TimeInterval = 5 * 60
     private var sub2ApiAccountPoolGeneration: UInt64 = 0
     private var sub2ApiAccountPoolRefreshID: UUID?
+    private struct Sub2ApiAccountPoolMutation {
+        let generation: UInt64
+        let previousSchedulable: Bool
+        let requestedSchedulable: Bool
+        var awaitingRefreshConfirmation: Bool
+    }
+    private var sub2ApiAccountPoolMutationGenerations: [Int64: UInt64] = [:]
+    private var sub2ApiAccountPoolMutations: [Int64: Sub2ApiAccountPoolMutation] = [:]
 
     private static let installationIDDefaultsKey = "threadrelay.management.installation-id"
 
@@ -1799,6 +1808,103 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Optimistically changes one Sub2API account's scheduling participation.
+    /// The daemon owns the upstream admin credential; this model only keeps a
+    /// short-lived local override until the next pool refresh confirms it.
+    @discardableResult
+    func toggleSub2ApiAccountSchedulable(
+        accountID: Int64,
+        schedulable: Bool
+    ) async -> Bool {
+        guard accountID > 0 else {
+            let message = "账号标识无效。"
+            sub2ApiAccountPoolError = message
+            sectionErrors[.accountPool] = message
+            return false
+        }
+        guard !sub2ApiAccountPoolMutationIDs.contains(accountID) else {
+            return false
+        }
+        guard let account = sub2ApiAccountPool?.accounts.first(where: { $0.id == accountID }) else {
+            let message = "找不到该账号池账号。"
+            sub2ApiAccountPoolError = message
+            sectionErrors[.accountPool] = message
+            return false
+        }
+
+        if fixtureStatus != nil {
+            replaceSub2ApiAccountSchedulable(accountID: accountID, schedulable: schedulable)
+            actionFeedback = ActionFeedback(
+                message: schedulable ? "预览模式：已开启账号调度" : "预览模式：已暂停账号调度"
+            )
+            return true
+        }
+        guard sub2ApiAdmin?.configured == true else {
+            let message = "尚未连接 Sub2API 账号池。"
+            sub2ApiAccountPoolError = message
+            sectionErrors[.accountPool] = message
+            return false
+        }
+
+        let generation = (sub2ApiAccountPoolMutationGenerations[accountID] ?? 0) &+ 1
+        sub2ApiAccountPoolMutationGenerations[accountID] = generation
+        sub2ApiAccountPoolMutations[accountID] = Sub2ApiAccountPoolMutation(
+            generation: generation,
+            previousSchedulable: account.schedulable,
+            requestedSchedulable: schedulable,
+            awaitingRefreshConfirmation: false
+        )
+        sub2ApiAccountPoolMutationIDs.insert(accountID)
+        sub2ApiAccountPoolError = nil
+        replaceSub2ApiAccountSchedulable(accountID: accountID, schedulable: schedulable)
+
+        do {
+            let response = try await apiClient.setSub2ApiAccountSchedulable(
+                accountID: accountID,
+                schedulable: schedulable
+            )
+            guard isCurrentSub2ApiAccountMutation(accountID: accountID, generation: generation) else {
+                return false
+            }
+            guard response.ok,
+                  response.accountId == accountID,
+                  response.schedulable == schedulable
+            else {
+                throw APIClientError.invalidResponse
+            }
+
+            // Keep the local value until a later pool response confirms the
+            // server state, so an in-flight stale refresh cannot undo success.
+            if var mutation = sub2ApiAccountPoolMutations[accountID] {
+                mutation.awaitingRefreshConfirmation = true
+                sub2ApiAccountPoolMutations[accountID] = mutation
+            }
+            sub2ApiAccountPoolMutationIDs.remove(accountID)
+            sub2ApiAccountPoolError = nil
+            sectionErrors[.accountPool] = nil
+            managementOperationError = nil
+            actionFeedback = ActionFeedback(
+                message: schedulable ? "账号已开启调度" : "账号已暂停调度"
+            )
+            return true
+        } catch {
+            guard isCurrentSub2ApiAccountMutation(accountID: accountID, generation: generation) else {
+                return false
+            }
+            replaceSub2ApiAccountSchedulable(
+                accountID: accountID,
+                schedulable: account.schedulable
+            )
+            sub2ApiAccountPoolMutations.removeValue(forKey: accountID)
+            sub2ApiAccountPoolMutationIDs.remove(accountID)
+            let message = userFacingMessage(for: error)
+            sub2ApiAccountPoolError = message
+            sectionErrors[.accountPool] = message
+            managementOperationError = message
+            return false
+        }
+    }
+
     func refreshSub2ApiAccountPool(
         forceBillingRefresh: Bool = false,
         now: Date = Date()
@@ -1848,7 +1954,13 @@ final class AppModel: ObservableObject {
                 id: refreshID,
                 generation: generation
             ) else { return }
-            sub2ApiAccountPool = response.pool
+            let pool = poolApplyingSub2ApiAccountMutationOverrides(response.pool)
+            sub2ApiAccountPool = pool
+            if let channel = gatewayProviderChannel,
+               let updated = pool.accounts.first(where: { $0.id == channel.id })
+            {
+                gatewayProviderChannel = updated
+            }
         } catch {
             guard isCurrentSub2ApiAccountPoolRefresh(
                 id: refreshID,
@@ -1870,6 +1982,87 @@ final class AppModel: ObservableObject {
         sub2ApiAccountPool = nil
         sub2ApiAccountPoolLoading = false
         sub2ApiAccountPoolError = nil
+        sub2ApiAccountPoolMutationIDs.removeAll()
+        sub2ApiAccountPoolMutationGenerations.removeAll()
+        sub2ApiAccountPoolMutations.removeAll()
+    }
+
+    private func isCurrentSub2ApiAccountMutation(
+        accountID: Int64,
+        generation: UInt64
+    ) -> Bool {
+        sub2ApiAccountPoolMutationGenerations[accountID] == generation
+    }
+
+    private func replaceSub2ApiAccountSchedulable(
+        accountID: Int64,
+        schedulable: Bool
+    ) {
+        if let pool = sub2ApiAccountPool {
+            let accounts = pool.accounts.map { account in
+                account.id == accountID
+                    ? accountWithSchedulable(account, schedulable: schedulable)
+                    : account
+            }
+            sub2ApiAccountPool = ManageSub2ApiAccountPoolResponse.Pool(
+                source: pool.source,
+                fetchedAtMs: pool.fetchedAtMs,
+                accounts: accounts,
+                warnings: pool.warnings
+            )
+        }
+        if let channel = gatewayProviderChannel, channel.id == accountID {
+            gatewayProviderChannel = accountWithSchedulable(channel, schedulable: schedulable)
+        }
+    }
+
+    private func poolApplyingSub2ApiAccountMutationOverrides(
+        _ pool: ManageSub2ApiAccountPoolResponse.Pool
+    ) -> ManageSub2ApiAccountPoolResponse.Pool {
+        guard !sub2ApiAccountPoolMutations.isEmpty else { return pool }
+        var confirmedIDs: [Int64] = []
+        let accounts = pool.accounts.map { account in
+            guard let mutation = sub2ApiAccountPoolMutations[account.id] else {
+                return account
+            }
+            if mutation.awaitingRefreshConfirmation,
+               account.schedulable == mutation.requestedSchedulable
+            {
+                confirmedIDs.append(account.id)
+            }
+            return accountWithSchedulable(
+                account,
+                schedulable: mutation.requestedSchedulable
+            )
+        }
+        for accountID in confirmedIDs {
+            sub2ApiAccountPoolMutations.removeValue(forKey: accountID)
+        }
+        return ManageSub2ApiAccountPoolResponse.Pool(
+            source: pool.source,
+            fetchedAtMs: pool.fetchedAtMs,
+            accounts: accounts,
+            warnings: pool.warnings
+        )
+    }
+
+    private func accountWithSchedulable(
+        _ account: ManageSub2ApiAccountPoolResponse.Account,
+        schedulable: Bool
+    ) -> ManageSub2ApiAccountPoolResponse.Account {
+        ManageSub2ApiAccountPoolResponse.Account(
+            id: account.id,
+            name: account.name,
+            siteUrl: account.siteUrl,
+            siteName: account.siteName,
+            platform: account.platform,
+            accountType: account.accountType,
+            status: account.status,
+            schedulable: schedulable,
+            localRateMultiplier: account.localRateMultiplier,
+            upstreamBilling: account.upstreamBilling,
+            upstreamBalance: account.upstreamBalance
+        )
     }
 
     private func isCurrentSub2ApiAccountPoolRefresh(

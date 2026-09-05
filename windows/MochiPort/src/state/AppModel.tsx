@@ -185,6 +185,7 @@ interface AppModelValue {
   saveSub2Api: (baseUrl: string, adminApiKey: string) => Promise<boolean>;
   disconnectSub2Api: () => Promise<boolean>;
   refreshSub2ApiPool: (forceBillingRefresh?: boolean) => Promise<void>;
+  setSub2ApiAccountSchedulable: (accountId: number, schedulable: boolean) => Promise<boolean>;
   toggleAccount: (account: IMAccount, enabled: boolean) => Promise<boolean>;
   deleteAccount: (account: IMAccount) => Promise<boolean>;
   addTelegram: (token: string, mentionOnly: boolean) => Promise<boolean>;
@@ -298,6 +299,9 @@ export function AppModelProvider({ children }: PropsWithChildren) {
   const requestLogLoadedPageCount = useRef(fixtureMode ? 1 : 0);
   const sub2ApiAdminRef = useRef<Sub2ApiAdmin | undefined>(fixtureMode ? fixtureSub2ApiAdmin : undefined);
   const sub2ApiPoolRef = useRef<Sub2ApiPool | undefined>(fixtureMode ? fixtureSub2ApiPool : undefined);
+  const sub2ApiPoolOverrides = useRef(new Map<number, boolean>());
+  const sub2ApiAccountMutationGenerations = useRef(new Map<number, number>());
+  const sub2ApiAccountMutationPending = useRef(new Set<number>());
   const sub2ApiPoolGeneration = useRef(0);
   const sub2ApiPoolInFlight = useRef<{ generation: number; promise: Promise<void> } | null>(null);
   const sub2ApiMutationGeneration = useRef(0);
@@ -332,9 +336,27 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     setSub2ApiPool(next);
   }, []);
 
+  const applySub2ApiPoolOverrides = useCallback((pool: Sub2ApiPool): Sub2ApiPool => {
+    if (sub2ApiPoolOverrides.current.size === 0) return pool;
+    let changed = false;
+    const accounts = pool.accounts.map((account) => {
+      const override = sub2ApiPoolOverrides.current.get(account.id);
+      if (override === undefined) return account;
+      if (override === account.schedulable) {
+        sub2ApiPoolOverrides.current.delete(account.id);
+        return account;
+      }
+      changed = true;
+      return { ...account, schedulable: override };
+    });
+    return changed ? { ...pool, accounts } : pool;
+  }, []);
+
   const invalidateSub2ApiPool = useCallback(() => {
     sub2ApiPoolGeneration.current += 1;
     sub2ApiPoolInFlight.current = null;
+    sub2ApiPoolOverrides.current.clear();
+    sub2ApiAccountMutationPending.current.clear();
     publishSub2ApiPool(undefined);
     setSub2ApiPoolLoading(false);
     setSub2ApiPoolError(undefined);
@@ -378,7 +400,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
         if (fixtureMode) {
           await delay(120);
           if (isCurrent()) {
-            publishSub2ApiPool({ ...fixtureSub2ApiPool, fetchedAtMs: Date.now() });
+            publishSub2ApiPool(applySub2ApiPoolOverrides({ ...fixtureSub2ApiPool, fetchedAtMs: Date.now() }));
           }
           return;
         }
@@ -392,7 +414,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
         }
 
         const pool = await api.sub2ApiAccounts(forceBillingRefresh);
-        if (isCurrent()) publishSub2ApiPool(pool);
+        if (isCurrent()) publishSub2ApiPool(applySub2ApiPoolOverrides(pool));
       } catch (error) {
         if (isCurrent()) {
           setSub2ApiPoolError(error instanceof Error ? error.message : String(error));
@@ -406,7 +428,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     });
     sub2ApiPoolInFlight.current = { generation, promise: task };
     return task;
-  }, [fixtureMode, invalidateSub2ApiPool, publishSub2ApiAdmin, publishSub2ApiPool]);
+  }, [applySub2ApiPoolOverrides, fixtureMode, invalidateSub2ApiPool, publishSub2ApiAdmin, publishSub2ApiPool]);
 
   const refreshSub2ApiPool = useCallback(
     (forceBillingRefresh = false) => refreshSub2ApiPoolWithAdmin(forceBillingRefresh),
@@ -928,6 +950,59 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     });
   }, [fixtureMode, invalidateSub2ApiPool, publishSub2ApiAdmin, recordError, withBusy]);
 
+  const setSub2ApiAccountSchedulable = useCallback(async (accountId: number, schedulable: boolean) => {
+    const current = sub2ApiPoolRef.current?.accounts.find((account) => account.id === accountId);
+    if (!current) return false;
+    if (sub2ApiAccountMutationPending.current.has(accountId)) return false;
+    const previous = current.schedulable;
+    const key = `sub2api-account:${accountId}`;
+    sub2ApiAccountMutationPending.current.add(accountId);
+    return withBusy(key, async () => {
+      const generation = (sub2ApiAccountMutationGenerations.current.get(accountId) ?? 0) + 1;
+      sub2ApiAccountMutationGenerations.current.set(accountId, generation);
+      sub2ApiPoolOverrides.current.set(accountId, schedulable);
+      const optimistic = sub2ApiPoolRef.current;
+      if (optimistic) {
+        publishSub2ApiPool({
+          ...optimistic,
+          accounts: optimistic.accounts.map((account) =>
+            account.id === accountId ? { ...account, schedulable } : account),
+        });
+      }
+      try {
+        if (!fixtureMode) {
+          const response = await api.setSub2ApiAccountSchedulable(accountId, schedulable);
+          if (response.accountId !== accountId || response.schedulable !== schedulable) {
+            throw new Error("本地服务返回的调度状态与请求不一致");
+          }
+        } else {
+          await delay(120);
+        }
+        if (sub2ApiAccountMutationGenerations.current.get(accountId) === generation) {
+          setFeedback(schedulable ? "账号已开启调度" : "账号已暂停调度");
+        }
+        return true;
+      } catch (error) {
+        if (sub2ApiAccountMutationGenerations.current.get(accountId) === generation) {
+          sub2ApiPoolOverrides.current.delete(accountId);
+          const rollback = sub2ApiPoolRef.current;
+          if (rollback) {
+            publishSub2ApiPool({
+              ...rollback,
+              accounts: rollback.accounts.map((account) =>
+                account.id === accountId ? { ...account, schedulable: previous } : account),
+            });
+          }
+          setSub2ApiPoolError(error instanceof Error ? error.message : String(error));
+          recordError("gateway", error);
+        }
+        return false;
+      } finally {
+        sub2ApiAccountMutationPending.current.delete(accountId);
+      }
+    });
+  }, [fixtureMode, publishSub2ApiPool, recordError, withBusy]);
+
   const toggleAccount = useCallback(async (account: IMAccount, enabled: boolean) => {
     const id = `${account.platform}:${account.accountId}`;
     return withBusy(`account:${id}`, async () => {
@@ -1413,6 +1488,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     saveSub2Api,
     disconnectSub2Api,
     refreshSub2ApiPool,
+    setSub2ApiAccountSchedulable,
     toggleAccount,
     deleteAccount,
     saveTelegramProjectGroups,
@@ -1439,7 +1515,7 @@ export function AppModelProvider({ children }: PropsWithChildren) {
     refreshSub2ApiPool, restartDaemon, rotateManagementCredential, runCodexAction, saveGatewaySettings, saveProvider,
     saveSettings, takeOverDaemonManagement, saveSub2Api, selectionState, sessionProviders,
     sessions, setSelection, settings, status, statusMessage, sub2ApiAdmin, sub2ApiPool, sub2ApiPoolError,
-    sub2ApiPoolLoading, toggleAccount,
+    setSub2ApiAccountSchedulable, sub2ApiPoolLoading, toggleAccount,
     saveTelegramProjectGroups, telegramProjectGroupAccounts,
     completeFixtureOnboarding,
   ]);
